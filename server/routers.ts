@@ -11,6 +11,7 @@ import {
   categorizeException,
   getAIAnalysis,
 } from "./reconciliationEngine";
+import { generateSampleData, type SampleDataConfig } from "./sampleDataGenerator";
 
 // ─── Admin Procedure ─────────────────────────────────────────────────
 
@@ -441,6 +442,39 @@ export const appRouter = router({
       const isAdmin = ctx.user.role === "admin";
       return db.getDashboardStats(ctx.user.id, isAdmin);
     }),
+  }),
+
+  // ─── Sample Data Generator ──────────────────────────────────────
+
+  sampleData: router({
+    generate: protectedProcedure
+      .input(
+        z.object({
+          transactionCount: z.number().min(10).max(500).default(50),
+          matchRate: z.number().min(0).max(100).default(75),
+          sourceChannel: z.string().default("nibss"),
+          targetChannel: z.string().default("bank_transfer"),
+          dateRangeStart: z.string(),
+          dateRangeEnd: z.string(),
+          includeAmountMismatches: z.boolean().default(true),
+          includeTimingDifferences: z.boolean().default(true),
+          includeMissingCounterparties: z.boolean().default(true),
+          includeDuplicates: z.boolean().default(true),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const result = generateSampleData(input as SampleDataConfig);
+
+        await logAudit(ctx.user.id, "generate_sample_data", "sample_data", undefined, {
+          transactionCount: input.transactionCount,
+          matchRate: input.matchRate,
+          sourceChannel: input.sourceChannel,
+          targetChannel: input.targetChannel,
+          summary: result.summary,
+        });
+
+        return result;
+      }),
   }),
 
   // ─── Admin ───────────────────────────────────────────────────────

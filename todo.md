@@ -71,3 +71,10 @@
 
 ## Bug Fixes
 - [x] Fix: Cannot update component while rendering - Home.tsx calls navigate() during render instead of useEffect
+
+## Feature 11: Sample Data Generator for Testing
+- [x] Backend: Generate realistic sample CSV data (source + target) with configurable parameters
+- [x] Backend: Include intentional mismatches, timing differences, and missing counterparties for exception testing
+- [x] Frontend: "Generate Sample Data" page/section with configuration options (transaction count, match rate, channels)
+- [x] Frontend: Download generated CSVs and one-click upload to test reconciliation
+- [x] End-to-end: User can generate → upload → run reconciliation → see results in dashboard

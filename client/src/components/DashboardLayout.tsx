@@ -35,6 +35,7 @@ import {
   Shield,
   Users,
   Layers,
+  Beaker,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -51,6 +52,7 @@ const menuItems = [
   { icon: ClipboardList, label: "Review Queue", path: "/review" },
   { icon: Shield, label: "Audit Trail", path: "/audit" },
   { icon: FileText, label: "Reports", path: "/reports" },
+  { icon: Beaker, label: "Sample Data", path: "/sample-data" },
 ];
 
 const adminMenuItems = [
