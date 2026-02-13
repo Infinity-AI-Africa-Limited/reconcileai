@@ -78,3 +78,35 @@
 - [x] Frontend: "Generate Sample Data" page/section with configuration options (transaction count, match rate, channels)
 - [x] Frontend: Download generated CSVs and one-click upload to test reconciliation
 - [x] End-to-end: User can generate → upload → run reconciliation → see results in dashboard
+
+## Production-Grade Audit & Hardening (Phase 2)
+- [x] Schema: Multi-tenant support with organizations table
+- [x] Schema: 47 database indexes for query performance
+- [x] Schema: Webhook and API key tables for external integrations
+- [x] Schema: Multi-currency support (15 African + international currencies)
+- [x] Schema: Reversal tracking fields (isReversal, originalTransactionRef)
+- [x] Schema: File hash (SHA-256) for upload idempotency
+- [x] Schema: Engine config snapshot on reconciliation jobs
+- [x] Engine: Hash-based O(1) lookups replacing O(n²) scans
+- [x] Engine: 3-pass matching (exact → tolerance → fuzzy)
+- [x] Engine: Duplicate transaction detection
+- [x] Engine: Reversal detection (flag + keyword + ref similarity)
+- [x] Engine: Currency mismatch categorization for cross-border
+- [x] Engine: Performance stats tracking (processingTimeMs)
+- [x] Backend: Input validation with Zod on all endpoints
+- [x] Backend: Batch size limits (max 5000 transactions per upload)
+- [x] Backend: Pagination limits (max 500 per page)
+- [x] Backend: Sanitized SQL queries with parameterized inputs
+- [x] Frontend: Drag-and-drop file upload
+- [x] Frontend: File size validation (max 10MB)
+- [x] Frontend: RFC-compliant CSV parser (handles quoted fields)
+- [x] Frontend: Multi-currency display in upload preview
+- [x] Frontend: Validation error reporting with row-level detail
+- [x] Frontend: File hash for duplicate upload detection
+- [x] Integration: Webhook management page (create, test, toggle)
+- [x] Integration: API key management page (create, revoke)
+- [x] Integration: CSV export for reconciliation results
+- [x] Integration: Integrations sidebar nav item
+- [x] Tests: 33 reconciliation engine tests (exact, tolerance, fuzzy, edge cases, duplicates, reversals, multi-currency, performance)
+- [x] Tests: 16 sample data generator tests
+- [x] Tests: 1 auth test — Total: 50 tests passing

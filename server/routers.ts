@@ -12,6 +12,14 @@ import {
   getAIAnalysis,
 } from "./reconciliationEngine";
 import { generateSampleData, type SampleDataConfig } from "./sampleDataGenerator";
+import { SUPPORTED_CURRENCIES } from "../drizzle/schema";
+import * as crypto from "crypto";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const MAX_UPLOAD_TRANSACTIONS = 10000;
+const MAX_SEARCH_LENGTH = 100;
+const MAX_NAME_LENGTH = 255;
 
 // ─── Admin Procedure ─────────────────────────────────────────────────
 
@@ -29,15 +37,68 @@ async function logAudit(
   action: string,
   entityType: string,
   entityId?: number,
-  details?: any
+  details?: any,
+  ipAddress?: string,
+  userAgent?: string
 ) {
-  await db.createAuditLog({
-    userId,
-    action,
-    entityType,
-    entityId,
-    details: details ? JSON.stringify(details) : null,
-  });
+  try {
+    await db.createAuditLog({
+      userId,
+      action,
+      entityType,
+      entityId,
+      details: details ? JSON.stringify(details) : null,
+      ipAddress: ipAddress || null,
+      userAgent: userAgent ? userAgent.substring(0, 500) : null,
+    });
+  } catch (err) {
+    // Audit logging should never crash the main operation
+    console.error("[Audit] Failed to log:", err);
+  }
+}
+
+function getClientInfo(ctx: any): { ip: string; ua: string } {
+  const ip = ctx.req?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
+    || ctx.req?.socket?.remoteAddress
+    || "unknown";
+  const ua = ctx.req?.headers?.["user-agent"] || "unknown";
+  return { ip, ua };
+}
+
+function sanitizeInput(input: string, maxLength: number = 255): string {
+  return input
+    .replace(/<[^>]*>/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
+    .trim()
+    .substring(0, maxLength);
+}
+
+// ─── Webhook Dispatcher ─────────────────────────────────────────────
+
+async function dispatchWebhook(event: string, payload: any) {
+  try {
+    const webhookList = await db.getActiveWebhooksByEvent(event);
+    for (const webhook of webhookList) {
+      const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
+      const signature = crypto.createHmac("sha256", webhook.secret).update(body).digest("hex");
+
+      fetch(webhook.url as string, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-ReconcileAI-Signature": signature,
+          "X-ReconcileAI-Event": event,
+        },
+        body,
+        signal: AbortSignal.timeout(10000), // 10s timeout
+      }).catch((err) => {
+        console.error(`[Webhook] Failed to deliver to ${webhook.url}:`, err);
+        db.updateWebhook(webhook.id, { failureCount: webhook.failureCount + 1 });
+      });
+    }
+  } catch (err) {
+    console.error("[Webhook] Dispatch error:", err);
+  }
 }
 
 // ─── Router ──────────────────────────────────────────────────────────
@@ -60,6 +121,24 @@ export const appRouter = router({
     list: protectedProcedure.query(async () => {
       return db.getChannels();
     }),
+
+    update: adminProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        matchingConfig: z.record(z.string(), z.any()).optional(),
+        fileFormat: z.record(z.string(), z.any()).optional(),
+        isActive: z.boolean().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.updateChannel(input.id, {
+          matchingConfig: input.matchingConfig ? JSON.stringify(input.matchingConfig) : undefined,
+          fileFormat: input.fileFormat ? JSON.stringify(input.fileFormat) : undefined,
+          isActive: input.isActive,
+        });
+        await logAudit(ctx.user.id, "update_channel", "channel", input.id, input, ip, ua);
+        return { success: true };
+      }),
   }),
 
   // ─── Upload & Ingestion ──────────────────────────────────────────
@@ -68,34 +147,53 @@ export const appRouter = router({
     createBatch: protectedProcedure
       .input(
         z.object({
-          channelCode: z.string(),
-          fileName: z.string(),
+          channelCode: z.string().min(1).max(50),
+          fileName: z.string().min(1).max(500),
+          fileHash: z.string().max(64).optional(),
           transactions: z.array(
             z.object({
-              transactionRef: z.string().optional(),
-              externalRef: z.string().optional(),
-              description: z.string().optional(),
-              amount: z.string(),
-              currency: z.string().default("NGN"),
-              transactionDate: z.string(),
+              transactionRef: z.string().max(255).optional(),
+              externalRef: z.string().max(255).optional(),
+              description: z.string().max(1000).optional(),
+              amount: z.string().min(1).max(30),
+              currency: z.string().length(3).default("NGN"),
+              transactionDate: z.string().min(1),
               valueDate: z.string().optional(),
               debitCredit: z.enum(["debit", "credit"]),
-              counterparty: z.string().optional(),
+              counterparty: z.string().max(255).optional(),
               rawData: z.any().optional(),
             })
-          ),
+          ).max(MAX_UPLOAD_TRANSACTIONS, {
+            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per upload`,
+          }),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         const channel = await db.getChannelByCode(input.channelCode);
         if (!channel) {
-          throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${input.channelCode}' not found` });
+          throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
+        }
+
+        // Idempotency check: if fileHash provided, check for duplicate upload
+        if (input.fileHash) {
+          const existing = await db.getUploadBatchByHash(input.fileHash);
+          if (existing) {
+            return {
+              batchId: existing.id,
+              validRows: existing.validRows,
+              invalidRows: existing.invalidRows,
+              totalRows: existing.totalRows,
+              deduplicated: true,
+            };
+          }
         }
 
         const batchId = await db.createUploadBatch({
           userId: ctx.user.id,
           channelId: channel.id,
-          fileName: input.fileName,
+          fileName: sanitizeInput(input.fileName, 500),
+          fileHash: input.fileHash || null,
           totalRows: input.transactions.length,
           validRows: 0,
           invalidRows: 0,
@@ -109,17 +207,37 @@ export const appRouter = router({
         let validRows = 0;
         let invalidRows = 0;
         const validTxns: any[] = [];
+        const errors: string[] = [];
 
-        for (const txn of input.transactions) {
+        for (let i = 0; i < input.transactions.length; i++) {
+          const txn = input.transactions[i];
           try {
             const amount = parseFloat(txn.amount);
-            if (isNaN(amount)) {
+            if (isNaN(amount) || !isFinite(amount)) {
               invalidRows++;
+              errors.push(`Row ${i + 1}: Invalid amount '${txn.amount}'`);
+              continue;
+            }
+            if (amount < 0) {
+              invalidRows++;
+              errors.push(`Row ${i + 1}: Negative amount not allowed`);
+              continue;
+            }
+            if (amount > 999999999999.99) {
+              invalidRows++;
+              errors.push(`Row ${i + 1}: Amount exceeds maximum`);
               continue;
             }
             const txnDate = new Date(txn.transactionDate);
             if (isNaN(txnDate.getTime())) {
               invalidRows++;
+              errors.push(`Row ${i + 1}: Invalid date '${txn.transactionDate}'`);
+              continue;
+            }
+            // Validate currency
+            if (txn.currency && !(SUPPORTED_CURRENCIES as readonly string[]).includes(txn.currency)) {
+              invalidRows++;
+              errors.push(`Row ${i + 1}: Unsupported currency '${txn.currency}'`);
               continue;
             }
             validTxns.push({
@@ -140,6 +258,7 @@ export const appRouter = router({
             validRows++;
           } catch {
             invalidRows++;
+            errors.push(`Row ${i + 1}: Unexpected parsing error`);
           }
         }
 
@@ -150,7 +269,8 @@ export const appRouter = router({
         await db.updateUploadBatch(batchId, {
           validRows,
           invalidRows,
-          status: "completed",
+          status: validRows > 0 ? "completed" : "failed",
+          errorMessage: errors.length > 0 ? errors.slice(0, 20).join("; ") : null,
           completedAt: new Date(),
         });
 
@@ -160,9 +280,24 @@ export const appRouter = router({
           totalRows: input.transactions.length,
           validRows,
           invalidRows,
+        }, ip, ua);
+
+        // Dispatch webhook
+        dispatchWebhook("upload.completed", {
+          batchId,
+          channel: input.channelCode,
+          validRows,
+          invalidRows,
         });
 
-        return { batchId, validRows, invalidRows, totalRows: input.transactions.length };
+        return {
+          batchId,
+          validRows,
+          invalidRows,
+          totalRows: input.transactions.length,
+          errors: errors.slice(0, 20),
+          deduplicated: false,
+        };
       }),
 
     history: protectedProcedure.query(async ({ ctx }) => {
@@ -177,15 +312,15 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
-          channelId: z.number().optional(),
-          status: z.string().optional(),
+          channelId: z.number().int().positive().optional(),
+          status: z.string().max(30).optional(),
           dateFrom: z.string().optional(),
           dateTo: z.string().optional(),
-          amountMin: z.number().optional(),
-          amountMax: z.number().optional(),
-          search: z.string().optional(),
-          limit: z.number().default(50),
-          offset: z.number().default(0),
+          amountMin: z.number().min(0).optional(),
+          amountMax: z.number().max(999999999999.99).optional(),
+          search: z.string().max(MAX_SEARCH_LENGTH).optional(),
+          limit: z.number().int().min(1).max(500).default(50),
+          offset: z.number().int().min(0).default(0),
         })
       )
       .query(async ({ ctx, input }) => {
@@ -212,25 +347,49 @@ export const appRouter = router({
     create: protectedProcedure
       .input(
         z.object({
-          name: z.string(),
-          sourceChannelId: z.number(),
-          targetChannelId: z.number(),
-          dateFrom: z.string(),
-          dateTo: z.string(),
-          amountTolerance: z.number().default(0.005),
-          dateWindowDays: z.number().default(3),
+          name: z.string().min(1).max(MAX_NAME_LENGTH),
+          sourceChannelId: z.number().int().positive(),
+          targetChannelId: z.number().int().positive(),
+          dateFrom: z.string().min(1),
+          dateTo: z.string().min(1),
+          amountTolerance: z.number().min(0).max(0.1).default(0.005),
+          dateWindowDays: z.number().int().min(0).max(30).default(3),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+
+        // Validate channels exist
+        const sourceChannel = await db.getChannelById(input.sourceChannelId);
+        const targetChannel = await db.getChannelById(input.targetChannelId);
+        if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
+        if (!targetChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
+
+        // Validate date range
+        const dateFrom = new Date(input.dateFrom);
+        const dateTo = new Date(input.dateTo);
+        if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid date range" });
+        }
+        if (dateFrom > dateTo) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
+        }
+
         const jobId = await db.createReconciliationJob({
           userId: ctx.user.id,
-          name: input.name,
+          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           sourceChannelId: input.sourceChannelId,
           targetChannelId: input.targetChannelId,
-          dateFrom: new Date(input.dateFrom),
-          dateTo: new Date(input.dateTo),
+          dateFrom,
+          dateTo,
           amountTolerance: String(input.amountTolerance),
           dateWindowDays: input.dateWindowDays,
+          engineConfig: JSON.stringify({
+            amountTolerance: input.amountTolerance,
+            dateWindowDays: input.dateWindowDays,
+            sourceChannel: sourceChannel.code,
+            targetChannel: targetChannel.code,
+          }),
           status: "pending",
         });
 
@@ -238,11 +397,11 @@ export const appRouter = router({
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create reconciliation job" });
         }
 
-        await logAudit(ctx.user.id, "create_reconciliation_job", "reconciliation_job", jobId, input);
+        await logAudit(ctx.user.id, "create_reconciliation_job", "reconciliation_job", jobId, input, ip, ua);
 
         // Run reconciliation asynchronously
         runReconciliation(jobId, input.sourceChannelId, input.targetChannelId,
-          new Date(input.dateFrom), new Date(input.dateTo),
+          dateFrom, dateTo,
           { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
           ctx.user.id
         ).catch(err => console.error("[Reconciliation] Job failed:", err));
@@ -256,7 +415,7 @@ export const appRouter = router({
     }),
 
     get: protectedProcedure
-      .input(z.object({ id: z.number() }))
+      .input(z.object({ id: z.number().int().positive() }))
       .query(async ({ input }) => {
         const job = await db.getReconciliationJob(input.id);
         if (!job) throw new TRPCError({ code: "NOT_FOUND" });
@@ -272,12 +431,12 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
-          jobId: z.number().optional(),
-          status: z.string().optional(),
-          category: z.string().optional(),
-          severity: z.string().optional(),
-          limit: z.number().default(50),
-          offset: z.number().default(0),
+          jobId: z.number().int().positive().optional(),
+          status: z.string().max(30).optional(),
+          category: z.string().max(50).optional(),
+          severity: z.string().max(20).optional(),
+          limit: z.number().int().min(1).max(500).default(50),
+          offset: z.number().int().min(0).default(0),
         })
       )
       .query(async ({ input }) => {
@@ -287,35 +446,61 @@ export const appRouter = router({
     resolve: protectedProcedure
       .input(
         z.object({
-          id: z.number(),
+          id: z.number().int().positive(),
           status: z.enum(["resolved", "dismissed"]),
-          resolutionNotes: z.string().optional(),
+          resolutionNotes: z.string().max(2000).optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         await db.updateException(input.id, {
           status: input.status,
           resolvedBy: ctx.user.id,
           resolvedAt: new Date(),
-          resolutionNotes: input.resolutionNotes || null,
+          resolutionNotes: input.resolutionNotes ? sanitizeInput(input.resolutionNotes, 2000) : null,
         });
         await logAudit(ctx.user.id, "resolve_exception", "exception", input.id, {
           status: input.status,
           notes: input.resolutionNotes,
-        });
+        }, ip, ua);
+
+        dispatchWebhook("exception.resolved", { exceptionId: input.id, status: input.status });
         return { success: true };
       }),
 
     assign: protectedProcedure
-      .input(z.object({ id: z.number(), assignedTo: z.number() }))
+      .input(z.object({
+        id: z.number().int().positive(),
+        assignedTo: z.number().int().positive(),
+      }))
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         await db.updateException(input.id, {
           assignedTo: input.assignedTo,
           status: "in_review",
         });
         await logAudit(ctx.user.id, "assign_exception", "exception", input.id, {
           assignedTo: input.assignedTo,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    escalate: protectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        notes: z.string().max(2000).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.updateException(input.id, {
+          status: "escalated",
+          resolutionNotes: input.notes ? sanitizeInput(input.notes, 2000) : null,
         });
+        await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, {
+          notes: input.notes,
+        }, ip, ua);
+
+        dispatchWebhook("exception.escalated", { exceptionId: input.id });
         return { success: true };
       }),
   }),
@@ -329,18 +514,20 @@ export const appRouter = router({
     }),
 
     approve: protectedProcedure
-      .input(z.object({ matchId: z.number() }))
+      .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         await db.updateMatchStatus(input.matchId, "confirmed", ctx.user.id);
-        await logAudit(ctx.user.id, "approve_match", "match", input.matchId);
+        await logAudit(ctx.user.id, "approve_match", "match", input.matchId, {}, ip, ua);
         return { success: true };
       }),
 
     reject: protectedProcedure
-      .input(z.object({ matchId: z.number() }))
+      .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         await db.updateMatchStatus(input.matchId, "rejected", ctx.user.id);
-        await logAudit(ctx.user.id, "reject_match", "match", input.matchId);
+        await logAudit(ctx.user.id, "reject_match", "match", input.matchId, {}, ip, ua);
         return { success: true };
       }),
   }),
@@ -351,10 +538,10 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
-          entityType: z.string().optional(),
-          entityId: z.number().optional(),
-          limit: z.number().default(50),
-          offset: z.number().default(0),
+          entityType: z.string().max(50).optional(),
+          entityId: z.number().int().positive().optional(),
+          limit: z.number().int().min(1).max(500).default(50),
+          offset: z.number().int().min(0).default(0),
         })
       )
       .query(async ({ ctx, input }) => {
@@ -377,12 +564,13 @@ export const appRouter = router({
     generate: protectedProcedure
       .input(
         z.object({
-          jobId: z.number(),
+          jobId: z.number().int().positive(),
           reportType: z.enum(["daily", "weekly", "monthly", "custom"]),
-          title: z.string(),
+          title: z.string().min(1).max(MAX_NAME_LENGTH),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         const job = await db.getReconciliationJob(input.jobId);
         if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -398,6 +586,7 @@ export const appRouter = router({
           exceptions: job.exceptionCount,
           unmatched: job.unmatchedCount,
           matchRate: job.matchRate,
+          processingTimeMs: job.processingTimeMs,
           matchBreakdown: {
             exact: jobMatches.filter((m) => m.matchType === "exact").length,
             fuzzy: jobMatches.filter((m) => m.matchType === "fuzzy").length,
@@ -405,6 +594,7 @@ export const appRouter = router({
             dateWindow: jobMatches.filter((m) => m.matchType === "date_window").length,
             aiSuggested: jobMatches.filter((m) => m.matchType === "ai_suggested").length,
             manual: jobMatches.filter((m) => m.matchType === "manual").length,
+            reversal: jobMatches.filter((m) => m.matchType === "reversal").length,
           },
           exceptionBreakdown: {
             missingCounterparty: jobExceptions.filter((e) => e.category === "missing_counterparty").length,
@@ -412,6 +602,8 @@ export const appRouter = router({
             timingDifference: jobExceptions.filter((e) => e.category === "timing_difference").length,
             duplicate: jobExceptions.filter((e) => e.category === "duplicate_transaction").length,
             unmatched: jobExceptions.filter((e) => e.category === "unmatched").length,
+            reversalUnmatched: jobExceptions.filter((e) => e.category === "reversal_unmatched").length,
+            currencyMismatch: jobExceptions.filter((e) => e.category === "currency_mismatch").length,
           },
           generatedAt: new Date().toISOString(),
           generatedBy: ctx.user.name || ctx.user.email || "Unknown",
@@ -421,7 +613,7 @@ export const appRouter = router({
           jobId: input.jobId,
           userId: ctx.user.id,
           reportType: input.reportType,
-          title: input.title,
+          title: sanitizeInput(input.title, MAX_NAME_LENGTH),
           summary: JSON.stringify(summary),
           format: "pdf",
         });
@@ -429,9 +621,68 @@ export const appRouter = router({
         await logAudit(ctx.user.id, "generate_report", "report", reportId || undefined, {
           jobId: input.jobId,
           reportType: input.reportType,
-        });
+        }, ip, ua);
 
         return { reportId, summary };
+      }),
+  }),
+
+  // ─── Export ──────────────────────────────────────────────────────
+
+  export: router({
+    csv: protectedProcedure
+      .input(z.object({
+        jobId: z.number().int().positive(),
+        type: z.enum(["matches", "exceptions", "transactions", "full"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const report = await db.getFullReconciliationReport(input.jobId);
+        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+
+        let csvContent = "";
+        const job = report.job;
+
+        if (input.type === "matches" || input.type === "full") {
+          csvContent += "=== MATCHES ===\n";
+          csvContent += "Match ID,Source Txn ID,Target Txn ID,Match Type,Confidence,Amount Diff,Date Diff,Reason,Status\n";
+          for (const m of report.matches) {
+            csvContent += `${m.id},${m.sourceTransactionId},${m.targetTransactionId},${m.matchType},${m.confidenceScore},${m.amountDifference || 0},${m.dateDifference || 0},"${(m.matchReason || "").replace(/"/g, '""')}",${m.status}\n`;
+          }
+        }
+
+        if (input.type === "exceptions" || input.type === "full") {
+          if (csvContent) csvContent += "\n";
+          csvContent += "=== EXCEPTIONS ===\n";
+          csvContent += "Exception ID,Transaction ID,Category,Severity,Description,Status\n";
+          for (const e of report.exceptions) {
+            csvContent += `${e.id},${e.transactionId},${e.category},${e.severity},"${(e.description || "").replace(/"/g, '""')}",${e.status}\n`;
+          }
+        }
+
+        if (input.type === "transactions" || input.type === "full") {
+          if (csvContent) csvContent += "\n";
+          csvContent += "=== TRANSACTIONS ===\n";
+          csvContent += "ID,Reference,External Ref,Amount,Currency,Date,Direction,Counterparty,Status,Channel ID\n";
+          for (const t of report.transactions) {
+            csvContent += `${t.id},${t.transactionRef || ""},${t.externalRef || ""},${t.amount},${t.currency},${new Date(t.transactionDate).toISOString()},${t.debitCredit},"${(t.counterparty || "").replace(/"/g, '""')}",${t.status},${t.channelId}\n`;
+          }
+        }
+
+        // Upload CSV to storage
+        const fileName = `reconciliation-export-${input.jobId}-${input.type}-${Date.now()}.csv`;
+        const { url } = await storagePut(
+          `exports/${ctx.user.id}/${fileName}`,
+          Buffer.from(csvContent, "utf-8"),
+          "text/csv"
+        );
+
+        await logAudit(ctx.user.id, "export_csv", "reconciliation_job", input.jobId, {
+          type: input.type,
+          fileName,
+        }, ip, ua);
+
+        return { url, fileName, rowCount: csvContent.split("\n").length - 1 };
       }),
   }),
 
@@ -450,12 +701,12 @@ export const appRouter = router({
     generate: protectedProcedure
       .input(
         z.object({
-          transactionCount: z.number().min(10).max(500).default(50),
+          transactionCount: z.number().int().min(10).max(500).default(50),
           matchRate: z.number().min(0).max(100).default(75),
-          sourceChannel: z.string().default("nibss"),
-          targetChannel: z.string().default("bank_transfer"),
-          dateRangeStart: z.string(),
-          dateRangeEnd: z.string(),
+          sourceChannel: z.string().min(1).max(50).default("nibss"),
+          targetChannel: z.string().min(1).max(50).default("bank_transfer"),
+          dateRangeStart: z.string().min(1),
+          dateRangeEnd: z.string().min(1),
           includeAmountMismatches: z.boolean().default(true),
           includeTimingDifferences: z.boolean().default(true),
           includeMissingCounterparties: z.boolean().default(true),
@@ -463,6 +714,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         const result = generateSampleData(input as SampleDataConfig);
 
         await logAudit(ctx.user.id, "generate_sample_data", "sample_data", undefined, {
@@ -471,9 +723,99 @@ export const appRouter = router({
           sourceChannel: input.sourceChannel,
           targetChannel: input.targetChannel,
           summary: result.summary,
-        });
+        }, ip, ua);
 
         return result;
+      }),
+  }),
+
+  // ─── Webhooks ───────────────────────────────────────────────────
+
+  webhooks: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      return db.getWebhooks(ctx.user.id);
+    }),
+
+    create: protectedProcedure
+      .input(z.object({
+        name: z.string().min(1).max(MAX_NAME_LENGTH),
+        url: z.string().url().max(2000),
+        events: z.array(z.string().max(50)).min(1).max(20),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const secret = crypto.randomBytes(32).toString("hex");
+        const id = await db.createWebhook({
+          userId: ctx.user.id,
+          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
+          url: input.url,
+          secret,
+          events: JSON.stringify(input.events),
+          isActive: true,
+        });
+        await logAudit(ctx.user.id, "create_webhook", "webhook", id || undefined, {
+          name: input.name,
+          events: input.events,
+        }, ip, ua);
+        return { id, secret }; // Return secret only on creation
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.deleteWebhook(input.id);
+        await logAudit(ctx.user.id, "delete_webhook", "webhook", input.id, {}, ip, ua);
+        return { success: true };
+      }),
+  }),
+
+  // ─── API Keys ───────────────────────────────────────────────────
+
+  apiKeys: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      return db.getApiKeys(ctx.user.id);
+    }),
+
+    create: protectedProcedure
+      .input(z.object({
+        name: z.string().min(1).max(MAX_NAME_LENGTH),
+        permissions: z.array(z.string().max(50)).min(1).max(20),
+        expiresInDays: z.number().int().min(1).max(365).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const rawKey = `rai_${crypto.randomBytes(32).toString("hex")}`;
+        const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+        const keyPrefix = rawKey.substring(0, 12);
+
+        const id = await db.createApiKey({
+          userId: ctx.user.id,
+          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
+          keyHash,
+          keyPrefix,
+          permissions: JSON.stringify(input.permissions),
+          isActive: true,
+          expiresAt: input.expiresInDays
+            ? new Date(Date.now() + input.expiresInDays * 86400000)
+            : null,
+        });
+
+        await logAudit(ctx.user.id, "create_api_key", "api_key", id || undefined, {
+          name: input.name,
+          permissions: input.permissions,
+        }, ip, ua);
+
+        return { id, key: rawKey, prefix: keyPrefix }; // Return raw key only on creation
+      }),
+
+    revoke: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.revokeApiKey(input.id);
+        await logAudit(ctx.user.id, "revoke_api_key", "api_key", input.id, {}, ip, ua);
+        return { success: true };
       }),
   }),
 
@@ -485,12 +827,16 @@ export const appRouter = router({
     }),
 
     updateRole: adminProcedure
-      .input(z.object({ userId: z.number(), role: z.enum(["user", "admin"]) }))
+      .input(z.object({
+        userId: z.number().int().positive(),
+        role: z.enum(["user", "admin"]),
+      }))
       .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
           newRole: input.role,
-        });
+        }, ip, ua);
         return { success: true };
       }),
   }),
@@ -509,6 +855,7 @@ async function runReconciliation(
   config: { amountTolerance: number; dateWindowDays: number },
   userId: number
 ) {
+  const startTime = Date.now();
   try {
     await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
 
@@ -546,7 +893,7 @@ async function runReconciliation(
       }
     }
 
-    // Process unmatched source transactions as exceptions
+    // Process unmatched transactions as exceptions
     let exceptionCount = 0;
     const allUnmatched = [...result.unmatchedSource, ...result.unmatchedTarget];
     const unmatchedTxns = await db.getTransactionsByIds(allUnmatched);
@@ -574,8 +921,25 @@ async function runReconciliation(
       exceptionCount++;
     }
 
+    // Create exceptions for detected duplicates
+    for (const dupGroup of result.duplicates) {
+      for (const txnId of dupGroup.transactionIds) {
+        await db.insertException({
+          jobId,
+          transactionId: txnId,
+          category: "duplicate_transaction",
+          severity: "medium",
+          description: dupGroup.reason,
+          suggestedResolution: "Review and remove duplicate transactions. Verify with the source system whether these are genuine separate transactions or data entry errors.",
+          status: "open",
+        });
+        exceptionCount++;
+      }
+    }
+
     const totalTxns = sourceTxns.length + targetTxns.length;
     const matchRate = totalTxns > 0 ? ((matchedCount * 2) / totalTxns * 100) : 0;
+    const processingTimeMs = Date.now() - startTime;
 
     await db.updateReconciliationJob(jobId, {
       status: "completed",
@@ -583,6 +947,7 @@ async function runReconciliation(
       exceptionCount,
       unmatchedCount: allUnmatched.length,
       matchRate: String(Math.round(matchRate * 100) / 100),
+      processingTimeMs,
       completedAt: new Date(),
     });
 
@@ -591,12 +956,27 @@ async function runReconciliation(
       exceptionCount,
       unmatchedCount: allUnmatched.length,
       matchRate: `${matchRate.toFixed(2)}%`,
+      processingTimeMs,
+      engineStats: result.stats,
     });
+
+    // Dispatch webhook
+    dispatchWebhook("reconciliation.completed", {
+      jobId,
+      matchedCount,
+      exceptionCount,
+      unmatchedCount: allUnmatched.length,
+      matchRate: Math.round(matchRate * 100) / 100,
+      processingTimeMs,
+    });
+
   } catch (error) {
     console.error("[Reconciliation] Job failed:", error);
     await db.updateReconciliationJob(jobId, {
       status: "failed",
       completedAt: new Date(),
     });
+
+    dispatchWebhook("reconciliation.failed", { jobId, error: String(error) });
   }
 }

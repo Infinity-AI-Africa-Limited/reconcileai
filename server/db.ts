@@ -10,8 +10,19 @@ import {
   exceptions, InsertException,
   auditLogs, InsertAuditLog,
   reconciliationReports, InsertReconciliationReport,
+  organizations, InsertOrganization,
+  webhooks, InsertWebhook,
+  apiKeys, InsertApiKey,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const MAX_QUERY_LIMIT = 500;
+const DEFAULT_QUERY_LIMIT = 50;
+const BATCH_INSERT_SIZE = 100;
+
+// ─── Database Connection ────────────────────────────────────────────
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -25,6 +36,62 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+// ─── Utility: Sanitize LIKE patterns ────────────────────────────────
+
+function sanitizeLikePattern(input: string): string {
+  // Escape SQL LIKE wildcards to prevent injection
+  return input.replace(/[%_\\]/g, (char) => `\\${char}`);
+}
+
+function clampLimit(limit: number | undefined): number {
+  const val = limit || DEFAULT_QUERY_LIMIT;
+  return Math.min(Math.max(1, val), MAX_QUERY_LIMIT);
+}
+
+function clampOffset(offset: number | undefined): number {
+  return Math.max(0, offset || 0);
+}
+
+// ─── Utility: Sanitize text input ───────────────────────────────────
+
+function sanitizeText(input: string | null | undefined): string | null {
+  if (!input) return null;
+  // Strip HTML tags and control characters to prevent XSS
+  return input
+    .replace(/<[^>]*>/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
+    .trim()
+    .substring(0, 10000); // Max text length
+}
+
+function sanitizeRef(input: string | null | undefined): string | null {
+  if (!input) return null;
+  // Allow only alphanumeric, hyphens, slashes, dots, underscores for references
+  return input.replace(/[^\w\-\/\.\s]/g, "").trim().substring(0, 255);
+}
+
+// ─── Organizations ──────────────────────────────────────────────────
+
+export async function createOrganization(data: InsertOrganization) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(organizations).values(data);
+  return result[0].insertId;
+}
+
+export async function getOrganizations() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(organizations).orderBy(asc(organizations.name));
+}
+
+export async function getOrganizationById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(organizations).where(eq(organizations.id, id)).limit(1);
+  return result[0];
 }
 
 // ─── Users ───────────────────────────────────────────────────────────
@@ -65,7 +132,7 @@ export async function getUserByOpenId(openId: string) {
 export async function getAllUsers() {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(users).orderBy(desc(users.createdAt));
+  return db.select().from(users).orderBy(desc(users.createdAt)).limit(MAX_QUERY_LIMIT);
 }
 
 export async function updateUserRole(userId: number, role: "user" | "admin") {
@@ -89,10 +156,23 @@ export async function getChannelByCode(code: string) {
   return result[0];
 }
 
+export async function getChannelById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(channels).where(eq(channels.id, id)).limit(1);
+  return result[0];
+}
+
 export async function createChannel(data: InsertChannel) {
   const db = await getDb();
   if (!db) return;
   await db.insert(channels).values(data);
+}
+
+export async function updateChannel(id: number, data: Partial<InsertChannel>) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(channels).set(data).where(eq(channels.id, id));
 }
 
 // ─── Upload Batches ──────────────────────────────────────────────────
@@ -102,6 +182,15 @@ export async function createUploadBatch(data: InsertUploadBatch) {
   if (!db) return null;
   const result = await db.insert(uploadBatches).values(data);
   return result[0].insertId;
+}
+
+export async function getUploadBatchByHash(fileHash: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(uploadBatches)
+    .where(and(eq(uploadBatches.fileHash, fileHash), eq(uploadBatches.status, "completed")))
+    .limit(1);
+  return result[0];
 }
 
 export async function updateUploadBatch(id: number, data: Partial<InsertUploadBatch>) {
@@ -125,9 +214,17 @@ export async function insertTransactions(txns: InsertTransaction[]) {
   const db = await getDb();
   if (!db) return;
   if (txns.length === 0) return;
-  // Insert in batches of 100
-  for (let i = 0; i < txns.length; i += 100) {
-    const batch = txns.slice(i, i + 100);
+  // Sanitize all text fields before insertion
+  const sanitized = txns.map((txn) => ({
+    ...txn,
+    transactionRef: sanitizeRef(txn.transactionRef),
+    externalRef: sanitizeRef(txn.externalRef),
+    description: sanitizeText(txn.description),
+    counterparty: sanitizeText(txn.counterparty),
+  }));
+  // Insert in batches to prevent memory issues
+  for (let i = 0; i < sanitized.length; i += BATCH_INSERT_SIZE) {
+    const batch = sanitized.slice(i, i + BATCH_INSERT_SIZE);
     await db.insert(transactions).values(batch);
   }
 }
@@ -159,18 +256,20 @@ export async function getTransactions(filters: {
   if (filters.amountMin) conditions.push(gte(transactions.amount, String(filters.amountMin)));
   if (filters.amountMax) conditions.push(lte(transactions.amount, String(filters.amountMax)));
   if (filters.search) {
+    // Sanitize search input to prevent SQL LIKE injection
+    const safeSearch = sanitizeLikePattern(filters.search.substring(0, 100));
     conditions.push(
       or(
-        like(transactions.transactionRef, `%${filters.search}%`),
-        like(transactions.description, `%${filters.search}%`),
-        like(transactions.counterparty, `%${filters.search}%`)
+        like(transactions.transactionRef, `%${safeSearch}%`),
+        like(transactions.description, `%${safeSearch}%`),
+        like(transactions.counterparty, `%${safeSearch}%`)
       )
     );
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-  const limit = filters.limit || 50;
-  const offset = filters.offset || 0;
+  const limit = clampLimit(filters.limit);
+  const offset = clampOffset(filters.offset);
 
   const data = await db.select().from(transactions)
     .where(whereClause)
@@ -187,7 +286,14 @@ export async function getTransactions(filters: {
 export async function getTransactionsByIds(ids: number[]) {
   const db = await getDb();
   if (!db || ids.length === 0) return [];
-  return db.select().from(transactions).where(inArray(transactions.id, ids));
+  // Batch large ID arrays to prevent query size limits
+  const results = [];
+  for (let i = 0; i < ids.length; i += 500) {
+    const batch = ids.slice(i, i + 500);
+    const batchResult = await db.select().from(transactions).where(inArray(transactions.id, batch));
+    results.push(...batchResult);
+  }
+  return results;
 }
 
 export async function updateTransactionStatus(id: number, status: string, matchId?: number) {
@@ -209,6 +315,25 @@ export async function getTransactionsForReconciliation(channelId: number, dateFr
       eq(transactions.status, "unmatched")
     ))
     .orderBy(asc(transactions.transactionDate));
+}
+
+// Check for duplicate transactions within a channel
+export async function findDuplicateTransactions(
+  channelId: number,
+  transactionRef: string,
+  amount: string,
+  transactionDate: Date
+) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(transactions)
+    .where(and(
+      eq(transactions.channelId, channelId),
+      eq(transactions.transactionRef, transactionRef),
+      eq(transactions.amount, amount),
+      eq(transactions.transactionDate, transactionDate)
+    ))
+    .limit(5);
 }
 
 // ─── Reconciliation Jobs ─────────────────────────────────────────────
@@ -251,6 +376,18 @@ export async function insertMatch(data: InsertMatch) {
   return result[0].insertId;
 }
 
+export async function insertMatchesBatch(dataArray: InsertMatch[]) {
+  const db = await getDb();
+  if (!db || dataArray.length === 0) return [];
+  const ids: number[] = [];
+  for (let i = 0; i < dataArray.length; i += BATCH_INSERT_SIZE) {
+    const batch = dataArray.slice(i, i + BATCH_INSERT_SIZE);
+    const result = await db.insert(matches).values(batch);
+    ids.push(result[0].insertId);
+  }
+  return ids;
+}
+
 export async function getMatchesByJob(jobId: number) {
   const db = await getDb();
   if (!db) return [];
@@ -280,6 +417,18 @@ export async function insertException(data: InsertException) {
   return result[0].insertId;
 }
 
+export async function insertExceptionsBatch(dataArray: InsertException[]) {
+  const db = await getDb();
+  if (!db || dataArray.length === 0) return [];
+  const ids: number[] = [];
+  for (let i = 0; i < dataArray.length; i += BATCH_INSERT_SIZE) {
+    const batch = dataArray.slice(i, i + BATCH_INSERT_SIZE);
+    const result = await db.insert(exceptions).values(batch);
+    ids.push(result[0].insertId);
+  }
+  return ids;
+}
+
 export async function getExceptions(filters: {
   jobId?: number;
   status?: string;
@@ -298,8 +447,8 @@ export async function getExceptions(filters: {
   if (filters.severity) conditions.push(eq(exceptions.severity, filters.severity as any));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-  const limit = filters.limit || 50;
-  const offset = filters.offset || 0;
+  const limit = clampLimit(filters.limit);
+  const offset = clampOffset(filters.offset);
 
   const data = await db.select().from(exceptions)
     .where(whereClause)
@@ -343,8 +492,8 @@ export async function getAuditLogs(filters: {
   if (filters.userId) conditions.push(eq(auditLogs.userId, filters.userId));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-  const limit = filters.limit || 50;
-  const offset = filters.offset || 0;
+  const limit = clampLimit(filters.limit);
+  const offset = clampOffset(filters.offset);
 
   const data = await db.select().from(auditLogs)
     .where(whereClause)
@@ -374,6 +523,89 @@ export async function getReports(userId: number, isAdmin: boolean) {
     return db.select().from(reconciliationReports).orderBy(desc(reconciliationReports.createdAt)).limit(100);
   }
   return db.select().from(reconciliationReports).where(eq(reconciliationReports.userId, userId)).orderBy(desc(reconciliationReports.createdAt)).limit(100);
+}
+
+// ─── Webhooks ────────────────────────────────────────────────────────
+
+export async function createWebhook(data: InsertWebhook) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(webhooks).values(data);
+  return result[0].insertId;
+}
+
+export async function getWebhooks(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(webhooks).where(eq(webhooks.userId, userId)).orderBy(desc(webhooks.createdAt));
+}
+
+export async function getActiveWebhooksByEvent(event: string) {
+  const db = await getDb();
+  if (!db) return [];
+  // Get all active webhooks and filter by event in application code
+  const allActive = await db.select().from(webhooks).where(eq(webhooks.isActive, true));
+  return allActive.filter((w) => {
+    const events = w.events as string[];
+    return events && events.includes(event);
+  });
+}
+
+export async function updateWebhook(id: number, data: Partial<InsertWebhook>) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(webhooks).set(data).where(eq(webhooks.id, id));
+}
+
+export async function deleteWebhook(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(webhooks).set({ isActive: false }).where(eq(webhooks.id, id));
+}
+
+// ─── API Keys ────────────────────────────────────────────────────────
+
+export async function createApiKey(data: InsertApiKey) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(apiKeys).values(data);
+  return result[0].insertId;
+}
+
+export async function getApiKeyByHash(keyHash: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(apiKeys)
+    .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.isActive, true)))
+    .limit(1);
+  return result[0];
+}
+
+export async function getApiKeys(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: apiKeys.id,
+    name: apiKeys.name,
+    keyPrefix: apiKeys.keyPrefix,
+    permissions: apiKeys.permissions,
+    isActive: apiKeys.isActive,
+    lastUsedAt: apiKeys.lastUsedAt,
+    expiresAt: apiKeys.expiresAt,
+    createdAt: apiKeys.createdAt,
+  }).from(apiKeys).where(eq(apiKeys.userId, userId)).orderBy(desc(apiKeys.createdAt));
+}
+
+export async function updateApiKeyLastUsed(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, id));
+}
+
+export async function revokeApiKey(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(apiKeys).set({ isActive: false }).where(eq(apiKeys.id, id));
 }
 
 // ─── Dashboard Stats ─────────────────────────────────────────────────
@@ -434,4 +666,34 @@ export async function getDashboardStats(userId: number, isAdmin: boolean) {
     },
     channelStats,
   };
+}
+
+// ─── Export Helpers ──────────────────────────────────────────────────
+
+export async function getTransactionsForExport(jobId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const job = await getReconciliationJob(jobId);
+  if (!job) return [];
+  // Get all transactions for both channels in the job's date range
+  const allTxns = await db.select().from(transactions)
+    .where(and(
+      or(
+        eq(transactions.channelId, job.sourceChannelId),
+        eq(transactions.channelId, job.targetChannelId)
+      ),
+      gte(transactions.transactionDate, job.dateFrom),
+      lte(transactions.transactionDate, job.dateTo)
+    ))
+    .orderBy(asc(transactions.transactionDate));
+  return allTxns;
+}
+
+export async function getFullReconciliationReport(jobId: number) {
+  const job = await getReconciliationJob(jobId);
+  if (!job) return null;
+  const jobMatches = await getMatchesByJob(jobId);
+  const { data: jobExceptions } = await getExceptions({ jobId, limit: MAX_QUERY_LIMIT });
+  const allTxns = await getTransactionsForExport(jobId);
+  return { job, matches: jobMatches, exceptions: jobExceptions, transactions: allTxns };
 }

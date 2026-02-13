@@ -17,6 +17,7 @@ import MultiChannel from "./pages/MultiChannel";
 import Reports from "./pages/Reports";
 import Admin from "./pages/Admin";
 import SampleData from "./pages/SampleData";
+import Integrations from "./pages/Integrations";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -41,6 +42,7 @@ function Router() {
       <Route path="/reports">{() => <DashboardPage component={Reports} />}</Route>
       <Route path="/admin">{() => <DashboardPage component={Admin} />}</Route>
       <Route path="/sample-data">{() => <DashboardPage component={SampleData} />}</Route>
+      <Route path="/integrations">{() => <DashboardPage component={Integrations} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

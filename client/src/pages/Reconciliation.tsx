@@ -5,13 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle } from "lucide-react";
+import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Download } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ReconciliationPage() {
   const { data: channels } = trpc.channels.list.useQuery();
   const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery();
   const createMutation = trpc.reconciliation.create.useMutation();
+  const exportMutation = trpc.export.csv.useMutation();
 
   const [open, setOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState<number | null>(null);
@@ -174,6 +175,18 @@ export default function ReconciliationPage() {
                     <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); setSelectedJob(job.id); }}>
                       <Eye className="h-4 w-4 mr-1" /> View
                     </Button>
+                    {job.status === "completed" && (
+                      <Button variant="outline" size="sm" onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          const res = await exportMutation.mutateAsync({ jobId: job.id, type: "full" });
+                          window.open(res.url, "_blank");
+                          toast.success(`Export ready: ${res.fileName}`);
+                        } catch (err: any) { toast.error(err.message || "Export failed"); }
+                      }}>
+                        <Download className="h-4 w-4 mr-1" /> Export
+                      </Button>
+                    )}
                   </div>
                 </div>
               </CardContent>

@@ -15,6 +15,13 @@
       "when": 1771009296707,
       "tag": "0001_high_prima",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1771014315088,
+      "tag": "0002_fluffy_beast",
+      "breakpoints": true
     }
   ]
 }
