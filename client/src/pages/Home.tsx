@@ -2,6 +2,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { getLoginUrl } from "@/const";
 import { useLocation } from "wouter";
+import { useEffect } from "react";
 import {
   ArrowRight,
   Zap,
@@ -16,8 +17,13 @@ export default function Home() {
   const { user, isAuthenticated, loading } = useAuth();
   const [, navigate] = useLocation();
 
+  useEffect(() => {
+    if (isAuthenticated && !loading) {
+      navigate("/dashboard");
+    }
+  }, [isAuthenticated, loading, navigate]);
+
   if (isAuthenticated && !loading) {
-    navigate("/dashboard");
     return null;
   }
 

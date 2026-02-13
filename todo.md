@@ -68,3 +68,6 @@
 ## Testing
 - [x] Backend API tests (matching engine, upload, reconciliation) - 14 tests passing
 - [x] Auth and RBAC tests - 1 test passing
+
+## Bug Fixes
+- [x] Fix: Cannot update component while rendering - Home.tsx calls navigate() during render instead of useEffect
