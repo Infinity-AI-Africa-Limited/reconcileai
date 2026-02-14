@@ -29,6 +29,13 @@
       "when": 1771026846697,
       "tag": "0003_solid_guardsmen",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1771056502714,
+      "tag": "0004_crazy_vivisector",
+      "breakpoints": true
     }
   ]
 }

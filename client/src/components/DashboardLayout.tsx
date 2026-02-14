@@ -40,6 +40,7 @@ import {
   Calendar,
   Activity,
   Mail,
+  Code,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -61,6 +62,7 @@ const menuItems = [
   { icon: Mail, label: "Email Settings", path: "/email-settings" },
   { icon: Beaker, label: "Sample Data", path: "/sample-data" },
   { icon: Plug, label: "Integrations", path: "/integrations" },
+  { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
 ];
 
 const adminMenuItems = [

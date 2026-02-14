@@ -510,3 +510,145 @@ export const jobProgressEvents = mysqlTable("job_progress_events", {
 
 export type JobProgressEvent = typeof jobProgressEvents.$inferSelect;
 export type InsertJobProgressEvent = typeof jobProgressEvents.$inferInsert;
+
+// ─── API Ingestion Logs ──────────────────────────────────────────────
+export const apiIngestionLogs = mysqlTable("api_ingestion_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  apiKeyId: int("apiKeyId"), // FK to api_keys table
+  endpoint: varchar("endpoint", { length: 255 }).notNull(), // e.g., /api/v1/transactions/upload
+  method: varchar("method", { length: 10 }).notNull(), // POST, PUT, etc.
+  channelId: int("channelId"),
+  fileName: varchar("fileName", { length: 500 }),
+  fileHash: varchar("fileHash", { length: 64 }), // SHA-256 for idempotency
+  payloadSize: int("payloadSize"), // bytes
+  totalRows: int("totalRows"),
+  validRows: int("validRows"),
+  invalidRows: int("invalidRows"),
+  status: mysqlEnum("status", ["success", "failed", "partial"]).notNull(),
+  statusCode: int("statusCode"), // HTTP status code
+  errorMessage: text("errorMessage"),
+  processingTimeMs: int("processingTimeMs"),
+  uploadBatchId: int("uploadBatchId"), // FK to upload_batches
+  reconciliationJobId: int("reconciliationJobId"), // FK to reconciliation_jobs if auto-reconcile enabled
+  ipAddress: varchar("ipAddress", { length: 45 }), // IPv4 or IPv6
+  userAgent: text("userAgent"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_api_log_org").on(table.organizationId),
+  index("idx_api_log_key").on(table.apiKeyId),
+  index("idx_api_log_status").on(table.status),
+  index("idx_api_log_created").on(table.createdAt),
+  index("idx_api_log_batch").on(table.uploadBatchId),
+  index("idx_api_log_hash").on(table.fileHash),
+]);
+
+export type ApiIngestionLog = typeof apiIngestionLogs.$inferSelect;
+export type InsertApiIngestionLog = typeof apiIngestionLogs.$inferInsert;
+
+// ─── SFTP Credentials ────────────────────────────────────────────────
+export const sftpCredentials = mysqlTable("sftp_credentials", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  userId: int("userId").notNull(), // Who created this config
+  name: varchar("name", { length: 255 }).notNull(), // Friendly name
+  host: varchar("host", { length: 255 }).notNull(),
+  port: int("port").default(22).notNull(),
+  username: varchar("username", { length: 255 }).notNull(),
+  // Password stored encrypted (use platform secrets or vault)
+  passwordEncrypted: text("passwordEncrypted"),
+  // Or use SSH key
+  privateKeyEncrypted: text("privateKeyEncrypted"),
+  // Remote path configuration
+  remotePath: varchar("remotePath", { length: 500 }).default("/").notNull(), // Directory to monitor
+  filePattern: varchar("filePattern", { length: 255 }).default("*.csv").notNull(), // Glob pattern
+  archivePath: varchar("archivePath", { length: 500 }), // Where to move processed files
+  // Channel mapping
+  channelId: int("channelId").notNull(), // Which channel these files belong to
+  // Polling configuration
+  pollingEnabled: boolean("pollingEnabled").default(true).notNull(),
+  pollingIntervalMinutes: int("pollingIntervalMinutes").default(15).notNull(), // Check every N minutes
+  // Auto-reconciliation
+  autoReconcile: boolean("autoReconcile").default(false).notNull(),
+  reconcileTargetChannelId: int("reconcileTargetChannelId"), // If autoReconcile, which channel to reconcile against
+  // Status
+  isActive: boolean("isActive").default(true).notNull(),
+  lastPolledAt: timestamp("lastPolledAt"),
+  lastSuccessAt: timestamp("lastSuccessAt"),
+  lastErrorAt: timestamp("lastErrorAt"),
+  lastErrorMessage: text("lastErrorMessage"),
+  totalFilesProcessed: int("totalFilesProcessed").default(0).notNull(),
+  totalFilesFailed: int("totalFilesFailed").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_sftp_org").on(table.organizationId),
+  index("idx_sftp_user").on(table.userId),
+  index("idx_sftp_channel").on(table.channelId),
+  index("idx_sftp_active").on(table.isActive),
+  index("idx_sftp_polling").on(table.pollingEnabled),
+]);
+
+export type SftpCredential = typeof sftpCredentials.$inferSelect;
+export type InsertSftpCredential = typeof sftpCredentials.$inferInsert;
+
+// ─── SFTP Ingestion Logs ─────────────────────────────────────────────
+export const sftpIngestionLogs = mysqlTable("sftp_ingestion_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  sftpCredentialId: int("sftpCredentialId").notNull(),
+  organizationId: int("organizationId"),
+  channelId: int("channelId"),
+  fileName: varchar("fileName", { length: 500 }).notNull(),
+  filePath: varchar("filePath", { length: 1000 }).notNull(),
+  fileSize: bigint("fileSize", { mode: "number" }), // bytes
+  fileHash: varchar("fileHash", { length: 64 }), // SHA-256
+  totalRows: int("totalRows"),
+  validRows: int("validRows"),
+  invalidRows: int("invalidRows"),
+  status: mysqlEnum("status", ["success", "failed", "partial", "skipped"]).notNull(),
+  errorMessage: text("errorMessage"),
+  processingTimeMs: int("processingTimeMs"),
+  uploadBatchId: int("uploadBatchId"), // FK to upload_batches
+  reconciliationJobId: int("reconciliationJobId"), // FK if auto-reconcile
+  archivedPath: varchar("archivedPath", { length: 1000 }), // Where file was moved after processing
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_sftp_log_cred").on(table.sftpCredentialId),
+  index("idx_sftp_log_org").on(table.organizationId),
+  index("idx_sftp_log_status").on(table.status),
+  index("idx_sftp_log_created").on(table.createdAt),
+  index("idx_sftp_log_hash").on(table.fileHash),
+]);
+
+export type SftpIngestionLog = typeof sftpIngestionLogs.$inferSelect;
+export type InsertSftpIngestionLog = typeof sftpIngestionLogs.$inferInsert;
+
+// ─── User Role Preferences ───────────────────────────────────────────
+export const userRolePreferences = mysqlTable("user_role_preferences", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  organizationId: int("organizationId"),
+  // Role-specific view preferences
+  defaultView: mysqlEnum("defaultView", ["cfo", "operations", "auditor", "standard"]).default("standard").notNull(),
+  // Widget visibility and ordering (JSON array of widget IDs)
+  visibleWidgets: json("visibleWidgets"), // ["match_rate", "exceptions", "channel_health", ...]
+  widgetOrder: json("widgetOrder"), // [1, 3, 2, 4, ...] for drag-and-drop reordering
+  // Data filters
+  defaultChannelFilter: json("defaultChannelFilter"), // [channelId1, channelId2, ...]
+  defaultDateRange: varchar("defaultDateRange", { length: 50 }).default("7d").notNull(), // "7d", "30d", "90d", "custom"
+  // Notification preferences
+  desktopNotifications: boolean("desktopNotifications").default(false).notNull(),
+  emailDigestFrequency: mysqlEnum("emailDigestFrequency", ["none", "daily", "weekly"]).default("none").notNull(),
+  // Theme and display
+  theme: mysqlEnum("theme", ["light", "dark", "auto"]).default("light").notNull(),
+  compactMode: boolean("compactMode").default(false).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_role_pref_user_org").on(table.userId, table.organizationId),
+  index("idx_role_pref_user").on(table.userId),
+  index("idx_role_pref_view").on(table.defaultView),
+]);
+
+export type UserRolePreference = typeof userRolePreferences.$inferSelect;
+export type InsertUserRolePreference = typeof userRolePreferences.$inferInsert;

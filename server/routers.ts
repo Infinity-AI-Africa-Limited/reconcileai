@@ -27,6 +27,7 @@ import {
   sendReconciliationReport,
   checkAndSendAlerts,
 } from "./emailReportService";
+import { publicApiRouter } from "./publicApiRouter";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -1105,6 +1106,10 @@ export const appRouter = router({
         }));
       }),
   }),
+
+  // ─── Public API (for external integrations) ─────────────────────
+
+  publicApi: publicApiRouter,
 
   // ─── Admin ───────────────────────────────────────────────────────
 

@@ -136,3 +136,27 @@
 - [x] Frontend: Key metrics panel — active jobs, avg processing time, success rate, throughput
 - [x] Frontend: Recent job activity feed with timestamps
 - [x] Frontend: Auto-refresh with configurable polling interval
+
+## Feature 15: SFTP/REST API Auto-Ingestion
+- [x] Schema: API ingestion logs table (endpoint, method, status, payload hash, processing time)
+- [x] Schema: SFTP credentials table (host, port, username, encrypted password, path, polling interval)
+- [x] Backend: REST API public endpoints for transaction upload with API key authentication
+- [x] Backend: Async file processing queue for API uploads (validate → parse → store → reconcile)
+- [ ] Backend: SFTP credential management endpoints (create, update, test connection, delete)
+- [ ] Backend: SFTP polling service (check for new files, download, process, archive)
+- [x] Backend: Ingestion status tracking and error reporting
+- [x] Frontend: API Ingestion page — endpoint documentation, test console
+- [ ] Frontend: SFTP Configuration page — credential management, connection testing, file path patterns
+- [x] Frontend: Ingestion logs viewer (placeholder, needs backend integration)
+
+## Feature 16: Role-Based Dashboard Views
+- [ ] Schema: User role preferences table (default view, widget visibility, data filters)
+- [ ] Backend: Role-specific data filtering in dashboard stats endpoints
+- [ ] Backend: CFO view — aggregate metrics, trend analysis, executive summary
+- [ ] Backend: Operations view — exception queue, pending reviews, high-priority alerts
+- [ ] Backend: Auditor view — compliance metrics, audit trail, regulatory reports
+- [ ] Frontend: CFO Dashboard — high-level KPIs, match rate trends, channel health, cost analysis
+- [ ] Frontend: Operations Dashboard — exception queue with action buttons, review workflow, SLA tracking
+- [ ] Frontend: Auditor Dashboard — compliance checklist, audit log viewer, regulatory export
+- [ ] Frontend: Role switcher in header (for users with multiple roles)
+- [ ] Frontend: Customizable dashboard widgets with drag-and-drop reordering
