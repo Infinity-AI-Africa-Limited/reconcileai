@@ -41,6 +41,7 @@ import {
   Activity,
   Mail,
   Code,
+  Server,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -63,6 +64,7 @@ const menuItems = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data" },
   { icon: Plug, label: "Integrations", path: "/integrations" },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
+  { icon: Server, label: "SFTP Config", path: "/sftp-config" },
 ];
 
 const adminMenuItems = [

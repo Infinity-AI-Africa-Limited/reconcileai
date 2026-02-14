@@ -142,11 +142,11 @@
 - [x] Schema: SFTP credentials table (host, port, username, encrypted password, path, polling interval)
 - [x] Backend: REST API public endpoints for transaction upload with API key authentication
 - [x] Backend: Async file processing queue for API uploads (validate → parse → store → reconcile)
-- [ ] Backend: SFTP credential management endpoints (create, update, test connection, delete)
-- [ ] Backend: SFTP polling service (check for new files, download, process, archive)
+- [x] Backend: SFTP credential management endpoints (create, update, test connection, delete)
+- [x] Backend: SFTP polling service (check for new files, download, process, archive)
 - [x] Backend: Ingestion status tracking and error reporting
 - [x] Frontend: API Ingestion page — endpoint documentation, test console
-- [ ] Frontend: SFTP Configuration page — credential management, connection testing, file path patterns
+- [x] Frontend: SFTP Configuration page — credential management, connection testing, file path patterns
 - [x] Frontend: Ingestion logs viewer (placeholder, needs backend integration)
 
 ## Feature 16: Role-Based Dashboard Views
@@ -160,3 +160,29 @@
 - [ ] Frontend: Auditor Dashboard — compliance checklist, audit log viewer, regulatory export
 - [ ] Frontend: Role switcher in header (for users with multiple roles)
 - [ ] Frontend: Customizable dashboard widgets with drag-and-drop reordering
+
+## Feature 17: SFTP Auto-Ingestion Service (Continuation of Feature 15)
+- [x] Backend: SFTP connection library integration (ssh2-sftp-client)
+- [x] Backend: Credential encryption/decryption service (AES-256-GCM)
+- [x] Backend: SFTP connection testing endpoint
+- [x] Backend: SFTP file polling service (scheduled checks)
+- [x] Backend: File download, validation, processing pipeline
+- [x] Backend: File archiving after successful processing
+- [x] Backend: SFTP credential CRUD endpoints
+- [x] Backend: SFTP ingestion logs tracking
+- [x] Frontend: SFTP Configuration page with credential management
+- [x] Frontend: Connection test button with real-time feedback
+- [x] Frontend: Polling interval configuration
+- [x] Frontend: SFTP ingestion logs viewer
+
+## Feature 18: Role-Based Dashboards
+- [ ] Backend: User role preference endpoints (get/update default view)
+- [ ] Backend: CFO dashboard data endpoint (aggregate KPIs, trends)
+- [ ] Backend: Operations dashboard data endpoint (exception queue, SLA metrics)
+- [ ] Backend: Auditor dashboard data endpoint (compliance metrics, audit trail)
+- [ ] Frontend: CFO Dashboard page (executive summary, trend charts, channel health)
+- [ ] Frontend: Operations Dashboard page (exception queue with actions, review workflow)
+- [ ] Frontend: Auditor Dashboard page (compliance checklist, audit log viewer, export)
+- [ ] Frontend: Role switcher component in header
+- [ ] Frontend: Dashboard routing based on user role and preferences
+- [ ] Frontend: Customizable widget visibility per role

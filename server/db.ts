@@ -17,6 +17,10 @@ import {
   scheduleRunHistory, InsertScheduleRunHistory,
   emailPreferences, InsertEmailPreference,
   jobProgressEvents, InsertJobProgressEvent,
+  sftpCredentials, InsertSftpCredential,
+  sftpIngestionLogs, InsertSftpIngestionLog,
+  apiIngestionLogs, InsertApiIngestionLog,
+  userRolePreferences, InsertUserRolePreference,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -936,4 +940,148 @@ export async function getMonitoringStats(userId: number, isAdmin: boolean) {
       active: Number(scheduleStats?.active || 0),
     },
   };
+}
+
+
+// ─── SFTP Credentials ───────────────────────────────────────────────
+
+export async function createSftpCredential(data: InsertSftpCredential) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const [result] = await db.insert(sftpCredentials).values(data);
+  return result.insertId;
+}
+
+export async function getSftpCredentials(userId: number, organizationId?: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  let conditions = [eq(sftpCredentials.userId, userId)];
+  
+  if (organizationId) {
+    conditions.push(eq(sftpCredentials.organizationId, organizationId));
+  }
+  
+  return db
+    .select()
+    .from(sftpCredentials)
+    .where(and(...conditions))
+    .orderBy(desc(sftpCredentials.createdAt));
+}
+
+export async function getSftpCredentialById(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const [cred] = await db
+    .select()
+    .from(sftpCredentials)
+    .where(eq(sftpCredentials.id, id))
+    .limit(1);
+  
+  return cred;
+}
+
+export async function updateSftpCredential(id: number, data: Partial<InsertSftpCredential>) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  await db
+    .update(sftpCredentials)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(sftpCredentials.id, id));
+}
+
+export async function deleteSftpCredential(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  await db.delete(sftpCredentials).where(eq(sftpCredentials.id, id));
+}
+
+// ─── SFTP Ingestion Logs ────────────────────────────────────────────
+
+export async function getSftpIngestionLogs(params: {
+  credentialId?: number;
+  organizationId?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const limit = Math.min(params.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+  const offset = params.offset || 0;
+  
+  let query = db.select().from(sftpIngestionLogs);
+  
+  if (params.credentialId) {
+    query = query.where(eq(sftpIngestionLogs.sftpCredentialId, params.credentialId)) as any;
+  }
+  
+  if (params.organizationId) {
+    query = query.where(eq(sftpIngestionLogs.organizationId, params.organizationId)) as any;
+  }
+  
+  return query
+    .orderBy(desc(sftpIngestionLogs.createdAt))
+    .limit(limit)
+    .offset(offset);
+}
+
+// ─── API Ingestion Logs ─────────────────────────────────────────────
+
+export async function getApiIngestionLogs(params: {
+  organizationId?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const limit = Math.min(params.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+  const offset = params.offset || 0;
+  
+  let query = db.select().from(apiIngestionLogs);
+  
+  if (params.organizationId) {
+    query = query.where(eq(apiIngestionLogs.organizationId, params.organizationId)) as any;
+  }
+  
+  return query
+    .orderBy(desc(apiIngestionLogs.createdAt))
+    .limit(limit)
+    .offset(offset);
+}
+
+// ─── User Role Preferences ──────────────────────────────────────────
+
+export async function getUserRolePreference(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const [pref] = await db
+    .select()
+    .from(userRolePreferences)
+    .where(eq(userRolePreferences.userId, userId))
+    .limit(1);
+  
+  return pref;
+}
+
+export async function upsertUserRolePreference(data: InsertUserRolePreference) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const existing = await getUserRolePreference(data.userId);
+  
+  if (existing) {
+    await db
+      .update(userRolePreferences)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(userRolePreferences.userId, data.userId));
+  } else {
+    await db.insert(userRolePreferences).values(data);
+  }
 }

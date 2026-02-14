@@ -28,12 +28,20 @@ import {
   checkAndSendAlerts,
 } from "./emailReportService";
 import { publicApiRouter } from "./publicApiRouter";
+import {
+  encryptCredential,
+  testSftpConnection,
+  listSftpFiles,
+  downloadAndProcessSftpFile,
+  startSftpPolling,
+} from "./sftpService";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
 const MAX_UPLOAD_TRANSACTIONS = 10000;
 const MAX_SEARCH_LENGTH = 100;
 const MAX_NAME_LENGTH = 255;
+const MAX_QUERY_LIMIT = 500;
 
 // ─── Admin Procedure ─────────────────────────────────────────────────
 
@@ -833,6 +841,159 @@ export const appRouter = router({
       }),
   }),
 
+  // ─── SFTP Credentials ────────────────────────────────────────────
+
+  sftp: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      return db.getSftpCredentials(ctx.user.id);
+    }),
+
+    create: protectedProcedure
+      .input(z.object({
+        name: z.string().min(1).max(MAX_NAME_LENGTH),
+        host: z.string().min(1).max(255),
+        port: z.number().int().min(1).max(65535).default(22),
+        username: z.string().min(1).max(255),
+        password: z.string().max(255).optional(),
+        privateKey: z.string().max(10000).optional(),
+        remotePath: z.string().min(1).max(500),
+        filePattern: z.string().min(1).max(100).default("*.csv"),
+        channelId: z.number().int().positive(),
+        pollingEnabled: z.boolean().default(false),
+        pollingIntervalMinutes: z.number().int().min(5).max(1440).default(60),
+        archivePath: z.string().max(500).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        
+        if (!input.password && !input.privateKey) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Either password or private key is required" });
+        }
+        
+        const id = await db.createSftpCredential({
+          userId: ctx.user.id,
+          organizationId: 0, // Default organization for now
+          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
+          host: input.host,
+          port: input.port,
+          username: input.username,
+          passwordEncrypted: input.password ? encryptCredential(input.password) : null,
+          privateKeyEncrypted: input.privateKey ? encryptCredential(input.privateKey) : null,
+          remotePath: input.remotePath,
+          filePattern: input.filePattern,
+          channelId: input.channelId,
+          pollingEnabled: input.pollingEnabled,
+          pollingIntervalMinutes: input.pollingIntervalMinutes,
+          archivePath: input.archivePath || null,
+          isActive: true,
+        });
+        
+        await logAudit(ctx.user.id, "create_sftp_credential", "sftp_credential", id || undefined, {
+          name: input.name,
+          host: input.host,
+        }, ip, ua);
+        
+        return { id };
+      }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        name: z.string().min(1).max(MAX_NAME_LENGTH).optional(),
+        host: z.string().min(1).max(255).optional(),
+        port: z.number().int().min(1).max(65535).optional(),
+        username: z.string().min(1).max(255).optional(),
+        password: z.string().max(255).optional(),
+        privateKey: z.string().max(10000).optional(),
+        remotePath: z.string().min(1).max(500).optional(),
+        filePattern: z.string().min(1).max(100).optional(),
+        pollingEnabled: z.boolean().optional(),
+        pollingIntervalMinutes: z.number().int().min(5).max(1440).optional(),
+        archivePath: z.string().max(500).optional(),
+        isActive: z.boolean().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const updateData: any = {};
+        
+        if (input.name) updateData.name = sanitizeInput(input.name, MAX_NAME_LENGTH);
+        if (input.host) updateData.host = input.host;
+        if (input.port) updateData.port = input.port;
+        if (input.username) updateData.username = input.username;
+        if (input.password) updateData.passwordEncrypted = encryptCredential(input.password);
+        if (input.privateKey) updateData.privateKeyEncrypted = encryptCredential(input.privateKey);
+        if (input.remotePath) updateData.remotePath = input.remotePath;
+        if (input.filePattern) updateData.filePattern = input.filePattern;
+        if (input.pollingEnabled !== undefined) updateData.pollingEnabled = input.pollingEnabled;
+        if (input.pollingIntervalMinutes) updateData.pollingIntervalMinutes = input.pollingIntervalMinutes;
+        if (input.archivePath !== undefined) updateData.archivePath = input.archivePath || null;
+        if (input.isActive !== undefined) updateData.isActive = input.isActive;
+        
+        await db.updateSftpCredential(input.id, updateData);
+        await logAudit(ctx.user.id, "update_sftp_credential", "sftp_credential", input.id, input, ip, ua);
+        
+        return { success: true };
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.deleteSftpCredential(input.id);
+        await logAudit(ctx.user.id, "delete_sftp_credential", "sftp_credential", input.id, {}, ip, ua);
+        return { success: true };
+      }),
+
+    testConnection: protectedProcedure
+      .input(z.object({
+        host: z.string().min(1).max(255),
+        port: z.number().int().min(1).max(65535).default(22),
+        username: z.string().min(1).max(255),
+        password: z.string().max(255).optional(),
+        privateKey: z.string().max(10000).optional(),
+      }))
+      .mutation(async ({ input }) => {
+        return testSftpConnection(input);
+      }),
+
+    listFiles: protectedProcedure
+      .input(z.object({ credentialId: z.number().int().positive() }))
+      .query(async ({ input }) => {
+        return listSftpFiles(input.credentialId);
+      }),
+
+    processFile: protectedProcedure
+      .input(z.object({
+        credentialId: z.number().int().positive(),
+        fileName: z.string().min(1).max(255),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const result = await downloadAndProcessSftpFile(input.credentialId, input.fileName);
+        
+        await logAudit(ctx.user.id, "process_sftp_file", "sftp_ingestion", input.credentialId, {
+          fileName: input.fileName,
+          success: result.success,
+        }, ip, ua);
+        
+        return result;
+      }),
+
+    logs: protectedProcedure
+      .input(z.object({
+        credentialId: z.number().int().positive().optional(),
+        limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(50),
+        offset: z.number().int().min(0).default(0),
+      }))
+      .query(async ({ input }) => {
+        return db.getSftpIngestionLogs({
+          credentialId: input.credentialId,
+          limit: input.limit,
+          offset: input.offset,
+        });
+      }),
+  }),
+
   // ─── Scheduled Tasks ─────────────────────────────────────────────
 
   schedules: router({
@@ -1304,6 +1465,8 @@ async function runReconciliation(
   }
 }
 
-// ─── Start Scheduler on Server Boot ─────────────────────────────────
+// ─── Start Services on Server Boot ──────────────────────────────────
 // Check for due tasks every 60 seconds
 startScheduler(60000);
+// Start SFTP polling service
+startSftpPolling();

@@ -22,6 +22,7 @@ import Schedules from "./pages/Schedules";
 import Monitor from "./pages/Monitor";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
+import SftpConfig from "./pages/SftpConfig";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -50,6 +51,7 @@ function Router() {
       <Route path="/schedules">{() => <DashboardPage component={Schedules} />}</Route>
       <Route path="/monitor">{() => <DashboardPage component={Monitor} />}</Route>
       <Route path="/api-ingestion">{() => <DashboardPage component={ApiIngestion} />}</Route>
+      <Route path="/sftp-config">{() => <DashboardPage component={SftpConfig} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
