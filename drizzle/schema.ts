@@ -386,3 +386,127 @@ export const AFRICAN_COUNTRIES = [
   { code: "SEN", name: "Senegal", currency: "XOF" },
   { code: "CMR", name: "Cameroon", currency: "XAF" },
 ] as const;
+
+
+// ─── Scheduled Reconciliation Tasks ─────────────────────────────────
+export const scheduledTasks = mysqlTable("scheduled_tasks", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  organizationId: int("organizationId"),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  sourceChannelId: int("sourceChannelId").notNull(),
+  targetChannelId: int("targetChannelId").notNull(),
+  // Schedule configuration
+  frequency: mysqlEnum("frequency", ["daily", "weekly", "biweekly", "monthly"]).notNull(),
+  scheduledTime: varchar("scheduledTime", { length: 5 }).notNull(), // HH:mm format
+  scheduledDayOfWeek: int("scheduledDayOfWeek"), // 0-6 for weekly (0=Sunday)
+  scheduledDayOfMonth: int("scheduledDayOfMonth"), // 1-31 for monthly
+  timezone: varchar("timezone", { length: 64 }).default("Africa/Lagos").notNull(),
+  // Reconciliation config
+  amountTolerance: decimal("amountTolerance", { precision: 5, scale: 4 }).default("0.005").notNull(),
+  dateWindowDays: int("dateWindowDays").default(3).notNull(),
+  lookbackDays: int("lookbackDays").default(1).notNull(), // How many days back to reconcile
+  // Email report settings
+  sendEmailReport: boolean("sendEmailReport").default(true).notNull(),
+  emailRecipients: json("emailRecipients"), // ["email1@bank.com", "email2@bank.com"]
+  // Status
+  isActive: boolean("isActive").default(true).notNull(),
+  lastRunAt: timestamp("lastRunAt"),
+  lastRunJobId: int("lastRunJobId"),
+  lastRunStatus: mysqlEnum("lastRunStatus", ["success", "failed", "skipped"]),
+  nextRunAt: timestamp("nextRunAt"),
+  totalRuns: int("totalRuns").default(0).notNull(),
+  successfulRuns: int("successfulRuns").default(0).notNull(),
+  failedRuns: int("failedRuns").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_sched_user").on(table.userId),
+  index("idx_sched_org").on(table.organizationId),
+  index("idx_sched_active").on(table.isActive),
+  index("idx_sched_next_run").on(table.nextRunAt),
+  index("idx_sched_source").on(table.sourceChannelId),
+  index("idx_sched_target").on(table.targetChannelId),
+]);
+
+export type ScheduledTask = typeof scheduledTasks.$inferSelect;
+export type InsertScheduledTask = typeof scheduledTasks.$inferInsert;
+
+// ─── Schedule Run History ───────────────────────────────────────────
+export const scheduleRunHistory = mysqlTable("schedule_run_history", {
+  id: int("id").autoincrement().primaryKey(),
+  scheduledTaskId: int("scheduledTaskId").notNull(),
+  jobId: int("jobId"),
+  status: mysqlEnum("status", ["success", "failed", "skipped", "running"]).notNull(),
+  startedAt: timestamp("startedAt").defaultNow().notNull(),
+  completedAt: timestamp("completedAt"),
+  matchedCount: int("matchedCount"),
+  exceptionCount: int("exceptionCount"),
+  totalTransactions: int("totalTransactions"),
+  matchRate: decimal("matchRate", { precision: 5, scale: 2 }),
+  errorMessage: text("errorMessage"),
+  emailSent: boolean("emailSent").default(false).notNull(),
+  emailError: text("emailError"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_run_hist_task").on(table.scheduledTaskId),
+  index("idx_run_hist_job").on(table.jobId),
+  index("idx_run_hist_status").on(table.status),
+  index("idx_run_hist_started").on(table.startedAt),
+]);
+
+export type ScheduleRunHistory = typeof scheduleRunHistory.$inferSelect;
+export type InsertScheduleRunHistory = typeof scheduleRunHistory.$inferInsert;
+
+// ─── Email Report Preferences ───────────────────────────────────────
+export const emailPreferences = mysqlTable("email_preferences", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  organizationId: int("organizationId"),
+  // Global email settings
+  emailEnabled: boolean("emailEnabled").default(true).notNull(),
+  defaultRecipients: json("defaultRecipients"), // ["cfo@bank.com", "ops@bank.com"]
+  // Report preferences
+  includeMatchBreakdown: boolean("includeMatchBreakdown").default(true).notNull(),
+  includeExceptionDetails: boolean("includeExceptionDetails").default(true).notNull(),
+  includeChannelPerformance: boolean("includeChannelPerformance").default(true).notNull(),
+  includeTrendAnalysis: boolean("includeTrendAnalysis").default(false).notNull(),
+  // Notification thresholds
+  notifyOnCompletion: boolean("notifyOnCompletion").default(true).notNull(),
+  notifyOnFailure: boolean("notifyOnFailure").default(true).notNull(),
+  notifyOnHighExceptions: boolean("notifyOnHighExceptions").default(true).notNull(),
+  highExceptionThreshold: int("highExceptionThreshold").default(10).notNull(), // Notify if exceptions > N
+  lowMatchRateThreshold: decimal("lowMatchRateThreshold", { precision: 5, scale: 2 }).default("80.00").notNull(), // Notify if match rate < N%
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_email_pref_user").on(table.userId),
+  index("idx_email_pref_org").on(table.organizationId),
+]);
+
+export type EmailPreference = typeof emailPreferences.$inferSelect;
+export type InsertEmailPreference = typeof emailPreferences.$inferInsert;
+
+// ─── Job Progress Events (for real-time monitoring) ─────────────────
+export const jobProgressEvents = mysqlTable("job_progress_events", {
+  id: int("id").autoincrement().primaryKey(),
+  jobId: int("jobId").notNull(),
+  phase: mysqlEnum("phase", [
+    "queued", "loading_data", "pass1_exact_match", "pass2_fuzzy_match",
+    "pass3_tolerance_match", "duplicate_detection", "reversal_detection",
+    "exception_categorization", "ai_analysis", "finalizing", "completed", "failed"
+  ]).notNull(),
+  progress: int("progress").default(0).notNull(), // 0-100
+  message: text("message"),
+  processedCount: int("processedCount").default(0).notNull(),
+  totalCount: int("totalCount").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_progress_job").on(table.jobId),
+  index("idx_progress_phase").on(table.phase),
+  index("idx_progress_created").on(table.createdAt),
+]);
+
+export type JobProgressEvent = typeof jobProgressEvents.$inferSelect;
+export type InsertJobProgressEvent = typeof jobProgressEvents.$inferInsert;

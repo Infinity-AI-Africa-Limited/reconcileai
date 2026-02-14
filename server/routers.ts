@@ -14,6 +14,19 @@ import {
 import { generateSampleData, type SampleDataConfig } from "./sampleDataGenerator";
 import { SUPPORTED_CURRENCIES } from "../drizzle/schema";
 import * as crypto from "crypto";
+import { trackProgress } from "./jobProgressService";
+import { getJobProgress, getAllActiveJobsProgress } from "./jobProgressService";
+import {
+  calculateNextRun,
+  validateScheduleConfig,
+  executeScheduledTask,
+  startScheduler,
+  getFrequencyDescription,
+} from "./schedulingEngine";
+import {
+  sendReconciliationReport,
+  checkAndSendAlerts,
+} from "./emailReportService";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -819,6 +832,280 @@ export const appRouter = router({
       }),
   }),
 
+  // ─── Scheduled Tasks ─────────────────────────────────────────────
+
+  schedules: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const isAdmin = ctx.user.role === "admin";
+      const tasks = await db.getScheduledTasks(ctx.user.id, isAdmin);
+      return tasks.map((t) => ({
+        ...t,
+        frequencyDescription: getFrequencyDescription(
+          t.frequency, t.scheduledTime, t.scheduledDayOfWeek, t.scheduledDayOfMonth
+        ),
+      }));
+    }),
+
+    get: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .query(async ({ input }) => {
+        const task = await db.getScheduledTaskById(input.id);
+        if (!task) throw new TRPCError({ code: "NOT_FOUND" });
+        const history = await db.getScheduleRunHistoryByTask(input.id, 20);
+        return {
+          ...task,
+          frequencyDescription: getFrequencyDescription(
+            task.frequency, task.scheduledTime, task.scheduledDayOfWeek, task.scheduledDayOfMonth
+          ),
+          history,
+        };
+      }),
+
+    create: protectedProcedure
+      .input(z.object({
+        name: z.string().min(1).max(MAX_NAME_LENGTH),
+        description: z.string().max(1000).optional(),
+        sourceChannelId: z.number().int().positive(),
+        targetChannelId: z.number().int().positive(),
+        frequency: z.enum(["daily", "weekly", "biweekly", "monthly"]),
+        scheduledTime: z.string().regex(/^\d{2}:\d{2}$/),
+        scheduledDayOfWeek: z.number().int().min(0).max(6).optional(),
+        scheduledDayOfMonth: z.number().int().min(1).max(31).optional(),
+        timezone: z.string().max(64).default("Africa/Lagos"),
+        amountTolerance: z.number().min(0).max(0.1).default(0.005),
+        dateWindowDays: z.number().int().min(0).max(30).default(3),
+        lookbackDays: z.number().int().min(1).max(90).default(1),
+        sendEmailReport: z.boolean().default(true),
+        emailRecipients: z.array(z.string().email()).max(10).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+
+        // Validate channels
+        const source = await db.getChannelById(input.sourceChannelId);
+        const target = await db.getChannelById(input.targetChannelId);
+        if (!source) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
+        if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
+        if (input.sourceChannelId === input.targetChannelId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Source and target channels must be different" });
+        }
+
+        const nextRun = calculateNextRun(input.frequency, input.scheduledTime, {
+          scheduledDayOfWeek: input.scheduledDayOfWeek,
+          scheduledDayOfMonth: input.scheduledDayOfMonth,
+          timezone: input.timezone,
+        });
+
+        const id = await db.createScheduledTask({
+          userId: ctx.user.id,
+          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
+          description: input.description ? sanitizeInput(input.description, 1000) : null,
+          sourceChannelId: input.sourceChannelId,
+          targetChannelId: input.targetChannelId,
+          frequency: input.frequency,
+          scheduledTime: input.scheduledTime,
+          scheduledDayOfWeek: input.scheduledDayOfWeek ?? null,
+          scheduledDayOfMonth: input.scheduledDayOfMonth ?? null,
+          timezone: input.timezone,
+          amountTolerance: String(input.amountTolerance),
+          dateWindowDays: input.dateWindowDays,
+          lookbackDays: input.lookbackDays,
+          sendEmailReport: input.sendEmailReport,
+          emailRecipients: input.emailRecipients ? JSON.stringify(input.emailRecipients) : null,
+          isActive: true,
+          nextRunAt: nextRun,
+        });
+
+        await logAudit(ctx.user.id, "create_schedule", "scheduled_task", id || undefined, input, ip, ua);
+        return { id, nextRun };
+      }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        name: z.string().min(1).max(MAX_NAME_LENGTH).optional(),
+        description: z.string().max(1000).optional(),
+        frequency: z.enum(["daily", "weekly", "biweekly", "monthly"]).optional(),
+        scheduledTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+        scheduledDayOfWeek: z.number().int().min(0).max(6).optional(),
+        scheduledDayOfMonth: z.number().int().min(1).max(31).optional(),
+        amountTolerance: z.number().min(0).max(0.1).optional(),
+        dateWindowDays: z.number().int().min(0).max(30).optional(),
+        lookbackDays: z.number().int().min(1).max(90).optional(),
+        sendEmailReport: z.boolean().optional(),
+        emailRecipients: z.array(z.string().email()).max(10).optional(),
+        isActive: z.boolean().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const task = await db.getScheduledTaskById(input.id);
+        if (!task) throw new TRPCError({ code: "NOT_FOUND" });
+
+        const updateData: any = {};
+        if (input.name) updateData.name = sanitizeInput(input.name, MAX_NAME_LENGTH);
+        if (input.description !== undefined) updateData.description = input.description ? sanitizeInput(input.description, 1000) : null;
+        if (input.frequency) updateData.frequency = input.frequency;
+        if (input.scheduledTime) updateData.scheduledTime = input.scheduledTime;
+        if (input.scheduledDayOfWeek !== undefined) updateData.scheduledDayOfWeek = input.scheduledDayOfWeek;
+        if (input.scheduledDayOfMonth !== undefined) updateData.scheduledDayOfMonth = input.scheduledDayOfMonth;
+        if (input.amountTolerance !== undefined) updateData.amountTolerance = String(input.amountTolerance);
+        if (input.dateWindowDays !== undefined) updateData.dateWindowDays = input.dateWindowDays;
+        if (input.lookbackDays !== undefined) updateData.lookbackDays = input.lookbackDays;
+        if (input.sendEmailReport !== undefined) updateData.sendEmailReport = input.sendEmailReport;
+        if (input.emailRecipients) updateData.emailRecipients = JSON.stringify(input.emailRecipients);
+        if (input.isActive !== undefined) updateData.isActive = input.isActive;
+
+        // Recalculate next run if schedule changed
+        const freq = input.frequency || task.frequency;
+        const time = input.scheduledTime || task.scheduledTime;
+        updateData.nextRunAt = calculateNextRun(freq, time, {
+          scheduledDayOfWeek: input.scheduledDayOfWeek ?? task.scheduledDayOfWeek,
+          scheduledDayOfMonth: input.scheduledDayOfMonth ?? task.scheduledDayOfMonth,
+        });
+
+        await db.updateScheduledTask(input.id, updateData);
+        await logAudit(ctx.user.id, "update_schedule", "scheduled_task", input.id, input, ip, ua);
+        return { success: true, nextRun: updateData.nextRunAt };
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.deleteScheduledTask(input.id);
+        await logAudit(ctx.user.id, "delete_schedule", "scheduled_task", input.id, {}, ip, ua);
+        return { success: true };
+      }),
+
+    runNow: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const result = await executeScheduledTask(input.id);
+        await logAudit(ctx.user.id, "manual_run_schedule", "scheduled_task", input.id, result, ip, ua);
+        if (!result.success) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: result.error });
+        }
+        return { jobId: result.jobId };
+      }),
+
+    history: protectedProcedure
+      .input(z.object({ taskId: z.number().int().positive() }))
+      .query(async ({ input }) => {
+        return db.getScheduleRunHistoryByTask(input.taskId, 50);
+      }),
+  }),
+
+  // ─── Email Preferences ──────────────────────────────────────────────
+
+  emailPreferences: router({
+    get: protectedProcedure.query(async ({ ctx }) => {
+      const prefs = await db.getEmailPreferences(ctx.user.id);
+      return prefs || {
+        emailEnabled: true,
+        defaultRecipients: [],
+        includeMatchBreakdown: true,
+        includeExceptionDetails: true,
+        includeChannelPerformance: true,
+        includeTrendAnalysis: false,
+        notifyOnCompletion: true,
+        notifyOnFailure: true,
+        notifyOnHighExceptions: true,
+        highExceptionThreshold: 10,
+        lowMatchRateThreshold: "80.00",
+      };
+    }),
+
+    update: protectedProcedure
+      .input(z.object({
+        emailEnabled: z.boolean().optional(),
+        defaultRecipients: z.array(z.string().email()).max(20).optional(),
+        includeMatchBreakdown: z.boolean().optional(),
+        includeExceptionDetails: z.boolean().optional(),
+        includeChannelPerformance: z.boolean().optional(),
+        includeTrendAnalysis: z.boolean().optional(),
+        notifyOnCompletion: z.boolean().optional(),
+        notifyOnFailure: z.boolean().optional(),
+        notifyOnHighExceptions: z.boolean().optional(),
+        highExceptionThreshold: z.number().int().min(1).max(1000).optional(),
+        lowMatchRateThreshold: z.number().min(0).max(100).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const updateData: any = { ...input };
+        if (input.defaultRecipients) {
+          updateData.defaultRecipients = JSON.stringify(input.defaultRecipients);
+        }
+        if (input.lowMatchRateThreshold !== undefined) {
+          updateData.lowMatchRateThreshold = String(input.lowMatchRateThreshold);
+        }
+        await db.upsertEmailPreferences(ctx.user.id, updateData);
+        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua);
+        return { success: true };
+      }),
+
+    sendReport: protectedProcedure
+      .input(z.object({
+        jobId: z.number().int().positive(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const prefs = await db.getEmailPreferences(ctx.user.id);
+        const result = await sendReconciliationReport(input.jobId, {
+          includeMatchBreakdown: prefs?.includeMatchBreakdown ?? true,
+          includeExceptionDetails: prefs?.includeExceptionDetails ?? true,
+          includeChannelPerformance: prefs?.includeChannelPerformance ?? true,
+          includeTrendAnalysis: prefs?.includeTrendAnalysis ?? false,
+        });
+        await logAudit(ctx.user.id, "send_email_report", "reconciliation_job", input.jobId, result, ip, ua);
+        if (!result.success) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: result.error || "Failed to send report" });
+        }
+        return result;
+      }),
+  }),
+
+  // ─── Job Monitoring ─────────────────────────────────────────────────
+
+  monitoring: router({
+    stats: protectedProcedure.query(async ({ ctx }) => {
+      const isAdmin = ctx.user.role === "admin";
+      return db.getMonitoringStats(ctx.user.id, isAdmin);
+    }),
+
+    activeJobs: protectedProcedure.query(async () => {
+      return getAllActiveJobsProgress();
+    }),
+
+    jobProgress: protectedProcedure
+      .input(z.object({ jobId: z.number().int().positive() }))
+      .query(async ({ input }) => {
+        const progress = await getJobProgress(input.jobId);
+        if (!progress) throw new TRPCError({ code: "NOT_FOUND" });
+        return progress;
+      }),
+
+    recentActivity: protectedProcedure
+      .input(z.object({ limit: z.number().int().min(1).max(100).default(20) }))
+      .query(async ({ ctx, input }) => {
+        const isAdmin = ctx.user.role === "admin";
+        const jobCondition = !isAdmin ? ctx.user.id : undefined;
+        // Get recent completed/failed jobs
+        const jobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        return jobs.slice(0, input.limit).map((j) => ({
+          id: j.id,
+          name: j.name,
+          status: j.status,
+          matchRate: j.matchRate,
+          matchedCount: j.matchedCount,
+          exceptionCount: j.exceptionCount,
+          processingTimeMs: j.processingTimeMs,
+          createdAt: j.createdAt,
+          completedAt: j.completedAt,
+        }));
+      }),
+  }),
+
   // ─── Admin ───────────────────────────────────────────────────────
 
   admin: router({
@@ -858,7 +1145,9 @@ async function runReconciliation(
   const startTime = Date.now();
   try {
     await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
+    await trackProgress(jobId, "queued", { message: "Job queued for processing" });
 
+    await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
     const sourceTxns = await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo);
     const targetTxns = await db.getTransactionsForReconciliation(targetChannelId, dateFrom, dateTo);
 
@@ -867,9 +1156,21 @@ async function runReconciliation(
       totalTargetTxns: targetTxns.length,
     });
 
+    await trackProgress(jobId, "pass1_exact_match", {
+      message: `Processing ${sourceTxns.length} source and ${targetTxns.length} target transactions`,
+      totalCount: sourceTxns.length + targetTxns.length,
+    });
     const result = runMatchingEngine(sourceTxns, targetTxns, config);
+    await trackProgress(jobId, "pass3_tolerance_match", {
+      message: `Matching complete: ${result.matches.length} matches found`,
+      processedCount: result.matches.length,
+      totalCount: sourceTxns.length,
+    });
 
     // Insert matches
+    await trackProgress(jobId, "duplicate_detection", {
+      message: `Processing ${result.duplicates.length} duplicate groups`,
+    });
     let matchedCount = 0;
     for (const match of result.matches) {
       const status = match.confidenceScore >= 85 ? "confirmed" : "pending_review";
@@ -893,6 +1194,10 @@ async function runReconciliation(
       }
     }
 
+    await trackProgress(jobId, "exception_categorization", {
+      message: `Categorizing ${result.unmatchedSource.length + result.unmatchedTarget.length} unmatched transactions`,
+      totalCount: result.unmatchedSource.length + result.unmatchedTarget.length,
+    });
     // Process unmatched transactions as exceptions
     let exceptionCount = 0;
     const allUnmatched = [...result.unmatchedSource, ...result.unmatchedTarget];
@@ -937,6 +1242,7 @@ async function runReconciliation(
       }
     }
 
+    await trackProgress(jobId, "finalizing", { message: "Finalizing reconciliation results" });
     const totalTxns = sourceTxns.length + targetTxns.length;
     const matchRate = totalTxns > 0 ? ((matchedCount * 2) / totalTxns * 100) : 0;
     const processingTimeMs = Date.now() - startTime;
@@ -960,6 +1266,12 @@ async function runReconciliation(
       engineStats: result.stats,
     });
 
+    await trackProgress(jobId, "completed", {
+      message: `Completed: ${matchedCount} matched, ${exceptionCount} exceptions, ${matchRate.toFixed(1)}% match rate`,
+      processedCount: matchedCount,
+      totalCount: totalTxns,
+    });
+
     // Dispatch webhook
     dispatchWebhook("reconciliation.completed", {
       jobId,
@@ -970,6 +1282,11 @@ async function runReconciliation(
       processingTimeMs,
     });
 
+    // Send email alerts based on user preferences
+    checkAndSendAlerts(jobId, userId).catch((err) =>
+      console.error("[EmailReport] Alert check failed:", err)
+    );
+
   } catch (error) {
     console.error("[Reconciliation] Job failed:", error);
     await db.updateReconciliationJob(jobId, {
@@ -977,6 +1294,11 @@ async function runReconciliation(
       completedAt: new Date(),
     });
 
+    await trackProgress(jobId, "failed", { message: `Failed: ${String(error)}` });
     dispatchWebhook("reconciliation.failed", { jobId, error: String(error) });
   }
 }
+
+// ─── Start Scheduler on Server Boot ─────────────────────────────────
+// Check for due tasks every 60 seconds
+startScheduler(60000);

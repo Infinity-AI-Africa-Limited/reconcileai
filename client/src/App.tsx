@@ -18,6 +18,9 @@ import Reports from "./pages/Reports";
 import Admin from "./pages/Admin";
 import SampleData from "./pages/SampleData";
 import Integrations from "./pages/Integrations";
+import Schedules from "./pages/Schedules";
+import Monitor from "./pages/Monitor";
+import EmailSettings from "./pages/EmailSettings";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -43,6 +46,9 @@ function Router() {
       <Route path="/admin">{() => <DashboardPage component={Admin} />}</Route>
       <Route path="/sample-data">{() => <DashboardPage component={SampleData} />}</Route>
       <Route path="/integrations">{() => <DashboardPage component={Integrations} />}</Route>
+      <Route path="/schedules">{() => <DashboardPage component={Schedules} />}</Route>
+      <Route path="/monitor">{() => <DashboardPage component={Monitor} />}</Route>
+      <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

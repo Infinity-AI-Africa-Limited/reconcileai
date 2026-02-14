@@ -37,6 +37,9 @@ import {
   Layers,
   Beaker,
   Plug,
+  Calendar,
+  Activity,
+  Mail,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -53,6 +56,9 @@ const menuItems = [
   { icon: ClipboardList, label: "Review Queue", path: "/review" },
   { icon: Shield, label: "Audit Trail", path: "/audit" },
   { icon: FileText, label: "Reports", path: "/reports" },
+  { icon: Calendar, label: "Schedules", path: "/schedules" },
+  { icon: Activity, label: "Monitor", path: "/monitor" },
+  { icon: Mail, label: "Email Settings", path: "/email-settings" },
   { icon: Beaker, label: "Sample Data", path: "/sample-data" },
   { icon: Plug, label: "Integrations", path: "/integrations" },
 ];

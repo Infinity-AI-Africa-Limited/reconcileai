@@ -109,4 +109,30 @@
 - [x] Integration: Integrations sidebar nav item
 - [x] Tests: 33 reconciliation engine tests (exact, tolerance, fuzzy, edge cases, duplicates, reversals, multi-currency, performance)
 - [x] Tests: 16 sample data generator tests
-- [x] Tests: 1 auth test — Total: 50 tests passing
+- [x] Tests: 1 auth test
+- [x] Tests: 32 scheduling/email report tests — Total: 82 tests passing
+
+## Feature 12: Automated Email Reconciliation Reports
+- [x] Schema: Email preferences table (recipients, frequency, format, filters)
+- [x] Backend: Email report generation service (HTML + PDF attachment)
+- [x] Backend: Report content — match summary, exception breakdown, channel performance, trend data
+- [x] Backend: Notification integration for sending emails via platform notification API
+- [x] Frontend: Email settings page — manage recipients, frequency, report format
+- [x] Frontend: Manual "Send Report Now" button on completed reconciliation jobs
+
+## Feature 13: Scheduled Reconciliation Task Manager
+- [x] Schema: Scheduled tasks table (cron expression, source/target channels, config, status, history)
+- [x] Backend: Schedule CRUD endpoints (create, update, delete, toggle active/inactive)
+- [x] Backend: Schedule execution engine — auto-run reconciliation at configured intervals
+- [x] Backend: Schedule run history tracking with success/failure status
+- [x] Frontend: Schedule Manager page — create/edit/delete schedules with visual cron builder
+- [x] Frontend: Schedule list with status indicators, next run time, last run result
+- [x] Frontend: Schedule run history view
+
+## Feature 14: Real-Time Job Monitoring Dashboard
+- [x] Backend: Job events/progress tracking (started, pass1 complete, pass2 complete, etc.)
+- [x] Backend: Polling endpoint for live job status with progress percentage
+- [x] Frontend: Real-Time Monitor page with live job cards showing progress bars
+- [x] Frontend: Key metrics panel — active jobs, avg processing time, success rate, throughput
+- [x] Frontend: Recent job activity feed with timestamps
+- [x] Frontend: Auto-refresh with configurable polling interval

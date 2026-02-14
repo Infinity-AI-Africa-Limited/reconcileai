@@ -13,6 +13,10 @@ import {
   organizations, InsertOrganization,
   webhooks, InsertWebhook,
   apiKeys, InsertApiKey,
+  scheduledTasks, InsertScheduledTask,
+  scheduleRunHistory, InsertScheduleRunHistory,
+  emailPreferences, InsertEmailPreference,
+  jobProgressEvents, InsertJobProgressEvent,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -696,4 +700,240 @@ export async function getFullReconciliationReport(jobId: number) {
   const { data: jobExceptions } = await getExceptions({ jobId, limit: MAX_QUERY_LIMIT });
   const allTxns = await getTransactionsForExport(jobId);
   return { job, matches: jobMatches, exceptions: jobExceptions, transactions: allTxns };
+}
+
+// ─── Scheduled Tasks ────────────────────────────────────────────────
+
+export async function createScheduledTask(data: InsertScheduledTask) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(scheduledTasks).values(data);
+  return result[0].insertId;
+}
+
+export async function updateScheduledTask(id: number, data: Partial<InsertScheduledTask>) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(scheduledTasks).set(data).where(eq(scheduledTasks.id, id));
+}
+
+export async function getScheduledTasks(userId: number, isAdmin: boolean) {
+  const db = await getDb();
+  if (!db) return [];
+  if (isAdmin) {
+    return db.select().from(scheduledTasks).orderBy(desc(scheduledTasks.createdAt)).limit(100);
+  }
+  return db.select().from(scheduledTasks)
+    .where(eq(scheduledTasks.userId, userId))
+    .orderBy(desc(scheduledTasks.createdAt))
+    .limit(100);
+}
+
+export async function getScheduledTaskById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(scheduledTasks).where(eq(scheduledTasks.id, id)).limit(1);
+  return result[0];
+}
+
+export async function getActiveScheduledTasks() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scheduledTasks)
+    .where(eq(scheduledTasks.isActive, true))
+    .orderBy(asc(scheduledTasks.nextRunAt));
+}
+
+export async function getDueScheduledTasks(now: Date) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scheduledTasks)
+    .where(and(
+      eq(scheduledTasks.isActive, true),
+      lte(scheduledTasks.nextRunAt, now)
+    ))
+    .orderBy(asc(scheduledTasks.nextRunAt));
+}
+
+export async function deleteScheduledTask(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(scheduledTasks).set({ isActive: false }).where(eq(scheduledTasks.id, id));
+}
+
+// ─── Schedule Run History ───────────────────────────────────────────
+
+export async function createScheduleRunHistory(data: InsertScheduleRunHistory) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(scheduleRunHistory).values(data);
+  return result[0].insertId;
+}
+
+export async function updateScheduleRunHistory(id: number, data: Partial<InsertScheduleRunHistory>) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(scheduleRunHistory).set(data).where(eq(scheduleRunHistory.id, id));
+}
+
+export async function getScheduleRunHistoryByTask(taskId: number, limit: number = 20) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scheduleRunHistory)
+    .where(eq(scheduleRunHistory.scheduledTaskId, taskId))
+    .orderBy(desc(scheduleRunHistory.startedAt))
+    .limit(clampLimit(limit));
+}
+
+export async function getRecentScheduleRuns(limit: number = 50) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scheduleRunHistory)
+    .orderBy(desc(scheduleRunHistory.startedAt))
+    .limit(clampLimit(limit));
+}
+
+// ─── Email Preferences ──────────────────────────────────────────────
+
+export async function getEmailPreferences(userId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(emailPreferences)
+    .where(eq(emailPreferences.userId, userId))
+    .limit(1);
+  return result[0];
+}
+
+export async function upsertEmailPreferences(userId: number, data: Partial<InsertEmailPreference>) {
+  const db = await getDb();
+  if (!db) return null;
+  const existing = await getEmailPreferences(userId);
+  if (existing) {
+    await db.update(emailPreferences).set(data).where(eq(emailPreferences.id, existing.id));
+    return existing.id;
+  } else {
+    const result = await db.insert(emailPreferences).values({ userId, ...data } as InsertEmailPreference);
+    return result[0].insertId;
+  }
+}
+
+// ─── Job Progress Events ────────────────────────────────────────────
+
+export async function insertJobProgressEvent(data: InsertJobProgressEvent) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(jobProgressEvents).values(data);
+  return result[0].insertId;
+}
+
+export async function getJobProgressEvents(jobId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(jobProgressEvents)
+    .where(eq(jobProgressEvents.jobId, jobId))
+    .orderBy(asc(jobProgressEvents.createdAt));
+}
+
+export async function getLatestJobProgress(jobId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(jobProgressEvents)
+    .where(eq(jobProgressEvents.jobId, jobId))
+    .orderBy(desc(jobProgressEvents.createdAt))
+    .limit(1);
+  return result[0];
+}
+
+export async function getActiveJobsProgress() {
+  const db = await getDb();
+  if (!db) return [];
+  // Get all running jobs
+  const runningJobs = await db.select().from(reconciliationJobs)
+    .where(or(
+      eq(reconciliationJobs.status, "running"),
+      eq(reconciliationJobs.status, "pending")
+    ))
+    .orderBy(desc(reconciliationJobs.createdAt))
+    .limit(20);
+
+  const jobsWithProgress = [];
+  for (const job of runningJobs) {
+    const latestProgress = await getLatestJobProgress(job.id);
+    jobsWithProgress.push({
+      ...job,
+      latestProgress: latestProgress || null,
+    });
+  }
+  return jobsWithProgress;
+}
+
+// ─── Dashboard Stats (Extended) ─────────────────────────────────────
+
+export async function getMonitoringStats(userId: number, isAdmin: boolean) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
+
+  // Active jobs count
+  const [activeJobs] = await db.select({
+    running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
+    pending: sql<number>`sum(case when ${reconciliationJobs.status} = 'pending' then 1 else 0 end)`,
+  }).from(reconciliationJobs).where(jobCondition);
+
+  // Recent jobs (last 24h)
+  const oneDayAgo = new Date(Date.now() - 86400000);
+  const recentJobs = await db.select().from(reconciliationJobs)
+    .where(and(
+      jobCondition,
+      gte(reconciliationJobs.createdAt, oneDayAgo)
+    ))
+    .orderBy(desc(reconciliationJobs.createdAt))
+    .limit(20);
+
+  // Performance stats (last 7 days)
+  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000);
+  const [perfStats] = await db.select({
+    avgProcessingTime: sql<number>`avg(${reconciliationJobs.processingTimeMs})`,
+    avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
+    totalCompleted: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
+    totalFailed: sql<number>`sum(case when ${reconciliationJobs.status} = 'failed' then 1 else 0 end)`,
+    totalTransactions: sql<number>`sum(${reconciliationJobs.totalSourceTxns} + ${reconciliationJobs.totalTargetTxns})`,
+  }).from(reconciliationJobs)
+    .where(and(
+      jobCondition,
+      gte(reconciliationJobs.createdAt, sevenDaysAgo)
+    ));
+
+  // Active schedules
+  const [scheduleStats] = await db.select({
+    total: sql<number>`count(*)`,
+    active: sql<number>`sum(case when ${scheduledTasks.isActive} = true then 1 else 0 end)`,
+  }).from(scheduledTasks)
+    .where(!isAdmin ? eq(scheduledTasks.userId, userId) : undefined);
+
+  return {
+    activeJobs: {
+      running: Number(activeJobs?.running || 0),
+      pending: Number(activeJobs?.pending || 0),
+    },
+    recentJobs,
+    performance: {
+      avgProcessingTimeMs: Number(perfStats?.avgProcessingTime || 0),
+      avgMatchRate: Number(perfStats?.avgMatchRate || 0),
+      totalCompleted: Number(perfStats?.totalCompleted || 0),
+      totalFailed: Number(perfStats?.totalFailed || 0),
+      totalTransactions: Number(perfStats?.totalTransactions || 0),
+      successRate: (() => {
+        const completed = Number(perfStats?.totalCompleted || 0);
+        const failed = Number(perfStats?.totalFailed || 0);
+        const total = completed + failed;
+        return total > 0 ? Math.round((completed / total) * 10000) / 100 : 100;
+      })(),
+    },
+    schedules: {
+      total: Number(scheduleStats?.total || 0),
+      active: Number(scheduleStats?.active || 0),
+    },
+  };
 }
