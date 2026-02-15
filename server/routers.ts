@@ -35,6 +35,7 @@ import {
   downloadAndProcessSftpFile,
   startSftpPolling,
 } from "./sftpService";
+import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -1268,11 +1269,175 @@ export const appRouter = router({
       }),
   }),
 
-  // ─── Public API (for external integrations) ─────────────────────
+  // ─── Public API (for external integrations) ─────────────────
 
   publicApi: publicApiRouter,
 
-  // ─── Admin ───────────────────────────────────────────────────────
+  // ─── Anomaly Detection ────────────────────────────────
+
+  anomalies: router({
+    detect: protectedProcedure
+      .input(z.object({
+        transactionIds: z.array(z.number().int().positive()).max(1000),
+        config: z.object({
+          enableStatistical: z.boolean().optional(),
+          enableTimePattern: z.boolean().optional(),
+          enableFrequency: z.boolean().optional(),
+          enableCounterparty: z.boolean().optional(),
+          enableLLM: z.boolean().optional(),
+          thresholds: z.object({
+            statistical: z.number().min(0).max(1).optional(),
+            timePattern: z.number().min(0).max(1).optional(),
+            frequency: z.number().min(0).max(1).optional(),
+            counterparty: z.number().min(0).max(1).optional(),
+            llm: z.number().min(0).max(1).optional(),
+            ensemble: z.number().min(0).max(1).optional(),
+          }).optional(),
+        }).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const transactions = await db.getTransactionsByIds(input.transactionIds);
+        if (transactions.length === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "No transactions found" });
+        }
+        
+        // Get historical transactions from the same channel
+        const historicalResult = await db.getTransactions({
+          channelId: transactions[0].channelId,
+          limit: 1000,
+        });
+        
+        const anomalies = await detectAnomalies(
+          transactions,
+          historicalResult.data,
+          input.config as AnomalyDetectionConfig
+        );
+        
+        // Store anomaly scores
+        if (anomalies.length > 0) {
+          await db.storeAnomalyScores(
+            anomalies.map(a => ({
+              transactionId: a.transactionId,
+              organizationId: ctx.user.organizationId || undefined,
+              anomalyScore: String(a.anomalyScore),
+              detectionMethod: a.detectionMethod as any,
+              detectionReason: a.detectionReason,
+              detectionMetadata: a.detectionMetadata,
+              isFlagged: true,
+              reviewStatus: "pending" as any,
+            }))
+          );
+        }
+        
+        return { detected: anomalies.length, anomalies };
+      }),
+
+    getFlagged: protectedProcedure
+      .input(z.object({
+        minScore: z.number().min(0).max(1).optional(),
+        reviewStatus: z.enum(["pending", "false_positive", "confirmed", "escalated", "resolved"]).optional(),
+        limit: z.number().int().positive().max(MAX_QUERY_LIMIT).optional(),
+        offset: z.number().int().nonnegative().optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        return db.getFlaggedTransactions({
+          organizationId: ctx.user.organizationId || undefined,
+          ...input,
+        });
+      }),
+
+    updateReview: protectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        reviewStatus: z.enum(["pending", "false_positive", "confirmed", "escalated", "resolved"]),
+        reviewNotes: z.string().max(1000).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await db.updateAnomalyReview(input.id, {
+          reviewStatus: input.reviewStatus,
+          reviewedBy: ctx.user.id,
+          reviewNotes: input.reviewNotes,
+        });
+        
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "update_anomaly_review", "anomaly", input.id, input, ip, ua);
+        
+        return { success: true };
+      }),
+  }),
+
+  detectionRules: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      return db.getDetectionRules(ctx.user.organizationId || undefined);
+    }),
+
+    create: protectedProcedure
+      .input(z.object({
+        ruleName: z.string().min(1).max(255),
+        ruleType: z.enum([
+          "amount_outlier",
+          "time_pattern",
+          "frequency_spike",
+          "counterparty_anomaly",
+          "description_suspicious",
+          "velocity_check",
+          "round_amount",
+        ]),
+        threshold: z.number().min(0),
+        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+        ruleConfig: z.record(z.string(), z.any()).optional(),
+        description: z.string().max(1000).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await db.createDetectionRule({
+          organizationId: ctx.user.organizationId || undefined,
+          createdBy: ctx.user.id,
+          ...input,
+          threshold: String(input.threshold),
+          ruleConfig: input.ruleConfig ? JSON.stringify(input.ruleConfig) : undefined,
+        } as any);
+        
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "create_detection_rule", "detection_rule", undefined, input, ip, ua);
+        
+        return { success: true };
+      }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        threshold: z.number().min(0).optional(),
+        isEnabled: z.boolean().optional(),
+        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+        ruleConfig: z.record(z.string(), z.any()).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...updates } = input;
+        await db.updateDetectionRule(id, {
+          ...updates,
+          threshold: updates.threshold ? String(updates.threshold) : undefined,
+          ruleConfig: updates.ruleConfig ? JSON.stringify(updates.ruleConfig) : undefined,
+        } as any);
+        
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "update_detection_rule", "detection_rule", id, input, ip, ua);
+        
+        return { success: true };
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        await db.deleteDetectionRule(input.id);
+        
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "delete_detection_rule", "detection_rule", input.id, {}, ip, ua);
+        
+        return { success: true };
+      }),
+  }),
+
+  // ─── Admin ─────────────────────────────────────
 
   admin: router({
     users: adminProcedure.query(async () => {

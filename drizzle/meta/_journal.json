@@ -36,6 +36,13 @@
       "when": 1771056502714,
       "tag": "0004_crazy_vivisector",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1771113951440,
+      "tag": "0005_chunky_manta",
+      "breakpoints": true
     }
   ]
 }

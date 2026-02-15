@@ -65,6 +65,7 @@ const menuItems = [
   { icon: Plug, label: "Integrations", path: "/integrations" },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
   { icon: Server, label: "SFTP Config", path: "/sftp-config" },
+  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
 ];
 
 const adminMenuItems = [

@@ -21,6 +21,8 @@ import {
   sftpIngestionLogs, InsertSftpIngestionLog,
   apiIngestionLogs, InsertApiIngestionLog,
   userRolePreferences, InsertUserRolePreference,
+  anomalyScores, InsertAnomalyScore,
+  detectionRules, InsertDetectionRule,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -1084,4 +1086,146 @@ export async function upsertUserRolePreference(data: InsertUserRolePreference) {
   } else {
     await db.insert(userRolePreferences).values(data);
   }
+}
+
+// ─── Anomaly Detection Helpers ──────────────────────────────────────
+
+export async function storeAnomalyScores(scores: InsertAnomalyScore[]) {
+  const db = await getDb();
+  if (!db || scores.length === 0) return [];
+  
+  // Batch insert
+  const results = [];
+  for (let i = 0; i < scores.length; i += BATCH_INSERT_SIZE) {
+    const batch = scores.slice(i, i + BATCH_INSERT_SIZE);
+    const inserted = await db.insert(anomalyScores).values(batch);
+    results.push(inserted);
+  }
+  return results;
+}
+
+export async function getAnomalyScores(filters: {
+  transactionId?: number;
+  organizationId?: number;
+  reviewStatus?: string;
+  minScore?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  
+  let query = db.select().from(anomalyScores);
+  
+  if (filters.transactionId) {
+    query = query.where(eq(anomalyScores.transactionId, filters.transactionId)) as any;
+  }
+  if (filters.organizationId) {
+    query = query.where(eq(anomalyScores.organizationId, filters.organizationId)) as any;
+  }
+  if (filters.reviewStatus) {
+    query = query.where(eq(anomalyScores.reviewStatus, filters.reviewStatus as any)) as any;
+  }
+  if (filters.minScore) {
+    query = query.where(gte(anomalyScores.anomalyScore, String(filters.minScore))) as any;
+  }
+  
+  const limit = Math.min(filters.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+  const offset = filters.offset || 0;
+  
+  return query.limit(limit).offset(offset).orderBy(desc(anomalyScores.anomalyScore));
+}
+
+export async function updateAnomalyReview(
+  id: number,
+  reviewData: {
+    reviewStatus: string;
+    reviewedBy: number;
+    reviewNotes?: string;
+  }
+) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  return db.update(anomalyScores)
+    .set({
+      ...reviewData,
+      reviewedAt: new Date(),
+    } as any)
+    .where(eq(anomalyScores.id, id));
+}
+
+export async function getDetectionRules(organizationId?: number) {
+  const db = await getDb();
+  if (!db) return [];
+  
+  let query = db.select().from(detectionRules);
+  
+  if (organizationId) {
+    query = query.where(eq(detectionRules.organizationId, organizationId)) as any;
+  }
+  
+  return query.orderBy(desc(detectionRules.createdAt));
+}
+
+export async function createDetectionRule(rule: InsertDetectionRule) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  return db.insert(detectionRules).values(rule);
+}
+
+export async function updateDetectionRule(id: number, updates: Partial<InsertDetectionRule>) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  return db.update(detectionRules)
+    .set(updates as any)
+    .where(eq(detectionRules.id, id));
+}
+
+export async function deleteDetectionRule(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  return db.delete(detectionRules).where(eq(detectionRules.id, id));
+}
+
+export async function getFlaggedTransactions(filters: {
+  organizationId?: number;
+  minScore?: number;
+  reviewStatus?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  
+  const limit = Math.min(filters.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+  const offset = filters.offset || 0;
+  
+  // Join anomaly_scores with transactions to get full transaction details
+  // Build where conditions
+  const conditions: any[] = [eq(anomalyScores.isFlagged, true)];
+  
+  if (filters.organizationId) {
+    conditions.push(eq(anomalyScores.organizationId, filters.organizationId));
+  }
+  if (filters.minScore) {
+    conditions.push(gte(anomalyScores.anomalyScore, String(filters.minScore)));
+  }
+  if (filters.reviewStatus) {
+    conditions.push(eq(anomalyScores.reviewStatus, filters.reviewStatus as any));
+  }
+  
+  return db.select({
+    anomaly: anomalyScores,
+    transaction: transactions,
+  })
+  .from(anomalyScores)
+  .innerJoin(transactions, eq(anomalyScores.transactionId, transactions.id))
+  .where(and(...conditions))
+  .limit(limit)
+  .offset(offset)
+  .orderBy(desc(anomalyScores.anomalyScore));
 }

@@ -652,3 +652,70 @@ export const userRolePreferences = mysqlTable("user_role_preferences", {
 
 export type UserRolePreference = typeof userRolePreferences.$inferSelect;
 export type InsertUserRolePreference = typeof userRolePreferences.$inferInsert;
+
+// ─── Anomaly Detection ───────────────────────────────────────────────
+export const anomalyScores = mysqlTable("anomaly_scores", {
+  id: int("id").autoincrement().primaryKey(),
+  transactionId: int("transactionId").notNull(),
+  organizationId: int("organizationId"),
+  anomalyScore: decimal("anomalyScore", { precision: 5, scale: 4 }).notNull(), // 0.0000 to 1.0000
+  detectionMethod: mysqlEnum("detectionMethod", [
+    "statistical_zscore",
+    "statistical_iqr",
+    "pattern_time",
+    "pattern_frequency",
+    "pattern_counterparty",
+    "llm_semantic",
+    "ensemble",
+  ]).notNull(),
+  detectionReason: text("detectionReason"), // Human-readable explanation
+  detectionMetadata: json("detectionMetadata"), // Method-specific details
+  isFlagged: boolean("isFlagged").default(true).notNull(),
+  reviewStatus: mysqlEnum("reviewStatus", ["pending", "false_positive", "confirmed", "escalated", "resolved"])
+    .default("pending")
+    .notNull(),
+  reviewedBy: int("reviewedBy"),
+  reviewedAt: timestamp("reviewedAt"),
+  reviewNotes: text("reviewNotes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_anomaly_txn").on(table.transactionId),
+  index("idx_anomaly_org").on(table.organizationId),
+  index("idx_anomaly_score").on(table.anomalyScore),
+  index("idx_anomaly_flagged").on(table.isFlagged),
+  index("idx_anomaly_review").on(table.reviewStatus),
+  index("idx_anomaly_method").on(table.detectionMethod),
+]);
+
+export type AnomalyScore = typeof anomalyScores.$inferSelect;
+export type InsertAnomalyScore = typeof anomalyScores.$inferInsert;
+
+export const detectionRules = mysqlTable("detection_rules", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  ruleName: varchar("ruleName", { length: 255 }).notNull(),
+  ruleType: mysqlEnum("ruleType", [
+    "amount_outlier",
+    "time_pattern",
+    "frequency_spike",
+    "counterparty_anomaly",
+    "description_suspicious",
+    "velocity_check",
+    "round_amount",
+  ]).notNull(),
+  threshold: decimal("threshold", { precision: 10, scale: 4 }).notNull(), // Rule-specific threshold
+  isEnabled: boolean("isEnabled").default(true).notNull(),
+  severity: mysqlEnum("severity", ["low", "medium", "high", "critical"]).default("medium").notNull(),
+  ruleConfig: json("ruleConfig"), // Rule-specific parameters
+  description: text("description"),
+  createdBy: int("createdBy").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_rules_org").on(table.organizationId),
+  index("idx_rules_type").on(table.ruleType),
+  index("idx_rules_enabled").on(table.isEnabled),
+]);
+
+export type DetectionRule = typeof detectionRules.$inferSelect;
+export type InsertDetectionRule = typeof detectionRules.$inferInsert;

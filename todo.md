@@ -186,3 +186,23 @@
 - [ ] Frontend: Role switcher component in header
 - [ ] Frontend: Dashboard routing based on user role and preferences
 - [ ] Frontend: Customizable widget visibility per role
+
+## Feature 19: AI-Powered Anomaly Detection
+- [x] Schema: Anomaly scores table (transaction_id, anomaly_score, detection_method, flagged_at)
+- [x] Schema: Detection rules table (rule_name, rule_type, threshold, enabled, metadata)
+- [x] Backend: Statistical anomaly detection (Z-score, IQR for amount outliers)
+- [x] Backend: Pattern-based detection (unusual time patterns, frequency spikes, counterparty anomalies)
+- [x] Backend: LLM-based semantic analysis for suspicious transaction descriptions
+- [x] Backend: Ensemble scoring (combine multiple detection methods)
+- [x] Backend: Anomaly detection integration via tRPC endpoints
+- [x] Backend: Detection rule CRUD endpoints (create, update, toggle, delete)
+- [x] Backend: Anomaly review workflow (mark as false positive, escalate, resolve)
+- [x] Frontend: Anomaly Detection page — flagged transactions with scores and reasons
+- [x] Frontend: Quick actions (false positive, confirm, escalate)
+- [ ] Frontend: Detection rules configuration UI with threshold sliders (deferred)
+- [ ] Frontend: Anomaly score visualization (heatmap, distribution chart) (deferred)
+- [ ] Frontend: Anomaly alerts badge in sidebar navigation (deferred)
+- [ ] Tests: Statistical detection accuracy tests (deferred)
+- [ ] Tests: Pattern detection tests with synthetic anomalies (deferred)
+- [ ] Tests: LLM detection tests with suspicious descriptions (deferred)
+- [ ] Tests: False positive rate validation (deferred)

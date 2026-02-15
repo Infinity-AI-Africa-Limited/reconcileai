@@ -23,6 +23,7 @@ import Monitor from "./pages/Monitor";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
+import AnomalyDetection from "./pages/AnomalyDetection";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -52,6 +53,7 @@ function Router() {
       <Route path="/monitor">{() => <DashboardPage component={Monitor} />}</Route>
       <Route path="/api-ingestion">{() => <DashboardPage component={ApiIngestion} />}</Route>
       <Route path="/sftp-config">{() => <DashboardPage component={SftpConfig} />}</Route>
+      <Route path="/anomalies">{() => <DashboardPage component={AnomalyDetection} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
