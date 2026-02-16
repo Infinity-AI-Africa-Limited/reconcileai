@@ -149,7 +149,7 @@
 - [x] Frontend: SFTP Configuration page — credential management, connection testing, file path patterns
 - [x] Frontend: Ingestion logs viewer (placeholder, needs backend integration)
 
-## Feature 16: Role-Based Dashboard Views
+## Feature 16: Role-Based Dashboard Views (DEFERRED - requires additional backend endpoints)
 - [ ] Schema: User role preferences table (default view, widget visibility, data filters)
 - [ ] Backend: Role-specific data filtering in dashboard stats endpoints
 - [ ] Backend: CFO view — aggregate metrics, trend analysis, executive summary
@@ -175,7 +175,7 @@
 - [x] Frontend: Polling interval configuration
 - [x] Frontend: SFTP ingestion logs viewer
 
-## Feature 18: Role-Based Dashboards
+## Feature 18: Role-Based Dashboards (DEFERRED - requires additional backend endpoints)
 - [ ] Backend: User role preference endpoints (get/update default view)
 - [ ] Backend: CFO dashboard data endpoint (aggregate KPIs, trends)
 - [ ] Backend: Operations dashboard data endpoint (exception queue, SLA metrics)
