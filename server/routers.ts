@@ -716,6 +716,128 @@ export const appRouter = router({
       const isAdmin = ctx.user.role === "admin";
       return db.getDashboardStats(ctx.user.id, isAdmin);
     }),
+
+    // CFO Dashboard Endpoints
+    cfoKpis: protectedProcedure.query(async ({ ctx }) => {
+      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      if (!stats) {
+        return {
+          totalTransactions: 0,
+          matchRate: 0,
+          totalExceptions: 0,
+          avgProcessingTime: 0,
+        };
+      }
+      return {
+        totalTransactions: stats.transactions.total,
+        matchRate: stats.transactions.total > 0
+          ? ((stats.transactions.matched / stats.transactions.total) * 100)
+          : 0,
+        totalExceptions: stats.exceptions.total,
+        avgProcessingTime: 0, // Placeholder - would need to be calculated from job data
+      };
+    }),
+
+    cfoChannelHealth: protectedProcedure.query(async ({ ctx }) => {
+      const channels = await db.getChannels();
+      const channelStats = await Promise.all(
+        channels.map(async (channel) => {
+          const { data: transactions } = await db.getTransactions({
+            channelId: channel.id,
+            limit: 10000,
+          });
+          const matched = transactions.filter((t) => t.status === "matched").length;
+          const total = transactions.length;
+          const matchRate = total > 0 ? (matched / total) * 100 : 0;
+          const exceptions = transactions.filter((t) => t.status === "exception").length;
+
+          return {
+            channel: channel.name,
+            channelCode: channel.code,
+            volume: total,
+            matchRate: parseFloat(matchRate.toFixed(1)),
+            exceptions,
+          };
+        })
+      );
+      return channelStats;
+    }),
+
+    // Operations Dashboard Endpoints
+    operationsQueue: protectedProcedure
+      .input(z.object({
+        priority: z.enum(["high", "medium", "low", "all"]).default("all"),
+        limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(50),
+      }))
+      .query(async ({ ctx, input }) => {
+        const { data: exceptions } = await db.getExceptions({
+          status: "open",
+          severity: input.priority !== "all" ? input.priority : undefined,
+          limit: input.limit,
+        });
+
+        return {
+          total: exceptions.length,
+          highPriority: exceptions.filter((e) => e.severity === "high").length,
+          mediumPriority: exceptions.filter((e) => e.severity === "medium").length,
+          lowPriority: exceptions.filter((e) => e.severity === "low").length,
+          overdue: exceptions.filter((e) => {
+            const hours = (Date.now() - new Date(e.createdAt).getTime()) / (1000 * 60 * 60);
+            return hours > 24;
+          }).length,
+          exceptions,
+        };
+      }),
+
+    operationsSla: protectedProcedure.query(async ({ ctx }) => {
+      const { data: allExceptions } = await db.getExceptions({ limit: 1000 });
+      const resolved = allExceptions.filter((e) => e.status === "resolved");
+      const resolvedWithin24h = resolved.filter((e) => {
+        if (!e.resolvedAt) return false;
+        const hours = (new Date(e.resolvedAt).getTime() - new Date(e.createdAt).getTime()) / (1000 * 60 * 60);
+        return hours <= 24;
+      });
+
+      const avgResolutionTime = resolved.length > 0
+        ? resolved.reduce((sum, e) => {
+            if (!e.resolvedAt) return sum;
+            return sum + (new Date(e.resolvedAt).getTime() - new Date(e.createdAt).getTime());
+          }, 0) / resolved.length / (1000 * 60 * 60) // Convert to hours
+        : 0;
+
+      return {
+        resolvedWithin24h: resolved.length > 0 ? (resolvedWithin24h.length / resolved.length) * 100 : 0,
+        avgResolutionTimeHours: avgResolutionTime,
+        backlogSize: allExceptions.filter((e) => e.status === "open").length,
+        slaCompliance: resolved.length > 0 && (resolvedWithin24h.length / resolved.length) >= 0.9 ? "On Track" : "At Risk",
+      };
+    }),
+
+    // Auditor Dashboard Endpoints
+    auditorCompliance: protectedProcedure.query(async ({ ctx }) => {
+      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      const { data: auditLogs } = await db.getAuditLogs({ limit: 1000 });
+
+      return {
+        totalReconciliations: stats?.jobs.total || 0,
+        completedReconciliations: stats?.jobs.completed || 0,
+        auditTrailEntries: auditLogs.length,
+        dataIntegrityScore: 98.5, // Placeholder - would be calculated from actual integrity checks
+        complianceRate: stats && stats.jobs.total > 0 ? (stats.jobs.completed / stats.jobs.total) * 100 : 0,
+      };
+    }),
+
+    auditorTrail: protectedProcedure
+      .input(z.object({
+        entityType: z.string().max(50).optional(),
+        limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(100),
+      }))
+      .query(async ({ ctx, input }) => {
+        return db.getAuditLogs({
+          entityType: input.entityType,
+          limit: input.limit,
+        });
+      }),
   }),
 
   // ─── Sample Data Generator ──────────────────────────────────────

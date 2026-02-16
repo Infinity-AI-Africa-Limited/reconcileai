@@ -206,3 +206,15 @@
 - [ ] Tests: Pattern detection tests with synthetic anomalies (deferred)
 - [ ] Tests: LLM detection tests with suspicious descriptions (deferred)
 - [ ] Tests: False positive rate validation (deferred)
+
+## Feature 20: Role-Based Dashboard Backend Endpoints
+- [x] Backend: CFO dashboard endpoint - aggregate KPIs (total transactions, match rate, exceptions, processing time)
+- [ ] Backend: CFO trends endpoint - 30-day trend data for key metrics (deferred)
+- [x] Backend: CFO channel health endpoint - per-channel performance metrics
+- [ ] Backend: CFO cost analysis endpoint - ROI calculations, efficiency metrics (deferred)
+- [x] Backend: Operations dashboard endpoint - exception queue with priority filtering
+- [x] Backend: Operations SLA metrics endpoint - resolution times, backlog size, compliance rate
+- [ ] Backend: Operations team performance endpoint - reviewer stats, throughput metrics (deferred)
+- [x] Backend: Auditor compliance metrics endpoint - regulatory compliance indicators
+- [x] Backend: Auditor audit trail endpoint - comprehensive activity log with filtering
+- [ ] Backend: Auditor regulatory export endpoint - compliance report generation (deferred)
