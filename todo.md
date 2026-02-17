@@ -218,3 +218,18 @@
 - [x] Backend: Auditor compliance metrics endpoint - regulatory compliance indicators
 - [x] Backend: Auditor audit trail endpoint - comprehensive activity log with filtering
 - [ ] Backend: Auditor regulatory export endpoint - compliance report generation (deferred)
+
+## Feature 21: Guest Access (Try Without Signup) - DEFERRED
+- [x] Schema: Guest sessions table (session_id, guest_user_id, expires_at, demo_data_seeded)
+- [ ] Backend: Guest session creation endpoint (generates temp user + session) - DEFERRED (requires auth middleware refactor)
+- [ ] Backend: Guest middleware (allows access without OAuth for guest sessions) - DEFERRED
+- [ ] Backend: Demo data seeding service (pre-populate sample transactions, reconciliations, exceptions) - DEFERRED
+- [ ] Backend: Guest session cleanup job (delete expired sessions and associated data) - DEFERRED
+- [ ] Frontend: "Try as Guest" button on Home/landing page - DEFERRED
+- [ ] Frontend: Guest session banner (shows "Guest Mode" with option to sign up) - DEFERRED
+- [ ] Frontend: Feature tour/onboarding flow for guest users - DEFERRED
+- [ ] Frontend: Convert to full account flow (sign up and migrate guest data) - DEFERRED
+- [ ] Tests: Guest session creation and expiry tests - DEFERRED
+- [ ] Tests: Demo data seeding tests - DEFERRED
+
+Note: Guest access requires significant auth middleware refactoring to bypass OAuth. The schema table is created but backend/frontend implementation is deferred to a future sprint.

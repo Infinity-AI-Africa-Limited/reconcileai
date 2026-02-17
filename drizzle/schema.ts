@@ -719,3 +719,20 @@ export const detectionRules = mysqlTable("detection_rules", {
 
 export type DetectionRule = typeof detectionRules.$inferSelect;
 export type InsertDetectionRule = typeof detectionRules.$inferInsert;
+
+// ─── Guest Sessions ───────────────────────────────────────────────────
+export const guestSessions = mysqlTable("guest_sessions", {
+  id: int("id").autoincrement().primaryKey(),
+  sessionId: varchar("sessionId", { length: 64 }).notNull().unique(),
+  guestUserId: int("guestUserId").notNull(), // References users table
+  guestOrganizationId: int("guestOrganizationId").notNull(), // References organizations table
+  demoDataSeeded: boolean("demoDataSeeded").default(false).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_guest_sessions_expires").on(table.expiresAt),
+  index("idx_guest_sessions_user").on(table.guestUserId),
+]);
+
+export type GuestSession = typeof guestSessions.$inferSelect;
+export type InsertGuestSession = typeof guestSessions.$inferInsert;

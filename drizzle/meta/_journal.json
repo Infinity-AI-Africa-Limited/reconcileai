@@ -43,6 +43,13 @@
       "when": 1771113951440,
       "tag": "0005_chunky_manta",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1771324505535,
+      "tag": "0006_open_weapon_omega",
+      "breakpoints": true
     }
   ]
 }
