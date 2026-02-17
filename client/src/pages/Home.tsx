@@ -76,7 +76,7 @@ export default function Home() {
         <div className="max-w-5xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8">
           {[
             { value: "95%+", label: "Auto-Match Rate" },
-            { value: "<4hrs", label: "Reconciliation Time" },
+            { value: "< 3min", label: "Avg Resolution Time" },
             { value: "80%", label: "Exception Reduction" },
             { value: "6+", label: "Payment Channels" },
           ].map((s) => (

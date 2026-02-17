@@ -233,3 +233,6 @@
 - [ ] Tests: Demo data seeding tests - DEFERRED
 
 Note: Guest access requires significant auth middleware refactoring to bypass OAuth. The schema table is created but backend/frontend implementation is deferred to a future sprint.
+
+## Feature 22: UI/UX Improvements
+- [x] Update landing page stats: Change "< 4hrs Reconciliation Time" to "< 3min Avg Resolution Time"
