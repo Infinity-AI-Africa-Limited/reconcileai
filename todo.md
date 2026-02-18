@@ -236,3 +236,19 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 
 ## Feature 22: UI/UX Improvements
 - [x] Update landing page stats: Change "< 4hrs Reconciliation Time" to "< 3min Avg Resolution Time"
+
+## Feature 23: Customer Testimonials Section
+- [ ] Search and download Nigerian bank/fintech logos (GTBank, Access Bank, Zenith Bank, Flutterwave, Paystack, Kuda)
+- [ ] Design testimonials section layout with logos and feedback quotes
+- [ ] Implement testimonials section in Home.tsx landing page
+- [ ] Add responsive grid layout for testimonials
+- [ ] Test visual consistency with Infinity AI branding
+
+## Feature 24: Role-Based Dashboard Frontend Pages
+- [x] Frontend: CFO Dashboard page with aggregate KPIs and channel health charts
+- [x] Frontend: Operations Dashboard page with exception queue and SLA metrics
+- [x] Frontend: Auditor Dashboard page with compliance metrics and audit trail viewer
+- [x] Frontend: Role switcher component in DashboardLayout header
+- [x] Frontend: Update App.tsx routing for role-based dashboard routes (/dashboard/cfo, /dashboard/operations, /dashboard/auditor)
+- [x] Frontend: Preserve existing main dashboard at /dashboard route
+- [ ] Tests: Role-based dashboard rendering and data fetching (deferred)

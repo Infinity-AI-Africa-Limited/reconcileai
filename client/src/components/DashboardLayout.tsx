@@ -42,6 +42,7 @@ import {
   Mail,
   Code,
   Server,
+  TrendingUp,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -147,6 +148,50 @@ type DashboardLayoutContentProps = {
   children: React.ReactNode;
   setSidebarWidth: (width: number) => void;
 };
+
+function RoleSwitcher({ location, setLocation }: { location: string; setLocation: (path: string) => void }) {
+  const dashboardRoutes = [
+    { label: "Main", path: "/dashboard", icon: LayoutDashboard },
+    { label: "CFO", path: "/dashboard/cfo", icon: TrendingUp },
+    { label: "Operations", path: "/dashboard/operations", icon: ClipboardList },
+    { label: "Auditor", path: "/dashboard/auditor", icon: Shield },
+  ];
+
+  const currentRoute = dashboardRoutes.find(r => location === r.path) || dashboardRoutes[0];
+  const CurrentIcon = currentRoute.icon;
+
+  // Only show role switcher on dashboard routes
+  if (!location.startsWith("/dashboard")) {
+    return null;
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="gap-2">
+          <CurrentIcon className="h-4 w-4" />
+          <span className="hidden sm:inline">{currentRoute.label} View</span>
+          <span className="sm:hidden">{currentRoute.label}</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        {dashboardRoutes.map((route) => {
+          const Icon = route.icon;
+          return (
+            <DropdownMenuItem
+              key={route.path}
+              onClick={() => setLocation(route.path)}
+              className="cursor-pointer"
+            >
+              <Icon className="mr-2 h-4 w-4" />
+              <span>{route.label} Dashboard</span>
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function DashboardLayoutContent({
   children,
@@ -337,6 +382,17 @@ function DashboardLayoutContent({
                 </div>
               </div>
             </div>
+            <RoleSwitcher location={location} setLocation={setLocation} />
+          </div>
+        )}
+        {!isMobile && (
+          <div className="flex border-b h-14 items-center justify-between bg-background/95 px-6 backdrop-blur supports-[backdrop-filter]:backdrop-blur sticky top-0 z-40">
+            <div className="flex items-center gap-2">
+              <span className="tracking-tight text-foreground font-medium text-lg">
+                {activeMenuItem?.label ?? "ReconcileAI"}
+              </span>
+            </div>
+            <RoleSwitcher location={location} setLocation={setLocation} />
           </div>
         )}
         <main className="flex-1 p-6">{children}</main>

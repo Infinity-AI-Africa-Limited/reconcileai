@@ -24,6 +24,9 @@ import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
 import AnomalyDetection from "./pages/AnomalyDetection";
+import CfoDashboard from "./pages/CfoDashboard";
+import OperationsDashboard from "./pages/OperationsDashboard";
+import AuditorDashboard from "./pages/AuditorDashboard";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -38,6 +41,9 @@ function Router() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/dashboard">{() => <DashboardPage component={Dashboard} />}</Route>
+      <Route path="/dashboard/cfo">{() => <DashboardPage component={CfoDashboard} />}</Route>
+      <Route path="/dashboard/operations">{() => <DashboardPage component={OperationsDashboard} />}</Route>
+      <Route path="/dashboard/auditor">{() => <DashboardPage component={AuditorDashboard} />}</Route>
       <Route path="/upload">{() => <DashboardPage component={Upload} />}</Route>
       <Route path="/reconciliation">{() => <DashboardPage component={Reconciliation} />}</Route>
       <Route path="/exceptions">{() => <DashboardPage component={Exceptions} />}</Route>
