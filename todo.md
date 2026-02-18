@@ -252,3 +252,10 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Update App.tsx routing for role-based dashboard routes (/dashboard/cfo, /dashboard/operations, /dashboard/auditor)
 - [x] Frontend: Preserve existing main dashboard at /dashboard route
 - [ ] Tests: Role-based dashboard rendering and data fetching (deferred)
+
+## Feature 25: Real-Time Updates for Operations Dashboard
+- [x] Add automatic polling (every 10 seconds) to Operations Dashboard exception queue
+- [x] Add visual indicator showing last update timestamp
+- [x] Add animation/highlight for newly appeared exceptions
+- [x] Add manual refresh button for immediate updates
+- [x] Test real-time updates with multiple priority filters

@@ -1,19 +1,50 @@
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Clock, CheckCircle2, TrendingDown, Eye, ArrowRight } from "lucide-react";
-import { useState } from "react";
+import { AlertTriangle, Clock, CheckCircle2, TrendingDown, Eye, ArrowRight, RefreshCw } from "lucide-react";
+import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 
 export default function OperationsDashboard() {
   const [, navigate] = useLocation();
   const [priority, setPriority] = useState<"all" | "high" | "medium" | "low">("all");
+  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [newExceptionIds, setNewExceptionIds] = useState<Set<number>>(new Set());
   
-  const { data: queue, isLoading: queueLoading } = trpc.dashboard.operationsQueue.useQuery({ 
+  const { data: queue, isLoading: queueLoading, refetch: refetchQueue } = trpc.dashboard.operationsQueue.useQuery({ 
     priority,
     limit: 50 
+  }, {
+    refetchInterval: 10000, // Poll every 10 seconds
+    refetchIntervalInBackground: true,
   });
-  const { data: sla, isLoading: slaLoading } = trpc.dashboard.operationsSla.useQuery();
+  const { data: sla, isLoading: slaLoading, refetch: refetchSla } = trpc.dashboard.operationsSla.useQuery(undefined, {
+    refetchInterval: 10000,
+    refetchIntervalInBackground: true,
+  });
+
+  // Track new exceptions
+  useEffect(() => {
+    if (queue?.exceptions) {
+      const currentIds = new Set(queue.exceptions.map(e => e.id));
+      const previousIds = newExceptionIds.size > 0 ? newExceptionIds : currentIds;
+      const newIds = new Set(Array.from(currentIds).filter(id => !previousIds.has(id)));
+      
+      if (newIds.size > 0 && previousIds.size > 0) {
+        setNewExceptionIds(newIds);
+        // Clear highlights after 5 seconds
+        setTimeout(() => setNewExceptionIds(new Set()), 5000);
+      }
+      setLastUpdate(new Date());
+    }
+  }, [queue]);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    await Promise.all([refetchQueue(), refetchSla()]);
+    setIsRefreshing(false);
+  };
 
   if (queueLoading || slaLoading) {
     return (
@@ -48,9 +79,29 @@ export default function OperationsDashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-[#1B365D]">Operations Dashboard</h1>
-        <p className="text-[#8C757D] mt-1">Exception queue and resolution tracking</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-[#1B365D]">Operations Dashboard</h1>
+          <p className="text-[#8C757D] mt-1">Exception queue and resolution tracking</p>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="text-right">
+            <p className="text-xs text-[#8C757D]">Last updated</p>
+            <p className="text-sm font-medium text-[#1B365D]">
+              {lastUpdate.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleManualRefresh}
+            disabled={isRefreshing}
+            className="gap-2"
+          >
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* SLA Metrics Cards */}
@@ -175,11 +226,22 @@ export default function OperationsDashboard() {
         <CardContent>
           <div className="space-y-3">
             {queue?.exceptions && queue.exceptions.length > 0 ? (
-              queue.exceptions.map((exception) => (
+              queue.exceptions.map((exception) => {
+                const isNew = newExceptionIds.has(exception.id);
+                return (
                 <div
                   key={exception.id}
-                  className="flex items-center justify-between p-4 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  className={`relative flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 transition-all ${
+                    isNew 
+                      ? 'border-blue-500 bg-blue-50 shadow-md animate-pulse' 
+                      : 'border-gray-200'
+                  }`}
                 >
+                  {isNew && (
+                    <div className="absolute -top-2 -right-2 bg-blue-500 text-white text-xs px-2 py-0.5 rounded-full font-semibold">
+                      NEW
+                    </div>
+                  )}
                   <div className="flex items-start gap-4 flex-1">
                     <div className={`mt-1 p-2 rounded-full ${
                       exception.severity === "high" 
@@ -231,7 +293,8 @@ export default function OperationsDashboard() {
                     Review
                   </Button>
                 </div>
-              ))
+                );
+              })
             ) : (
               <div className="text-center py-12">
                 <CheckCircle2 className="h-12 w-12 text-green-500 mx-auto mb-3" />
