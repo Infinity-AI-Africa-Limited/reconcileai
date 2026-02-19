@@ -1,11 +1,126 @@
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { TrendingUp, DollarSign, AlertCircle, Clock, Activity } from "lucide-react";
+import { TrendingUp, DollarSign, AlertCircle, Clock, Activity, Download } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
+import { useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 
 export default function CfoDashboard() {
+  const [isExporting, setIsExporting] = useState(false);
   const { data: kpis, isLoading: kpisLoading } = trpc.dashboard.cfoKpis.useQuery();
   const { data: channelHealth, isLoading: channelLoading } = trpc.dashboard.cfoChannelHealth.useQuery();
+
+  const exportToPDF = async () => {
+    setIsExporting(true);
+    try {
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 15;
+      let yPosition = margin;
+
+      // Header
+      pdf.setFillColor(27, 54, 93); // #1B365D
+      pdf.rect(0, 0, pageWidth, 35, 'F');
+      pdf.setTextColor(255, 255, 255);
+      pdf.setFontSize(24);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text('ReconcileAI', margin, 15);
+      pdf.setFontSize(14);
+      pdf.setFont('helvetica', 'normal');
+      pdf.text('CFO Dashboard Report', margin, 25);
+      pdf.setFontSize(10);
+      pdf.text(`Generated: ${new Date().toLocaleString('en-NG')}`, margin, 30);
+
+      yPosition = 45;
+      pdf.setTextColor(0, 0, 0);
+
+      // KPIs Section
+      pdf.setFontSize(16);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text('Key Performance Indicators', margin, yPosition);
+      yPosition += 10;
+
+      pdf.setFontSize(11);
+      pdf.setFont('helvetica', 'normal');
+      const kpiData = [
+        ['Total Transactions', `${formatNumber(kpis?.totalTransactions || 0)}`],
+        ['Match Rate', `${formatPercentage(kpis?.matchRate || 0)}`],
+        ['Total Exceptions', `${kpis?.totalExceptions || 0}`],
+        ['Avg Processing Time', formatTime(kpis?.avgProcessingTime || 0)]
+      ];
+
+      kpiData.forEach(([label, value]) => {
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(label + ':', margin, yPosition);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text(value, margin + 60, yPosition);
+        yPosition += 7;
+      });
+
+      yPosition += 5;
+
+      // Channel Health Table
+      pdf.setFontSize(16);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text('Channel Health Metrics', margin, yPosition);
+      yPosition += 10;
+
+      // Table headers
+      pdf.setFillColor(240, 240, 240);
+      pdf.rect(margin, yPosition - 5, pageWidth - 2 * margin, 8, 'F');
+      pdf.setFontSize(10);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text('Channel', margin + 2, yPosition);
+      pdf.text('Volume', margin + 50, yPosition);
+      pdf.text('Match Rate', margin + 90, yPosition);
+      pdf.text('Exceptions', margin + 130, yPosition);
+      pdf.text('Status', margin + 165, yPosition);
+      yPosition += 8;
+
+      // Table rows
+      pdf.setFont('helvetica', 'normal');
+      channelHealth?.forEach((channel: any, index: number) => {
+        if (yPosition > pageHeight - 20) {
+          pdf.addPage();
+          yPosition = margin;
+        }
+
+        if (index % 2 === 0) {
+          pdf.setFillColor(250, 250, 250);
+          pdf.rect(margin, yPosition - 5, pageWidth - 2 * margin, 7, 'F');
+        }
+
+        pdf.text(channel.name, margin + 2, yPosition);
+        pdf.text(`₦${formatNumber(channel.volume)}`, margin + 50, yPosition);
+        pdf.text(`${formatPercentage(channel.matchRate)}`, margin + 90, yPosition);
+        pdf.text(`${channel.exceptions}`, margin + 130, yPosition);
+        
+        // Status with color
+        const statusColor = channel.status === 'healthy' ? [34, 197, 94] : 
+                           channel.status === 'warning' ? [251, 146, 60] : [239, 68, 68];
+        pdf.setTextColor(statusColor[0], statusColor[1], statusColor[2]);
+        pdf.text(channel.status.toUpperCase(), margin + 165, yPosition);
+        pdf.setTextColor(0, 0, 0);
+        
+        yPosition += 7;
+      });
+
+      // Footer
+      pdf.setFontSize(8);
+      pdf.setTextColor(140, 117, 125);
+      pdf.text('ReconcileAI - Confidential Report', margin, pageHeight - 10);
+      pdf.text(`Page 1 of 1`, pageWidth - margin - 20, pageHeight - 10);
+
+      pdf.save(`CFO-Dashboard-Report-${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (error) {
+      console.error('PDF export failed:', error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   if (kpisLoading || channelLoading) {
     return (
@@ -47,9 +162,19 @@ export default function CfoDashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-[#1B365D]">CFO Dashboard</h1>
-        <p className="text-[#8C757D] mt-1">Executive financial reconciliation overview</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-[#1B365D]">CFO Dashboard</h1>
+          <p className="text-[#8C757D] mt-1">Executive financial reconciliation overview</p>
+        </div>
+        <Button
+          onClick={exportToPDF}
+          disabled={isExporting}
+          className="gap-2 bg-[#1B365D] hover:bg-[#2A4A7C]"
+        >
+          <Download className={`h-4 w-4 ${isExporting ? 'animate-bounce' : ''}`} />
+          {isExporting ? 'Exporting...' : 'Export PDF'}
+        </Button>
       </div>
 
       {/* KPI Cards */}

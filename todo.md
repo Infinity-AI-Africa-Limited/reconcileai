@@ -259,3 +259,12 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add animation/highlight for newly appeared exceptions
 - [x] Add manual refresh button for immediate updates
 - [x] Test real-time updates with multiple priority filters
+
+## Feature 26: Dashboard PDF Export for CFO and Auditor
+- [x] Install jsPDF library for client-side PDF generation
+- [x] Add export button to CFO Dashboard with download icon
+- [x] Implement CFO Dashboard PDF generation with KPIs, charts, and channel metrics table
+- [x] Add export button to Auditor Dashboard with download icon
+- [x] Implement Auditor Dashboard PDF generation with compliance metrics, audit trail, and CBN checklist
+- [x] Add professional PDF styling with ReconcileAI branding and timestamps
+- [x] Test PDF exports with real data and verify formatting
