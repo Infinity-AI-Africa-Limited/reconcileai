@@ -2,6 +2,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { getLoginUrl } from "@/const";
 import { useLocation } from "wouter";
+import { trpc } from "@/lib/trpc";
 import { useEffect } from "react";
 import {
   ArrowRight,
@@ -12,6 +13,27 @@ import {
   Clock,
   CheckCircle2,
 } from "lucide-react";
+
+function GuestLoginButton() {
+  const [, navigate] = useLocation();
+  const guestLogin = trpc.auth.guestLogin.useMutation({
+    onSuccess: () => {
+      navigate("/dashboard");
+    },
+  });
+
+  return (
+    <Button
+      size="lg"
+      variant="outline"
+      onClick={() => guestLogin.mutate()}
+      disabled={guestLogin.isPending}
+      className="border-[#1B365D] text-[#1B365D] hover:bg-[#1B365D]/5 px-8 h-12 text-base"
+    >
+      {guestLogin.isPending ? "Loading..." : "Try as Guest"}
+    </Button>
+  );
+}
 
 export default function Home() {
   const { user, isAuthenticated, loading } = useAuth();
@@ -67,6 +89,7 @@ export default function Home() {
             >
               Get Started <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
+            <GuestLoginButton />
           </div>
         </div>
       </section>

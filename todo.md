@@ -268,3 +268,9 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Implement Auditor Dashboard PDF generation with compliance metrics, audit trail, and CBN checklist
 - [x] Add professional PDF styling with ReconcileAI branding and timestamps
 - [x] Test PDF exports with real data and verify formatting
+
+## Feature 27: Guest Login Button
+- [x] Review current authentication flow and landing page
+- [x] Add guest login backend endpoint in routers.ts
+- [x] Add guest login button to Home.tsx landing page
+- [x] Test guest login flow and verify dashboard access

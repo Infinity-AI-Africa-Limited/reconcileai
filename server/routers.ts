@@ -136,6 +136,25 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+    guestLogin: publicProcedure.mutation(async ({ ctx }) => {
+      // Create a mock guest user for demo purposes
+      const guestUser = {
+        id: 999999,
+        openId: 'guest_' + Date.now(),
+        name: 'Guest User',
+        email: 'guest@demo.reconcileai.com',
+        role: 'user' as const,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      
+      // Set a session cookie for the guest user
+      const token = Buffer.from(JSON.stringify(guestUser)).toString('base64');
+      const cookieOptions = getSessionCookieOptions(ctx.req);
+      ctx.res.cookie(COOKIE_NAME, token, { ...cookieOptions, maxAge: 24 * 60 * 60 * 1000 }); // 24 hours
+      
+      return { success: true, user: guestUser };
+    }),
   }),
 
   // ─── Channels ────────────────────────────────────────────────────
