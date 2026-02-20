@@ -57,6 +57,13 @@
       "when": 1771573915373,
       "tag": "0007_simple_the_phantom",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1771580090843,
+      "tag": "0008_melted_justice",
+      "breakpoints": true
     }
   ]
 }

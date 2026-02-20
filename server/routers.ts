@@ -53,6 +53,18 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   return next({ ctx });
 });
 
+// ─── Guest Protection Middleware ─────────────────────────────────────
+
+const guestProtectedProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.user.isGuest) {
+    throw new TRPCError({ 
+      code: "FORBIDDEN", 
+      message: "Guest users cannot perform write operations. Please sign up to save your work." 
+    });
+  }
+  return next({ ctx });
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 async function logAudit(
@@ -144,6 +156,7 @@ export const appRouter = router({
         name: 'Guest User',
         email: 'guest@demo.reconcileai.com',
         role: 'user' as const,
+        isGuest: true,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -186,7 +199,7 @@ export const appRouter = router({
   // ─── Upload & Ingestion ──────────────────────────────────────────
 
   upload: router({
-    createBatch: protectedProcedure
+    createBatch: guestProtectedProcedure
       .input(
         z.object({
           channelCode: z.string().min(1).max(50),
@@ -386,7 +399,7 @@ export const appRouter = router({
   // ─── Reconciliation ─────────────────────────────────────────────
 
   reconciliation: router({
-    create: protectedProcedure
+    create: guestProtectedProcedure
       .input(
         z.object({
           name: z.string().min(1).max(MAX_NAME_LENGTH),
@@ -485,7 +498,7 @@ export const appRouter = router({
         return db.getExceptions(input);
       }),
 
-    resolve: protectedProcedure
+    resolve: guestProtectedProcedure
       .input(
         z.object({
           id: z.number().int().positive(),
@@ -510,7 +523,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    assign: protectedProcedure
+    assign: guestProtectedProcedure
       .input(z.object({
         id: z.number().int().positive(),
         assignedTo: z.number().int().positive(),
@@ -530,6 +543,31 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    bulkAssign: guestProtectedProcedure
+      .input(z.object({
+        exceptionIds: z.array(z.number().int().positive()).min(1).max(100),
+        assignedTo: z.number().int().positive(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const updatePromises = input.exceptionIds.map(id =>
+          db.updateException(id, {
+            assignedTo: input.assignedTo,
+            assignedAt: new Date(),
+            assignedBy: ctx.user.id,
+            status: "in_review",
+          })
+        );
+        await Promise.all(updatePromises);
+        await logAudit(ctx.user.id, "bulk_assign_exceptions", "exception", undefined, {
+          exceptionIds: input.exceptionIds,
+          assignedTo: input.assignedTo,
+          assignedBy: ctx.user.id,
+          count: input.exceptionIds.length,
+        }, ip, ua);
+        return { success: true, count: input.exceptionIds.length };
+      }),
+
     getTeamMembers: protectedProcedure
       .query(async () => {
         // Get all active users for assignment
@@ -537,7 +575,56 @@ export const appRouter = router({
         return allUsers.filter(u => u.isActive);
       }),
 
-    escalate: protectedProcedure
+    getTeamWorkload: protectedProcedure
+      .query(async () => {
+        const allUsers = await db.getAllUsers();
+        const activeUsers = allUsers.filter(u => u.isActive && !u.isGuest);
+        const exceptionsResult = await db.getExceptions({ limit: 10000 });
+        const allExceptions = exceptionsResult.data;
+        
+        const workloadData = await Promise.all(activeUsers.map(async (user) => {
+          const userExceptions = allExceptions.filter((e: any) => e.assignedTo === user.id);
+          const currentLoad = userExceptions.filter((e: any) => e.status === 'open' || e.status === 'in_review').length;
+          const resolvedExceptions = userExceptions.filter((e: any) => e.status === 'resolved');
+          
+          // Calculate average resolution time
+          let avgResolutionTime = 0;
+          if (resolvedExceptions.length > 0) {
+            const totalTime = resolvedExceptions.reduce((sum: number, e: any) => {
+              if (e.createdAt && e.resolvedAt) {
+                return sum + (e.resolvedAt.getTime() - e.createdAt.getTime());
+              }
+              return sum;
+            }, 0);
+            avgResolutionTime = totalTime / resolvedExceptions.length / (1000 * 60 * 60); // hours
+          }
+          
+          // Calculate SLA compliance (resolved within 24 hours)
+          const slaCompliant = resolvedExceptions.filter((e: any) => {
+            if (e.createdAt && e.resolvedAt) {
+              const hoursToResolve = (e.resolvedAt.getTime() - e.createdAt.getTime()) / (1000 * 60 * 60);
+              return hoursToResolve <= 24;
+            }
+            return false;
+          }).length;
+          const slaComplianceRate = resolvedExceptions.length > 0 
+            ? (slaCompliant / resolvedExceptions.length) * 100 
+            : 100;
+          
+          return {
+            userId: user.id,
+            userName: user.name || user.email || 'Unknown',
+            currentLoad,
+            avgResolutionTime: Math.round(avgResolutionTime * 10) / 10,
+            slaComplianceRate: Math.round(slaComplianceRate),
+            totalResolved: resolvedExceptions.length,
+          };
+        }));
+        
+        return workloadData.sort((a, b) => b.currentLoad - a.currentLoad);
+      }),
+
+    escalate: guestProtectedProcedure
       .input(z.object({
         id: z.number().int().positive(),
         notes: z.string().max(2000).optional(),
@@ -565,7 +652,7 @@ export const appRouter = router({
       return db.getPendingReviewMatches(ctx.user.id, isAdmin);
     }),
 
-    approve: protectedProcedure
+    approve: guestProtectedProcedure
       .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -574,7 +661,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    reject: protectedProcedure
+    reject: guestProtectedProcedure
       .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -613,7 +700,7 @@ export const appRouter = router({
       return db.getReports(ctx.user.id, isAdmin);
     }),
 
-    generate: protectedProcedure
+    generate: guestProtectedProcedure
       .input(
         z.object({
           jobId: z.number().int().positive(),
@@ -890,7 +977,7 @@ export const appRouter = router({
   // ─── Sample Data Generator ──────────────────────────────────────
 
   sampleData: router({
-    generate: protectedProcedure
+    generate: guestProtectedProcedure
       .input(
         z.object({
           transactionCount: z.number().int().min(10).max(500).default(50),
@@ -928,7 +1015,7 @@ export const appRouter = router({
       return db.getWebhooks(ctx.user.id);
     }),
 
-    create: protectedProcedure
+    create: guestProtectedProcedure
       .input(z.object({
         name: z.string().min(1).max(MAX_NAME_LENGTH),
         url: z.string().url().max(2000),
@@ -952,7 +1039,7 @@ export const appRouter = router({
         return { id, secret }; // Return secret only on creation
       }),
 
-    delete: protectedProcedure
+    delete: guestProtectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -969,7 +1056,7 @@ export const appRouter = router({
       return db.getApiKeys(ctx.user.id);
     }),
 
-    create: protectedProcedure
+    create: guestProtectedProcedure
       .input(z.object({
         name: z.string().min(1).max(MAX_NAME_LENGTH),
         permissions: z.array(z.string().max(50)).min(1).max(20),
@@ -1018,7 +1105,7 @@ export const appRouter = router({
       return db.getSftpCredentials(ctx.user.id);
     }),
 
-    create: protectedProcedure
+    create: guestProtectedProcedure
       .input(z.object({
         name: z.string().min(1).max(MAX_NAME_LENGTH),
         host: z.string().min(1).max(255),
@@ -1105,7 +1192,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: protectedProcedure
+    delete: guestProtectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -1193,7 +1280,7 @@ export const appRouter = router({
         };
       }),
 
-    create: protectedProcedure
+    create: guestProtectedProcedure
       .input(z.object({
         name: z.string().min(1).max(MAX_NAME_LENGTH),
         description: z.string().max(1000).optional(),
@@ -1300,7 +1387,7 @@ export const appRouter = router({
         return { success: true, nextRun: updateData.nextRunAt };
       }),
 
-    delete: protectedProcedure
+    delete: guestProtectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -1540,7 +1627,7 @@ export const appRouter = router({
       return db.getDetectionRules(ctx.user.organizationId || undefined);
     }),
 
-    create: protectedProcedure
+    create: guestProtectedProcedure
       .input(z.object({
         ruleName: z.string().min(1).max(255),
         ruleType: z.enum([
@@ -1594,7 +1681,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: protectedProcedure
+    delete: guestProtectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         await db.deleteDetectionRule(input.id);

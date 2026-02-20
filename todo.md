@@ -295,3 +295,48 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Frontend: Add SLA progress bar showing time remaining until 24hr deadline (deferred)
 - [ ] Frontend: Sort exceptions by SLA urgency (red first, then yellow, then green) (deferred)
 - [ ] Frontend: Add SLA filter to show only at-risk exceptions (yellow/red) (deferred)
+
+## Feature 30: Guest Mode Enhancements
+- [ ] Add guest mode banner to DashboardLayout header with "Guest Mode" label (deferred - needs careful refactoring)
+- [ ] Add "Sign Up to Save Your Work" CTA button in guest banner (deferred)
+- [ ] Implement view-only restrictions for guest users (disable upload, create, edit, delete actions) (deferred)
+- [ ] Allow guests to access sample data generator only (deferred)
+- [ ] Create ProductTour component with interactive tooltips using react-joyride or similar (deferred)
+- [ ] Define tour steps highlighting key features (upload, reconciliation, exceptions, dashboards) (deferred)
+- [ ] Auto-launch product tour for guest users on first dashboard visit (deferred)
+- [ ] Add "Skip Tour" and "Next" navigation controls to tour (deferred)
+- [ ] Store tour completion status in localStorage to prevent repeated launches (deferred)
+- [ ] Test all guest mode restrictions and tour flow (deferred)
+
+## Feature 31: Backend Guest User Detection
+- [x] Database: Add isGuest boolean field to user table schema
+- [x] Database: Push schema changes with pnpm db:push
+- [x] Backend: Update guest login endpoint to set isGuest=true
+- [x] Backend: Create guestProtectedProcedure middleware to block write operations
+- [x] Backend: Apply guestProtectedProcedure to all mutation endpoints (upload, create, edit, delete)
+- [x] Frontend: Display appropriate error messages when guests attempt write operations (via tRPC error handling)
+- [ ] Tests: Verify guest users cannot perform write operations (deferred)
+
+## Feature 32: Bulk Exception Assignment
+- [x] Frontend: Add checkbox column to Operations Dashboard exception table
+- [ ] Frontend: Add "Select All" checkbox in table header (deferred - can select individually)
+- [x] Frontend: Track selected exception IDs in component state
+- [x] Frontend: Add "Bulk Assign" button above exception table
+- [x] Frontend: Show bulk assignment dialog with team member dropdown
+- [x] Backend: Create bulkAssignExceptions endpoint accepting array of exception IDs
+- [x] Backend: Update all selected exceptions with assigned user and timestamp
+- [x] Frontend: Show success toast with count of assigned exceptions
+- [x] Frontend: Clear selection and refresh exception list after bulk assignment
+- [ ] Tests: Verify bulk assignment updates multiple exceptions correctly (deferred)
+
+## Feature 33: Exception Workload Analytics
+- [x] Backend: Create getTeamWorkload endpoint returning per-user metrics
+- [x] Backend: Calculate current exception count per team member
+- [x] Backend: Calculate average resolution time per team member
+- [x] Backend: Calculate SLA compliance rate per team member (% resolved within 24hrs)
+- [x] Frontend: Create WorkloadAnalytics component with team member cards
+- [x] Frontend: Display current load, avg resolution time, and SLA compliance for each member
+- [x] Frontend: Add color-coded indicators (green/yellow/red) for workload levels
+- [x] Frontend: Add workload analytics section to Operations Dashboard
+- [ ] Frontend: Add "Balance Load" suggestion when workload is uneven (deferred)
+- [ ] Tests: Verify workload calculations are accurate (deferred)

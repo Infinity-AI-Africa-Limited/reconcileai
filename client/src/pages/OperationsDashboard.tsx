@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/select";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
+import { toast } from "sonner";
 
 export default function OperationsDashboard() {
   const [, navigate] = useLocation();
@@ -18,6 +19,8 @@ export default function OperationsDashboard() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [newExceptionIds, setNewExceptionIds] = useState<Set<number>>(new Set());
+  const [selectedExceptions, setSelectedExceptions] = useState<Set<number>>(new Set());
+  const [bulkAssignUserId, setBulkAssignUserId] = useState<string>("");
   
   const { data: queue, isLoading: queueLoading, refetch: refetchQueue } = trpc.dashboard.operationsQueue.useQuery({ 
     priority,
@@ -31,9 +34,21 @@ export default function OperationsDashboard() {
     refetchIntervalInBackground: true,
   });
   const { data: teamMembers } = trpc.exceptions.getTeamMembers.useQuery();
+  const { data: workload, isLoading: workloadLoading } = trpc.exceptions.getTeamWorkload.useQuery();
   const assignException = trpc.exceptions.assign.useMutation({
     onSuccess: () => {
       refetchQueue();
+    },
+  });
+  const bulkAssignMutation = trpc.exceptions.bulkAssign.useMutation({
+    onSuccess: (data) => {
+      toast.success(`Successfully assigned ${data.count} exceptions`);
+      setSelectedExceptions(new Set());
+      setBulkAssignUserId("");
+      refetchQueue();
+    },
+    onError: (error) => {
+      toast.error(error.message);
     },
   });
 
@@ -237,6 +252,49 @@ export default function OperationsDashboard() {
           </div>
         </CardHeader>
         <CardContent>
+          {selectedExceptions.size > 0 && (
+            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <span className="font-semibold text-blue-900">
+                  {selectedExceptions.size} exception{selectedExceptions.size !== 1 ? 's' : ''} selected
+                </span>
+                <Select value={bulkAssignUserId} onValueChange={setBulkAssignUserId}>
+                  <SelectTrigger className="w-[200px] bg-white">
+                    <SelectValue placeholder="Assign to..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {teamMembers?.map((member) => (
+                      <SelectItem key={member.id} value={String(member.id)}>
+                        {member.name || member.email}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  onClick={() => {
+                    if (bulkAssignUserId) {
+                      bulkAssignMutation.mutate({
+                        exceptionIds: Array.from(selectedExceptions),
+                        assignedTo: parseInt(bulkAssignUserId),
+                      });
+                    }
+                  }}
+                  disabled={!bulkAssignUserId || bulkAssignMutation.isPending}
+                  size="sm"
+                >
+                  <UserPlus className="h-4 w-4 mr-2" />
+                  Bulk Assign
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setSelectedExceptions(new Set())}
+                >
+                  Clear Selection
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="space-y-3">
             {queue?.exceptions && queue.exceptions.length > 0 ? (
               queue.exceptions.map((exception) => {
@@ -256,6 +314,20 @@ export default function OperationsDashboard() {
                     </div>
                   )}
                   <div className="flex items-start gap-4 flex-1">
+                    <input
+                      type="checkbox"
+                      checked={selectedExceptions.has(exception.id)}
+                      onChange={(e) => {
+                        const newSelection = new Set(selectedExceptions);
+                        if (e.target.checked) {
+                          newSelection.add(exception.id);
+                        } else {
+                          newSelection.delete(exception.id);
+                        }
+                        setSelectedExceptions(newSelection);
+                      }}
+                      className="mt-2 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
                     <div className={`mt-1 p-2 rounded-full ${
                       exception.severity === "high" 
                         ? "bg-red-100" 
@@ -371,6 +443,70 @@ export default function OperationsDashboard() {
                 View All Exceptions
                 <ArrowRight className="h-4 w-4" />
               </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Team Workload Analytics */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-[#1B365D]">Team Workload Analytics</CardTitle>
+          <p className="text-sm text-[#8C757D] mt-1">Current load and performance metrics per team member</p>
+        </CardHeader>
+        <CardContent>
+          {workloadLoading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="p-4 border rounded-lg animate-pulse">
+                  <div className="h-4 bg-gray-200 rounded w-32 mb-3"></div>
+                  <div className="h-6 bg-gray-200 rounded w-16 mb-2"></div>
+                  <div className="h-3 bg-gray-200 rounded w-24"></div>
+                </div>
+              ))}
+            </div>
+          ) : workload && workload.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {workload.map((member) => {
+                const loadLevel = member.currentLoad > 10 ? 'high' : member.currentLoad > 5 ? 'medium' : 'low';
+                const loadColor = loadLevel === 'high' ? 'bg-red-50 border-red-200' : loadLevel === 'medium' ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200';
+                const loadTextColor = loadLevel === 'high' ? 'text-red-700' : loadLevel === 'medium' ? 'text-yellow-700' : 'text-green-700';
+                
+                return (
+                  <div key={member.userId} className={`p-4 border rounded-lg ${loadColor}`}>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="font-semibold text-[#1B365D]">{member.userName}</h3>
+                      <span className={`text-2xl font-bold ${loadTextColor}`}>{member.currentLoad}</span>
+                    </div>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-[#8C757D]">Current Load:</span>
+                        <span className={`font-medium ${loadTextColor}`}>
+                          {member.currentLoad} exception{member.currentLoad !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#8C757D]">Avg Resolution:</span>
+                        <span className="font-medium text-[#1B365D]">{member.avgResolutionTime}hrs</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#8C757D]">SLA Compliance:</span>
+                        <span className={`font-medium ${member.slaComplianceRate >= 90 ? 'text-green-600' : member.slaComplianceRate >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
+                          {member.slaComplianceRate}%
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#8C757D]">Total Resolved:</span>
+                        <span className="font-medium text-[#1B365D]">{member.totalResolved}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <p className="text-[#8C757D]">No team workload data available</p>
             </div>
           )}
         </CardContent>

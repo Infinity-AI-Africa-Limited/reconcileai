@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `isGuest` boolean DEFAULT false NOT NULL;
