@@ -370,3 +370,9 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Frontend: Allow inline template editing and saving new templates (deferred)
 - [ ] Frontend: Add template management page for admins (deferred)
 - [ ] Tests: Verify template CRUD operations and auto-fill functionality (deferred)
+
+## Bug Fix: Guest Login Authentication Flow
+- [ ] Diagnose why guest login redirects to sign-in gate instead of dashboard
+- [ ] Fix guest session handling in authentication middleware
+- [ ] Verify guest users can access dashboard after login
+- [ ] Test guest login flow end-to-end

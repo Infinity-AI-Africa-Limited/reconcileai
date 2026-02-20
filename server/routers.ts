@@ -151,22 +151,34 @@ export const appRouter = router({
       return { success: true } as const;
     }),
     guestLogin: publicProcedure.mutation(async ({ ctx }) => {
-      // Create a mock guest user for demo purposes
-      const guestUser = {
-        id: 999999,
-        openId: 'guest_' + Date.now(),
-        name: 'Guest User',
-        email: 'guest@demo.reconcileai.com',
-        role: 'user' as const,
-        isGuest: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
+      // Create or retrieve a guest user in the database
+      const guestOpenId = 'guest_' + Date.now() + '_' + Math.random().toString(36).substring(7);
       
-      // Set a session cookie for the guest user
-      const token = Buffer.from(JSON.stringify(guestUser)).toString('base64');
+      // Create guest user in database
+      await db.upsertUser({
+        openId: guestOpenId,
+        name: 'Guest User',
+        email: `guest_${Date.now()}@demo.reconcileai.com`,
+        role: 'user',
+        isGuest: true,
+      });
+      
+      // Retrieve the created user
+      const guestUser = await db.getUserByOpenId(guestOpenId);
+      if (!guestUser) {
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create guest user' });
+      }
+      
+      // Create a proper JWT session token using the SDK
+      const { sdk } = await import("./_core/sdk");
+      const sessionToken = await sdk.createSessionToken(guestUser.openId, {
+        name: guestUser.name,
+        expiresInMs: 24 * 60 * 60 * 1000, // 24 hours
+      });
+      
+      // Set the session cookie
       const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.cookie(COOKIE_NAME, token, { ...cookieOptions, maxAge: 24 * 60 * 60 * 1000 }); // 24 hours
+      ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: 24 * 60 * 60 * 1000 });
       
       return { success: true, user: guestUser };
     }),
