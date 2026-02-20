@@ -244,6 +244,8 @@ export const exceptions = mysqlTable("exceptions", {
     .default("open")
     .notNull(),
   assignedTo: int("assignedTo"),
+  assignedAt: timestamp("assignedAt"),
+  assignedBy: int("assignedBy"),
   resolvedBy: int("resolvedBy"),
   resolvedAt: timestamp("resolvedAt"),
   resolutionNotes: text("resolutionNotes"),

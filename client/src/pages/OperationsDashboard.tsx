@@ -1,7 +1,14 @@
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Clock, CheckCircle2, TrendingDown, Eye, ArrowRight, RefreshCw } from "lucide-react";
+import { AlertTriangle, Clock, CheckCircle2, TrendingDown, Eye, ArrowRight, RefreshCw, UserPlus } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 
@@ -22,6 +29,12 @@ export default function OperationsDashboard() {
   const { data: sla, isLoading: slaLoading, refetch: refetchSla } = trpc.dashboard.operationsSla.useQuery(undefined, {
     refetchInterval: 10000,
     refetchIntervalInBackground: true,
+  });
+  const { data: teamMembers } = trpc.exceptions.getTeamMembers.useQuery();
+  const assignException = trpc.exceptions.assign.useMutation({
+    onSuccess: () => {
+      refetchQueue();
+    },
   });
 
   // Track new exceptions
@@ -259,7 +272,7 @@ export default function OperationsDashboard() {
                       }`} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
                           exception.severity === "high" 
                             ? "bg-red-100 text-red-800" 
@@ -272,6 +285,18 @@ export default function OperationsDashboard() {
                         <span className="text-sm font-medium text-[#1B365D]">
                           {exception.category}
                         </span>
+                        {exception.slaStatus && (
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                            exception.slaStatus === "green"
+                              ? "bg-green-100 text-green-800"
+                              : exception.slaStatus === "yellow"
+                              ? "bg-yellow-100 text-yellow-800"
+                              : "bg-red-100 text-red-800"
+                          }`}>
+                            <Clock className="h-3 w-3 mr-1" />
+                            {exception.hoursOpen}h open
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-[#8C757D] mb-2">
                         Transaction ID: {exception.transactionId} • Status: {exception.status}
@@ -281,17 +306,49 @@ export default function OperationsDashboard() {
                           <strong className="text-blue-700">AI Suggestion:</strong> {exception.suggestedResolution}
                         </p>
                       )}
+                      {exception.assignedTo && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className="text-xs text-[#8C757D]">Assigned to:</span>
+                          <span className="text-xs font-medium text-[#1B365D] bg-blue-100 px-2 py-1 rounded">
+                            {teamMembers?.find(u => u.id === exception.assignedTo)?.name || `User #${exception.assignedTo}`}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => navigate("/exceptions")}
-                    className="ml-4"
-                  >
-                    <Eye className="h-4 w-4 mr-1" />
-                    Review
-                  </Button>
+                  <div className="flex items-center gap-2 ml-4">
+                    <Select
+                      value={exception.assignedTo?.toString() || ""}
+                      onValueChange={(value) => {
+                        if (value) {
+                          assignException.mutate({
+                            id: exception.id,
+                            assignedTo: parseInt(value),
+                          });
+                        }
+                      }}
+                    >
+                      <SelectTrigger className="w-[140px] h-9">
+                        <UserPlus className="h-4 w-4 mr-2" />
+                        <SelectValue placeholder="Assign" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {teamMembers?.map((member) => (
+                          <SelectItem key={member.id} value={member.id.toString()}>
+                            {member.name || member.email || `User #${member.id}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => navigate("/exceptions")}
+                    >
+                      <Eye className="h-4 w-4 mr-1" />
+                      Review
+                    </Button>
+                  </div>
                 </div>
                 );
               })

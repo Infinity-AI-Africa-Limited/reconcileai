@@ -274,3 +274,24 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add guest login backend endpoint in routers.ts
 - [x] Add guest login button to Home.tsx landing page
 - [x] Test guest login flow and verify dashboard access
+
+## Feature 28: Exception Assignment Workflow
+- [x] Database: Add assignedToUserId, assignedAt, assignedByUserId fields to exceptions table
+- [ ] Database: Add assignmentHistory table to track reassignments (deferred - audit log covers this)
+- [x] Backend: Create endpoint to get list of team members for assignment
+- [x] Backend: Create endpoint to assign exception to team member
+- [x] Backend: Update assign endpoint to track assignedAt and assignedBy
+- [x] Backend: Add assignment history tracking in audit log
+- [x] Frontend: Add assignment dropdown in Operations Dashboard exception queue
+- [x] Frontend: Show assigned user badge on each exception
+- [x] Frontend: Add reassignment capability (select different user in dropdown)
+- [ ] Frontend: Display assignment history in exception detail view (deferred)
+
+## Feature 29: Exception SLA Warning Indicators
+- [x] Backend: Calculate time elapsed since exception creation
+- [x] Backend: Add SLA status calculation (green < 12hrs, yellow 12-20hrs, red > 20hrs)
+- [x] Backend: Include SLA data in exception list responses
+- [x] Frontend: Add color-coded time badges to exception rows
+- [ ] Frontend: Add SLA progress bar showing time remaining until 24hr deadline (deferred)
+- [ ] Frontend: Sort exceptions by SLA urgency (red first, then yellow, then green) (deferred)
+- [ ] Frontend: Add SLA filter to show only at-risk exceptions (yellow/red) (deferred)

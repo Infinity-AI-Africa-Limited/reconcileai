@@ -519,12 +519,22 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         await db.updateException(input.id, {
           assignedTo: input.assignedTo,
+          assignedAt: new Date(),
+          assignedBy: ctx.user.id,
           status: "in_review",
         });
         await logAudit(ctx.user.id, "assign_exception", "exception", input.id, {
           assignedTo: input.assignedTo,
+          assignedBy: ctx.user.id,
         }, ip, ua);
         return { success: true };
+      }),
+
+    getTeamMembers: protectedProcedure
+      .query(async () => {
+        // Get all active users for assignment
+        const allUsers = await db.getAllUsers();
+        return allUsers.filter(u => u.isActive);
       }),
 
     escalate: protectedProcedure
@@ -795,6 +805,24 @@ export const appRouter = router({
           limit: input.limit,
         });
 
+        // Calculate SLA status for each exception
+        const exceptionsWithSla = exceptions.map((e) => {
+          const hoursOpen = (Date.now() - new Date(e.createdAt).getTime()) / (1000 * 60 * 60);
+          let slaStatus: "green" | "yellow" | "red";
+          if (hoursOpen < 12) {
+            slaStatus = "green";
+          } else if (hoursOpen < 20) {
+            slaStatus = "yellow";
+          } else {
+            slaStatus = "red";
+          }
+          return {
+            ...e,
+            hoursOpen: Math.round(hoursOpen * 10) / 10, // Round to 1 decimal
+            slaStatus,
+          };
+        });
+
         return {
           total: exceptions.length,
           highPriority: exceptions.filter((e) => e.severity === "high").length,
@@ -804,7 +832,7 @@ export const appRouter = router({
             const hours = (Date.now() - new Date(e.createdAt).getTime()) / (1000 * 60 * 60);
             return hours > 24;
           }).length,
-          exceptions,
+          exceptions: exceptionsWithSla,
         };
       }),
 
