@@ -8,15 +8,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare } from "lucide-react";
 import { toast } from "sonner";
 
-export default function ExceptionsPage() {
-  const [filters, setFilters] = useState({ status: "", category: "", severity: "" });
+export default function Exceptions() {
+  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
+  const [filters, setFilters] = useState({ status: "all", category: "all", severity: "all" });
+  const { data: templates } = trpc.resolutionTemplates.list.useQuery();
 
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
-    status: filters.status || undefined,
-    category: filters.category || undefined,
-    severity: filters.severity || undefined,
+    status: statusFilter !== "all" ? statusFilter : undefined,
     limit: 100,
     offset: 0,
   });
@@ -205,7 +205,29 @@ export default function ExceptionsPage() {
               {(selectedEx.status === "open" || selectedEx.status === "in_review") && (
                 <div className="space-y-3 pt-2 border-t">
                   <div>
-                    <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-sm font-medium block">Resolution Notes</label>
+                      <Select 
+                        value="" 
+                        onValueChange={(templateId: string) => {
+                          const template = (templates || []).find((t: any) => t.id.toString() === templateId);
+                          if (template) {
+                            setResolveNotes(template.templateText);
+                          }
+                        }}
+                      >
+                        <SelectTrigger className="w-[180px] h-8">
+                          <SelectValue placeholder="Use Template" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(templates || []).map((template: any) => (
+                            <SelectItem key={template.id} value={String(template.id)}>
+                              {template.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Add notes about how this was resolved..." rows={3} />
                   </div>
                   <div className="flex gap-2">

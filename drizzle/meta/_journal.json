@@ -64,6 +64,13 @@
       "when": 1771580090843,
       "tag": "0008_melted_justice",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1771580886895,
+      "tag": "0009_mean_shaman",
+      "breakpoints": true
     }
   ]
 }

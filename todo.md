@@ -340,3 +340,33 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Add workload analytics section to Operations Dashboard
 - [ ] Frontend: Add "Balance Load" suggestion when workload is uneven (deferred)
 - [ ] Tests: Verify workload calculations are accurate (deferred)
+
+## Feature 34: SLA Breach Email Notifications
+- [x] Backend: Create SLA monitoring service that checks exception ages
+- [x] Backend: Implement email notification function for SLA breaches
+- [x] Backend: Add scheduled task to check for SLA breaches every hour
+- [x] Backend: Send alert when exception crosses 20-hour threshold (yellow → red)
+- [x] Backend: Send alert when exception remains unresolved past 24 hours
+- [x] Backend: Include exception details, assigned user, and time remaining in email
+- [x] Backend: Track notification history to avoid duplicate alerts (via owner notification system)
+- [ ] Tests: Verify SLA breach detection and email sending (deferred)
+
+## Feature 35: Exception Filtering by Assigned User
+- [x] Frontend: Add "Assigned To" filter dropdown to Operations Dashboard
+- [x] Frontend: Include "My Exceptions" quick filter button
+- [x] Frontend: Update exception query to filter by assignedTo parameter
+- [x] Backend: Update operationsQueue endpoint to accept assignedTo filter
+- [x] Frontend: Show filtered user name in header when filter is active
+- [ ] Frontend: Persist filter selection in URL query parameters (deferred)
+- [ ] Tests: Verify filtering returns correct exceptions (deferred)
+
+## Feature 36: Exception Resolution Templates
+- [x] Database: Create resolution_templates table with name, category, template text
+- [x] Database: Push schema changes with pnpm db:push
+- [x] Backend: Create CRUD endpoints for resolution templates (list, create, update, delete)
+- [ ] Backend: Add default templates for common exception types on first use (deferred)
+- [x] Frontend: Add template selector dropdown in Exceptions page resolution dialog
+- [x] Frontend: Auto-fill resolution notes when template is selected
+- [ ] Frontend: Allow inline template editing and saving new templates (deferred)
+- [ ] Frontend: Add template management page for admins (deferred)
+- [ ] Tests: Verify template CRUD operations and auto-fill functionality (deferred)

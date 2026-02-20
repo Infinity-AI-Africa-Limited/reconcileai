@@ -5,6 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
+import { eq } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -35,6 +36,7 @@ import {
   downloadAndProcessSftpFile,
   startSftpPolling,
 } from "./sftpService";
+import { startSLAMonitoring } from "./slaMonitoringService";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -644,6 +646,96 @@ export const appRouter = router({
       }),
   }),
 
+  // ─── Resolution Templates ────────────────────────────────────────
+
+  resolutionTemplates: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const dbConn = await db.getDb();
+      if (!dbConn) return [];
+      
+      const templates = await dbConn.query.resolutionTemplates.findMany({
+        where: (t: any, { or, eq, isNull }: any) => or(
+          eq(t.organizationId, ctx.user.organizationId),
+          isNull(t.organizationId)
+        ),
+        orderBy: (t: any, { desc }: any) => [desc(t.isDefault), desc(t.createdAt)],
+      });
+      return templates;
+    }),
+
+    create: guestProtectedProcedure
+      .input(z.object({
+        name: z.string().min(1).max(255),
+        category: z.enum([
+          "unmatched",
+          "missing_counterparty",
+          "amount_mismatch",
+          "timing_difference",
+          "duplicate_transaction",
+          "reversal_unmatched",
+          "currency_mismatch",
+          "format_error",
+        ]),
+        templateText: z.string().min(1).max(2000),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        
+        await dbConn.insert(db.resolutionTemplates).values({
+          name: sanitizeInput(input.name, 255),
+          category: input.category,
+          templateText: sanitizeInput(input.templateText, 2000),
+          createdBy: ctx.user.id,
+          organizationId: ctx.user.organizationId,
+          isDefault: false,
+        });
+        await logAudit(ctx.user.id, "create_resolution_template", "template", undefined, {
+          name: input.name,
+          category: input.category,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    update: guestProtectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        name: z.string().min(1).max(255),
+        templateText: z.string().min(1).max(2000),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        
+        await dbConn.update(db.resolutionTemplates)
+          .set({
+            name: sanitizeInput(input.name, 255),
+            templateText: sanitizeInput(input.templateText, 2000),
+            updatedAt: new Date(),
+          })
+          .where(eq(db.resolutionTemplates.id, input.id));
+        await logAudit(ctx.user.id, "update_resolution_template", "template", input.id, {
+          name: input.name,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    delete: guestProtectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        
+        await dbConn.delete(db.resolutionTemplates)
+          .where(eq(db.resolutionTemplates.id, input.id));
+        await logAudit(ctx.user.id, "delete_resolution_template", "template", input.id, {}, ip, ua);
+        return { success: true };
+      }),
+  }),
+
   // ─── Review Queue (Matches) ──────────────────────────────────────
 
   review: router({
@@ -884,13 +976,19 @@ export const appRouter = router({
       .input(z.object({
         priority: z.enum(["high", "medium", "low", "all"]).default("all"),
         limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(50),
+        assignedTo: z.number().int().positive().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        const { data: exceptions } = await db.getExceptions({
+        let { data: exceptions } = await db.getExceptions({
           status: "open",
           severity: input.priority !== "all" ? input.priority : undefined,
           limit: input.limit,
         });
+        
+        // Filter by assignedTo if specified
+        if (input.assignedTo !== undefined) {
+          exceptions = exceptions.filter((e: any) => e.assignedTo === input.assignedTo);
+        }
 
         // Calculate SLA status for each exception
         const exceptionsWithSla = exceptions.map((e) => {
@@ -1891,3 +1989,5 @@ async function runReconciliation(
 startScheduler(60000);
 // Start SFTP polling service
 startSftpPolling();
+// Start SLA monitoring service (check every 60 minutes)
+startSLAMonitoring(60);

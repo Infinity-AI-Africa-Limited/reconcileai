@@ -23,6 +23,7 @@ import {
   userRolePreferences, InsertUserRolePreference,
   anomalyScores, InsertAnomalyScore,
   detectionRules, InsertDetectionRule,
+  resolutionTemplates, InsertResolutionTemplate,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -47,6 +48,9 @@ export async function getDb() {
   }
   return _db;
 }
+
+// Export schema tables for use in routers
+export { resolutionTemplates };
 
 // ─── Utility: Sanitize LIKE patterns ────────────────────────────────
 

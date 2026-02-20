@@ -12,10 +12,13 @@ import {
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 export default function OperationsDashboard() {
   const [, navigate] = useLocation();
+  const { user } = useAuth();
   const [priority, setPriority] = useState<"all" | "high" | "medium" | "low">("all");
+  const [assignedToFilter, setAssignedToFilter] = useState<number | undefined>(undefined);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [newExceptionIds, setNewExceptionIds] = useState<Set<number>>(new Set());
@@ -24,7 +27,8 @@ export default function OperationsDashboard() {
   
   const { data: queue, isLoading: queueLoading, refetch: refetchQueue } = trpc.dashboard.operationsQueue.useQuery({ 
     priority,
-    limit: 50 
+    limit: 50,
+    assignedTo: assignedToFilter,
   }, {
     refetchInterval: 10000, // Poll every 10 seconds
     refetchIntervalInBackground: true,
@@ -210,12 +214,45 @@ export default function OperationsDashboard() {
             <div>
               <CardTitle className="text-lg font-semibold text-[#1B365D]">
                 Exception Queue
+                {assignedToFilter && (
+                  <span className="ml-2 text-sm font-normal text-[#8C757D]">
+                    (Filtered by: {teamMembers?.find(m => m.id === assignedToFilter)?.name || 'User'})
+                  </span>
+                )}
               </CardTitle>
               <p className="text-sm text-[#8C757D] mt-1">
                 {queue?.total || 0} exceptions requiring attention
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-center">
+              <Select 
+                value={assignedToFilter?.toString() || "all"} 
+                onValueChange={(value) => setAssignedToFilter(value === "all" ? undefined : parseInt(value))}
+              >
+                <SelectTrigger className="w-[180px]">
+                  <SelectValue placeholder="All Users" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Users</SelectItem>
+                  {teamMembers?.map((member) => (
+                    <SelectItem key={member.id} value={String(member.id)}>
+                      {member.name || member.email}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (user) {
+                    setAssignedToFilter(user.id);
+                  }
+                }}
+              >
+                My Exceptions
+              </Button>
+              <div className="h-6 w-px bg-gray-300 mx-2"></div>
               <Button
                 variant={priority === "all" ? "default" : "outline"}
                 size="sm"

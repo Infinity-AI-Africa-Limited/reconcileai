@@ -739,3 +739,31 @@ export const guestSessions = mysqlTable("guest_sessions", {
 
 export type GuestSession = typeof guestSessions.$inferSelect;
 export type InsertGuestSession = typeof guestSessions.$inferInsert;
+
+// ─── Resolution Templates ────────────────────────────────────────────
+export const resolutionTemplates = mysqlTable("resolution_templates", {
+  id: int("id").autoincrement().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  category: mysqlEnum("category", [
+    "unmatched",
+    "missing_counterparty",
+    "amount_mismatch",
+    "timing_difference",
+    "duplicate_transaction",
+    "reversal_unmatched",
+    "currency_mismatch",
+    "format_error",
+  ]).notNull(),
+  templateText: text("templateText").notNull(),
+  isDefault: boolean("isDefault").default(false).notNull(),
+  createdBy: int("createdBy").notNull(), // References users table
+  organizationId: int("organizationId"), // References organizations table
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_resolution_templates_category").on(table.category),
+  index("idx_resolution_templates_org").on(table.organizationId),
+]);
+
+export type ResolutionTemplate = typeof resolutionTemplates.$inferSelect;
+export type InsertResolutionTemplate = typeof resolutionTemplates.$inferInsert;
