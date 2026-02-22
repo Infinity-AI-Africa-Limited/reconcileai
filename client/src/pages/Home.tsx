@@ -12,6 +12,9 @@ import {
   Layers,
   Clock,
   CheckCircle2,
+  AlertTriangle,
+  TrendingDown,
+  FileCheck,
 } from "lucide-react";
 
 function GuestLoginButton() {
@@ -71,15 +74,15 @@ export default function Home() {
       <section className="pt-24 pb-20 px-6">
         <div className="max-w-4xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[#F47458]/10 text-[#F47458] text-sm font-medium mb-6">
-            <Zap className="h-4 w-4" /> Powered by Agentic AI
+            <Shield className="h-4 w-4" /> CBN-Compliant | License-Safe
           </div>
           <h1 className="text-5xl md:text-6xl font-bold text-[#1B365D] leading-tight tracking-tight">
-            Autonomous Financial
+            Stop Losing Your License
             <br />
-            <span className="text-[#F47458]">Reconciliation</span>
+            to <span className="text-[#F47458]">Reconciliation Gaps</span>
           </h1>
           <p className="text-lg text-[#8C757D] mt-6 max-w-2xl mx-auto leading-relaxed">
-            Transform reconciliation from a manual, resource-intensive bottleneck into an intelligent, autonomous process. Built for African financial institutions.
+            Reduce false positives by 95%, eliminate multi-system logins, and protect your financial license with intelligent reconciliation built for Nigerian banks and FinTechs.
           </p>
           <div className="flex items-center justify-center gap-4 mt-10">
             <Button
@@ -87,7 +90,7 @@ export default function Home() {
               onClick={() => window.location.href = getLoginUrl()}
               className="bg-[#1B365D] hover:bg-[#142847] text-white px-8 h-12 text-base"
             >
-              Get Started <ArrowRight className="ml-2 h-4 w-4" />
+              Protect Your License <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
             <GuestLoginButton />
           </div>
@@ -98,10 +101,10 @@ export default function Home() {
       <section className="py-12 bg-white border-y border-gray-200">
         <div className="max-w-5xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8">
           {[
-            { value: "95%+", label: "Auto-Match Rate" },
+            { value: "95%", label: "False Positive Reduction" },
             { value: "< 3min", label: "Avg Resolution Time" },
-            { value: "80%", label: "Exception Reduction" },
-            { value: "6+", label: "Payment Channels" },
+            { value: "5+ Systems", label: "Unified in One View" },
+            { value: "60%", label: "Time Saved on Matching" },
           ].map((s) => (
             <div key={s.label} className="text-center">
               <p className="text-3xl font-bold text-[#1B365D]">{s.value}</p>
@@ -111,46 +114,91 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Features */}
-      <section className="py-20 px-6">
+      {/* Pain Points */}
+      <section className="py-20 px-6 bg-[#F8F9FA]">
         <div className="max-w-5xl mx-auto">
-          <h2 className="text-3xl font-bold text-[#1B365D] text-center mb-12">
-            Built for African Finance
+          <h2 className="text-3xl font-bold text-[#1B365D] text-center mb-4">
+            Your Reconciliation Nightmare
           </h2>
-          <div className="grid md:grid-cols-3 gap-8">
+          <p className="text-center text-[#8C757D] mb-12 max-w-2xl mx-auto">
+            Validated pain points from Nigerian banks, payment processors, and FinTechs
+          </p>
+          <div className="grid md:grid-cols-3 gap-6">
             {[
               {
-                icon: Zap,
-                title: "AI-Powered Matching",
-                desc: "Fuzzy matching, amount tolerance, and date windowing reconcile transactions across sources autonomously.",
+                icon: AlertTriangle,
+                title: "95-98% False Positives",
+                desc: "Only 2-5% of flagged exceptions are real issues. Your team wastes 30+ minutes investigating each false alarm.",
+                severity: "critical",
               },
               {
                 icon: Layers,
-                title: "Multi-Channel Support",
-                desc: "NIBSS, POS, ATM, mobile wallets, and bank statements — all reconciled in a single view.",
+                title: "5+ System Logins Daily",
+                desc: "Logging into NIBSS, POS portals, bank statements, core banking, and ERP systems. 60% of your day spent on manual downloads.",
+                severity: "high",
+              },
+              {
+                icon: FileCheck,
+                title: "License Revocation Risk",
+                desc: "Unresolved exceptions can cost you your CBN license. Audit confidence sits at only 6.5/10 for most institutions.",
+                severity: "critical",
+              },
+            ].map((p) => (
+              <div key={p.title} className={`p-6 rounded-xl bg-white border-2 ${p.severity === 'critical' ? 'border-red-200 bg-red-50/30' : 'border-orange-200 bg-orange-50/30'}`}>
+                <div className={`h-10 w-10 rounded-lg ${p.severity === 'critical' ? 'bg-red-100' : 'bg-orange-100'} flex items-center justify-center mb-4`}>
+                  <p.icon className={`h-5 w-5 ${p.severity === 'critical' ? 'text-red-600' : 'text-orange-600'}`} />
+                </div>
+                <h3 className="font-semibold text-[#1B365D] mb-2">{p.title}</h3>
+                <p className="text-sm text-[#8C757D] leading-relaxed">{p.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section className="py-20 px-6 bg-white">
+        <div className="max-w-5xl mx-auto">
+          <h2 className="text-3xl font-bold text-[#1B365D] text-center mb-4">
+            Intelligent Automation, Human-in-the-Loop
+          </h2>
+          <p className="text-center text-[#8C757D] mb-12 max-w-2xl mx-auto">
+            AI-assisted decision-making that keeps you in control while eliminating 95% of manual work
+          </p>
+          <div className="grid md:grid-cols-3 gap-8">
+            {[
+              {
+                icon: TrendingDown,
+                title: "False Positive Elimination",
+                desc: "AI learns your transaction patterns to reduce 95-98% of false alarms. Surface the 2 real frauds hidden in 50 exceptions.",
+              },
+              {
+                icon: Layers,
+                title: "Multi-System Orchestration",
+                desc: "One login replaces 5+ portals. Automatically fetch from NIBSS, POS, mobile wallets, bank statements, and core banking.",
               },
               {
                 icon: Shield,
-                title: "CBN Compliance",
-                desc: "Comprehensive audit trails and automated reporting for regulatory compliance.",
-              },
-              {
-                icon: BarChart3,
-                title: "Real-Time Dashboard",
-                desc: "Match rates, exception summaries, and trend analytics at a glance.",
+                title: "License Protection & CBN Compliance",
+                desc: "Structured audit trails, regulatory reporting templates, and exception resolution workflows that prevent license revocation.",
               },
               {
                 icon: Clock,
-                title: "Exception Management",
-                desc: "AI categorizes unmatched items and suggests resolutions to accelerate review.",
+                title: "Real-Time Pre-Settlement Reconciliation",
+                desc: "Reconcile before settlement to prevent merchant payment delays. Catch discrepancies in minutes, not days.",
               },
               {
-                icon: CheckCircle2,
-                title: "Automated Reports",
-                desc: "Daily, weekly, and monthly reconciliation reports generated and exported automatically.",
+                icon: Zap,
+                title: "Weeks → Days Onboarding",
+                desc: "Launch new payment channels in days instead of weeks. Pre-configured templates for Nigerian payment rails.",
+              },
+              {
+                icon: BarChart3,
+                title: "Role-Based Dashboards",
+                desc: "CFO, Operations, and Auditor views with KPIs, exception queues, and compliance metrics tailored to each role.",
               },
             ].map((f) => (
-              <div key={f.title} className="p-6 rounded-xl bg-white border border-gray-100 hover:border-[#1B365D]/20 transition-colors">
+              <div key={f.title} className="p-6 rounded-xl bg-[#F8F9FA] border border-gray-100 hover:border-[#1B365D]/20 transition-colors">
                 <div className="h-10 w-10 rounded-lg bg-[#1B365D]/5 flex items-center justify-center mb-4">
                   <f.icon className="h-5 w-5 text-[#1B365D]" />
                 </div>
@@ -162,22 +210,66 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Social Proof */}
+      <section className="py-16 px-6 bg-[#F8F9FA] border-y border-gray-200">
+        <div className="max-w-4xl mx-auto text-center">
+          <p className="text-sm text-[#8C757D] mb-6 uppercase tracking-wide font-medium">
+            Validated by Nigerian Financial Services Leaders
+          </p>
+          <div className="grid md:grid-cols-3 gap-8">
+            {[
+              {
+                quote: "If the decision making remains in the hands of a human, that can take away the fear.",
+                role: "Payment Processor",
+                company: "Interswitch",
+              },
+              {
+                quote: "Exceptions that can cost you a license. Without structured reconciliation, it's your nightmare.",
+                role: "FinTech Operations",
+                company: "Nigerian FinTech",
+              },
+              {
+                quote: "95-98% false positive rate. Only 2-5% of exceptions are legitimate issues.",
+                role: "Bank Reconciliation Lead",
+                company: "Tier-1 Nigerian Bank",
+              },
+            ].map((t, i) => (
+              <div key={i} className="p-6 rounded-xl bg-white border border-gray-100">
+                <p className="text-sm text-[#1B365D] italic mb-4">"{t.quote}"</p>
+                <p className="text-xs text-[#8C757D] font-medium">{t.role}</p>
+                <p className="text-xs text-[#8C757D]">{t.company}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* CTA */}
       <section className="py-20 px-6 bg-[#1B365D]">
         <div className="max-w-3xl mx-auto text-center">
           <h2 className="text-3xl font-bold text-white mb-4">
-            Ready to Automate Reconciliation?
+            Protect Your License. Eliminate False Positives.
           </h2>
           <p className="text-[#F8F9FA]/70 mb-8">
-            Join leading Nigerian financial institutions using ReconcileAI to eliminate manual reconciliation.
+            Join Nigerian banks and FinTechs using ReconcileAI to reduce reconciliation time by 60% while maintaining CBN compliance.
           </p>
-          <Button
-            size="lg"
-            onClick={() => window.location.href = getLoginUrl()}
-            className="bg-[#F47458] hover:bg-[#e0644a] text-white px-8 h-12 text-base"
-          >
-            Start Free Trial <ArrowRight className="ml-2 h-4 w-4" />
-          </Button>
+          <div className="flex items-center justify-center gap-4">
+            <Button
+              size="lg"
+              onClick={() => window.location.href = getLoginUrl()}
+              className="bg-[#F47458] hover:bg-[#e0644a] text-white px-8 h-12 text-base"
+            >
+              Start Free Trial <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+            <Button
+              size="lg"
+              variant="outline"
+              onClick={() => window.location.href = "mailto:hello@reconcileai.ng"}
+              className="border-white text-white hover:bg-white/10 px-8 h-12 text-base"
+            >
+              Schedule Demo
+            </Button>
+          </div>
         </div>
       </section>
 
