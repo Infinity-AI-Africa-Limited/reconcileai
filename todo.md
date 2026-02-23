@@ -398,3 +398,6 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add "Exception Management" feature (replaces removed items)
 - [x] Add "Automated Reports" feature (daily, weekly, monthly reports)
 - [x] Keep existing: False Positive Elimination, Multi-System Orchestration, License Protection & CBN Compliance, Role-Based Dashboards
+
+## Feature 27: Hero Subtitle Refinement
+- [x] Update hero subtitle from "intelligent reconciliation" to "intelligent AI-assisted reconciliation"

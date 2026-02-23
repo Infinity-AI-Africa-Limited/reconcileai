@@ -82,7 +82,7 @@ export default function Home() {
             to <span className="text-[#F47458]">Reconciliation Gaps</span>
           </h1>
           <p className="text-lg text-[#8C757D] mt-6 max-w-2xl mx-auto leading-relaxed">
-            Reduce false positives by 95%, eliminate multi-system logins, and protect your financial license with intelligent reconciliation built for Nigerian banks and FinTechs.
+            Reduce false positives by 95%, eliminate multi-system logins, and protect your financial license with intelligent AI-assisted reconciliation built for Nigerian banks and FinTechs.
           </p>
           <div className="flex items-center justify-center gap-4 mt-10">
             <Button
