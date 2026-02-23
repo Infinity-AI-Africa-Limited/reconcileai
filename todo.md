@@ -401,3 +401,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 
 ## Feature 27: Hero Subtitle Refinement
 - [x] Update hero subtitle from "intelligent reconciliation" to "intelligent AI-assisted reconciliation"
+
+## Feature 28: Anonymize Interswitch Testimonial
+- [x] Change job title from "Payment Processor" to "Reconciliation Lead"
+- [x] Change company from "Interswitch" to "A leading payment processor"

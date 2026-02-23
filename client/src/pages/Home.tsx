@@ -225,8 +225,8 @@ export default function Home() {
             {[
               {
                 quote: "If the decision making remains in the hands of a human, that can take away the fear.",
-                role: "Payment Processor",
-                company: "Interswitch",
+                role: "Reconciliation Lead",
+                company: "A leading payment processor",
               },
               {
                 quote: "Exceptions that can cost you a license. Without structured reconciliation, it's your nightmare.",
