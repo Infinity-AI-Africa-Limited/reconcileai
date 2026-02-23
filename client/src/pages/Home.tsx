@@ -168,6 +168,11 @@ export default function Home() {
           <div className="grid md:grid-cols-3 gap-8">
             {[
               {
+                icon: Zap,
+                title: "AI-Powered Matching",
+                desc: "Fuzzy matching, amount tolerance, and date windowing reconcile transactions across sources with intelligent pattern recognition.",
+              },
+              {
                 icon: TrendingDown,
                 title: "False Positive Elimination",
                 desc: "AI learns your transaction patterns to reduce 95-98% of false alarms. Surface the 2 real frauds hidden in 50 exceptions.",
@@ -184,13 +189,13 @@ export default function Home() {
               },
               {
                 icon: Clock,
-                title: "Real-Time Pre-Settlement Reconciliation",
-                desc: "Reconcile before settlement to prevent merchant payment delays. Catch discrepancies in minutes, not days.",
+                title: "Exception Management",
+                desc: "AI categorizes unmatched items and suggests resolutions to accelerate review while keeping you in control.",
               },
               {
-                icon: Zap,
-                title: "Weeks → Days Onboarding",
-                desc: "Launch new payment channels in days instead of weeks. Pre-configured templates for Nigerian payment rails.",
+                icon: CheckCircle2,
+                title: "Automated Reports",
+                desc: "Daily, weekly, and monthly reconciliation reports generated and exported automatically for stakeholder review.",
               },
               {
                 icon: BarChart3,

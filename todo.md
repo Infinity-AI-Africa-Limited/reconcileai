@@ -390,3 +390,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 
 ## Feature 25: Home Page Hero Headline Refinement
 - [x] Update hero headline from "Stop Losing Your License" to "Eliminate the risk of losing your license"
+
+## Feature 26: Merge Features Section Content
+- [x] Remove "Real-Time Pre-Settlement Reconciliation" from features section
+- [x] Remove "Weeks → Days Onboarding" from features section
+- [x] Add "AI-Powered Matching" feature (fuzzy matching, amount tolerance, date windowing - without "autonomous" language)
+- [x] Add "Exception Management" feature (replaces removed items)
+- [x] Add "Automated Reports" feature (daily, weekly, monthly reports)
+- [x] Keep existing: False Positive Elimination, Multi-System Orchestration, License Protection & CBN Compliance, Role-Based Dashboards
