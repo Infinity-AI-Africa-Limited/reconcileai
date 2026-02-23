@@ -77,7 +77,7 @@ export default function Home() {
             <Shield className="h-4 w-4" /> CBN-Compliant | License-Safe
           </div>
           <h1 className="text-5xl md:text-6xl font-bold text-[#1B365D] leading-tight tracking-tight">
-            Stop Losing Your License
+            Eliminate the risk of losing your license
             <br />
             to <span className="text-[#F47458]">Reconciliation Gaps</span>
           </h1>
