@@ -82,7 +82,7 @@ export default function Home() {
             to <span className="text-[#F47458]">Reconciliation Gaps</span>
           </h1>
           <p className="text-lg text-[#8C757D] mt-6 max-w-2xl mx-auto leading-relaxed">
-            Reduce false positives by 95%, eliminate multi-system logins, and protect your financial license with intelligent AI-assisted reconciliation built for Nigerian banks and FinTechs.
+            Reduce false positives by 95%, eliminate multi-system logins, and protect your financial license with intelligent Agentic AI-assisted reconciliation built for Nigerian banks and FinTechs.
           </p>
           <div className="flex items-center justify-center gap-4 mt-10">
             <Button
@@ -160,7 +160,7 @@ export default function Home() {
       <section className="py-20 px-6 bg-white">
         <div className="max-w-5xl mx-auto">
           <h2 className="text-3xl font-bold text-[#1B365D] text-center mb-4">
-            Intelligent Automation, Human-in-the-Loop
+            Agentic AI Automation, Human-in-the-Loop
           </h2>
           <p className="text-center text-[#8C757D] mb-12 max-w-2xl mx-auto">
             AI-assisted decision-making that keeps you in control while eliminating 95% of manual work

@@ -405,3 +405,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 ## Feature 28: Anonymize Interswitch Testimonial
 - [x] Change job title from "Payment Processor" to "Reconciliation Lead"
 - [x] Change company from "Interswitch" to "A leading payment processor"
+
+## Feature 29: Update Home Page Terminology to Agentic AI-Assisted
+- [x] Change "intelligent AI-assisted reconciliation" to "intelligent Agentic AI-assisted reconciliation" in hero subtitle
+- [x] Update "Intelligent Automation, Human-in-the-Loop" section title to "Agentic AI Automation, Human-in-the-Loop"
