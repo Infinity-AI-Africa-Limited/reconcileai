@@ -409,3 +409,88 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 ## Feature 29: Update Home Page Terminology to Agentic AI-Assisted
 - [x] Change "intelligent AI-assisted reconciliation" to "intelligent Agentic AI-assisted reconciliation" in hero subtitle
 - [x] Update "Intelligent Automation, Human-in-the-Loop" section title to "Agentic AI Automation, Human-in-the-Loop"
+
+## Feature 30: Implement Three-Module Architecture from PRD v2
+- [ ] Update database schema to support three reconciliation modules (Transaction Integrity, Settlement, Account-Level)
+- [ ] Create module configuration table for enabling/disabling modules per client
+- [ ] Update user roles to support module-specific permissions
+
+## Feature 31: Transaction Integrity Reconciliation Module
+- [ ] Create transaction ingestion interface for multiple sources (NIBSS, POS, mobile money, core banking)
+- [ ] Implement intelligent matching engine with fuzzy matching, amount tolerance, date windowing
+- [ ] Build duplicate detection system (unidirectional and bidirectional)
+- [ ] Create timestamp normalization logic
+- [ ] Implement amount denomination correction
+- [ ] Build false positive classification system (timing differences, rounding, system lag)
+
+## Feature 32: Settlement Reconciliation Module
+- [ ] Create settlement file upload interface for processor statements
+- [ ] Implement pre-settlement reconciliation workflow
+- [ ] Build merchant settlement dashboard showing reconciliation status before payment
+- [ ] Create settlement discrepancy detection and alerting
+- [ ] Implement settlement approval workflow
+
+## Feature 33: Account-Level Reconciliation Module
+- [ ] Create GL account reconciliation interface
+- [ ] Implement balance verification across systems
+- [ ] Build account-level exception detection
+- [ ] Create account reconciliation reporting
+
+## Feature 34: Agentic AI-Assisted Matching Engine
+- [ ] Implement three-tier classification system (Perfect Match, No Match, Suspected False Positive)
+- [ ] Build reinforcement learning feedback loop (users rate AI accuracy)
+- [ ] Create AI confidence scoring for each match
+- [ ] Implement pattern recognition for recurring exceptions
+- [ ] Build resolution template suggestion system
+
+## Feature 35: Exception Management Workflow
+- [ ] Create exception dashboard with categorization (timing, amount, missing transaction, duplicate)
+- [ ] Implement exception assignment and collaboration system
+- [ ] Build exception resolution workflow with approval chains
+- [ ] Create exception comments and notes system
+- [ ] Implement exception aging and SLA tracking
+
+## Feature 36: Multi-System Orchestration
+- [ ] Create unified dashboard showing all payment channels in one view
+- [ ] Implement automated data ingestion from multiple sources (eliminate manual downloads)
+- [ ] Build connector framework for NIBSS, Interswitch, UPSL, eTranzact, mobile money platforms
+- [ ] Create data source configuration interface
+
+## Feature 37: Audit Trail & CBN Compliance
+- [ ] Implement comprehensive audit log for all reconciliation activities
+- [ ] Create CBN-compliant reporting templates
+- [ ] Build audit confidence scoring dashboard
+- [ ] Implement automated regulatory report generation
+- [ ] Create audit trail export functionality
+
+## Feature 38: Role-Based Dashboards
+- [ ] Create Reconciliation Specialist dashboard (daily operations, exception queue)
+- [ ] Build Settlement Officer dashboard (settlement windows, merchant payments)
+- [ ] Implement Operations Lead dashboard (team performance, SLA tracking)
+- [ ] Create CFO/Compliance dashboard (audit readiness, regulatory metrics)
+
+## Feature 39: Performance Metrics & Analytics
+- [ ] Implement false positive rate tracking
+- [ ] Create manual matching time reduction metrics
+- [ ] Build exception resolution time analytics
+- [ ] Implement audit confidence scoring
+- [ ] Create ROI dashboard showing time savings and efficiency gains
+
+## Feature 30: Implement Three-Module Architecture from PRD v2
+- [x] Update database schema to support three reconciliation modules (Transaction Integrity, Settlement, Account-Level)
+- [x] Add moduleType field to reconciliation_jobs table with enum values
+- [x] Create module_configurations table for enabling/disabling modules per organization
+- [x] Add proper indexes for module queries
+- [x] Push database schema changes with pnpm db:push
+- [x] Fix TypeScript errors in server/routers.ts (resolution templates query refactoring)
+- [x] Fix Drizzle ORM initialization to include schema and mode
+- [x] Add module configuration imports to server/db.ts
+- [x] Create backend endpoints for module management (list, toggle, updateConfig)
+- [x] Update frontend UI to show module selection and configuration
+- [x] Create Module Configuration page for admins
+- [x] Add module configuration link to admin sidebar menu
+- [x] Update reconciliation job creation to support module selection
+- [x] Add module type dropdown with descriptions to reconciliation form
+- [x] Update backend reconciliation.create endpoint to accept moduleType
+- [ ] Add module-specific dashboards and workflows (future enhancement)
+- [ ] Display module type badge on reconciliation job list (future enhancement)

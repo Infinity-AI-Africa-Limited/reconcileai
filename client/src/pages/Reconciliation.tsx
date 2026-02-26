@@ -18,6 +18,7 @@ export default function ReconciliationPage() {
   const [selectedJob, setSelectedJob] = useState<number | null>(null);
   const [form, setForm] = useState({
     name: "",
+    moduleType: "transaction_integrity" as "transaction_integrity" | "settlement" | "account_level",
     sourceChannelId: "",
     targetChannelId: "",
     dateFrom: "",
@@ -41,6 +42,7 @@ export default function ReconciliationPage() {
     try {
       await createMutation.mutateAsync({
         name: form.name,
+        moduleType: form.moduleType,
         sourceChannelId: parseInt(form.sourceChannelId),
         targetChannelId: parseInt(form.targetChannelId),
         dateFrom: form.dateFrom,
@@ -50,7 +52,7 @@ export default function ReconciliationPage() {
       });
       toast.success("Reconciliation job created and running!");
       setOpen(false);
-      setForm({ name: "", sourceChannelId: "", targetChannelId: "", dateFrom: "", dateTo: "", amountTolerance: "0.005", dateWindowDays: "3" });
+      setForm({ name: "", moduleType: "transaction_integrity", sourceChannelId: "", targetChannelId: "", dateFrom: "", dateTo: "", amountTolerance: "0.005", dateWindowDays: "3" });
       refetch();
     } catch (err: any) {
       toast.error(err.message || "Failed to create job");
@@ -86,6 +88,22 @@ export default function ReconciliationPage() {
               <div>
                 <label className="text-sm font-medium mb-1 block">Job Name</label>
                 <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. NIBSS vs Core Banking - Feb 2026" />
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-1 block">Reconciliation Module</label>
+                <Select value={form.moduleType} onValueChange={(v: any) => setForm({ ...form, moduleType: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="transaction_integrity">Transaction Integrity</SelectItem>
+                    <SelectItem value="settlement">Settlement</SelectItem>
+                    <SelectItem value="account_level">Account-Level</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-gray-500 mt-1">
+                  {form.moduleType === "transaction_integrity" && "Internal system validation - ensure all transactions are accounted for"}
+                  {form.moduleType === "settlement" && "External settlement validation - validate bulk settlement amounts"}
+                  {form.moduleType === "account_level" && "Account balance validation - match money in accounts to transaction reports"}
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>

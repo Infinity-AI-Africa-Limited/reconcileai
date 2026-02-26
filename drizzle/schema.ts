@@ -157,6 +157,9 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
   organizationId: int("organizationId"),
+  moduleType: mysqlEnum("moduleType", ["transaction_integrity", "settlement", "account_level"])
+    .default("transaction_integrity")
+    .notNull(),
   name: varchar("name", { length: 255 }).notNull(),
   sourceChannelId: int("sourceChannelId").notNull(),
   targetChannelId: int("targetChannelId").notNull(),
@@ -182,6 +185,7 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
 }, (table) => [
   index("idx_jobs_user").on(table.userId),
   index("idx_jobs_org").on(table.organizationId),
+  index("idx_jobs_module").on(table.moduleType),
   index("idx_jobs_status").on(table.status),
   index("idx_jobs_source").on(table.sourceChannelId),
   index("idx_jobs_target").on(table.targetChannelId),
@@ -767,3 +771,21 @@ export const resolutionTemplates = mysqlTable("resolution_templates", {
 
 export type ResolutionTemplate = typeof resolutionTemplates.$inferSelect;
 export type InsertResolutionTemplate = typeof resolutionTemplates.$inferInsert;
+
+// ─── Module Configurations ──────────────────────────────────────────
+export const moduleConfigurations = mysqlTable("module_configurations", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  moduleType: mysqlEnum("moduleType", ["transaction_integrity", "settlement", "account_level"]).notNull(),
+  isEnabled: boolean("isEnabled").default(true).notNull(),
+  configuration: json("configuration"), // Module-specific settings
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_module_config_org").on(table.organizationId),
+  index("idx_module_config_type").on(table.moduleType),
+  uniqueIndex("unique_org_module").on(table.organizationId, table.moduleType),
+]);
+
+export type ModuleConfiguration = typeof moduleConfigurations.$inferSelect;
+export type InsertModuleConfiguration = typeof moduleConfigurations.$inferInsert;

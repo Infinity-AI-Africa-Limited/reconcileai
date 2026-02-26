@@ -27,6 +27,7 @@ import AnomalyDetection from "./pages/AnomalyDetection";
 import CfoDashboard from "./pages/CfoDashboard";
 import OperationsDashboard from "./pages/OperationsDashboard";
 import AuditorDashboard from "./pages/AuditorDashboard";
+import ModuleConfiguration from "./pages/ModuleConfiguration";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -61,6 +62,7 @@ function Router() {
       <Route path="/sftp-config">{() => <DashboardPage component={SftpConfig} />}</Route>
       <Route path="/anomalies">{() => <DashboardPage component={AnomalyDetection} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
+      <Route path="/modules">{() => <DashboardPage component={ModuleConfiguration} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

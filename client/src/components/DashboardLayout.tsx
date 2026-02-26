@@ -43,6 +43,7 @@ import {
   Code,
   Server,
   TrendingUp,
+  Settings2,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -71,6 +72,7 @@ const menuItems = [
 
 const adminMenuItems = [
   { icon: Users, label: "User Management", path: "/admin/users" },
+  { icon: Settings2, label: "Module Configuration", path: "/modules" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";

@@ -5,7 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
-import { eq } from "drizzle-orm";
+import { eq, or, desc, sql, isNull, and } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -172,7 +172,7 @@ export const appRouter = router({
       // Create a proper JWT session token using the SDK
       const { sdk } = await import("./_core/sdk");
       const sessionToken = await sdk.createSessionToken(guestUser.openId, {
-        name: guestUser.name,
+        name: guestUser.name || undefined,
         expiresInMs: 24 * 60 * 60 * 1000, // 24 hours
       });
       
@@ -417,6 +417,7 @@ export const appRouter = router({
       .input(
         z.object({
           name: z.string().min(1).max(MAX_NAME_LENGTH),
+          moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]).default("transaction_integrity"),
           sourceChannelId: z.number().int().positive(),
           targetChannelId: z.number().int().positive(),
           dateFrom: z.string().min(1),
@@ -447,6 +448,7 @@ export const appRouter = router({
         const jobId = await db.createReconciliationJob({
           userId: ctx.user.id,
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
+          moduleType: input.moduleType,
           sourceChannelId: input.sourceChannelId,
           targetChannelId: input.targetChannelId,
           dateFrom,
@@ -665,13 +667,15 @@ export const appRouter = router({
       const dbConn = await db.getDb();
       if (!dbConn) return [];
       
-      const templates = await dbConn.query.resolutionTemplates.findMany({
-        where: (t: any, { or, eq, isNull }: any) => or(
-          eq(t.organizationId, ctx.user.organizationId),
-          isNull(t.organizationId)
-        ),
-        orderBy: (t: any, { desc }: any) => [desc(t.isDefault), desc(t.createdAt)],
-      });
+      // Fetch templates for user's org and global templates (organizationId = null)
+      const allTemplates = await dbConn.select()
+        .from(db.resolutionTemplates)
+        .orderBy(desc(db.resolutionTemplates.isDefault), desc(db.resolutionTemplates.createdAt));
+      
+      // Filter in memory to include user's org templates and global templates
+      const templates = allTemplates.filter(t => 
+        t.organizationId === ctx.user.organizationId || t.organizationId === null
+      );
       return templates;
     }),
 
@@ -744,6 +748,87 @@ export const appRouter = router({
         await dbConn.delete(db.resolutionTemplates)
           .where(eq(db.resolutionTemplates.id, input.id));
         await logAudit(ctx.user.id, "delete_resolution_template", "template", input.id, {}, ip, ua);
+        return { success: true };
+      }),
+  }),
+
+  // ─── Module Configurations ───────────────────────────────────────
+
+  modules: router({    
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const dbConn = await db.getDb();
+      if (!dbConn) return [];
+      
+      const configs = await dbConn.select()
+        .from(db.moduleConfigurations)
+        .where(eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0));
+      return configs;
+    }),
+
+    toggle: adminProcedure
+      .input(z.object({
+        moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]),
+        isEnabled: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        
+        // Check if configuration exists
+        const existing = await dbConn.select()
+          .from(db.moduleConfigurations)
+          .where(
+            and(
+              eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0),
+              eq(db.moduleConfigurations.moduleType, input.moduleType)
+            )
+          )
+          .limit(1);
+        
+        if (existing.length > 0) {
+          // Update existing
+          await dbConn.update(db.moduleConfigurations)
+            .set({ isEnabled: input.isEnabled, updatedAt: new Date() })
+            .where(eq(db.moduleConfigurations.id, existing[0].id));
+        } else {
+          // Insert new
+          await dbConn.insert(db.moduleConfigurations).values({
+            organizationId: ctx.user.organizationId || 0,
+            moduleType: input.moduleType,
+            isEnabled: input.isEnabled,
+          });
+        }
+        
+        await logAudit(ctx.user.id, "toggle_module", "module_configuration", undefined, {
+          moduleType: input.moduleType,
+          isEnabled: input.isEnabled,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    updateConfig: adminProcedure
+      .input(z.object({
+        moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]),
+        configuration: z.record(z.string(), z.any()),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        
+        await dbConn.update(db.moduleConfigurations)
+          .set({ configuration: input.configuration, updatedAt: new Date() })
+          .where(
+            and(
+              eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0),
+              eq(db.moduleConfigurations.moduleType, input.moduleType)
+            )
+          );
+        
+        await logAudit(ctx.user.id, "update_module_config", "module_configuration", undefined, {
+          moduleType: input.moduleType,
+        }, ip, ua);
         return { success: true };
       }),
   }),
