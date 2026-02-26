@@ -294,17 +294,17 @@ function DashboardLayoutContent({
 
             {user?.role === "admin" && (
               <>
-                <div className="px-4 py-3">
+                <div className="px-4 py-4 mt-2">
                   <div className="h-px bg-sidebar-border" />
                 </div>
-                <div className="px-4 pb-1">
+                <div className="px-4 pb-2 pt-1">
                   {!isCollapsed && (
-                    <span className="text-xs font-medium text-sidebar-foreground/50 uppercase tracking-wider">
+                    <span className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider">
                       Admin
                     </span>
                   )}
                 </div>
-                <SidebarMenu className="px-2 py-1">
+                <SidebarMenu className="px-2 py-0">
                   {adminMenuItems.map((item) => {
                     const isActive = location.startsWith(item.path);
                     return (
