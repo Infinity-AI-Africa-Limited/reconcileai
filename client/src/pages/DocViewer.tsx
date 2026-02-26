@@ -14,7 +14,10 @@ export default function DocViewer() {
   const [error, setError] = useState<string | null>(null);
 
   const docName = params?.docName;
-  const filename = `ReconcileAI_${docName?.replace(/-/g, "_")}.md`;
+  // If docName already starts with ReconcileAI_, use it as is, otherwise prepend it
+  const filename = docName?.startsWith("ReconcileAI_") 
+    ? `${docName}.md` 
+    : `ReconcileAI_${docName?.replace(/-/g, "_")}.md`;
 
   useEffect(() => {
     const fetchDoc = async () => {
@@ -24,8 +27,9 @@ export default function DocViewer() {
       setError(null);
 
       try {
+        const input = { "0": { json: { filename } } };
         const response = await fetch(
-          `/api/trpc/docs.download?input=${encodeURIComponent(JSON.stringify({ filename }))}`
+          `/api/trpc/docs.download?batch=1&input=${encodeURIComponent(JSON.stringify(input))}`
         );
 
         if (!response.ok) {
@@ -33,7 +37,7 @@ export default function DocViewer() {
         }
 
         const data = await response.json();
-        const result = data.result.data;
+        const result = data[0].result.data.json;
         setContent(result.content);
       } catch (err) {
         console.error("Error fetching documentation:", err);

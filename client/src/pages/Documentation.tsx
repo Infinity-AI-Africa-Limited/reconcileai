@@ -68,14 +68,15 @@ export default function Documentation() {
     try {
       toast.info(`Downloading ${filename}...`);
       
-      // Fetch the file content from the server
-      const response = await fetch(`/api/trpc/docs.download?input=${encodeURIComponent(JSON.stringify({ filename }))}`);      
+      // Fetch the file content from the server using tRPC batch format
+      const input = { "0": { json: { filename } } };
+      const response = await fetch(`/api/trpc/docs.download?batch=1&input=${encodeURIComponent(JSON.stringify(input))}`);      
       if (!response.ok) {
         throw new Error("Failed to fetch documentation");
       }
       
       const data = await response.json();
-      const result = data.result.data;
+      const result = data[0].result.data.json;
       
       // Create a blob from the content
       const blob = new Blob([result.content], { type: result.contentType });

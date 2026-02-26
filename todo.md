@@ -569,4 +569,28 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Verified backend endpoint serves documentation files correctly
 - [x] Verified download functionality works
 - [x] Verified view online functionality with DocViewer page
+- [x] Create checkpoint (version 91fcdd81)
+- [x] All documentation download and view functionality working correctly
+
+
+## Bug Fix: Documentation Buttons Still Not Working
+- [x] Check browser console logs for errors when clicking download buttons
+- [x] Found error: "Failed to fetch documentation" with 400 Bad Request
+- [x] Identified issue: tRPC query format was incorrect (missing batch parameter)
+- [x] Fixed Documentation.tsx to use proper tRPC batch format
+- [x] Fixed DocViewer.tsx to use proper tRPC batch format
+- [x] Check browser console logs for errors when clicking view online buttons
+- [x] Test download button functionality in browser - SUCCESS
+- [x] Test view online button functionality in browser
+- [x] Fixed DocViewer filename construction to handle full filenames from URL
+- [x] Fixed routing issues with /docs/:docName paths
+- [x] Verified documentation content displays correctly with markdown formatting
+- [x] Test all documentation buttons (User Guide, Admin Guide) end-to-end
+- [x] Quick Start Guide Download - SUCCESS
+- [x] Quick Start Guide View Online - SUCCESS
+- [x] User Guide View Online - SUCCESS (73-page guide displaying correctly)
+- [x] Administrator Guide View Online - SUCCESS (58-page guide displaying correctly)
+- [x] All documentation buttons working correctly
+- [x] Verified TypeScript compilation (0 errors)
+- [x] Verified dev server running successfully
 - [ ] Create checkpoint
