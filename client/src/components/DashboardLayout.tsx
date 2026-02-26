@@ -44,6 +44,7 @@ import {
   Server,
   TrendingUp,
   Settings2,
+  BookOpen,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -68,6 +69,7 @@ const menuItems = [
   { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
   { icon: Server, label: "SFTP Config", path: "/sftp-config" },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
+  { icon: BookOpen, label: "Documentation", path: "/documentation" },
 ];
 
 const adminMenuItems = [
