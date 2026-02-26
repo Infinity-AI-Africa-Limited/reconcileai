@@ -1909,6 +1909,35 @@ export const appRouter = router({
         return { success: true };
       }),
   }),
+
+  // ─── Documentation ────────────────────────────────────────────────────
+
+  docs: router({
+    download: publicProcedure
+      .input(z.object({
+        filename: z.enum(["ReconcileAI_Quick_Start.md", "ReconcileAI_User_Guide.md", "ReconcileAI_Admin_Guide.md"]),
+      }))
+      .query(async ({ input }) => {
+        const fs = await import("fs/promises");
+        const path = await import("path");
+        
+        const filePath = path.join("/home/ubuntu", input.filename);
+        
+        try {
+          const content = await fs.readFile(filePath, "utf-8");
+          return {
+            filename: input.filename,
+            content,
+            contentType: "text/markdown",
+          };
+        } catch (error) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: `Documentation file not found: ${input.filename}`,
+          });
+        }
+      }),
+  }),
 });
 
 export type AppRouter = typeof appRouter;

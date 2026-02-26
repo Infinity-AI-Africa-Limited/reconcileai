@@ -63,3 +63,58 @@ describe('Documentation Files', () => {
     expect(content).toContain('Troubleshooting');
   });
 });
+
+describe('Documentation Backend Endpoints', () => {
+  it('should have docs.download endpoint', async () => {
+    const { appRouter } = await import('./routers');
+    const { createContext } = await import('./_core/context');
+    
+    const mockReq = {} as any;
+    const mockRes = {} as any;
+    const ctx = createContext({ req: mockReq, res: mockRes });
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.docs.download({
+      filename: 'ReconcileAI_Quick_Start.md',
+    });
+
+    expect(result).toBeDefined();
+    expect(result.filename).toBe('ReconcileAI_Quick_Start.md');
+    expect(result.contentType).toBe('text/markdown');
+    expect(result.content).toContain('ReconcileAI');
+  });
+
+  it('should download User Guide via endpoint', async () => {
+    const { appRouter } = await import('./routers');
+    const { createContext } = await import('./_core/context');
+    
+    const mockReq = {} as any;
+    const mockRes = {} as any;
+    const ctx = createContext({ req: mockReq, res: mockRes });
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.docs.download({
+      filename: 'ReconcileAI_User_Guide.md',
+    });
+
+    expect(result.filename).toBe('ReconcileAI_User_Guide.md');
+    expect(result.content.length).toBeGreaterThan(10000);
+  });
+
+  it('should download Admin Guide via endpoint', async () => {
+    const { appRouter } = await import('./routers');
+    const { createContext } = await import('./_core/context');
+    
+    const mockReq = {} as any;
+    const mockRes = {} as any;
+    const ctx = createContext({ req: mockReq, res: mockRes });
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.docs.download({
+      filename: 'ReconcileAI_Admin_Guide.md',
+    });
+
+    expect(result.filename).toBe('ReconcileAI_Admin_Guide.md');
+    expect(result.content.length).toBeGreaterThan(10000);
+  });
+});

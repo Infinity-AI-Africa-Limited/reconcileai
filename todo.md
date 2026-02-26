@@ -553,3 +553,20 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Verified TypeScript compilation (0 errors)
 - [x] Verified dev server running successfully
 - [x] All nested anchor tag errors resolved
+
+
+## Bug Fix: Documentation Page Download and View Links
+- [x] Read Documentation.tsx to understand current implementation
+- [x] Implement proper download functionality for documentation files
+- [x] Create backend endpoint to serve documentation files (docs.download)
+- [x] Fix View Online links to display documentation content
+- [x] Create DocViewer page for viewing documentation online
+- [x] Create routes for viewing each documentation guide online
+- [x] Install react-markdown and remark-gfm packages
+- [x] Add DocViewer route to App.tsx
+- [x] Test all download buttons and view links
+- [x] Create and run documentation tests (8 tests passed)
+- [x] Verified backend endpoint serves documentation files correctly
+- [x] Verified download functionality works
+- [x] Verified view online functionality with DocViewer page
+- [ ] Create checkpoint

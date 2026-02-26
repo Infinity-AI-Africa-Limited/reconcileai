@@ -1,6 +1,9 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { BookOpen, FileText, Rocket, Code, Shield, HelpCircle } from "lucide-react";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
+import { Link } from "wouter";
 
 export default function Documentation() {
   const documentationSections = [
@@ -61,10 +64,37 @@ export default function Documentation() {
     },
   ];
 
-  const handleDownload = (filename: string) => {
-    // In a real implementation, this would download the file from the server
-    // For now, we'll show a toast notification
-    alert(`Downloading ${filename}...`);
+  const handleDownload = async (filename: string) => {
+    try {
+      toast.info(`Downloading ${filename}...`);
+      
+      // Fetch the file content from the server
+      const response = await fetch(`/api/trpc/docs.download?input=${encodeURIComponent(JSON.stringify({ filename }))}`);      
+      if (!response.ok) {
+        throw new Error("Failed to fetch documentation");
+      }
+      
+      const data = await response.json();
+      const result = data.result.data;
+      
+      // Create a blob from the content
+      const blob = new Blob([result.content], { type: result.contentType });
+      const url = window.URL.createObjectURL(blob);
+      
+      // Create a temporary link and trigger download
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      
+      toast.success(`${filename} downloaded successfully`);
+    } catch (error) {
+      toast.error(`Failed to download ${filename}`);
+      console.error("Download error:", error);
+    }
   };
 
   return (
@@ -106,12 +136,11 @@ export default function Documentation() {
                       <FileText className="h-4 w-4 mr-2" />
                       Download Guide
                     </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => window.open(`/docs/${section.file}`, '_blank')}
-                    >
-                      View Online
-                    </Button>
+                    <Link href={`/docs/${section.file?.replace('.md', '')}`}>
+                      <Button variant="outline">
+                        View Online
+                      </Button>
+                    </Link>
                   </div>
                 ) : (
                   <Button
