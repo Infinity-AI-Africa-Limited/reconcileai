@@ -10,14 +10,14 @@ export default function BanksLanding() {
       {/* Navigation */}
       <nav className="container mx-auto px-4 py-6 flex items-center justify-between">
         <Link href="/">
-          <a className="text-2xl font-bold text-white">ReconcileAI</a>
+          <span className="text-2xl font-bold text-white cursor-pointer">ReconcileAI</span>
         </Link>
         <div className="flex items-center gap-4">
           <Link href="/fintechs">
-            <a className="text-white/80 hover:text-white transition-colors">For FinTechs</a>
+            <span className="text-white/80 hover:text-white transition-colors cursor-pointer">For FinTechs</span>
           </Link>
           <Link href="/payment-processors">
-            <a className="text-white/80 hover:text-white transition-colors">For Payment Processors</a>
+            <span className="text-white/80 hover:text-white transition-colors cursor-pointer">For Payment Processors</span>
           </Link>
           <Link href="/dashboard">
             <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20">
