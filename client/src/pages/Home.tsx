@@ -97,6 +97,56 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Segment Navigation */}
+      <section className="py-16 px-6 bg-white">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl font-bold text-[#1B365D] mb-3">Built for Your Industry</h2>
+            <p className="text-lg text-gray-600">Tailored solutions for Banks, FinTechs, and Payment Processors</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <a href="/banks" className="group block">
+              <div className="border-2 border-gray-200 rounded-lg p-8 hover:border-[#1B365D] hover:shadow-lg transition-all">
+                <div className="h-12 w-12 bg-[#1B365D]/10 rounded-lg flex items-center justify-center mb-4 group-hover:bg-[#1B365D] transition-colors">
+                  <Shield className="h-6 w-6 text-[#1B365D] group-hover:text-white" />
+                </div>
+                <h3 className="text-xl font-semibold text-[#1B365D] mb-2">For Banks</h3>
+                <p className="text-gray-600 mb-4">Protect your banking license with 9+/10 audit confidence. Eliminate 5+ daily portal logins.</p>
+                <div className="flex items-center text-[#1B365D] font-medium group-hover:translate-x-1 transition-transform">
+                  Learn more <ArrowRight className="ml-2 h-4 w-4" />
+                </div>
+              </div>
+            </a>
+
+            <a href="/fintechs" className="group block">
+              <div className="border-2 border-gray-200 rounded-lg p-8 hover:border-[#F4758C] hover:shadow-lg transition-all">
+                <div className="h-12 w-12 bg-[#F4758C]/10 rounded-lg flex items-center justify-center mb-4 group-hover:bg-[#F4758C] transition-colors">
+                  <Zap className="h-6 w-6 text-[#F4758C] group-hover:text-white" />
+                </div>
+                <h3 className="text-xl font-semibold text-[#1B365D] mb-2">For FinTechs</h3>
+                <p className="text-gray-600 mb-4">Scale without scaling your recon team. Reduce 60% of manual matching time. Deploy in weeks.</p>
+                <div className="flex items-center text-[#F4758C] font-medium group-hover:translate-x-1 transition-transform">
+                  Learn more <ArrowRight className="ml-2 h-4 w-4" />
+                </div>
+              </div>
+            </a>
+
+            <a href="/payment-processors" className="group block">
+              <div className="border-2 border-gray-200 rounded-lg p-8 hover:border-[#2A4A7C] hover:shadow-lg transition-all">
+                <div className="h-12 w-12 bg-[#2A4A7C]/10 rounded-lg flex items-center justify-center mb-4 group-hover:bg-[#2A4A7C] transition-colors">
+                  <Layers className="h-6 w-6 text-[#2A4A7C] group-hover:text-white" />
+                </div>
+                <h3 className="text-xl font-semibold text-[#1B365D] mb-2">For Payment Processors</h3>
+                <p className="text-gray-600 mb-4">Eliminate 95-98% false positives. Save 30+ minutes per false alarm across 20+ processes.</p>
+                <div className="flex items-center text-[#2A4A7C] font-medium group-hover:translate-x-1 transition-transform">
+                  Learn more <ArrowRight className="ml-2 h-4 w-4" />
+                </div>
+              </div>
+            </a>
+          </div>
+        </div>
+      </section>
+
       {/* Stats */}
       <section className="py-12 bg-white border-y border-gray-200">
         <div className="max-w-5xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8">

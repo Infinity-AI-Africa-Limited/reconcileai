@@ -28,6 +28,9 @@ import CfoDashboard from "./pages/CfoDashboard";
 import OperationsDashboard from "./pages/OperationsDashboard";
 import AuditorDashboard from "./pages/AuditorDashboard";
 import ModuleConfiguration from "./pages/ModuleConfiguration";
+import BanksLanding from "./pages/BanksLanding";
+import FinTechsLanding from "./pages/FinTechsLanding";
+import PaymentProcessorsLanding from "./pages/PaymentProcessorsLanding";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -41,6 +44,9 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/banks" component={BanksLanding} />
+      <Route path="/fintechs" component={FinTechsLanding} />
+      <Route path="/payment-processors" component={PaymentProcessorsLanding} />
       <Route path="/dashboard">{() => <DashboardPage component={Dashboard} />}</Route>
       <Route path="/dashboard/cfo">{() => <DashboardPage component={CfoDashboard} />}</Route>
       <Route path="/dashboard/operations">{() => <DashboardPage component={OperationsDashboard} />}</Route>

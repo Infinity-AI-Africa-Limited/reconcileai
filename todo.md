@@ -494,3 +494,18 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Update backend reconciliation.create endpoint to accept moduleType
 - [ ] Add module-specific dashboards and workflows (future enhancement)
 - [ ] Display module type badge on reconciliation job list (future enhancement)
+
+
+## Feature 31: Segment-Specific Landing Pages
+- [x] Review PRD v2 segment insights and pain points
+- [x] Design landing page structure and component architecture
+- [x] Create routing for /banks, /fintechs, /payment-processors
+- [x] Implement Banks landing page with audit compliance focus
+- [x] Implement FinTechs landing page with scale and efficiency focus
+- [x] Implement Payment Processors landing page with multi-processor orchestration focus
+- [x] Update main landing page with segment navigation
+- [x] Add segment-specific CTAs and value propositions
+- [x] Add routes for all segment landing pages
+- [x] Test all landing pages and create checkpoint
+- [x] Create segment landing page tests
+- [x] All 5 tests passed successfully
