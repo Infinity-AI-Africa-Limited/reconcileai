@@ -1915,25 +1915,49 @@ export const appRouter = router({
   docs: router({
     download: publicProcedure
       .input(z.object({
-        filename: z.enum(["ReconcileAI_Quick_Start.md", "ReconcileAI_User_Guide.md", "ReconcileAI_Admin_Guide.md"]),
+        filename: z.enum(["ReconcileAI_Quick_Start.md", "ReconcileAI_User_Guide.md", "ReconcileAI_Admin_Guide.md", "ReconcileAI_Quick_Start.docx", "ReconcileAI_User_Guide.docx", "ReconcileAI_Admin_Guide.docx"]),
       }))
       .query(async ({ input }) => {
-        const fs = await import("fs/promises");
-        const path = await import("path");
+        // Map filenames to S3 CDN URLs
+        const fileUrls: Record<string, string> = {
+          "ReconcileAI_Quick_Start.md": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/XqoRUpsesmquaKWW.md",
+          "ReconcileAI_User_Guide.md": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/vGDalcLJIHenxGOX.md",
+          "ReconcileAI_Admin_Guide.md": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/UJWSitfkNmYbknnF.md",
+          "ReconcileAI_Quick_Start.docx": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/wQbWtJmZrTsvYFql.docx",
+          "ReconcileAI_User_Guide.docx": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/dqZmSHeiUaEqLfiR.docx",
+          "ReconcileAI_Admin_Guide.docx": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/xcMlkwIotMjyWZGq.docx",
+        };
         
-        const filePath = path.join("/home/ubuntu", input.filename);
-        
-        try {
-          const content = await fs.readFile(filePath, "utf-8");
-          return {
-            filename: input.filename,
-            content,
-            contentType: "text/markdown",
-          };
-        } catch (error) {
+        const fileUrl = fileUrls[input.filename];
+        if (!fileUrl) {
           throw new TRPCError({
             code: "NOT_FOUND",
             message: `Documentation file not found: ${input.filename}`,
+          });
+        }
+        
+        try {
+          // Fetch file content from S3 CDN
+          const response = await fetch(fileUrl);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch file: ${response.statusText}`);
+          }
+          
+          const content = await response.text();
+          const contentType = input.filename.endsWith('.docx') 
+            ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            : 'text/markdown';
+          
+          return {
+            filename: input.filename,
+            content,
+            contentType,
+            url: fileUrl,
+          };
+        } catch (error) {
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Failed to fetch documentation file: ${input.filename}`,
           });
         }
       }),

@@ -1,6 +1,6 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { BookOpen, FileText, Rocket, Code, Shield, HelpCircle } from "lucide-react";
+import { BookOpen, FileText, Rocket, Code, Shield, HelpCircle, Download } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { Link } from "wouter";
@@ -128,20 +128,35 @@ export default function Documentation() {
               </CardHeader>
               <CardContent>
                 {section.file ? (
-                  <div className="flex gap-3">
-                    <Button
-                      variant="default"
-                      onClick={() => handleDownload(section.file!)}
-                      className="flex-1"
-                    >
-                      <FileText className="h-4 w-4 mr-2" />
-                      Download Guide
-                    </Button>
-                    <Link href={`/docs/${section.file?.replace('.md', '')}`}>
-                      <Button variant="outline">
-                        View Online
+                  <div className="space-y-3">
+                    <div className="flex gap-3">
+                      <Link href={`/docs/${section.file?.replace('.md', '')}`} className="flex-1">
+                        <Button variant="default" className="w-full">
+                          <BookOpen className="h-4 w-4 mr-2" />
+                          View Online
+                        </Button>
+                      </Link>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDownload(section.file!)}
+                        className="flex-1"
+                      >
+                        <Download className="h-3 w-3 mr-1" />
+                        Markdown
                       </Button>
-                    </Link>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDownload(section.file!.replace('.md', '.docx'))}
+                        className="flex-1"
+                      >
+                        <Download className="h-3 w-3 mr-1" />
+                        Word
+                      </Button>
+                    </div>
                   </div>
                 ) : (
                   <Button

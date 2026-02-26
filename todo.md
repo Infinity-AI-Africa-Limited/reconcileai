@@ -608,4 +608,31 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Verified User Management and Module Configuration are properly organized
 - [x] Verified divider line separates regular menu from admin section
 - [x] No overlapping or muddled appearance
+- [x] Create checkpoint (version 2ddcf15a)
+- [x] Admin menu layout issue resolved
+
+
+## Feature 34: Fix Documentation for Published Website and Add Word Format
+- [x] Upload documentation files to S3 for published website access
+- [x] Uploaded ReconcileAI_Quick_Start.md to S3: https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/XqoRUpsesmquaKWW.md
+- [x] Uploaded ReconcileAI_User_Guide.md to S3: https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/vGDalcLJIHenxGOX.md
+- [x] Uploaded ReconcileAI_Admin_Guide.md to S3: https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/UJWSitfkNmYbknnF.md
+- [x] Convert Quick Start Guide from markdown to Word (.docx)
+- [x] Convert User Guide from markdown to Word (.docx)
+- [x] Convert Administrator Guide from markdown to Word (.docx)
+- [x] Upload Word documents to S3
+- [x] Uploaded ReconcileAI_Quick_Start.docx to S3: https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/wQbWtJmZrTsvYFql.docx
+- [x] Uploaded ReconcileAI_User_Guide.docx to S3: https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/dqZmSHeiUaEqLfiR.docx
+- [x] Uploaded ReconcileAI_Admin_Guide.docx to S3: https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/xcMlkwIotMjyWZGq.docx
+- [x] Update backend docs.download endpoint to serve from S3
+- [x] Update backend to support both markdown and Word format downloads
+- [x] Added S3 CDN URLs mapping for all 6 documentation files
+- [x] Update frontend Documentation page to offer format selection (Markdown/Word)
+- [x] Added separate Markdown and Word download buttons
+- [x] Reorganized UI to prioritize View Online with download options below
+- [x] Test download functionality in dev environment
+- [x] Tested Word download button - SUCCESS
+- [x] Verified toast notifications appear correctly
+- [x] Created comprehensive tests for S3 documentation download (10 tests passed)
+- [x] All documentation files (markdown and Word) served successfully from S3
 - [ ] Create checkpoint
