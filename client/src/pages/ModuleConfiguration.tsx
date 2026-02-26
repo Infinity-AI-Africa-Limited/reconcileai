@@ -42,7 +42,7 @@ export default function ModuleConfiguration() {
         "False positive classification",
       ],
       metrics: [
-        "Reduce false positive rate from 95-98% to <2%",
+        "Reduce false positive rate from 35-65% to <2%",
         "Reduce manual matching time by 60%",
         "99.9%+ transaction accounting accuracy",
       ],

@@ -137,7 +137,7 @@ export default function Home() {
                   <Layers className="h-6 w-6 text-[#2A4A7C] group-hover:text-white" />
                 </div>
                 <h3 className="text-xl font-semibold text-[#1B365D] mb-2">For Payment Processors</h3>
-                <p className="text-gray-600 mb-4">Eliminate 95-98% false positives. Save 30+ minutes per false alarm across 20+ processes.</p>
+                <p className="text-gray-600 mb-4">Eliminate 35-65% false positives. Save 30+ minutes per false alarm across 20+ processes.</p>
                 <div className="flex items-center text-[#2A4A7C] font-medium group-hover:translate-x-1 transition-transform">
                   Learn more <ArrowRight className="ml-2 h-4 w-4" />
                 </div>
@@ -177,7 +177,7 @@ export default function Home() {
             {[
               {
                 icon: AlertTriangle,
-                title: "95-98% False Positives",
+                title: "35-65% False Positives",
                 desc: "Only 2-5% of flagged exceptions are real issues. Your team wastes 30+ minutes investigating each false alarm.",
                 severity: "critical",
               },
@@ -225,7 +225,7 @@ export default function Home() {
               {
                 icon: TrendingDown,
                 title: "False Positive Elimination",
-                desc: "AI learns your transaction patterns to reduce 95-98% of false alarms. Surface the 2 real frauds hidden in 50 exceptions.",
+                desc: "AI learns your transaction patterns to reduce 35-65% of false alarms. Surface real frauds hidden in exception queues.",
               },
               {
                 icon: Layers,
@@ -284,7 +284,7 @@ export default function Home() {
                 company: "Nigerian FinTech",
               },
               {
-                quote: "95-98% false positive rate. Only 2-5% of exceptions are legitimate issues.",
+                quote: "35-65% false positive rate. Many exceptions are timing differences and data quality issues.",
                 role: "Bank Reconciliation Lead",
                 company: "Tier-1 Nigerian Bank",
               },

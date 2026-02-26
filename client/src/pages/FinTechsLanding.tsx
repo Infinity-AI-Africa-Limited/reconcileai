@@ -63,7 +63,7 @@ export default function FinTechsLanding() {
             <div>
               <div className="text-4xl font-bold text-[#F4758C] mb-2">&lt;2%</div>
               <div className="text-gray-600">False Positive Rate</div>
-              <div className="text-sm text-gray-500 mt-1">Down from 95-98%</div>
+              <div className="text-sm text-gray-500 mt-1">Down from 35-65%</div>
             </div>
             <div>
               <div className="text-4xl font-bold text-[#F4758C] mb-2">Weeks</div>
@@ -159,7 +159,7 @@ export default function FinTechsLanding() {
                 </div>
                 <h3 className="font-semibold text-xl text-[#1B365D] mb-3">Transaction Integrity</h3>
                 <p className="text-gray-600 mb-4">
-                  Ensure every transaction is accounted for across your systems. Eliminate 95-98% false positive rates that waste your team's time.
+                  Ensure every transaction is accounted for across your systems. Eliminate 35-65% false positive rates that waste your team's time.
                 </p>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">

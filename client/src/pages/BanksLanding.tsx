@@ -158,7 +158,7 @@ export default function BanksLanding() {
                 </div>
                 <h3 className="font-semibold text-xl text-[#1B365D] mb-3">Transaction Integrity</h3>
                 <p className="text-gray-600 mb-4">
-                  Ensure all transactions are accounted for across your internal systems. Eliminate 95-98% false positive rates.
+                  Ensure all transactions are accounted for across your internal systems. Eliminate 35-65% false positive rates.
                 </p>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">

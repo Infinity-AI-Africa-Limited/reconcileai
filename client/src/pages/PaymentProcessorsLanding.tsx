@@ -32,7 +32,7 @@ export default function PaymentProcessorsLanding() {
         <div className="max-w-4xl mx-auto text-center">
           <Badge className="mb-4 bg-[#F4758C] text-white border-none">For Payment Processors</Badge>
           <h1 className="text-5xl font-bold text-white mb-6">
-            Eliminate 95-98% False Positives Across 20+ Reconciliation Processes
+            Eliminate 35-65% False Positives Across 20+ Reconciliation Processes
           </h1>
           <p className="text-xl text-white/90 mb-8 leading-relaxed">
             Stop wasting 30+ minutes per false alarm. Reconcile POS, transfers, bill payments, and web purchases with &lt;2% false positive rates.
@@ -57,7 +57,7 @@ export default function PaymentProcessorsLanding() {
             <div>
               <div className="text-4xl font-bold text-[#2A4A7C] mb-2">&lt;2%</div>
               <div className="text-gray-600">False Positive Rate</div>
-              <div className="text-sm text-gray-500 mt-1">Down from 95-98%</div>
+              <div className="text-sm text-gray-500 mt-1">Down from 35-65%</div>
             </div>
             <div>
               <div className="text-4xl font-bold text-[#2A4A7C] mb-2">30+</div>
@@ -93,7 +93,7 @@ export default function PaymentProcessorsLanding() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
             <Card className="border-l-4 border-l-[#2A4A7C]">
               <CardContent className="pt-6">
-                <h3 className="font-semibold text-lg text-[#1B365D] mb-2">95-98% False Positive Rates</h3>
+                <h3 className="font-semibold text-lg text-[#1B365D] mb-2">35-65% False Positive Rates</h3>
                 <p className="text-gray-600 mb-3">
                   Reconciliation teams waste <span className="font-semibold">30+ minutes per false alarm</span> investigating timing differences, 
                   rounding errors, and system lag that aren't real issues.
@@ -158,7 +158,7 @@ export default function PaymentProcessorsLanding() {
                 </div>
                 <h3 className="font-semibold text-xl text-[#1B365D] mb-3">Transaction Integrity</h3>
                 <p className="text-gray-600 mb-4">
-                  Eliminate 95-98% false positive rates. Intelligent pattern recognition learns timing differences, rounding, and system lag.
+                  Eliminate 35-65% false positive rates. Intelligent pattern recognition learns timing differences, rounding, and system lag.
                 </p>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
@@ -299,7 +299,7 @@ export default function PaymentProcessorsLanding() {
             Eliminate False Positives and Protect Your Operating License
           </h2>
           <p className="text-xl text-white/90 mb-8 max-w-2xl mx-auto">
-            Join leading Nigerian payment processors in reducing false positive rates from 95-98% to &lt;2%.
+            Join leading Nigerian payment processors in reducing false positive rates from 35-65% to &lt;2%.
           </p>
           <div className="flex items-center justify-center gap-4">
             <Link href="/dashboard">
