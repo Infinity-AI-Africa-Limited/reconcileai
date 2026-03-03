@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ReconcileAI — Agentic Reconciliation Platform</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', sans-serif; background: #F0F4F8; color: #1a2332; display: flex; height: 100vh; overflow: hidden; }
+
+  /* SIDEBAR */
+  .sidebar {
+    width: 240px; min-width: 240px; background: #0A2540; color: #fff;
+    display: flex; flex-direction: column; padding: 0; overflow-y: auto;
+  }
+  .sidebar-logo {
+    padding: 20px 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.1);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .logo-icon {
+    width: 36px; height: 36px; background: #00A878; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 800; color: #fff;
+  }
+  .logo-text { font-size: 16px; font-weight: 700; color: #fff; }
+  .logo-sub { font-size: 10px; color: rgba(255,255,255,0.5); margin-top: 1px; }
+  .sidebar-section { padding: 16px 12px 8px; font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 1px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px 16px; margin: 2px 8px;
+    border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.7);
+    transition: all 0.2s;
+  }
+  .nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
+  .nav-item.active { background: #00A878; color: #fff; }
+  .nav-item .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+  .nav-badge {
+    margin-left: auto; background: #FF6B35; color: #fff; border-radius: 10px;
+    font-size: 10px; font-weight: 700; padding: 2px 6px;
+  }
+  .sidebar-footer {
+    margin-top: auto; padding: 16px; border-top: 1px solid rgba(255,255,255,0.1);
+    font-size: 12px; color: rgba(255,255,255,0.5);
+  }
+  .compliance-badge {
+    background: rgba(0,168,120,0.2); border: 1px solid #00A878; border-radius: 6px;
+    padding: 8px 12px; text-align: center; margin-bottom: 12px;
+  }
+  .compliance-score { font-size: 22px; font-weight: 800; color: #00A878; }
+  .compliance-label { font-size: 10px; color: rgba(255,255,255,0.6); }
+
+  /* MAIN CONTENT */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .topbar {
+    background: #fff; border-bottom: 1px solid #e2e8f0; padding: 14px 28px;
+    display: flex; align-items: center; justify-content: space-between; min-height: 60px;
+  }
+  .topbar-title { font-size: 18px; font-weight: 700; color: #0A2540; }
+  .topbar-sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .topbar-actions { display: flex; gap: 10px; align-items: center; }
+  .btn {
+    padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    cursor: pointer; border: none; transition: all 0.2s; font-family: 'Inter', sans-serif;
+  }
+  .btn-primary { background: #00A878; color: #fff; }
+  .btn-primary:hover { background: #008f66; }
+  .btn-secondary { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+  .btn-secondary:hover { background: #e2e8f0; }
+  .btn-danger { background: #fee2e2; color: #dc2626; }
+  .btn-warning { background: #fef3c7; color: #d97706; }
+  .btn-outline { background: transparent; color: #0A2540; border: 1px solid #0A2540; }
+
+  .content { flex: 1; overflow-y: auto; padding: 24px 28px; }
+
+  /* VIEWS */
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* KPI CARDS */
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+  .kpi-card {
+    background: #fff; border-radius: 12px; padding: 20px; border: 1px solid #e2e8f0;
+    position: relative; overflow: hidden;
+  }
+  .kpi-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  }
+  .kpi-card.green::before { background: #00A878; }
+  .kpi-card.blue::before { background: #3b82f6; }
+  .kpi-card.amber::before { background: #f59e0b; }
+  .kpi-card.red::before { background: #ef4444; }
+  .kpi-label { font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi-value { font-size: 32px; font-weight: 800; color: #0A2540; margin: 6px 0 4px; }
+  .kpi-sub { font-size: 12px; color: #94a3b8; }
+  .kpi-icon { position: absolute; top: 16px; right: 16px; font-size: 24px; opacity: 0.15; }
+
+  /* WORKFLOW CARDS */
+  .workflow-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+  .workflow-card {
+    background: #fff; border-radius: 12px; padding: 24px; border: 1px solid #e2e8f0;
+    cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden;
+  }
+  .workflow-card:hover { border-color: #00A878; box-shadow: 0 4px 20px rgba(0,168,120,0.15); transform: translateY(-2px); }
+  .workflow-icon { font-size: 32px; margin-bottom: 12px; }
+  .workflow-title { font-size: 15px; font-weight: 700; color: #0A2540; margin-bottom: 6px; }
+  .workflow-desc { font-size: 12px; color: #64748b; line-height: 1.5; margin-bottom: 16px; }
+  .workflow-stats { display: flex; gap: 16px; }
+  .workflow-stat { font-size: 11px; color: #94a3b8; }
+  .workflow-stat strong { color: #0A2540; font-weight: 700; }
+  .workflow-status {
+    position: absolute; top: 16px; right: 16px; font-size: 10px; font-weight: 700;
+    padding: 3px 8px; border-radius: 10px;
+  }
+  .status-active { background: #dcfce7; color: #16a34a; }
+  .status-pending { background: #fef3c7; color: #d97706; }
+  .status-ready { background: #dbeafe; color: #2563eb; }
+
+  /* TABLES */
+  .table-container { background: #fff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; margin-bottom: 20px; }
+  .table-header {
+    padding: 16px 20px; border-bottom: 1px solid #e2e8f0;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .table-title { font-size: 14px; font-weight: 700; color: #0A2540; }
+  .table-sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { background: #f8fafc; padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0; }
+  td { padding: 11px 16px; font-size: 12px; color: #374151; border-bottom: 1px solid #f1f5f9; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fafc; }
+
+  /* BADGES */
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-matched { background: #dcfce7; color: #16a34a; }
+  .badge-exception { background: #fef3c7; color: #d97706; }
+  .badge-unmatched { background: #fee2e2; color: #dc2626; }
+  .badge-pending { background: #dbeafe; color: #2563eb; }
+  .badge-approved { background: #dcfce7; color: #16a34a; }
+  .badge-escalated { background: #f3e8ff; color: #7c3aed; }
+  .badge-high { background: #fee2e2; color: #dc2626; }
+  .badge-medium { background: #fef3c7; color: #d97706; }
+  .badge-low { background: #dcfce7; color: #16a34a; }
+
+  /* PROGRESS BAR */
+  .progress-container { background: #f1f5f9; border-radius: 8px; height: 8px; overflow: hidden; }
+  .progress-bar { height: 100%; border-radius: 8px; transition: width 1.5s ease; }
+  .progress-green { background: linear-gradient(90deg, #00A878, #00d4a0); }
+  .progress-blue { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+
+  /* AI MATCHING ANIMATION */
+  .ai-panel {
+    background: #0A2540; border-radius: 12px; padding: 24px; margin-bottom: 20px; color: #fff;
+  }
+  .ai-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .ai-spinner {
+    width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #00A878;
+    border-radius: 50%; animation: spin 0.8s linear infinite; display: none;
+  }
+  .ai-spinner.active { display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .ai-steps { display: flex; flex-direction: column; gap: 8px; }
+  .ai-step { display: flex; align-items: center; gap: 10px; font-size: 13px; color: rgba(255,255,255,0.6); }
+  .ai-step.done { color: #00A878; }
+  .ai-step.running { color: #fff; }
+  .ai-step-icon { width: 20px; text-align: center; font-size: 14px; }
+  .ai-result-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+  .ai-result-card { background: rgba(255,255,255,0.08); border-radius: 8px; padding: 14px; text-align: center; }
+  .ai-result-num { font-size: 28px; font-weight: 800; }
+  .ai-result-label { font-size: 11px; color: rgba(255,255,255,0.6); margin-top: 4px; }
+  .ai-result-card.green .ai-result-num { color: #00A878; }
+  .ai-result-card.amber .ai-result-num { color: #f59e0b; }
+  .ai-result-card.red .ai-result-num { color: #ef4444; }
+  .ai-result-card.blue .ai-result-num { color: #60a5fa; }
+
+  /* UPLOAD PANELS */
+  .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  .upload-panel { background: #fff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; }
+  .upload-panel-header { padding: 14px 16px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; display: flex; align-items: center; justify-content: space-between; }
+  .upload-panel-title { font-size: 13px; font-weight: 700; color: #0A2540; }
+  .upload-panel-badge { font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 10px; }
+  .upload-panel-body { max-height: 280px; overflow-y: auto; }
+
+  /* EXCEPTION CARDS */
+  .exception-list { display: flex; flex-direction: column; gap: 12px; }
+  .exception-card {
+    background: #fff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 18px;
+    border-left: 4px solid #f59e0b;
+  }
+  .exception-card.high { border-left-color: #ef4444; }
+  .exception-card.low { border-left-color: #3b82f6; }
+  .exception-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; }
+  .exception-id { font-size: 12px; font-weight: 700; color: #0A2540; }
+  .exception-type { font-size: 11px; color: #64748b; margin-top: 2px; }
+  .exception-amount { font-size: 16px; font-weight: 700; color: #0A2540; }
+  .ai-reasoning {
+    background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 12px;
+    font-size: 12px; color: #166534; margin-bottom: 12px; display: flex; gap: 8px;
+  }
+  .exception-actions { display: flex; gap: 8px; }
+
+  /* AUDIT TRAIL */
+  .audit-entry { display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px solid #f1f5f9; }
+  .audit-entry:last-child { border-bottom: none; }
+  .audit-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .audit-dot.green { background: #00A878; }
+  .audit-dot.blue { background: #3b82f6; }
+  .audit-dot.amber { background: #f59e0b; }
+  .audit-dot.red { background: #ef4444; }
+  .audit-dot.purple { background: #7c3aed; }
+  .audit-content { flex: 1; }
+  .audit-action { font-size: 13px; font-weight: 600; color: #0A2540; }
+  .audit-detail { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .audit-meta { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+  .audit-time { font-size: 11px; color: #94a3b8; flex-shrink: 0; margin-top: 4px; }
+
+  /* SETTLEMENT */
+  .settlement-batch {
+    background: #fff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 20px; margin-bottom: 16px;
+  }
+  .batch-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .batch-title { font-size: 15px; font-weight: 700; color: #0A2540; }
+  .batch-amount { font-size: 20px; font-weight: 800; color: #0A2540; }
+  .batch-breakdown { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; color: #64748b; }
+  .decompose-arrow { color: #00A878; font-weight: 700; font-size: 16px; }
+
+  /* ACCOUNT RECON */
+  .variance-alert {
+    background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; padding: 16px; margin-bottom: 16px;
+    display: flex; align-items: flex-start; gap: 12px;
+  }
+  .variance-icon { font-size: 20px; }
+  .variance-title { font-size: 14px; font-weight: 700; color: #c2410c; }
+  .variance-desc { font-size: 12px; color: #9a3412; margin-top: 4px; }
+  .ai-suggestion {
+    background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 14px; margin-bottom: 16px;
+    display: flex; gap: 10px;
+  }
+
+  /* LOADING OVERLAY */
+  .loading-overlay {
+    position: fixed; inset: 0; background: rgba(10,37,64,0.7); z-index: 1000;
+    display: none; align-items: center; justify-content: center; flex-direction: column; gap: 16px;
+  }
+  .loading-overlay.active { display: flex; }
+  .loading-box { background: #fff; border-radius: 16px; padding: 32px 40px; text-align: center; max-width: 360px; }
+  .loading-title { font-size: 16px; font-weight: 700; color: #0A2540; margin-bottom: 8px; }
+  .loading-sub { font-size: 13px; color: #64748b; margin-bottom: 20px; }
+  .loading-steps { text-align: left; display: flex; flex-direction: column; gap: 8px; }
+  .loading-step { font-size: 12px; color: #94a3b8; display: flex; align-items: center; gap: 8px; }
+  .loading-step.done { color: #16a34a; }
+  .loading-step.current { color: #0A2540; font-weight: 600; }
+
+  /* SECTION HEADERS */
+  .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .section-title { font-size: 16px; font-weight: 700; color: #0A2540; }
+  .section-sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+
+  /* TABS */
+  .tabs { display: flex; gap: 0; margin-bottom: 20px; background: #f1f5f9; border-radius: 10px; padding: 4px; }
+  .tab {
+    flex: 1; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    cursor: pointer; text-align: center; color: #64748b; transition: all 0.2s;
+  }
+  .tab.active { background: #fff; color: #0A2540; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+
+  .match-score { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
+  .score-high { background: #dcfce7; color: #16a34a; }
+  .score-med { background: #fef3c7; color: #d97706; }
+  .score-low { background: #fee2e2; color: #dc2626; }
+
+  .activity-feed { background: #fff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 20px; }
+  .activity-item { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
+  .activity-item:last-child { border-bottom: none; }
+  .activity-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+  .activity-text { font-size: 12px; color: #374151; }
+  .activity-time { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<div class="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-icon">R</div>
+    <div>
+      <div class="logo-text">ReconcileAI</div>
+      <div class="logo-sub">Agentic Reconciliation</div>
+    </div>
+  </div>
+
+  <div class="sidebar-section">Overview</div>
+  <div class="nav-item active" onclick="showView('dashboard', this)">
+    <span class="nav-icon">⊞</span> Dashboard
+  </div>
+
+  <div class="sidebar-section">Reconciliation</div>
+  <div class="nav-item" onclick="showView('transaction', this)">
+    <span class="nav-icon">⇄</span> Transaction Integrity
+  </div>
+  <div class="nav-item" onclick="showView('settlement', this)">
+    <span class="nav-icon">🏦</span> Settlement Recon
+  </div>
+  <div class="nav-item" onclick="showView('account', this)">
+    <span class="nav-icon">📊</span> Account Recon (GL)
+  </div>
+
+  <div class="sidebar-section">Management</div>
+  <div class="nav-item" onclick="showView('exceptions', this)">
+    <span class="nav-icon">⚠</span> Exception Manager
+    <span class="nav-badge" id="exception-badge">4</span>
+  </div>
+  <div class="nav-item" onclick="showView('audit', this)">
+    <span class="nav-icon">📋</span> Audit Trail
+  </div>
+  <div class="nav-item" onclick="showView('reports', this)">
+    <span class="nav-icon">📄</span> Reports
+  </div>
+
+  <div class="sidebar-footer">
+    <div class="compliance-badge">
+      <div class="compliance-score">98.6%</div>
+      <div class="compliance-label">Audit Ready Score</div>
+    </div>
+    <div style="font-size:11px;">Lapo MFB · Production</div>
+    <div style="font-size:10px; margin-top:4px; color:rgba(255,255,255,0.3);">Last sync: 2 mins ago</div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title" id="topbar-title">Dashboard</div>
+      <div class="topbar-sub" id="topbar-sub">Monday, 3 March 2026 · Lapo Microfinance Bank</div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-secondary" onclick="alert('Sync complete — all data sources up to date')">🔄 Sync Now</button>
+      <button class="btn btn-primary" onclick="showView('transaction', document.querySelector(\'.nav-item:nth-child(5)\'))">+ New Reconciliation</button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- DASHBOARD VIEW -->
+    <div class="view active" id="view-dashboard">
+      <div class="kpi-grid">
+        <div class="kpi-card green">
+          <div class="kpi-icon">⇄</div>
+          <div class="kpi-label">Transactions Today</div>
+          <div class="kpi-value">847</div>
+          <div class="kpi-sub">↑ 12% vs yesterday</div>
+        </div>
+        <div class="kpi-card blue">
+          <div class="kpi-icon">✓</div>
+          <div class="kpi-label">Auto-Match Rate</div>
+          <div class="kpi-value">98.6%</div>
+          <div class="kpi-sub">Target: 95% · Exceeded</div>
+        </div>
+        <div class="kpi-card amber">
+          <div class="kpi-icon">⚠</div>
+          <div class="kpi-label">Open Exceptions</div>
+          <div class="kpi-value">12</div>
+          <div class="kpi-sub">4 high priority</div>
+        </div>
+        <div class="kpi-card red">
+          <div class="kpi-icon">⏱</div>
+          <div class="kpi-label">Avg Resolution Time</div>
+          <div class="kpi-value">4.2m</div>
+          <div class="kpi-sub">↓ 94% vs manual (68m)</div>
+        </div>
+      </div>
+
+      <div class="workflow-grid">
+        <div class="workflow-card" onclick="showView('transaction', document.querySelectorAll('.nav-item')[1])">
+          <span class="workflow-status status-active">● Active</span>
+          <div class="workflow-icon">⇄</div>
+          <div class="workflow-title">Transaction Integrity</div>
+          <div class="workflow-desc">AI-powered matching of core banking transactions against NIBSS/NIPS payment rails with probabilistic scoring.</div>
+          <div class="workflow-stats">
+            <div class="workflow-stat"><strong>523</strong> matched today</div>
+            <div class="workflow-stat"><strong>3</strong> exceptions</div>
+          </div>
+        </div>
+        <div class="workflow-card" onclick="showView('settlement', document.querySelectorAll('.nav-item')[2])">
+          <span class="workflow-status status-active">● Active</span>
+          <div class="workflow-icon">🏦</div>
+          <div class="workflow-title">Settlement Reconciliation</div>
+          <div class="workflow-desc">Decompose NIPS lump-sum batches into constituent transactions and match against settlement records.</div>
+          <div class="workflow-stats">
+            <div class="workflow-stat"><strong>284</strong> settled today</div>
+            <div class="workflow-stat"><strong>2</strong> pending</div>
+          </div>
+        </div>
+        <div class="workflow-card" onclick="showView('account', document.querySelectorAll('.nav-item')[3])">
+          <span class="workflow-status status-pending">● Review</span>
+          <div class="workflow-icon">📊</div>
+          <div class="workflow-title">Account Reconciliation</div>
+          <div class="workflow-desc">GL balance vs bank statement comparison with AI-powered variance detection and root cause analysis.</div>
+          <div class="workflow-stats">
+            <div class="workflow-stat"><strong>40</strong> accounts</div>
+            <div class="workflow-stat"><strong>1</strong> variance</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="table-container">
+          <div class="table-header">
+            <div>
+              <div class="table-title">Recent Reconciliation Jobs</div>
+              <div class="table-sub">Last 5 completed runs</div>
+            </div>
+          </div>
+          <table>
+            <thead><tr><th>Job</th><th>Type</th><th>Transactions</th><th>Match Rate</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td>REC-2026-0847</td><td>Transaction Integrity</td><td>200</td><td>99.5%</td><td><span class="badge badge-matched">✓ Complete</span></td></tr>
+              <tr><td>REC-2026-0846</td><td>Settlement</td><td>156</td><td>100%</td><td><span class="badge badge-matched">✓ Complete</span></td></tr>
+              <tr><td>REC-2026-0845</td><td>Account GL</td><td>40</td><td>97.5%</td><td><span class="badge badge-exception">⚠ Exception</span></td></tr>
+              <tr><td>REC-2026-0844</td><td>Transaction Integrity</td><td>312</td><td>98.1%</td><td><span class="badge badge-matched">✓ Complete</span></td></tr>
+              <tr><td>REC-2026-0843</td><td>Settlement</td><td>89</td><td>100%</td><td><span class="badge badge-matched">✓ Complete</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="activity-feed">
+          <div class="table-title" style="margin-bottom:14px;">Live Activity Feed</div>
+          <div class="activity-item">
+            <div class="activity-dot" style="background:#00A878"></div>
+            <div>
+              <div class="activity-text">AI matched 46/50 transactions — REC-2026-0847</div>
+              <div class="activity-time">2 minutes ago</div>
+            </div>
+          </div>
+          <div class="activity-item">
+            <div class="activity-dot" style="background:#f59e0b"></div>
+            <div>
+              <div class="activity-text">Exception flagged: Amount mismatch ₦50 on TXN-00234</div>
+              <div class="activity-time">5 minutes ago</div>
+            </div>
+          </div>
+          <div class="activity-item">
+            <div class="activity-dot" style="background:#3b82f6"></div>
+            <div>
+              <div class="activity-text">NIPS batch NGN-BATCH-0091 decomposed into 12 transactions</div>
+              <div class="activity-time">18 minutes ago</div>
+            </div>
+          </div>
+          <div class="activity-item">
+            <div class="activity-dot" style="background:#7c3aed"></div>
+            <div>
+              <div class="activity-text">Adaeze escalated exception EXC-0042 to supervisor</div>
+              <div class="activity-time">34 minutes ago</div>
+            </div>
+          </div>
+          <div class="activity-item">
+            <div class="activity-dot" style="background:#00A878"></div>
+            <div>
+              <div class="activity-text">GL variance ₦125,000 detected — Account 0012345678</div>
+              <div class="activity-time">1 hour ago</div>
+            </div>
+          </div>
+          <div class="activity-item">
+            <div class="activity-dot" style="background:#00A878"></div>
+            <div>
+              <div class="activity-text">CBN compliance report generated — 98.6% score</div>
+              <div class="activity-time">2 hours ago</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRANSACTION INTEGRITY VIEW -->
+    <div class="view" id="view-transaction">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Transaction Integrity Reconciliation</div>
+          <div class="section-sub">Match core banking transactions against NIBSS/NIPS payment rails using agentic AI</div>
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn btn-secondary" onclick="loadSampleData()">📂 Load Sample Data</button>
+          <button class="btn btn-primary" id="run-btn" onclick="runAIMatching()" disabled>▶ Run AI Matching Engine</button>
+        </div>
+      </div>
+
+      <div class="upload-grid" id="upload-panels">
+        <div class="upload-panel">
+          <div class="upload-panel-header">
+            <div>
+              <div class="upload-panel-title">Core Banking System (CBS)</div>
+              <div style="font-size:11px;color:#64748b;margin-top:2px;" id="cbs-count">No data loaded</div>
+            </div>
+            <span class="upload-panel-badge" id="cbs-badge" style="background:#f1f5f9;color:#64748b;">Awaiting Data</span>
+          </div>
+          <div class="upload-panel-body">
+            <table id="cbs-table" style="display:none;">
+              <thead><tr><th>Ref</th><th>Date</th><th>Amount (₦)</th><th>Narration</th><th>Type</th></tr></thead>
+              <tbody id="cbs-tbody"></tbody>
+            </table>
+            <div id="cbs-empty" style="padding:40px;text-align:center;color:#94a3b8;font-size:13px;">
+              <div style="font-size:32px;margin-bottom:8px;">📁</div>
+              Click "Load Sample Data" to populate CBS transactions
+            </div>
+          </div>
+        </div>
+        <div class="upload-panel">
+          <div class="upload-panel-header">
+            <div>
+              <div class="upload-panel-title">NIBSS / NIPS Payment Rail</div>
+              <div style="font-size:11px;color:#64748b;margin-top:2px;" id="nips-count">No data loaded</div>
+            </div>
+            <span class="upload-panel-badge" id="nips-badge" style="background:#f1f5f9;color:#64748b;">Awaiting Data</span>
+          </div>
+          <div class="upload-panel-body">
+            <table id="nips-table" style="display:none;">
+              <thead><tr><th>Session ID</th><th>Date</th><th>Amount (₦)</th><th>Beneficiary</th><th>Status</th></tr></thead>
+              <tbody id="nips-tbody"></tbody>
+            </table>
+            <div id="nips-empty" style="padding:40px;text-align:center;color:#94a3b8;font-size:13px;">
+              <div style="font-size:32px;margin-bottom:8px;">📁</div>
+              Click "Load Sample Data" to populate NIPS transactions
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI MATCHING PANEL (hidden initially) -->
+      <div class="ai-panel" id="ai-panel" style="display:none;">
+        <div class="ai-title">
+          <div class="ai-spinner" id="ai-spinner"></div>
+          🤖 Agentic AI Matching Engine
+          <span id="ai-status-text" style="font-size:13px;font-weight:400;color:rgba(255,255,255,0.6);margin-left:8px;"></span>
+        </div>
+        <div class="ai-steps" id="ai-steps">
+          <div class="ai-step" id="step-1"><span class="ai-step-icon">⏳</span> Ingesting and normalising CBS data (50 transactions)</div>
+          <div class="ai-step" id="step-2"><span class="ai-step-icon">⏳</span> Ingesting and normalising NIPS feed (50 transactions)</div>
+          <div class="ai-step" id="step-3"><span class="ai-step-icon">⏳</span> Running probabilistic matching algorithm</div>
+          <div class="ai-step" id="step-4"><span class="ai-step-icon">⏳</span> Applying narration parsing and reference extraction</div>
+          <div class="ai-step" id="step-5"><span class="ai-step-icon">⏳</span> Scoring confidence levels and flagging exceptions</div>
+          <div class="ai-step" id="step-6"><span class="ai-step-icon">⏳</span> Generating audit trail entries</div>
+        </div>
+        <div class="ai-result-grid" id="ai-results" style="display:none;">
+          <div class="ai-result-card green"><div class="ai-result-num">46</div><div class="ai-result-label">Auto-Matched</div></div>
+          <div class="ai-result-card amber"><div class="ai-result-num">3</div><div class="ai-result-label">Exceptions</div></div>
+          <div class="ai-result-card red"><div class="ai-result-num">1</div><div class="ai-result-label">Unmatched</div></div>
+          <div class="ai-result-card blue"><div class="ai-result-num">92%</div><div class="ai-result-label">Avg Confidence</div></div>
+        </div>
+      </div>
+
+      <!-- RESULTS TABLE (hidden initially) -->
+      <div id="results-section" style="display:none;">
+        <div class="table-container">
+          <div class="table-header">
+            <div>
+              <div class="table-title">Matching Results</div>
+              <div class="table-sub">50 transactions processed · 46 auto-matched · 4 require review</div>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-secondary" onclick="showView('exceptions', document.querySelectorAll('.nav-item')[4])">View Exceptions (4)</button>
+              <button class="btn btn-primary" onclick="alert('Audit trail updated. Report ready for CBN submission.')">Export Report</button>
+            </div>
+          </div>
+          <table>
+            <thead><tr><th>CBS Ref</th><th>NIPS Session ID</th><th>Amount (₦)</th><th>Date</th><th>Confidence</th><th>Status</th><th>Action</th></tr></thead>
+            <tbody id="results-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- SETTLEMENT RECONCILIATION VIEW -->
+    <div class="view" id="view-settlement">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Settlement Reconciliation</div>
+          <div class="section-sub">Decompose NIPS lump-sum settlement batches into constituent transactions</div>
+        </div>
+        <button class="btn btn-primary" onclick="runSettlement()">▶ Process Settlement Batch</button>
+      </div>
+
+      <div class="settlement-batch">
+        <div class="batch-header">
+          <div>
+            <div class="batch-title">NIPS Settlement Batch: NGN-BATCH-20260303-0091</div>
+            <div style="font-size:12px;color:#64748b;margin-top:4px;">Received: 03 Mar 2026, 09:15:00 · Interbank Settlement System</div>
+          </div>
+          <div style="text-align:right;">
+            <div class="batch-amount">₦4,782,500.00</div>
+            <div style="font-size:12px;color:#64748b;">Lump-sum settlement</div>
+          </div>
+        </div>
+        <div class="batch-breakdown">
+          <span style="font-weight:600;color:#0A2540;">1 Batch Settlement</span>
+          <span class="decompose-arrow">→</span>
+          <span style="color:#00A878;font-weight:600;">12 Constituent Transactions</span>
+          <span style="margin-left:auto;"><span class="badge badge-matched">✓ All Matched</span></span>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar progress-green" style="width:100%"></div>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <div class="table-title">Decomposed Transactions</div>
+            <div class="table-sub">12 transactions extracted from batch NGN-BATCH-20260303-0091</div>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Transaction Ref</th><th>Originator</th><th>Beneficiary Account</th><th>Amount (₦)</th><th>Narration</th><th>Match Status</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>NIPS-TXN-001</td><td>First Bank</td><td>0012345678</td><td>450,000.00</td><td>Salary payment - March</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>2</td><td>NIPS-TXN-002</td><td>GTBank</td><td>0023456789</td><td>320,500.00</td><td>Vendor payment INV-2026-0341</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>3</td><td>NIPS-TXN-003</td><td>Zenith Bank</td><td>0034567890</td><td>1,200,000.00</td><td>Contract disbursement</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>4</td><td>NIPS-TXN-004</td><td>Access Bank</td><td>0045678901</td><td>87,500.00</td><td>Utility payment - EKEDC</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>5</td><td>NIPS-TXN-005</td><td>UBA</td><td>0056789012</td><td>250,000.00</td><td>Loan repayment - LN-2025-1122</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>6</td><td>NIPS-TXN-006</td><td>Sterling Bank</td><td>0067890123</td><td>175,000.00</td><td>School fees payment</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>7</td><td>NIPS-TXN-007</td><td>Fidelity Bank</td><td>0078901234</td><td>500,000.00</td><td>Business transfer - RCNO 1234567</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>8</td><td>NIPS-TXN-008</td><td>Polaris Bank</td><td>0089012345</td><td>95,000.00</td><td>Insurance premium payment</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>9</td><td>NIPS-TXN-009</td><td>Keystone Bank</td><td>0090123456</td><td>620,000.00</td><td>Rent payment - Q1 2026</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>10</td><td>NIPS-TXN-010</td><td>FCMB</td><td>0001234567</td><td>285,000.00</td><td>Medical equipment purchase</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>11</td><td>NIPS-TXN-011</td><td>Wema Bank</td><td>0012345670</td><td>400,000.00</td><td>Staff welfare disbursement</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+            <tr><td>12</td><td>NIPS-TXN-012</td><td>Heritage Bank</td><td>0023456780</td><td>399,500.00</td><td>Supplier payment - PO-2026-0089</td><td><span class="badge badge-matched">✓ Matched</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px;display:flex;align-items:center;gap:12px;">
+        <span style="font-size:24px;">✅</span>
+        <div>
+          <div style="font-size:14px;font-weight:700;color:#166534;">Settlement Fully Reconciled</div>
+          <div style="font-size:12px;color:#166534;margin-top:4px;">All 12 constituent transactions matched. Total: ₦4,782,500.00. Audit entry logged at 09:17:42.</div>
+        </div>
+        <button class="btn btn-primary" style="margin-left:auto;" onclick="alert('Settlement report exported to PDF. Ready for CBN submission.')">Export Settlement Report</button>
+      </div>
+    </div>
+
+    <!-- ACCOUNT RECONCILIATION VIEW -->
+    <div class="view" id="view-account">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Account Reconciliation — General Ledger</div>
+          <div class="section-sub">Compare GL balances against bank statements and detect variances with AI root cause analysis</div>
+        </div>
+        <button class="btn btn-primary" onclick="alert('GL sync complete. 40 accounts refreshed.')">🔄 Sync GL Data</button>
+      </div>
+
+      <div class="variance-alert">
+        <div class="variance-icon">⚠️</div>
+        <div>
+          <div class="variance-title">Variance Detected — Account 0012345678 (Current Account)</div>
+          <div class="variance-desc">GL Balance: ₦12,450,000.00 · Bank Statement Balance: ₦12,325,000.00 · Variance: ₦125,000.00</div>
+        </div>
+        <button class="btn btn-warning" style="margin-left:auto;" onclick="document.getElementById('ai-root-cause').style.display='flex'">🤖 AI Root Cause Analysis</button>
+      </div>
+
+      <div class="ai-suggestion" id="ai-root-cause" style="display:none;">
+        <span style="font-size:20px;">🤖</span>
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#166534;">AI Root Cause Analysis</div>
+          <div style="font-size:12px;color:#166534;margin-top:6px;line-height:1.6;">
+            <strong>Likely cause:</strong> 2 unposted journal entries totalling ₦125,000.00 identified in CBS pending queue (TXN-00891 and TXN-00892). These transactions were processed on 28 Feb 2026 but GL posting was delayed due to end-of-month batch processing cutoff.<br>
+            <strong>Recommended action:</strong> Post pending journal entries to GL. Variance should resolve automatically on next reconciliation cycle.
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px;">
+            <button class="btn btn-primary" onclick="resolveVariance()">✓ Post Journal Entries</button>
+            <button class="btn btn-secondary" onclick="alert('Escalated to Finance Manager for review.')">Escalate to Finance Manager</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <div class="table-title">Account Reconciliation Summary</div>
+            <div class="table-sub">40 accounts · 39 reconciled · 1 variance pending</div>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>Account</th><th>Account Name</th><th>GL Balance (₦)</th><th>Statement Balance (₦)</th><th>Variance (₦)</th><th>Status</th></tr></thead>
+          <tbody id="gl-tbody">
+            <tr><td>0012345678</td><td>Current Account - Corporate</td><td>12,450,000.00</td><td>12,325,000.00</td><td style="color:#dc2626;font-weight:600;">125,000.00</td><td><span class="badge badge-exception">⚠ Variance</span></td></tr>
+            <tr><td>0023456789</td><td>Savings Account Pool</td><td>45,230,500.00</td><td>45,230,500.00</td><td>0.00</td><td><span class="badge badge-matched">✓ Balanced</span></td></tr>
+            <tr><td>0034567890</td><td>NIPS Settlement Account</td><td>8,920,000.00</td><td>8,920,000.00</td><td>0.00</td><td><span class="badge badge-matched">✓ Balanced</span></td></tr>
+            <tr><td>0045678901</td><td>Loan Disbursement Account</td><td>22,100,000.00</td><td>22,100,000.00</td><td>0.00</td><td><span class="badge badge-matched">✓ Balanced</span></td></tr>
+            <tr><td>0056789012</td><td>Fee Income Account</td><td>3,450,750.00</td><td>3,450,750.00</td><td>0.00</td><td><span class="badge badge-matched">✓ Balanced</span></td></tr>
+            <tr><td>0067890123</td><td>Interbank Clearing Account</td><td>1,200,000.00</td><td>1,200,000.00</td><td>0.00</td><td><span class="badge badge-matched">✓ Balanced</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- EXCEPTION MANAGER VIEW -->
+    <div class="view" id="view-exceptions">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Exception Manager</div>
+          <div class="section-sub">AI-flagged transactions requiring human review and decision</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <span style="font-size:13px;color:#64748b;align-self:center;" id="exception-count">4 open exceptions</span>
+          <button class="btn btn-secondary" onclick="alert('All exceptions exported to CSV.')">Export</button>
+        </div>
+      </div>
+
+      <div class="exception-list" id="exception-list">
+
+        <div class="exception-card high" id="exc-1">
+          <div class="exception-header">
+            <div>
+              <div class="exception-id">EXC-2026-0044 · TXN-00234</div>
+              <div class="exception-type">Amount Mismatch · <span class="badge badge-high">High Priority</span></div>
+            </div>
+            <div class="exception-amount">CBS: ₦50,000 · NIPS: ₦49,950</div>
+          </div>
+          <div class="ai-reasoning">
+            🤖 <span><strong>AI Reasoning:</strong> ₦50 variance likely represents a bank charge or fee deduction applied by the originating bank. Pattern matches 94% of similar fee-deduction exceptions in training data. Reference numbers match exactly: CBS-TXN-00234 = NIPS-SESSION-20260303-00891.</span>
+          </div>
+          <div class="exception-actions">
+            <button class="btn btn-primary" onclick="resolveException('exc-1', 'approved')">✓ Approve Match</button>
+            <button class="btn btn-danger" onclick="resolveException('exc-1', 'rejected')">✗ Reject</button>
+            <button class="btn btn-secondary" onclick="resolveException('exc-1', 'escalated')">↑ Escalate</button>
+            <button class="btn btn-secondary" onclick="alert('Note saved to audit trail.')">📝 Add Note</button>
+          </div>
+        </div>
+
+        <div class="exception-card" id="exc-2">
+          <div class="exception-header">
+            <div>
+              <div class="exception-id">EXC-2026-0043 · TXN-00198</div>
+              <div class="exception-type">Duplicate Reference Detected · <span class="badge badge-medium">Medium Priority</span></div>
+            </div>
+            <div class="exception-amount">₦120,000.00 × 2</div>
+          </div>
+          <div class="ai-reasoning">
+            🤖 <span><strong>AI Reasoning:</strong> Two CBS entries share the same reference number CBS-TXN-00198 with identical amounts (₦120,000) and dates (02 Mar 2026). One entry is likely a duplicate posting. Recommend verifying with CBS system administrator before approving.</span>
+          </div>
+          <div class="exception-actions">
+            <button class="btn btn-primary" onclick="resolveException('exc-2', 'approved')">✓ Confirm Duplicate — Remove</button>
+            <button class="btn btn-danger" onclick="resolveException('exc-2', 'rejected')">✗ Both Valid</button>
+            <button class="btn btn-secondary" onclick="resolveException('exc-2', 'escalated')">↑ Escalate</button>
+          </div>
+        </div>
+
+        <div class="exception-card" id="exc-3">
+          <div class="exception-header">
+            <div>
+              <div class="exception-id">EXC-2026-0042 · NIPS-BATCH-0087</div>
+              <div class="exception-type">Unmatched NIPS Credit — Batch Decomposition Required · <span class="badge badge-medium">Medium Priority</span></div>
+            </div>
+            <div class="exception-amount">₦875,000.00</div>
+          </div>
+          <div class="ai-reasoning">
+            🤖 <span><strong>AI Reasoning:</strong> NIPS credit of ₦875,000 has no matching CBS entry. This appears to be a lump-sum settlement that was not decomposed. Recommend routing to Settlement Reconciliation module for batch decomposition before matching.</span>
+          </div>
+          <div class="exception-actions">
+            <button class="btn btn-primary" onclick="showView('settlement', document.querySelectorAll('.nav-item')[2])">→ Route to Settlement Recon</button>
+            <button class="btn btn-secondary" onclick="resolveException('exc-3', 'escalated')">↑ Escalate</button>
+          </div>
+        </div>
+
+        <div class="exception-card low" id="exc-4">
+          <div class="exception-header">
+            <div>
+              <div class="exception-id">EXC-2026-0041 · TXN-00156</div>
+              <div class="exception-type">Date Offset (+1 Day) · <span class="badge badge-low">Low Priority</span></div>
+            </div>
+            <div class="exception-amount">₦200,000.00</div>
+          </div>
+          <div class="ai-reasoning">
+            🤖 <span><strong>AI Reasoning:</strong> CBS records transaction on 02 Mar 2026; NIPS records on 03 Mar 2026. This is a T+1 settlement pattern consistent with interbank transfer timing. All other fields match exactly. Confidence: 98%. Safe to approve.</span>
+          </div>
+          <div class="exception-actions">
+            <button class="btn btn-primary" onclick="resolveException('exc-4', 'approved')">✓ Approve — T+1 Pattern</button>
+            <button class="btn btn-danger" onclick="resolveException('exc-4', 'rejected')">✗ Reject</button>
+            <button class="btn btn-secondary" onclick="resolveException('exc-4', 'escalated')">↑ Escalate</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- AUDIT TRAIL VIEW -->
+    <div class="view" id="view-audit">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Audit Trail</div>
+          <div class="section-sub">Immutable log of all reconciliation actions, decisions, and system events</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" onclick="alert('Audit trail exported to PDF. CBN-ready format.')">📄 Export CBN Report</button>
+          <button class="btn btn-primary" onclick="alert('Compliance score: 98.6% — Audit Ready. No critical gaps detected.')">🛡 Compliance Check</button>
+        </div>
+      </div>
+
+      <div class="two-col" style="margin-bottom:20px;">
+        <div class="kpi-card green" style="padding:16px;">
+          <div class="kpi-label">Compliance Score</div>
+          <div class="kpi-value" style="font-size:28px;">98.6%</div>
+          <div class="kpi-sub">CBN Audit Ready</div>
+          <div class="progress-container" style="margin-top:10px;">
+            <div class="progress-bar progress-green" style="width:98.6%"></div>
+          </div>
+        </div>
+        <div class="kpi-card blue" style="padding:16px;">
+          <div class="kpi-label">Total Audit Entries Today</div>
+          <div class="kpi-value" style="font-size:28px;">1,247</div>
+          <div class="kpi-sub">All entries immutable and timestamped</div>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <div class="table-title">Audit Log</div>
+            <div class="table-sub">Showing most recent 15 entries · All times WAT (UTC+1)</div>
+          </div>
+        </div>
+        <div style="padding:0 20px;">
+          <div class="audit-entry">
+            <div class="audit-dot green"></div>
+            <div class="audit-content">
+              <div class="audit-action">AI Auto-Match Completed — REC-2026-0847</div>
+              <div class="audit-detail">46 transactions matched automatically · 4 exceptions flagged · Match rate: 92%</div>
+              <div class="audit-meta">User: AI Agent (ReconcileAI) · Job: REC-2026-0847 · Hash: a3f9b2e4c1d8</div>
+            </div>
+            <div class="audit-time">09:32:14</div>
+          </div>
+          <div class="audit-entry">
+            <div class="audit-dot amber"></div>
+            <div class="audit-content">
+              <div class="audit-action">Exception Flagged — EXC-2026-0044</div>
+              <div class="audit-detail">Amount mismatch ₦50 on TXN-00234 · AI confidence: 94% · Routed to exception queue</div>
+              <div class="audit-meta">User: AI Agent · Hash: b7c3d1e5f2a9</div>
+            </div>
+            <div class="audit-time">09:32:15</div>
+          </div>
+          <div class="audit-entry">
+            <div class="audit-dot blue"></div>
+            <div class="audit-content">
+              <div class="audit-action">Settlement Batch Decomposed — NGN-BATCH-20260303-0091</div>
+              <div class="audit-detail">₦4,782,500 batch decomposed into 12 constituent transactions · All matched</div>
+              <div class="audit-meta">User: AI Agent · Hash: c9e4f6a2b8d1</div>
+            </div>
+            <div class="audit-time">09:17:42</div>
+          </div>
+          <div class="audit-entry">
+            <div class="audit-dot purple"></div>
+            <div class="audit-content">
+              <div class="audit-action">Exception Escalated — EXC-2026-0042</div>
+              <div class="audit-detail">Adaeze Okafor escalated to Supervisor Chidi Nwosu · Note: "Requires CBS verification"</div>
+              <div class="audit-meta">User: adaeze.okafor@lapomfb.com · IP: 192.168.1.45 · Hash: d2f8a1c7e3b5</div>
+            </div>
+            <div class="audit-time">08:54:22</div>
+          </div>
+          <div class="audit-entry">
+            <div class="audit-dot green"></div>
+            <div class="audit-content">
+              <div class="audit-action">Exception Approved — EXC-2026-0039</div>
+              <div class="audit-detail">T+1 date offset approved by Chidi Nwosu · TXN-00134 · ₦350,000</div>
+              <div class="audit-meta">User: chidi.nwosu@lapomfb.com · IP: 192.168.1.12 · Hash: e5b9c3d7f1a4</div>
+            </div>
+            <div class="audit-time">08:41:09</div>
+          </div>
+          <div class="audit-entry">
+            <div class="audit-dot green"></div>
+            <div class="audit-content">
+              <div class="audit-action">GL Variance Detected — Account 0012345678</div>
+              <div class="audit-detail">₦125,000 variance identified · AI root cause: 2 unposted journal entries</div>
+              <div class="audit-meta">User: AI Agent · Hash: f1a7e2c4b9d6</div>
+            </div>
+            <div class="audit-time">08:15:33</div>
+          </div>
+          <div class="audit-entry">
+            <div class="audit-dot green"></div>
+            <div class="audit-content">
+              <div class="audit-action">CBN Compliance Report Generated</div>
+              <div class="audit-detail">Score: 98.6% · 847 transactions · 0 unresolved critical exceptions · Report ID: CBN-2026-0303-001</div>
+              <div class="audit-meta">User: System Scheduler · Hash: a8d3f5b2c1e7</div>
+            </div>
+            <div class="audit-time">07:00:00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- REPORTS VIEW -->
+    <div class="view" id="view-reports">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Reports & Compliance</div>
+          <div class="section-sub">Generate CBN-ready reports and compliance documentation</div>
+        </div>
+      </div>
+      <div class="three-col">
+        <div class="workflow-card" onclick="alert('CBN Daily Reconciliation Report generated. Report ID: CBN-2026-0303-001')">
+          <div class="workflow-icon">📄</div>
+          <div class="workflow-title">CBN Daily Reconciliation Report</div>
+          <div class="workflow-desc">One-click generation of CBN-compliant daily reconciliation summary with full audit trail.</div>
+          <button class="btn btn-primary" style="width:100%;margin-top:8px;">Generate Report</button>
+        </div>
+        <div class="workflow-card" onclick="alert('Exception Summary Report exported to Excel.')">
+          <div class="workflow-icon">⚠</div>
+          <div class="workflow-title">Exception Summary Report</div>
+          <div class="workflow-desc">Full breakdown of all exceptions, resolutions, and escalations for the selected period.</div>
+          <button class="btn btn-secondary" style="width:100%;margin-top:8px;">Export to Excel</button>
+        </div>
+        <div class="workflow-card" onclick="alert('Settlement Reconciliation Report exported to PDF.')">
+          <div class="workflow-icon">🏦</div>
+          <div class="workflow-title">Settlement Reconciliation Report</div>
+          <div class="workflow-desc">Detailed settlement batch reconciliation with constituent transaction breakdown.</div>
+          <button class="btn btn-secondary" style="width:100%;margin-top:8px;">Export to PDF</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end content -->
+</div><!-- end main -->
+
+<!-- LOADING OVERLAY -->
+<div class="loading-overlay" id="loading-overlay">
+  <div class="loading-box">
+    <div style="font-size:32px;margin-bottom:12px;">🤖</div>
+    <div class="loading-title">AI Matching Engine Running</div>
+    <div class="loading-sub">Processing 50 transactions across both data sources</div>
+    <div class="loading-steps" id="loading-steps">
+      <div class="loading-step current" id="ls-1">⟳ Ingesting CBS data...</div>
+      <div class="loading-step" id="ls-2">○ Ingesting NIPS feed...</div>
+      <div class="loading-step" id="ls-3">○ Running probabilistic matching...</div>
+      <div class="loading-step" id="ls-4">○ Parsing narrations and references...</div>
+      <div class="loading-step" id="ls-5">○ Scoring confidence levels...</div>
+      <div class="loading-step" id="ls-6">○ Generating audit entries...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== NAVIGATION =====
+function showView(viewName, navEl) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('view-' + viewName).classList.add('active');
+  if (navEl) navEl.classList.add('active');
+
+  const titles = {
+    dashboard: ['Dashboard', 'Monday, 3 March 2026 · Lapo Microfinance Bank'],
+    transaction: ['Transaction Integrity Reconciliation', 'CBS vs NIBSS/NIPS matching · Agentic AI Engine'],
+    settlement: ['Settlement Reconciliation', 'NIPS batch decomposition and matching'],
+    account: ['Account Reconciliation — General Ledger', 'GL balance vs bank statement comparison'],
+    exceptions: ['Exception Manager', '4 open exceptions requiring human review'],
+    audit: ['Audit Trail', 'Immutable log · CBN-ready compliance reporting'],
+    reports: ['Reports & Compliance', 'Generate CBN-ready reports and documentation']
+  };
+  document.getElementById('topbar-title').textContent = titles[viewName][0];
+  document.getElementById('topbar-sub').textContent = titles[viewName][1];
+}
+
+// ===== SAMPLE DATA =====
+const cbsData = [
+  ['CBS-TXN-00234','03/03/2026','50,000.00','Transfer to GTBank - Emeka Obi','Debit'],
+  ['CBS-TXN-00235','03/03/2026','120,000.00','Vendor payment - Kola Supplies','Debit'],
+  ['CBS-TXN-00236','03/03/2026','75,500.00','Salary advance - Ngozi Adeyemi','Debit'],
+  ['CBS-TXN-00237','03/03/2026','200,000.00','Interbank transfer - Zenith','Debit'],
+  ['CBS-TXN-00238','03/03/2026','35,000.00','POS settlement - Terminal 0091','Credit'],
+  ['CBS-TXN-00239','03/03/2026','450,000.00','Loan disbursement - LN-2026-0441','Debit'],
+  ['CBS-TXN-00240','03/03/2026','18,750.00','ATM withdrawal - Card 4521','Debit'],
+  ['CBS-TXN-00241','03/03/2026','320,000.00','USSD transfer - *737*','Debit'],
+  ['CBS-TXN-00242','03/03/2026','88,000.00','Mobile banking - Chidi Nwosu','Credit'],
+  ['CBS-TXN-00243','03/03/2026','1,200,000.00','Corporate payment - Dangote Group','Credit'],
+];
+
+const nipsData = [
+  ['NIPS-20260303-00891','03/03/2026','49,950.00','Emeka Obi / First Bank','Settled'],
+  ['NIPS-20260303-00892','03/03/2026','120,000.00','Kola Supplies Ltd / GTBank','Settled'],
+  ['NIPS-20260303-00893','03/03/2026','75,500.00','Ngozi Adeyemi / Access Bank','Settled'],
+  ['NIPS-20260303-00894','03/03/2026','200,000.00','Lapo MFB / Zenith Bank','Settled'],
+  ['NIPS-20260303-00895','03/03/2026','35,000.00','POS Aggregator / Interswitch','Settled'],
+  ['NIPS-20260303-00896','03/03/2026','450,000.00','Loan Beneficiary / UBA','Settled'],
+  ['NIPS-20260303-00897','03/03/2026','18,750.00','ATM Network / Interswitch','Settled'],
+  ['NIPS-20260303-00898','03/03/2026','320,000.00','Chidi Nwosu / Fidelity Bank','Settled'],
+  ['NIPS-20260303-00899','03/03/2026','88,000.00','Chidi Nwosu / Sterling Bank','Settled'],
+  ['NIPS-20260303-00900','03/03/2026','1,200,000.00','Dangote Group / First Bank','Settled'],
+];
+
+function loadSampleData() {
+  // Populate CBS table
+  const cbsTbody = document.getElementById('cbs-tbody');
+  cbsTbody.innerHTML = '';
+  cbsData.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row[0]}</td><td>${row[1]}</td><td>₦${row[2]}</td><td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${row[3]}</td><td><span class="badge ${row[4]==='Credit'?'badge-matched':'badge-pending'}">${row[4]}</span></td>`;
+    cbsTbody.appendChild(tr);
+  });
+  document.getElementById('cbs-table').style.display = 'table';
+  document.getElementById('cbs-empty').style.display = 'none';
+  document.getElementById('cbs-count').textContent = '10 transactions loaded';
+  document.getElementById('cbs-badge').textContent = '✓ Loaded';
+  document.getElementById('cbs-badge').style.cssText = 'background:#dcfce7;color:#16a34a;';
+
+  // Populate NIPS table
+  const nipsTbody = document.getElementById('nips-tbody');
+  nipsTbody.innerHTML = '';
+  nipsData.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row[0]}</td><td>${row[1]}</td><td>₦${row[2]}</td><td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${row[3]}</td><td><span class="badge badge-matched">${row[4]}</span></td>`;
+    nipsTbody.appendChild(tr);
+  });
+  document.getElementById('nips-table').style.display = 'table';
+  document.getElementById('nips-empty').style.display = 'none';
+  document.getElementById('nips-count').textContent = '10 transactions loaded';
+  document.getElementById('nips-badge').textContent = '✓ Loaded';
+  document.getElementById('nips-badge').style.cssText = 'background:#dcfce7;color:#16a34a;';
+
+  document.getElementById('run-btn').disabled = false;
+}
+
+// ===== AI MATCHING ENGINE =====
+function runAIMatching() {
+  document.getElementById('ai-panel').style.display = 'block';
+  document.getElementById('ai-spinner').classList.add('active');
+  document.getElementById('ai-status-text').textContent = 'Processing...';
+  document.getElementById('run-btn').disabled = true;
+
+  const steps = ['step-1','step-2','step-3','step-4','step-5','step-6'];
+  const icons = ['⟳','⟳','⟳','⟳','⟳','⟳'];
+  let i = 0;
+
+  function activateStep() {
+    if (i > 0) {
+      document.getElementById(steps[i-1]).classList.remove('running');
+      document.getElementById(steps[i-1]).classList.add('done');
+      document.getElementById(steps[i-1]).querySelector('.ai-step-icon').textContent = '✓';
+    }
+    if (i < steps.length) {
+      document.getElementById(steps[i]).classList.add('running');
+      document.getElementById(steps[i]).querySelector('.ai-step-icon').textContent = '⟳';
+      i++;
+      setTimeout(activateStep, 600);
+    } else {
+      // Done
+      document.getElementById('ai-spinner').classList.remove('active');
+      document.getElementById('ai-status-text').textContent = '✓ Complete — 46 matched, 4 exceptions';
+      document.getElementById('ai-results').style.display = 'grid';
+      showResults();
+    }
+  }
+  activateStep();
+}
+
+function showResults() {
+  const results = [
+    ['CBS-TXN-00234','NIPS-20260303-00891','50,000.00','03/03/2026','94%','exception'],
+    ['CBS-TXN-00235','NIPS-20260303-00892','120,000.00','03/03/2026','99%','matched'],
+    ['CBS-TXN-00236','NIPS-20260303-00893','75,500.00','03/03/2026','100%','matched'],
+    ['CBS-TXN-00237','NIPS-20260303-00894','200,000.00','03/03/2026','97%','exception'],
+    ['CBS-TXN-00238','NIPS-20260303-00895','35,000.00','03/03/2026','100%','matched'],
+    ['CBS-TXN-00239','NIPS-20260303-00896','450,000.00','03/03/2026','99%','matched'],
+    ['CBS-TXN-00240','NIPS-20260303-00897','18,750.00','03/03/2026','100%','matched'],
+    ['CBS-TXN-00241','NIPS-20260303-00898','320,000.00','03/03/2026','98%','matched'],
+    ['CBS-TXN-00242','NIPS-20260303-00899','88,000.00','03/03/2026','100%','matched'],
+    ['CBS-TXN-00243','NIPS-20260303-00900','1,200,000.00','03/03/2026','100%','matched'],
+  ];
+
+  const tbody = document.getElementById('results-tbody');
+  tbody.innerHTML = '';
+  results.forEach(row => {
+    const isException = row[5] === 'exception';
+    const scoreClass = parseInt(row[4]) >= 98 ? 'score-high' : parseInt(row[4]) >= 90 ? 'score-med' : 'score-low';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${row[0]}</td>
+      <td>${row[1]}</td>
+      <td>₦${row[2]}</td>
+      <td>${row[3]}</td>
+      <td><span class="match-score ${scoreClass}">${row[4]}</span></td>
+      <td><span class="badge ${isException ? 'badge-exception' : 'badge-matched'}">${isException ? '⚠ Exception' : '✓ Matched'}</span></td>
+      <td>${isException ? '<button class="btn btn-warning" style="padding:4px 10px;font-size:11px;" onclick="showView(\'exceptions\', document.querySelectorAll(\'.nav-item\')[4])">Review</button>' : '<span style="color:#94a3b8;font-size:12px;">Auto-resolved</span>'}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById('results-section').style.display = 'block';
+}
+
+// ===== EXCEPTION RESOLUTION =====
+let resolvedCount = 0;
+function resolveException(id, action) {
+  const card = document.getElementById(id);
+  const actions = {
+    approved: { label: '✓ Approved', cls: 'badge-approved', border: '#00A878' },
+    rejected: { label: '✗ Rejected', cls: 'badge-unmatched', border: '#ef4444' },
+    escalated: { label: '↑ Escalated', cls: 'badge-escalated', border: '#7c3aed' }
+  };
+  const a = actions[action];
+  card.style.opacity = '0.6';
+  card.querySelector('.exception-actions').innerHTML = `<span class="badge ${a.cls}" style="font-size:13px;padding:6px 12px;">${a.label}</span><span style="font-size:12px;color:#94a3b8;margin-left:8px;">Logged to audit trail · ${new Date().toLocaleTimeString()}</span>`;
+  card.style.borderLeftColor = a.border;
+
+  resolvedCount++;
+  const remaining = 4 - resolvedCount;
+  document.getElementById('exception-count').textContent = `${remaining} open exception${remaining !== 1 ? 's' : ''}`;
+  document.getElementById('exception-badge').textContent = remaining;
+  if (remaining === 0) document.getElementById('exception-badge').style.display = 'none';
+}
+
+// ===== SETTLEMENT =====
+function runSettlement() {
+  alert('Settlement batch NGN-BATCH-20260303-0091 processed.\n\n✓ 12 constituent transactions extracted\n✓ All 12 matched to CBS records\n✓ Total: ₦4,782,500.00 reconciled\n✓ Audit entry logged');
+}
+
+// ===== ACCOUNT RECON =====
+function resolveVariance() {
+  const tbody = document.getElementById('gl-tbody');
+  const firstRow = tbody.querySelector('tr:first-child');
+  firstRow.cells[4].textContent = '0.00';
+  firstRow.cells[4].style.color = '';
+  firstRow.cells[5].innerHTML = '<span class="badge badge-matched">✓ Balanced</span>';
+  document.querySelector('.variance-alert').style.display = 'none';
+  document.getElementById('ai-root-cause').style.display = 'none';
+
+  const successDiv = document.createElement('div');
+  successDiv.style.cssText = 'background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px;display:flex;align-items:center;gap:12px;margin-bottom:16px;';
+  successDiv.innerHTML = '<span style="font-size:24px;">✅</span><div><div style="font-size:14px;font-weight:700;color:#166534;">Variance Resolved</div><div style="font-size:12px;color:#166534;margin-top:4px;">Journal entries TXN-00891 and TXN-00892 posted. Account 0012345678 now balanced. Audit entry logged.</div></div>';
+  document.querySelector('#view-account .section-header').after(successDiv);
+}
+</script>
+</body>
+</html>
