@@ -1,0 +1,66 @@
+{
+  "query": "SELECT id, name, code, channelType, isActive FROM channels ORDER BY id;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute SELECT id, name, code, channelType, isActive FROM channels ORDER BY id;",
+  "rows": [
+    {
+      "id": "1",
+      "name": "NIBSS Instant Payment",
+      "code": "nibss",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "2",
+      "name": "POS Terminal",
+      "code": "pos",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "3",
+      "name": "ATM",
+      "code": "atm",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "4",
+      "name": "Mobile Money",
+      "code": "mobile_money",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "5",
+      "name": "Bank Statement",
+      "code": "bank_statement",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "6",
+      "name": "Fintech API",
+      "code": "fintech_api",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "7",
+      "name": "USSD Banking",
+      "code": "ussd",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    },
+    {
+      "id": "8",
+      "name": "NEFT",
+      "code": "neft",
+      "channelType": "bank_transfer",
+      "isActive": "1"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tname\tcode\tchannelType\tisActive\n1\tNIBSS Instant Payment\tnibss\tbank_transfer\t1\n2\tPOS Terminal\tpos\tbank_transfer\t1\n3\tATM\tatm\tbank_transfer\t1\n4\tMobile Money\tmobile_money\tbank_transfer\t1\n5\tBank Statement\tbank_statement\tbank_transfer\t1\n6\tFintech API\tfintech_api\tbank_transfer\t1\n7\tUSSD Banking\tussd\tbank_transfer\t1\n8\tNEFT\tneft\tbank_transfer\t1\n",
+  "stderr": "",
+  "execution_time_ms": 173
+}

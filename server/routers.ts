@@ -191,6 +191,43 @@ export const appRouter = router({
       return db.getChannels();
     }),
 
+    create: adminProcedure
+      .input(z.object({
+        name: z.string().min(1).max(100),
+        code: z.string().min(1).max(50),
+        description: z.string().max(500).optional(),
+        channelType: z.enum([
+          "bank_core", "nibss", "pos", "atm", "mobile_money", "bank_transfer",
+          "agent_banking", "fintech_api", "card_payments", "rtgs", "swift",
+          "mobile_banking", "ussd", "qr_payment",
+        ]).default("bank_transfer"),
+        country: z.string().length(3).default("NGA"),
+        defaultCurrency: z.string().length(3).default("NGN"),
+        matchingConfig: z.record(z.string(), z.any()).optional(),
+        fileFormat: z.record(z.string(), z.any()).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        // Check for duplicate code
+        const existing = await db.getChannelByCode(input.code);
+        if (existing) {
+          throw new TRPCError({ code: "CONFLICT", message: `Channel with code '${input.code}' already exists` });
+        }
+        await db.createChannel({
+          name: input.name,
+          code: input.code,
+          description: input.description,
+          channelType: input.channelType,
+          country: input.country,
+          defaultCurrency: input.defaultCurrency,
+          matchingConfig: input.matchingConfig ? JSON.stringify(input.matchingConfig) : undefined,
+          fileFormat: input.fileFormat ? JSON.stringify(input.fileFormat) : undefined,
+          isActive: true,
+        });
+        await logAudit(ctx.user.id, "create_channel", "channel", 0, input, ip, ua);
+        return { success: true };
+      }),
+
     update: adminProcedure
       .input(z.object({
         id: z.number().int().positive(),

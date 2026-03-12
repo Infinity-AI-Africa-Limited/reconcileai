@@ -1,0 +1,9 @@
+{
+  "query": "INSERT INTO channels (name, code, description, channelType, country, defaultCurrency, isActive, createdAt, updatedAt)\nVALUES (\n  'Core Banking System',\n  'core_banking',\n  'The authoritative core banking system (CBS) — the primary transaction source for all channel reconciliations. Holds loan account transactions, savings transactions, GL ledger postings, and product portfolio entries.',\n  'bank_core',\n  'NGA',\n  'NGN',\n  1,\n  NOW(),\n  NOW()\n);",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute INSERT INTO channels (name, code, description, channelType, country, defaultCurrency, isActive, createdAt, updatedAt)\nVALUES (\n  'Core Banking System',\n  'core_banking',\n  'The authoritative core banking system (CBS) — the primary transaction source for all channel reconciliations. Holds loan account transactions, savings transactions, GL ledger postings, and product portfolio entries.',\n  'bank_core',\n  'NGA',\n  'NGN',\n  1,\n  NOW(),\n  NOW()\n);",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 83
+}

@@ -68,7 +68,22 @@ const CHANNEL_PREFIXES: Record<string, string> = {
   agent_banking: "AGT",
   fintech_api: "FIN",
   card_payments: "CRD",
+  core_banking: "CBS",
+  neft: "NFT",
+  ussd: "USD",
+  bank_statement: "BST",
 };
+
+// Core banking specific transaction descriptions (loan, ledger, savings context)
+const CBS_TRANSACTION_DESCRIPTIONS = [
+  "Loan disbursement", "Loan repayment", "Interest accrual", "Principal repayment",
+  "Savings deposit", "Savings withdrawal", "Account maintenance fee", "Ledger posting",
+  "Product portfolio entry", "Loan account credit", "Loan account debit",
+  "Interest income posting", "Fee income posting", "Reversal posting",
+  "Contra entry", "GL transfer", "Product balance adjustment", "Accrued interest settlement",
+  "Penalty charge", "Insurance premium deduction", "Collateral release",
+  "Loan origination fee", "Processing fee", "Early repayment", "Partial repayment",
+];
 
 // ─── Utility Functions ──────────────────────────────────────────────
 
@@ -164,13 +179,20 @@ export function generateSampleData(config: SampleDataConfig): {
   let srcIdx = 0;
   let tgtIdx = 0;
 
+  // Helper: pick description based on channel context
+  const isCbsSource = config.sourceChannel === "core_banking";
+  const isCbsTarget = config.targetChannel === "core_banking";
+  const pickSrcDesc = () => isCbsSource ? randomChoice(CBS_TRANSACTION_DESCRIPTIONS) : randomChoice(TRANSACTION_DESCRIPTIONS);
+  const pickTgtDesc = () => isCbsTarget ? randomChoice(CBS_TRANSACTION_DESCRIPTIONS) : randomChoice(TRANSACTION_DESCRIPTIONS);
+
   // 1. Generate exact matches
   for (let i = 0; i < exactMatchCount; i++) {
     const date = randomDate(startDate, endDate);
     const amount = randomFloat(500, 5000000, 2);
     const counterparty = randomChoice(NIGERIAN_NAMES);
     const bank = randomChoice(NIGERIAN_BANKS);
-    const desc = randomChoice(TRANSACTION_DESCRIPTIONS);
+    const srcDesc = pickSrcDesc();
+    const tgtDesc = isCbsSource || isCbsTarget ? srcDesc : randomChoice(TRANSACTION_DESCRIPTIONS);
     const ref = generateRef(srcPrefix, srcIdx);
     const debitCredit = Math.random() > 0.5 ? "credit" : "debit";
 
@@ -181,7 +203,7 @@ export function generateSampleData(config: SampleDataConfig): {
       amount: amount.toFixed(2),
       type: debitCredit,
       currency: "NGN",
-      description: `${desc} - ${bank}`,
+      description: isCbsSource ? `${srcDesc} | Acct:${Math.floor(Math.random()*9000000+1000000)}` : `${srcDesc} - ${bank}`,
       counterparty,
       value_date: formatDate(addDays(date, randomInt(0, 1))),
     });
@@ -193,7 +215,7 @@ export function generateSampleData(config: SampleDataConfig): {
       amount: amount.toFixed(2),
       type: debitCredit === "credit" ? "debit" : "credit",
       currency: "NGN",
-      description: `${desc} - ${bank}`,
+      description: isCbsTarget ? `${tgtDesc} | Acct:${Math.floor(Math.random()*9000000+1000000)}` : `${tgtDesc} - ${bank}`,
       counterparty,
       value_date: formatDate(addDays(date, randomInt(0, 1))),
     });

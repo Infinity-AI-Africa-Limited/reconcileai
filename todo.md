@@ -772,3 +772,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add demo route to reconcileai webdev project (served at /demo.html)
 - [x] Verified 200 OK response at /demo.html
 - [ ] Save checkpoint and publish
+
+## Feature: Core Banking Channel
+- [x] Add Core Banking channel to database (code: core_banking, type: bank_core)
+- [x] Add core_banking to CHANNEL_PREFIXES in sampleDataGenerator.ts with CBS prefix
+- [x] Add Core Banking to CHANNELS list in SampleData.tsx UI
+- [x] Add core_banking to sampleDataGenerator channel-specific description logic
+- [x] Add channels.create procedure to routers.ts for admin channel creation
+- [x] Seed Core Banking channel via SQL

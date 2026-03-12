@@ -34,14 +34,18 @@ import { toast } from "sonner";
 import { useLocation } from "wouter";
 
 const CHANNELS = [
+  { code: "core_banking", name: "Core Banking System (CBS)" },
   { code: "nibss", name: "NIBSS Instant Payment (NIP)" },
   { code: "pos", name: "POS Terminal" },
   { code: "mobile_money", name: "Mobile Money" },
   { code: "atm", name: "ATM" },
   { code: "bank_transfer", name: "Bank Transfer" },
+  { code: "bank_statement", name: "Bank Statement" },
   { code: "agent_banking", name: "Agent Banking" },
   { code: "fintech_api", name: "Fintech API" },
   { code: "card_payments", name: "Card Payments" },
+  { code: "ussd", name: "USSD Banking" },
+  { code: "neft", name: "NEFT" },
 ];
 
 export default function SampleDataPage() {
@@ -332,6 +336,11 @@ export default function SampleDataPage() {
               </div>
 
               {/* Channel Selection */}
+              {(sourceChannel === "core_banking" || targetChannel === "core_banking") && (
+                <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                  <strong>Core Banking System (CBS)</strong> is the authoritative transaction source. When selected, generated transactions will use CBS reference prefixes (CBS/...) and loan/ledger-specific descriptions, mirroring real core banking postings.
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">Source Channel</Label>
