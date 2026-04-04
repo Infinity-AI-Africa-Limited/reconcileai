@@ -28,6 +28,7 @@ import CfoDashboard from "./pages/CfoDashboard";
 import OperationsDashboard from "./pages/OperationsDashboard";
 import AuditorDashboard from "./pages/AuditorDashboard";
 import ModuleConfiguration from "./pages/ModuleConfiguration";
+import SuperAgent from "./pages/SuperAgent";
 import BanksLanding from "./pages/BanksLanding";
 import FinTechsLanding from "./pages/FinTechsLanding";
 import PaymentProcessorsLanding from "./pages/PaymentProcessorsLanding";
@@ -73,6 +74,7 @@ function Router() {
       <Route path="/anomalies">{() => <DashboardPage component={AnomalyDetection} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
       <Route path="/modules">{() => <DashboardPage component={ModuleConfiguration} />}</Route>
+      <Route path="/super-agent">{() => <DashboardPage component={SuperAgent} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

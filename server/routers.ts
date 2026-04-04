@@ -38,6 +38,7 @@ import {
 } from "./sftpService";
 import { startSLAMonitoring } from "./slaMonitoringService";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
+import { invokeLLM } from "./_core/llm";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -1944,6 +1945,157 @@ export const appRouter = router({
           newRole: input.role,
         }, ip, ua);
         return { success: true };
+      }),
+  }),
+
+  // ─── Super Agent ─────────────────────────────────────────────────────
+
+  superAgent: router({
+    query: protectedProcedure
+      .input(z.object({
+        query: z.string().min(1).max(2000),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = ctx.user.id;
+        const orgId = ctx.user.organizationId;
+
+        // Fetch recent exceptions and stats for context
+        const isAdmin = ctx.user.role === 'admin';
+        const [recentExceptions, recentJobsRaw] = await Promise.all([
+          db.getExceptions({ status: 'open', limit: 20, offset: 0 }),
+          db.getReconciliationJobs(userId, isAdmin),
+        ]);
+
+        const exceptionSummary = recentExceptions.data.slice(0, 5).map((e: any) => ({
+          id: e.id,
+          category: e.category,
+          severity: e.severity,
+          description: e.description?.substring(0, 150),
+          amount: e.amount,
+          currency: e.currency,
+        }));
+
+        const jobStats = recentJobsRaw.slice(0, 3).map((j: any) => ({
+          id: j.id,
+          status: j.status,
+          matchRate: j.matchRate,
+          exceptionCount: j.exceptionCount,
+          matchedCount: j.matchedCount,
+          createdAt: j.createdAt,
+        }));
+
+        const systemPrompt = `You are the ReconcileAI Super Agent — an autonomous financial reconciliation intelligence for African FMCG and corporate B2B payment environments.
+
+Your role is to:
+1. Diagnose the root cause of reconciliation exceptions with precision
+2. Identify patterns across multiple exceptions
+3. Propose specific, actionable resolution drafts for human approval
+4. Never commit any action without explicit human sign-off (HitL principle)
+
+Current system context:
+- Open exceptions: ${recentExceptions.total} total, showing top ${exceptionSummary.length}
+- Recent jobs: ${JSON.stringify(jobStats, null, 2)}
+- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}
+
+When proposing an action draft, structure your response as JSON with this exact format:
+{
+  "diagnosis": "Your detailed diagnosis text here",
+  "hasActionDraft": true,
+  "actionDraft": {
+    "type": "journal_entry|vendor_email|credit_note_request|payment_allocation|escalation",
+    "title": "Brief title",
+    "description": "What this action does",
+    "details": { "key": "value pairs of action specifics" },
+    "riskLevel": "low|medium|high"
+  }
+}
+
+If no action draft is needed, respond as JSON:
+{
+  "diagnosis": "Your analysis text here",
+  "hasActionDraft": false
+}
+
+Always be specific, reference actual exception IDs and amounts where available, and explain your reasoning in plain language suitable for a finance team member.`;
+
+        const response = await invokeLLM({
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: input.query },
+          ],
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'agent_response',
+              strict: true,
+              schema: {
+                type: 'object',
+                properties: {
+                  diagnosis: { type: 'string' },
+                  hasActionDraft: { type: 'boolean' },
+                  actionDraft: {
+                    type: 'object',
+                    properties: {
+                      type: { type: 'string', enum: ['journal_entry', 'vendor_email', 'credit_note_request', 'payment_allocation', 'escalation'] },
+                      title: { type: 'string' },
+                      description: { type: 'string' },
+                      details: { type: 'object', additionalProperties: { type: 'string' } },
+                      riskLevel: { type: 'string', enum: ['low', 'medium', 'high'] },
+                    },
+                    required: ['type', 'title', 'description', 'details', 'riskLevel'],
+                    additionalProperties: false,
+                  },
+                },
+                required: ['diagnosis', 'hasActionDraft'],
+                additionalProperties: false,
+              },
+            },
+          },
+        });
+
+        const content = response.choices?.[0]?.message?.content;
+        let parsed: any = { diagnosis: 'Analysis complete.', hasActionDraft: false };
+        try {
+          parsed = JSON.parse(typeof content === 'string' ? content : JSON.stringify(content));
+        } catch {
+          parsed = { diagnosis: typeof content === 'string' ? content : 'Analysis complete.', hasActionDraft: false };
+        }
+
+        // Log to audit trail
+        await logAudit(userId, 'super_agent_query', 'super_agent', undefined, {
+          query: input.query.substring(0, 200),
+          hasActionDraft: parsed.hasActionDraft,
+        });
+
+        return {
+          diagnosis: parsed.diagnosis,
+          actionDraft: parsed.hasActionDraft ? parsed.actionDraft : null,
+        };
+      }),
+
+    approveAction: protectedProcedure
+      .input(z.object({
+        actionType: z.enum(['journal_entry', 'vendor_email', 'credit_note_request', 'payment_allocation', 'escalation']),
+        details: z.record(z.string(), z.string()),
+        approved: z.boolean(),
+        modificationNotes: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = ctx.user.id;
+
+        // Log the approval decision to audit trail
+        await logAudit(userId, input.approved ? 'super_agent_action_approved' : 'super_agent_action_rejected', 'super_agent', undefined, {
+          actionType: input.actionType,
+          actionDetails: input.details,
+          modificationNotes: input.modificationNotes,
+        });
+
+        return {
+          success: true,
+          message: input.approved
+            ? `Action approved and logged. ${input.actionType.replace(/_/g, ' ')} has been committed to the audit trail.`
+            : 'Action rejected. Exception returned to review queue.',
+        };
       }),
   }),
 
