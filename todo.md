@@ -844,3 +844,44 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add Demo Mode toggle button to DashboardLayout sidebar footer (amber when active)
 - [x] Add amber demo banner in main content area when Demo Mode is active
 - [x] All demo data tagged for clean wipe on deactivation
+
+## Feature Batch: Demo & Sales Enhancements
+
+### Memory Layer Demo Seed
+- [ ] Seed 12 realistic past resolution records into agent_memory table via demoSeedEngine
+- [ ] Add "Load Demo Memory" button to Memory Layer tab in Super Agent workspace
+- [ ] Memory records cover: partial payment, FX fee, promotional deduction, split payment, timing difference, duplicate, name variant, contra entry
+
+### Deep Diagnose in Review Queue
+- [ ] Add "Deep Diagnose" button to each exception card in ReviewQueue.tsx
+- [ ] Call superAgent.diagnose tRPC procedure on click
+- [ ] Open diagnosis result in a right-side panel (sheet/drawer) with: root cause, confidence, recommended action, similar past cases
+- [ ] Show loading state while diagnosis runs
+
+### Distributor Registry Seed (15 Nigerian Distributors)
+- [ ] Seed 15 realistic Nigerian FMCG distributors with name variants, bank accounts, zones, and status in demoSeedEngine
+- [ ] Pre-populate registry immediately on Demo Mode activation (not separate step)
+
+### Request Demo Form on Corporate B2B Landing
+- [ ] Add "Request Demo" modal/form to CorporateB2BLanding.tsx
+- [ ] Fields: company name, contact email, estimated monthly payment volume, message
+- [ ] Submit via tRPC mutation that stores lead and notifies owner via notifyOwner
+- [ ] Show success confirmation after submission
+
+### Pilot Readiness Scorecard → CSV Import
+- [ ] Add "Import Distributors from CSV" button to Pilot Readiness Scorecard widget
+- [ ] Button visible when Distributor Name Consistency score < 75%
+- [ ] Opens file picker for CSV upload; parses and bulk-inserts into distributors table
+- [ ] Show import summary (rows imported, errors)
+
+### Demo Mode Auto-Run Reconciliation
+- [ ] After seedDemoData completes, automatically trigger a reconciliation job
+- [ ] Return jobId and matchRate in activate mutation response
+- [ ] Show match rate in Demo Mode activated toast notification
+
+### Share Demo Link (Guest Token)
+- [ ] Add guest_tokens table to schema (token, createdBy, expiresAt, viewCount, isActive)
+- [ ] Add demo.createGuestLink tRPC procedure (generates 32-char token, 7-day expiry)
+- [ ] Add "Share Demo Link" button to Demo Mode active state in sidebar
+- [ ] Guest token route: /demo/:token — read-only dashboard view with demo data
+- [ ] Add demo.validateGuestToken public procedure for token verification

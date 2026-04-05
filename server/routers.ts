@@ -2495,15 +2495,106 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-    activate: protectedProcedure
+     activate: protectedProcedure
       .mutation(async ({ ctx }) => {
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
-        return { success: true, ...result };
+        // Return match rate from the seeded reconciliation job
+        const drizzle = await getDb();
+        let matchRate = "90.00";
+        if (drizzle) {
+          const { reconciliationJobs: rj } = await import("../drizzle/schema");
+          const jobs = await drizzle.select().from(rj).where(eq(rj.id, result.jobId));
+          if (jobs[0]) matchRate = jobs[0].matchRate ?? "90.00";
+        }
+        return { success: true, matchRate, ...result };
       }),
-
     deactivate: protectedProcedure
       .mutation(async ({ ctx }) => {
         await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        return { success: true };
+      }),
+    createGuestLink: protectedProcedure
+      .input(z.object({ label: z.string().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { guestTokens } = await import("../drizzle/schema");
+        const crypto = await import("crypto");
+        const token = crypto.randomBytes(24).toString("hex"); // 48-char hex token
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+        await drizzle.insert(guestTokens).values({
+          token,
+          createdBy: ctx.user.id,
+          organizationId: ctx.user.organizationId ?? null,
+          label: input.label ?? "Demo Link",
+          expiresAt,
+          viewCount: 0,
+          isActive: true,
+        });
+        const origin = process.env.VITE_APP_ID ? `https://${process.env.VITE_APP_ID}.manus.space` : "";
+        return { success: true, token, expiresAt, url: `${origin}/demo/${token}` };
+      }),
+    validateGuestToken: publicProcedure
+      .input(z.object({ token: z.string() }))
+      .query(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) return { valid: false, reason: "Database unavailable" };
+        const { guestTokens } = await import("../drizzle/schema");
+        const rows = await drizzle.select().from(guestTokens).where(eq(guestTokens.token, input.token)).limit(1);
+        if (!rows[0]) return { valid: false, reason: "Token not found" };
+        const gt = rows[0];
+        if (!gt.isActive) return { valid: false, reason: "Token has been revoked" };
+        if (new Date(gt.expiresAt) < new Date()) return { valid: false, reason: "Token has expired" };
+        // Increment view count
+        await drizzle.update(guestTokens).set({ viewCount: (gt.viewCount ?? 0) + 1 }).where(eq(guestTokens.token, input.token));
+        return { valid: true, label: gt.label, expiresAt: gt.expiresAt, organizationId: gt.organizationId };
+      }),
+    listGuestLinks: protectedProcedure
+      .query(async ({ ctx }) => {
+        const drizzle = await getDb();
+        if (!drizzle) return [];
+        const { guestTokens } = await import("../drizzle/schema");
+        return drizzle.select().from(guestTokens).where(eq(guestTokens.createdBy, ctx.user.id));
+      }),
+    revokeGuestLink: protectedProcedure
+      .input(z.object({ token: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { guestTokens } = await import("../drizzle/schema");
+        await drizzle.update(guestTokens).set({ isActive: false }).where(and(eq(guestTokens.token, input.token), eq(guestTokens.createdBy, ctx.user.id)));
+        return { success: true };
+      }),
+  }),
+  leads: router({
+    requestDemo: publicProcedure
+      .input(z.object({
+        companyName: z.string().min(2),
+        contactEmail: z.string().email(),
+        monthlyPaymentVolume: z.string().optional(),
+        message: z.string().optional(),
+        source: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { demoRequests } = await import("../drizzle/schema");
+        await drizzle.insert(demoRequests).values({
+          companyName: input.companyName,
+          contactEmail: input.contactEmail,
+          monthlyPaymentVolume: input.monthlyPaymentVolume ?? null,
+          message: input.message ?? null,
+          source: input.source ?? "corporate_b2b_landing",
+          status: "new",
+        });
+        // Notify owner
+        try {
+          const { notifyOwner } = await import("./_core/notification");
+          await notifyOwner({
+            title: `New Demo Request: ${input.companyName}`,
+            content: `Company: ${input.companyName}\nEmail: ${input.contactEmail}\nMonthly Volume: ${input.monthlyPaymentVolume ?? "Not specified"}\nMessage: ${input.message ?? "None"}\nSource: ${input.source ?? "corporate_b2b_landing"}`,
+          });
+        } catch (_) { /* non-fatal */ }
         return { success: true };
       }),
   }),

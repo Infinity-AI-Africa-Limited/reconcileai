@@ -1,12 +1,18 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   ArrowRight, CheckCircle2, TrendingUp, Clock, Building2, Layers,
   AlertTriangle, ShieldCheck, Zap, Users, BarChart3, GitMerge,
-  ChevronRight, Star,
+  ChevronRight, Star, Send, Loader2,
 } from "lucide-react";
 import { Link } from "wouter";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
 
 const PAIN_POINTS = [
   {
@@ -109,6 +115,32 @@ const TESTIMONIAL = {
 };
 
 export default function CorporateB2BLanding() {
+  const [showDemoModal, setShowDemoModal] = useState(false);
+  const [demoForm, setDemoForm] = useState({ companyName: "", email: "", paymentVolume: "", name: "" });
+  const [submitted, setSubmitted] = useState(false);
+  const requestDemo = trpc.leads.requestDemo.useMutation({
+    onSuccess: () => {
+      setSubmitted(true);
+      toast.success("Demo request received!", { description: "Our team will contact you within 24 hours." });
+    },
+    onError: (err: { message: string }) => toast.error("Submission failed", { description: err.message }),
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!demoForm.companyName || !demoForm.email) {
+      toast.error("Please fill in all required fields");
+      return;
+    }
+    requestDemo.mutate({
+      companyName: demoForm.companyName,
+      contactEmail: demoForm.email,
+      monthlyPaymentVolume: demoForm.paymentVolume,
+      message: demoForm.name ? `Contact: ${demoForm.name}` : undefined,
+      source: "corporate_b2b_landing",
+    });
+  };
+
   return (
     <div className="min-h-screen bg-white">
       {/* Navigation */}
@@ -389,11 +421,13 @@ export default function CorporateB2BLanding() {
             We run a no-risk pilot on your actual data. If ReconcileAI does not achieve a 90% auto-match rate within 4 weeks, you pay nothing and walk away with a free data quality report.
           </p>
           <div className="flex flex-wrap justify-center gap-4">
-            <Link href="/dashboard">
-              <Button size="lg" className="bg-white text-[#F47458] hover:bg-gray-100 font-semibold">
-                Start Your Pilot <ArrowRight className="ml-2 h-5 w-5" />
-              </Button>
-            </Link>
+            <Button
+              size="lg"
+              className="bg-white text-[#F47458] hover:bg-gray-100 font-semibold"
+              onClick={() => { setShowDemoModal(true); setSubmitted(false); }}
+            >
+              Request a Demo <ArrowRight className="ml-2 h-5 w-5" />
+            </Button>
             <Link href="/super-agent">
               <Button size="lg" variant="outline" className="bg-white/20 text-white border-white/40 hover:bg-white/30">
                 See the Super Agent
@@ -410,6 +444,82 @@ export default function CorporateB2BLanding() {
           </div>
         </div>
       </section>
+
+      {/* Request Demo Modal */}
+      <Dialog open={showDemoModal} onOpenChange={setShowDemoModal}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold text-[#1B365D]">Request a Demo</DialogTitle>
+            <DialogDescription>
+              Tell us about your company and we will set up a personalised demo within 24 hours.
+            </DialogDescription>
+          </DialogHeader>
+          {submitted ? (
+            <div className="py-8 flex flex-col items-center gap-4 text-center">
+              <div className="h-14 w-14 rounded-full bg-green-100 flex items-center justify-center">
+                <CheckCircle2 className="h-7 w-7 text-green-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-foreground text-lg">Request Received!</p>
+                <p className="text-sm text-muted-foreground mt-1">Our team will contact you at <strong>{demoForm.email}</strong> within 24 hours.</p>
+              </div>
+              <Button className="mt-2" onClick={() => setShowDemoModal(false)}>Close</Button>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4 pt-2">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-foreground">Your Name</label>
+                <Input
+                  placeholder="e.g. Adaeze Okafor"
+                  value={demoForm.name}
+                  onChange={(e) => setDemoForm(f => ({ ...f, name: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-foreground">Company Name <span className="text-red-500">*</span></label>
+                <Input
+                  placeholder="e.g. BrightGoods Nigeria Ltd"
+                  value={demoForm.companyName}
+                  onChange={(e) => setDemoForm(f => ({ ...f, companyName: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-foreground">Work Email <span className="text-red-500">*</span></label>
+                <Input
+                  type="email"
+                  placeholder="e.g. adaeze@brightgoods.com"
+                  value={demoForm.email}
+                  onChange={(e) => setDemoForm(f => ({ ...f, email: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-foreground">Estimated Monthly Payment Volume</label>
+                <Select onValueChange={(v) => setDemoForm(f => ({ ...f, paymentVolume: v }))}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a range" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Under ₦50M/month">Under ₦50M/month</SelectItem>
+                    <SelectItem value="₦50M–₦200M/month">₦50M–₦200M/month</SelectItem>
+                    <SelectItem value="₦200M–₦1B/month">₦200M–₦1B/month</SelectItem>
+                    <SelectItem value="Over ₦1B/month">Over ₦1B/month</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                type="submit"
+                className="w-full bg-[#F47458] hover:bg-[#e0634a] text-white font-semibold"
+                disabled={requestDemo.isPending}
+              >
+                {requestDemo.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Send className="h-4 w-4 mr-2" />}
+                Send Request
+              </Button>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Footer */}
       <footer className="bg-[#1B365D] text-white/60 py-8">

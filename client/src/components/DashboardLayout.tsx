@@ -54,7 +54,7 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X } from "lucide-react";
+import { FlaskConical, X, Share2, Check } from "lucide-react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -220,19 +220,37 @@ function DashboardLayoutContent({
 
   // Demo Mode
   const { data: demoStatus, refetch: refetchDemoStatus } = trpc.demo.status.useQuery(undefined, { enabled: !!user });
+  const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);
+  const [guestLinkCopied, setGuestLinkCopied] = useState(false);
   const activateDemo = trpc.demo.activate.useMutation({
-    onSuccess: () => {
-      toast.success("Demo Mode activated", { description: "BrightGoods FMCG demo data loaded — 60 transactions, 6 exceptions, 10 memory records." });
+    onSuccess: (data) => {
+      const mr = (data as { matchRate?: string })?.matchRate ?? "90.00";
+      setActivatedMatchRate(mr);
+      toast.success("Demo Mode activated", { description: `BrightGoods FMCG data loaded — 60 txns, 6 exceptions, 15 distributors, 12 memory records. Match rate: ${mr}%` });
       refetchDemoStatus();
     },
     onError: (err) => toast.error("Demo activation failed", { description: err.message }),
   });
   const deactivateDemo = trpc.demo.deactivate.useMutation({
     onSuccess: () => {
+      setActivatedMatchRate(null);
       toast.success("Demo Mode deactivated", { description: "All demo data has been removed." });
       refetchDemoStatus();
     },
     onError: (err) => toast.error("Demo deactivation failed", { description: err.message }),
+  });
+  const createGuestLink = trpc.demo.createGuestLink.useMutation({
+    onSuccess: (data) => {
+      const url = (data as { url?: string })?.url ?? "";
+      if (url) {
+        navigator.clipboard.writeText(url).then(() => {
+          setGuestLinkCopied(true);
+          setTimeout(() => setGuestLinkCopied(false), 3000);
+          toast.success("Demo link copied!", { description: `Valid for 7 days. Share with prospects.` });
+        });
+      }
+    },
+    onError: (err) => toast.error("Failed to create demo link", { description: err.message }),
   });
   const isDemoActive = demoStatus?.active ?? false;
   const isTogglingDemo = activateDemo.isPending || deactivateDemo.isPending;
@@ -375,10 +393,21 @@ function DashboardLayoutContent({
                 )}
               </button>
               {isDemoActive && demoStatus && (
-                <div className="mt-1 px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/20">
+                <div className="mt-1 px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/20 space-y-1.5">
                   <p className="text-[10px] text-amber-600/80 leading-relaxed">
                     {demoStatus.transactionCount} txns · {demoStatus.exceptionCount} exceptions · {demoStatus.distributorCount} distributors · {demoStatus.memoryCount} memories
                   </p>
+                  {activatedMatchRate && (
+                    <p className="text-[10px] font-semibold text-amber-700">Auto-match rate: {activatedMatchRate}%</p>
+                  )}
+                  <button
+                    onClick={() => createGuestLink.mutate({ label: "BrightGoods Demo" })}
+                    disabled={createGuestLink.isPending}
+                    className="w-full flex items-center gap-1.5 text-[10px] text-amber-700 hover:text-amber-900 font-medium transition-colors disabled:opacity-50"
+                  >
+                    {guestLinkCopied ? <Check className="h-3 w-3" /> : <Share2 className="h-3 w-3" />}
+                    {guestLinkCopied ? "Link copied to clipboard!" : createGuestLink.isPending ? "Generating link..." : "Share demo link"}
+                  </button>
                 </div>
               )}
             </div>

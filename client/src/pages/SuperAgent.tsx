@@ -650,6 +650,14 @@ function MemoryLayerPanel() {
     { embeddingText: searchText || "exception unmatched distributor payment", topK: 10 },
     { enabled: true }
   );
+  const { data: demoStatus } = trpc.demo.status.useQuery();
+  const activateDemo = trpc.demo.activate.useMutation({
+    onSuccess: () => {
+      toast.success("Demo memory loaded", { description: "12 realistic FMCG resolution records added to the memory layer." });
+      refetch();
+    },
+    onError: (err) => toast.error("Failed to load demo memory", { description: err.message }),
+  });
 
   const outcomeColor = (o: string) => ({
     resolved: "bg-green-100 text-green-700 border-green-200",
@@ -664,9 +672,23 @@ function MemoryLayerPanel() {
           <h2 className="text-base font-semibold">Semantic Memory Layer</h2>
           <p className="text-xs text-muted-foreground mt-0.5">The agent's institutional knowledge — past exception resolutions stored as searchable reasoning records.</p>
         </div>
-        <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={() => refetch()}>
-          <RefreshCw className="h-3 w-3" /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          {!demoStatus?.active && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50"
+              onClick={() => activateDemo.mutate()}
+              disabled={activateDemo.isPending}
+            >
+              {activateDemo.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Database className="h-3 w-3" />}
+              Load Demo Memory
+            </Button>
+          )}
+          <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={() => refetch()}>
+            <RefreshCw className="h-3 w-3" /> Refresh
+          </Button>
+        </div>
       </div>
 
       <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-start gap-3">

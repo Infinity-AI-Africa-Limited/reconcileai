@@ -1,7 +1,10 @@
+import { useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardCheck, ChevronRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardCheck, ChevronRight, Upload } from "lucide-react";
 import { Link } from "wouter";
+import { toast } from "sonner";
 
 export default function Dashboard() {
   const { data: stats, isLoading } = trpc.dashboard.stats.useQuery();
@@ -189,7 +192,36 @@ export default function Dashboard() {
 }
 
 function PilotReadinessScorecard({ stats, channels }: { stats: any; channels: any[] | undefined }) {
-  const { data: distributorStats } = trpc.distributor.stats.useQuery();
+  const { data: distributorStats, refetch: refetchDistributors } = trpc.distributor.stats.useQuery();
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const bulkCreateDistributors = trpc.distributor.create.useMutation();
+
+  const handleCSVImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const lines = text.split("\n").filter(Boolean);
+    const header = lines[0].toLowerCase();
+    const nameIdx = header.split(",").findIndex((h) => h.includes("name"));
+    const codeIdx = header.split(",").findIndex((h) => h.includes("code") || h.includes("id"));
+    const zoneIdx = header.split(",").findIndex((h) => h.includes("zone") || h.includes("region"));
+    let imported = 0;
+    for (const line of lines.slice(1)) {
+      const cols = line.split(",");
+      const name = cols[nameIdx >= 0 ? nameIdx : 0]?.trim();
+      if (!name) continue;
+      try {
+        await bulkCreateDistributors.mutateAsync({
+          canonicalName: name,
+          zone: zoneIdx >= 0 ? cols[zoneIdx]?.trim() : undefined,
+        });
+        imported++;
+      } catch { /* skip duplicates */ }
+    }
+    toast.success(`CSV import complete`, { description: `${imported} distributors imported from ${file.name}` });
+    refetchDistributors();
+    if (csvInputRef.current) csvInputRef.current.value = "";
+  };
 
   // Compute scores for 5 dimensions (0-100 each)
   const totalTx = stats?.transactions?.total || 0;
@@ -291,11 +323,34 @@ function PilotReadinessScorecard({ stats, channels }: { stats: any; channels: an
             );
           })}
         </div>
-        <div className="mt-4 pt-4 border-t flex items-center justify-between">
-          <p className="text-xs text-muted-foreground">Overall score is the average of all 5 dimensions. A score ≥ 75 indicates the system is ready for a live pilot.</p>
-          <div className="flex items-center gap-2">
-            <div className={`h-2.5 w-2.5 rounded-full ${scoreBg} flex-shrink-0`} />
-            <span className={`text-xs font-semibold ${scoreColor}`}>{readinessLabel}</span>
+        <div className="mt-4 pt-4 border-t flex items-center justify-between gap-4">
+          <p className="text-xs text-muted-foreground flex-1">Overall score is the average of all 5 dimensions. A score ≥ 75 indicates the system is ready for a live pilot.</p>
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {dimensions[0].score < 75 && (
+              <>
+                <input
+                  ref={csvInputRef}
+                  type="file"
+                  accept=".csv"
+                  className="hidden"
+                  onChange={handleCSVImport}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs gap-1.5 border-amber-300 text-amber-700 hover:bg-amber-50"
+                  onClick={() => csvInputRef.current?.click()}
+                  disabled={bulkCreateDistributors.isPending}
+                >
+                  {bulkCreateDistributors.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+                  Import Distributors CSV
+                </Button>
+              </>
+            )}
+            <div className="flex items-center gap-2">
+              <div className={`h-2.5 w-2.5 rounded-full ${scoreBg} flex-shrink-0`} />
+              <span className={`text-xs font-semibold ${scoreColor}`}>{readinessLabel}</span>
+            </div>
           </div>
         </div>
       </CardContent>

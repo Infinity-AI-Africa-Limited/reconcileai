@@ -890,3 +890,38 @@ export const agentMemory = mysqlTable("agent_memory", {
 ]);
 export type AgentMemoryRecord = typeof agentMemory.$inferSelect;
 export type InsertAgentMemoryRecord = typeof agentMemory.$inferInsert;
+
+// ─── Guest Demo Tokens ───────────────────────────────────────────────
+export const guestTokens = mysqlTable("guest_tokens", {
+  id: int("id").autoincrement().primaryKey(),
+  token: varchar("token", { length: 64 }).notNull().unique(),
+  createdBy: int("createdBy").notNull(),
+  organizationId: int("organizationId"),
+  label: varchar("label", { length: 128 }).default("Demo Link"),
+  expiresAt: timestamp("expiresAt").notNull(),
+  viewCount: int("viewCount").default(0).notNull(),
+  isActive: boolean("isActive").default(true).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_guest_tokens_token").on(table.token),
+  index("idx_guest_tokens_created_by").on(table.createdBy),
+]);
+export type GuestToken = typeof guestTokens.$inferSelect;
+export type InsertGuestToken = typeof guestTokens.$inferInsert;
+
+// ─── Demo Request Leads ──────────────────────────────────────────────
+export const demoRequests = mysqlTable("demo_requests", {
+  id: int("id").autoincrement().primaryKey(),
+  companyName: varchar("companyName", { length: 256 }).notNull(),
+  contactEmail: varchar("contactEmail", { length: 256 }).notNull(),
+  monthlyPaymentVolume: varchar("monthlyPaymentVolume", { length: 64 }),
+  message: text("message"),
+  source: varchar("source", { length: 64 }).default("corporate_b2b_landing"),
+  status: mysqlEnum("status", ["new", "contacted", "qualified", "closed"]).default("new").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_demo_requests_status").on(table.status),
+  index("idx_demo_requests_email").on(table.contactEmail),
+]);
+export type DemoRequest = typeof demoRequests.$inferSelect;
+export type InsertDemoRequest = typeof demoRequests.$inferInsert;
