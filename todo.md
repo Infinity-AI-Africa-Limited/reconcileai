@@ -837,3 +837,10 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add memory retriever: for new exceptions, find top-K similar past cases using token similarity
 - [x] Wire memory retrieval into the LLM diagnosis prompt as context
 - [x] Add Memory Layer tab to Super Agent UI with semantic search interface
+
+## Feature: Demo Mode Toggle
+- [x] Create demoSeedEngine.ts with realistic Nigerian FMCG distributors, transactions, exceptions, and memory records
+- [x] Add demo.status, demo.activate, demo.deactivate tRPC procedures
+- [x] Add Demo Mode toggle button to DashboardLayout sidebar footer (amber when active)
+- [x] Add amber demo banner in main content area when Demo Mode is active
+- [x] All demo data tagged for clean wipe on deactivation

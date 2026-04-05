@@ -52,6 +52,9 @@ import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
+import { FlaskConical, X } from "lucide-react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -215,6 +218,25 @@ function DashboardLayoutContent({
   const activeMenuItem = allItems.find((item) => location.startsWith(item.path));
   const isMobile = useIsMobile();
 
+  // Demo Mode
+  const { data: demoStatus, refetch: refetchDemoStatus } = trpc.demo.status.useQuery(undefined, { enabled: !!user });
+  const activateDemo = trpc.demo.activate.useMutation({
+    onSuccess: () => {
+      toast.success("Demo Mode activated", { description: "BrightGoods FMCG demo data loaded — 60 transactions, 6 exceptions, 10 memory records." });
+      refetchDemoStatus();
+    },
+    onError: (err) => toast.error("Demo activation failed", { description: err.message }),
+  });
+  const deactivateDemo = trpc.demo.deactivate.useMutation({
+    onSuccess: () => {
+      toast.success("Demo Mode deactivated", { description: "All demo data has been removed." });
+      refetchDemoStatus();
+    },
+    onError: (err) => toast.error("Demo deactivation failed", { description: err.message }),
+  });
+  const isDemoActive = demoStatus?.active ?? false;
+  const isTogglingDemo = activateDemo.isPending || deactivateDemo.isPending;
+
   useEffect(() => {
     if (isCollapsed) {
       setIsResizing(false);
@@ -333,6 +355,33 @@ function DashboardLayoutContent({
           </SidebarContent>
 
           <SidebarFooter className="p-3">
+            {/* Demo Mode Toggle */}
+            <div className="mb-2 group-data-[collapsible=icon]:hidden">
+              <button
+                onClick={() => isDemoActive ? deactivateDemo.mutate() : activateDemo.mutate()}
+                disabled={isTogglingDemo}
+                className={`w-full flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-all ${
+                  isDemoActive
+                    ? "bg-amber-500/15 text-amber-600 border border-amber-500/30 hover:bg-amber-500/25"
+                    : "bg-sidebar-accent/40 text-sidebar-foreground/60 border border-sidebar-border hover:bg-sidebar-accent/70"
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+                <span className="flex-1 text-left">
+                  {isTogglingDemo ? (isDemoActive ? "Removing..." : "Loading demo...") : (isDemoActive ? "Demo Mode: ON" : "Demo Mode: OFF")}
+                </span>
+                {isDemoActive && !isTogglingDemo && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                )}
+              </button>
+              {isDemoActive && demoStatus && (
+                <div className="mt-1 px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/20">
+                  <p className="text-[10px] text-amber-600/80 leading-relaxed">
+                    {demoStatus.transactionCount} txns · {demoStatus.exceptionCount} exceptions · {demoStatus.distributorCount} distributors · {demoStatus.memoryCount} memories
+                  </p>
+                </div>
+              )}
+            </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-3 rounded-lg px-1 py-1 hover:bg-sidebar-accent/50 transition-colors w-full text-left group-data-[collapsible=icon]:justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
@@ -401,6 +450,22 @@ function DashboardLayoutContent({
               </span>
             </div>
             <RoleSwitcher location={location} setLocation={setLocation} />
+          </div>
+        )}
+        {isDemoActive && (
+          <div className="sticky top-14 z-30 flex items-center gap-3 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 px-6 py-2.5">
+            <FlaskConical className="h-4 w-4 text-amber-600 shrink-0" />
+            <p className="text-xs text-amber-700 dark:text-amber-400 flex-1">
+              <span className="font-semibold">Demo Mode active.</span> Viewing BrightGoods FMCG demo data — {demoStatus?.transactionCount ?? 0} transactions, {demoStatus?.exceptionCount ?? 0} exceptions, {demoStatus?.distributorCount ?? 0} distributors. This is not real data.
+            </p>
+            <button
+              onClick={() => deactivateDemo.mutate()}
+              disabled={isTogglingDemo}
+              className="text-amber-600 hover:text-amber-800 transition-colors disabled:opacity-50"
+              title="Deactivate Demo Mode"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
         )}
         <main className="flex-1 p-6">{children}</main>

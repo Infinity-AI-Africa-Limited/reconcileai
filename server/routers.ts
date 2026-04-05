@@ -49,6 +49,7 @@ import {
   type SATransaction,
   type MemoryRecord,
 } from "./superAgentEngine";
+import { seedDemoData, wipeDemoData } from "./demoSeedEngine";
 import { agentActionDrafts, agentMemory } from "../drizzle/schema";
 import { getDb } from "./db";
 
@@ -2462,6 +2463,50 @@ Always be specific, reference actual exception IDs and amounts where available, 
   }),
 
   // ─── Documentation ────────────────────────────────────────────────────
+
+  demo: router({
+    status: protectedProcedure
+      .query(async ({ ctx }) => {
+        const drizzle = await getDb();
+        if (!drizzle) return { active: false, jobId: null, exceptionCount: 0, transactionCount: 0, distributorCount: 0, memoryCount: 0 };
+        const { reconciliationJobs: rj, transactions: txns, distributors: dist, agentMemory: am } = await import("../drizzle/schema");
+        const demoJobs = await drizzle.select().from(rj).where(eq(rj.userId, ctx.user.id));
+        const activeDemoJob = demoJobs.find(j => j.name?.includes("Demo"));
+        if (!activeDemoJob) return { active: false, jobId: null, exceptionCount: 0, transactionCount: 0, distributorCount: 0, memoryCount: 0 };
+        const allBatches = await drizzle.select().from(await import("../drizzle/schema").then(s => s.uploadBatches)).where(eq(await import("../drizzle/schema").then(s => s.uploadBatches).then(t => t.userId), ctx.user.id));
+        const demoBatches = allBatches.filter((b: { fileName?: string }) => b.fileName?.includes("Demo"));
+        const demoBatchIds = demoBatches.map((b: { id: number }) => b.id);
+        let transactionCount = 0;
+        for (const batchId of demoBatchIds) {
+          const txnRows = await drizzle.select().from(txns).where(eq(txns.batchId, batchId));
+          transactionCount += txnRows.length;
+        }
+        const distRows = await drizzle.select().from(dist).where(eq(dist.organizationId, ctx.user.organizationId ?? 0));
+        const demoDistributors = distRows.filter((d: { notes?: string | null }) => d.notes?.includes("DEMO DATA"));
+        const memRows = await drizzle.select().from(am).where(eq(am.organizationId, ctx.user.organizationId ?? 0));
+        const seedMemory = memRows.filter((m: { exceptionId?: number | null }) => !m.exceptionId);
+        return {
+          active: true,
+          jobId: activeDemoJob.id,
+          exceptionCount: activeDemoJob.exceptionCount,
+          transactionCount,
+          distributorCount: demoDistributors.length,
+          memoryCount: seedMemory.length,
+        };
+      }),
+
+    activate: protectedProcedure
+      .mutation(async ({ ctx }) => {
+        const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        return { success: true, ...result };
+      }),
+
+    deactivate: protectedProcedure
+      .mutation(async ({ ctx }) => {
+        await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        return { success: true };
+      }),
+  }),
 
   docs: router({
     download: publicProcedure
