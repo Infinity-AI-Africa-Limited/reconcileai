@@ -39,6 +39,18 @@ import {
 import { startSLAMonitoring } from "./slaMonitoringService";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 import { invokeLLM } from "./_core/llm";
+import {
+  runM2MMatching,
+  diagnoseException,
+  generateActionDraft,
+  buildMemoryEmbeddingText,
+  retrieveSimilarMemories,
+  formatMemoryContext,
+  type SATransaction,
+  type MemoryRecord,
+} from "./superAgentEngine";
+import { agentActionDrafts, agentMemory } from "../drizzle/schema";
+import { getDb } from "./db";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -2185,6 +2197,267 @@ Always be specific, reference actual exception IDs and amounts where available, 
             ? `Action approved and logged. ${input.actionType.replace(/_/g, ' ')} has been committed to the audit trail.`
             : 'Action rejected. Exception returned to review queue.',
         };
+      }),
+
+    // ── Layer 3+4: Deep Diagnose + Action Draft Generation ────────────
+    diagnose: protectedProcedure
+      .input(z.object({
+        transactionId: z.number().int().positive(),
+        jobId: z.number().int().positive().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = ctx.user.id;
+        const orgId = ctx.user.organizationId ?? 0;
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+
+        // Fetch the transaction
+        const txnRowsArr = await db.getTransactionsByIds([input.transactionId]);
+        const txnRows = txnRowsArr[0];
+        if (!txnRows) throw new TRPCError({ code: 'NOT_FOUND', message: 'Transaction not found' });
+
+        const txn: SATransaction = {
+          id: txnRows.id,
+          transactionRef: txnRows.transactionRef,
+          description: txnRows.description,
+          counterparty: txnRows.counterparty,
+          amount: txnRows.amount,
+          currency: txnRows.currency,
+          transactionDate: txnRows.transactionDate,
+          channelId: txnRows.channelId,
+          debitCredit: txnRows.debitCredit,
+          isReversal: txnRows.isReversal,
+          originalTransactionRef: txnRows.originalTransactionRef,
+        };
+
+        // Fetch recent memory records for context
+        const memoryRows = await drizzle
+          .select()
+          .from(agentMemory)
+          .where(eq(agentMemory.organizationId, orgId))
+          .orderBy(desc(agentMemory.createdAt))
+          .limit(50);
+
+        const memories: MemoryRecord[] = memoryRows.map((m) => ({
+          id: m.id,
+          exceptionCategory: m.exceptionCategory,
+          transactionRef: m.transactionRef || '',
+          amountRange: m.amountRange,
+          counterpartyType: m.counterpartyType,
+          deductionType: m.deductionType,
+          resolution: m.resolution,
+          outcome: m.outcome,
+          reasoning: m.reasoning,
+          embeddingText: m.embeddingText,
+          createdAt: m.createdAt,
+        }));
+
+        // Build memory context for LLM
+        const dummyDiagnosis: any = { category: 'unmatched', deductionType: null };
+        const similar = retrieveSimilarMemories(txn, dummyDiagnosis, memories, 3);
+        const memoryContext = formatMemoryContext(similar);
+
+        // Run deep diagnosis
+        const diagnosis = await diagnoseException(
+          txn,
+          [], // no target txns needed for standalone diagnosis
+          { amountTolerance: 0.015, dateWindowDays: 7 },
+          memoryContext
+        );
+
+        // Generate action draft
+        const actionDraft = await generateActionDraft(txn, diagnosis, ctx.user.organizationId?.toString() || 'your company');
+
+        // Persist the draft to DB
+        await drizzle.insert(agentActionDrafts).values({
+          organizationId: orgId,
+          transactionRef: txn.transactionRef,
+          actionType: actionDraft.actionType as any,
+          subject: actionDraft.subject,
+          body: actionDraft.body,
+          metadata: actionDraft.metadata,
+          status: 'pending_approval',
+          diagnosisCategory: diagnosis.category,
+          diagnosisConfidence: diagnosis.confidence,
+          shortfallAmount: diagnosis.shortfall?.toString(),
+          currency: txn.currency,
+          createdByAgent: 1,
+        });
+
+        await logAudit(userId, 'super_agent_diagnose', 'transaction', input.transactionId, {
+          category: diagnosis.category,
+          confidence: diagnosis.confidence,
+          actionType: actionDraft.actionType,
+        });
+
+        return { diagnosis, actionDraft, memoriesUsed: similar.length };
+      }),
+
+    // ── Layer 4: Get pending action drafts ────────────────────────────
+    getDrafts: protectedProcedure
+      .input(z.object({
+        status: z.enum(['pending_approval', 'approved', 'rejected', 'executed', 'modified']).optional(),
+        limit: z.number().int().min(1).max(100).default(20),
+        offset: z.number().int().min(0).default(0),
+      }))
+      .query(async ({ input, ctx }) => {
+        const orgId = ctx.user.organizationId ?? 0;
+        const drizzle = await getDb();
+        if (!drizzle) return { drafts: [], total: 0 };
+
+        const conditions = [eq(agentActionDrafts.organizationId, orgId)];
+        if (input.status) conditions.push(eq(agentActionDrafts.status, input.status));
+
+        const rows = await drizzle
+          .select()
+          .from(agentActionDrafts)
+          .where(and(...conditions))
+          .orderBy(desc(agentActionDrafts.createdAt))
+          .limit(input.limit)
+          .offset(input.offset);
+
+        return { drafts: rows, total: rows.length };
+      }),
+
+    // ── Layer 4: Approve or reject a draft ────────────────────────────
+    resolveDraft: protectedProcedure
+      .input(z.object({
+        draftId: z.number().int().positive(),
+        decision: z.enum(['approved', 'rejected', 'modified']),
+        modifiedBody: z.string().optional(),
+        rejectionReason: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = ctx.user.id;
+        const orgId = ctx.user.organizationId ?? 0;
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+
+        const updateData: any = {
+          status: input.decision,
+          updatedAt: new Date(),
+        };
+
+        if (input.decision === 'approved' || input.decision === 'modified') {
+          updateData.approvedBy = userId;
+          updateData.approvedAt = new Date();
+          if (input.modifiedBody) updateData.body = input.modifiedBody;
+        } else {
+          updateData.rejectedBy = userId;
+          updateData.rejectedAt = new Date();
+          if (input.rejectionReason) updateData.rejectionReason = input.rejectionReason;
+        }
+
+        await drizzle
+          .update(agentActionDrafts)
+          .set(updateData)
+          .where(and(eq(agentActionDrafts.id, input.draftId), eq(agentActionDrafts.organizationId, orgId)));
+
+        await logAudit(userId, `super_agent_draft_${input.decision}`, 'agent_action_draft', input.draftId, {
+          decision: input.decision,
+          rejectionReason: input.rejectionReason,
+        });
+
+        return { success: true, message: `Draft ${input.decision}.` };
+      }),
+
+    // ── Layer 5: Add a resolved case to semantic memory ───────────────
+    addMemory: protectedProcedure
+      .input(z.object({
+        exceptionId: z.number().int().positive().optional(),
+        exceptionCategory: z.string(),
+        transactionRef: z.string().optional(),
+        amountRange: z.enum(['0-100k', '100k-1m', '1m+']),
+        deductionType: z.string().optional(),
+        resolution: z.string(),
+        outcome: z.enum(['resolved', 'escalated', 'rejected']),
+        reasoning: z.string(),
+        embeddingText: z.string(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = ctx.user.id;
+        const orgId = ctx.user.organizationId ?? 0;
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+
+        await drizzle.insert(agentMemory).values({
+          organizationId: orgId,
+          exceptionId: input.exceptionId,
+          exceptionCategory: input.exceptionCategory,
+          transactionRef: input.transactionRef,
+          amountRange: input.amountRange,
+          counterpartyType: 'distributor',
+          deductionType: input.deductionType,
+          resolution: input.resolution,
+          outcome: input.outcome,
+          reasoning: input.reasoning,
+          embeddingText: input.embeddingText,
+          resolvedBy: userId,
+        });
+
+        await logAudit(userId, 'super_agent_memory_added', 'agent_memory', undefined, {
+          category: input.exceptionCategory,
+          outcome: input.outcome,
+        });
+
+        return { success: true };
+      }),
+
+    // ── Layer 5: Retrieve similar past cases ──────────────────────────
+    getSimilarCases: protectedProcedure
+      .input(z.object({
+        embeddingText: z.string(),
+        topK: z.number().int().min(1).max(10).default(3),
+      }))
+      .query(async ({ input, ctx }) => {
+        const orgId = ctx.user.organizationId ?? 0;
+        const drizzle = await getDb();
+        if (!drizzle) return { cases: [] };
+
+        const memoryRows = await drizzle
+          .select()
+          .from(agentMemory)
+          .where(eq(agentMemory.organizationId, orgId))
+          .orderBy(desc(agentMemory.createdAt))
+          .limit(200);
+
+        const memories: MemoryRecord[] = memoryRows.map((m) => ({
+          id: m.id,
+          exceptionCategory: m.exceptionCategory,
+          transactionRef: m.transactionRef || '',
+          amountRange: m.amountRange,
+          counterpartyType: m.counterpartyType,
+          deductionType: m.deductionType,
+          resolution: m.resolution,
+          outcome: m.outcome,
+          reasoning: m.reasoning,
+          embeddingText: m.embeddingText,
+          createdAt: m.createdAt,
+        }));
+
+        // Use a dummy txn/diagnosis for the similarity search
+        const dummyTxn: SATransaction = { id: 0, transactionRef: null, description: null, counterparty: null, amount: 0, currency: 'NGN', transactionDate: new Date(), channelId: 0, debitCredit: 'credit' };
+        const dummyDiag: any = { category: 'unmatched', deductionType: null };
+
+        // Override the embedding text for search
+        const queryTokens = new Set(input.embeddingText.toLowerCase().split(/[\s|:]+/).filter((t) => t.length > 2));
+        const queryTokensArr = Array.from(queryTokens);
+
+        const scored = memories.map((mem) => {
+          const memTokens = new Set(mem.embeddingText.toLowerCase().split(/[\s|:]+/).filter((t) => t.length > 2));
+          const memTokensArr = Array.from(memTokens);
+          const intersectionArr = queryTokensArr.filter((t) => memTokens.has(t));
+          const unionArr = Array.from(new Set(queryTokensArr.concat(memTokensArr)));
+          const similarity = unionArr.length > 0 ? intersectionArr.length / unionArr.length : 0;
+          return { memory: mem, similarity };
+        });
+
+        const results = scored
+          .filter((s) => s.similarity > 0.15)
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, input.topK);
+
+        return { cases: results };
       }),
   }),
 

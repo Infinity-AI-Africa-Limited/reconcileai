@@ -809,3 +809,31 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add scorecard widget to Dashboard.tsx
 - [x] Five dimensions with visual score bars
 - [x] Overall readiness score calculation
+
+## Super Agent Architecture Upgrade (Phase 1)
+
+### Layer 1: Many-to-Many Matching Engine
+- [x] Add M2M matching pass to superAgentEngine.ts (one source → many targets, many sources → one target)
+- [x] Add semantic reference parser: extract invoice numbers, deduction codes, damage claims from free-text refs
+- [x] Add FX variance handler: detect bank-fee deductions (flat fee + percentage) as valid matches
+- [x] Extend MatchCandidate type with m2m fields: splitRatio, invoiceIds, deductionType, deductionAmount
+- [x] Extend ReconciliationResult with m2mMatches array
+
+### Layer 2: Categorical Exception Classifier
+- [x] Upgrade categorizeException to return 12 categories (add: partial_payment, promotional_deduction, fx_bank_fee, split_payment, contra_entry, duplicate_invoice)
+- [x] Add LLM-powered diagnosis: structured JSON output with rootCause, shortfall, deductionType, recommendedAction
+- [x] Add confidence score to diagnosis
+- [x] Store diagnosis in exceptions table (new diagnosis_json column)
+
+### Layer 3: Action Draft Layer
+- [x] Add agent_action_drafts table to drizzle schema (exceptionId, actionType, draftContent, status, approvedBy, executedAt)
+- [x] Add action generator: for each diagnosed exception, generate a draft action (vendor email / credit note / journal entry / payment allocation)
+- [x] Add tRPC procedures: getDrafts, resolveDraft, addMemory, getSimilarCases
+- [x] Wire approval workflow into Super Agent UI (Action Drafts Queue tab)
+
+### Layer 4: Semantic Memory Layer
+- [x] Add agent_memory table (exceptionId, embeddingText, resolution, outcome, reasoning, createdAt)
+- [x] Add memory writer: after each approved action, store reasoning + outcome as a memory record
+- [x] Add memory retriever: for new exceptions, find top-K similar past cases using token similarity
+- [x] Wire memory retrieval into the LLM diagnosis prompt as context
+- [x] Add Memory Layer tab to Super Agent UI with semantic search interface

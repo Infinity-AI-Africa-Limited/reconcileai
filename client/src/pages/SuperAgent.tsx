@@ -9,8 +9,10 @@ import { Progress } from "@/components/ui/progress";
 import {
   Bot, Loader2, Send, CheckCircle2, XCircle, AlertTriangle, Zap, Brain,
   MessageSquare, FileText, Mail, DollarSign, Clock, ChevronRight, Sparkles,
-  ShieldCheck, GitMerge, ArrowRight, CheckCheck, Info,
+  ShieldCheck, GitMerge, ArrowRight, CheckCheck, Info, Database, Inbox,
+  RefreshCw, ThumbsUp, ThumbsDown, Edit3, Filter,
 } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -463,6 +465,276 @@ function ManyToManyDemo() {
   );
 }
 
+// ─── Action Drafts Queue Tab ────────────────────────────────────────
+
+function ActionDraftsQueue() {
+  const [statusFilter, setStatusFilter] = useState<string>("pending_approval");
+  const [selectedDraft, setSelectedDraft] = useState<any | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [showRejectInput, setShowRejectInput] = useState(false);
+
+  const { data, isLoading, refetch } = trpc.superAgent.getDrafts.useQuery({
+    status: statusFilter as any,
+    limit: 50,
+    offset: 0,
+  });
+
+  const resolveMutation = trpc.superAgent.resolveDraft.useMutation({
+    onSuccess: (res) => {
+      toast.success(res.message);
+      setSelectedDraft(null);
+      setShowRejectInput(false);
+      setRejectReason("");
+      refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const statusBadge = (s: string) => {
+    const map: Record<string, string> = {
+      pending_approval: "bg-amber-100 text-amber-700 border-amber-200",
+      approved: "bg-green-100 text-green-700 border-green-200",
+      rejected: "bg-red-100 text-red-700 border-red-200",
+      executed: "bg-blue-100 text-blue-700 border-blue-200",
+      modified: "bg-purple-100 text-purple-700 border-purple-200",
+    };
+    return map[s] || "bg-muted text-muted-foreground";
+  };
+
+  const actionIcon = (t: string) => ({
+    vendor_email: <Mail className="h-4 w-4" />,
+    credit_note_request: <DollarSign className="h-4 w-4" />,
+    journal_entry: <FileText className="h-4 w-4" />,
+    payment_allocation: <CheckCircle2 className="h-4 w-4" />,
+    escalate_to_manager: <AlertTriangle className="h-4 w-4" />,
+    no_action: <Info className="h-4 w-4" />,
+  }[t] || <FileText className="h-4 w-4" />);
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold">Action Draft Queue</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">All agent-generated action drafts pending your review. Nothing executes without approval.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="h-8 text-xs w-44">
+              <Filter className="h-3 w-3 mr-1" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="pending_approval">Pending Approval</SelectItem>
+              <SelectItem value="approved">Approved</SelectItem>
+              <SelectItem value="rejected">Rejected</SelectItem>
+              <SelectItem value="modified">Modified</SelectItem>
+              <SelectItem value="executed">Executed</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={() => refetch()}>
+            <RefreshCw className="h-3 w-3" /> Refresh
+          </Button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-16 text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading drafts...
+        </div>
+      ) : !data?.drafts.length ? (
+        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+          <Inbox className="h-10 w-10 mb-3 opacity-30" />
+          <p className="text-sm font-medium">No drafts found</p>
+          <p className="text-xs mt-1">Use the Agent Chat to generate action drafts from exceptions</p>
+        </div>
+      ) : (
+        <div className="grid md:grid-cols-2 gap-3">
+          {data.drafts.map((draft) => (
+            <div
+              key={draft.id}
+              className={`border rounded-lg overflow-hidden cursor-pointer transition-all hover:shadow-sm ${
+                selectedDraft?.id === draft.id ? "ring-2 ring-primary" : ""
+              }`}
+              onClick={() => setSelectedDraft(selectedDraft?.id === draft.id ? null : draft)}
+            >
+              <div className="px-4 py-3 flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="h-7 w-7 rounded-md bg-primary/10 flex items-center justify-center text-primary flex-shrink-0">
+                    {actionIcon(draft.actionType)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold truncate">{draft.subject}</p>
+                    <p className="text-xs text-muted-foreground">{draft.actionType.replace(/_/g, " ")}</p>
+                  </div>
+                </div>
+                <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border flex-shrink-0 ${statusBadge(draft.status)}`}>
+                  {draft.status.replace(/_/g, " ").toUpperCase()}
+                </span>
+              </div>
+              {draft.transactionRef && (
+                <div className="px-4 pb-2">
+                  <span className="font-mono text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{draft.transactionRef}</span>
+                </div>
+              )}
+              {selectedDraft?.id === draft.id && (
+                <div className="border-t px-4 py-3 space-y-3 bg-muted/20">
+                  <p className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">{draft.body}</p>
+                  {draft.status === "pending_approval" && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <ShieldCheck className="h-3.5 w-3.5 text-amber-600" />
+                        <span className="text-[11px] font-semibold text-amber-700">Human Approval Required</span>
+                      </div>
+                      {!showRejectInput ? (
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm" className="h-7 text-xs gap-1.5 bg-green-600 hover:bg-green-700"
+                            disabled={resolveMutation.isPending}
+                            onClick={(e) => { e.stopPropagation(); resolveMutation.mutate({ draftId: draft.id, decision: "approved" }); }}
+                          >
+                            {resolveMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <ThumbsUp className="h-3 w-3" />}
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+                            onClick={(e) => { e.stopPropagation(); setShowRejectInput(true); }}
+                          >
+                            <Edit3 className="h-3 w-3" /> Modify
+                          </Button>
+                          <Button
+                            size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-red-600 border-red-200 hover:bg-red-50"
+                            onClick={(e) => { e.stopPropagation(); setShowRejectInput(true); }}
+                          >
+                            <ThumbsDown className="h-3 w-3" /> Reject
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
+                          <Textarea
+                            placeholder="Reason for rejection or modification instructions..."
+                            className="text-xs h-16 resize-none"
+                            value={rejectReason}
+                            onChange={(e) => setRejectReason(e.target.value)}
+                          />
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm" className="h-7 text-xs bg-red-600 hover:bg-red-700"
+                              disabled={resolveMutation.isPending || !rejectReason.trim()}
+                              onClick={() => resolveMutation.mutate({ draftId: draft.id, decision: "rejected", rejectionReason: rejectReason })}
+                            >
+                              Confirm Reject
+                            </Button>
+                            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setShowRejectInput(false); setRejectReason(""); }}>
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Memory Layer Panel Tab ───────────────────────────────────────────
+
+function MemoryLayerPanel() {
+  const [searchText, setSearchText] = useState("");
+  const { data, isLoading, refetch } = trpc.superAgent.getSimilarCases.useQuery(
+    { embeddingText: searchText || "exception unmatched distributor payment", topK: 10 },
+    { enabled: true }
+  );
+
+  const outcomeColor = (o: string) => ({
+    resolved: "bg-green-100 text-green-700 border-green-200",
+    escalated: "bg-amber-100 text-amber-700 border-amber-200",
+    rejected: "bg-red-100 text-red-700 border-red-200",
+  }[o] || "bg-muted text-muted-foreground");
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold">Semantic Memory Layer</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">The agent's institutional knowledge — past exception resolutions stored as searchable reasoning records.</p>
+        </div>
+        <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={() => refetch()}>
+          <RefreshCw className="h-3 w-3" /> Refresh
+        </Button>
+      </div>
+
+      <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-start gap-3">
+        <Brain className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" />
+        <div className="text-sm text-muted-foreground">
+          <span className="font-semibold text-foreground">How the memory layer works:</span> Every time a finance team member resolves an exception, the reasoning is stored here. When the agent encounters a similar case in future, it retrieves the most relevant past resolutions and uses them to generate a more accurate diagnosis — without retraining the model.
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          placeholder="Search memory by keyword (e.g. 'partial payment', 'bank fee', 'damaged goods')..."
+          className="flex-1 h-9 text-sm border rounded-md px-3 bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+        />
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-16 text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin mr-2" /> Searching memory...
+        </div>
+      ) : !data?.cases.length ? (
+        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+          <Database className="h-10 w-10 mb-3 opacity-30" />
+          <p className="text-sm font-medium">Memory layer is empty</p>
+          <p className="text-xs mt-1">Resolved exceptions will appear here as the agent learns from your team's decisions</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {data.cases.map(({ memory, similarity }) => (
+            <div key={memory.id} className="border rounded-lg overflow-hidden">
+              <div className="px-4 py-3 flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-semibold text-foreground capitalize">{memory.exceptionCategory.replace(/_/g, " ")}</span>
+                    {memory.deductionType && (
+                      <span className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{memory.deductionType}</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{memory.resolution}</p>
+                </div>
+                <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                  <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${outcomeColor(memory.outcome)}`}>
+                    {memory.outcome.toUpperCase()}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">{Math.round(similarity * 100)}% match</span>
+                </div>
+              </div>
+              <div className="border-t px-4 py-2 bg-muted/20">
+                <p className="text-[11px] text-muted-foreground"><span className="font-medium text-foreground">Reasoning:</span> {memory.reasoning}</p>
+              </div>
+              <div className="px-4 py-2 flex items-center gap-3 text-[10px] text-muted-foreground">
+                <span>Amount range: <span className="font-medium text-foreground">{memory.amountRange}</span></span>
+                <span>·</span>
+                <span>Counterparty: <span className="font-medium text-foreground">{memory.counterpartyType}</span></span>
+                <span>·</span>
+                <span>{new Date(memory.createdAt).toLocaleDateString()}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Super Agent Page ───────────────────────────────────────────
 
 export default function SuperAgentPage() {
@@ -609,6 +881,12 @@ export default function SuperAgentPage() {
               <GitMerge className="h-3 w-3" /> Many-to-Many Demo
               <Badge className="ml-1 bg-primary/10 text-primary border-none text-[9px] px-1">NEW</Badge>
             </TabsTrigger>
+            <TabsTrigger value="drafts" className="text-xs gap-1.5 h-7">
+              <Inbox className="h-3 w-3" /> Action Drafts
+            </TabsTrigger>
+            <TabsTrigger value="memory" className="text-xs gap-1.5 h-7">
+              <Database className="h-3 w-3" /> Memory Layer
+            </TabsTrigger>
           </TabsList>
 
           {/* ── Chat Tab ── */}
@@ -656,6 +934,16 @@ export default function SuperAgentPage() {
           {/* ── Many-to-Many Demo Tab ── */}
           <TabsContent value="m2m" className="mt-0 overflow-y-auto" style={{ height: "calc(100vh - 14rem)" }}>
             <ManyToManyDemo />
+          </TabsContent>
+
+          {/* ── Action Drafts Tab ── */}
+          <TabsContent value="drafts" className="mt-0 overflow-y-auto" style={{ height: "calc(100vh - 14rem)" }}>
+            <ActionDraftsQueue />
+          </TabsContent>
+
+          {/* ── Memory Layer Tab ── */}
+          <TabsContent value="memory" className="mt-0 overflow-y-auto" style={{ height: "calc(100vh - 14rem)" }}>
+            <MemoryLayerPanel />
           </TabsContent>
         </Tabs>
       </div>

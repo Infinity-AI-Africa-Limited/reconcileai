@@ -1,5 +1,6 @@
 import {
   int,
+  tinyint,
   mysqlEnum,
   mysqlTable,
   text,
@@ -821,3 +822,71 @@ export const distributors = mysqlTable("distributors", {
 ]);
 export type Distributor = typeof distributors.$inferSelect;
 export type InsertDistributor = typeof distributors.$inferInsert;
+
+// ─── Super Agent: Action Draft Layer ────────────────────────────────
+export const agentActionDrafts = mysqlTable("agent_action_drafts", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  exceptionId: int("exceptionId"),                   // FK to exceptions table (nullable for standalone)
+  transactionRef: varchar("transactionRef", { length: 128 }),
+  actionType: mysqlEnum("actionType", [
+    "vendor_email",
+    "credit_note_request",
+    "journal_entry",
+    "payment_allocation",
+    "escalate_to_manager",
+    "no_action",
+  ]).notNull(),
+  subject: varchar("subject", { length: 512 }).notNull(),
+  body: text("body").notNull(),
+  metadata: json("metadata"),                        // Record<string, string|number>
+  status: mysqlEnum("status", [
+    "pending_approval",
+    "approved",
+    "rejected",
+    "executed",
+    "modified",
+  ]).default("pending_approval").notNull(),
+  diagnosisCategory: varchar("diagnosisCategory", { length: 64 }),
+  diagnosisConfidence: int("diagnosisConfidence"),
+  shortfallAmount: decimal("shortfallAmount", { precision: 18, scale: 2 }),
+  currency: varchar("currency", { length: 8 }).default("NGN").notNull(),
+  createdByAgent: tinyint("createdByAgent").default(1).notNull(),  // 1 = AI generated
+  approvedBy: int("approvedBy"),
+  approvedAt: timestamp("approvedAt"),
+  rejectedBy: int("rejectedBy"),
+  rejectedAt: timestamp("rejectedAt"),
+  rejectionReason: text("rejectionReason"),
+  executedAt: timestamp("executedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_action_drafts_org").on(table.organizationId),
+  index("idx_action_drafts_status").on(table.status),
+  index("idx_action_drafts_exception").on(table.exceptionId),
+]);
+export type AgentActionDraft = typeof agentActionDrafts.$inferSelect;
+export type InsertAgentActionDraft = typeof agentActionDrafts.$inferInsert;
+
+// ─── Super Agent: Semantic Memory Layer ─────────────────────────────
+export const agentMemory = mysqlTable("agent_memory", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  exceptionId: int("exceptionId"),
+  exceptionCategory: varchar("exceptionCategory", { length: 64 }).notNull(),
+  transactionRef: varchar("transactionRef", { length: 128 }),
+  amountRange: mysqlEnum("amountRange", ["0-100k", "100k-1m", "1m+"]).notNull(),
+  counterpartyType: varchar("counterpartyType", { length: 64 }).default("distributor").notNull(),
+  deductionType: varchar("deductionType", { length: 64 }),
+  resolution: text("resolution").notNull(),          // what action was taken
+  outcome: mysqlEnum("outcome", ["resolved", "escalated", "rejected"]).default("resolved").notNull(),
+  reasoning: text("reasoning").notNull(),            // why this resolution was chosen
+  embeddingText: text("embeddingText").notNull(),    // tokenised text for similarity search
+  resolvedBy: int("resolvedBy"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_agent_memory_org").on(table.organizationId),
+  index("idx_agent_memory_category").on(table.exceptionCategory),
+]);
+export type AgentMemoryRecord = typeof agentMemory.$inferSelect;
+export type InsertAgentMemoryRecord = typeof agentMemory.$inferInsert;
