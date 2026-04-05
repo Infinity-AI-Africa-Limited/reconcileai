@@ -78,6 +78,13 @@
       "when": 1772045282177,
       "tag": "0010_needy_power_pack",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "5",
+      "when": 1775351722882,
+      "tag": "0011_next_magneto",
+      "breakpoints": true
     }
   ]
 }

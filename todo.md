@@ -780,3 +780,32 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add core_banking to sampleDataGenerator channel-specific description logic
 - [x] Add channels.create procedure to routers.ts for admin channel creation
 - [x] Seed Core Banking channel via SQL
+
+## Feature: Corporate B2B Landing Page
+- [x] Create /corporate-b2b route and CorporateB2BLanding.tsx page
+- [x] Hero section: headline, subheadline, CTA buttons
+- [x] Problem section: corporate B2B payment pain points
+- [x] Solution section: how ReconcileAI solves them
+- [x] Many-to-Many matching explainer section
+- [x] Key metrics / ROI section
+- [x] CTA section with demo request
+- [x] Add link from Home.tsx navigation
+
+## Feature: Many-to-Many Matching Demo in Super Agent
+- [x] Add M2M demo tab to SuperAgent.tsx
+- [x] Animated step-by-step split of N10M deposit across 3 invoices
+- [x] Show confidence scores and reasoning for each split
+- [x] HitL approval step for the proposed split
+
+## Feature: Distributor Identity Registry
+- [x] Create /distributors route and DistributorRegistry.tsx page
+- [x] Add distributors table to drizzle/schema.ts
+- [x] Add db helpers for distributor CRUD
+- [x] Add tRPC procedures for distributor list, create, update, confirm, addVariant
+- [x] Build UI: table with search, filter, status badges, detail panel, alias management
+- [x] Add to sidebar navigation
+
+## Feature: Pilot Readiness Scorecard
+- [x] Add scorecard widget to Dashboard.tsx
+- [x] Five dimensions with visual score bars
+- [x] Overall readiness score calculation

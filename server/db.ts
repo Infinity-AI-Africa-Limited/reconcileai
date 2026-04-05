@@ -26,6 +26,7 @@ import {
   detectionRules, InsertDetectionRule,
   resolutionTemplates, InsertResolutionTemplate,
   moduleConfigurations, InsertModuleConfiguration,
+  distributors,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -1234,4 +1235,122 @@ export async function getFlaggedTransactions(filters: {
   .limit(limit)
   .offset(offset)
   .orderBy(desc(anomalyScores.anomalyScore));
+}
+
+// ─── Distributor Identity Registry ──────────────────────────────────
+
+export async function getDistributors(filters: {
+  organizationId: number;
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  const limit = Math.min(filters.limit || 50, 200);
+  const offset = filters.offset || 0;
+  const conditions: any[] = [eq(distributors.organizationId, filters.organizationId)];
+  if (filters.status) conditions.push(eq(distributors.status, filters.status as any));
+  if (filters.search) {
+    conditions.push(
+      or(
+        like(distributors.canonicalName, `%${filters.search}%`),
+        like(distributors.canonicalId, `%${filters.search}%`),
+        like(distributors.zone, `%${filters.search}%`)
+      )
+    );
+  }
+  return db.select().from(distributors)
+    .where(and(...conditions))
+    .orderBy(desc(distributors.updatedAt))
+    .limit(limit).offset(offset);
+}
+
+export async function getDistributorById(id: number, organizationId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(distributors)
+    .where(and(eq(distributors.id, id), eq(distributors.organizationId, organizationId)))
+    .limit(1);
+  return rows[0] || null;
+}
+
+export async function createDistributor(data: {
+  organizationId: number;
+  canonicalName: string;
+  registeredBusinessName?: string;
+  taxId?: string;
+  primaryBankAccount?: string;
+  primaryBankName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  zone?: string;
+  nameVariants?: string[];
+  notes?: string;
+  createdBy: number;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  // Generate canonical ID
+  const count = await db.select().from(distributors)
+    .where(eq(distributors.organizationId, data.organizationId));
+  const canonicalId = `DIST-${String(count.length + 1).padStart(4, "0")}`;
+  const result = await db.insert(distributors).values({
+    ...data,
+    canonicalId,
+    nameVariants: data.nameVariants || [],
+    status: "active",
+  });
+  return result;
+}
+
+export async function updateDistributor(
+  id: number,
+  organizationId: number,
+  data: Partial<{
+    canonicalName: string;
+    registeredBusinessName: string;
+    taxId: string;
+    primaryBankAccount: string;
+    primaryBankName: string;
+    contactEmail: string;
+    contactPhone: string;
+    zone: string;
+    status: "active" | "inactive" | "pending_confirmation" | "flagged";
+    nameVariants: string[];
+    notes: string;
+    confirmedBy: number;
+    confirmedAt: Date;
+  }>
+) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  return db.update(distributors)
+    .set({ ...data, updatedAt: new Date() })
+    .where(and(eq(distributors.id, id), eq(distributors.organizationId, organizationId)));
+}
+
+export async function addDistributorNameVariant(id: number, organizationId: number, variant: string) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const dist = await getDistributorById(id, organizationId);
+  if (!dist) throw new Error("Distributor not found");
+  const existing = (dist.nameVariants as string[]) || [];
+  if (!existing.includes(variant)) {
+    await updateDistributor(id, organizationId, { nameVariants: [...existing, variant] });
+  }
+}
+
+export async function getDistributorStats(organizationId: number) {
+  const db = await getDb();
+  if (!db) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
+  const all = await db.select().from(distributors)
+    .where(eq(distributors.organizationId, organizationId));
+  return {
+    total: all.length,
+    active: all.filter((d) => d.status === "active").length,
+    pendingConfirmation: all.filter((d) => d.status === "pending_confirmation").length,
+    flagged: all.filter((d) => d.status === "flagged").length,
+  };
 }

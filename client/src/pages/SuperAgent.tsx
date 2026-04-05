@@ -4,25 +4,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
 import {
-  Bot,
-  Loader2,
-  Send,
-  CheckCircle2,
-  XCircle,
-  AlertTriangle,
-  Zap,
-  Brain,
-  MessageSquare,
-  FileText,
-  Mail,
-  DollarSign,
-  Clock,
-  ChevronRight,
-  Sparkles,
-  ShieldCheck,
-  RotateCcw,
+  Bot, Loader2, Send, CheckCircle2, XCircle, AlertTriangle, Zap, Brain,
+  MessageSquare, FileText, Mail, DollarSign, Clock, ChevronRight, Sparkles,
+  ShieldCheck, GitMerge, ArrowRight, CheckCheck, Info,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -45,45 +32,58 @@ interface ActionDraft {
   riskLevel: "low" | "medium" | "high";
 }
 
-interface DiagnosisResult {
-  exceptionId: number;
-  category: string;
-  rootCause: string;
-  confidence: number;
-  evidence: string[];
-  proposedAction: ActionDraft;
-  auditNote: string;
-}
+// ─── Many-to-Many Demo Data ──────────────────────────────────────────
 
-// ─── Agent Step Indicator ────────────────────────────────────────────
+const M2M_DEPOSIT = {
+  amount: "₦10,000,000.00",
+  sender: "Kola Ventures Ltd",
+  bankRef: "GTB-20240115-KV-001",
+  valueDate: "15 Jan 2024",
+  account: "0123456789 — ReconcileAI Demo Co.",
+};
 
-function AgentStep({ step, label, status }: { step: number; label: string; status: "pending" | "active" | "done" }) {
-  return (
-    <div className={`flex items-center gap-2 text-xs ${
-      status === "done" ? "text-green-600" :
-      status === "active" ? "text-primary" :
-      "text-muted-foreground"
-    }`}>
-      <div className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-        status === "done" ? "bg-green-100 text-green-600" :
-        status === "active" ? "bg-primary/10 text-primary" :
-        "bg-muted text-muted-foreground"
-      }`}>
-        {status === "done" ? <CheckCircle2 className="h-3 w-3" /> : step}
-      </div>
-      <span className={status === "active" ? "font-medium" : ""}>{label}</span>
-    </div>
-  );
-}
+const M2M_INVOICES = [
+  {
+    id: "INV-2024-00847",
+    description: "Distributor stock replenishment — Lagos Zone A",
+    amount: "₦4,200,000.00",
+    dueDate: "12 Jan 2024",
+    confidence: 99.1,
+    matchReason: "Exact payment reference match + amount within tolerance",
+    status: "matched" as const,
+  },
+  {
+    id: "INV-2024-00851",
+    description: "Distributor stock replenishment — Lagos Zone B",
+    amount: "₦3,800,000.00",
+    dueDate: "14 Jan 2024",
+    confidence: 97.8,
+    matchReason: "Amount match + distributor pattern + date window (1 day)",
+    status: "matched" as const,
+  },
+  {
+    id: "INV-2024-00863",
+    description: "Promotional stock advance — Q1 2024",
+    amount: "₦2,000,000.00",
+    dueDate: "20 Jan 2024",
+    confidence: 94.3,
+    matchReason: "Distributor identity match + partial reference similarity",
+    status: "matched" as const,
+  },
+];
+
+const M2M_STEPS = [
+  { id: 1, label: "Ingest bank deposit", description: "Agent reads the ₦10M deposit from the GTBank feed" },
+  { id: 2, label: "Identify payer", description: "Distributor Identity Registry resolves 'Kola Ventures Ltd' → Canonical ID: DIST-0042" },
+  { id: 3, label: "Retrieve open invoices", description: "3 open invoices found for DIST-0042 totalling ₦10,000,000" },
+  { id: 4, label: "Run many-to-many split", description: "Balance Engine allocates deposit across all 3 invoices with confidence scoring" },
+  { id: 5, label: "Generate allocation draft", description: "Draft presented to finance team for HitL approval" },
+];
 
 // ─── Action Draft Card ───────────────────────────────────────────────
 
 function ActionDraftCard({
-  draft,
-  onApprove,
-  onModify,
-  onReject,
-  isApproving,
+  draft, onApprove, onModify, onReject, isApproving,
 }: {
   draft: ActionDraft;
   onApprove: () => void;
@@ -118,7 +118,6 @@ function ActionDraftCard({
 
   return (
     <div className="mt-3 border rounded-lg overflow-hidden">
-      {/* Header */}
       <div className="bg-primary/5 border-b px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="h-7 w-7 rounded-md bg-primary/10 flex items-center justify-center text-primary">
@@ -133,8 +132,6 @@ function ActionDraftCard({
           {draft.riskLevel.toUpperCase()} RISK
         </span>
       </div>
-
-      {/* Details */}
       <div className="px-4 py-3 space-y-2">
         <p className="text-xs text-muted-foreground">{draft.description}</p>
         <div className="grid grid-cols-2 gap-2 mt-2">
@@ -146,8 +143,6 @@ function ActionDraftCard({
           ))}
         </div>
       </div>
-
-      {/* HitL Approval Controls */}
       <div className="bg-amber-50/50 border-t px-4 py-3">
         <div className="flex items-center gap-1.5 mb-2">
           <ShieldCheck className="h-3.5 w-3.5 text-amber-600" />
@@ -155,59 +150,23 @@ function ActionDraftCard({
         </div>
         {!modifyMode ? (
           <div className="flex gap-2">
-            <Button
-              size="sm"
-              className="h-7 text-xs gap-1.5 bg-green-600 hover:bg-green-700"
-              onClick={onApprove}
-              disabled={isApproving}
-            >
+            <Button size="sm" className="h-7 text-xs gap-1.5 bg-green-600 hover:bg-green-700" onClick={onApprove} disabled={isApproving}>
               {isApproving ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle2 className="h-3 w-3" />}
               Approve & Execute
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs gap-1.5"
-              onClick={() => setModifyMode(true)}
-            >
-              <FileText className="h-3 w-3" />
-              Modify
+            <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setModifyMode(true)}>
+              <FileText className="h-3 w-3" /> Modify
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs gap-1.5 text-red-600 border-red-200 hover:bg-red-50"
-              onClick={onReject}
-            >
-              <XCircle className="h-3 w-3" />
-              Reject
+            <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-red-600 border-red-200 hover:bg-red-50" onClick={onReject}>
+              <XCircle className="h-3 w-3" /> Reject
             </Button>
           </div>
         ) : (
           <div className="space-y-2">
-            <Textarea
-              placeholder="Describe your modification or add notes for the agent..."
-              className="text-xs h-16 resize-none"
-              value={modifyNotes}
-              onChange={(e) => setModifyNotes(e.target.value)}
-            />
+            <Textarea placeholder="Describe your modification..." className="text-xs h-16 resize-none" value={modifyNotes} onChange={(e) => setModifyNotes(e.target.value)} />
             <div className="flex gap-2">
-              <Button
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => { onModify(modifyNotes); setModifyMode(false); }}
-                disabled={!modifyNotes.trim()}
-              >
-                Submit Modification
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 text-xs"
-                onClick={() => setModifyMode(false)}
-              >
-                Cancel
-              </Button>
+              <Button size="sm" className="h-7 text-xs" onClick={() => { onModify(modifyNotes); setModifyMode(false); }} disabled={!modifyNotes.trim()}>Submit Modification</Button>
+              <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setModifyMode(false)}>Cancel</Button>
             </div>
           </div>
         )}
@@ -226,7 +185,6 @@ function ChatMessage({ msg, onApprove, onModify, onReject, isApproving }: {
   isApproving?: boolean;
 }) {
   const isAgent = msg.role === "agent";
-
   return (
     <div className={`flex gap-3 ${isAgent ? "" : "flex-row-reverse"}`}>
       {isAgent && (
@@ -241,15 +199,10 @@ function ChatMessage({ msg, onApprove, onModify, onReject, isApproving }: {
             {msg.content}
           </div>
         ) : (
-          <div className={`rounded-lg px-3 py-2.5 text-sm ${
-            isAgent
-              ? "bg-muted/60 text-foreground"
-              : "bg-primary text-primary-foreground"
-          }`}>
+          <div className={`rounded-lg px-3 py-2.5 text-sm ${isAgent ? "bg-muted/60 text-foreground" : "bg-primary text-primary-foreground"}`}>
             <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
           </div>
         )}
-
         {msg.actionDraft && onApprove && onModify && onReject && (
           <ActionDraftCard
             draft={msg.actionDraft}
@@ -259,10 +212,252 @@ function ChatMessage({ msg, onApprove, onModify, onReject, isApproving }: {
             isApproving={isApproving || false}
           />
         )}
-
         <p className="text-[10px] text-muted-foreground mt-1 px-1">
           {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Many-to-Many Demo Tab ───────────────────────────────────────────
+
+function ManyToManyDemo() {
+  const [demoStep, setDemoStep] = useState(0); // 0 = idle, 1-5 = steps, 6 = complete
+  const [approved, setApproved] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+
+  const runDemo = async () => {
+    setIsRunning(true);
+    setApproved(false);
+    for (let i = 1; i <= 5; i++) {
+      setDemoStep(i);
+      await new Promise((r) => setTimeout(r, 900));
+    }
+    setDemoStep(6);
+    setIsRunning(false);
+  };
+
+  const reset = () => { setDemoStep(0); setApproved(false); };
+
+  const totalInvoiceAmount = M2M_INVOICES.reduce((sum, inv) => {
+    const num = parseFloat(inv.amount.replace(/[₦,]/g, ""));
+    return sum + num;
+  }, 0);
+
+  const avgConfidence = Math.round(M2M_INVOICES.reduce((s, i) => s + i.confidence, 0) / M2M_INVOICES.length * 10) / 10;
+
+  return (
+    <div className="p-6 space-y-6">
+      {/* Explainer banner */}
+      <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-start gap-3">
+        <Info className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" />
+        <div className="text-sm text-muted-foreground">
+          <span className="font-semibold text-foreground">Many-to-Many Matching</span> is the ability to split a single bank deposit across multiple open invoices — or aggregate multiple payments against a single invoice. Standard reconciliation tools cannot do this. ReconcileAI's Super Agent handles it natively, with full reasoning and HitL approval.
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-6">
+        {/* Left: Incoming deposit + agent steps */}
+        <div className="space-y-4">
+          {/* Deposit card */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <div className="h-6 w-6 rounded bg-blue-100 flex items-center justify-center">
+                  <DollarSign className="h-3.5 w-3.5 text-blue-600" />
+                </div>
+                Incoming Bank Deposit
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Amount</span>
+                <span className="font-bold text-lg text-foreground">{M2M_DEPOSIT.amount}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Sender</span>
+                <span className="font-medium">{M2M_DEPOSIT.sender}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Bank Reference</span>
+                <span className="font-mono text-xs bg-muted px-2 py-0.5 rounded">{M2M_DEPOSIT.bankRef}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Value Date</span>
+                <span>{M2M_DEPOSIT.valueDate}</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Agent reasoning steps */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Brain className="h-4 w-4 text-primary" />
+                Agent Reasoning Steps
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {M2M_STEPS.map((step) => {
+                const status = demoStep === 0 ? "pending" : demoStep > step.id ? "done" : demoStep === step.id ? "active" : "pending";
+                return (
+                  <div key={step.id} className={`flex gap-3 transition-all duration-300 ${status === "pending" ? "opacity-40" : "opacity-100"}`}>
+                    <div className={`h-6 w-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5 transition-colors ${
+                      status === "done" ? "bg-green-100 text-green-600" :
+                      status === "active" ? "bg-primary text-primary-foreground" :
+                      "bg-muted text-muted-foreground"
+                    }`}>
+                      {status === "done" ? <CheckCircle2 className="h-3.5 w-3.5" /> : status === "active" ? <Loader2 className="h-3 w-3 animate-spin" /> : step.id}
+                    </div>
+                    <div>
+                      <p className={`text-sm font-medium ${status === "active" ? "text-primary" : "text-foreground"}`}>{step.label}</p>
+                      <p className="text-xs text-muted-foreground">{step.description}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+
+          {/* Run button */}
+          {demoStep === 0 && (
+            <Button className="w-full gap-2" onClick={runDemo}>
+              <Zap className="h-4 w-4" />
+              Run Many-to-Many Matching Demo
+            </Button>
+          )}
+          {isRunning && (
+            <div className="text-center text-sm text-muted-foreground flex items-center justify-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              Agent is processing…
+            </div>
+          )}
+          {demoStep === 6 && !isRunning && !approved && (
+            <Button variant="outline" className="w-full gap-2 text-muted-foreground" onClick={reset}>
+              Reset Demo
+            </Button>
+          )}
+        </div>
+
+        {/* Right: Invoice allocation results */}
+        <div className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <GitMerge className="h-4 w-4 text-primary" />
+                Proposed Invoice Allocation
+                {demoStep >= 6 && (
+                  <Badge className="ml-auto bg-green-100 text-green-700 border-green-200 text-[10px]">
+                    Ready for Approval
+                  </Badge>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {M2M_INVOICES.map((inv, i) => {
+                const visible = demoStep >= 4 + i - 1 && demoStep > 0;
+                return (
+                  <div key={inv.id} className={`border rounded-lg overflow-hidden transition-all duration-500 ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"} ${approved ? "border-green-300 bg-green-50/30" : "border-border"}`}>
+                    <div className="px-3 py-2.5">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-mono text-xs font-semibold text-primary">{inv.id}</span>
+                        {approved ? (
+                          <Badge className="bg-green-100 text-green-700 border-green-200 text-[10px] gap-1">
+                            <CheckCheck className="h-2.5 w-2.5" /> Committed
+                          </Badge>
+                        ) : visible ? (
+                          <Badge className="bg-blue-100 text-blue-700 border-blue-200 text-[10px]">Draft</Badge>
+                        ) : null}
+                      </div>
+                      <p className="text-xs text-muted-foreground mb-2">{inv.description}</p>
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-foreground">{inv.amount}</span>
+                        <span className="text-xs text-muted-foreground">Due {inv.dueDate}</span>
+                      </div>
+                      {visible && (
+                        <div className="mt-2 space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-muted-foreground">Confidence</span>
+                            <span className={`font-semibold ${inv.confidence >= 97 ? "text-green-600" : "text-amber-600"}`}>{inv.confidence}%</span>
+                          </div>
+                          <Progress value={inv.confidence} className="h-1.5" />
+                          <p className="text-[10px] text-muted-foreground italic">{inv.matchReason}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {demoStep >= 6 && (
+                <div className="border-t pt-3 space-y-1">
+                  <div className="flex justify-between text-sm font-semibold">
+                    <span>Total Allocated</span>
+                    <span className="text-green-600">₦{totalInvoiceAmount.toLocaleString()}.00</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Average Confidence</span>
+                    <span>{avgConfidence}%</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Unallocated Balance</span>
+                    <span className="text-green-600">₦0.00</span>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* HitL Approval Panel */}
+          {demoStep >= 6 && !approved && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldCheck className="h-4 w-4 text-amber-600" />
+                <span className="text-sm font-semibold text-amber-800">Human Approval Required</span>
+              </div>
+              <p className="text-xs text-amber-700 mb-4">
+                The Super Agent has proposed splitting the ₦10M deposit across 3 invoices with an average confidence of {avgConfidence}%. Review the allocation above and approve to commit to your books, or reject to return to manual review.
+              </p>
+              <div className="flex gap-3">
+                <Button
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white gap-2"
+                  onClick={() => {
+                    setApproved(true);
+                    toast.success("Allocation approved — 3 invoices matched and committed to audit trail");
+                  }}
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  Approve Allocation
+                </Button>
+                <Button
+                  variant="outline"
+                  className="flex-1 text-red-600 border-red-200 hover:bg-red-50 gap-2"
+                  onClick={() => {
+                    reset();
+                    toast.info("Allocation rejected — returned to manual review queue");
+                  }}
+                >
+                  <XCircle className="h-4 w-4" />
+                  Reject
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {approved && (
+            <div className="border border-green-300 bg-green-50 rounded-lg p-4 text-center">
+              <CheckCheck className="h-8 w-8 text-green-600 mx-auto mb-2" />
+              <p className="text-sm font-semibold text-green-800">Allocation Committed</p>
+              <p className="text-xs text-green-700 mt-1">
+                3 invoices matched. Logged to audit trail with timestamp and approver ID. Books updated.
+              </p>
+              <Button variant="outline" size="sm" className="mt-3 text-xs" onClick={reset}>
+                Run Demo Again
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -282,7 +477,6 @@ export default function SuperAgentPage() {
   ]);
   const [input, setInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [activeSteps, setActiveSteps] = useState<Record<string, "pending" | "active" | "done">>({});
   const [approvingMsgId, setApprovingMsgId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -312,64 +506,26 @@ export default function SuperAgentPage() {
     const userQuery = input.trim();
     setInput("");
     setIsProcessing(true);
-
     addMessage({ role: "user", content: userQuery, type: "text" });
-
-    // Show thinking steps
-    const thinkingId = addMessage({
-      role: "agent",
-      content: "Analysing your query and gathering context...",
-      type: "thinking",
-    });
-
+    const thinkingId = addMessage({ role: "agent", content: "Analysing your query and gathering context...", type: "thinking" });
     try {
-      // Simulate multi-step agent reasoning with visual feedback
       await new Promise((r) => setTimeout(r, 600));
       removeMessage(thinkingId);
-
-      const step1Id = addMessage({
-        role: "agent",
-        content: "Searching transaction records and exception queue...",
-        type: "thinking",
-      });
+      const step1Id = addMessage({ role: "agent", content: "Searching transaction records and exception queue...", type: "thinking" });
       await new Promise((r) => setTimeout(r, 700));
       removeMessage(step1Id);
-
-      const step2Id = addMessage({
-        role: "agent",
-        content: "Running diagnostic reasoning engine...",
-        type: "thinking",
-      });
-
+      const step2Id = addMessage({ role: "agent", content: "Running diagnostic reasoning engine...", type: "thinking" });
       const result = await agentQueryMutation.mutateAsync({ query: userQuery });
       removeMessage(step2Id);
-
       if (result.actionDraft) {
-        addMessage({
-          role: "agent",
-          content: result.diagnosis,
-          type: "diagnosis",
-        });
-        addMessage({
-          role: "agent",
-          content: `I have prepared a draft action for your review. Please examine the details below and approve, modify, or reject.`,
-          type: "action_draft",
-          actionDraft: result.actionDraft,
-        });
+        addMessage({ role: "agent", content: result.diagnosis, type: "diagnosis" });
+        addMessage({ role: "agent", content: `I have prepared a draft action for your review. Please examine the details below and approve, modify, or reject.`, type: "action_draft", actionDraft: result.actionDraft });
       } else {
-        addMessage({
-          role: "agent",
-          content: result.diagnosis,
-          type: "result",
-        });
+        addMessage({ role: "agent", content: result.diagnosis, type: "result" });
       }
     } catch (err: any) {
       removeMessage(thinkingId);
-      addMessage({
-        role: "agent",
-        content: `I encountered an error while processing your request: ${err.message || "Unknown error"}. Please try again or rephrase your query.`,
-        type: "text",
-      });
+      addMessage({ role: "agent", content: `I encountered an error: ${err.message || "Unknown error"}. Please try again.`, type: "text" });
     } finally {
       setIsProcessing(false);
     }
@@ -380,19 +536,8 @@ export default function SuperAgentPage() {
     if (!msg?.actionDraft) return;
     setApprovingMsgId(msgId);
     try {
-      await agentApproveMutation.mutateAsync({
-        actionType: msg.actionDraft.type,
-        details: msg.actionDraft.details,
-        approved: true,
-      });
-      // Replace the action draft message with a success confirmation
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === msgId
-            ? { ...m, actionDraft: undefined, content: `✓ Action approved and executed. ${msg.actionDraft!.title} has been committed to the audit trail. The finance team has been notified.` }
-            : m
-        )
-      );
+      await agentApproveMutation.mutateAsync({ actionType: msg.actionDraft.type, details: msg.actionDraft.details, approved: true });
+      setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, actionDraft: undefined, content: `✓ Action approved and executed. ${msg.actionDraft!.title} has been committed to the audit trail.` } : m));
       toast.success("Action approved and logged to audit trail");
     } catch (err: any) {
       toast.error(err.message || "Approval failed");
@@ -405,23 +550,13 @@ export default function SuperAgentPage() {
     const msg = messages.find((m) => m.id === msgId);
     if (!msg?.actionDraft) return;
     setIsProcessing(true);
-
     addMessage({ role: "user", content: `Modification request: ${notes}`, type: "text" });
     const thinkingId = addMessage({ role: "agent", content: "Revising the draft based on your instructions...", type: "thinking" });
-
     try {
-      const result = await agentQueryMutation.mutateAsync({
-        query: `Revise the previous ${msg.actionDraft.type} draft with these modifications: ${notes}`,
-      });
+      const result = await agentQueryMutation.mutateAsync({ query: `Revise the previous ${msg.actionDraft.type} draft with these modifications: ${notes}` });
       removeMessage(thinkingId);
-      // Remove old draft message and add revised one
       setMessages((prev) => prev.filter((m) => m.id !== msgId));
-      addMessage({
-        role: "agent",
-        content: result.diagnosis,
-        type: "action_draft",
-        actionDraft: result.actionDraft || msg.actionDraft,
-      });
+      addMessage({ role: "agent", content: result.diagnosis, type: "action_draft", actionDraft: result.actionDraft || msg.actionDraft });
     } catch {
       removeMessage(thinkingId);
       addMessage({ role: "agent", content: "I was unable to revise the draft. Please try again.", type: "text" });
@@ -431,13 +566,7 @@ export default function SuperAgentPage() {
   };
 
   const handleReject = (msgId: string) => {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === msgId
-          ? { ...m, actionDraft: undefined, content: "Draft rejected. The exception has been returned to the review queue for manual handling. No changes were made to your books." }
-          : m
-      )
-    );
+    setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, actionDraft: undefined, content: "Draft rejected. Exception returned to the review queue. No changes were made to your books." } : m));
     toast.info("Draft rejected — exception returned to review queue");
   };
 
@@ -451,8 +580,8 @@ export default function SuperAgentPage() {
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] max-h-[calc(100vh-4rem)]">
       {/* Header */}
-      <div className="flex-shrink-0 px-6 pt-6 pb-4 border-b bg-background">
-        <div className="flex items-center justify-between">
+      <div className="flex-shrink-0 px-6 pt-5 pb-3 border-b bg-background">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
             <div className="h-9 w-9 rounded-lg bg-primary flex items-center justify-center">
               <Sparkles className="h-5 w-5 text-primary-foreground" />
@@ -465,91 +594,70 @@ export default function SuperAgentPage() {
               <p className="text-xs text-muted-foreground">Autonomous reconciliation intelligence with Human-in-the-Loop approval</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground bg-amber-50 border border-amber-200 rounded-md px-3 py-1.5">
+          <div className="hidden md:flex items-center gap-2 text-xs text-muted-foreground bg-amber-50 border border-amber-200 rounded-md px-3 py-1.5">
             <ShieldCheck className="h-3.5 w-3.5 text-amber-600" />
             <span className="text-amber-700 font-medium">Draft Layer Active — No action commits without your approval</span>
           </div>
         </div>
 
-        {/* Agent capability pills */}
-        <div className="flex gap-2 mt-3 flex-wrap">
-          {[
-            { icon: Brain, label: "Root Cause Diagnosis" },
-            { icon: Zap, label: "Many-to-Many Matching" },
-            { icon: Mail, label: "Vendor Communication" },
-            { icon: FileText, label: "Journal Entry Drafting" },
-            { icon: ShieldCheck, label: "HitL Approval Gate" },
-          ].map(({ icon: Icon, label }) => (
-            <div key={label} className="flex items-center gap-1.5 text-[11px] bg-muted/60 rounded-full px-2.5 py-1 text-muted-foreground">
-              <Icon className="h-3 w-3 text-primary" />
-              {label}
+        <Tabs defaultValue="chat" className="w-full">
+          <TabsList className="h-8">
+            <TabsTrigger value="chat" className="text-xs gap-1.5 h-7">
+              <MessageSquare className="h-3 w-3" /> Agent Chat
+            </TabsTrigger>
+            <TabsTrigger value="m2m" className="text-xs gap-1.5 h-7">
+              <GitMerge className="h-3 w-3" /> Many-to-Many Demo
+              <Badge className="ml-1 bg-primary/10 text-primary border-none text-[9px] px-1">NEW</Badge>
+            </TabsTrigger>
+          </TabsList>
+
+          {/* ── Chat Tab ── */}
+          <TabsContent value="chat" className="mt-0 flex flex-col" style={{ height: "calc(100vh - 14rem)" }}>
+            <div className="flex-1 overflow-y-auto py-4 space-y-4">
+              {messages.map((msg) => (
+                <ChatMessage key={msg.id} msg={msg} onApprove={handleApprove} onModify={handleModify} onReject={handleReject} isApproving={approvingMsgId === msg.id} />
+              ))}
+              <div ref={messagesEndRef} />
             </div>
-          ))}
-        </div>
-      </div>
+            {messages.length === 1 && (
+              <div className="flex-shrink-0 pb-2">
+                <p className="text-xs text-muted-foreground mb-2">Suggested queries:</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {suggestedQueries.map((q) => (
+                    <button key={q} onClick={() => setInput(q)} className="text-left text-xs bg-muted/40 hover:bg-muted/80 border rounded-md px-3 py-2 text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5">
+                      <ChevronRight className="h-3 w-3 flex-shrink-0 text-primary" />
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex-shrink-0 pt-3 border-t bg-background">
+              <div className="flex gap-2 items-end">
+                <Textarea
+                  placeholder="Ask the agent to investigate, diagnose, or draft an action..."
+                  className="resize-none text-sm min-h-[44px] max-h-[120px]"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                  disabled={isProcessing}
+                />
+                <Button onClick={handleSend} disabled={!input.trim() || isProcessing} className="h-11 w-11 p-0 flex-shrink-0">
+                  {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                </Button>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1.5 flex items-center gap-1">
+                <ShieldCheck className="h-3 w-3" />
+                All agent actions are logged to the immutable audit trail. Press Enter to send, Shift+Enter for new line.
+              </p>
+            </div>
+          </TabsContent>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-        {messages.map((msg) => (
-          <ChatMessage
-            key={msg.id}
-            msg={msg}
-            onApprove={handleApprove}
-            onModify={handleModify}
-            onReject={handleReject}
-            isApproving={approvingMsgId === msg.id}
-          />
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Suggested queries (show when only welcome message) */}
-      {messages.length === 1 && (
-        <div className="flex-shrink-0 px-6 pb-2">
-          <p className="text-xs text-muted-foreground mb-2">Suggested queries:</p>
-          <div className="grid grid-cols-2 gap-2">
-            {suggestedQueries.map((q) => (
-              <button
-                key={q}
-                onClick={() => setInput(q)}
-                className="text-left text-xs bg-muted/40 hover:bg-muted/80 border rounded-md px-3 py-2 text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5"
-              >
-                <ChevronRight className="h-3 w-3 flex-shrink-0 text-primary" />
-                {q}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Input */}
-      <div className="flex-shrink-0 px-6 pb-6 pt-3 border-t bg-background">
-        <div className="flex gap-2 items-end">
-          <Textarea
-            placeholder="Ask the agent to investigate, diagnose, or draft an action..."
-            className="resize-none text-sm min-h-[44px] max-h-[120px]"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            disabled={isProcessing}
-          />
-          <Button
-            onClick={handleSend}
-            disabled={!input.trim() || isProcessing}
-            className="h-11 w-11 p-0 flex-shrink-0"
-          >
-            {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </Button>
-        </div>
-        <p className="text-[10px] text-muted-foreground mt-1.5 flex items-center gap-1">
-          <ShieldCheck className="h-3 w-3" />
-          All agent actions are logged to the immutable audit trail. Press Enter to send, Shift+Enter for new line.
-        </p>
+          {/* ── Many-to-Many Demo Tab ── */}
+          <TabsContent value="m2m" className="mt-0 overflow-y-auto" style={{ height: "calc(100vh - 14rem)" }}>
+            <ManyToManyDemo />
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

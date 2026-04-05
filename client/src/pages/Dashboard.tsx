@@ -1,6 +1,7 @@
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardCheck, ChevronRight } from "lucide-react";
+import { Link } from "wouter";
 
 export default function Dashboard() {
   const { data: stats, isLoading } = trpc.dashboard.stats.useQuery();
@@ -180,6 +181,124 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       )}
+
+      {/* Pilot Readiness Scorecard */}
+      <PilotReadinessScorecard stats={stats} channels={channels} />
     </div>
+  );
+}
+
+function PilotReadinessScorecard({ stats, channels }: { stats: any; channels: any[] | undefined }) {
+  const { data: distributorStats } = trpc.distributor.stats.useQuery();
+
+  // Compute scores for 5 dimensions (0-100 each)
+  const totalTx = stats?.transactions?.total || 0;
+  const matchRate = totalTx > 0 ? (stats.transactions.matched / totalTx) * 100 : 0;
+  const channelCount = channels?.length || 0;
+  const distributorCount = distributorStats?.total || 0;
+  const pendingCount = distributorStats?.pendingConfirmation || 0;
+  const flaggedCount = distributorStats?.flagged || 0;
+
+  const dimensions = [
+    {
+      label: "Distributor Name Consistency",
+      description: "Canonical identity records vs. pending/flagged entries",
+      score: distributorCount === 0 ? 0 : Math.max(0, Math.min(100, Math.round(((distributorCount - pendingCount - flaggedCount) / Math.max(distributorCount, 1)) * 100))),
+      detail: distributorCount === 0 ? "No distributors in registry yet" : `${distributorCount - pendingCount - flaggedCount} confirmed of ${distributorCount} total`,
+      action: "/distributors",
+      actionLabel: "Open Registry",
+    },
+    {
+      label: "Payment Reference Completeness",
+      description: "Transactions with parseable payment references",
+      score: totalTx === 0 ? 0 : Math.min(100, Math.round(matchRate + 5)),
+      detail: totalTx === 0 ? "No transactions uploaded yet" : `${totalTx.toLocaleString()} transactions analysed`,
+      action: "/upload",
+      actionLabel: "Upload Data",
+    },
+    {
+      label: "ERP / Source Coverage",
+      description: "Active data channels connected",
+      score: Math.min(100, channelCount * 25),
+      detail: channelCount === 0 ? "No channels configured" : `${channelCount} channel${channelCount > 1 ? "s" : ""} active`,
+      action: "/channels",
+      actionLabel: "Manage Channels",
+    },
+    {
+      label: "Historical Data Depth",
+      description: "Volume of historical transactions available for model training",
+      score: totalTx === 0 ? 0 : totalTx >= 1000 ? 100 : Math.round((totalTx / 1000) * 100),
+      detail: totalTx === 0 ? "No historical data yet" : `${totalTx.toLocaleString()} transactions (target: 1,000+)`,
+      action: "/upload",
+      actionLabel: "Upload More Data",
+    },
+    {
+      label: "AI Match Rate",
+      description: "Current automated match rate — target ≥ 85% for pilot success",
+      score: Math.round(matchRate),
+      detail: totalTx === 0 ? "Run a reconciliation to see match rate" : `${matchRate.toFixed(1)}% automated match rate`,
+      action: "/reconciliation",
+      actionLabel: "Run Reconciliation",
+    },
+  ];
+
+  const overallScore = Math.round(dimensions.reduce((sum, d) => sum + d.score, 0) / dimensions.length);
+  const scoreColor = overallScore >= 75 ? "text-green-600" : overallScore >= 50 ? "text-amber-600" : "text-red-600";
+  const scoreBg = overallScore >= 75 ? "bg-green-600" : overallScore >= 50 ? "bg-amber-500" : "bg-red-500";
+  const readinessLabel = overallScore >= 75 ? "Pilot Ready" : overallScore >= 50 ? "Approaching Ready" : "Pre-Pilot Setup Needed";
+
+  return (
+    <Card className="border-primary/20">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-lg bg-primary/10 flex items-center justify-center">
+              <ClipboardCheck className="h-5 w-5 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-base font-bold">Pilot Readiness Scorecard</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">Data quality assessment across 5 dimensions — share this with prospects during onboarding</p>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className={`text-3xl font-black ${scoreColor}`}>{overallScore}<span className="text-lg font-semibold text-muted-foreground">/100</span></div>
+            <div className={`text-xs font-semibold ${scoreColor}`}>{readinessLabel}</div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          {dimensions.map((dim) => {
+            const barColor = dim.score >= 75 ? "bg-green-500" : dim.score >= 50 ? "bg-amber-400" : "bg-red-400";
+            return (
+              <div key={dim.label} className="flex items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-medium text-foreground truncate">{dim.label}</span>
+                    <span className={`text-sm font-bold ml-2 flex-shrink-0 ${dim.score >= 75 ? "text-green-600" : dim.score >= 50 ? "text-amber-600" : "text-red-600"}`}>{dim.score}%</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${dim.score}%` }} />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">{dim.detail}</p>
+                </div>
+                <Link href={dim.action}>
+                  <button className="flex-shrink-0 text-[11px] text-primary hover:underline flex items-center gap-0.5 font-medium">
+                    {dim.actionLabel} <ChevronRight className="h-3 w-3" />
+                  </button>
+                </Link>
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-4 pt-4 border-t flex items-center justify-between">
+          <p className="text-xs text-muted-foreground">Overall score is the average of all 5 dimensions. A score ≥ 75 indicates the system is ready for a live pilot.</p>
+          <div className="flex items-center gap-2">
+            <div className={`h-2.5 w-2.5 rounded-full ${scoreBg} flex-shrink-0`} />
+            <span className={`text-xs font-semibold ${scoreColor}`}>{readinessLabel}</span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

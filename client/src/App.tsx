@@ -29,6 +29,8 @@ import OperationsDashboard from "./pages/OperationsDashboard";
 import AuditorDashboard from "./pages/AuditorDashboard";
 import ModuleConfiguration from "./pages/ModuleConfiguration";
 import SuperAgent from "./pages/SuperAgent";
+import DistributorRegistry from "./pages/DistributorRegistry";
+import CorporateB2BLanding from "./pages/CorporateB2BLanding";
 import BanksLanding from "./pages/BanksLanding";
 import FinTechsLanding from "./pages/FinTechsLanding";
 import PaymentProcessorsLanding from "./pages/PaymentProcessorsLanding";
@@ -48,6 +50,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/banks" component={BanksLanding} />
+      <Route path="/corporate-b2b" component={CorporateB2BLanding} />
       <Route path="/fintechs" component={FinTechsLanding} />
       <Route path="/payment-processors" component={PaymentProcessorsLanding} />
       <Route path="/docs/:docName" component={DocViewer} />
@@ -75,6 +78,7 @@ function Router() {
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
       <Route path="/modules">{() => <DashboardPage component={ModuleConfiguration} />}</Route>
       <Route path="/super-agent">{() => <DashboardPage component={SuperAgent} />}</Route>
+      <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

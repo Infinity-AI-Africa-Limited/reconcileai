@@ -139,7 +139,95 @@ async function dispatchWebhook(event: string, payload: any) {
   }
 }
 
-// ─── Router ──────────────────────────────────────────────────────────
+// ─── Distributor Identity Registry Router ───────────────────────────
+const distributorRouter = router({
+  list: protectedProcedure
+    .input(z.object({
+      status: z.string().optional(),
+      search: z.string().optional(),
+      limit: z.number().optional(),
+      offset: z.number().optional(),
+    }))
+    .query(async ({ ctx, input }) => {
+      const user = await db.getUserByOpenId(ctx.user.openId);
+      if (!user?.organizationId) return [];
+      return db.getDistributors({ organizationId: user.organizationId, ...input });
+    }),
+
+  stats: protectedProcedure
+    .query(async ({ ctx }) => {
+      const user = await db.getUserByOpenId(ctx.user.openId);
+      if (!user?.organizationId) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
+      return db.getDistributorStats(user.organizationId);
+    }),
+
+  create: protectedProcedure
+    .input(z.object({
+      canonicalName: z.string().min(1),
+      registeredBusinessName: z.string().optional(),
+      taxId: z.string().optional(),
+      primaryBankAccount: z.string().optional(),
+      primaryBankName: z.string().optional(),
+      contactEmail: z.string().email().optional(),
+      contactPhone: z.string().optional(),
+      zone: z.string().optional(),
+      nameVariants: z.array(z.string()).optional(),
+      notes: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.getUserByOpenId(ctx.user.openId);
+      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.createDistributor({ ...input, organizationId: user.organizationId, createdBy: user.id });
+      return { success: true };
+    }),
+
+  update: protectedProcedure
+    .input(z.object({
+      id: z.number(),
+      canonicalName: z.string().optional(),
+      registeredBusinessName: z.string().optional(),
+      taxId: z.string().optional(),
+      primaryBankAccount: z.string().optional(),
+      primaryBankName: z.string().optional(),
+      contactEmail: z.string().email().optional(),
+      contactPhone: z.string().optional(),
+      zone: z.string().optional(),
+      status: z.enum(["active", "inactive", "pending_confirmation", "flagged"]).optional(),
+      nameVariants: z.array(z.string()).optional(),
+      notes: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.getUserByOpenId(ctx.user.openId);
+      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
+      const { id, ...data } = input;
+      await db.updateDistributor(id, user.organizationId, data);
+      return { success: true };
+    }),
+
+  confirm: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.getUserByOpenId(ctx.user.openId);
+      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.updateDistributor(input.id, user.organizationId, {
+        status: "active",
+        confirmedBy: user.id,
+        confirmedAt: new Date(),
+      });
+      return { success: true };
+    }),
+
+  addVariant: protectedProcedure
+    .input(z.object({ id: z.number(), variant: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.getUserByOpenId(ctx.user.openId);
+      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.addDistributorNameVariant(input.id, user.organizationId, input.variant);
+      return { success: true };
+    }),
+});
+
+// ─── Router ──────────────────────────────────────────────────────────────
 
 export const appRouter = router({
   system: systemRouter,
@@ -1950,6 +2038,7 @@ export const appRouter = router({
 
   // ─── Super Agent ─────────────────────────────────────────────────────
 
+  distributor: distributorRouter,
   superAgent: router({
     query: protectedProcedure
       .input(z.object({

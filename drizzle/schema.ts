@@ -789,3 +789,35 @@ export const moduleConfigurations = mysqlTable("module_configurations", {
 
 export type ModuleConfiguration = typeof moduleConfigurations.$inferSelect;
 export type InsertModuleConfiguration = typeof moduleConfigurations.$inferInsert;
+
+// ─── Distributor Identity Registry ──────────────────────────────────
+export const distributors = mysqlTable("distributors", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  canonicalId: varchar("canonicalId", { length: 32 }).notNull(), // e.g. DIST-0042
+  canonicalName: varchar("canonicalName", { length: 255 }).notNull(),
+  registeredBusinessName: varchar("registeredBusinessName", { length: 255 }),
+  taxId: varchar("taxId", { length: 64 }),
+  primaryBankAccount: varchar("primaryBankAccount", { length: 64 }),
+  primaryBankName: varchar("primaryBankName", { length: 128 }),
+  contactEmail: varchar("contactEmail", { length: 255 }),
+  contactPhone: varchar("contactPhone", { length: 32 }),
+  zone: varchar("zone", { length: 128 }), // e.g. Lagos Zone A
+  status: mysqlEnum("status", ["active", "inactive", "pending_confirmation", "flagged"]).default("active").notNull(),
+  nameVariants: json("nameVariants"), // string[] of known aliases
+  totalPaymentsMatched: int("totalPaymentsMatched").default(0).notNull(),
+  totalAmountMatched: decimal("totalAmountMatched", { precision: 18, scale: 2 }).default("0").notNull(),
+  lastPaymentAt: timestamp("lastPaymentAt"),
+  confirmedBy: int("confirmedBy"), // userId who last confirmed
+  confirmedAt: timestamp("confirmedAt"),
+  notes: text("notes"),
+  createdBy: int("createdBy").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_distributors_org").on(table.organizationId),
+  index("idx_distributors_status").on(table.status),
+  uniqueIndex("unique_canonical_id_org").on(table.organizationId, table.canonicalId),
+]);
+export type Distributor = typeof distributors.$inferSelect;
+export type InsertDistributor = typeof distributors.$inferInsert;

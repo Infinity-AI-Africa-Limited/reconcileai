@@ -46,6 +46,7 @@ import {
   Settings2,
   BookOpen,
   Sparkles,
+  Building2,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -55,6 +56,7 @@ import { Button } from "./ui/button";
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
+  { icon: Building2, label: "Distributor Registry", path: "/distributors" },
   { icon: Upload, label: "Upload Data", path: "/upload" },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
   { icon: Layers, label: "Multi-Channel", path: "/channels" },
