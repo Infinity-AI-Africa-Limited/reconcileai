@@ -54,11 +54,12 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid } from "lucide-react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
+  { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
   { icon: Upload, label: "Upload Data", path: "/upload" },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
@@ -376,7 +377,7 @@ function DashboardLayoutContent({
             {/* Demo Mode Toggle */}
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
               <button
-                onClick={() => isDemoActive ? deactivateDemo.mutate() : activateDemo.mutate()}
+                onClick={() => isDemoActive ? deactivateDemo.mutate() : activateDemo.mutate({ segment: "fmcg" })}
                 disabled={isTogglingDemo}
                 className={`w-full flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-all ${
                   isDemoActive

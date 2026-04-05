@@ -678,7 +678,7 @@ function MemoryLayerPanel() {
               size="sm"
               variant="outline"
               className="h-8 text-xs gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50"
-              onClick={() => activateDemo.mutate()}
+              onClick={() => activateDemo.mutate({ segment: "fmcg" })}
               disabled={activateDemo.isPending}
             >
               {activateDemo.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Database className="h-3 w-3" />}

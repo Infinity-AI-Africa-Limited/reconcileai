@@ -2496,17 +2496,15 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
      activate: protectedProcedure
-      .mutation(async ({ ctx }) => {
-        const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
-        // Return match rate from the seeded reconciliation job
-        const drizzle = await getDb();
-        let matchRate = "90.00";
-        if (drizzle) {
-          const { reconciliationJobs: rj } = await import("../drizzle/schema");
-          const jobs = await drizzle.select().from(rj).where(eq(rj.id, result.jobId));
-          if (jobs[0]) matchRate = jobs[0].matchRate ?? "90.00";
+      .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.segment === "finserv") {
+          const { seedFinServDemoData } = await import("./demoSeedFinServ");
+          const result = await seedFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null, "both");
+          return { success: true, ...result };
         }
-        return { success: true, matchRate, ...result };
+        const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        return { success: true, ...result };
       }),
     deactivate: protectedProcedure
       .mutation(async ({ ctx }) => {

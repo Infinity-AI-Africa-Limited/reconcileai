@@ -29,6 +29,7 @@ import OperationsDashboard from "./pages/OperationsDashboard";
 import AuditorDashboard from "./pages/AuditorDashboard";
 import ModuleConfiguration from "./pages/ModuleConfiguration";
 import SuperAgent from "./pages/SuperAgent";
+import DemoDashboard from "./pages/DemoDashboard";
 import DistributorRegistry from "./pages/DistributorRegistry";
 import CorporateB2BLanding from "./pages/CorporateB2BLanding";
 import BanksLanding from "./pages/BanksLanding";
@@ -79,6 +80,7 @@ function Router() {
       <Route path="/modules">{() => <DashboardPage component={ModuleConfiguration} />}</Route>
       <Route path="/super-agent">{() => <DashboardPage component={SuperAgent} />}</Route>
       <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
+      <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

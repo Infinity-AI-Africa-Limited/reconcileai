@@ -885,3 +885,12 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Add "Share Demo Link" button to Demo Mode active state in sidebar
 - [ ] Guest token route: /demo/:token — read-only dashboard view with demo data
 - [ ] Add demo.validateGuestToken public procedure for token verification
+
+## Demo Mode Phase 2 Upgrade
+- [ ] Upgrade BrightGoods FMCG seed: 1,000 transactions, 95% match rate, healthy exception profile with plain-language narratives
+- [ ] Build Financial Services demo seed engine: LapoMFB + Renmoney MFB, millions of transactions, all payment rails, 95% match rate
+- [ ] FinServ demo: plain-language exception narratives and AI recommendations
+- [ ] Build separate Demo Dashboard page (/demo-dashboard) isolated from live dashboard
+- [ ] Demo Dashboard: FMCG vs Financial Services segment selector with segment-specific KPIs
+- [ ] Add Demo Dashboard to sidebar navigation (visible when Demo Mode is active)
+- [ ] Update Demo Mode toggle to support two demo types: FMCG and Financial Services
