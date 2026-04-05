@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   CheckCircle2, AlertTriangle, TrendingUp, Zap, Building2, Landmark,
   FlaskConical, RefreshCw, Loader2, BarChart3, Clock, Shield,
-  DollarSign, Users, Activity, ArrowUpRight, ArrowDownRight,
+  DollarSign, Users, Activity, ArrowUpRight, ArrowDownRight, Printer,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -485,7 +485,89 @@ function FinServDemoPanel() {
 
 // ── Main Demo Dashboard ───────────────────────────────────────────────────────
 
+function printDemoReport(segment: "fmcg" | "finserv") {
+  const title = segment === "fmcg" ? "BrightGoods FMCG — ReconcileAI Demo Report" : "Financial Services (LapoMFB + Renmoney) — ReconcileAI Demo Report";
+  const date = new Date().toLocaleDateString("en-NG", { year: "numeric", month: "long", day: "numeric" });
+  const fmcgContent = `
+    <h2>FMCG Reconciliation Summary</h2>
+    <table><tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Total Transactions</td><td>1,000</td></tr>
+      <tr><td>Auto-Match Rate</td><td>95.0%</td></tr>
+      <tr><td>Automatically Matched</td><td>950</td></tr>
+      <tr><td>Exceptions for Review</td><td>50</td></tr>
+      <tr><td>Time Saved per Cycle</td><td>18.5 hours</td></tr>
+      <tr><td>Finance Officers Required</td><td>1 (vs 4 manual)</td></tr>
+    </table>
+    <h2>Match Type Breakdown</h2>
+    <table><tr><th>Match Type</th><th>Count</th><th>%</th></tr>
+      <tr><td>Exact reference match</td><td>720</td><td>72%</td></tr>
+      <tr><td>Fuzzy name match (AI)</td><td>145</td><td>14.5%</td></tr>
+      <tr><td>FX variance tolerance</td><td>55</td><td>5.5%</td></tr>
+      <tr><td>Many-to-many split</td><td>30</td><td>3%</td></tr>
+    </table>
+    <h2>Exception Narratives (Sample)</h2>
+    <p><strong>Partial Payment — Kola Ventures:</strong> Paid ₦1.8M against ₦2.4M invoice. Shortfall of ₦600K consistent with promotional deduction on Order #ORD-2847. Recommendation: verify with account manager and raise credit note if approved.</p>
+    <p><strong>FX Bank Fee — Remi Foods:</strong> Paid ₦2,398,500 against ₦2,400,000 invoice. ₦1,500 bank fee deducted by sending bank. Recommendation: accept as full payment, write off ₦1,500 to Bank Charges.</p>
+    <p><strong>Split Payment — Ade Distributors:</strong> Single ₦10M deposit matched to 3 invoices (₦3.3M + ₦3.3M + ₦3.4M). Numbers add up perfectly. Recommendation: approve three-way split, mark all three invoices as paid.</p>
+    <h2>ROI Summary</h2>
+    <p>At 1,000 transactions per reconciliation cycle, ReconcileAI reduces manual reconciliation from 4 finance officers to 1, saving 18.5 hours per cycle. The 95% auto-match rate eliminates ₦600M in annual unreconciled payment risk.</p>
+  `;
+  const finservContent = `
+    <h2>Financial Services Reconciliation Summary</h2>
+    <table><tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Total Transactions</td><td>3,000,000/month</td></tr>
+      <tr><td>Auto-Match Rate</td><td>95.0%</td></tr>
+      <tr><td>Payment Rails Covered</td><td>7 (NIP, Direct Debit, USSD, POS, Mobile, Agent Banking, Card)</td></tr>
+      <tr><td>Exceptions for Review</td><td>150,000 (5%)</td></tr>
+      <tr><td>Staff Reduction</td><td>10 FTEs (12 → 2)</td></tr>
+      <tr><td>Daily Collections Reconciled</td><td>₦2.4B</td></tr>
+    </table>
+    <h2>Payment Rail Breakdown</h2>
+    <table><tr><th>Rail</th><th>Transactions</th><th>Match Rate</th></tr>
+      <tr><td>NIP / NIBSS</td><td>1,200,000</td><td>97%</td></tr>
+      <tr><td>Direct Debit</td><td>600,000</td><td>94%</td></tr>
+      <tr><td>USSD</td><td>480,000</td><td>93%</td></tr>
+      <tr><td>POS</td><td>360,000</td><td>96%</td></tr>
+      <tr><td>Mobile Banking</td><td>240,000</td><td>95%</td></tr>
+      <tr><td>Agent Banking</td><td>72,000</td><td>92%</td></tr>
+      <tr><td>Card Payments</td><td>48,000</td><td>96%</td></tr>
+    </table>
+    <h2>Exception Narratives (Sample)</h2>
+    <p><strong>Failed Direct Debit — Chukwuemeka Obi:</strong> Mandate #DD-2847 failed with code R01 (insufficient funds). Loan repayment of ₦45,000 not collected. Recommendation: retry in 3 days, flag account for collections review.</p>
+    <p><strong>USSD Timeout — Amina Yusuf:</strong> Customer initiated ₦12,500 transfer via USSD but session timed out. Debit posted but credit not confirmed. Recommendation: check interbank settlement report, reverse debit if credit not confirmed within 24 hours.</p>
+    <h2>ROI Summary</h2>
+    <p>At 3,000,000 transactions per month across 7 payment rails, ReconcileAI reduces reconciliation staff from 12 to 2 officers. The 95% auto-match rate prevents ₦2.4B in unreconciled collections from ageing beyond 48 hours — a critical CBN regulatory requirement.</p>
+  `;
+  const content = segment === "fmcg" ? fmcgContent : finservContent;
+  const html = `<!DOCTYPE html><html><head><title>${title}</title><style>
+    body { font-family: Arial, sans-serif; font-size: 12px; color: #111; margin: 40px; }
+    h1 { font-size: 18px; color: #1B365D; border-bottom: 2px solid #1B365D; padding-bottom: 8px; margin-bottom: 4px; }
+    h2 { font-size: 14px; color: #1B365D; margin-top: 20px; margin-bottom: 8px; }
+    .meta { font-size: 11px; color: #666; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+    th { background: #1B365D; color: white; padding: 6px 10px; text-align: left; font-size: 11px; }
+    td { padding: 5px 10px; border-bottom: 1px solid #e5e7eb; font-size: 11px; }
+    tr:nth-child(even) td { background: #f9fafb; }
+    p { line-height: 1.6; margin-bottom: 10px; }
+    .footer { margin-top: 40px; font-size: 10px; color: #999; border-top: 1px solid #e5e7eb; padding-top: 10px; }
+    @media print { body { margin: 20px; } }
+  </style></head><body>
+    <h1>ReconcileAI — Demo Report</h1>
+    <p class="meta">Prepared by: Infinity AI &nbsp;|&nbsp; Date: ${date} &nbsp;|&nbsp; Segment: ${segment === "fmcg" ? "FMCG (BrightGoods)" : "Financial Services (LapoMFB + Renmoney MFB)"}</p>
+    ${content}
+    <div class="footer">This report was generated by ReconcileAI, a product of Infinity AI. The data shown is for demonstration purposes only. Contact: hello@infinityai.ng</div>
+  </body></html>`;
+  const win = window.open("", "_blank");
+  if (win) {
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 500);
+  }
+}
+
 export default function DemoDashboard() {
+  const [activeSegment, setActiveSegment] = useState<"fmcg" | "finserv">("fmcg");
   return (
     <div className="p-6 max-w-5xl mx-auto space-y-6">
       {/* Page Header */}
@@ -497,11 +579,17 @@ export default function DemoDashboard() {
           <h1 className="text-xl font-bold text-foreground">Demo Dashboard</h1>
           <p className="text-sm text-muted-foreground">Isolated demo environment — data shown here is for demonstration purposes only and does not affect your live reconciliation data</p>
         </div>
-        <Badge className="ml-auto bg-amber-500 text-white text-xs">DEMO ONLY</Badge>
+        <div className="ml-auto flex items-center gap-2">
+          <Badge className="bg-amber-500 text-white text-xs">DEMO ONLY</Badge>
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={() => printDemoReport(activeSegment)}>
+            <Printer className="h-3.5 w-3.5" />
+            Print Report
+          </Button>
+        </div>
       </div>
 
       {/* Segment Tabs */}
-      <Tabs defaultValue="fmcg">
+      <Tabs defaultValue="fmcg" onValueChange={(v) => setActiveSegment(v as "fmcg" | "finserv")}>
         <TabsList className="grid w-full max-w-sm grid-cols-2">
           <TabsTrigger value="fmcg" className="gap-1.5 text-xs">
             <Building2 className="h-3.5 w-3.5" />

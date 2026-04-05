@@ -894,3 +894,8 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Demo Dashboard: FMCG vs Financial Services segment selector with segment-specific KPIs
 - [ ] Add Demo Dashboard to sidebar navigation (visible when Demo Mode is active)
 - [ ] Update Demo Mode toggle to support two demo types: FMCG and Financial Services
+
+## Demo UX Improvements (Phase 3)
+- [ ] Print Demo Report button on Demo Dashboard (browser-native PDF export with print stylesheet)
+- [ ] "View Demo Dashboard →" link in the demo banner in DashboardLayout
+- [ ] Switch Segment toggle in sidebar Demo Mode panel (FMCG / FinServ when Demo Mode is ON)

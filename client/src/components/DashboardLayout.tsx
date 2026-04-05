@@ -396,13 +396,38 @@ function DashboardLayoutContent({
               {isDemoActive && demoStatus && (
                 <div className="mt-1 px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/20 space-y-1.5">
                   <p className="text-[10px] text-amber-600/80 leading-relaxed">
-                    {demoStatus.transactionCount} txns · {demoStatus.exceptionCount} exceptions · {demoStatus.distributorCount} distributors · {demoStatus.memoryCount} memories
+                    {demoStatus.transactionCount} txns · {demoStatus.exceptionCount} exceptions · {demoStatus.distributorCount} distributors
                   </p>
                   {activatedMatchRate && (
                     <p className="text-[10px] font-semibold text-amber-700">Auto-match rate: {activatedMatchRate}%</p>
                   )}
+                  {/* Switch Segment */}
+                  <div className="flex gap-1 pt-0.5">
+                    <button
+                      onClick={() => { if (demoStatus.segment !== "fmcg") activateDemo.mutate({ segment: "fmcg" }); }}
+                      disabled={isTogglingDemo}
+                      className={`flex-1 text-[10px] font-medium rounded px-1.5 py-1 transition-all disabled:opacity-50 ${
+                        demoStatus.segment === "fmcg" || !demoStatus.segment
+                          ? "bg-amber-500 text-white"
+                          : "bg-amber-500/10 text-amber-700 hover:bg-amber-500/20"
+                      }`}
+                    >
+                      FMCG
+                    </button>
+                    <button
+                      onClick={() => { if (demoStatus.segment !== "finserv") activateDemo.mutate({ segment: "finserv" }); }}
+                      disabled={isTogglingDemo}
+                      className={`flex-1 text-[10px] font-medium rounded px-1.5 py-1 transition-all disabled:opacity-50 ${
+                        demoStatus.segment === "finserv"
+                          ? "bg-amber-500 text-white"
+                          : "bg-amber-500/10 text-amber-700 hover:bg-amber-500/20"
+                      }`}
+                    >
+                      FinServ
+                    </button>
+                  </div>
                   <button
-                    onClick={() => createGuestLink.mutate({ label: "BrightGoods Demo" })}
+                    onClick={() => createGuestLink.mutate({ label: demoStatus.segment === "finserv" ? "FinServ Demo" : "BrightGoods Demo" })}
                     disabled={createGuestLink.isPending}
                     className="w-full flex items-center gap-1.5 text-[10px] text-amber-700 hover:text-amber-900 font-medium transition-colors disabled:opacity-50"
                   >
@@ -486,12 +511,18 @@ function DashboardLayoutContent({
           <div className="sticky top-14 z-30 flex items-center gap-3 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 px-6 py-2.5">
             <FlaskConical className="h-4 w-4 text-amber-600 shrink-0" />
             <p className="text-xs text-amber-700 dark:text-amber-400 flex-1">
-              <span className="font-semibold">Demo Mode active.</span> Viewing BrightGoods FMCG demo data — {demoStatus?.transactionCount ?? 0} transactions, {demoStatus?.exceptionCount ?? 0} exceptions, {demoStatus?.distributorCount ?? 0} distributors. This is not real data.
+              <span className="font-semibold">Demo Mode active.</span> Viewing {demoStatus?.segment === "finserv" ? "Financial Services (LapoMFB + Renmoney)" : "BrightGoods FMCG"} demo data — {demoStatus?.transactionCount ?? 0} transactions, {demoStatus?.exceptionCount ?? 0} exceptions. This is not real data.
             </p>
+            <button
+              onClick={() => setLocation("/demo-dashboard")}
+              className="text-xs font-semibold text-amber-700 hover:text-amber-900 underline underline-offset-2 transition-colors whitespace-nowrap"
+            >
+              View Demo Dashboard →
+            </button>
             <button
               onClick={() => deactivateDemo.mutate()}
               disabled={isTogglingDemo}
-              className="text-amber-600 hover:text-amber-800 transition-colors disabled:opacity-50"
+              className="text-amber-600 hover:text-amber-800 transition-colors disabled:opacity-50 ml-1"
               title="Deactivate Demo Mode"
             >
               <X className="h-4 w-4" />
