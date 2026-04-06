@@ -32,13 +32,13 @@ const daysAgo = (n: number) => { const d = new Date(); d.setDate(d.getDate() - n
 // ── Payment Rails ──────────────────────────────────────────────────────────
 
 const PAYMENT_RAILS = [
-  { name: "NIBSS NIP Transfer", code: "NIBSS_NIP", channelType: "bank_core", description: "NIBSS Instant Payment — interbank transfers via NIP gateway" },
+  { name: "NIBSS NIP Transfer", code: "NIBSS_NIP", channelType: "nibss", description: "NIBSS Instant Payment — interbank transfers via NIP gateway" },
   { name: "USSD Banking", code: "USSD_BANKING", channelType: "mobile_money", description: "USSD *737#/*901# mobile banking transactions" },
   { name: "POS Terminal", code: "POS_TERMINAL", channelType: "pos", description: "Point-of-Sale card transactions at merchant terminals" },
   { name: "Mobile App Banking", code: "MOBILE_APP", channelType: "mobile_money", description: "In-app transfers via LapoMFB and Renmoney mobile apps" },
   { name: "Core Banking (Finacle)", code: "CORE_BANKING", channelType: "bank_core", description: "Direct core banking system entries (Finacle/T24)" },
-  { name: "Direct Debit (NIBSS)", code: "DIRECT_DEBIT", channelType: "bank_core", description: "NIBSS Direct Debit mandate collections for loan repayments" },
-  { name: "Card Payment (Visa/MC)", code: "CARD_PAYMENT", channelType: "card", description: "Visa and Mastercard online card payments" },
+  { name: "Direct Debit (NIBSS)", code: "DIRECT_DEBIT", channelType: "bank_transfer", description: "NIBSS Direct Debit mandate collections for loan repayments" },
+  { name: "Card Payment (Visa/MC)", code: "CARD_PAYMENT", channelType: "card_payments", description: "Visa and Mastercard online card payments" },
   { name: "Agent Banking (MFIN)", code: "AGENT_BANKING", channelType: "mobile_money", description: "Agent banking network collections via MFIN-licensed agents" },
 ];
 
