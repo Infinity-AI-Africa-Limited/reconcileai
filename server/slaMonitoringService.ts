@@ -1,9 +1,12 @@
 /**
  * SLA Monitoring Service
  * Monitors exception resolution times and sends alerts when SLA thresholds are breached.
+ * Demo job exceptions (jobs whose name contains "Demo") are excluded from all alerts.
  */
 import { notifyOwner } from "./_core/notification";
-import * as db from "./db";
+import { getDb, getAllUsers } from "./db";
+import { eq, and, or } from "drizzle-orm";
+import { exceptions, reconciliationJobs } from "../drizzle/schema";
 
 // SLA thresholds in hours
 const SLA_WARNING_THRESHOLD = 20; // Yellow alert
@@ -18,87 +21,114 @@ interface SLABreach {
 }
 
 /**
- * Check all open exceptions for SLA breaches and send notifications
+ * Check all open exceptions for SLA breaches and send notifications.
+ * Exceptions linked to demo reconciliation jobs are intentionally excluded.
  */
 export async function checkSLABreaches(): Promise<void> {
   try {
-    // Get all open and in-review exceptions
-    const { data: exceptions } = await db.getExceptions({ 
-      limit: 10000 
-    });
-    
-    const openExceptions = exceptions.filter(
-      (e: any) => e.status === 'open' || e.status === 'in_review'
+    const db = await getDb();
+    if (!db) return;
+
+    // 1. Find all demo job IDs so we can exclude their exceptions.
+    //    Demo jobs are identified by having "Demo" or "demo" in their name.
+    const allDemoJobs = await db
+      .select({ id: reconciliationJobs.id, name: reconciliationJobs.name })
+      .from(reconciliationJobs);
+
+    const demoJobIds = allDemoJobs
+      .filter(j => j.name && (j.name.includes("Demo") || j.name.includes("demo")))
+      .map(j => j.id);
+
+    // 2. Fetch all open/in-review exceptions, excluding demo job exceptions
+    const openExceptions = await db
+      .select()
+      .from(exceptions)
+      .where(
+        and(
+          or(
+            eq(exceptions.status, "open"),
+            eq(exceptions.status, "in_review")
+          ),
+          // Exclude exceptions that belong to demo jobs
+          demoJobIds.length > 0
+            ? (exceptions.jobId
+                ? // @ts-ignore — drizzle notInArray is available via inArray negation pattern
+                  undefined
+                : undefined)
+            : undefined
+        )
+      )
+      .limit(10000);
+
+    // Filter out demo job exceptions in JS (safe fallback for any ORM version)
+    const demoJobIdSet = new Set(demoJobIds);
+    const realExceptions = openExceptions.filter(
+      (e) => !demoJobIdSet.has(e.jobId)
     );
-    
+
     const breaches: SLABreach[] = [];
     const now = new Date();
-    
-    for (const exception of openExceptions) {
+
+    for (const exception of realExceptions) {
       if (!exception.createdAt) continue;
-      
+
       const hoursOpen = (now.getTime() - exception.createdAt.getTime()) / (1000 * 60 * 60);
-      
-      // Check if this exception has crossed a threshold
+
       if (hoursOpen >= SLA_BREACH_THRESHOLD) {
-        // Get assigned user info if available
-        let assignedUserName: string | undefined;
-        if (exception.assignedTo) {
-          const allUsers = await db.getAllUsers();
-          const user = allUsers.find((u: any) => u.id === exception.assignedTo);
-          assignedUserName = user?.name || user?.email || `User #${exception.assignedTo}`;
-        }
-        
         breaches.push({
           exceptionId: exception.id,
           hoursOpen: Math.round(hoursOpen * 10) / 10,
           severity: 'critical',
           assignedTo: exception.assignedTo || undefined,
-          assignedUserName,
         });
       } else if (hoursOpen >= SLA_WARNING_THRESHOLD) {
-        let assignedUserName: string | undefined;
-        if (exception.assignedTo) {
-          const allUsers = await db.getAllUsers();
-          const user = allUsers.find((u: any) => u.id === exception.assignedTo);
-          assignedUserName = user?.name || user?.email || `User #${exception.assignedTo}`;
-        }
-        
         breaches.push({
           exceptionId: exception.id,
           hoursOpen: Math.round(hoursOpen * 10) / 10,
           severity: 'warning',
           assignedTo: exception.assignedTo || undefined,
-          assignedUserName,
         });
       }
     }
-    
+
+    // Enrich with assigned user names if needed
+    if (breaches.some(b => b.assignedTo)) {
+      const allUsers = await getAllUsers();
+      for (const breach of breaches) {
+        if (breach.assignedTo) {
+          const user = allUsers.find((u: any) => u.id === breach.assignedTo);
+          breach.assignedUserName = user?.name || user?.email || `User #${breach.assignedTo}`;
+        }
+      }
+    }
+
     // Send notifications if there are breaches
     if (breaches.length > 0) {
       await sendSLABreachNotification(breaches);
     }
-    
-    console.log(`[SLA Monitor] Checked ${openExceptions.length} exceptions, found ${breaches.length} SLA breaches`);
+
+    console.log(
+      `[SLA Monitor] Checked ${realExceptions.length} real exceptions (excluded ${openExceptions.length - realExceptions.length} demo exceptions), found ${breaches.length} SLA breaches`
+    );
   } catch (error) {
     console.error('[SLA Monitor] Error checking SLA breaches:', error);
   }
 }
 
 /**
- * Send SLA breach notification to managers
+ * Send SLA breach notification to the owner
  */
 async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   const criticalBreaches = breaches.filter(b => b.severity === 'critical');
   const warningBreaches = breaches.filter(b => b.severity === 'warning');
-  
+
   let content = '## SLA Breach Alert\n\n';
-  
+
   if (criticalBreaches.length > 0) {
     content += `### 🔴 Critical (>24 hours): ${criticalBreaches.length} exceptions\n\n`;
     criticalBreaches.slice(0, 10).forEach(breach => {
-      const assignedInfo = breach.assignedUserName 
-        ? `Assigned to: ${breach.assignedUserName}` 
+      const assignedInfo = breach.assignedUserName
+        ? `Assigned to: ${breach.assignedUserName}`
         : 'Unassigned';
       content += `- Exception #${breach.exceptionId} - ${breach.hoursOpen}hrs open - ${assignedInfo}\n`;
     });
@@ -107,12 +137,12 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
     }
     content += '\n';
   }
-  
+
   if (warningBreaches.length > 0) {
     content += `### ⚠️ Warning (>20 hours): ${warningBreaches.length} exceptions\n\n`;
     warningBreaches.slice(0, 10).forEach(breach => {
-      const assignedInfo = breach.assignedUserName 
-        ? `Assigned to: ${breach.assignedUserName}` 
+      const assignedInfo = breach.assignedUserName
+        ? `Assigned to: ${breach.assignedUserName}`
         : 'Unassigned';
       const timeRemaining = 24 - breach.hoursOpen;
       content += `- Exception #${breach.exceptionId} - ${breach.hoursOpen}hrs open - ${timeRemaining.toFixed(1)}hrs remaining - ${assignedInfo}\n`;
@@ -121,11 +151,12 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
       content += `\n_...and ${warningBreaches.length - 10} more warning exceptions_\n`;
     }
   }
-  
+
   content += '\n---\n\n';
   content += `**Action Required:** Please review and resolve these exceptions to maintain SLA compliance.\n`;
   content += `**24-hour SLA Target:** All exceptions should be resolved within 24 hours of creation.\n`;
-  
+  content += `\n_Note: Demo data exceptions are excluded from this alert._\n`;
+
   await notifyOwner({
     title: `⚠️ SLA Breach Alert: ${breaches.length} Exception${breaches.length !== 1 ? 's' : ''} Require Attention`,
     content,
@@ -138,10 +169,10 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
  */
 export function startSLAMonitoring(intervalMinutes: number = 60): NodeJS.Timeout {
   console.log(`[SLA Monitor] Starting with ${intervalMinutes}-minute interval`);
-  
+
   // Run immediately on start
   checkSLABreaches();
-  
+
   // Then run periodically
   return setInterval(() => {
     checkSLABreaches();
