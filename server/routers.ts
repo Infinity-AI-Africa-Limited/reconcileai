@@ -509,7 +509,7 @@ export const appRouter = router({
       }),
 
     history: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getUploadBatches(ctx.user.id, isAdmin);
     }),
   }),
@@ -532,7 +532,7 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
         return db.getTransactions({
           userId: ctx.user.id,
           isAdmin,
@@ -620,7 +620,7 @@ export const appRouter = router({
       }),
 
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getReconciliationJobs(ctx.user.id, isAdmin);
     }),
 
@@ -976,7 +976,7 @@ export const appRouter = router({
 
   review: router({
     pending: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getPendingReviewMatches(ctx.user.id, isAdmin);
     }),
 
@@ -1012,7 +1012,7 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
         return db.getAuditLogs({
           ...input,
           userId: isAdmin ? undefined : ctx.user.id,
@@ -1024,7 +1024,7 @@ export const appRouter = router({
 
   reports: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getReports(ctx.user.id, isAdmin);
     }),
 
@@ -1154,16 +1154,16 @@ export const appRouter = router({
   }),
 
   // ─── Dashboard ───────────────────────────────────────────────────
-
   dashboard: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      // Guest users in demo mode should see all data (no userId filter)
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getDashboardStats(ctx.user.id, isAdmin);
     }),
 
     // CFO Dashboard Endpoints
     cfoKpis: protectedProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin" || ctx.user.isGuest === true);
       if (!stats) {
         return {
           totalTransactions: 0,
@@ -1589,7 +1589,7 @@ export const appRouter = router({
 
   schedules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       const tasks = await db.getScheduledTasks(ctx.user.id, isAdmin);
       return tasks.map((t) => ({
         ...t,
@@ -1822,7 +1822,7 @@ export const appRouter = router({
 
   monitoring: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
+      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getMonitoringStats(ctx.user.id, isAdmin);
     }),
 
@@ -1841,7 +1841,7 @@ export const appRouter = router({
     recentActivity: protectedProcedure
       .input(z.object({ limit: z.number().int().min(1).max(100).default(20) }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
         const jobCondition = !isAdmin ? ctx.user.id : undefined;
         // Get recent completed/failed jobs
         const jobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
@@ -2062,7 +2062,7 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId;
 
         // Fetch recent exceptions and stats for context
-        const isAdmin = ctx.user.role === 'admin';
+        const isAdmin = ctx.user.role === 'admin' || ctx.user.isGuest === true;
         const [recentExceptions, recentJobsRaw] = await Promise.all([
           db.getExceptions({ status: 'open', limit: 20, offset: 0 }),
           db.getReconciliationJobs(userId, isAdmin),
