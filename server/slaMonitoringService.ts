@@ -29,38 +29,39 @@ export async function checkSLABreaches(): Promise<void> {
     const db = await getDb();
     if (!db) return;
 
-    // 1. Find all demo job IDs so we can exclude their exceptions.
-    //    Demo jobs are identified by having "Demo" or "demo" in their name.
-    const allDemoJobs = await db
+    // 1. Find all demo/seeded job IDs so we can exclude their exceptions.
+    //    Demo jobs are identified by:
+    //    - Having "Demo" or "demo" in their name
+    //    - Being seeded reconciliation jobs (name contains "vs CBS GL" — these are
+    //      the bulk-seeded FinServ demo jobs, not real user-created jobs)
+    const allJobs = await db
       .select({ id: reconciliationJobs.id, name: reconciliationJobs.name })
       .from(reconciliationJobs);
 
-    const demoJobIds = allDemoJobs
-      .filter(j => j.name && (j.name.includes("Demo") || j.name.includes("demo")))
+    const demoJobIds = allJobs
+      .filter(j => {
+        if (!j.name) return false;
+        // Explicitly seeded demo jobs
+        if (j.name.includes("Demo") || j.name.includes("demo")) return true;
+        // Bulk-seeded FinServ channel jobs (e.g. "NIBSS_NIP vs CBS GL — April 2026")
+        if (j.name.includes("vs CBS GL")) return true;
+        return false;
+      })
       .map(j => j.id);
 
-    // 2. Fetch all open/in-review exceptions, excluding demo job exceptions
+    // 2. Fetch all open/in-review exceptions
     const openExceptions = await db
       .select()
       .from(exceptions)
       .where(
-        and(
-          or(
-            eq(exceptions.status, "open"),
-            eq(exceptions.status, "in_review")
-          ),
-          // Exclude exceptions that belong to demo jobs
-          demoJobIds.length > 0
-            ? (exceptions.jobId
-                ? // @ts-ignore — drizzle notInArray is available via inArray negation pattern
-                  undefined
-                : undefined)
-            : undefined
+        or(
+          eq(exceptions.status, "open"),
+          eq(exceptions.status, "in_review")
         )
       )
       .limit(10000);
 
-    // Filter out demo job exceptions in JS (safe fallback for any ORM version)
+    // Filter out demo job exceptions in JS
     const demoJobIdSet = new Set(demoJobIds);
     const realExceptions = openExceptions.filter(
       (e) => !demoJobIdSet.has(e.jobId)
