@@ -41,10 +41,12 @@ export async function checkSLABreaches(): Promise<void> {
     const demoJobIds = allJobs
       .filter(j => {
         if (!j.name) return false;
-        // Explicitly seeded demo jobs
+        // Explicitly seeded demo jobs (name contains Demo/demo)
         if (j.name.includes("Demo") || j.name.includes("demo")) return true;
         // Bulk-seeded FinServ channel jobs (e.g. "NIBSS_NIP vs CBS GL — April 2026")
         if (j.name.includes("vs CBS GL")) return true;
+        // BrightGoods FMCG demo reconciliation jobs
+        if (j.name.includes("BrightGoods") || j.name.includes("Demo Reconciliation")) return true;
         return false;
       })
       .map(j => j.id);
