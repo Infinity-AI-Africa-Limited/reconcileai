@@ -1,20 +1,21 @@
 /**
  * ReconcileAI — Woodcore POC Dashboard
- * Demonstrates all three layers of the reconciliation engine against
- * the real Woodcore CBS dataset (August 2025 dump).
+ * Three-layer reconciliation engine against the real Woodcore CBS dataset.
+ * Features: date-range selector, PDF exception report export.
  */
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   AlertTriangle,
   CheckCircle2,
-  XCircle,
   Play,
   RefreshCw,
   Database,
@@ -22,11 +23,13 @@ import {
   Bot,
   TrendingUp,
   TrendingDown,
-  Minus,
   ChevronDown,
   ChevronUp,
   FileText,
+  Download,
+  Calendar,
 } from "lucide-react";
+import jsPDF from "jspdf";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -130,24 +133,196 @@ function categoryLabel(cat: string): string {
   }
 }
 
+// ─── PDF Export ───────────────────────────────────────────────────────────────
+
+function exportToPDF(
+  layer1: Layer1Result,
+  exceptions: Layer2Exception[],
+  layer3: Layer3Result[]
+) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const pageW = 210;
+  const margin = 18;
+  const contentW = pageW - margin * 2;
+  let y = 20;
+
+  const LINE_H = 6;
+  const SECTION_GAP = 8;
+
+  // ── Header ──
+  doc.setFillColor(67, 56, 202); // indigo-700
+  doc.rect(0, 0, pageW, 28, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(16);
+  doc.setFont("helvetica", "bold");
+  doc.text("ReconcileAI — Woodcore CBS Exception Report", margin, 12);
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "normal");
+  doc.text(
+    `Generated: ${new Date().toLocaleString()}  |  Period: ${layer1.periodStart} to ${layer1.periodEnd}`,
+    margin,
+    20
+  );
+  y = 36;
+
+  // ── Layer 1 Summary ──
+  doc.setTextColor(30, 30, 30);
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text("Layer 1 — Balance Reconciliation Summary", margin, y);
+  y += LINE_H;
+
+  doc.setDrawColor(200, 200, 200);
+  doc.line(margin, y, pageW - margin, y);
+  y += 5;
+
+  const summaryRows = [
+    ["Product", layer1.productName],
+    ["GL Account", `${layer1.portfolioLedgerName} (GL ${layer1.portfolioLedgerGlCode})`],
+    ["Expected Balance", formatNGN(layer1.expectedBalance)],
+    ["Actual GL Balance", formatNGN(layer1.actualGlBalance)],
+    ["Variance", `${formatNGN(Math.abs(layer1.varianceAmount))} (${layer1.varianceDirection.replace("_", " ")})`],
+    ["Status", layer1.status],
+    ["Currency", layer1.currencyCode],
+  ];
+
+  doc.setFontSize(9);
+  for (const [label, value] of summaryRows) {
+    doc.setFont("helvetica", "bold");
+    doc.text(label + ":", margin, y);
+    doc.setFont("helvetica", "normal");
+    doc.text(String(value), margin + 48, y);
+    y += LINE_H;
+  }
+
+  y += SECTION_GAP;
+
+  // ── Exception Summary ──
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text(`Layer 2 & 3 — Exception Analysis (${exceptions.length} exceptions)`, margin, y);
+  y += LINE_H;
+  doc.setDrawColor(200, 200, 200);
+  doc.line(margin, y, pageW - margin, y);
+  y += 5;
+
+  // Priority counts
+  const priorityCounts: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
+  for (const r of layer3) priorityCounts[r.priorityLevel] = (priorityCounts[r.priorityLevel] ?? 0) + 1;
+
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "normal");
+  doc.text(
+    `Critical: ${priorityCounts.CRITICAL}   High: ${priorityCounts.HIGH}   Medium: ${priorityCounts.MEDIUM}   Low: ${priorityCounts.LOW}`,
+    margin,
+    y
+  );
+  y += SECTION_GAP;
+
+  // ── Individual Exceptions ──
+  for (let i = 0; i < exceptions.length; i++) {
+    const exc = exceptions[i];
+    const l3 = layer3[i];
+
+    // Check page space
+    if (y > 260) {
+      doc.addPage();
+      y = 20;
+    }
+
+    // Exception header bar
+    doc.setFillColor(245, 245, 250);
+    doc.rect(margin, y - 4, contentW, 8, "F");
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(30, 30, 30);
+    doc.text(
+      `Exception ${i + 1} — GL #${exc.glEntryId}  |  ${categoryLabel(exc.exceptionCategory)}  |  ${formatNGN(exc.glEntryAmount)} ${exc.glEntryType}  |  ${exc.glEntryDate}`,
+      margin + 2,
+      y + 1
+    );
+    y += 9;
+
+    if (l3) {
+      // Priority badge text
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(100, 100, 100);
+      doc.text(`Priority: ${l3.priorityLevel}   Confidence: ${l3.agentConfidence}%`, margin + 2, y);
+      y += LINE_H;
+
+      // AI Explanation
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8.5);
+      doc.setTextColor(60, 60, 60);
+      doc.text("AI Analysis:", margin + 2, y);
+      y += LINE_H - 1;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      doc.setTextColor(50, 50, 50);
+      const explanationLines = doc.splitTextToSize(l3.agentExplanation, contentW - 4);
+      for (const line of explanationLines) {
+        if (y > 270) { doc.addPage(); y = 20; }
+        doc.text(line, margin + 2, y);
+        y += LINE_H - 1;
+      }
+
+      // Recommended Action
+      y += 1;
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8.5);
+      doc.setTextColor(146, 64, 14); // amber-800
+      doc.text("Recommended Action:", margin + 2, y);
+      y += LINE_H - 1;
+
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(120, 53, 15);
+      const actionLines = doc.splitTextToSize(l3.recommendedAction, contentW - 4);
+      for (const line of actionLines) {
+        if (y > 270) { doc.addPage(); y = 20; }
+        doc.text(line, margin + 2, y);
+        y += LINE_H - 1;
+      }
+    }
+
+    y += SECTION_GAP;
+  }
+
+  // ── Footer ──
+  const totalPages = (doc as unknown as { internal: { getNumberOfPages: () => number } }).internal.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFontSize(7);
+    doc.setTextColor(150, 150, 150);
+    doc.setFont("helvetica", "normal");
+    doc.text(
+      `ReconcileAI Confidential — Woodcore CBS POC Report — Page ${p} of ${totalPages}`,
+      margin,
+      295
+    );
+  }
+
+  doc.save(`ReconcileAI_Woodcore_Exception_Report_${layer1.periodStart}_${layer1.periodEnd}.pdf`);
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function StatCard({ label, value, sub, icon: Icon, color }: {
+function StatCard({ label, value, sub, icon: Icon }: {
   label: string;
   value: string | number;
   sub?: string;
   icon: React.ElementType;
-  color: string;
 }) {
   return (
-    <div className={`rounded-xl border p-4 flex gap-3 items-start ${color}`}>
-      <div className="mt-0.5">
+    <div className="rounded-xl border bg-white p-4 flex gap-3 items-start">
+      <div className="mt-0.5 text-indigo-500">
         <Icon className="h-5 w-5" />
       </div>
       <div>
-        <p className="text-xs font-medium opacity-70 uppercase tracking-wide">{label}</p>
-        <p className="text-xl font-bold mt-0.5">{value}</p>
-        {sub && <p className="text-xs opacity-60 mt-0.5">{sub}</p>}
+        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</p>
+        <p className="text-2xl font-bold text-gray-900 mt-0.5">{value}</p>
+        {sub && <p className="text-xs text-gray-400 mt-0.5 font-mono">{sub}</p>}
       </div>
     </div>
   );
@@ -159,7 +334,6 @@ function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
 
   return (
     <div className="space-y-4">
-      {/* Status banner */}
       <div className={`rounded-xl p-4 flex items-center gap-3 ${isBalanced ? "bg-green-50 border border-green-200" : "bg-red-50 border border-red-200"}`}>
         {isBalanced
           ? <CheckCircle2 className="h-6 w-6 text-green-600 shrink-0" />
@@ -180,7 +354,6 @@ function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
         )}
       </div>
 
-      {/* Balance comparison */}
       <div className="grid grid-cols-2 gap-4">
         <div className="rounded-xl border bg-white p-4">
           <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Expected Balance</p>
@@ -194,7 +367,6 @@ function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
         </div>
       </div>
 
-      {/* GL activity breakdown */}
       <div className="rounded-xl border bg-white p-4">
         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">GL Activity Breakdown ({layer1.currencyCode})</p>
         <div className="grid grid-cols-2 gap-3">
@@ -229,7 +401,6 @@ function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
         </div>
       </div>
 
-      {/* Layer 2 trigger */}
       <div className={`rounded-lg p-3 text-sm flex items-center gap-2 ${layer1.layer2Triggered ? "bg-orange-50 border border-orange-200 text-orange-800" : "bg-green-50 border border-green-200 text-green-800"}`}>
         <Layers className="h-4 w-4 shrink-0" />
         {layer1.layer2Triggered
@@ -245,7 +416,6 @@ function ExceptionRow({ exc, layer3 }: { exc: Layer2Exception; layer3?: Layer3Re
 
   return (
     <div className="border rounded-xl overflow-hidden">
-      {/* Header row */}
       <button
         className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors"
         onClick={() => setExpanded(!expanded)}
@@ -269,10 +439,8 @@ function ExceptionRow({ exc, layer3 }: { exc: Layer2Exception; layer3?: Layer3Re
         </span>
       </button>
 
-      {/* Expanded details */}
       {expanded && (
         <div className="border-t bg-gray-50 px-4 py-4 space-y-3">
-          {/* Layer 2 details */}
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div>
               <p className="text-xs text-gray-500 font-medium">Manual Entry Flag</p>
@@ -300,7 +468,6 @@ function ExceptionRow({ exc, layer3 }: { exc: Layer2Exception; layer3?: Layer3Re
             )}
           </div>
 
-          {/* Layer 3 agent output */}
           {layer3 && (
             <>
               <Separator />
@@ -326,11 +493,25 @@ function ExceptionRow({ exc, layer3 }: { exc: Layer2Exception; layer3?: Layer3Re
   );
 }
 
+// ─── Date Range Presets ───────────────────────────────────────────────────────
+
+const DATE_PRESETS = [
+  { label: "April only", start: "2025-04-01", end: "2025-04-30" },
+  { label: "May only", start: "2025-05-01", end: "2025-05-31" },
+  { label: "June only", start: "2025-06-01", end: "2025-06-30" },
+  { label: "July only", start: "2025-07-01", end: "2025-07-31" },
+  { label: "Apr–Jun", start: "2025-04-01", end: "2025-06-30" },
+  { label: "Apr–Jul (full)", start: "2025-04-01", end: "2025-07-31" },
+];
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function WoodcorePOC() {
   const [pocResult, setPocResult] = useState<POCResult | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
+  const [periodStart, setPeriodStart] = useState("2025-04-01");
+  const [periodEnd, setPeriodEnd] = useState("2025-07-31");
+  const [showDatePanel, setShowDatePanel] = useState(false);
 
   const statsQuery = trpc.woodcore.stats.useQuery();
   const runsQuery = trpc.woodcore.getRuns.useQuery();
@@ -346,74 +527,134 @@ export default function WoodcorePOC() {
   const stats = statsQuery.data;
   const isRunning = runPOC.isPending;
 
-  // Build layer3 lookup map by exceptionId
-  // We'll match by index since layer3 results correspond to layer2 exceptions in order
   const layer3ByIndex = pocResult?.layer3Results ?? [];
 
-  // Exception category summary
   const categoryCount = new Map<string, number>();
   for (const exc of pocResult?.layer2Exceptions ?? []) {
     categoryCount.set(exc.exceptionCategory, (categoryCount.get(exc.exceptionCategory) ?? 0) + 1);
   }
 
+  const handleRunPOC = () => {
+    runPOC.mutate({
+      productId: 2,
+      productType: "SAVINGS",
+      currencyCode: "NGN",
+      periodStart,
+      periodEnd,
+      varianceThreshold: 1.0,
+    });
+    setShowDatePanel(false);
+  };
+
+  const handlePreset = (start: string, end: string) => {
+    setPeriodStart(start);
+    setPeriodEnd(end);
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <div className="bg-white border-b px-6 py-4 flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <Database className="h-5 w-5 text-indigo-600" />
-            <h1 className="text-xl font-bold text-gray-900">Woodcore CBS — Reconciliation POC</h1>
-            <Badge variant="outline" className="text-xs border-indigo-300 text-indigo-700 bg-indigo-50">Live Dataset</Badge>
+      <div className="bg-white border-b px-6 py-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <Database className="h-5 w-5 text-indigo-600" />
+              <h1 className="text-xl font-bold text-gray-900">Woodcore CBS — Reconciliation POC</h1>
+              <Badge variant="outline" className="text-xs border-indigo-300 text-indigo-700 bg-indigo-50">Live Dataset</Badge>
+            </div>
+            <p className="text-sm text-gray-500 mt-0.5">
+              Three-layer reconciliation engine running against real Woodcore production data (August 2025 dump)
+            </p>
           </div>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Three-layer reconciliation engine running against real Woodcore production data (August 2025 dump)
-          </p>
+
+          {/* Run controls */}
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowDatePanel(!showDatePanel)}
+              className="gap-1.5 text-gray-600"
+            >
+              <Calendar className="h-4 w-4" />
+              {periodStart} → {periodEnd}
+              <ChevronDown className="h-3 w-3 ml-1" />
+            </Button>
+            <Button
+              onClick={handleRunPOC}
+              disabled={isRunning}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2"
+            >
+              {isRunning
+                ? <><RefreshCw className="h-4 w-4 animate-spin" /> Running…</>
+                : <><Play className="h-4 w-4" /> Run POC</>
+              }
+            </Button>
+          </div>
         </div>
-        <Button
-          onClick={() => runPOC.mutate({
-            productId: 2,
-            productType: "SAVINGS",
-            currencyCode: "NGN",
-            periodStart: "2025-04-01",
-            periodEnd: "2025-07-31",
-            varianceThreshold: 1.0,
-          })}
-          disabled={isRunning}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2"
-        >
-          {isRunning
-            ? <><RefreshCw className="h-4 w-4 animate-spin" /> Running…</>
-            : <><Play className="h-4 w-4" /> Run POC</>
-          }
-        </Button>
+
+        {/* Date range panel */}
+        {showDatePanel && (
+          <div className="mt-4 border rounded-xl bg-gray-50 p-4 space-y-4">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide flex items-center gap-1.5">
+              <Calendar className="h-3.5 w-3.5" /> Select Analysis Period
+            </p>
+
+            {/* Presets */}
+            <div className="flex flex-wrap gap-2">
+              {DATE_PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  onClick={() => handlePreset(p.start, p.end)}
+                  className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+                    periodStart === p.start && periodEnd === p.end
+                      ? "bg-indigo-600 text-white border-indigo-600"
+                      : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Custom range */}
+            <div className="flex items-end gap-3">
+              <div className="space-y-1">
+                <Label className="text-xs text-gray-500">From</Label>
+                <Input
+                  type="date"
+                  value={periodStart}
+                  onChange={(e) => setPeriodStart(e.target.value)}
+                  className="h-8 text-sm w-40"
+                  min="2025-04-01"
+                  max="2025-07-31"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-gray-500">To</Label>
+                <Input
+                  type="date"
+                  value={periodEnd}
+                  onChange={(e) => setPeriodEnd(e.target.value)}
+                  className="h-8 text-sm w-40"
+                  min="2025-04-01"
+                  max="2025-07-31"
+                />
+              </div>
+              <Button size="sm" onClick={handleRunPOC} disabled={isRunning} className="bg-indigo-600 hover:bg-indigo-700 text-white gap-1.5">
+                <Play className="h-3.5 w-3.5" /> Run
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="max-w-6xl mx-auto px-6 py-6 space-y-6">
 
         {/* Dataset stats */}
         <div className="grid grid-cols-3 gap-4">
-          <StatCard
-            label="GL Journal Entries"
-            value={stats?.glEntries ?? "—"}
-            sub="wc_acc_gl_journal_entry"
-            icon={FileText}
-            color="bg-white border text-gray-800"
-          />
-          <StatCard
-            label="Savings Transactions"
-            value={stats?.savingsTransactions ?? "—"}
-            sub="wc_m_savings_account_transaction"
-            icon={TrendingUp}
-            color="bg-white border text-gray-800"
-          />
-          <StatCard
-            label="Savings Accounts"
-            value={stats?.savingsAccounts ?? "—"}
-            sub="wc_m_savings_account"
-            icon={Database}
-            color="bg-white border text-gray-800"
-          />
+          <StatCard label="GL Journal Entries" value={stats?.glEntries ?? "—"} sub="wc_acc_gl_journal_entry" icon={FileText} />
+          <StatCard label="Savings Transactions" value={stats?.savingsTransactions ?? "—"} sub="wc_m_savings_account_transaction" icon={TrendingUp} />
+          <StatCard label="Savings Accounts" value={stats?.savingsAccounts ?? "—"} sub="wc_m_savings_account" icon={Database} />
         </div>
 
         {/* Run history */}
@@ -482,7 +723,6 @@ export default function WoodcorePOC() {
                 </div>
               ) : (
                 <>
-                  {/* Category summary */}
                   <div className="flex flex-wrap gap-2">
                     {Array.from(categoryCount.entries()).map(([cat, count]) => (
                       <span key={cat} className={`text-xs font-semibold px-3 py-1 rounded-full border ${categoryColor(cat)}`}>
@@ -490,15 +730,9 @@ export default function WoodcorePOC() {
                       </span>
                     ))}
                   </div>
-
-                  {/* Exception list */}
                   <div className="space-y-2">
                     {pocResult.layer2Exceptions.map((exc, idx) => (
-                      <ExceptionRow
-                        key={exc.glEntryId}
-                        exc={exc}
-                        layer3={layer3ByIndex[idx]}
-                      />
+                      <ExceptionRow key={exc.glEntryId} exc={exc} layer3={layer3ByIndex[idx]} />
                     ))}
                   </div>
                 </>
@@ -515,15 +749,31 @@ export default function WoodcorePOC() {
                 </div>
               ) : (
                 <>
+                  {/* Report header with download button */}
                   <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
                     <Bot className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" />
-                    <div>
+                    <div className="flex-1">
                       <p className="text-sm font-semibold text-indigo-800">Context-Aware Agent Report</p>
                       <p className="text-xs text-indigo-600 mt-0.5">
                         {pocResult.layer3Results.length} exception{pocResult.layer3Results.length !== 1 ? "s" : ""} analysed ·
-                        Plain-English explanations and recommended actions generated for each
+                        Period: {pocResult.layer1.periodStart} to {pocResult.layer1.periodEnd}
                       </p>
                     </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5 border-indigo-300 text-indigo-700 hover:bg-indigo-100 shrink-0"
+                      onClick={() =>
+                        exportToPDF(
+                          pocResult.layer1,
+                          pocResult.layer2Exceptions,
+                          pocResult.layer3Results
+                        )
+                      }
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download Report (PDF)
+                    </Button>
                   </div>
 
                   {/* Priority breakdown */}
@@ -575,15 +825,14 @@ export default function WoodcorePOC() {
           </Tabs>
         )}
 
-        {/* Initial state — no run yet */}
+        {/* Initial state */}
         {!pocResult && (runsQuery.data?.length ?? 0) === 0 && (
           <div className="text-center py-16 text-gray-400">
             <Play className="h-12 w-12 mx-auto mb-4 text-indigo-300" />
             <p className="text-lg font-semibold text-gray-600">Ready to run</p>
             <p className="text-sm mt-2 max-w-md mx-auto">
-              Click <strong>Run POC</strong> to execute all three layers of the reconciliation engine
-              against the real Woodcore CBS dataset. The engine will analyse {stats?.glEntries ?? "62"} GL
-              entries and {stats?.savingsTransactions ?? "35"} savings transactions.
+              Select a period above and click <strong>Run POC</strong> to execute all three layers
+              against the real Woodcore CBS dataset.
             </p>
           </div>
         )}

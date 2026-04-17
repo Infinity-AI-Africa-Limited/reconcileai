@@ -54,12 +54,13 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database } from "lucide-react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
   { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
+  { icon: Database, label: "Woodcore POC", path: "/woodcore-poc" },
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
   { icon: Upload, label: "Upload Data", path: "/upload" },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
