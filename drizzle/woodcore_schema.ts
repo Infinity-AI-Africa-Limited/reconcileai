@@ -225,6 +225,14 @@ export const wc_exceptions = mysqlTable("wc_exceptions", {
   priorityLevel: varchar("priority_level", { length: 10 }), // CRITICAL | HIGH | MEDIUM | LOW
   passedToLayer3: tinyint("passed_to_layer3").default(0),
   layer3Processed: tinyint("layer3_processed").default(0),
+  refNum: varchar("ref_num", { length: 100 }),
+  description: varchar("description", { length: 500 }),
+  // Exception status tracking
+  reviewStatus: varchar("review_status", { length: 20 }).default("OPEN"),
+  // OPEN | ACKNOWLEDGED | RESOLVED | ESCALATED
+  reviewedBy: varchar("reviewed_by", { length: 100 }),
+  reviewedAt: datetime("reviewed_at"),
+  reviewNote: text("review_note"),
   createdAt: datetime("created_at").notNull(),
 }, (t) => [
   index("idx_wc_exc_run").on(t.reconciliationRunId),

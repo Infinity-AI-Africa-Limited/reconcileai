@@ -2705,6 +2705,44 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
         return runFullPOC(config);
       }),
+
+    // Update exception review status
+    updateExceptionStatus: publicProcedure
+      .input(z.object({
+        exceptionId: z.number(),
+        reviewStatus: z.enum(["OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED"]),
+        reviewedBy: z.string().optional(),
+        reviewNote: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_exceptions } = await import("../drizzle/woodcore_schema");
+        await db2.update(wc_exceptions)
+          .set({
+            reviewStatus: input.reviewStatus,
+            reviewedBy: input.reviewedBy ?? "Reviewer",
+            reviewedAt: new Date(),
+            reviewNote: input.reviewNote ?? null,
+          })
+          .where(eq(wc_exceptions.id, input.exceptionId));
+        return { success: true, exceptionId: input.exceptionId, reviewStatus: input.reviewStatus };
+      }),
+
+    // Compare two runs side by side
+    compareRuns: publicProcedure
+      .input(z.object({
+        runIdA: z.number(),
+        runIdB: z.number(),
+      }))
+      .query(async ({ input }) => {
+        const runA = await getRunById(input.runIdA);
+        const runB = await getRunById(input.runIdB);
+        const exceptionsA = await getRunExceptions(input.runIdA);
+        const exceptionsB = await getRunExceptions(input.runIdB);
+        return { runA, runB, exceptionsA, exceptionsB };
+      }),
   }),
 });
 
