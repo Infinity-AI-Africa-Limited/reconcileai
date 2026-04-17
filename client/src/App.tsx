@@ -37,6 +37,7 @@ import FinTechsLanding from "./pages/FinTechsLanding";
 import PaymentProcessorsLanding from "./pages/PaymentProcessorsLanding";
 import Documentation from "./pages/Documentation";
 import DocViewer from "./pages/DocViewer";
+import WoodcorePOC from "./pages/WoodcorePOC";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -81,6 +82,7 @@ function Router() {
       <Route path="/super-agent">{() => <DashboardPage component={SuperAgent} />}</Route>
       <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
       <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
+      <Route path="/woodcore-poc" component={WoodcorePOC} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

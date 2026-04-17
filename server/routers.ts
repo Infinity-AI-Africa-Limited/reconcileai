@@ -38,6 +38,14 @@ import {
 } from "./sftpService";
 import { startSLAMonitoring } from "./slaMonitoringService";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
+import {
+  runFullPOC,
+  getLatestRuns,
+  getRunExceptions,
+  getRunById,
+  getWoodcoreStats,
+  type ReconciliationConfig,
+} from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
 import {
   runM2MMatching,
@@ -2647,6 +2655,55 @@ Always be specific, reference actual exception IDs and amounts where available, 
             message: `Failed to fetch documentation file: ${input.filename}`,
           });
         }
+      }),
+  }),
+
+  // ─── Woodcore POC Procedures ─────────────────────────────────────────
+  woodcore: router({
+    // Get dataset stats
+    stats: publicProcedure.query(async () => {
+      return getWoodcoreStats();
+    }),
+
+    // Get all reconciliation runs
+    getRuns: publicProcedure.query(async () => {
+      return getLatestRuns(20);
+    }),
+
+    // Get a specific run
+    getRun: publicProcedure
+      .input(z.object({ runId: z.number() }))
+      .query(async ({ input }) => {
+        return getRunById(input.runId);
+      }),
+
+    // Get exceptions for a run
+    getExceptions: publicProcedure
+      .input(z.object({ runId: z.number() }))
+      .query(async ({ input }) => {
+        return getRunExceptions(input.runId);
+      }),
+
+    // Run the full POC (all 3 layers)
+    runPOC: publicProcedure
+      .input(z.object({
+        productId: z.number().default(2),
+        productType: z.enum(["SAVINGS", "LOAN"]).default("SAVINGS"),
+        currencyCode: z.string().default("NGN"),
+        periodStart: z.string().default("2025-04-01"),
+        periodEnd: z.string().default("2025-07-31"),
+        varianceThreshold: z.number().default(1.0),
+      }))
+      .mutation(async ({ input }) => {
+        const config: ReconciliationConfig = {
+          productId: input.productId,
+          productType: input.productType,
+          currencyCode: input.currencyCode,
+          periodStart: input.periodStart,
+          periodEnd: input.periodEnd,
+          varianceThreshold: input.varianceThreshold,
+        };
+        return runFullPOC(config);
       }),
   }),
 });
