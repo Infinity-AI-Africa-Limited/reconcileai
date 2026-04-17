@@ -120,6 +120,13 @@
       "when": 1776418235505,
       "tag": "0016_puzzling_zaran",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "5",
+      "when": 1776422006210,
+      "tag": "0017_demonic_energizer",
+      "breakpoints": true
     }
   ]
 }

@@ -899,3 +899,8 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Print Demo Report button on Demo Dashboard (browser-native PDF export with print stylesheet)
 - [ ] "View Demo Dashboard →" link in the demo banner in DashboardLayout
 - [ ] Switch Segment toggle in sidebar Demo Mode panel (FMCG / FinServ when Demo Mode is ON)
+
+## Feature 35: Woodcore POC Enhancements (Round 3)
+- [ ] Bulk "Mark All as Acknowledged" action on Layer 2 with reviewer note field
+- [ ] Variance trend sparkline in overview stats bar across all runs
+- [ ] Shareable read-only URL for a run's Layer 3 report (public token-based route)

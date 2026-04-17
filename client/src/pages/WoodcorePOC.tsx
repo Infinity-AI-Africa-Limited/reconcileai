@@ -5,7 +5,8 @@
  *           exception status tracking (Acknowledged / Resolved / Escalated), PDF export.
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
+import { LineChart, Line, Tooltip, ResponsiveContainer } from "recharts";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +52,9 @@ import {
   Clock,
   User,
   MessageSquare,
+  Share2,
+  Copy,
+  CheckCheck as CheckCheckIcon,
 } from "lucide-react";
 import jsPDF from "jspdf";
 
@@ -991,6 +995,54 @@ const DATE_PRESETS = [
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+// ─── Variance Sparkline ──────────────────────────────────────────────────────
+
+function VarianceSparkline({ runs }: { runs: RunRecord[] }) {
+  if (runs.length < 2) return null;
+  const sorted = [...runs].sort((a, b) => a.id - b.id);
+  const data = sorted.map((r) => ({
+    name: `Run #${r.id}`,
+    variance: r.varianceAmount ? Math.abs(parseFloat(r.varianceAmount)) : 0,
+    period: `${r.periodStart?.slice(5)} → ${r.periodEnd?.slice(5)}`,
+  }));
+  const max = Math.max(...data.map((d) => d.variance));
+  const min = Math.min(...data.map((d) => d.variance));
+  const trend = data[data.length - 1].variance < data[0].variance ? "improving" : "worsening";
+  return (
+    <div className="bg-white border rounded-xl px-5 py-3 flex items-center gap-4">
+      <div className="shrink-0">
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Variance Trend</p>
+        <p className={`text-xs font-bold mt-0.5 ${trend === "improving" ? "text-green-600" : "text-red-500"}`}>
+          {trend === "improving" ? "↓ Improving" : "↑ Worsening"} across {data.length} runs
+        </p>
+      </div>
+      <div className="flex-1" style={{ height: 48 }}>
+        <ResponsiveContainer width="100%" height={48}>
+          <LineChart data={data} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
+            <Line
+              type="monotone"
+              dataKey="variance"
+              stroke={trend === "improving" ? "#16a34a" : "#dc2626"}
+              strokeWidth={2}
+              dot={{ r: 3, fill: trend === "improving" ? "#16a34a" : "#dc2626" }}
+              isAnimationActive={false}
+            />
+            <Tooltip
+              formatter={(v: number) => [`₦${v.toLocaleString("en-NG", { minimumFractionDigits: 2 })}`, "Variance"]}
+              labelFormatter={(label) => label}
+              contentStyle={{ fontSize: 11, padding: "4px 8px" }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="text-xs text-gray-400">Peak: ₦{max.toLocaleString("en-NG", { minimumFractionDigits: 0 })}</p>
+        <p className="text-xs text-gray-400">Low: ₦{min.toLocaleString("en-NG", { minimumFractionDigits: 0 })}</p>
+      </div>
+    </div>
+  );
+}
+
 export default function WoodcorePOC() {
   const [pocResult, setPocResult] = useState<POCResult | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
@@ -999,9 +1051,33 @@ export default function WoodcorePOC() {
   const [showDatePanel, setShowDatePanel] = useState(false);
   const [layer3Local, setLayer3Local] = useState<Layer3Result[]>([]);
   const [statusFilter, setStatusFilter] = useState<ReviewStatus | "ALL">("ALL");
+  const [bulkAckOpen, setBulkAckOpen] = useState(false);
+  const [bulkNote, setBulkNote] = useState("");
+  const [shareToken, setShareToken] = useState<string | null>(null);
+  const [shareCopied, setShareCopied] = useState(false);
 
   const statsQuery = trpc.woodcore.stats.useQuery();
   const runsQuery = trpc.woodcore.getRuns.useQuery();
+
+  const bulkAcknowledge = trpc.woodcore.bulkAcknowledge.useMutation({
+    onSuccess: (data) => {
+      // Update local layer3 state to reflect bulk acknowledge
+      setLayer3Local((prev) =>
+        prev.map((r) => (r.reviewStatus === "OPEN" || !r.reviewStatus)
+          ? { ...r, reviewStatus: "ACKNOWLEDGED", reviewNote: bulkNote || "Bulk acknowledged", reviewedBy: "Reviewer", reviewedAt: new Date().toISOString() }
+          : r
+        )
+      );
+      setBulkAckOpen(false);
+      setBulkNote("");
+    },
+  });
+
+  const createShareToken = trpc.woodcore.createShareToken.useMutation({
+    onSuccess: (data) => {
+      setShareToken(data.token);
+    },
+  });
 
   const runPOC = trpc.woodcore.runPOC.useMutation({
     onSuccess: (data) => {
@@ -1140,6 +1216,9 @@ export default function WoodcorePOC() {
           <StatCard label="Savings Accounts" value={stats?.savingsAccounts ?? "—"} sub="wc_m_savings_account" icon={Database} />
         </div>
 
+        {/* Variance trend sparkline — shown when 2+ runs exist */}
+        {runs.length >= 2 && <VarianceSparkline runs={runs} />}
+
         {/* Run history */}
         {runs.length > 0 && !pocResult && (
           <Card>
@@ -1211,6 +1290,60 @@ export default function WoodcorePOC() {
                       </span>
                     ))}
                   </div>
+
+                  {/* Bulk acknowledge action */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-500">
+                      {pocResult.layer2Exceptions.filter((_, i) => ((layer3Local[i]?.reviewStatus as ReviewStatus) ?? "OPEN") === "OPEN").length} OPEN exception(s) pending review
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5 border-blue-300 text-blue-700 hover:bg-blue-50"
+                      onClick={() => setBulkAckOpen(true)}
+                      disabled={pocResult.layer2Exceptions.filter((_, i) => ((layer3Local[i]?.reviewStatus as ReviewStatus) ?? "OPEN") === "OPEN").length === 0}
+                    >
+                      <CheckCheck className="h-3.5 w-3.5" /> Mark All as Acknowledged
+                    </Button>
+                  </div>
+
+                  {/* Bulk acknowledge dialog */}
+                  <Dialog open={bulkAckOpen} onOpenChange={setBulkAckOpen}>
+                    <DialogContent className="max-w-md">
+                      <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                          <CheckCheck className="h-4 w-4 text-blue-600" /> Bulk Acknowledge All OPEN Exceptions
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-3 py-2">
+                        <p className="text-sm text-gray-600">
+                          This will mark all <strong>{pocResult.layer2Exceptions.filter((_, i) => ((layer3Local[i]?.reviewStatus as ReviewStatus) ?? "OPEN") === "OPEN").length} OPEN</strong> exceptions as <strong>ACKNOWLEDGED</strong> for Run #{pocResult.layer1.runId}.
+                        </p>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs text-gray-600">Reviewer Note (optional)</Label>
+                          <Textarea
+                            placeholder="e.g. Reviewed by compliance team — all manual entries confirmed as authorised"
+                            value={bulkNote}
+                            onChange={(e) => setBulkNote(e.target.value)}
+                            className="text-sm"
+                            rows={3}
+                          />
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <Button variant="outline" size="sm" onClick={() => setBulkAckOpen(false)}>Cancel</Button>
+                        <Button
+                          size="sm"
+                          className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5"
+                          onClick={() => bulkAcknowledge.mutate({ runId: pocResult.layer1.runId, reviewedBy: "Reviewer", reviewNote: bulkNote })}
+                          disabled={bulkAcknowledge.isPending}
+                        >
+                          {bulkAcknowledge.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />}
+                          Acknowledge All
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
 
                   {/* Status filter bar */}
                   <div className="flex items-center gap-2 bg-gray-50 border rounded-xl px-4 py-2.5">
@@ -1290,14 +1423,54 @@ export default function WoodcorePOC() {
                         {layer3Local.length} exception{layer3Local.length !== 1 ? "s" : ""} analysed · Period: {pocResult.layer1.periodStart} to {pocResult.layer1.periodEnd}
                       </p>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="gap-1.5 border-indigo-300 text-indigo-700 hover:bg-indigo-100 shrink-0"
-                      onClick={() => exportToPDF(pocResult.layer1, pocResult.layer2Exceptions, layer3Local)}
-                    >
-                      <Download className="h-3.5 w-3.5" /> Download Report (PDF)
-                    </Button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5 border-indigo-300 text-indigo-700 hover:bg-indigo-100"
+                        onClick={() => exportToPDF(pocResult.layer1, pocResult.layer2Exceptions, layer3Local)}
+                      >
+                        <Download className="h-3.5 w-3.5" /> Download PDF
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5 border-green-300 text-green-700 hover:bg-green-50"
+                        onClick={() => createShareToken.mutate({ runId: pocResult.layer1.runId, createdBy: "ReconcileAI User" })}
+                        disabled={createShareToken.isPending}
+                      >
+                        {createShareToken.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Share2 className="h-3.5 w-3.5" />}
+                        Share Report
+                      </Button>
+                    </div>
+
+                    {/* Share link display */}
+                    {shareToken && (
+                      <div className="bg-green-50 border border-green-200 rounded-xl p-3 mt-2">
+                        <p className="text-xs font-semibold text-green-800 mb-2 flex items-center gap-1.5">
+                          <Share2 className="h-3.5 w-3.5" /> Shareable Report Link (valid 30 days)
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 text-xs bg-white border border-green-200 rounded px-2 py-1.5 font-mono text-green-900 truncate">
+                            {window.location.origin}/shared-report/{shareToken}
+                          </code>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0 border-green-300 text-green-700 hover:bg-green-100 gap-1"
+                            onClick={() => {
+                              navigator.clipboard.writeText(`${window.location.origin}/shared-report/${shareToken}`);
+                              setShareCopied(true);
+                              setTimeout(() => setShareCopied(false), 2000);
+                            }}
+                          >
+                            {shareCopied ? <CheckCheckIcon className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                            {shareCopied ? "Copied!" : "Copy"}
+                          </Button>
+                        </div>
+                        <p className="text-xs text-green-600 mt-1.5">Anyone with this link can view the exception report without logging in.</p>
+                      </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-4 gap-3">

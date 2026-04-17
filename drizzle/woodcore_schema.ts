@@ -199,6 +199,19 @@ export const wc_reconciliation_runs = mysqlTable("wc_reconciliation_runs", {
   createdAt: datetime("created_at").notNull(),
 });
 
+// ─── ReconcileAI: Share Tokens (read-only public report links) ──────────────
+export const wc_share_tokens = mysqlTable("wc_share_tokens", {
+  id: int("id").autoincrement().primaryKey(),
+  token: varchar("token", { length: 64 }).notNull().unique(),
+  reconciliationRunId: int("reconciliation_run_id").notNull(),
+  createdBy: varchar("created_by", { length: 100 }),
+  expiresAt: datetime("expires_at"),
+  createdAt: datetime("created_at").notNull(),
+}, (t) => [
+  uniqueIndex("idx_wc_share_token").on(t.token),
+  index("idx_wc_share_run").on(t.reconciliationRunId),
+]);
+
 // ─── ReconcileAI: POC Exception Records ──────────────────────────────────────
 export const wc_exceptions = mysqlTable("wc_exceptions", {
   id: int("id").autoincrement().primaryKey(),

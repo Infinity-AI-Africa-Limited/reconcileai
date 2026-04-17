@@ -2743,6 +2743,81 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const exceptionsB = await getRunExceptions(input.runIdB);
         return { runA, runB, exceptionsA, exceptionsB };
       }),
+
+    // Bulk acknowledge all OPEN exceptions for a run
+    bulkAcknowledge: publicProcedure
+      .input(z.object({
+        runId: z.number(),
+        reviewedBy: z.string().default("Reviewer"),
+        reviewNote: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_exceptions } = await import("../drizzle/woodcore_schema");
+        const result = await db2.update(wc_exceptions)
+          .set({
+            reviewStatus: "ACKNOWLEDGED",
+            reviewedBy: input.reviewedBy,
+            reviewedAt: new Date(),
+            reviewNote: input.reviewNote ?? "Bulk acknowledged",
+          })
+          .where(
+            and(
+              eq(wc_exceptions.reconciliationRunId, input.runId),
+              eq(wc_exceptions.reviewStatus, "OPEN"),
+            )
+          );
+        return { success: true, updatedCount: result[0]?.affectedRows ?? 0 };
+      }),
+
+    // Create a shareable read-only token for a run's Layer 3 report
+    createShareToken: publicProcedure
+      .input(z.object({
+        runId: z.number(),
+        createdBy: z.string().optional(),
+        expiresInDays: z.number().default(30),
+      }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_share_tokens } = await import("../drizzle/woodcore_schema");
+        const crypto = await import("crypto");
+        const token = crypto.randomBytes(32).toString("hex");
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + input.expiresInDays);
+        await db2.insert(wc_share_tokens).values({
+          token,
+          reconciliationRunId: input.runId,
+          createdBy: input.createdBy ?? "ReconcileAI User",
+          expiresAt,
+          createdAt: new Date(),
+        });
+        return { token, expiresAt };
+      }),
+
+    // Get a shared run report by token (public, no auth required)
+    getSharedReport: publicProcedure
+      .input(z.object({ token: z.string() }))
+      .query(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_share_tokens } = await import("../drizzle/woodcore_schema");
+        const rows = await db2.select().from(wc_share_tokens)
+          .where(eq(wc_share_tokens.token, input.token))
+          .limit(1);
+        if (!rows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Invalid or expired share link" });
+        const shareRow = rows[0];
+        if (shareRow.expiresAt && new Date(shareRow.expiresAt) < new Date()) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "This share link has expired" });
+        }
+        const run = await getRunById(shareRow.reconciliationRunId);
+        const exceptions = await getRunExceptions(shareRow.reconciliationRunId);
+        return { run, exceptions, sharedBy: shareRow.createdBy, expiresAt: shareRow.expiresAt };
+      }),
   }),
 });
 

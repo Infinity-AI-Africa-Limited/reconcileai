@@ -38,6 +38,7 @@ import PaymentProcessorsLanding from "./pages/PaymentProcessorsLanding";
 import Documentation from "./pages/Documentation";
 import DocViewer from "./pages/DocViewer";
 import WoodcorePOC from "./pages/WoodcorePOC";
+import SharedReport from "./pages/SharedReport";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -83,6 +84,7 @@ function Router() {
       <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
       <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
       <Route path="/woodcore-poc" component={WoodcorePOC} />
+      <Route path="/shared-report/:token" component={SharedReport} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>
