@@ -651,6 +651,118 @@ function ExceptionRow({
 
 // ─── Comparison Panel ─────────────────────────────────────────────────────────
 
+function exportComparisonPDF(
+  runA: RunRecord,
+  runB: RunRecord,
+  exceptionsA: Layer2Exception[],
+  exceptionsB: Layer2Exception[],
+  catA: Map<string, number>,
+  catB: Map<string, number>,
+  allCats: string[]
+) {
+  const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+  const W = 297; // A4 landscape width
+  const margin = 14;
+  let y = margin;
+
+  // Header banner
+  doc.setFillColor(67, 56, 202); // indigo-700
+  doc.rect(0, 0, W, 22, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(13);
+  doc.setFont("helvetica", "bold");
+  doc.text("ReconcileAI — Woodcore CBS Reconciliation POC", margin, 10);
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "normal");
+  doc.text("Run Comparison Report · Generated " + new Date().toLocaleString(), margin, 17);
+  doc.setTextColor(0, 0, 0);
+  y = 30;
+
+  // Section title
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text("Side-by-Side Run Summary", margin, y);
+  y += 6;
+
+  const colW = (W - margin * 2 - 6) / 2;
+  const panels = [
+    { run: runA, exceptions: exceptionsA, label: "Run A" },
+    { run: runB, exceptions: exceptionsB, label: "Run B" },
+  ];
+
+  panels.forEach(({ run, exceptions, label }, pi) => {
+    const x = margin + pi * (colW + 6);
+    // Panel header
+    doc.setFillColor(pi === 0 ? 79 : 99, pi === 0 ? 70 : 102, pi === 0 ? 229 : 241);
+    doc.rect(x, y, colW, 8, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "bold");
+    doc.text(`${label} — Run #${run.id}  |  ${run.status}`, x + 3, y + 5.5);
+    doc.setTextColor(0, 0, 0);
+
+    let py = y + 12;
+    doc.setFontSize(8);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Period: ${run.periodStart} → ${run.periodEnd}`, x + 3, py); py += 5;
+    doc.text(`Expected Balance: ₦${Number(run.expectedBalance).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`, x + 3, py); py += 5;
+    doc.text(`Actual GL Balance: ₦${Number(run.actualGlBalance).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`, x + 3, py); py += 5;
+    const variance = run.varianceAmount ? Math.abs(parseFloat(run.varianceAmount)) : 0;
+    doc.setFont("helvetica", "bold");
+    doc.text(`Variance: ₦${variance.toLocaleString("en-NG", { minimumFractionDigits: 2 })} (${run.varianceDirection ?? "—"})`, x + 3, py); py += 5;
+    doc.setFont("helvetica", "normal");
+    doc.text(`Total Exceptions: ${exceptions.length}`, x + 3, py);
+  });
+
+  y += 55;
+
+  // Category comparison table
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text("Exception Category Comparison", margin, y);
+  y += 6;
+
+  // Table header
+  doc.setFillColor(243, 244, 246);
+  doc.rect(margin, y, W - margin * 2, 7, "F");
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "bold");
+  doc.text("Category", margin + 3, y + 5);
+  doc.text("Run A", margin + 100, y + 5);
+  doc.text("Run B", margin + 130, y + 5);
+  doc.text("Change", margin + 160, y + 5);
+  y += 7;
+
+  doc.setFont("helvetica", "normal");
+  allCats.forEach((cat, i) => {
+    if (i % 2 === 0) {
+      doc.setFillColor(249, 250, 251);
+      doc.rect(margin, y, W - margin * 2, 7, "F");
+    }
+    const a = catA.get(cat) ?? 0;
+    const b = catB.get(cat) ?? 0;
+    const diff = b - a;
+    doc.setFontSize(8);
+    doc.text(categoryLabel(cat), margin + 3, y + 5);
+    doc.text(String(a), margin + 103, y + 5);
+    doc.text(String(b), margin + 133, y + 5);
+    if (diff !== 0) {
+      doc.setTextColor(diff > 0 ? 220 : 22, diff > 0 ? 38 : 163, diff > 0 ? 38 : 74);
+    }
+    doc.text(diff === 0 ? "—" : (diff > 0 ? `+${diff}` : String(diff)), margin + 163, y + 5);
+    doc.setTextColor(0, 0, 0);
+    y += 7;
+  });
+
+  y += 8;
+  // Footer
+  doc.setFontSize(7);
+  doc.setTextColor(150, 150, 150);
+  doc.text("Confidential — ReconcileAI POC Environment · Woodcore CBS · August 2025 Dataset", margin, y);
+
+  doc.save(`ReconcileAI_Woodcore_Comparison_Run${runA.id}_vs_Run${runB.id}.pdf`);
+}
+
 function ComparisonPanel({ runs }: { runs: RunRecord[] }) {
   const [runIdA, setRunIdA] = useState<number | null>(null);
   const [runIdB, setRunIdB] = useState<number | null>(null);
@@ -826,6 +938,29 @@ function ComparisonPanel({ runs }: { runs: RunRecord[] }) {
         </div>
       )}
 
+      {data && (
+        <div className="flex justify-end">
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5 border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+            onClick={() =>
+              exportComparisonPDF(
+                data.runA as RunRecord,
+                data.runB as RunRecord,
+                data.exceptionsA as Layer2Exception[],
+                data.exceptionsB as Layer2Exception[],
+                catA,
+                catB,
+                allCats
+              )
+            }
+          >
+            <Download className="h-3.5 w-3.5" /> Export Comparison to PDF
+          </Button>
+        </div>
+      )}
+
       {!data && !compareQuery.isLoading && runIdA !== null && runIdB !== null && runIdA !== runIdB && (
         <div className="text-center py-8 text-gray-400">
           <p className="text-sm">No data available for the selected runs.</p>
@@ -863,6 +998,7 @@ export default function WoodcorePOC() {
   const [periodEnd, setPeriodEnd] = useState("2025-07-31");
   const [showDatePanel, setShowDatePanel] = useState(false);
   const [layer3Local, setLayer3Local] = useState<Layer3Result[]>([]);
+  const [statusFilter, setStatusFilter] = useState<ReviewStatus | "ALL">("ALL");
 
   const statsQuery = trpc.woodcore.stats.useQuery();
   const runsQuery = trpc.woodcore.getRuns.useQuery();
@@ -1067,6 +1203,7 @@ export default function WoodcorePOC() {
                 </div>
               ) : (
                 <>
+                  {/* Category summary pills */}
                   <div className="flex flex-wrap gap-2">
                     {Array.from(categoryCount.entries()).map(([cat, count]) => (
                       <span key={cat} className={`text-xs font-semibold px-3 py-1 rounded-full border ${categoryColor(cat)}`}>
@@ -1074,15 +1211,64 @@ export default function WoodcorePOC() {
                       </span>
                     ))}
                   </div>
+
+                  {/* Status filter bar */}
+                  <div className="flex items-center gap-2 bg-gray-50 border rounded-xl px-4 py-2.5">
+                    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Filter by status:</span>
+                    {(["ALL", "OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED"] as const).map((s) => {
+                      const count = s === "ALL"
+                        ? pocResult.layer2Exceptions.length
+                        : pocResult.layer2Exceptions.filter((_, i) => ((layer3Local[i]?.reviewStatus as ReviewStatus) ?? "OPEN") === s).length;
+                      return (
+                        <button
+                          key={s}
+                          onClick={() => setStatusFilter(s)}
+                          className={`text-xs px-3 py-1 rounded-full border font-semibold transition-all ${
+                            statusFilter === s
+                              ? s === "ALL" ? "bg-gray-700 text-white border-gray-700"
+                                : s === "OPEN" ? "bg-gray-600 text-white border-gray-600"
+                                : s === "ACKNOWLEDGED" ? "bg-blue-600 text-white border-blue-600"
+                                : s === "RESOLVED" ? "bg-green-600 text-white border-green-600"
+                                : "bg-red-600 text-white border-red-600"
+                              : "bg-white text-gray-600 border-gray-300 hover:border-gray-400"
+                          }`}
+                        >
+                          {s === "ALL" ? `All (${count})` : `${s} (${count})`}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Filtered exception list */}
                   <div className="space-y-2">
-                    {pocResult.layer2Exceptions.map((exc, idx) => (
-                      <ExceptionRow
-                        key={exc.glEntryId}
-                        exc={exc}
-                        layer3={layer3Local[idx]}
-                        onStatusUpdate={handleStatusUpdate}
-                      />
-                    ))}
+                    {pocResult.layer2Exceptions
+                      .map((exc, idx) => ({ exc, idx, layer3: layer3Local[idx] }))
+                      .filter(({ layer3 }) => {
+                        if (statusFilter === "ALL") return true;
+                        const s: ReviewStatus = (layer3?.reviewStatus as ReviewStatus) ?? "OPEN";
+                        return s === statusFilter;
+                      })
+                      .map(({ exc, idx, layer3 }) => (
+                        <ExceptionRow
+                          key={exc.glEntryId}
+                          exc={exc}
+                          layer3={layer3}
+                          onStatusUpdate={handleStatusUpdate}
+                        />
+                      ))
+                    }
+                    {pocResult.layer2Exceptions
+                      .filter((_, i) => {
+                        if (statusFilter === "ALL") return false;
+                        const s: ReviewStatus = (layer3Local[i]?.reviewStatus as ReviewStatus) ?? "OPEN";
+                        return s !== statusFilter;
+                      }).length === pocResult.layer2Exceptions.length && (
+                      <div className="text-center py-8 text-gray-400">
+                        <CheckCircle2 className="h-8 w-8 mx-auto mb-2 text-gray-300" />
+                        <p className="text-sm">No exceptions with status <strong>{statusFilter}</strong></p>
+                        <button className="text-xs text-indigo-500 mt-1 underline" onClick={() => setStatusFilter("ALL")}>Show all</button>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
