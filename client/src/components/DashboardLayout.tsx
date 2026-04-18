@@ -221,7 +221,20 @@ function DashboardLayoutContent({
   const isMobile = useIsMobile();
 
   // Demo Mode
-  const { data: demoStatus, refetch: refetchDemoStatus } = trpc.demo.status.useQuery(undefined, { enabled: !!user });
+  // For guest users: poll every 5s until demo data appears (background seeding)
+  const isGuest = (user as { isGuest?: boolean } | null)?.isGuest === true;
+  const [seedingComplete, setSeedingComplete] = useState(false);
+  const { data: demoStatus, refetch: refetchDemoStatus } = trpc.demo.status.useQuery(undefined, {
+    enabled: !!user,
+    refetchInterval: (isGuest && !seedingComplete) ? 5000 : false,
+  });
+  // Stop polling once demo data is confirmed active for guest
+  useEffect(() => {
+    if (isGuest && demoStatus?.active && !seedingComplete) {
+      setSeedingComplete(true);
+      toast.success("Demo data ready!", { description: `All banking channels loaded — ${demoStatus.transactionCount?.toLocaleString()} transactions across ${demoStatus.segment === "both" ? "FMCG + 8 banking channels" : demoStatus.segment === "finserv" ? "8 banking channels" : "FMCG channels"}.` });
+    }
+  }, [isGuest, demoStatus?.active, seedingComplete]);
   const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);
   const [guestLinkCopied, setGuestLinkCopied] = useState(false);
   const activateDemo = trpc.demo.activate.useMutation({
@@ -508,11 +521,19 @@ function DashboardLayoutContent({
             <RoleSwitcher location={location} setLocation={setLocation} />
           </div>
         )}
+        {isGuest && !isDemoActive && !seedingComplete && (
+          <div className="sticky top-14 z-30 flex items-center gap-3 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-200 dark:border-blue-800 px-6 py-2.5">
+            <div className="h-4 w-4 rounded-full border-2 border-blue-500 border-t-transparent animate-spin shrink-0" />
+            <p className="text-xs text-blue-700 dark:text-blue-400 flex-1">
+              <span className="font-semibold">Loading demo data…</span> Setting up BrightGoods FMCG + all 8 banking channels in the background. This takes about 30–60 seconds. The page will update automatically.
+            </p>
+          </div>
+        )}
         {isDemoActive && (
           <div className="sticky top-14 z-30 flex items-center gap-3 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 px-6 py-2.5">
             <FlaskConical className="h-4 w-4 text-amber-600 shrink-0" />
             <p className="text-xs text-amber-700 dark:text-amber-400 flex-1">
-              <span className="font-semibold">Demo Mode active.</span> Viewing {demoStatus?.segment === "finserv" ? "Financial Services (LapoMFB + Renmoney)" : "BrightGoods FMCG"} demo data — {demoStatus?.transactionCount ?? 0} transactions, {demoStatus?.exceptionCount ?? 0} exceptions. This is not real data.
+              <span className="font-semibold">Demo Mode active.</span> Viewing {demoStatus?.segment === "both" ? "BrightGoods FMCG + Financial Services (8 banking channels)" : demoStatus?.segment === "finserv" ? "Financial Services (LapoMFB + Renmoney — 8 banking channels)" : "BrightGoods FMCG"} demo data — {demoStatus?.transactionCount ?? 0} transactions, {demoStatus?.exceptionCount ?? 0} exceptions. This is not real data.
             </p>
             <button
               onClick={() => setLocation("/demo-dashboard")}
