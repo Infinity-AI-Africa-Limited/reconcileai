@@ -63,10 +63,12 @@ export async function checkSLABreaches(): Promise<void> {
       )
       .limit(10000);
 
-    // Filter out demo job exceptions in JS
+    // Filter out demo job exceptions in JS.
+    // Also exclude exceptions with jobId = 0 — these are seeded demo/FinServ
+    // exceptions inserted without a real reconciliation job reference.
     const demoJobIdSet = new Set(demoJobIds);
     const realExceptions = openExceptions.filter(
-      (e) => !demoJobIdSet.has(e.jobId)
+      (e) => e.jobId !== 0 && !demoJobIdSet.has(e.jobId)
     );
 
     const breaches: SLABreach[] = [];
