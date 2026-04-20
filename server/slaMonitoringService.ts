@@ -125,40 +125,45 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   const criticalBreaches = breaches.filter(b => b.severity === 'critical');
   const warningBreaches = breaches.filter(b => b.severity === 'warning');
 
-  let content = '## SLA Breach Alert\n\n';
+  const lines: string[] = [];
 
   if (criticalBreaches.length > 0) {
-    content += `### 🔴 Critical (>24 hours): ${criticalBreaches.length} exceptions\n\n`;
-    criticalBreaches.slice(0, 10).forEach(breach => {
+    lines.push(`🔴 CRITICAL — ${criticalBreaches.length} exception${criticalBreaches.length !== 1 ? 's' : ''} breached the 24-hour SLA:`);
+    lines.push('');
+    criticalBreaches.slice(0, 10).forEach((breach, i) => {
       const assignedInfo = breach.assignedUserName
         ? `Assigned to: ${breach.assignedUserName}`
         : 'Unassigned';
-      content += `- Exception #${breach.exceptionId} - ${breach.hoursOpen}hrs open - ${assignedInfo}\n`;
+      lines.push(`  ${i + 1}. Exception #${breach.exceptionId} — ${breach.hoursOpen}hrs open — ${assignedInfo}`);
     });
     if (criticalBreaches.length > 10) {
-      content += `\n_...and ${criticalBreaches.length - 10} more critical exceptions_\n`;
+      lines.push(`  ...and ${criticalBreaches.length - 10} more critical exceptions`);
     }
-    content += '\n';
+    lines.push('');
   }
 
   if (warningBreaches.length > 0) {
-    content += `### ⚠️ Warning (>20 hours): ${warningBreaches.length} exceptions\n\n`;
-    warningBreaches.slice(0, 10).forEach(breach => {
+    lines.push(`⚠️ WARNING — ${warningBreaches.length} exception${warningBreaches.length !== 1 ? 's' : ''} approaching the 24-hour SLA limit:`);
+    lines.push('');
+    warningBreaches.slice(0, 10).forEach((breach, i) => {
       const assignedInfo = breach.assignedUserName
         ? `Assigned to: ${breach.assignedUserName}`
         : 'Unassigned';
       const timeRemaining = 24 - breach.hoursOpen;
-      content += `- Exception #${breach.exceptionId} - ${breach.hoursOpen}hrs open - ${timeRemaining.toFixed(1)}hrs remaining - ${assignedInfo}\n`;
+      lines.push(`  ${i + 1}. Exception #${breach.exceptionId} — ${breach.hoursOpen}hrs open — ${timeRemaining.toFixed(1)}hrs remaining — ${assignedInfo}`);
     });
     if (warningBreaches.length > 10) {
-      content += `\n_...and ${warningBreaches.length - 10} more warning exceptions_\n`;
+      lines.push(`  ...and ${warningBreaches.length - 10} more warning exceptions`);
     }
+    lines.push('');
   }
 
-  content += '\n---\n\n';
-  content += `**Action Required:** Please review and resolve these exceptions to maintain SLA compliance.\n`;
-  content += `**24-hour SLA Target:** All exceptions should be resolved within 24 hours of creation.\n`;
-  content += `\n_Note: Demo data exceptions are excluded from this alert._\n`;
+  lines.push('Action Required: Please review and resolve these exceptions to maintain SLA compliance.');
+  lines.push('24-hour SLA Target: All exceptions should be resolved within 24 hours of creation.');
+  lines.push('');
+  lines.push('Note: Demo data exceptions are excluded from this alert.');
+
+  const content = lines.join('\n');
 
   await notifyOwner({
     title: `⚠️ SLA Breach Alert: ${breaches.length} Exception${breaches.length !== 1 ? 's' : ''} Require Attention`,
