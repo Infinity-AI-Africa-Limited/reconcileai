@@ -172,6 +172,12 @@ export default function Exceptions() {
                 <div>
                   <p className="text-xs text-muted-foreground">Severity</p>
                   <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${severityColor(selectedEx.severity || "low")}`}>{selectedEx.severity}</span>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    {selectedEx.severity === "critical" && "Immediate action — regulatory breach or material financial exposure"}
+                    {selectedEx.severity === "high" && "Resolve within 4 hrs — significant variance or fraud indicator"}
+                    {selectedEx.severity === "medium" && "Resolve within 24 hrs — timing or posting difference, low financial risk"}
+                    {(selectedEx.severity === "low" || !selectedEx.severity) && "Informational — minor discrepancy, auto-resolvable or monitoring only"}
+                  </p>
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground">Status</p>

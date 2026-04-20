@@ -1474,12 +1474,18 @@ export default function WoodcorePOC() {
                   </div>
 
                   <div className="grid grid-cols-4 gap-3">
-                    {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const).map((p) => {
+                    {([
+                      { level: "CRITICAL", def: "Immediate action — regulatory breach or material financial exposure" },
+                      { level: "HIGH",     def: "Resolve within 4 hrs — significant variance or fraud indicator" },
+                      { level: "MEDIUM",   def: "Resolve within 24 hrs — timing or posting difference, low financial risk" },
+                      { level: "LOW",      def: "Informational — minor discrepancy, auto-resolvable or monitoring only" },
+                    ] as const).map(({ level: p, def }) => {
                       const count = layer3Local.filter((r) => r.priorityLevel === p).length;
                       return (
                         <div key={p} className={`rounded-xl p-3 text-center ${priorityColor(p)}`}>
                           <p className="text-2xl font-bold">{count}</p>
-                          <p className="text-xs font-medium opacity-80 mt-0.5">{p}</p>
+                          <p className="text-xs font-semibold opacity-90 mt-0.5 tracking-wide">{p}</p>
+                          <p className="text-[10px] opacity-75 mt-1 leading-tight">{def}</p>
                         </div>
                       );
                     })}
