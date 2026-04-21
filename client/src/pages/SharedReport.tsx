@@ -89,7 +89,7 @@ export default function SharedReport() {
     );
   }
 
-  const { run, exceptions, layer3Results } = reportQuery.data as unknown as {
+  const rawData = reportQuery.data as unknown as {
     run: {
       id: number;
       productName: string;
@@ -112,7 +112,7 @@ export default function SharedReport() {
       linkedSavingsTxnId: number | null;
       productMatch: boolean | null;
       description: string | null;
-    }>;
+    }> | null | undefined;
     layer3Results: Array<{
       exceptionId: number;
       priorityLevel: string;
@@ -124,8 +124,12 @@ export default function SharedReport() {
       reviewNote: string | null;
       reviewedBy: string | null;
       reviewedAt: string | null;
-    }>;
+    }> | null | undefined;
   };
+
+  const { run } = rawData;
+  const exceptions = rawData.exceptions ?? [];
+  const layer3Results = rawData.layer3Results ?? [];
 
   const openCount = layer3Results.filter((r) => !r.reviewStatus || r.reviewStatus === "OPEN").length;
   const resolvedCount = layer3Results.filter((r) => r.reviewStatus === "RESOLVED").length;

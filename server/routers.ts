@@ -2832,8 +2832,35 @@ Always be specific, reference actual exception IDs and amounts where available, 
           throw new TRPCError({ code: "FORBIDDEN", message: "This share link has expired" });
         }
         const run = await getRunById(shareRow.reconciliationRunId);
-        const exceptions = await getRunExceptions(shareRow.reconciliationRunId);
-        return { run, exceptions, sharedBy: shareRow.createdBy, expiresAt: shareRow.expiresAt };
+        const allExceptions = await getRunExceptions(shareRow.reconciliationRunId);
+        // Separate raw GL exceptions from layer3 AI results (same table, different view)
+        const exceptions = allExceptions.map((e: any) => ({
+          glEntryId: e.glEntryId,
+          glEntryAmount: e.glEntryAmount,
+          glEntryType: e.glEntryType,
+          glEntryDate: e.glEntryDate,
+          exceptionCategory: e.exceptionCategory,
+          manualEntryFlag: e.manualEntryFlag,
+          refNum: e.refNum,
+          linkedSavingsTxnId: e.linkedSavingsTxnId,
+          productMatch: e.productMatch,
+          description: e.description,
+        }));
+        const layer3Results = allExceptions
+          .filter((e: any) => e.layer3Processed === 1 || e.layer3Processed === true)
+          .map((e: any) => ({
+            exceptionId: e.id,
+            priorityLevel: e.priorityLevel ?? "LOW",
+            agentClassification: e.agentClassification ?? "UNCLASSIFIED",
+            agentExplanation: e.agentExplanation ?? "",
+            recommendedAction: e.recommendedAction ?? "",
+            agentConfidence: e.agentConfidence ?? 0,
+            reviewStatus: e.reviewStatus ?? "OPEN",
+            reviewNote: e.reviewNote ?? null,
+            reviewedBy: e.reviewedBy ?? null,
+            reviewedAt: e.reviewedAt ?? null,
+          }));
+        return { run, exceptions, layer3Results, sharedBy: shareRow.createdBy, expiresAt: shareRow.expiresAt };
       }),
   }),
 });
