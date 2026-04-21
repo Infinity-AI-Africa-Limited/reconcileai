@@ -3008,6 +3008,9 @@ async function runReconciliation(
       totalCount: totalTxns,
     });
 
+    // Invalidate dashboard stats cache so next load reflects fresh data
+    db.invalidateDashboardStatsCache().catch(() => {});
+
     // Dispatch webhook
     dispatchWebhook("reconciliation.completed", {
       jobId,

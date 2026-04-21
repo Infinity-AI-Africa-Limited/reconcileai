@@ -162,7 +162,7 @@ export default function Dashboard() {
                 </thead>
                 <tbody>
                   {stats.channelStats.map((ch) => {
-                    const channel = channelMap.get(ch.channelId);
+                    const channel = ch.channelId != null ? channelMap.get(ch.channelId) : undefined;
                     const rate = ch.total > 0 ? ((Number(ch.matched) / Number(ch.total)) * 100).toFixed(1) : "0.0";
                     return (
                       <tr key={ch.channelId} className="border-b last:border-0">

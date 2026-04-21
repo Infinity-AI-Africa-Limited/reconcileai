@@ -127,6 +127,13 @@
       "when": 1776422006210,
       "tag": "0017_demonic_energizer",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "5",
+      "when": 1776769336656,
+      "tag": "0018_mature_tenebrous",
+      "breakpoints": true
     }
   ]
 }

@@ -27,6 +27,7 @@ import {
   resolutionTemplates, InsertResolutionTemplate,
   moduleConfigurations, InsertModuleConfiguration,
   distributors,
+  dashboardStatsCache,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -631,6 +632,51 @@ export async function getDashboardStats(userId: number, isAdmin: boolean) {
   const db = await getDb();
   if (!db) return null;
 
+  // ── Cache-first: read pre-computed stats (avoids full scan of 26M+ rows) ──
+  const cacheRows = await db.select().from(dashboardStatsCache).limit(1);
+  const cached = cacheRows[0];
+
+  if (cached) {
+    // Cache hit — return instantly
+    const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
+    const [jobStats] = await db.select({
+      total: sql<number>`count(*)`,
+      completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
+      running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
+      avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
+    }).from(reconciliationJobs).where(jobCondition);
+
+    const [exceptionStats] = await db.select({
+      total: sql<number>`count(*)`,
+      open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
+      inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
+      resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
+    }).from(exceptions);
+
+    return {
+      transactions: {
+        total: Number(cached.totalTransactions || 0),
+        matched: Number(cached.matchedTransactions || 0),
+        unmatched: Number(cached.unmatchedTransactions || 0),
+        exceptions: Number(cached.exceptionTransactions || 0),
+      },
+      jobs: {
+        total: Number(jobStats?.total || 0),
+        completed: Number(jobStats?.completed || 0),
+        running: Number(jobStats?.running || 0),
+        avgMatchRate: Number(jobStats?.avgMatchRate || 0),
+      },
+      exceptions: {
+        total: Number(exceptionStats?.total || 0),
+        open: Number(exceptionStats?.open || 0),
+        inReview: Number(exceptionStats?.inReview || 0),
+        resolved: Number(exceptionStats?.resolved || 0),
+      },
+      channelStats: [] as Array<{ channelId: number | null; total: number; matched: number; unmatched: number }>,
+    };
+  }
+
+  // ── Cache miss: run full query and seed the cache ──
   const userCondition = !isAdmin ? eq(transactions.userId, userId) : undefined;
   const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
 
@@ -655,12 +701,25 @@ export async function getDashboardStats(userId: number, isAdmin: boolean) {
     resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
   }).from(exceptions);
 
-  const channelStats = await db.select({
-    channelId: transactions.channelId,
-    total: sql<number>`count(*)`,
-    matched: sql<number>`sum(case when ${transactions.status} = 'matched' or ${transactions.status} = 'manually_matched' then 1 else 0 end)`,
-    unmatched: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
-  }).from(transactions).where(userCondition).groupBy(transactions.channelId);
+  // Seed the cache so future requests are instant
+  try {
+    await db.insert(dashboardStatsCache).values({
+      totalTransactions: Number(txnStats?.total || 0),
+      matchedTransactions: Number(txnStats?.matched || 0),
+      unmatchedTransactions: Number(txnStats?.unmatched || 0),
+      exceptionTransactions: Number(txnStats?.exceptions || 0),
+      totalJobs: Number(jobStats?.total || 0),
+      completedJobs: Number(jobStats?.completed || 0),
+      runningJobs: Number(jobStats?.running || 0),
+      avgMatchRate: String(Number(jobStats?.avgMatchRate || 0).toFixed(2)),
+      totalExceptions: Number(exceptionStats?.total || 0),
+      openExceptions: Number(exceptionStats?.open || 0),
+      inReviewExceptions: Number(exceptionStats?.inReview || 0),
+      resolvedExceptions: Number(exceptionStats?.resolved || 0),
+    });
+  } catch (_e) {
+    // Non-fatal: cache seeding failure should not break the dashboard
+  }
 
   return {
     transactions: {
@@ -681,8 +740,22 @@ export async function getDashboardStats(userId: number, isAdmin: boolean) {
       inReview: Number(exceptionStats?.inReview || 0),
       resolved: Number(exceptionStats?.resolved || 0),
     },
-    channelStats,
+    channelStats: [] as Array<{ channelId: number | null; total: number; matched: number; unmatched: number }>,
   };
+}
+
+/**
+ * Invalidate the dashboard stats cache after a reconciliation job completes.
+ * Call this from the reconciliation runner after each job finishes.
+ */
+export async function invalidateDashboardStatsCache() {
+  const db = await getDb();
+  if (!db) return;
+  try {
+    await db.delete(dashboardStatsCache);
+  } catch (_e) {
+    // Non-fatal
+  }
 }
 
 // ─── Export Helpers ──────────────────────────────────────────────────

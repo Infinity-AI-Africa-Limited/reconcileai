@@ -925,3 +925,27 @@ export const demoRequests = mysqlTable("demo_requests", {
 ]);
 export type DemoRequest = typeof demoRequests.$inferSelect;
 export type InsertDemoRequest = typeof demoRequests.$inferInsert;
+
+// ─── Dashboard Stats Cache ───────────────────────────────────────────
+// Pre-computed stats to avoid full table scans on 26M+ transaction rows
+export const dashboardStatsCache = mysqlTable("dashboard_stats_cache", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  totalTransactions: bigint("totalTransactions", { mode: "number" }).default(0).notNull(),
+  matchedTransactions: bigint("matchedTransactions", { mode: "number" }).default(0).notNull(),
+  unmatchedTransactions: bigint("unmatchedTransactions", { mode: "number" }).default(0).notNull(),
+  exceptionTransactions: bigint("exceptionTransactions", { mode: "number" }).default(0).notNull(),
+  totalJobs: int("totalJobs").default(0).notNull(),
+  completedJobs: int("completedJobs").default(0).notNull(),
+  runningJobs: int("runningJobs").default(0).notNull(),
+  avgMatchRate: decimal("avgMatchRate", { precision: 5, scale: 2 }).default("0.00").notNull(),
+  totalExceptions: int("totalExceptions").default(0).notNull(),
+  openExceptions: int("openExceptions").default(0).notNull(),
+  inReviewExceptions: int("inReviewExceptions").default(0).notNull(),
+  resolvedExceptions: int("resolvedExceptions").default(0).notNull(),
+  lastUpdatedAt: timestamp("lastUpdatedAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_stats_cache_org").on(table.organizationId),
+]);
+export type DashboardStatsCache = typeof dashboardStatsCache.$inferSelect;
+export type InsertDashboardStatsCache = typeof dashboardStatsCache.$inferInsert;
