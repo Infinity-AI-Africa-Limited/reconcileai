@@ -549,6 +549,12 @@ function ExceptionRow({
           {categoryLabel(exc.exceptionCategory)}
         </span>
         <span className="text-sm font-mono text-gray-600 shrink-0">GL #{exc.glEntryId}</span>
+        {exc.linkedTransactionId && (
+          <span className="text-xs font-mono bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded shrink-0" title="GL Transaction ID">TXN: {exc.linkedTransactionId}</span>
+        )}
+        {exc.linkedSavingsTxnId && (
+          <span className="text-xs font-mono bg-purple-50 text-purple-700 border border-purple-200 px-1.5 py-0.5 rounded shrink-0" title="CBS Savings Transaction ID">CBS: {exc.linkedSavingsTxnId}</span>
+        )}
         <span className="text-sm font-semibold text-gray-900 ml-1">{formatNGN(exc.glEntryAmount)}</span>
         <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${exc.glEntryType === "CREDIT" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
           {exc.glEntryType}
@@ -570,9 +576,11 @@ function ExceptionRow({
       {expanded && (
         <div className="border-t bg-gray-50 px-4 py-4 space-y-3">
           <div className="grid grid-cols-2 gap-3 text-sm">
+            <div><p className="text-xs text-gray-500 font-medium">GL Entry ID</p><p className="font-mono text-xs font-bold text-gray-800">#{exc.glEntryId}</p></div>
+            <div><p className="text-xs text-gray-500 font-medium">GL Transaction ID</p><p className="font-mono text-xs text-blue-700">{exc.linkedTransactionId ?? "—"}</p></div>
+            <div><p className="text-xs text-gray-500 font-medium">CBS Savings Txn ID</p><p className="font-mono text-xs text-purple-700">{exc.linkedSavingsTxnId ?? "None"}</p></div>
             <div><p className="text-xs text-gray-500 font-medium">Manual Entry Flag</p><p className="font-semibold">{exc.manualEntryFlag ? "Yes" : "No"}</p></div>
             <div><p className="text-xs text-gray-500 font-medium">Reference</p><p className="font-mono text-xs">{exc.refNum ?? "—"}</p></div>
-            <div><p className="text-xs text-gray-500 font-medium">Linked Savings Txn</p><p className="font-mono text-xs">{exc.linkedSavingsTxnId ?? "None"}</p></div>
             <div>
               <p className="text-xs text-gray-500 font-medium">Product Match</p>
               <p className={`font-semibold text-xs ${exc.productMatch === null ? "text-gray-400" : exc.productMatch ? "text-green-600" : "text-red-600"}`}>

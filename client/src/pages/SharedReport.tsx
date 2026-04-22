@@ -109,6 +109,7 @@ export default function SharedReport() {
       exceptionCategory: string;
       manualEntryFlag: boolean | number;
       refNum: string | null;
+      linkedTransactionId: string | null;
       linkedSavingsTxnId: number | null;
       productMatch: boolean | null;
       description: string | null;
@@ -238,6 +239,13 @@ export default function SharedReport() {
                       {r.priorityLevel}
                     </span>
                     <span className="text-sm font-mono text-gray-500">Exception #{r.exceptionId}</span>
+                    <span className="text-xs font-mono text-gray-500">GL #{exc.glEntryId}</span>
+                    {exc.linkedTransactionId && (
+                      <span className="text-xs font-mono bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded" title="GL Transaction ID">TXN: {exc.linkedTransactionId}</span>
+                    )}
+                    {exc.linkedSavingsTxnId && (
+                      <span className="text-xs font-mono bg-purple-50 text-purple-700 border border-purple-200 px-1.5 py-0.5 rounded" title="CBS Savings Transaction ID">CBS: {exc.linkedSavingsTxnId}</span>
+                    )}
                     {exc && (
                       <>
                         <span className="text-sm font-semibold text-gray-700">{formatNGN(exc.glEntryAmount)}</span>
