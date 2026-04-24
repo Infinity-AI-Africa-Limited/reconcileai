@@ -385,6 +385,7 @@ function StatCard({ label, value, sub, icon: Icon }: {
 function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
   const isBalanced = layer1.varianceDirection === "BALANCED";
   const isOver = layer1.varianceDirection === "OVER_POSTED";
+  const isLoan = layer1.productName?.toLowerCase().includes("loan") || layer1.productName?.toLowerCase().includes("sme");
   return (
     <div className="space-y-4">
       <div className={`rounded-xl p-4 flex items-center gap-3 ${isBalanced ? "bg-green-50 border border-green-200" : "bg-red-50 border border-red-200"}`}>
@@ -409,12 +410,12 @@ function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
         <div className="rounded-xl border bg-white p-4">
           <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Expected Balance</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">{formatNGN(layer1.expectedBalance)}</p>
-          <p className="text-xs text-gray-400 mt-1">Sum of account balances from CBS master</p>
+          <p className="text-xs text-gray-400 mt-1">{isLoan ? "Total disbursements minus principal repaid (CBS loan transactions)" : "Sum of account balances from CBS master"}</p>
         </div>
         <div className="rounded-xl border bg-white p-4">
           <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Actual GL Balance</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">{formatNGN(layer1.actualGlBalance)}</p>
-          <p className="text-xs text-gray-400 mt-1">Credits minus debits on portfolio ledger</p>
+          <p className="text-xs text-gray-400 mt-1">{isLoan ? "Debits minus credits on Loan Portfolio Account (GL 117083)" : "Credits minus debits on portfolio ledger"}</p>
         </div>
       </div>
       <div className="rounded-xl border bg-white p-4">
@@ -430,11 +431,11 @@ function Layer1Panel({ layer1 }: { layer1: Layer1Result }) {
           </div>
           <div className="flex items-center gap-2">
             <TrendingUp className="h-4 w-4 text-blue-500" />
-            <div><p className="text-xs text-gray-500">CBS Deposits</p><p className="font-semibold text-sm">{formatNGN(layer1.savingsDeposits)}</p></div>
+            <div><p className="text-xs text-gray-500">{isLoan ? "Total Disbursed" : "CBS Deposits"}</p><p className="font-semibold text-sm">{formatNGN(layer1.savingsDeposits)}</p></div>
           </div>
           <div className="flex items-center gap-2">
             <TrendingDown className="h-4 w-4 text-orange-500" />
-            <div><p className="text-xs text-gray-500">CBS Withdrawals</p><p className="font-semibold text-sm">{formatNGN(layer1.savingsWithdrawals)}</p></div>
+            <div><p className="text-xs text-gray-500">{isLoan ? "Principal Repaid" : "CBS Withdrawals"}</p><p className="font-semibold text-sm">{formatNGN(layer1.savingsWithdrawals)}</p></div>
           </div>
         </div>
       </div>
@@ -1057,6 +1058,7 @@ export default function WoodcorePOC() {
   const [periodStart, setPeriodStart] = useState("2025-04-01");
   const [periodEnd, setPeriodEnd] = useState("2025-07-31");
   const [showDatePanel, setShowDatePanel] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<"SAVINGS" | "LOAN">("SAVINGS");
   const [layer3Local, setLayer3Local] = useState<Layer3Result[]>([]);
   const [statusFilter, setStatusFilter] = useState<ReviewStatus | "ALL">("ALL");
   const [bulkAckOpen, setBulkAckOpen] = useState(false);
@@ -1117,7 +1119,8 @@ export default function WoodcorePOC() {
   }, []);
 
   const handleRunPOC = () => {
-    runPOC.mutate({ productId: 2, productType: "SAVINGS", currencyCode: "NGN", periodStart, periodEnd, varianceThreshold: 1.0 });
+    const productId = selectedProduct === "LOAN" ? 1 : 2;
+    runPOC.mutate({ productId, productType: selectedProduct, currencyCode: "NGN", periodStart, periodEnd, varianceThreshold: 1.0 });
     setShowDatePanel(false);
   };
 
@@ -1217,11 +1220,52 @@ export default function WoodcorePOC() {
       </div>
 
       <div className="max-w-6xl mx-auto px-6 py-6 space-y-6">
+        {/* Product selector */}
+        <div className="flex items-center gap-3 bg-white border rounded-xl px-4 py-3">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Product to Reconcile</span>
+          <div className="flex gap-2 ml-2">
+            <button
+              onClick={() => setSelectedProduct("SAVINGS")}
+              className={`text-sm px-4 py-1.5 rounded-full border font-medium transition-colors ${
+                selectedProduct === "SAVINGS"
+                  ? "bg-indigo-600 text-white border-indigo-600"
+                  : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600"
+              }`}
+            >
+              WoodCore Savings
+            </button>
+            <button
+              onClick={() => setSelectedProduct("LOAN")}
+              className={`text-sm px-4 py-1.5 rounded-full border font-medium transition-colors ${
+                selectedProduct === "LOAN"
+                  ? "bg-amber-600 text-white border-amber-600"
+                  : "bg-white text-gray-700 border-gray-300 hover:border-amber-400 hover:text-amber-600"
+              }`}
+            >
+              SME Loan — Principal Balance
+            </button>
+          </div>
+          {selectedProduct === "LOAN" && (
+            <span className="ml-auto text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full font-medium">
+              GL 117083 · SME Loan Portfolio Account
+            </span>
+          )}
+        </div>
         {/* Dataset stats */}
         <div className="grid grid-cols-3 gap-4">
-          <StatCard label="GL Journal Entries" value={stats?.glEntries ?? "—"} sub="wc_acc_gl_journal_entry" icon={FileText} />
-          <StatCard label="Savings Transactions" value={stats?.savingsTransactions ?? "—"} sub="wc_m_savings_account_transaction" icon={TrendingUp} />
-          <StatCard label="Savings Accounts" value={stats?.savingsAccounts ?? "—"} sub="wc_m_savings_account" icon={Database} />
+          {selectedProduct === "SAVINGS" ? (
+            <>
+              <StatCard label="GL Journal Entries" value={stats?.glEntries ?? "—"} sub="wc_acc_gl_journal_entry" icon={FileText} />
+              <StatCard label="Savings Transactions" value={stats?.savingsTransactions ?? "—"} sub="wc_m_savings_account_transaction" icon={TrendingUp} />
+              <StatCard label="Savings Accounts" value={stats?.savingsAccounts ?? "—"} sub="wc_m_savings_account" icon={Database} />
+            </>
+          ) : (
+            <>
+              <StatCard label="GL Journal Entries" value={stats?.glEntries ?? "—"} sub="wc_acc_gl_journal_entry" icon={FileText} />
+              <StatCard label="Loan Transactions" value={(stats as any)?.loanTransactions ?? "—"} sub="wc_m_loan_transaction" icon={TrendingUp} />
+              <StatCard label="Loan Accounts" value={(stats as any)?.loanAccounts ?? "—"} sub="wc_m_loan (SME product)" icon={Database} />
+            </>
+          )}
         </div>
 
         {/* Variance trend sparkline — shown when 2+ runs exist */}
