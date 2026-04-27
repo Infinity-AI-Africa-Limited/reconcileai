@@ -127,6 +127,7 @@ type POCResult = {
 type RunRecord = {
   id: number;
   productName: string;
+  productType: string | null;  // "SAVINGS" | "LOAN"
   periodStart: string;
   periodEnd: string;
   status: string;
@@ -1112,7 +1113,13 @@ function POCModePanel({
 
   const stats = statsQuery.data;
   const isRunning = runPOC.isPending;
-  const runs: RunRecord[] = (runsQuery.data ?? []) as RunRecord[];
+  // Filter runs to only show those matching this panel's mode
+  const allRuns: RunRecord[] = (runsQuery.data ?? []) as RunRecord[];
+  const runs: RunRecord[] = allRuns.filter((r) => {
+    const pt = (r.productType ?? "").toUpperCase();
+    if (mode === "SAVINGS") return pt === "SAVINGS" || pt === "";
+    return pt === "LOAN";
+  });
 
   const categoryCount = new Map<string, number>();
   for (const exc of pocResult?.layer2Exceptions ?? []) {
