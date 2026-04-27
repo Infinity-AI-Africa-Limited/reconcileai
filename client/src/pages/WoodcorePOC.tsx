@@ -1052,13 +1052,27 @@ function VarianceSparkline({ runs }: { runs: RunRecord[] }) {
   );
 }
 
-export default function WoodcorePOC() {
+// ─── POC Mode Panel ─────────────────────────────────────────────────────────
+// A self-contained panel for one POC mode (Savings or Loan).
+// All state is local to this component so the two modes never interfere.
+function POCModePanel({
+  mode,
+  onBack,
+}: {
+  mode: "SAVINGS" | "LOAN";
+  onBack: () => void;
+}) {
+  const isSavings = mode === "SAVINGS";
+  const accentClass = isSavings ? "bg-indigo-600 hover:bg-indigo-700" : "bg-amber-600 hover:bg-amber-700";
+  const accentText = isSavings ? "text-indigo-600" : "text-amber-600";
+  const accentBorder = isSavings ? "border-indigo-300" : "border-amber-300";
+  const accentBg = isSavings ? "bg-indigo-50" : "bg-amber-50";
+
   const [pocResult, setPocResult] = useState<POCResult | null>(null);
-  const [activeTab, setActiveTab] = useState("overview");
+  const [activeTab, setActiveTab] = useState("layer1");
   const [periodStart, setPeriodStart] = useState("2025-04-01");
   const [periodEnd, setPeriodEnd] = useState("2025-07-31");
   const [showDatePanel, setShowDatePanel] = useState(false);
-  const [selectedProduct, setSelectedProduct] = useState<"SAVINGS" | "LOAN">("SAVINGS");
   const [layer3Local, setLayer3Local] = useState<Layer3Result[]>([]);
   const [statusFilter, setStatusFilter] = useState<ReviewStatus | "ALL">("ALL");
   const [bulkAckOpen, setBulkAckOpen] = useState(false);
@@ -1070,8 +1084,7 @@ export default function WoodcorePOC() {
   const runsQuery = trpc.woodcore.getRuns.useQuery();
 
   const bulkAcknowledge = trpc.woodcore.bulkAcknowledge.useMutation({
-    onSuccess: (data) => {
-      // Update local layer3 state to reflect bulk acknowledge
+    onSuccess: () => {
       setLayer3Local((prev) =>
         prev.map((r) => (r.reviewStatus === "OPEN" || !r.reviewStatus)
           ? { ...r, reviewStatus: "ACKNOWLEDGED", reviewNote: bulkNote || "Bulk acknowledged", reviewedBy: "Reviewer", reviewedAt: new Date().toISOString() }
@@ -1084,9 +1097,7 @@ export default function WoodcorePOC() {
   });
 
   const createShareToken = trpc.woodcore.createShareToken.useMutation({
-    onSuccess: (data) => {
-      setShareToken(data.token);
-    },
+    onSuccess: (data) => { setShareToken(data.token); },
   });
 
   const runPOC = trpc.woodcore.runPOC.useMutation({
@@ -1119,71 +1130,54 @@ export default function WoodcorePOC() {
   }, []);
 
   const handleRunPOC = () => {
-    const productId = selectedProduct === "LOAN" ? 1 : 2;
-    runPOC.mutate({ productId, productType: selectedProduct, currencyCode: "NGN", periodStart, periodEnd, varianceThreshold: 1.0 });
+    const productId = mode === "LOAN" ? 1 : 2;
+    runPOC.mutate({ productId, productType: mode, currencyCode: "NGN", periodStart, periodEnd, varianceThreshold: 1.0 });
     setShowDatePanel(false);
   };
 
+  const modeLabel = isSavings ? "Savings Reconciliation" : "Loan Principal Balance Reconciliation";
+  const modeGlLabel = isSavings ? "GL 100001 · Savings Control Account" : "GL 117083 · SME Loan Portfolio Account";
+
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Woodcore Branding Banner */}
-      <div className="bg-gradient-to-r from-[#1a2f6e] via-[#1e3a8a] to-[#2563eb] px-6 py-3 flex items-center gap-4">
-        <img
-          src={WOODCORE_LOGO}
-          alt="WoodCore"
-          className="h-7 object-contain brightness-0 invert"
-          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-        />
-        <div className="h-5 w-px bg-white/30" />
-        <div>
-          <p className="text-white text-sm font-semibold leading-none">Woodcore CBS — AI Reconciliation POC</p>
-          <p className="text-blue-200 text-xs mt-0.5">Powered by ReconcileAI · Live production dataset · August 2025</p>
-        </div>
+      {/* Mode sub-header */}
+      <div className={`${isSavings ? "bg-gradient-to-r from-indigo-700 to-indigo-500" : "bg-gradient-to-r from-amber-700 to-amber-500"} px-6 py-3 flex items-center gap-3`}>
+        <button
+          onClick={onBack}
+          className="text-white/80 hover:text-white text-xs flex items-center gap-1 border border-white/30 rounded-full px-3 py-1 transition-colors"
+        >
+          ← Back to POC Selection
+        </button>
+        <div className="h-4 w-px bg-white/30" />
+        <span className="text-white text-sm font-semibold">{modeLabel}</span>
+        <span className="text-white/70 text-xs">{modeGlLabel}</span>
         <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-blue-200 bg-white/10 px-2.5 py-1 rounded-full border border-white/20">
-            Confidential — POC Environment
-          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowDatePanel(!showDatePanel)}
+            className="gap-1.5 text-white border-white/40 bg-white/10 hover:bg-white/20 hover:text-white text-xs"
+          >
+            <Calendar className="h-3.5 w-3.5" />
+            {periodStart} → {periodEnd}
+            <ChevronDown className="h-3 w-3 ml-1" />
+          </Button>
+          <Button
+            onClick={handleRunPOC}
+            disabled={isRunning}
+            className="bg-white text-gray-800 hover:bg-gray-100 gap-2 text-sm font-semibold"
+          >
+            {isRunning
+              ? <><RefreshCw className="h-4 w-4 animate-spin" /> Running…</>
+              : <><Play className="h-4 w-4" /> Run POC</>}
+          </Button>
         </div>
       </div>
 
-      {/* Page Header */}
-      <div className="bg-white border-b px-6 py-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <Database className="h-5 w-5 text-indigo-600" />
-              <h1 className="text-xl font-bold text-gray-900">Woodcore CBS — Reconciliation POC</h1>
-              <Badge variant="outline" className="text-xs border-indigo-300 text-indigo-700 bg-indigo-50">Live Dataset</Badge>
-            </div>
-            <p className="text-sm text-gray-500 mt-0.5">
-              Three-layer reconciliation engine running against real Woodcore production data (August 2025 dump)
-            </p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowDatePanel(!showDatePanel)}
-              className="gap-1.5 text-gray-600"
-            >
-              <Calendar className="h-4 w-4" />
-              {periodStart} → {periodEnd}
-              <ChevronDown className="h-3 w-3 ml-1" />
-            </Button>
-            <Button
-              onClick={handleRunPOC}
-              disabled={isRunning}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2"
-            >
-              {isRunning
-                ? <><RefreshCw className="h-4 w-4 animate-spin" /> Running…</>
-                : <><Play className="h-4 w-4" /> Run POC</>}
-            </Button>
-          </div>
-        </div>
-
-        {showDatePanel && (
-          <div className="mt-4 border rounded-xl bg-gray-50 p-4 space-y-4">
+      {/* Date panel */}
+      {showDatePanel && (
+        <div className="bg-white border-b px-6 py-4">
+          <div className="border rounded-xl bg-gray-50 p-4 space-y-4">
             <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide flex items-center gap-1.5">
               <Calendar className="h-3.5 w-3.5" /> Select Analysis Period
             </p>
@@ -1194,7 +1188,7 @@ export default function WoodcorePOC() {
                   onClick={() => { setPeriodStart(p.start); setPeriodEnd(p.end); }}
                   className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
                     periodStart === p.start && periodEnd === p.end
-                      ? "bg-indigo-600 text-white border-indigo-600"
+                      ? `${accentClass} text-white`
                       : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600"
                   }`}
                 >
@@ -1211,49 +1205,18 @@ export default function WoodcorePOC() {
                 <Label className="text-xs text-gray-500">To</Label>
                 <Input type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} className="h-8 text-sm w-40" min="2025-04-01" max="2025-07-31" />
               </div>
-              <Button size="sm" onClick={handleRunPOC} disabled={isRunning} className="bg-indigo-600 hover:bg-indigo-700 text-white gap-1.5">
+              <Button size="sm" onClick={handleRunPOC} disabled={isRunning} className={`${accentClass} text-white gap-1.5`}>
                 <Play className="h-3.5 w-3.5" /> Run
               </Button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className="max-w-6xl mx-auto px-6 py-6 space-y-6">
-        {/* Product selector */}
-        <div className="flex items-center gap-3 bg-white border rounded-xl px-4 py-3">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Product to Reconcile</span>
-          <div className="flex gap-2 ml-2">
-            <button
-              onClick={() => setSelectedProduct("SAVINGS")}
-              className={`text-sm px-4 py-1.5 rounded-full border font-medium transition-colors ${
-                selectedProduct === "SAVINGS"
-                  ? "bg-indigo-600 text-white border-indigo-600"
-                  : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600"
-              }`}
-            >
-              WoodCore Savings
-            </button>
-            <button
-              onClick={() => setSelectedProduct("LOAN")}
-              className={`text-sm px-4 py-1.5 rounded-full border font-medium transition-colors ${
-                selectedProduct === "LOAN"
-                  ? "bg-amber-600 text-white border-amber-600"
-                  : "bg-white text-gray-700 border-gray-300 hover:border-amber-400 hover:text-amber-600"
-              }`}
-            >
-              SME Loan — Principal Balance
-            </button>
-          </div>
-          {selectedProduct === "LOAN" && (
-            <span className="ml-auto text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full font-medium">
-              GL 117083 · SME Loan Portfolio Account
-            </span>
-          )}
-        </div>
         {/* Dataset stats */}
         <div className="grid grid-cols-3 gap-4">
-          {selectedProduct === "SAVINGS" ? (
+          {isSavings ? (
             <>
               <StatCard label="GL Journal Entries" value={stats?.glEntries ?? "—"} sub="wc_acc_gl_journal_entry" icon={FileText} />
               <StatCard label="Savings Transactions" value={stats?.savingsTransactions ?? "—"} sub="wc_m_savings_account_transaction" icon={TrendingUp} />
@@ -1268,36 +1231,49 @@ export default function WoodcorePOC() {
           )}
         </div>
 
-        {/* Variance trend sparkline — shown when 2+ runs exist */}
         {runs.length >= 2 && <VarianceSparkline runs={runs} />}
 
-        {/* Run history */}
-        {runs.length > 0 && !pocResult && (
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-gray-700">Previous Runs</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {runs.slice(0, 5).map((run) => (
-                  <div key={run.id} className="flex items-center gap-3 text-sm py-2 border-b last:border-0">
-                    <span className="font-mono text-gray-500 text-xs">Run #{run.id}</span>
-                    <span className="text-gray-700">{run.productName}</span>
-                    <span className="text-gray-400">{run.periodStart} → {run.periodEnd}</span>
-                    <Badge className={`ml-auto text-xs ${run.status === "BALANCED" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
-                      {run.status}
-                    </Badge>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+        {/* Initial state */}
+        {!pocResult && runs.length === 0 && (
+          <div className="text-center py-16 text-gray-400">
+            <Play className={`h-12 w-12 mx-auto mb-4 ${accentText}`} />
+            <p className="text-lg font-semibold text-gray-600">Ready to run</p>
+            <p className="text-sm mt-2 max-w-md mx-auto">
+              Select a period above and click <strong>Run POC</strong> to execute all three layers against the real Woodcore CBS dataset.
+            </p>
+          </div>
+        )}
+
+        {/* Run history when no fresh result */}
+        {!pocResult && runs.length > 0 && (
+          <div className="space-y-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-semibold text-gray-700">Previous Runs</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {runs.slice(0, 8).map((run) => (
+                    <div key={run.id} className="flex items-center gap-3 text-sm py-2 border-b last:border-0">
+                      <span className="font-mono text-gray-500 text-xs">Run #{run.id}</span>
+                      <span className="text-gray-700">{run.productName}</span>
+                      <span className="text-gray-400">{run.periodStart} → {run.periodEnd}</span>
+                      <Badge className={`ml-auto text-xs ${run.status === "BALANCED" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
+                        {run.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+            <ComparisonPanel runs={runs} />
+          </div>
         )}
 
         {/* POC results */}
         {pocResult && (
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="bg-white border">
+            <TabsList className={`bg-white border`}>
               <TabsTrigger value="layer1" className="gap-1.5">
                 <TrendingUp className="h-3.5 w-3.5" /> Layer 1 — Balance
               </TabsTrigger>
@@ -1334,7 +1310,6 @@ export default function WoodcorePOC() {
                 </div>
               ) : (
                 <>
-                  {/* Category summary pills */}
                   <div className="flex flex-wrap gap-2">
                     {Array.from(categoryCount.entries()).map(([cat, count]) => (
                       <span key={cat} className={`text-xs font-semibold px-3 py-1 rounded-full border ${categoryColor(cat)}`}>
@@ -1342,8 +1317,6 @@ export default function WoodcorePOC() {
                       </span>
                     ))}
                   </div>
-
-                  {/* Bulk acknowledge action */}
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-gray-500">
                       {pocResult.layer2Exceptions.filter((_, i) => ((layer3Local[i]?.reviewStatus as ReviewStatus) ?? "OPEN") === "OPEN").length} OPEN exception(s) pending review
@@ -1358,8 +1331,6 @@ export default function WoodcorePOC() {
                       <CheckCheck className="h-3.5 w-3.5" /> Mark All as Acknowledged
                     </Button>
                   </div>
-
-                  {/* Bulk acknowledge dialog */}
                   <Dialog open={bulkAckOpen} onOpenChange={setBulkAckOpen}>
                     <DialogContent className="max-w-md">
                       <DialogHeader>
@@ -1396,8 +1367,6 @@ export default function WoodcorePOC() {
                       </DialogFooter>
                     </DialogContent>
                   </Dialog>
-
-                  {/* Status filter bar */}
                   <div className="flex items-center gap-2 bg-gray-50 border rounded-xl px-4 py-2.5">
                     <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Filter by status:</span>
                     {(["ALL", "OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED"] as const).map((s) => {
@@ -1423,8 +1392,6 @@ export default function WoodcorePOC() {
                       );
                     })}
                   </div>
-
-                  {/* Filtered exception list */}
                   <div className="space-y-2">
                     {pocResult.layer2Exceptions
                       .map((exc, idx) => ({ exc, idx, layer3: layer3Local[idx] }))
@@ -1467,11 +1434,11 @@ export default function WoodcorePOC() {
                 </div>
               ) : (
                 <>
-                  <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
-                    <Bot className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" />
+                  <div className={`${accentBg} border ${accentBorder} rounded-xl p-4 flex items-start gap-3`}>
+                    <Bot className={`h-5 w-5 ${accentText} shrink-0 mt-0.5`} />
                     <div className="flex-1">
-                      <p className="text-sm font-semibold text-indigo-800">Context-Aware Agent Report</p>
-                      <p className="text-xs text-indigo-600 mt-0.5">
+                      <p className={`text-sm font-semibold ${accentText}`}>Context-Aware Agent Report — {modeLabel}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
                         {layer3Local.length} exception{layer3Local.length !== 1 ? "s" : ""} analysed · Period: {pocResult.layer1.periodStart} to {pocResult.layer1.periodEnd}
                       </p>
                     </div>
@@ -1479,7 +1446,7 @@ export default function WoodcorePOC() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="gap-1.5 border-indigo-300 text-indigo-700 hover:bg-indigo-100"
+                        className={`gap-1.5 ${accentBorder} ${accentText} hover:${accentBg}`}
                         onClick={() => exportToPDF(pocResult.layer1, pocResult.layer2Exceptions, layer3Local)}
                       >
                         <Download className="h-3.5 w-3.5" /> Download PDF
@@ -1495,36 +1462,33 @@ export default function WoodcorePOC() {
                         Share Report
                       </Button>
                     </div>
-
-                    {/* Share link display */}
-                    {shareToken && (
-                      <div className="bg-green-50 border border-green-200 rounded-xl p-3 mt-2">
-                        <p className="text-xs font-semibold text-green-800 mb-2 flex items-center gap-1.5">
-                          <Share2 className="h-3.5 w-3.5" /> Shareable Report Link (valid 30 days)
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-xs bg-white border border-green-200 rounded px-2 py-1.5 font-mono text-green-900 truncate">
-                            {window.location.origin}/shared-report/{shareToken}
-                          </code>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="shrink-0 border-green-300 text-green-700 hover:bg-green-100 gap-1"
-                            onClick={() => {
-                              navigator.clipboard.writeText(`${window.location.origin}/shared-report/${shareToken}`);
-                              setShareCopied(true);
-                              setTimeout(() => setShareCopied(false), 2000);
-                            }}
-                          >
-                            {shareCopied ? <CheckCheckIcon className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                            {shareCopied ? "Copied!" : "Copy"}
-                          </Button>
-                        </div>
-                        <p className="text-xs text-green-600 mt-1.5">Anyone with this link can view the exception report without logging in.</p>
-                      </div>
-                    )}
                   </div>
-
+                  {shareToken && (
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-3">
+                      <p className="text-xs font-semibold text-green-800 mb-2 flex items-center gap-1.5">
+                        <Share2 className="h-3.5 w-3.5" /> Shareable Report Link (valid 30 days)
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 text-xs bg-white border border-green-200 rounded px-2 py-1.5 font-mono text-green-900 truncate">
+                          {window.location.origin}/shared-report/{shareToken}
+                        </code>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="shrink-0 border-green-300 text-green-700 hover:bg-green-100 gap-1"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/shared-report/${shareToken}`);
+                            setShareCopied(true);
+                            setTimeout(() => setShareCopied(false), 2000);
+                          }}
+                        >
+                          {shareCopied ? <CheckCheckIcon className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                          {shareCopied ? "Copied!" : "Copy"}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-green-600 mt-1.5">Anyone with this link can view the exception report without logging in.</p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-4 gap-3">
                     {([
                       { level: "CRITICAL", def: "Immediate action — regulatory breach or material financial exposure" },
@@ -1542,7 +1506,6 @@ export default function WoodcorePOC() {
                       );
                     })}
                   </div>
-
                   <div className="space-y-3">
                     {layer3Local.map((r, idx) => {
                       const exc = pocResult.layer2Exceptions[idx];
@@ -1588,43 +1551,107 @@ export default function WoodcorePOC() {
             </TabsContent>
           </Tabs>
         )}
+      </div>
+    </div>
+  );
+}
 
-        {/* Initial state */}
-        {!pocResult && runs.length === 0 && (
-          <div className="text-center py-16 text-gray-400">
-            <Play className="h-12 w-12 mx-auto mb-4 text-indigo-300" />
-            <p className="text-lg font-semibold text-gray-600">Ready to run</p>
-            <p className="text-sm mt-2 max-w-md mx-auto">
-              Select a period above and click <strong>Run POC</strong> to execute all three layers against the real Woodcore CBS dataset.
-            </p>
-          </div>
-        )}
 
-        {/* Show compare tab even without a fresh run if there are historical runs */}
-        {!pocResult && runs.length > 0 && (
-          <div className="space-y-4">
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-semibold text-gray-700">Previous Runs</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {runs.slice(0, 8).map((run) => (
-                    <div key={run.id} className="flex items-center gap-3 text-sm py-2 border-b last:border-0">
-                      <span className="font-mono text-gray-500 text-xs">Run #{run.id}</span>
-                      <span className="text-gray-700">{run.productName}</span>
-                      <span className="text-gray-400">{run.periodStart} → {run.periodEnd}</span>
-                      <Badge className={`ml-auto text-xs ${run.status === "BALANCED" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
-                        {run.status}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-            <ComparisonPanel runs={runs} />
+// ─── Main Page ────────────────────────────────────────────────────────────────
+export default function WoodcorePOC() {
+  const [activeMode, setActiveMode] = useState<"SAVINGS" | "LOAN" | null>(null);
+
+  if (activeMode !== null) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        {/* Woodcore Branding Banner */}
+        <div className="bg-gradient-to-r from-[#1a2f6e] via-[#1e3a8a] to-[#2563eb] px-6 py-3 flex items-center gap-4">
+          <img
+            src={WOODCORE_LOGO}
+            alt="WoodCore"
+            className="h-7 object-contain brightness-0 invert"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+          <div className="h-5 w-px bg-white/30" />
+          <div>
+            <p className="text-white text-sm font-semibold leading-none">Woodcore CBS — AI Reconciliation POC</p>
+            <p className="text-blue-200 text-xs mt-0.5">Powered by ReconcileAI · Live production dataset · August 2025</p>
           </div>
-        )}
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-blue-200 bg-white/10 px-2.5 py-1 rounded-full border border-white/20">
+              Confidential — POC Environment
+            </span>
+          </div>
+        </div>
+        <POCModePanel mode={activeMode} onBack={() => setActiveMode(null)} />
+      </div>
+    );
+  }
+
+  // Landing — two-card selector
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Woodcore Branding Banner */}
+      <div className="bg-gradient-to-r from-[#1a2f6e] via-[#1e3a8a] to-[#2563eb] px-6 py-3 flex items-center gap-4">
+        <img
+          src={WOODCORE_LOGO}
+          alt="WoodCore"
+          className="h-7 object-contain brightness-0 invert"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+        />
+        <div className="h-5 w-px bg-white/30" />
+        <div>
+          <p className="text-white text-sm font-semibold leading-none">Woodcore CBS — AI Reconciliation POC</p>
+          <p className="text-blue-200 text-xs mt-0.5">Powered by ReconcileAI · Live production dataset · August 2025</p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-xs text-blue-200 bg-white/10 px-2.5 py-1 rounded-full border border-white/20">
+            Confidential — POC Environment
+          </span>
+        </div>
+      </div>
+
+      <div className="max-w-4xl mx-auto px-6 py-16 space-y-8">
+        <div className="text-center space-y-2">
+          <h1 className="text-2xl font-bold text-gray-900">Select a Reconciliation POC</h1>
+          <p className="text-gray-500 text-sm">Choose a product type to run the AI reconciliation engine against the live Woodcore CBS dataset.</p>
+        </div>
+        <div className="grid grid-cols-2 gap-6">
+          {/* Savings card */}
+          <button
+            onClick={() => setActiveMode("SAVINGS")}
+            className="group text-left border-2 border-indigo-200 hover:border-indigo-500 bg-white rounded-2xl p-8 shadow-sm hover:shadow-md transition-all space-y-4"
+          >
+            <div className="h-12 w-12 rounded-xl bg-indigo-100 flex items-center justify-center group-hover:bg-indigo-600 transition-colors">
+              <TrendingUp className="h-6 w-6 text-indigo-600 group-hover:text-white transition-colors" />
+            </div>
+            <div>
+              <p className="text-lg font-bold text-gray-900">Savings Reconciliation</p>
+              <p className="text-xs text-indigo-600 font-semibold mt-0.5">GL 100001 · Savings Control Account</p>
+            </div>
+            <p className="text-sm text-gray-500 leading-relaxed">Reconcile CBS savings account transactions against the GL savings control account. Detects timing differences, unposted withdrawals, and manual entry anomalies.</p>
+            <div className="flex items-center gap-2 text-indigo-600 text-sm font-semibold">
+              Launch Savings POC <span>→</span>
+            </div>
+          </button>
+          {/* Loan card */}
+          <button
+            onClick={() => setActiveMode("LOAN")}
+            className="group text-left border-2 border-amber-200 hover:border-amber-500 bg-white rounded-2xl p-8 shadow-sm hover:shadow-md transition-all space-y-4"
+          >
+            <div className="h-12 w-12 rounded-xl bg-amber-100 flex items-center justify-center group-hover:bg-amber-600 transition-colors">
+              <Database className="h-6 w-6 text-amber-600 group-hover:text-white transition-colors" />
+            </div>
+            <div>
+              <p className="text-lg font-bold text-gray-900">Loan Principal Balance</p>
+              <p className="text-xs text-amber-600 font-semibold mt-0.5">GL 117083 · SME Loan Portfolio Account</p>
+            </div>
+            <p className="text-sm text-gray-500 leading-relaxed">Reconcile SME loan disbursements and principal repayments against the GL loan portfolio account. Detects mispostings, orphaned entries, and unposted repayments.</p>
+            <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold">
+              Launch Loan POC <span>→</span>
+            </div>
+          </button>
+        </div>
       </div>
     </div>
   );
