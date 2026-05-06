@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   TrendingDown,
   FileCheck,
+  Building2,
 } from "lucide-react";
 
 function GuestLoginButton() {
@@ -102,9 +103,9 @@ export default function Home() {
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
             <h2 className="text-3xl font-bold text-[#1B365D] mb-3">Built for Your Industry</h2>
-            <p className="text-lg text-gray-600">Tailored solutions for Banks, FinTechs, and Payment Processors</p>
+            <p className="text-lg text-gray-600">Tailored solutions for Banks, FinTechs, Payment Processors, and Corporate B2B</p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             <a href="/banks" className="group block">
               <div className="border-2 border-gray-200 rounded-lg p-8 hover:border-[#1B365D] hover:shadow-lg transition-all">
                 <div className="h-12 w-12 bg-[#1B365D]/10 rounded-lg flex items-center justify-center mb-4 group-hover:bg-[#1B365D] transition-colors">
@@ -139,6 +140,22 @@ export default function Home() {
                 <h3 className="text-xl font-semibold text-[#1B365D] mb-2">For Payment Processors</h3>
                 <p className="text-gray-600 mb-4">Eliminate 35-65% false positives. Save 30+ minutes per false alarm across 20+ processes.</p>
                 <div className="flex items-center text-[#2A4A7C] font-medium group-hover:translate-x-1 transition-transform">
+                  Learn more <ArrowRight className="ml-2 h-4 w-4" />
+                </div>
+              </div>
+            </a>
+
+            <a href="/corporate-b2b" className="group block">
+              <div className="border-2 border-gray-200 rounded-lg p-8 hover:border-[#F47458] hover:shadow-lg transition-all relative">
+                <div className="absolute top-3 right-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide bg-[#F47458]/10 text-[#F47458] px-2 py-0.5 rounded-full">Coming FY2</span>
+                </div>
+                <div className="h-12 w-12 bg-[#F47458]/10 rounded-lg flex items-center justify-center mb-4 group-hover:bg-[#F47458] transition-colors">
+                  <Building2 className="h-6 w-6 text-[#F47458] group-hover:text-white" />
+                </div>
+                <h3 className="text-xl font-semibold text-[#1B365D] mb-2">For Corporate B2B</h3>
+                <p className="text-gray-600 mb-4">Auto-match distributor payments to invoices. Eliminate month-end reconciliation wars across ERP and bank.</p>
+                <div className="flex items-center text-[#F47458] font-medium group-hover:translate-x-1 transition-transform">
                   Learn more <ArrowRight className="ml-2 h-4 w-4" />
                 </div>
               </div>
