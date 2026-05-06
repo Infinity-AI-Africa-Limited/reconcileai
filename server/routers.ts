@@ -58,6 +58,13 @@ import {
   type MemoryRecord,
 } from "./superAgentEngine";
 import { seedDemoData, wipeDemoData } from "./demoSeedEngine";
+import {
+  prewarmDemoUser,
+  isPrewarmComplete,
+  getPrewarmUserId,
+  getPrewarmOrgId,
+  DEMO_PREWARM_OPEN_ID,
+} from "./prewarmDemoUser";
 import { agentActionDrafts, agentMemory } from "../drizzle/schema";
 import { getDb } from "./db";
 
@@ -261,49 +268,56 @@ export const appRouter = router({
       return { success: true } as const;
     }),
     guestLogin: publicProcedure.mutation(async ({ ctx }) => {
-      // Create or retrieve a guest user in the database
-      const guestOpenId = 'guest_' + Date.now() + '_' + Math.random().toString(36).substring(7);
-      
-      // Create guest user in database
-      await db.upsertUser({
-        openId: guestOpenId,
-        name: 'Guest User',
-        email: `guest_${Date.now()}@demo.reconcileai.com`,
-        role: 'user',
-        isGuest: true,
-      });
-      
-      // Retrieve the created user
-      const guestUser = await db.getUserByOpenId(guestOpenId);
-      if (!guestUser) {
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create guest user' });
-      }
-      
-      // Fire-and-forget background seed — does not block login response
-      // Seeds FMCG + all 8 FinServ banking channels asynchronously
-      setImmediate(async () => {
-        try {
-          await seedDemoData(guestUser.id, guestUser.organizationId ?? null);
-          const { seedFinServDemoData } = await import("./demoSeedFinServ");
-          await seedFinServDemoData(guestUser.id, guestUser.organizationId ?? null, "both");
-          console.log(`[guestLogin] Background seed complete for guest user ${guestUser.id}`);
-        } catch (seedErr) {
-          console.error("[guestLogin] Background seed failed:", seedErr);
-        }
-      });
+      // ── Use the shared pre-warmed demo user so every guest gets instant data ──
+      // The prewarmDemoUser service seeds FMCG + FinServ data once at boot time.
+      // All guests share the same read-only view of that pre-seeded dataset.
+      const sharedUser = await db.getUserByOpenId(DEMO_PREWARM_OPEN_ID);
 
-      // Create a proper JWT session token using the SDK
+      if (!sharedUser) {
+        // Pre-warm hasn't run yet (e.g. very first cold start before DB is ready).
+        // Fall back to creating a per-session guest and seeding in the background.
+        const guestOpenId = 'guest_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+        await db.upsertUser({
+          openId: guestOpenId,
+          name: 'Guest User',
+          email: `guest_${Date.now()}@demo.reconcileai.com`,
+          role: 'user',
+          isGuest: true,
+        });
+        const fallbackUser = await db.getUserByOpenId(guestOpenId);
+        if (!fallbackUser) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create guest user' });
+        }
+        setImmediate(async () => {
+          try {
+            await seedDemoData(fallbackUser.id, fallbackUser.organizationId ?? null);
+            const { seedFinServDemoData } = await import("./demoSeedFinServ");
+            await seedFinServDemoData(fallbackUser.id, fallbackUser.organizationId ?? null, "both");
+            console.log(`[guestLogin] Fallback background seed complete for guest user ${fallbackUser.id}`);
+          } catch (seedErr) {
+            console.error("[guestLogin] Fallback background seed failed:", seedErr);
+          }
+        });
+        const { sdk } = await import("./_core/sdk");
+        const fallbackToken = await sdk.createSessionToken(fallbackUser.openId, {
+          name: fallbackUser.name || undefined,
+          expiresInMs: 24 * 60 * 60 * 1000,
+        });
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, fallbackToken, { ...cookieOptions, maxAge: 24 * 60 * 60 * 1000 });
+        return { success: true, user: fallbackUser };
+      }
+
+      // Happy path: issue a 24-hour session for the shared pre-warmed demo user
       const { sdk } = await import("./_core/sdk");
-      const sessionToken = await sdk.createSessionToken(guestUser.openId, {
-        name: guestUser.name || undefined,
-        expiresInMs: 24 * 60 * 60 * 1000, // 24 hours
+      const sessionToken = await sdk.createSessionToken(sharedUser.openId, {
+        name: sharedUser.name || undefined,
+        expiresInMs: 24 * 60 * 60 * 1000,
       });
-      
-      // Set the session cookie
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: 24 * 60 * 60 * 1000 });
-      
-      return { success: true, user: guestUser };
+      console.log(`[guestLogin] Issued session for shared pre-warmed demo user (id=${sharedUser.id}, prewarmComplete=${isPrewarmComplete()})`);
+      return { success: true, user: sharedUser };
     }),
   }),
 
@@ -2491,11 +2505,18 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const drizzle = await getDb();
         if (!drizzle) return { active: false, jobId: null, exceptionCount: 0, transactionCount: 0, distributorCount: 0, memoryCount: 0, segment: "both" as "fmcg" | "finserv" | "both" };
         const { reconciliationJobs: rj, transactions: txns, distributors: dist, agentMemory: am } = await import("../drizzle/schema");
-        const demoJobs = await drizzle.select().from(rj).where(eq(rj.userId, ctx.user.id));
+
+        // For guests using the shared pre-warmed demo user, read data from that user's account.
+        // This ensures demo.status returns active:true immediately without waiting for seeding.
+        const isSharedDemoUser = ctx.user.openId === DEMO_PREWARM_OPEN_ID;
+        const targetUserId = isSharedDemoUser ? (getPrewarmUserId() ?? ctx.user.id) : ctx.user.id;
+        const targetOrgId = isSharedDemoUser ? (getPrewarmOrgId() ?? ctx.user.organizationId ?? 0) : (ctx.user.organizationId ?? 0);
+
+        const demoJobs = await drizzle.select().from(rj).where(eq(rj.userId, targetUserId));
         const allDemoJobs = demoJobs.filter(j => j.name?.includes("Demo"));
         const activeDemoJob = allDemoJobs[0];
         if (!activeDemoJob) return { active: false, jobId: null, exceptionCount: 0, transactionCount: 0, distributorCount: 0, memoryCount: 0, segment: "both" as "fmcg" | "finserv" | "both" };
-        const allBatches = await drizzle.select().from(await import("../drizzle/schema").then(s => s.uploadBatches)).where(eq(await import("../drizzle/schema").then(s => s.uploadBatches).then(t => t.userId), ctx.user.id));
+        const allBatches = await drizzle.select().from(await import("../drizzle/schema").then(s => s.uploadBatches)).where(eq(await import("../drizzle/schema").then(s => s.uploadBatches).then(t => t.userId), targetUserId));
         const demoBatches = allBatches.filter((b: { fileName?: string }) => b.fileName?.includes("Demo"));
         const demoBatchIds = demoBatches.map((b: { id: number }) => b.id);
         let transactionCount = 0;
@@ -2503,9 +2524,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
           const txnRows = await drizzle.select().from(txns).where(eq(txns.batchId, batchId));
           transactionCount += txnRows.length;
         }
-        const distRows = await drizzle.select().from(dist).where(eq(dist.organizationId, ctx.user.organizationId ?? 0));
+        const distRows = await drizzle.select().from(dist).where(eq(dist.organizationId, targetOrgId));
         const demoDistributors = distRows.filter((d: { notes?: string | null }) => d.notes?.includes("DEMO DATA"));
-        const memRows = await drizzle.select().from(am).where(eq(am.organizationId, ctx.user.organizationId ?? 0));
+        const memRows = await drizzle.select().from(am).where(eq(am.organizationId, targetOrgId));
         const seedMemory = memRows.filter((m: { exceptionId?: number | null }) => !m.exceptionId);
         const hasFmcg = allDemoJobs.some(j => !j.name?.includes("FinServ") && !j.name?.includes("LapoMFB"));
         const hasFinServ = allDemoJobs.some(j => j.name?.includes("FinServ") || j.name?.includes("LapoMFB"));
@@ -3045,3 +3066,10 @@ startScheduler(60000);
 startSftpPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
+// Pre-warm the shared demo user so the first guest gets instant data
+// Runs asynchronously — does not block server startup
+setImmediate(() => {
+  prewarmDemoUser().catch((err) =>
+    console.error("[Boot] prewarmDemoUser failed:", err)
+  );
+});

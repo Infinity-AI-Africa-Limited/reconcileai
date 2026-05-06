@@ -221,18 +221,25 @@ function DashboardLayoutContent({
   const isMobile = useIsMobile();
 
   // Demo Mode
-  // For guest users: poll every 5s until demo data appears (background seeding)
+  // For guest users: the shared pre-warmed demo user already has data seeded at deploy time,
+  // so demo.status returns active:true immediately — no polling needed.
+  // We keep a short poll (3 attempts) as a safety net for the rare cold-start fallback path.
   const isGuest = (user as { isGuest?: boolean } | null)?.isGuest === true;
   const [seedingComplete, setSeedingComplete] = useState(false);
+  const [pollCount, setPollCount] = useState(0);
+  const MAX_POLL_ATTEMPTS = 3; // safety net for cold-start fallback only
   const { data: demoStatus, refetch: refetchDemoStatus } = trpc.demo.status.useQuery(undefined, {
     enabled: !!user,
-    refetchInterval: (isGuest && !seedingComplete) ? 5000 : false,
+    // Poll only if guest, data not yet active, and we haven't exceeded the safety-net limit
+    refetchInterval: (isGuest && !seedingComplete && pollCount < MAX_POLL_ATTEMPTS) ? 5000 : false,
   });
-  // Stop polling once demo data is confirmed active for guest
+  // Stop polling once demo data is confirmed active for guest; increment poll counter
   useEffect(() => {
-    if (isGuest && demoStatus?.active && !seedingComplete) {
+    if (!isGuest || seedingComplete) return;
+    if (demoStatus?.active) {
       setSeedingComplete(true);
-      toast.success("Demo data ready!", { description: `All banking channels loaded — ${demoStatus.transactionCount?.toLocaleString()} transactions across ${demoStatus.segment === "both" ? "FMCG + 8 banking channels" : demoStatus.segment === "finserv" ? "8 banking channels" : "FMCG channels"}.` });
+    } else {
+      setPollCount(c => c + 1);
     }
   }, [isGuest, demoStatus?.active, seedingComplete]);
   const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);

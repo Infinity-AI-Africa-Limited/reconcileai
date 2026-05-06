@@ -904,3 +904,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Bulk "Mark All as Acknowledged" action on Layer 2 with reviewer note field
 - [ ] Variance trend sparkline in overview stats bar across all runs
 - [ ] Shareable read-only URL for a run's Layer 3 report (public token-based route)
+- [x] Pre-warm shared demo user at server boot — guests get instant data (no 30-60s wait)
