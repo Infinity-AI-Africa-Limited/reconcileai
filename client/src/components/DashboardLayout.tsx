@@ -72,18 +72,18 @@ const menuItems = [
   { icon: FileText, label: "Reports", path: "/reports" },
   { icon: Calendar, label: "Schedules", path: "/schedules" },
   { icon: Activity, label: "Monitor", path: "/monitor" },
-  { icon: Mail, label: "Email Settings", path: "/email-settings" },
-  { icon: Beaker, label: "Sample Data", path: "/sample-data" },
-  { icon: Plug, label: "Integrations", path: "/integrations" },
-  { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
-  { icon: Server, label: "SFTP Config", path: "/sftp-config" },
-  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
   { icon: BookOpen, label: "Documentation", path: "/documentation" },
 ];
 
 const adminMenuItems = [
   { icon: Users, label: "User Management", path: "/admin/users" },
   { icon: Settings2, label: "Module Configuration", path: "/modules" },
+  { icon: Mail, label: "Email Settings", path: "/email-settings" },
+  { icon: Beaker, label: "Sample Data", path: "/sample-data" },
+  { icon: Plug, label: "Integrations", path: "/integrations" },
+  { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
+  { icon: Server, label: "SFTP Config", path: "/sftp-config" },
+  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
