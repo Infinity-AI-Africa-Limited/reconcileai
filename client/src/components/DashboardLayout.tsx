@@ -352,9 +352,9 @@ function DashboardLayoutContent({
                       tooltip={item.label}
                       className="h-8 transition-all font-normal"
                     >
-                      <item.icon
-                        className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`}
-                      />
+                      <span className="flex items-center justify-center w-4 h-4 shrink-0">
+                        <item.icon className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`} />
+                      </span>
                       <span>{item.label}</span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -385,9 +385,9 @@ function DashboardLayoutContent({
                           tooltip={item.label}
                           className="h-8 transition-all font-normal"
                         >
-                          <item.icon
-                            className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`}
-                          />
+                          <span className="flex items-center justify-center w-4 h-4 shrink-0">
+                            <item.icon className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`} />
+                          </span>
                           <span>{item.label}</span>
                         </SidebarMenuButton>
                       </SidebarMenuItem>
@@ -417,9 +417,9 @@ function DashboardLayoutContent({
                           tooltip={item.label}
                           className="h-8 transition-all font-normal pl-6"
                         >
-                          <item.icon
-                            className={`h-3.5 w-3.5 ${isActive ? "text-sidebar-primary" : "text-sidebar-foreground/60"}`}
-                          />
+                          <span className="flex items-center justify-center w-4 h-4 shrink-0">
+                            <item.icon className={`h-3.5 w-3.5 ${isActive ? "text-sidebar-primary" : "text-sidebar-foreground/60"}`} />
+                          </span>
                           <span className="text-sidebar-foreground/70">{item.label}</span>
                         </SidebarMenuButton>
                       </SidebarMenuItem>
