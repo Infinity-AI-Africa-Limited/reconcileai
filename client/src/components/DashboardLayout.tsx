@@ -54,7 +54,7 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid, Database } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown } from "lucide-react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -79,6 +79,9 @@ const adminMenuItems = [
   { icon: Users, label: "User Management", path: "/admin/users" },
   { icon: Settings2, label: "Module Configuration", path: "/modules" },
   { icon: Mail, label: "Email Settings", path: "/email-settings" },
+];
+
+const adminAdvancedItems = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data" },
   { icon: Plug, label: "Integrations", path: "/integrations" },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
@@ -244,6 +247,7 @@ function DashboardLayoutContent({
   }, [isGuest, demoStatus?.active, seedingComplete]);
   const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);
   const [guestLinkCopied, setGuestLinkCopied] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const activateDemo = trpc.demo.activate.useMutation({
     onSuccess: (data) => {
       const mr = (data as { matchRate?: string })?.matchRate ?? "90.00";
@@ -346,7 +350,7 @@ function DashboardLayoutContent({
                       isActive={isActive}
                       onClick={() => setLocation(item.path)}
                       tooltip={item.label}
-                      className="h-10 transition-all font-normal"
+                      className="h-8 transition-all font-normal"
                     >
                       <item.icon
                         className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`}
@@ -379,12 +383,44 @@ function DashboardLayoutContent({
                           isActive={isActive}
                           onClick={() => setLocation(item.path)}
                           tooltip={item.label}
-                          className="h-10 transition-all font-normal"
+                          className="h-8 transition-all font-normal"
                         >
                           <item.icon
                             className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`}
                           />
                           <span>{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                  {/* Advanced toggle */}
+                  {!isCollapsed && (
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => setShowAdvanced((v) => !v)}
+                        className="h-8 transition-all font-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/80"
+                      >
+                        <ChevronDown
+                          className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-180" : ""}`}
+                        />
+                        <span className="text-xs">{showAdvanced ? "Hide advanced" : "Advanced tools"}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )}
+                  {showAdvanced && adminAdvancedItems.map((item) => {
+                    const isActive = location.startsWith(item.path);
+                    return (
+                      <SidebarMenuItem key={item.path}>
+                        <SidebarMenuButton
+                          isActive={isActive}
+                          onClick={() => setLocation(item.path)}
+                          tooltip={item.label}
+                          className="h-8 transition-all font-normal pl-6"
+                        >
+                          <item.icon
+                            className={`h-3.5 w-3.5 ${isActive ? "text-sidebar-primary" : "text-sidebar-foreground/60"}`}
+                          />
+                          <span className="text-sidebar-foreground/70">{item.label}</span>
                         </SidebarMenuButton>
                       </SidebarMenuItem>
                     );
