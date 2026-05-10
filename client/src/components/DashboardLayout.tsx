@@ -64,11 +64,6 @@ const menuItems = [
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
   { icon: Upload, label: "Upload Data", path: "/upload" },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
-  { icon: Layers, label: "Multi-Channel", path: "/channels" },
-  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
-  { icon: Search, label: "Transactions", path: "/transactions" },
-  { icon: ClipboardList, label: "Review Queue", path: "/review" },
-  { icon: Shield, label: "Audit Trail", path: "/audit" },
   { icon: FileText, label: "Reports", path: "/reports" },
   { icon: Calendar, label: "Schedules", path: "/schedules" },
   { icon: Activity, label: "Monitor", path: "/monitor" },
@@ -76,6 +71,11 @@ const menuItems = [
 ];
 
 const adminMenuItems = [
+  { icon: Layers, label: "Multi-Channel", path: "/channels" },
+  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
+  { icon: Search, label: "Transactions", path: "/transactions" },
+  { icon: ClipboardList, label: "Review Queue", path: "/review" },
+  { icon: Shield, label: "Audit Trail", path: "/audit" },
   { icon: Users, label: "User Management", path: "/admin/users" },
   { icon: Settings2, label: "Module Configuration", path: "/modules" },
   { icon: Mail, label: "Email Settings", path: "/email-settings" },
