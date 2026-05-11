@@ -201,12 +201,43 @@ export default function Exceptions() {
                 </div>
               )}
 
-              {selectedEx.aiAnalysis && (
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1"><MessageSquare className="h-3 w-3" /> AI Analysis</p>
-                  <p className="text-sm bg-purple-50 p-3 rounded text-purple-800">{selectedEx.aiAnalysis}</p>
-                </div>
-              )}
+              {selectedEx.aiAnalysis && (() => {
+                let parsed: any = null;
+                try { parsed = JSON.parse(selectedEx.aiAnalysis); } catch {}
+                if (parsed && typeof parsed === "object") {
+                  return (
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1"><MessageSquare className="h-3 w-3" /> AI Analysis</p>
+                      <div className="bg-purple-50 p-3 rounded space-y-2">
+                        {parsed.plainLanguage && (
+                          <p className="text-sm text-purple-900">{parsed.plainLanguage}</p>
+                        )}
+                        {parsed.rootCause && (
+                          <div>
+                            <p className="text-[10px] font-semibold text-purple-700 uppercase tracking-wide">Root Cause</p>
+                            <p className="text-xs text-purple-800">{parsed.rootCause}</p>
+                          </div>
+                        )}
+                        {parsed.recommendedAction && (
+                          <div>
+                            <p className="text-[10px] font-semibold text-purple-700 uppercase tracking-wide">Recommended Action</p>
+                            <p className="text-xs text-purple-800">{parsed.recommendedAction}</p>
+                          </div>
+                        )}
+                        {parsed.confidence !== undefined && (
+                          <p className="text-[10px] text-purple-600">Confidence: {Math.round(parsed.confidence * 100)}%</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1"><MessageSquare className="h-3 w-3" /> AI Analysis</p>
+                    <p className="text-sm bg-purple-50 p-3 rounded text-purple-800">{selectedEx.aiAnalysis}</p>
+                  </div>
+                );
+              })()}
 
               {(selectedEx.status === "open" || selectedEx.status === "in_review") && (
                 <div className="space-y-3 pt-2 border-t">
