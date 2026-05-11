@@ -1,0 +1,66 @@
+{
+  "query": "SELECT id, name, code, channelType, organizationId, isActive FROM channels WHERE id > 120003 ORDER BY id;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute SELECT id, name, code, channelType, organizationId, isActive FROM channels WHERE id > 120003 ORDER BY id;",
+  "rows": [
+    {
+      "id": "120004",
+      "name": "Agent Banking (Moniepoint)",
+      "code": "AGENT_MONIEPOINT",
+      "channelType": "agent_banking",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120005",
+      "name": "Mobile Money (OPay)",
+      "code": "MOBILE_MONEY_OPAY",
+      "channelType": "mobile_money",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120006",
+      "name": "Mobile Banking (GTBank App)",
+      "code": "MOBILE_BANKING_GTB",
+      "channelType": "mobile_banking",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120007",
+      "name": "Bank Core / GL (CBS)",
+      "code": "BANK_CORE_GL",
+      "channelType": "bank_core",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120008",
+      "name": "NIBSS NIP (Instant Payments)",
+      "code": "NIBSS_NIP",
+      "channelType": "nibss",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "180001",
+      "name": "Bank Statement (BrightGoods)",
+      "code": "BANK_STATEMENT_FMCG",
+      "channelType": "bank_core",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "180002",
+      "name": "ERP Orders (BrightGoods)",
+      "code": "ERP_ORDERS_FMCG",
+      "channelType": "fintech_api",
+      "organizationId": "NULL",
+      "isActive": "1"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tname\tcode\tchannelType\torganizationId\tisActive\n120004\tAgent Banking (Moniepoint)\tAGENT_MONIEPOINT\tagent_banking\t1\t1\n120005\tMobile Money (OPay)\tMOBILE_MONEY_OPAY\tmobile_money\t1\t1\n120006\tMobile Banking (GTBank App)\tMOBILE_BANKING_GTB\tmobile_banking\t1\t1\n120007\tBank Core / GL (CBS)\tBANK_CORE_GL\tbank_core\t1\t1\n120008\tNIBSS NIP (Instant Payments)\tNIBSS_NIP\tnibss\t1\t1\n180001\tBank Statement (BrightGoods)\tBANK_STATEMENT_FMCG\tbank_core\tNULL\t1\n180002\tERP Orders (BrightGoods)\tERP_ORDERS_FMCG\tfintech_api\tNULL\t1\n",
+  "stderr": "",
+  "execution_time_ms": 253
+}

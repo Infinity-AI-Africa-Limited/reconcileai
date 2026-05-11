@@ -43,7 +43,10 @@ const CHANNELS = [
   { code: "bank_statement", name: "Bank Statement" },
   { code: "agent_banking", name: "Agent Banking" },
   { code: "fintech_api", name: "Fintech API" },
-  { code: "card_payments", name: "Card Payments" },
+  { code: "card_payments", name: "Card Payments (Generic)" },
+  { code: "CARD_MASTERCARD_ISW", name: "Mastercard (Interswitch)" },
+  { code: "CARD_VISA_ISW", name: "Visa (Interswitch)" },
+  { code: "CARD_VERVE_ISW", name: "Verve (Interswitch)" },
   { code: "ussd", name: "USSD Banking" },
   { code: "neft", name: "NEFT" },
 ];

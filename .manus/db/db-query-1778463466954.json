@@ -1,0 +1,226 @@
+{
+  "query": "SELECT id, name, code, channelType, organizationId, isActive FROM channels ORDER BY id LIMIT 30;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute SELECT id, name, code, channelType, organizationId, isActive FROM channels ORDER BY id LIMIT 30;",
+  "rows": [
+    {
+      "id": "1",
+      "name": "NIBSS Instant Payment",
+      "code": "nibss",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "2",
+      "name": "POS Terminal",
+      "code": "pos",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "3",
+      "name": "ATM",
+      "code": "atm",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "4",
+      "name": "Mobile Money",
+      "code": "mobile_money",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "5",
+      "name": "Bank Statement",
+      "code": "bank_statement",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "6",
+      "name": "Fintech API",
+      "code": "fintech_api",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "7",
+      "name": "USSD Banking",
+      "code": "ussd",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "8",
+      "name": "NEFT",
+      "code": "neft",
+      "channelType": "bank_transfer",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "30001",
+      "name": "Core Banking System",
+      "code": "core_banking",
+      "channelType": "bank_core",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "60001",
+      "name": "ERP Orders (Demo)",
+      "code": "ERP_ORDERS",
+      "channelType": "fintech_api",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "60002",
+      "name": "NIBSS NIP Transfer",
+      "code": "NIBSS_NIP_LEGACY",
+      "channelType": "bank_core",
+      "organizationId": "1",
+      "isActive": "0"
+    },
+    {
+      "id": "60003",
+      "name": "USSD Banking",
+      "code": "USSD_BANKING",
+      "channelType": "mobile_money",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "60004",
+      "name": "POS Terminal",
+      "code": "POS_TERMINAL",
+      "channelType": "pos",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "60005",
+      "name": "Mobile App Banking",
+      "code": "MOBILE_APP",
+      "channelType": "mobile_money",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "60006",
+      "name": "Direct Debit (NIBSS)",
+      "code": "DIRECT_DEBIT",
+      "channelType": "bank_core",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "90005",
+      "name": "Card Payment (Visa/MC)",
+      "code": "CARD_PAYMENT",
+      "channelType": "card_payments",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "90006",
+      "name": "Agent Banking (MFIN)",
+      "code": "AGENT_BANKING",
+      "channelType": "mobile_money",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "120001",
+      "name": "POS Transactions (Interswitch)",
+      "code": "POS_INTERSWITCH",
+      "channelType": "pos",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120002",
+      "name": "Card Payments (Visa/Mastercard)",
+      "code": "CARD_PAYMENTS",
+      "channelType": "card_payments",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120003",
+      "name": "USSD Transactions",
+      "code": "USSD_CHANNEL",
+      "channelType": "ussd",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120004",
+      "name": "Agent Banking (Moniepoint)",
+      "code": "AGENT_MONIEPOINT",
+      "channelType": "agent_banking",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120005",
+      "name": "Mobile Money (OPay)",
+      "code": "MOBILE_MONEY_OPAY",
+      "channelType": "mobile_money",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120006",
+      "name": "Mobile Banking (GTBank App)",
+      "code": "MOBILE_BANKING_GTB",
+      "channelType": "mobile_banking",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120007",
+      "name": "Bank Core / GL (CBS)",
+      "code": "BANK_CORE_GL",
+      "channelType": "bank_core",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "120008",
+      "name": "NIBSS NIP (Instant Payments)",
+      "code": "NIBSS_NIP",
+      "channelType": "nibss",
+      "organizationId": "1",
+      "isActive": "1"
+    },
+    {
+      "id": "180001",
+      "name": "Bank Statement (BrightGoods)",
+      "code": "BANK_STATEMENT_FMCG",
+      "channelType": "bank_core",
+      "organizationId": "NULL",
+      "isActive": "1"
+    },
+    {
+      "id": "180002",
+      "name": "ERP Orders (BrightGoods)",
+      "code": "ERP_ORDERS_FMCG",
+      "channelType": "fintech_api",
+      "organizationId": "NULL",
+      "isActive": "1"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tname\tcode\tchannelType\torganizationId\tisActive\n1\tNIBSS Instant Payment\tnibss\tbank_transfer\tNULL\t1\n2\tPOS Terminal\tpos\tbank_transfer\tNULL\t1\n3\tATM\tatm\tbank_transfer\tNULL\t1\n4\tMobile Money\tmobile_money\tbank_transfer\tNULL\t1\n5\tBank Statement\tbank_statement\tbank_transfer\tNULL\t1\n6\tFintech API\tfintech_api\tbank_transfer\tNULL\t1\n7\tUSSD Banking\tussd\tbank_transfer\tNULL\t1\n8\tNEFT\tneft\tbank_transfer\tNULL\t1\n30001\tCore Banking System\tcore_banking\tbank_core\tNULL\t1\n60001\tERP Orders (Demo)\tERP_ORDERS\tfintech_api\tNULL\t1\n60002\tNIBSS NIP Transfer\tNIBSS_NIP_LEGACY\tbank_core\t1\t0\n60003\tUSSD Banking\tUSSD_BANKING\tmobile_money\tNULL\t1\n60004\tPOS Terminal\tPOS_TERMINAL\tpos\tNULL\t1\n60005\tMobile App Banking\tMOBILE_APP\tmobile_money\tNULL\t1\n60006\tDirect Debit (NIBSS)\tDIRECT_DEBIT\tbank_core\tNULL\t1\n90005\tCard Payment (Visa/MC)\tCARD_PAYMENT\tcard_payments\tNULL\t1\n90006\tAgent Banking (MFIN)\tAGENT_BANKING\tmobile_money\tNULL\t1\n120001\tPOS Transactions (Interswitch)\tPOS_INTERSWITCH\tpos\t1\t1\n120002\tCard Payments (Visa/Mastercard)\tCARD_PAYMENTS\tcard_payments\t1\t1\n120003\tUSSD Transactions\tUSSD_CHANNEL\tussd\t1\t1\n120004\tAgent Banking (Moniepoint)\tAGENT_MONIEPOINT\tagent_banking\t1\t1\n120005\tMobile Money (OPay)\tMOBILE_MONEY_OPAY\tmobile_money\t1\t1\n120006\tMobile Banking (GTBank App)\tMOBILE_BANKING_GTB\tmobile_banking\t1\t1\n120007\tBank Core / GL (CBS)\tBANK_CORE_GL\tbank_core\t1\t1\n120008\tNIBSS NIP (Instant Payments)\tNIBSS_NIP\tnibss\t1\t1\n180001\tBank Statement (BrightGoods)\tBANK_STATEMENT_FMCG\tbank_core\tNULL\t1\n180002\tERP Orders (BrightGoods)\tERP_ORDERS_FMCG\tfintech_api\tNULL\t1\n",
+  "stderr": "",
+  "execution_time_ms": 259
+}

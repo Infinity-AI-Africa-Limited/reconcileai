@@ -11,6 +11,24 @@ export default function MultiChannelPage() {
   const channelIcons: Record<string, string> = {
     NIBSS: "🏦", POS: "💳", ATM: "🏧", MOBILE_MONEY: "📱",
     BANK_STATEMENT: "📄", FINTECH_API: "⚡", USSD: "📞",
+    // Card scheme channels
+    CARD_MASTERCARD_ISW: "💳", CARD_VISA_ISW: "💳", CARD_VERVE_ISW: "💳",
+    CARD_MASTERCARD_UP: "💳", CARD_VISA_UP: "💳",
+    CARD_PAYMENT: "💳", CARD_PAYMENTS: "💳",
+  };
+
+  const channelTypeBadge: Record<string, { label: string; color: string }> = {
+    card_payments: { label: "Card Scheme", color: "bg-purple-100 text-purple-700" },
+    nibss: { label: "NIBSS", color: "bg-blue-100 text-blue-700" },
+    pos: { label: "POS", color: "bg-green-100 text-green-700" },
+    atm: { label: "ATM", color: "bg-amber-100 text-amber-700" },
+    mobile_money: { label: "Mobile", color: "bg-sky-100 text-sky-700" },
+    bank_core: { label: "Core Banking", color: "bg-slate-100 text-slate-700" },
+    agent_banking: { label: "Agent", color: "bg-orange-100 text-orange-700" },
+    ussd: { label: "USSD", color: "bg-teal-100 text-teal-700" },
+    fintech_api: { label: "API", color: "bg-indigo-100 text-indigo-700" },
+    mobile_banking: { label: "Mobile Banking", color: "bg-cyan-100 text-cyan-700" },
+    bank_transfer: { label: "Bank Transfer", color: "bg-gray-100 text-gray-700" },
   };
 
   const channelStats = stats?.channelStats || [];
@@ -43,7 +61,15 @@ export default function MultiChannelPage() {
                         <span className="text-2xl">{channelIcons[ch.code] || "📊"}</span>
                         <div>
                           <CardTitle className="text-base">{ch.name}</CardTitle>
-                          <p className="text-xs text-muted-foreground">{ch.code}</p>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <p className="text-xs text-muted-foreground">{ch.code}</p>
+                            {ch.channelType && (() => {
+                              const badge = channelTypeBadge[ch.channelType];
+                              return badge ? (
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${badge.color}`}>{badge.label}</span>
+                              ) : null;
+                            })()}
+                          </div>
                         </div>
                       </div>
                       <div className={`w-3 h-3 rounded-full ${ch.isActive ? "bg-green-500" : "bg-gray-300"}`} />
@@ -138,6 +164,7 @@ export default function MultiChannelPage() {
                           <td className="py-3 px-3 text-right font-mono">{total.toLocaleString()}</td>
                           <td className="py-3 px-3 text-right font-mono text-green-600">{matched.toLocaleString()}</td>
                           <td className="py-3 px-3 text-right font-mono text-amber-500">{unmatched.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right font-mono text-red-500">{unmatched.toLocaleString()}</td>
                           <td className="py-3 px-3 text-right">
                             <span className={`font-bold ${matchRate >= 80 ? "text-green-600" : matchRate >= 50 ? "text-amber-500" : "text-red-500"}`}>
                               {total > 0 ? `${matchRate.toFixed(1)}%` : "-"}
