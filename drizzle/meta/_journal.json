@@ -134,6 +134,13 @@
       "when": 1776769336656,
       "tag": "0018_mature_tenebrous",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "5",
+      "when": 1778572130064,
+      "tag": "0019_daily_fenris",
+      "breakpoints": true
     }
   ]
 }

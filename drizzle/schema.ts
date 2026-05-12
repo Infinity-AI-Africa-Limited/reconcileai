@@ -949,3 +949,90 @@ export const dashboardStatsCache = mysqlTable("dashboard_stats_cache", {
 ]);
 export type DashboardStatsCache = typeof dashboardStatsCache.$inferSelect;
 export type InsertDashboardStatsCache = typeof dashboardStatsCache.$inferInsert;
+
+// ─── Compliance Settings (NDPA/NDPR — NDA Clause 11) ────────────────
+// Stores org-level data protection officer contact, retention policy,
+// and compliance programme status as required by the LAPO MFB NDA.
+export const complianceSettings = mysqlTable("compliance_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  // DPO / Privacy Officer contact (Clause 11(a))
+  dpoName: varchar("dpoName", { length: 255 }),
+  dpoEmail: varchar("dpoEmail", { length: 320 }),
+  dpoPhone: varchar("dpoPhone", { length: 50 }),
+  // Data retention policy (Clause 2 & 7)
+  retentionPeriodDays: int("retentionPeriodDays").default(1825).notNull(), // 5 years default
+  autoDeleteEnabled: boolean("autoDeleteEnabled").default(false).notNull(),
+  // Compliance programme status flags (Clause 11)
+  ndpaCompliant: boolean("ndpaCompliant").default(false).notNull(),
+  ndprCompliant: boolean("ndprCompliant").default(false).notNull(),
+  ropaCompleted: boolean("ropaCompleted").default(false).notNull(), // Record of Processing Activities
+  lastAuditDate: timestamp("lastAuditDate"),
+  nextAuditDate: timestamp("nextAuditDate"),
+  // Breach notification contact (Clause 12)
+  breachNotificationEmail: varchar("breachNotificationEmail", { length: 320 }),
+  // Notes / programme documentation reference
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_compliance_org").on(table.organizationId),
+]);
+export type ComplianceSettings = typeof complianceSettings.$inferSelect;
+export type InsertComplianceSettings = typeof complianceSettings.$inferInsert;
+
+// ─── Data Deletion Requests (NDA Clause 7 — Return/Destruction) ──────
+// Tracks requests to delete or return all Confidential Information,
+// and stores the deletion certificate reference for audit purposes.
+export const dataDeletionRequests = mysqlTable("data_deletion_requests", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  requestedByUserId: int("requestedByUserId").notNull(),
+  requestedAt: timestamp("requestedAt").defaultNow().notNull(),
+  scope: mysqlEnum("scope", ["all_transactions", "specific_channel", "specific_job", "all_data"]).default("all_data").notNull(),
+  channelId: int("channelId"), // populated if scope = specific_channel
+  jobId: int("jobId"),         // populated if scope = specific_job
+  status: mysqlEnum("status", ["pending", "in_progress", "completed", "failed"]).default("pending").notNull(),
+  completedAt: timestamp("completedAt"),
+  recordsDeleted: bigint("recordsDeleted", { mode: "number" }).default(0),
+  certificateText: text("certificateText"), // Signed deletion certificate content
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_deletion_org").on(table.organizationId),
+  index("idx_deletion_status").on(table.status),
+]);
+export type DataDeletionRequest = typeof dataDeletionRequests.$inferSelect;
+export type InsertDataDeletionRequest = typeof dataDeletionRequests.$inferInsert;
+
+// ─── Security Incidents (NDA Clause 12 — Breach Notification) ────────
+// Logs any security incident or unauthorised disclosure event,
+// and tracks the notification sent to the counterparty.
+export const securityIncidents = mysqlTable("security_incidents", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  reportedByUserId: int("reportedByUserId").notNull(),
+  reportedAt: timestamp("reportedAt").defaultNow().notNull(),
+  incidentType: mysqlEnum("incidentType", ["unauthorised_access", "data_breach", "unauthorised_disclosure", "system_compromise", "other"]).default("other").notNull(),
+  severity: mysqlEnum("severity", ["low", "medium", "high", "critical"]).default("medium").notNull(),
+  description: text("description").notNull(),
+  affectedDataTypes: json("affectedDataTypes"), // e.g. ["transaction_data", "customer_pii"]
+  estimatedRecordsAffected: int("estimatedRecordsAffected"),
+  // Notification tracking (Clause 12 — immediate notification obligation)
+  counterpartyNotifiedAt: timestamp("counterpartyNotifiedAt"),
+  counterpartyNotifiedVia: varchar("counterpartyNotifiedVia", { length: 100 }), // email/phone/letter
+  regulatorNotifiedAt: timestamp("regulatorNotifiedAt"), // NDPC notification if required
+  // Resolution
+  status: mysqlEnum("status", ["open", "investigating", "contained", "resolved"]).default("open").notNull(),
+  resolvedAt: timestamp("resolvedAt"),
+  resolutionNotes: text("resolutionNotes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_incidents_org").on(table.organizationId),
+  index("idx_incidents_status").on(table.status),
+  index("idx_incidents_severity").on(table.severity),
+]);
+export type SecurityIncident = typeof securityIncidents.$inferSelect;
+export type InsertSecurityIncident = typeof securityIncidents.$inferInsert;

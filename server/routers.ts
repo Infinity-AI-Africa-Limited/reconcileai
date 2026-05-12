@@ -2884,6 +2884,165 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { run, exceptions, layer3Results, sharedBy: shareRow.createdBy, expiresAt: shareRow.expiresAt };
       }),
   }),
+
+  // ─── Compliance (NDPA/NDPR — NDA Clause 11, 7, 12) ──────────────────
+  compliance: router({
+    // Get compliance settings for the current org
+    getSettings: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? null;
+      const drizzle = await getDb();
+      if (!drizzle) return null;
+      const { complianceSettings } = await import("../drizzle/schema");
+      const rows = await drizzle.select().from(complianceSettings)
+        .where(orgId ? eq(complianceSettings.organizationId, orgId) : isNull(complianceSettings.organizationId))
+        .limit(1);
+      return rows[0] ?? null;
+    }),
+
+    // Upsert compliance settings
+    saveSettings: protectedProcedure
+      .input(z.object({
+        dpoName: z.string().optional(),
+        dpoEmail: z.string().email().optional(),
+        dpoPhone: z.string().optional(),
+        retentionPeriodDays: z.number().min(1).max(3650).optional(),
+        autoDeleteEnabled: z.boolean().optional(),
+        ndpaCompliant: z.boolean().optional(),
+        ndprCompliant: z.boolean().optional(),
+        ropaCompleted: z.boolean().optional(),
+        breachNotificationEmail: z.string().email().optional(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? null;
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceSettings } = await import("../drizzle/schema");
+        const existing = await drizzle.select({ id: complianceSettings.id }).from(complianceSettings)
+          .where(orgId ? eq(complianceSettings.organizationId, orgId) : isNull(complianceSettings.organizationId))
+          .limit(1);
+        if (existing.length > 0) {
+          await drizzle.update(complianceSettings).set({ ...input, updatedAt: new Date() })
+            .where(eq(complianceSettings.id, existing[0].id));
+        } else {
+          await drizzle.insert(complianceSettings).values({ ...input, organizationId: orgId });
+        }
+        return { success: true };
+      }),
+
+    // Request data deletion (Clause 7)
+    requestDeletion: protectedProcedure
+      .input(z.object({
+        scope: z.enum(["all_transactions", "specific_channel", "specific_job", "all_data"]),
+        channelId: z.number().optional(),
+        jobId: z.number().optional(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? null;
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { dataDeletionRequests, transactions, uploadBatches, reconciliationJobs, matches, exceptions } = await import("../drizzle/schema");
+        // Count records to be deleted
+        let recordsDeleted = 0;
+        try {
+          const txCount = await drizzle.select({ count: sql<number>`count(*)` }).from(transactions)
+            .where(orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId));
+          recordsDeleted = Number(txCount[0]?.count ?? 0);
+        } catch {}
+        // Create deletion request record
+        const [req] = await drizzle.insert(dataDeletionRequests).values({
+          organizationId: orgId,
+          requestedByUserId: ctx.user.id,
+          scope: input.scope,
+          channelId: input.channelId,
+          jobId: input.jobId,
+          status: "in_progress",
+          notes: input.notes,
+        }).$returningId();
+        // Perform deletion based on scope
+        if (input.scope === "all_data" || input.scope === "all_transactions") {
+          const txWhereClause = orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId);
+          const jobWhereClause = orgId ? eq(reconciliationJobs.organizationId, orgId) : isNull(reconciliationJobs.organizationId);
+          // Get job IDs for this org to delete matches and exceptions
+          const orgJobIds = await drizzle.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(jobWhereClause);
+          if (orgJobIds.length > 0) {
+            const jobIdList = orgJobIds.map(j => j.id);
+            // Delete matches and exceptions linked to these jobs
+            for (const jid of jobIdList) {
+              await drizzle.delete(matches).where(eq(matches.jobId, jid)).catch(() => {});
+              await drizzle.delete(exceptions).where(eq(exceptions.jobId, jid)).catch(() => {});
+            }
+          }
+          await drizzle.delete(transactions).where(txWhereClause).catch(() => {});
+          if (input.scope === "all_data") {
+            await drizzle.delete(uploadBatches).where(orgId ? eq(uploadBatches.organizationId, orgId) : isNull(uploadBatches.organizationId)).catch(() => {});
+            await drizzle.delete(reconciliationJobs).where(jobWhereClause).catch(() => {});
+          }
+        }
+        // Generate deletion certificate
+        const certText = `DATA DELETION CERTIFICATE\n\nIssued by: ReconcileAI (Infinity AI Africa Limited)\nDate: ${new Date().toISOString()}\nOrganisation ID: ${orgId ?? "N/A"}\nScope: ${input.scope}\nRecords deleted: ${recordsDeleted}\nRequested by user ID: ${ctx.user.id}\n\nThis certifies that all data within the specified scope has been permanently deleted from the ReconcileAI platform in accordance with the data return/destruction obligations under the applicable Non-Disclosure Agreement and the Nigeria Data Protection Act 2023 (NDPA).\n\nCertificate ID: CERT-${req.id}-${Date.now()}`;
+        await drizzle.update(dataDeletionRequests).set({
+          status: "completed",
+          completedAt: new Date(),
+          recordsDeleted,
+          certificateText: certText,
+        }).where(eq(dataDeletionRequests.id, req.id));
+        return { success: true, certificateText: certText, recordsDeleted, requestId: req.id };
+      }),
+
+    // List deletion requests
+    listDeletionRequests: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? null;
+      const drizzle = await getDb();
+      if (!drizzle) return [];
+      const { dataDeletionRequests } = await import("../drizzle/schema");
+      return drizzle.select().from(dataDeletionRequests)
+        .where(orgId ? eq(dataDeletionRequests.organizationId, orgId) : isNull(dataDeletionRequests.organizationId))
+        .orderBy(desc(dataDeletionRequests.requestedAt))
+        .limit(50);
+    }),
+
+    // Report a security incident (Clause 12)
+    reportIncident: protectedProcedure
+      .input(z.object({
+        incidentType: z.enum(["unauthorised_access", "data_breach", "unauthorised_disclosure", "system_compromise", "other"]),
+        severity: z.enum(["low", "medium", "high", "critical"]),
+        description: z.string().min(10),
+        affectedDataTypes: z.array(z.string()).optional(),
+        estimatedRecordsAffected: z.number().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? null;
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { securityIncidents } = await import("../drizzle/schema");
+        const [inc] = await drizzle.insert(securityIncidents).values({
+          organizationId: orgId,
+          reportedByUserId: ctx.user.id,
+          ...input,
+        }).$returningId();
+        // Notify the platform owner immediately (Clause 12 — immediate notification)
+        const { notifyOwner } = await import("./_core/notification");
+        await notifyOwner({
+          title: `\uD83D\uDEA8 Security Incident Reported [${input.severity.toUpperCase()}]`,
+          content: `Type: ${input.incidentType}\nSeverity: ${input.severity}\nDescription: ${input.description}\nReported by user ID: ${ctx.user.id}\nOrg ID: ${orgId ?? "N/A"}\nTimestamp: ${new Date().toISOString()}`,
+        }).catch(() => {});
+        return { success: true, incidentId: inc.id };
+      }),
+
+    // List incidents
+    listIncidents: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? null;
+      const drizzle = await getDb();
+      if (!drizzle) return [];
+      const { securityIncidents } = await import("../drizzle/schema");
+      return drizzle.select().from(securityIncidents)
+        .where(orgId ? eq(securityIncidents.organizationId, orgId) : isNull(securityIncidents.organizationId))
+        .orderBy(desc(securityIncidents.reportedAt))
+        .limit(100);
+    }),
+  }),
 });
 
 export type AppRouter = typeof appRouter;

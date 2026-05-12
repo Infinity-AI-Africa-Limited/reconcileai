@@ -905,3 +905,15 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Variance trend sparkline in overview stats bar across all runs
 - [ ] Shareable read-only URL for a run's Layer 3 report (public token-based route)
 - [x] Pre-warm shared demo user at server boot — guests get instant data (no 30-60s wait)
+
+## Feature NDA-1: NDPA/NDPR Compliance (LAPO MFB NDA — Clause 11 & 7)
+- [x] Schema: compliance_settings table (org-level DPO contact, retention policy, last audit date, ndpa_compliant flag)
+- [x] Schema: data_deletion_requests table (requestedBy, requestedAt, completedAt, certificateUrl, scope)
+- [x] Backend: Compliance settings CRUD endpoints (get/update per org)
+- [x] Backend: Data deletion endpoint — wipe all org transaction data and generate deletion certificate
+- [x] Backend: Breach notification endpoint — log incident and trigger owner notification
+- [x] Frontend: Compliance Settings page (DPO contact, retention period, NDPA/NDPR status badges)
+- [x] Frontend: Data Deletion workflow — confirm dialog, progress, downloadable deletion certificate
+- [x] Frontend: Data minimisation notice on Upload page (banner informing analysts to upload only necessary data)
+- [x] Frontend: Breach Notification form (internal incident report with auto-notify to owner)
+- [ ] Audit log: Ensure all data access events (upload, view, export, delete) are logged with userId, timestamp, IP
