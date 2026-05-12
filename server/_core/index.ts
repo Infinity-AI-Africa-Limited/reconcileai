@@ -10,6 +10,7 @@ import { serveStatic, setupVite } from "./vite";
 import { getLlmProviderInfo } from "./llm";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
+import { storagePut, storageGet } from "../storage";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -57,7 +58,33 @@ async function startServer() {
       };
     }
 
-    // 2. LLM provider
+    // 2. Storage (S3) — write a tiny probe file then verify a download URL is returned
+    try {
+      const probeKey = `health-checks/probe-${Date.now()}.txt`;
+      const probeData = `reconcileai-health-probe ${new Date().toISOString()}`;
+      const uploadStart = Date.now();
+      const { key, url: uploadedUrl } = await storagePut(probeKey, probeData, "text/plain");
+      const uploadMs = Date.now() - uploadStart;
+
+      const downloadStart = Date.now();
+      const { url: downloadUrl } = await storageGet(key);
+      const downloadMs = Date.now() - downloadStart;
+
+      checks.storage = {
+        status: "ok",
+        uploadMs,
+        downloadMs,
+        uploadUrl: uploadedUrl,
+        downloadUrl,
+      };
+    } catch (err) {
+      checks.storage = {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // 3. LLM provider
     try {
       const llm = getLlmProviderInfo();
       checks.llm = { status: "ok", ...llm };
