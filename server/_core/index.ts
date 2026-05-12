@@ -7,6 +7,9 @@ import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { getLlmProviderInfo } from "./llm";
+import { getDb } from "../db";
+import { sql } from "drizzle-orm";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -33,6 +36,55 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  // ── Health check ─────────────────────────────────────────────────────────
+  // GET /api/health
+  // Returns DB connectivity, LLM provider mode/model, and app version.
+  // Useful for Rocket.new deployment verification and uptime monitoring.
+  app.get("/api/health", async (_req, res) => {
+    const startedAt = Date.now();
+    const checks: Record<string, unknown> = {};
+
+    // 1. Database connectivity
+    try {
+      const db = await getDb();
+      if (!db) throw new Error("Database connection unavailable");
+      await db.execute(sql`SELECT 1`);
+      checks.database = { status: "ok", latencyMs: Date.now() - startedAt };
+    } catch (err) {
+      checks.database = {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // 2. LLM provider
+    try {
+      const llm = getLlmProviderInfo();
+      checks.llm = { status: "ok", ...llm };
+    } catch (err) {
+      checks.llm = {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // 3. App metadata
+    const allOk = Object.values(checks).every(
+      (c) => (c as { status: string }).status === "ok"
+    );
+
+    const body = {
+      status: allOk ? "healthy" : "degraded",
+      timestamp: new Date().toISOString(),
+      uptime: Math.floor(process.uptime()),
+      environment: process.env.NODE_ENV ?? "unknown",
+      version: process.env.npm_package_version ?? "unknown",
+      checks,
+    };
+
+    res.status(allOk ? 200 : 503).json(body);
+  });
+
   // OAuth callback under /api/oauth/callback
   registerOAuthRoutes(app);
   // tRPC API
