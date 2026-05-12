@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare } from "lucide-react";
+import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Exceptions() {
@@ -22,6 +22,7 @@ export default function Exceptions() {
   });
 
   const resolveMutation = trpc.exceptions.resolve.useMutation();
+  const moveToReviewMutation = trpc.exceptions.moveToReview.useMutation();
 
   const handleResolve = async (id: number, status: "resolved" | "dismissed") => {
     try {
@@ -32,6 +33,18 @@ export default function Exceptions() {
       refetch();
     } catch (err: any) {
       toast.error(err.message || "Failed to resolve");
+    }
+  };
+
+  const handleMoveToReview = async (id: number) => {
+    try {
+      await moveToReviewMutation.mutateAsync({ id, notes: resolveNotes || undefined });
+      toast.success("Exception moved to Review Queue");
+      setSelectedEx(null);
+      setResolveNotes("");
+      refetch();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to move to review");
     }
   };
 
@@ -267,6 +280,21 @@ export default function Exceptions() {
                     </div>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Add notes about how this was resolved..." rows={3} />
                   </div>
+                  {selectedEx.status === "open" && (
+                    <Button
+                      variant="outline"
+                      onClick={() => handleMoveToReview(selectedEx.id)}
+                      disabled={moveToReviewMutation.isPending}
+                      className="w-full border-amber-300 text-amber-700 hover:bg-amber-50"
+                    >
+                      {moveToReviewMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                      ) : (
+                        <ClipboardList className="h-4 w-4 mr-1" />
+                      )}
+                      Move to Review Queue
+                    </Button>
+                  )}
                   <div className="flex gap-2">
                     <Button onClick={() => handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
                       <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve

@@ -840,6 +840,28 @@ export const appRouter = router({
         dispatchWebhook("exception.escalated", { exceptionId: input.id });
         return { success: true };
       }),
+
+    moveToReview: guestProtectedProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        notes: z.string().max(2000).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.updateException(input.id, {
+          status: "in_review",
+          assignedTo: ctx.user.id,
+          assignedAt: new Date(),
+          assignedBy: ctx.user.id,
+          resolutionNotes: input.notes ? sanitizeInput(input.notes, 2000) : null,
+        });
+        await logAudit(ctx.user.id, "move_exception_to_review", "exception", input.id, {
+          assignedTo: ctx.user.id,
+          notes: input.notes,
+        }, ip, ua);
+        dispatchWebhook("exception.in_review", { exceptionId: input.id, reviewedBy: ctx.user.id });
+        return { success: true };
+      }),
   }),
 
   // ─── Resolution Templates ────────────────────────────────────────

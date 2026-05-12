@@ -923,3 +923,8 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Log login events to audit trail (user_login action with userId, IP, timestamp)
 - [x] Log logout events to audit trail (user_logout action)
 - [x] Log sensitive read events: view transactions, view reports, export CSV/PDF
+
+## Feature: Move to Review Queue Button (Exception Modal)
+- [x] Backend: exceptions.moveToReview tRPC procedure (sets status to in_review, assigns to current user, logs audit event, dispatches webhook)
+- [x] Frontend: "Move to Review Queue" amber button in Exception modal (visible for open exceptions only)
+- [x] Tests: 4 vitest tests for moveToReview procedure (defined, auth guard, invalid id, notes length)
