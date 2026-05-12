@@ -7,4 +7,9 @@ export const ENV = {
   isProduction: process.env.NODE_ENV === "production",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+  // Direct LLM provider (production / Rocket.new / self-hosted)
+  // Set DIRECT_LLM_API_KEY to switch away from Manus Forge with zero code changes.
+  directLlmApiKey: process.env.DIRECT_LLM_API_KEY ?? "",
+  directLlmApiUrl: process.env.DIRECT_LLM_API_URL ?? "",   // e.g. https://api.anthropic.com or https://api.openai.com
+  directLlmModel: process.env.DIRECT_LLM_MODEL ?? "",       // e.g. gpt-4o, claude-3-5-sonnet-20241022
 };
