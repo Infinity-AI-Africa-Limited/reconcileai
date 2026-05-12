@@ -155,16 +155,6 @@ export default function Compliance() {
   return (
     <DashboardLayout>
       <div className="p-6 space-y-6">
-        {/* Page Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-foreground">Compliance</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Data protection settings, incident management, and regulatory compliance status
-            </p>
-          </div>
-        </div>
-
         {/* Data Minimisation Notice */}
         <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
           <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
