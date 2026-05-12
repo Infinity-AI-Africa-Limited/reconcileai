@@ -9,6 +9,34 @@ function getQueryParam(req: Request, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+async function logAuthEvent(
+  userId: number | null,
+  orgId: number | null | undefined,
+  req: Request,
+  action: string,
+  details?: Record<string, unknown>
+) {
+  try {
+    const ip =
+      (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+      req.socket?.remoteAddress ||
+      "unknown";
+    const ua = (req.headers["user-agent"] || "unknown").substring(0, 500);
+    await db.createAuditLog({
+      userId,
+      organizationId: orgId ?? null,
+      action,
+      entityType: "user_session",
+      details: details ? JSON.stringify(details) : null,
+      ipAddress: ip,
+      userAgent: ua,
+    });
+  } catch (err) {
+    // Audit logging must never crash the auth flow
+    console.error("[Audit] Failed to log auth event:", err);
+  }
+}
+
 export function registerOAuthRoutes(app: Express) {
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
     const code = getQueryParam(req, "code");
@@ -43,6 +71,19 @@ export function registerOAuthRoutes(app: Express) {
 
       const cookieOptions = getSessionCookieOptions(req);
       res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+
+      // Audit: log successful login
+      const loggedInUser = await db.getUserByOpenId(userInfo.openId);
+      await logAuthEvent(
+        loggedInUser?.id ?? null,
+        loggedInUser?.organizationId,
+        req,
+        "user_login",
+        {
+          email: userInfo.email ?? null,
+          loginMethod: userInfo.loginMethod ?? userInfo.platform ?? "oauth",
+        }
+      );
 
       res.redirect(302, "/");
     } catch (error) {

@@ -916,4 +916,10 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Data Deletion workflow — confirm dialog, progress, downloadable deletion certificate
 - [x] Frontend: Data minimisation notice on Upload page (banner informing analysts to upload only necessary data)
 - [x] Frontend: Breach Notification form (internal incident report with auto-notify to owner)
-- [ ] Audit log: Ensure all data access events (upload, view, export, delete) are logged with userId, timestamp, IP
+- [x] Audit log: Ensure all data access events (upload, view, export, delete) are logged with userId, timestamp, IP
+
+## Feature NDA-2: Compliance Gap Fixes (Req #2 & #3)
+- [x] Add data minimisation notice banner to Upload page (at point of upload, not just Compliance page)
+- [x] Log login events to audit trail (user_login action with userId, IP, timestamp)
+- [x] Log logout events to audit trail (user_logout action)
+- [x] Log sensitive read events: view transactions, view reports, export CSV/PDF

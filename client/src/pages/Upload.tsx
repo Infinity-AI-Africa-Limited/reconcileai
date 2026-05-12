@@ -294,9 +294,18 @@ export default function UploadPage() {
 
   return (
     <div className="space-y-6">
-      <div>
+       <div>
         <h1 className="text-2xl font-bold tracking-tight text-primary">Upload Transactions</h1>
         <p className="text-muted-foreground mt-1">Import transaction data from CSV files for reconciliation across African banking channels</p>
+      </div>
+
+      {/* Data Minimisation Notice */}
+      <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        <Info className="h-4 w-4 mt-0.5 shrink-0 text-amber-600" />
+        <div>
+          <span className="font-semibold">Data Minimisation Notice: </span>
+          Upload only the minimum transaction data required for reconciliation. Do not include customer names, BVN, NIN, or phone numbers in transaction files unless strictly necessary. ReconcileAI processes financial reference data only.
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

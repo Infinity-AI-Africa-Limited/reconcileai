@@ -262,8 +262,13 @@ export const appRouter = router({
 
   auth: router({
     me: publicProcedure.query((opts) => opts.ctx.user),
-    logout: publicProcedure.mutation(({ ctx }) => {
+    logout: publicProcedure.mutation(async ({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
+      // Audit: log logout before clearing the cookie
+      if (ctx.user) {
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua);
+      }
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
@@ -661,11 +666,14 @@ export const appRouter = router({
 
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const job = await db.getReconciliationJob(input.id);
         if (!job) throw new TRPCError({ code: "NOT_FOUND" });
         const jobMatches = await db.getMatchesByJob(input.id);
         const { data: jobExceptions } = await db.getExceptions({ jobId: input.id });
+        // Audit: log data access event
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua);
         return { job, matches: jobMatches, exceptions: jobExceptions };
       }),
   }),
