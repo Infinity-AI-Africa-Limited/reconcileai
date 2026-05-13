@@ -867,21 +867,39 @@ export const appRouter = router({
   // ─── Resolution Templates ────────────────────────────────────────
 
   resolutionTemplates: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const dbConn = await db.getDb();
-      if (!dbConn) return [];
-      
-      // Fetch templates for user's org and global templates (organizationId = null)
-      const allTemplates = await dbConn.select()
-        .from(db.resolutionTemplates)
-        .orderBy(desc(db.resolutionTemplates.isDefault), desc(db.resolutionTemplates.createdAt));
-      
-      // Filter in memory to include user's org templates and global templates
-      const templates = allTemplates.filter(t => 
-        t.organizationId === ctx.user.organizationId || t.organizationId === null
-      );
-      return templates;
-    }),
+    list: protectedProcedure
+      .input(z.object({
+        category: z.enum([
+          "unmatched",
+          "missing_counterparty",
+          "amount_mismatch",
+          "timing_difference",
+          "duplicate_transaction",
+          "reversal_unmatched",
+          "currency_mismatch",
+          "format_error",
+        ]).optional(),
+      }).optional())
+      .query(async ({ ctx, input }) => {
+        const dbConn = await db.getDb();
+        if (!dbConn) return [];
+        
+        // Fetch templates for user's org and global templates (organizationId = null)
+        const allTemplates = await dbConn.select()
+          .from(db.resolutionTemplates)
+          .orderBy(desc(db.resolutionTemplates.isDefault), desc(db.resolutionTemplates.createdAt));
+        
+        // Filter in memory to include user's org templates and global templates
+        const orgFiltered = allTemplates.filter(t => 
+          t.organizationId === ctx.user.organizationId || t.organizationId === null
+        );
+
+        // If a category is specified, return only templates for that category
+        if (input?.category) {
+          return orgFiltered.filter(t => t.category === input.category);
+        }
+        return orgFiltered;
+      }),
 
     create: guestProtectedProcedure
       .input(z.object({

@@ -928,3 +928,10 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Backend: exceptions.moveToReview tRPC procedure (sets status to in_review, assigns to current user, logs audit event, dispatches webhook)
 - [x] Frontend: "Move to Review Queue" amber button in Exception modal (visible for open exceptions only)
 - [x] Tests: 4 vitest tests for moveToReview procedure (defined, auth guard, invalid id, notes length)
+
+## Feature: Filter "Use Template" by Exception Category
+- [x] Backend: resolutionTemplates.list now accepts optional category input — returns only templates matching that category when provided
+- [x] Frontend: Exceptions.tsx passes selectedEx.category to the templates query; dropdown shows only relevant templates
+- [x] Frontend: Dropdown trigger label shows the active category filter (e.g., "Templates (amount mismatch)")
+- [x] Frontend: Empty state message "No templates for this category" when no templates match
+- [x] Tests: 6 vitest tests for resolutionTemplates.list (defined, no input, valid category, all categories, invalid category, unauthenticated)

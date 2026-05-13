@@ -13,7 +13,26 @@ export default function Exceptions() {
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
   const [filters, setFilters] = useState({ status: "all", category: "all", severity: "all" });
-  const { data: templates } = trpc.resolutionTemplates.list.useQuery();
+  // Derive the valid category for the selected exception (must match the enum)
+  const TEMPLATE_CATEGORIES = [
+    "unmatched",
+    "missing_counterparty",
+    "amount_mismatch",
+    "timing_difference",
+    "duplicate_transaction",
+    "reversal_unmatched",
+    "currency_mismatch",
+    "format_error",
+  ] as const;
+  type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
+  const selectedCategory: TemplateCategory | undefined =
+    selectedEx && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory)
+      ? (selectedEx.category as TemplateCategory)
+      : undefined;
+
+  const { data: templates } = trpc.resolutionTemplates.list.useQuery(
+    selectedCategory ? { category: selectedCategory } : undefined
+  );
 
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
     status: statusFilter !== "all" ? statusFilter : undefined,
@@ -266,15 +285,23 @@ export default function Exceptions() {
                           }
                         }}
                       >
-                        <SelectTrigger className="w-[180px] h-8">
-                          <SelectValue placeholder="Use Template" />
+                        <SelectTrigger className="w-[200px] h-8">
+                          <SelectValue placeholder={
+                            selectedCategory
+                              ? `Templates (${selectedCategory.replace(/_/g, " ")})`
+                              : "Use Template"
+                          } />
                         </SelectTrigger>
                         <SelectContent>
-                          {(templates || []).map((template: any) => (
-                            <SelectItem key={template.id} value={String(template.id)}>
-                              {template.name}
-                            </SelectItem>
-                          ))}
+                          {(templates || []).length === 0 ? (
+                            <div className="px-3 py-2 text-xs text-muted-foreground">No templates for this category</div>
+                          ) : (
+                            (templates || []).map((template: any) => (
+                              <SelectItem key={template.id} value={String(template.id)}>
+                                {template.name}
+                              </SelectItem>
+                            ))
+                          )}
                         </SelectContent>
                       </Select>
                     </div>
