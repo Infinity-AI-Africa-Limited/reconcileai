@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList, FilterX, Filter } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 
 // ─── Template category filter persistence ───────────────────────────────────
@@ -319,16 +320,24 @@ export default function Exceptions() {
                       <div className="flex items-center gap-1.5">
                         {/* Re-enable auto-filter button — visible only when filter was cleared this session */}
                         {!autoFilter && selectedCategory === undefined && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory) && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-8 px-2 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50"
-                            onClick={handleReenableFilter}
-                            title="Re-enable automatic template filter by exception category"
-                          >
-                            <Filter className="h-3 w-3 mr-1" />
-                            Re-enable filter
-                          </Button>
+                          <TooltipProvider delayDuration={200}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 transition-all duration-150 hover:scale-105 group"
+                                  onClick={handleReenableFilter}
+                                >
+                                  <Filter className="h-3 w-3 mr-1 transition-transform duration-150 group-hover:rotate-12" />
+                                  Re-enable filter
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" className="max-w-[220px] text-center">
+                                <p className="text-xs">Auto-filter is off. Click to show only templates matching <span className="font-semibold">{selectedEx.category?.replace(/_/g, " ")}</span> exceptions — your preference is saved across sessions.</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
                         )}
                         <Select
                           value=""

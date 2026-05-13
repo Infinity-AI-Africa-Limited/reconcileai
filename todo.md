@@ -942,3 +942,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] "Re-enable filter" button appears inline next to the dropdown when the filter is off but the exception has a matchable category — clicking it re-enables the filter and persists the preference
 - [x] Filter state is read from localStorage on component mount so it survives page refresh, logout, and login
 - [x] Tests: 6 vitest tests for the filter behaviour (all pass)
+
+## Feature: Re-enable filter button — hover animation + tooltip
+- [x] Add Tooltip component wrapping the Re-enable filter button with descriptive text
+- [x] Add subtle hover animation (scale + icon pulse) to the button
