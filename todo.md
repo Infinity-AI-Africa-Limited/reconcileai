@@ -935,3 +935,10 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Dropdown trigger label shows the active category filter (e.g., "Templates (amount mismatch)")
 - [x] Frontend: Empty state message "No templates for this category" when no templates match
 - [x] Tests: 6 vitest tests for resolutionTemplates.list (defined, no input, valid category, all categories, invalid category, unauthenticated)
+
+## Feature: Template Auto-Filter Persistence (localStorage)
+- [x] Filter defaults to ON — active on first visit and after every logout/login (localStorage key "reconcileai_template_autofilter" defaults to true when absent)
+- [x] "Clear filter — show all templates" option at the top of the dropdown; selecting it disables the filter and persists the preference to localStorage
+- [x] "Re-enable filter" button appears inline next to the dropdown when the filter is off but the exception has a matchable category — clicking it re-enables the filter and persists the preference
+- [x] Filter state is read from localStorage on component mount so it survives page refresh, logout, and login
+- [x] Tests: 6 vitest tests for the filter behaviour (all pass)

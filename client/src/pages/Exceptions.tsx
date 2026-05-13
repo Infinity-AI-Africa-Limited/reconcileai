@@ -1,32 +1,62 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList } from "lucide-react";
+import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList, FilterX, Filter } from "lucide-react";
 import { toast } from "sonner";
+
+// ─── Template category filter persistence ───────────────────────────────────
+// "true" = auto-filter ON (default), "false" = user cleared it this session.
+// Stored in localStorage so it survives logout/login; cleared back to "true"
+// only when the user explicitly clicks "Re-enable auto-filter".
+const LS_KEY = "reconcileai_template_autofilter";
+
+function readFilterPref(): boolean {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    // Default to true if nothing stored yet
+    return raw === null ? true : raw === "true";
+  } catch {
+    return true;
+  }
+}
+
+function writeFilterPref(value: boolean) {
+  try {
+    localStorage.setItem(LS_KEY, String(value));
+  } catch {}
+}
+
+const TEMPLATE_CATEGORIES = [
+  "unmatched",
+  "missing_counterparty",
+  "amount_mismatch",
+  "timing_difference",
+  "duplicate_transaction",
+  "reversal_unmatched",
+  "currency_mismatch",
+  "format_error",
+] as const;
+type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
 
 export default function Exceptions() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
   const [filters, setFilters] = useState({ status: "all", category: "all", severity: "all" });
-  // Derive the valid category for the selected exception (must match the enum)
-  const TEMPLATE_CATEGORIES = [
-    "unmatched",
-    "missing_counterparty",
-    "amount_mismatch",
-    "timing_difference",
-    "duplicate_transaction",
-    "reversal_unmatched",
-    "currency_mismatch",
-    "format_error",
-  ] as const;
-  type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
+
+  // Auto-filter preference — read from localStorage on mount so it persists across login/logout
+  const [autoFilter, setAutoFilter] = useState<boolean>(true);
+  useEffect(() => {
+    setAutoFilter(readFilterPref());
+  }, []);
+
+  // Derive the active category for the template query
   const selectedCategory: TemplateCategory | undefined =
-    selectedEx && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory)
+    autoFilter && selectedEx && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory)
       ? (selectedEx.category as TemplateCategory)
       : undefined;
 
@@ -65,6 +95,16 @@ export default function Exceptions() {
     } catch (err: any) {
       toast.error(err.message || "Failed to move to review");
     }
+  };
+
+  const handleClearFilter = () => {
+    setAutoFilter(false);
+    writeFilterPref(false);
+  };
+
+  const handleReenableFilter = () => {
+    setAutoFilter(true);
+    writeFilterPref(true);
   };
 
   const severityColor = (s: string) => {
@@ -276,34 +316,62 @@ export default function Exceptions() {
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="text-sm font-medium block">Resolution Notes</label>
-                      <Select 
-                        value="" 
-                        onValueChange={(templateId: string) => {
-                          const template = (templates || []).find((t: any) => t.id.toString() === templateId);
-                          if (template) {
-                            setResolveNotes(template.templateText);
-                          }
-                        }}
-                      >
-                        <SelectTrigger className="w-[200px] h-8">
-                          <SelectValue placeholder={
-                            selectedCategory
-                              ? `Templates (${selectedCategory.replace(/_/g, " ")})`
-                              : "Use Template"
-                          } />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(templates || []).length === 0 ? (
-                            <div className="px-3 py-2 text-xs text-muted-foreground">No templates for this category</div>
-                          ) : (
-                            (templates || []).map((template: any) => (
-                              <SelectItem key={template.id} value={String(template.id)}>
-                                {template.name}
+                      <div className="flex items-center gap-1.5">
+                        {/* Re-enable auto-filter button — visible only when filter was cleared this session */}
+                        {!autoFilter && selectedCategory === undefined && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory) && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                            onClick={handleReenableFilter}
+                            title="Re-enable automatic template filter by exception category"
+                          >
+                            <Filter className="h-3 w-3 mr-1" />
+                            Re-enable filter
+                          </Button>
+                        )}
+                        <Select
+                          value=""
+                          onValueChange={(val: string) => {
+                            if (val === "__clear_filter__") {
+                              handleClearFilter();
+                              return;
+                            }
+                            const template = (templates || []).find((t: any) => t.id.toString() === val);
+                            if (template) {
+                              setResolveNotes(template.templateText);
+                            }
+                          }}
+                        >
+                          <SelectTrigger className="w-[200px] h-8">
+                            <SelectValue placeholder={
+                              autoFilter && selectedCategory
+                                ? `Templates (${selectedCategory.replace(/_/g, " ")})`
+                                : "Use Template"
+                            } />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {/* Clear Filter option — only shown when auto-filter is active and a category is matched */}
+                            {autoFilter && selectedCategory && (
+                              <SelectItem value="__clear_filter__" className="text-muted-foreground text-xs border-b mb-1 pb-1">
+                                <span className="flex items-center gap-1.5">
+                                  <FilterX className="h-3 w-3" />
+                                  Clear filter — show all templates
+                                </span>
                               </SelectItem>
-                            ))
-                          )}
-                        </SelectContent>
-                      </Select>
+                            )}
+                            {(templates || []).length === 0 ? (
+                              <div className="px-3 py-2 text-xs text-muted-foreground">No templates for this category</div>
+                            ) : (
+                              (templates || []).map((template: any) => (
+                                <SelectItem key={template.id} value={String(template.id)}>
+                                  {template.name}
+                                </SelectItem>
+                              ))
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Add notes about how this was resolved..." rows={3} />
                   </div>
