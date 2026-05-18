@@ -1026,3 +1026,22 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Pipeline stage dropdown per row (New → Contacted → Demo Booked → Proposal Sent → Closed Won → Closed Lost)
 - [x] Frontend: Stage badge with colour coding (grey/blue/amber/purple/emerald/red)
 - [x] Frontend: Overdue count summary card replaces Pending Demo Invites
+
+## Feature: CBN Compliance Report Module
+- [ ] Schema: cbnReportFrameworks, cbnReportSubmissions, cbnReportFindings, cbnActionPlans tables
+- [ ] Backend: cbnCompliance router — listFrameworks, listSubmissions, createSubmission, updateSubmission, submitReport, listFindings, createFinding, updateFinding, listActionPlans, createActionPlan, updateActionPlan, generateAiGapAnalysis, exportReport
+- [ ] Frontend: CBNCompliance.tsx — full module with 4 tabs: Dashboard, Report Builder, Findings & Actions, Audit Trail
+- [ ] Frontend: Compliance dashboard — summary cards (total reports, pending, overdue, compliance score), submission calendar heatmap, framework health grid
+- [ ] Frontend: Report builder — framework selector, period picker, section-by-section form, AI gap analysis panel, submit to CBN workflow
+- [ ] Frontend: Findings tracker — create/edit/close findings, severity badges, action plan linkage, due date tracking
+- [ ] Frontend: Audit trail — immutable log of all compliance actions with user, timestamp, and change details
+- [ ] Frontend: Export — PDF/CSV export of any submission with CBN-formatted layout
+- [ ] Nav: Add "CBN Compliance" entry to DashboardLayout sidebar under Compliance section
+- [ ] Seed: Pre-populate 8 CBN regulatory frameworks (AML/CFT, Prudential, Capital Adequacy, Liquidity, KYC/CDD, Cybersecurity, IFRS 9, Consumer Protection)
+
+## Feature: CBN Compliance Module (Reconciliation-Scoped Frontend)
+- [x] CBNCompliance.tsx page with 4 panels: Threshold Breaches, CBN Returns Export, Regulatory Deadlines, AML/CFT Flag Summary
+- [x] All data derived from existing reconciliation/transaction/exception tables — no new data sources
+- [x] Route /cbn-compliance registered in App.tsx
+- [x] CBN Reports sidebar nav item wired (FileBarChart2 icon in adminMenuItems)
+- [x] Seed cbnReportFrameworks with 8 CBN framework reference records (idempotent — available via cbnCompliance.seedFrameworks mutation)

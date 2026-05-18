@@ -2,6 +2,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
@@ -3665,8 +3666,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { success: true, message: 'You have been unsubscribed from all ReconcileAI assessment emails.' };
       }),
   }),
+  cbnCompliance: cbnComplianceRouter,
 });
-
 export type AppRouter = typeof appRouter;
 
 // ─── Background Reconciliation Runner ────────────────────────────────

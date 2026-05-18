@@ -45,6 +45,7 @@ import ComplianceAssessmentQuiz from "./pages/ComplianceAssessmentQuiz";
 import ComplianceAssessmentResult from "./pages/ComplianceAssessmentResult";
 import AdminAssessments from "./pages/AdminAssessments";
 import ComplianceAssessmentUnsubscribe from "./pages/ComplianceAssessmentUnsubscribe";
+import CBNCompliance from "./pages/CBNCompliance";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -75,6 +76,7 @@ function Router() {
       <Route path="/review">{() => <DashboardPage component={ReviewQueue} />}</Route>
       <Route path="/audit">{() => <DashboardPage component={AuditTrail} />}</Route>
       <Route path="/compliance">{() => <DashboardPage component={Compliance} />}</Route>
+      <Route path="/cbn-compliance">{() => <DashboardPage component={CBNCompliance} />}</Route>
       <Route path="/channels">{() => <DashboardPage component={MultiChannel} />}</Route>
       <Route path="/reports">{() => <DashboardPage component={Reports} />}</Route>
       <Route path="/admin">{() => <DashboardPage component={Admin} />}</Route>

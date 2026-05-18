@@ -56,7 +56,7 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2 } from "lucide-react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -79,6 +79,7 @@ const adminMenuItems = [
   { icon: ClipboardList, label: "Review Queue", path: "/review" },
   { icon: Shield, label: "Audit Trail", path: "/audit" },
   { icon: ShieldCheck, label: "Compliance", path: "/compliance" },
+  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance" },
   { icon: Users, label: "User Management", path: "/admin/users" },
   { icon: ClipboardCheck, label: "Assessments", path: "/admin/assessments" },
   { icon: Settings2, label: "Module Configuration", path: "/modules" },

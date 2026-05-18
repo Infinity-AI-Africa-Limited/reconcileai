@@ -1088,3 +1088,155 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
 ]);
 export type ComplianceAssessment = typeof complianceAssessments.$inferSelect;
 export type InsertComplianceAssessment = typeof complianceAssessments.$inferInsert;
+
+// ─── CBN Compliance Report Module ─────────────────────────────────────────────
+// Covers: AML/CFT, Prudential, Capital Adequacy, Liquidity, KYC/CDD,
+//         Cybersecurity, IFRS 9, Consumer Protection reporting frameworks.
+
+// Framework catalogue — seeded at startup, one row per CBN reporting area
+export const cbnReportFrameworks = mysqlTable("cbnReportFrameworks", {
+  id: int("id").autoincrement().primaryKey(),
+  code: varchar("code", { length: 64 }).notNull().unique(), // e.g. "AML_CFT"
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  regulatoryBasis: text("regulatoryBasis"), // e.g. "MLPPA 2022 / CBN AML/CFT Regulations 2022"
+  frequency: mysqlEnum("frequency", ["daily", "weekly", "monthly", "quarterly", "semi_annual", "annual", "ad_hoc"]).notNull(),
+  submissionDeadlineDays: int("submissionDeadlineDays").default(5), // days after period end
+  isActive: boolean("isActive").default(true).notNull(),
+  sortOrder: int("sortOrder").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+export type CbnReportFramework = typeof cbnReportFrameworks.$inferSelect;
+
+// Individual report submissions — one per period per framework per org
+export const cbnReportSubmissions = mysqlTable("cbnReportSubmissions", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  frameworkId: int("frameworkId").notNull(),
+  // Period covered by this submission
+  periodStart: timestamp("periodStart").notNull(),
+  periodEnd: timestamp("periodEnd").notNull(),
+  reportingPeriodLabel: varchar("reportingPeriodLabel", { length: 64 }), // e.g. "Q1 2026", "Jan 2026"
+  // Lifecycle status
+  status: mysqlEnum("status", [
+    "draft",        // being prepared
+    "in_review",    // internal review
+    "approved",     // approved by compliance officer
+    "submitted",    // sent to CBN
+    "acknowledged", // CBN acknowledged receipt
+    "queried",      // CBN raised queries
+    "closed",       // fully resolved
+  ]).default("draft").notNull(),
+  // Submission metadata
+  submittedAt: timestamp("submittedAt"),
+  submittedByUserId: int("submittedByUserId"),
+  acknowledgedAt: timestamp("acknowledgedAt"),
+  cbNReferenceNumber: varchar("cbNReferenceNumber", { length: 128 }), // CBN's own ref
+  submissionChannel: mysqlEnum("submissionChannel", ["goAML", "FinA", "email", "portal", "manual"]).default("portal"),
+  // Report content (structured JSON — section responses)
+  reportData: json("reportData"), // { sectionKey: { value, narrative, attachments[] } }
+  // Compliance score computed at submission time (0–100)
+  complianceScore: int("complianceScore"),
+  // AI-generated gap analysis narrative
+  aiGapAnalysis: text("aiGapAnalysis"),
+  aiGapGeneratedAt: timestamp("aiGapGeneratedAt"),
+  // Internal notes
+  internalNotes: text("internalNotes"),
+  // Who created / last updated
+  createdByUserId: int("createdByUserId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_cbn_submissions_org").on(table.organizationId),
+  index("idx_cbn_submissions_framework").on(table.frameworkId),
+  index("idx_cbn_submissions_status").on(table.status),
+  index("idx_cbn_submissions_period").on(table.periodStart, table.periodEnd),
+]);
+export type CbnReportSubmission = typeof cbnReportSubmissions.$inferSelect;
+export type InsertCbnReportSubmission = typeof cbnReportSubmissions.$inferInsert;
+
+// Findings — regulatory gaps / deficiencies identified during preparation or CBN examination
+export const cbnReportFindings = mysqlTable("cbnReportFindings", {
+  id: int("id").autoincrement().primaryKey(),
+  submissionId: int("submissionId"), // nullable — can be standalone
+  frameworkId: int("frameworkId").notNull(),
+  organizationId: int("organizationId"),
+  // Finding details
+  findingRef: varchar("findingRef", { length: 64 }), // e.g. "F-2026-001"
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description"),
+  category: mysqlEnum("category", [
+    "governance",
+    "kyc_cdd",
+    "aml_cft",
+    "capital_adequacy",
+    "liquidity",
+    "credit_risk",
+    "cybersecurity",
+    "ifrs9",
+    "consumer_protection",
+    "reporting",
+    "other",
+  ]).default("other").notNull(),
+  severity: mysqlEnum("severity", ["low", "medium", "high", "critical"]).default("medium").notNull(),
+  source: mysqlEnum("source", ["self_assessment", "internal_audit", "cbn_examination", "external_audit", "ai_gap_analysis"]).default("self_assessment").notNull(),
+  status: mysqlEnum("status", ["open", "in_progress", "resolved", "accepted_risk", "closed"]).default("open").notNull(),
+  dueDate: timestamp("dueDate"),
+  resolvedAt: timestamp("resolvedAt"),
+  resolvedByUserId: int("resolvedByUserId"),
+  createdByUserId: int("createdByUserId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_cbn_findings_org").on(table.organizationId),
+  index("idx_cbn_findings_framework").on(table.frameworkId),
+  index("idx_cbn_findings_status").on(table.status),
+  index("idx_cbn_findings_severity").on(table.severity),
+]);
+export type CbnReportFinding = typeof cbnReportFindings.$inferSelect;
+export type InsertCbnReportFinding = typeof cbnReportFindings.$inferInsert;
+
+// Action plans — remediation steps linked to findings
+export const cbnActionPlans = mysqlTable("cbnActionPlans", {
+  id: int("id").autoincrement().primaryKey(),
+  findingId: int("findingId").notNull(),
+  organizationId: int("organizationId"),
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description"),
+  owner: varchar("owner", { length: 255 }), // person / team responsible
+  priority: mysqlEnum("priority", ["low", "medium", "high", "critical"]).default("medium").notNull(),
+  status: mysqlEnum("status", ["not_started", "in_progress", "completed", "deferred", "cancelled"]).default("not_started").notNull(),
+  targetDate: timestamp("targetDate"),
+  completedAt: timestamp("completedAt"),
+  evidenceNotes: text("evidenceNotes"), // notes on evidence of completion
+  createdByUserId: int("createdByUserId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_cbn_actions_finding").on(table.findingId),
+  index("idx_cbn_actions_org").on(table.organizationId),
+  index("idx_cbn_actions_status").on(table.status),
+]);
+export type CbnActionPlan = typeof cbnActionPlans.$inferSelect;
+export type InsertCbnActionPlan = typeof cbnActionPlans.$inferInsert;
+
+// Audit log — immutable record of every compliance action
+export const cbnAuditLog = mysqlTable("cbnAuditLog", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  userId: int("userId"),
+  userName: varchar("userName", { length: 255 }),
+  action: varchar("action", { length: 128 }).notNull(), // e.g. "submission.created", "finding.resolved"
+  entityType: varchar("entityType", { length: 64 }), // "submission" | "finding" | "action_plan"
+  entityId: int("entityId"),
+  entityLabel: varchar("entityLabel", { length: 255 }), // human-readable label
+  details: json("details"), // before/after snapshot or extra context
+  ipAddress: varchar("ipAddress", { length: 64 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_cbn_audit_org").on(table.organizationId),
+  index("idx_cbn_audit_action").on(table.action),
+  index("idx_cbn_audit_entity").on(table.entityType, table.entityId),
+  index("idx_cbn_audit_created").on(table.createdAt),
+]);
+export type CbnAuditLog = typeof cbnAuditLog.$inferSelect;
