@@ -984,3 +984,9 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add weekly Monday 8 AM WAT heartbeat cron (task_uid: cic7MqEL7sVRfdXkWdEjXb, next: 2026-05-25T07:00Z)
 - [x] Add /api/scheduled/weeklyAssessmentDigest endpoint in server/_core/index.ts
 - [x] 8 vitest tests passing (PDF filename + digest stats logic)
+
+## Feature: Admin Assessments Table Enhancements (Consented Only + Export CSV)
+- [x] Backend: consentOnly filter added to assessment.listAll procedure
+- [x] Backend: assessment.exportCsv procedure added (returns CSV string + count, up to 5000 rows, respects all active filters)
+- [x] Frontend: "Consented only" quick-filter chip above the table (toggleable, highlighted when active, resets pagination)
+- [x] Frontend: "Export CSV" button in header (lazy query, triggers Blob download on data arrival, shows spinner while loading)

@@ -3382,6 +3382,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
         search: z.string().optional(),
         emailOptedOut: z.boolean().optional(),
+        consentOnly: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
@@ -3392,6 +3393,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const conditions = [];
         if (input.riskLevel) conditions.push(eq(complianceAssessments.riskLevel, input.riskLevel));
         if (input.emailOptedOut !== undefined) conditions.push(eq(complianceAssessments.emailOptedOut, input.emailOptedOut));
+        if (input.consentOnly) conditions.push(eq(complianceAssessments.consentToContact, true));
         if (input.search) {
           const q = `%${input.search}%`;
           conditions.push(
@@ -3428,6 +3430,79 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { rows, total: Number(count), page: input.page, pageSize: input.pageSize };
       }),
 
+
+    exportCsv: protectedProcedure
+      .input(z.object({
+        riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
+        emailOptedOut: z.boolean().optional(),
+        consentOnly: z.boolean().optional(),
+        search: z.string().optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        const conditions = [];
+        if (input.riskLevel) conditions.push(eq(complianceAssessments.riskLevel, input.riskLevel));
+        if (input.emailOptedOut !== undefined) conditions.push(eq(complianceAssessments.emailOptedOut, input.emailOptedOut));
+        if (input.consentOnly) conditions.push(eq(complianceAssessments.consentToContact, true));
+        if (input.search) {
+          const q = `%${input.search}%`;
+          conditions.push(or(
+            like(complianceAssessments.institutionName, q),
+            like(complianceAssessments.respondentName, q),
+            like(complianceAssessments.respondentEmail, q),
+          ));
+        }
+        const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+        const rows = await drizzle.select({
+          institutionName: complianceAssessments.institutionName,
+          institutionType: complianceAssessments.institutionType,
+          respondentName: complianceAssessments.respondentName,
+          respondentEmail: complianceAssessments.respondentEmail,
+          respondentRole: complianceAssessments.respondentRole,
+          overallScore: complianceAssessments.overallScore,
+          riskLevel: complianceAssessments.riskLevel,
+          consentToContact: complianceAssessments.consentToContact,
+          followUpEmailSent: complianceAssessments.followUpEmailSent,
+          demoInviteSent: complianceAssessments.demoInviteSent,
+          emailOptedOut: complianceAssessments.emailOptedOut,
+          createdAt: complianceAssessments.createdAt,
+          token: complianceAssessments.token,
+        }).from(complianceAssessments)
+          .where(whereClause)
+          .orderBy(desc(complianceAssessments.createdAt))
+          .limit(5000);
+        // Build CSV
+        const headers = ["Institution Name","Institution Type","Respondent Name","Respondent Email","Respondent Role","Overall Score","Risk Level","Consent to Contact","Follow-up Email Sent","Demo Invite Sent","Email Opted Out","Submitted Date","Report URL"];
+        const INST_TYPE_LABELS: Record<string, string> = {
+          commercial_bank: "Commercial Bank", microfinance_bank: "Microfinance Bank",
+          fintech: "Fintech", payment_processor: "Payment Processor",
+          corporate_b2b: "Corporate B2B", other: "Other",
+        };
+        const escape = (v: unknown) => {
+          const s = v == null ? "" : String(v);
+          return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+        };
+        const csvRows = rows.map(r => [
+          escape(r.institutionName ?? "Anonymous"),
+          escape(INST_TYPE_LABELS[r.institutionType ?? ""] ?? r.institutionType ?? ""),
+          escape(r.respondentName ?? ""),
+          escape(r.respondentEmail ?? ""),
+          escape(r.respondentRole ?? ""),
+          escape(r.overallScore ?? ""),
+          escape(r.riskLevel ?? ""),
+          escape(r.consentToContact ? "Yes" : "No"),
+          escape(r.followUpEmailSent ? "Yes" : "No"),
+          escape(r.demoInviteSent ? "Yes" : "No"),
+          escape(r.emailOptedOut ? "Yes" : "No"),
+          escape(r.createdAt ? new Date(r.createdAt).toISOString().split("T")[0] : ""),
+          escape(r.token ? `https://reconcileai.vip/compliance-assessment/result/${r.token}` : ""),
+        ].join(","));
+        const csv = [headers.join(","), ...csvRows].join("\n");
+        return { csv, count: rows.length };
+      }),
     unsubscribe: publicProcedure
       .input(z.object({ token: z.string().length(48) }))
       .mutation(async ({ input }) => {
