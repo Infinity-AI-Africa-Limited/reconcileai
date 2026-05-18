@@ -1,7 +1,8 @@
 import { useParams, Link } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
-import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink, Copy, Check } from "lucide-react";
+import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink, Copy, Check, Linkedin } from "lucide-react";
+import { toast } from "sonner";
 import { useState } from "react";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -79,6 +80,131 @@ function CategoryBar({ label, score, icon }: { label: string; score: number; ico
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+const RISK_LABEL: Record<string, string> = {
+  critical: "Critical Risk",
+  high: "High Risk",
+  medium: "Medium Risk",
+  low: "Low Risk",
+};
+
+function ShareBadge({
+  score,
+  riskLevel,
+  institutionName,
+  token,
+}: {
+  score: number;
+  riskLevel: string;
+  institutionName?: string;
+  token: string;
+}) {
+  const [embedCopied, setEmbedCopied] = useState(false);
+  const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${token}`;
+  const riskLabel = RISK_LABEL[riskLevel] ?? "Medium Risk";
+  const scoreColor = score >= 80 ? "#10b981" : score >= 60 ? "#f59e0b" : score >= 40 ? "#f97316" : "#ef4444";
+  const badgeBg = score >= 80 ? "#f0fdf4" : score >= 60 ? "#fffbeb" : score >= 40 ? "#fff7ed" : "#fef2f2";
+  const badgeBorder = score >= 80 ? "#bbf7d0" : score >= 60 ? "#fde68a" : score >= 40 ? "#fed7aa" : "#fecaca";
+
+  const linkedInText = encodeURIComponent(
+    `I just completed the ReconcileAI CBN Compliance Readiness Assessment.\n\nMy score: ${score}/100 (${riskLabel})\n\nIf you're in banking or fintech in Nigeria, this 5-minute assessment is worth doing — it maps your reconciliation and compliance gaps against CBN requirements.\n\nTake the free assessment: ${resultUrl}`
+  );
+  const linkedInUrl = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(resultUrl)}&summary=${linkedInText}`;
+
+  const embedSnippet = `<a href="${resultUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:10px;padding:10px 16px;background:${badgeBg};border:1.5px solid ${badgeBorder};border-radius:10px;text-decoration:none;font-family:Inter,Arial,sans-serif;">
+  <span style="font-size:22px;font-weight:800;color:${scoreColor};">${score}</span>
+  <span style="font-size:11px;color:#6b7280;">/ 100</span>
+  <span style="width:1px;height:28px;background:#e5e7eb;margin:0 4px;"></span>
+  <span style="font-size:12px;font-weight:600;color:#1B365D;">${riskLabel}</span>
+  <span style="font-size:11px;color:#9ca3af;">· CBN Compliance · ReconcileAI</span>
+</a>`;
+
+  const handleCopyEmbed = async () => {
+    try {
+      await navigator.clipboard.writeText(embedSnippet);
+    } catch {
+      const el = document.createElement("textarea");
+      el.value = embedSnippet;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setEmbedCopied(true);
+    toast.success("Embed snippet copied!", { description: "Paste it into your website, email signature, or LinkedIn post." });
+    setTimeout(() => setEmbedCopied(false), 3000);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 p-6 mb-6 shadow-sm">
+      <h2 className="text-base font-bold text-[#1B365D] mb-1">Share Your Score</h2>
+      <p className="text-xs text-[#8C757D] mb-5">
+        Share your compliance score on LinkedIn or embed the badge on your website.
+      </p>
+
+      {/* Badge preview */}
+      <div
+        className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-xl border mb-5"
+        style={{ background: badgeBg, borderColor: badgeBorder }}
+      >
+        <span className="text-2xl font-extrabold" style={{ color: scoreColor }}>{score}</span>
+        <span className="text-xs text-gray-400">/ 100</span>
+        <span className="w-px h-7 bg-gray-200 mx-1" />
+        <span className="text-sm font-semibold text-[#1B365D]">{riskLabel}</span>
+        <span className="text-xs text-gray-400 hidden sm:inline">· CBN Compliance · ReconcileAI</span>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        {/* LinkedIn share */}
+        <a
+          href={linkedInUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-[#0A66C2] text-white text-sm font-semibold hover:bg-[#0958a8] transition-colors"
+        >
+          <Linkedin className="h-4 w-4" />
+          Share on LinkedIn
+        </a>
+
+        {/* Copy embed snippet */}
+        <button
+          onClick={handleCopyEmbed}
+          className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border text-sm font-semibold transition-all duration-150 ${
+            embedCopied
+              ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+              : "border-gray-200 bg-white text-[#1B365D] hover:border-[#1B365D]/30 hover:bg-[#1B365D]/5"
+          }`}
+        >
+          {embedCopied ? (
+            <><Check className="h-4 w-4" /> Copied!</>
+          ) : (
+            <><Copy className="h-4 w-4" /> Copy embed snippet</>
+          )}
+        </button>
+
+        {/* Copy report link */}
+        <button
+          onClick={async () => {
+            try { await navigator.clipboard.writeText(resultUrl); }
+            catch { /* silent */ }
+            toast.success("Link copied!", { description: "Anyone with this link can view your full report." });
+          }}
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-[#1B365D] text-sm font-semibold hover:border-[#1B365D]/30 hover:bg-[#1B365D]/5 transition-colors"
+        >
+          <Share2 className="h-4 w-4" /> Copy report link
+        </button>
+      </div>
+
+      {institutionName && (
+        <p className="text-xs text-[#8C757D] mt-4">
+          Scored for <strong>{institutionName}</strong> · <a href={resultUrl} className="text-[#F47458] hover:underline">View full report</a>
+        </p>
+      )}
     </div>
   );
 }
@@ -315,6 +441,14 @@ export default function ComplianceAssessmentResult() {
             </p>
           </div>
         )}
+
+        {/* Share Badge */}
+        <ShareBadge
+          score={overallScore}
+          riskLevel={riskLevel}
+          institutionName={data.institutionName ?? undefined}
+          token={token}
+        />
 
         {/* Full action plan */}
         <div className="bg-white rounded-2xl border border-gray-100 p-6 mb-6 shadow-sm">

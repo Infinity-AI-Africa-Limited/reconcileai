@@ -1063,6 +1063,8 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
   consentToContact: boolean("consentToContact").default(false).notNull(),
   // Whether a follow-up email was sent to the respondent
   followUpEmailSent: boolean("followUpEmailSent").default(false).notNull(),
+  // Whether a demo invitation email was sent by an admin
+  demoInviteSent: boolean("demoInviteSent").default(false).notNull(),
   // Optional: linked to a user account if they were logged in
   userId: int("userId"),
   completedAt: timestamp("completedAt").defaultNow().notNull(),

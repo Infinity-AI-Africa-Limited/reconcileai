@@ -3278,6 +3278,96 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return rows[0];
       }),
 
+    // Admin: send a personalised demo invitation email to a specific respondent
+    sendDemoInvite: protectedProcedure
+      .input(z.object({ token: z.string().length(48) }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        const rows = await drizzle.select().from(complianceAssessments)
+          .where(eq(complianceAssessments.token, input.token))
+          .limit(1);
+        if (!rows.length) throw new TRPCError({ code: 'NOT_FOUND', message: 'Assessment not found' });
+        const assessment = rows[0];
+        if (!assessment.respondentEmail) throw new TRPCError({ code: 'BAD_REQUEST', message: 'No email address on record for this respondent' });
+
+        const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${assessment.token}`;
+        const firstName = assessment.respondentName?.split(" ")[0] ?? "there";
+        const riskLevelLabel = assessment.riskLevel === "critical" ? "Critical Risk" : assessment.riskLevel === "high" ? "High Risk" : assessment.riskLevel === "medium" ? "Medium Risk" : "Low Risk";
+        const overallScore = assessment.overallScore;
+        const institutionName = assessment.institutionName ?? "your institution";
+
+        const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;">
+        <tr><td style="background:#1B365D;padding:28px 32px;">
+          <p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">ReconcileAI</p>
+          <p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">AI-Powered Financial Reconciliation for African Banks &amp; Fintechs</p>
+        </td></tr>
+        <tr><td style="padding:32px;">
+          <p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your score of <strong>${overallScore}/100 (${riskLevelLabel})</strong> tells us a lot about where ${institutionName} stands today — and where the biggest opportunities for improvement are.</p>
+          <p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">We'd love to show you exactly how ReconcileAI closes those gaps. In a focused 20-minute demo, we'll walk through:</p>
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+            ${[
+              ["⚡", "Automated reconciliation", "Cut your daily close from hours to under 10 minutes across NIBSS, Interswitch, card schemes, and your CBS."],
+              ["🎯", "AI exception classification", "Every mismatch is automatically categorised by severity, with a suggested resolution — no more manual triage."],
+              ["📋", "CBN-ready audit trail", "Every matching decision and manual intervention is logged with timestamp and user — audit-ready on demand."],
+            ].map(([icon, title, desc]) => `
+            <tr><td style="padding:12px 16px;background:#f8f9fa;border-radius:8px;margin-bottom:8px;">
+              <p style="margin:0;font-size:14px;font-weight:600;color:#1B365D;">${icon} ${title}</p>
+              <p style="margin:4px 0 0;font-size:13px;color:#4a5568;">${desc}</p>
+            </td></tr><tr><td style="height:8px;"></td></tr>`).join("")}
+          </table>
+          <table cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+            <tr><td style="background:#F47458;border-radius:8px;">
+              <a href="https://reconcileai.vip" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">Book a 20-Minute Demo →</a>
+            </td></tr>
+          </table>
+          <p style="margin:0 0 8px;font-size:14px;color:#4a5568;line-height:1.6;">You can also review your full compliance report at any time:</p>
+          <p style="margin:0;font-size:14px;"><a href="${resultUrl}" style="color:#F47458;font-weight:600;text-decoration:none;">View your assessment report →</a></p>
+        </td></tr>
+        <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
+          <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
+          <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you completed a compliance assessment at reconcileai.vip.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+        try {
+          const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${process.env.BUILT_IN_FORGE_API_KEY}`,
+            },
+            body: JSON.stringify({
+              to: assessment.respondentEmail,
+              subject: `${firstName}, see how ReconcileAI closes your compliance gaps — 20-min demo`,
+              html: emailHtml,
+              text: `Hi ${firstName},\n\nThank you for completing the ReconcileAI CBN Compliance Readiness Assessment.\n\nYour score: ${overallScore}/100 (${riskLevelLabel})\n\nWe'd love to show you how ReconcileAI closes those gaps in a focused 20-minute demo.\n\nBook a demo: https://reconcileai.vip\n\nView your report: ${resultUrl}\n\n— ReconcileAI by Infinity AI Africa Limited`,
+            }),
+          });
+          if (!emailRes.ok) throw new Error(`Email API returned ${emailRes.status}`);
+          await drizzle.update(complianceAssessments)
+            .set({ demoInviteSent: true })
+            .where(eq(complianceAssessments.token, input.token));
+          return { success: true };
+        } catch (err) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to send demo invite email' });
+        }
+      }),
+
     // Admin: list all assessments (protected, admin only)
     listAll: protectedProcedure
       .input(z.object({
@@ -3318,6 +3408,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           categoryScores: complianceAssessments.categoryScores,
           consentToContact: complianceAssessments.consentToContact,
           followUpEmailSent: complianceAssessments.followUpEmailSent,
+          demoInviteSent: complianceAssessments.demoInviteSent,
           createdAt: complianceAssessments.createdAt,
         }).from(complianceAssessments)
           .where(whereClause)

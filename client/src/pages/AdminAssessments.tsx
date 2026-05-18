@@ -11,8 +11,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { toast } from "sonner";
+import {
   AlertTriangle,
-  TrendingUp,
   CheckCircle2,
   Search,
   ExternalLink,
@@ -21,6 +27,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   Loader2,
+  SendHorizonal,
 } from "lucide-react";
 
 const RISK_COLORS: Record<string, { badge: string; dot: string; label: string }> = {
@@ -61,6 +68,62 @@ function ScoreBar({ score }: { score: number }) {
   );
 }
 
+function DemoInviteButton({ token, hasEmail, demoInviteSent }: { token: string; hasEmail: boolean; demoInviteSent: boolean }) {
+  const utils = trpc.useUtils();
+  const [localSent, setLocalSent] = useState(demoInviteSent);
+
+  const sendInvite = trpc.assessment.sendDemoInvite.useMutation({
+    onSuccess: () => {
+      setLocalSent(true);
+      utils.assessment.listAll.invalidate();
+      toast.success("Demo invite sent", { description: "The personalised demo invitation email has been delivered." });
+    },
+    onError: (err) => {
+      toast.error("Failed to send invite", { description: err.message });
+    },
+  });
+
+  if (!hasEmail) {
+    return (
+      <span className="text-xs text-gray-300 italic">No email</span>
+    );
+  }
+
+  if (localSent) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
+        <CheckCircle2 className="h-3.5 w-3.5" /> Demo invited
+      </span>
+    );
+  }
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2.5 text-xs border-[#F47458]/40 text-[#F47458] hover:bg-[#F47458]/5 hover:border-[#F47458] hover:scale-105 transition-all duration-150 gap-1.5"
+            disabled={sendInvite.isPending}
+            onClick={() => sendInvite.mutate({ token })}
+          >
+            {sendInvite.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <SendHorizonal className="h-3 w-3" />
+            )}
+            Send Demo Invite
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="left" className="max-w-[220px] text-xs">
+          Send a personalised demo invitation email referencing this respondent's score and institution name.
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export default function AdminAssessments() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -86,12 +149,12 @@ export default function AdminAssessments() {
     setPage(1);
   };
 
-  // Summary stats
   const rows = data?.rows ?? [];
   const criticalCount = rows.filter(r => r.riskLevel === "critical").length;
   const highCount = rows.filter(r => r.riskLevel === "high").length;
   const consentCount = rows.filter(r => r.consentToContact).length;
   const avgScore = rows.length > 0 ? Math.round(rows.reduce((s, r) => s + (r.overallScore ?? 0), 0) / rows.length) : 0;
+  const pendingInvites = rows.filter(r => r.respondentEmail && !r.demoInviteSent).length;
 
   return (
     <DashboardLayout>
@@ -115,12 +178,13 @@ export default function AdminAssessments() {
         </div>
 
         {/* Summary cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
           {[
             { label: "Total Submitted", value: data?.total ?? 0, color: "text-[#1B365D]" },
             { label: "Critical / High Risk", value: `${criticalCount + highCount} / ${rows.length}`, color: "text-red-600" },
             { label: "Avg Score", value: `${avgScore} / 100`, color: "text-[#F47458]" },
             { label: "Consented to Contact", value: consentCount, color: "text-emerald-600" },
+            { label: "Pending Demo Invites", value: pendingInvites, color: pendingInvites > 0 ? "text-amber-600" : "text-gray-400" },
           ].map(({ label, value, color }) => (
             <div key={label} className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
               <p className="text-xs text-[#8C757D] mb-1">{label}</p>
@@ -186,8 +250,8 @@ export default function AdminAssessments() {
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Score</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Risk</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Date</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Contact</th>
-                    <th className="px-4 py-3" />
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Status</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -222,24 +286,37 @@ export default function AdminAssessments() {
                         {row.createdAt ? new Date(row.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—"}
                       </td>
                       <td className="px-4 py-3">
-                        {row.consentToContact ? (
-                          <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            {row.followUpEmailSent ? "Email sent" : "Consented"}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-[#8C757D]">No consent</span>
-                        )}
+                        <div className="flex flex-col gap-0.5">
+                          {row.consentToContact ? (
+                            <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium">
+                              <CheckCircle2 className="h-3 w-3" /> Consented
+                            </span>
+                          ) : (
+                            <span className="text-xs text-[#8C757D]">No consent</span>
+                          )}
+                          {row.followUpEmailSent && (
+                            <span className="inline-flex items-center gap-1 text-xs text-blue-600">
+                              <Mail className="h-3 w-3" /> Auto-email sent
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
-                        <a
-                          href={`/compliance-assessment/result/${row.token}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-[#F47458] hover:text-[#e0644a] font-medium"
-                        >
-                          View <ExternalLink className="h-3 w-3" />
-                        </a>
+                        <div className="flex items-center gap-2">
+                          <DemoInviteButton
+                            token={row.token}
+                            hasEmail={!!row.respondentEmail}
+                            demoInviteSent={row.demoInviteSent ?? false}
+                          />
+                          <a
+                            href={`/compliance-assessment/result/${row.token}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-[#1B365D]/60 hover:text-[#1B365D] font-medium"
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        </div>
                       </td>
                     </tr>
                   ))}

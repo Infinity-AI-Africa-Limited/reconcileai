@@ -968,3 +968,13 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add CTA card to Home.tsx after segment cards section
 - [x] 8 vitest tests passing (scoring logic, token generation)
 - [x] TypeScript: 0 errors
+
+## Feature: Send Demo Invite button (Admin Assessments)
+- [ ] Add demoInviteSent column to complianceAssessments schema + db:push
+- [ ] Add assessment.sendDemoInvite tRPC procedure (sends personalised HTML email, marks demoInviteSent)
+- [ ] Wire "Send Demo Invite" button in AdminAssessments.tsx (shows for rows with email, disabled after sent)
+
+## Feature: Shareable LinkedIn assessment badge
+- [ ] Add ShareBadge section to ComplianceAssessmentResult.tsx
+- [ ] LinkedIn share link with pre-filled text (score, risk level, tool URL)
+- [ ] Copy-to-clipboard embed snippet button
