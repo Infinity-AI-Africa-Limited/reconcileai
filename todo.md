@@ -1045,3 +1045,25 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Route /cbn-compliance registered in App.tsx
 - [x] CBN Reports sidebar nav item wired (FileBarChart2 icon in adminMenuItems)
 - [x] Seed cbnReportFrameworks with 8 CBN framework reference records (idempotent — available via cbnCompliance.seedFrameworks mutation)
+
+## Feature: CBN Compliance PDF + Submission Log
+- [ ] Schema: Add `cbnDeadlineSubmissions` table (frameworkCode, periodLabel, submittedAt, submittedByUserId, submittedByName, notes)
+- [ ] Backend: cbnCompliance.markDeadlineSubmitted procedure (upsert per frameworkCode + periodLabel)
+- [ ] Backend: cbnCompliance.listDeadlineSubmissions procedure (list all, keyed by frameworkCode)
+- [ ] Frontend: "Print Attestation" button on Scorecard tab — opens print-optimised single-page PDF with institution name, date, 4 threshold results, compliance officer sign-off block
+- [ ] Frontend: Print stylesheet (print:block / print:hidden) scoped to attestation div
+- [ ] Frontend: "Mark as submitted" button per deadline row — opens small dialog (period label + optional notes), saves to DB, turns row green with submitted date
+- [ ] Frontend: Submitted rows show green "Submitted [date]" badge and lock the Mark as submitted button
+
+## Feature: CBN Compliance PDF Attestation + Deadline Submission Log
+
+- [x] Schema: Add `cbnDeadlineSubmissions` table (frameworkCode, periodLabel, submittedAt, submittedByName, notes)
+- [x] DB migration 0029 applied
+- [x] Backend: cbnCompliance.markDeadlineSubmitted procedure (upsert per framework+period, writes audit log)
+- [x] Backend: cbnCompliance.listDeadlineSubmissions procedure
+- [x] Frontend: Print-to-PDF attestation — hidden print div with CBN-formatted attestation document, threshold table, dual signature lines
+- [x] Frontend: "Print Attestation" button in Scorecard tab header (triggers window.print)
+- [x] Frontend: "Mark as Submitted" button per deadline row — opens confirmation dialog with optional notes
+- [x] Frontend: Submitted rows turn green with submitter name, date, and notes inline
+- [x] Frontend: Deadlines tab badge only counts unsubmitted critical deadlines
+- [x] Frontend: "Re-submit" ghost button for already-submitted rows

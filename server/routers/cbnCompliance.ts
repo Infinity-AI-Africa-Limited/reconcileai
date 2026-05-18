@@ -23,6 +23,7 @@ import {
   cbnReportFindings,
   cbnActionPlans,
   cbnAuditLog,
+  cbnDeadlineSubmissions,
 } from "../../drizzle/schema";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -731,4 +732,52 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
       ];
       return { csv: csvLines.join("\n"), filename: `CBN_${frameworkCode}_${submission.reportingPeriodLabel ?? submission.id}_${new Date().toISOString().slice(0, 10)}.csv` };
     }),
+
+  // ── Mark a regulatory deadline as submitted ───────────────────────────────
+  markDeadlineSubmitted: protectedProcedure
+    .input(z.object({
+      frameworkCode: z.string().max(64),
+      frameworkName: z.string().max(255),
+      periodLabel: z.string().max(64),
+      notes: z.string().max(1000).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      // Upsert: delete existing record for this framework+period then insert fresh
+      await db.delete(cbnDeadlineSubmissions).where(
+        and(
+          eq(cbnDeadlineSubmissions.frameworkCode, input.frameworkCode),
+          eq(cbnDeadlineSubmissions.periodLabel, input.periodLabel),
+        )
+      );
+      await db.insert(cbnDeadlineSubmissions).values({
+        organizationId: ctx.user.organizationId ?? null,
+        frameworkCode: input.frameworkCode,
+        frameworkName: input.frameworkName,
+        periodLabel: input.periodLabel,
+        submittedAt: new Date(),
+        submittedByUserId: ctx.user.id,
+        submittedByName: ctx.user.name ?? "Unknown",
+        notes: input.notes ?? null,
+      });
+      await writeAuditLog(
+        ctx.user.id,
+        ctx.user.name,
+        "deadline.submitted",
+        "deadline",
+        null,
+        `${input.frameworkName} \u2014 ${input.periodLabel}`,
+        { frameworkCode: input.frameworkCode, periodLabel: input.periodLabel },
+      );
+      return { success: true };
+    }),
+
+  // ── List all deadline submission records ──────────────────────────────────
+  listDeadlineSubmissions: protectedProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return [];
+    return db.select().from(cbnDeadlineSubmissions)
+      .orderBy(desc(cbnDeadlineSubmissions.submittedAt));
+  }),
 });

@@ -1240,3 +1240,24 @@ export const cbnAuditLog = mysqlTable("cbnAuditLog", {
   index("idx_cbn_audit_created").on(table.createdAt),
 ]);
 export type CbnAuditLog = typeof cbnAuditLog.$inferSelect;
+
+// ─── CBN Deadline Submission Log ─────────────────────────────────────────────
+// Lightweight record of when each regulatory framework deadline was submitted
+export const cbnDeadlineSubmissions = mysqlTable("cbnDeadlineSubmissions", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  frameworkCode: varchar("frameworkCode", { length: 64 }).notNull(), // e.g. "AML_CFT"
+  frameworkName: varchar("frameworkName", { length: 255 }).notNull(),
+  periodLabel: varchar("periodLabel", { length: 64 }).notNull(),    // e.g. "May 2026", "Q2 2026"
+  submittedAt: timestamp("submittedAt").notNull(),
+  submittedByUserId: int("submittedByUserId"),
+  submittedByName: varchar("submittedByName", { length: 255 }),
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_cbn_deadline_org").on(table.organizationId),
+  index("idx_cbn_deadline_code").on(table.frameworkCode),
+  index("idx_cbn_deadline_period").on(table.frameworkCode, table.periodLabel),
+]);
+export type CbnDeadlineSubmission = typeof cbnDeadlineSubmissions.$inferSelect;
+export type InsertCbnDeadlineSubmission = typeof cbnDeadlineSubmissions.$inferInsert;
