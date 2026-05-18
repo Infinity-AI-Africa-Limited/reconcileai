@@ -3384,6 +3384,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         emailOptedOut: z.boolean().optional(),
         consentOnly: z.boolean().optional(),
         notContacted: z.boolean().optional(),
+        hasNotes: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
@@ -3396,6 +3397,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         if (input.emailOptedOut !== undefined) conditions.push(eq(complianceAssessments.emailOptedOut, input.emailOptedOut));
         if (input.consentOnly) conditions.push(eq(complianceAssessments.consentToContact, true));
         if (input.notContacted) conditions.push(eq(complianceAssessments.markedContacted, false));
+        if (input.hasNotes) conditions.push(and(sql`${complianceAssessments.adminNotes} IS NOT NULL`, sql`${complianceAssessments.adminNotes} != ''`));
         if (input.search) {
           const q = `%${input.search}%`;
           conditions.push(
@@ -3424,6 +3426,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           emailOptedOut: complianceAssessments.emailOptedOut,
           markedContacted: complianceAssessments.markedContacted,
           adminNotes: complianceAssessments.adminNotes,
+          lastContactedAt: complianceAssessments.lastContactedAt,
           createdAt: complianceAssessments.createdAt,
         }).from(complianceAssessments)
           .where(whereClause)
@@ -3570,10 +3573,14 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
+        const now = new Date();
         await drizzle.update(complianceAssessments)
-          .set({ markedContacted: input.contacted })
+          .set({
+            markedContacted: input.contacted,
+            lastContactedAt: input.contacted ? now : null,
+          })
           .where(eq(complianceAssessments.token, input.token));
-        return { success: true, contacted: input.contacted };
+        return { success: true, contacted: input.contacted, lastContactedAt: input.contacted ? now : null };
       }),
 
     // Admin: update free-text notes/memo for a single assessment

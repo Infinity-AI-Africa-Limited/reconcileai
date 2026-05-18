@@ -1071,6 +1071,8 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
   markedContacted: boolean("markedContacted").default(false).notNull(),
   // CRM notes: free-text memo field for sales team (inline editable in admin)
   adminNotes: text("adminNotes"),
+  // CRM: timestamp auto-set when markedContacted is toggled on; cleared when toggled off
+  lastContactedAt: timestamp("lastContactedAt"),
   // Optional: linked to a user account if they were logged in
   userId: int("userId"),
   completedAt: timestamp("completedAt").defaultNow().notNull(),

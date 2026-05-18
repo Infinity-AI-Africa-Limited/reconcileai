@@ -43,6 +43,7 @@ import {
   Zap,
   StickyNote,
   Check,
+  FileText,
 } from "lucide-react";
 
 const RISK_COLORS: Record<string, { badge: string; dot: string; label: string }> = {
@@ -60,6 +61,25 @@ const INST_TYPE_LABELS: Record<string, string> = {
   corporate_b2b: "Corporate B2B",
   other: "Other",
 };
+
+/** Returns a human-readable relative time string, e.g. "3 days ago", "just now" */
+function relativeTime(date: Date | null | undefined): string | null {
+  if (!date) return null;
+  const diffMs = Date.now() - new Date(date).getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return "just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay === 1) return "yesterday";
+  if (diffDay < 30) return `${diffDay} days ago`;
+  const diffWk = Math.floor(diffDay / 7);
+  if (diffWk < 8) return `${diffWk} weeks ago`;
+  const diffMo = Math.floor(diffDay / 30);
+  return `${diffMo} months ago`;
+}
 
 function RiskBadge({ level }: { level: string }) {
   const c = RISK_COLORS[level] ?? RISK_COLORS.medium;
@@ -125,37 +145,67 @@ function DemoInviteButton({ token, hasEmail, demoInviteSent }: { token: string; 
   );
 }
 
-function MarkContactedButton({ token, markedContacted }: { token: string; markedContacted: boolean }) {
+function MarkContactedButton({
+  token,
+  markedContacted,
+  lastContactedAt,
+}: {
+  token: string;
+  markedContacted: boolean;
+  lastContactedAt: Date | null | undefined;
+}) {
   const utils = trpc.useUtils();
-  const [local, setLocal] = useState(markedContacted);
+  const [localContacted, setLocalContacted] = useState(markedContacted);
+  const [localTs, setLocalTs] = useState<Date | null | undefined>(lastContactedAt);
 
   const toggle = trpc.assessment.markContacted.useMutation({
-    onMutate: () => setLocal(prev => !prev),
-    onSuccess: (data) => { setLocal(data.contacted); utils.assessment.listAll.invalidate(); },
-    onError: () => { setLocal(prev => !prev); toast.error("Failed to update contacted status"); },
+    onMutate: () => {
+      const next = !localContacted;
+      setLocalContacted(next);
+      setLocalTs(next ? new Date() : null);
+    },
+    onSuccess: (data) => {
+      setLocalContacted(data.contacted);
+      setLocalTs(data.lastContactedAt ?? null);
+      utils.assessment.listAll.invalidate();
+    },
+    onError: () => {
+      setLocalContacted(prev => !prev);
+      setLocalTs(lastContactedAt ?? null);
+      toast.error("Failed to update contacted status");
+    },
   });
 
+  const rel = relativeTime(localTs);
+
   return (
-    <TooltipProvider delayDuration={200}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            onClick={() => toggle.mutate({ token, contacted: !local })}
-            disabled={toggle.isPending}
-            className={`inline-flex items-center justify-center h-7 w-7 rounded-md border transition-all duration-150 ${
-              local
-                ? "bg-[#1B365D] border-[#1B365D] text-white hover:bg-[#142847]"
-                : "bg-white border-gray-200 text-gray-300 hover:border-[#1B365D] hover:text-[#1B365D]"
-            }`}
-          >
-            {toggle.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Phone className="h-3 w-3" />}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="left" className="text-xs max-w-[180px]">
-          {local ? "Marked as contacted — click to unmark" : "Mark as contacted (offline follow-up)"}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <div className="flex flex-col items-center gap-0.5">
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => toggle.mutate({ token, contacted: !localContacted })}
+              disabled={toggle.isPending}
+              className={`inline-flex items-center justify-center h-7 w-7 rounded-md border transition-all duration-150 ${
+                localContacted
+                  ? "bg-[#1B365D] border-[#1B365D] text-white hover:bg-[#142847]"
+                  : "bg-white border-gray-200 text-gray-300 hover:border-[#1B365D] hover:text-[#1B365D]"
+              }`}
+            >
+              {toggle.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Phone className="h-3 w-3" />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="left" className="text-xs max-w-[200px]">
+            {localContacted
+              ? `Marked as contacted${rel ? ` · ${rel}` : ""} — click to unmark`
+              : "Mark as contacted (offline follow-up)"}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      {localContacted && rel && (
+        <span className="text-[10px] text-[#1B365D]/50 whitespace-nowrap leading-tight">{rel}</span>
+      )}
+    </div>
   );
 }
 
@@ -177,7 +227,6 @@ function InlineNotes({ token, initialNotes }: { token: string; initialNotes: str
   useEffect(() => {
     if (editing && textareaRef.current) {
       textareaRef.current.focus();
-      // Move cursor to end
       const len = textareaRef.current.value.length;
       textareaRef.current.setSelectionRange(len, len);
     }
@@ -251,6 +300,7 @@ export default function AdminAssessments() {
   const [optOutFilter, setOptOutFilter] = useState<string>("all");
   const [consentOnly, setConsentOnly] = useState(false);
   const [notContacted, setNotContacted] = useState(false);
+  const [hasNotes, setHasNotes] = useState(false);
   const [exportEnabled, setExportEnabled] = useState(false);
   const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
 
@@ -264,14 +314,13 @@ export default function AdminAssessments() {
     emailOptedOut: emailOptedOutParam,
     consentOnly: consentOnly || undefined,
     notContacted: notContacted || undefined,
+    hasNotes: hasNotes || undefined,
   });
 
-  // Eligible count for bulk invite dialog
   const { data: eligibleData, refetch: refetchEligible } = trpc.assessment.countBulkEligible.useQuery(undefined, {
     enabled: false,
   });
 
-  // Bulk send mutation
   const utils = trpc.useUtils();
   const bulkSend = trpc.assessment.bulkSendDemoInvites.useMutation({
     onSuccess: (result) => {
@@ -291,7 +340,6 @@ export default function AdminAssessments() {
     onError: (err) => toast.error("Bulk send failed", { description: err.message }),
   });
 
-  // Export CSV query — only fires when exportEnabled is true
   const { data: csvData, isFetching: csvLoading } = trpc.assessment.exportCsv.useQuery(
     {
       riskLevel: (riskFilter !== "all" ? riskFilter : undefined) as "critical" | "high" | "medium" | "low" | undefined,
@@ -302,7 +350,6 @@ export default function AdminAssessments() {
     { enabled: exportEnabled, staleTime: 0 }
   );
 
-  // Trigger download when CSV data arrives
   if (exportEnabled && csvData && !csvLoading) {
     const blob = new Blob([csvData.csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -325,6 +372,7 @@ export default function AdminAssessments() {
   const handleOptOutFilter = (val: string) => { setOptOutFilter(val); setPage(1); };
   const handleConsentToggle = () => { setConsentOnly(prev => !prev); setPage(1); };
   const handleNotContactedToggle = () => { setNotContacted(prev => !prev); setPage(1); };
+  const handleHasNotesToggle = () => { setHasNotes(prev => !prev); setPage(1); };
 
   const handleOpenBulkDialog = () => {
     refetchEligible();
@@ -337,6 +385,8 @@ export default function AdminAssessments() {
   const consentCount = rows.filter(r => r.consentToContact).length;
   const avgScore = rows.length > 0 ? Math.round(rows.reduce((s, r) => s + (r.overallScore ?? 0), 0) / rows.length) : 0;
   const pendingInvites = rows.filter(r => r.respondentEmail && !r.demoInviteSent).length;
+
+  const activeChips = [consentOnly && "consented", notContacted && "not contacted", hasNotes && "has notes"].filter(Boolean);
 
   return (
     <DashboardLayout>
@@ -454,7 +504,7 @@ export default function AdminAssessments() {
 
         {/* Quick-filter chips */}
         <div className="flex items-center gap-2 mb-4 flex-wrap">
-          {/* Consented only chip */}
+          {/* Consented only */}
           <button
             onClick={handleConsentToggle}
             className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all duration-150 ${
@@ -468,7 +518,7 @@ export default function AdminAssessments() {
             {consentOnly && <span className="ml-0.5 opacity-75">✕</span>}
           </button>
 
-          {/* Not contacted chip */}
+          {/* Not yet contacted */}
           <button
             onClick={handleNotContactedToggle}
             className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all duration-150 ${
@@ -482,9 +532,23 @@ export default function AdminAssessments() {
             {notContacted && <span className="ml-0.5 opacity-75">✕</span>}
           </button>
 
-          {(consentOnly || notContacted) && (
+          {/* Has notes */}
+          <button
+            onClick={handleHasNotesToggle}
+            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all duration-150 ${
+              hasNotes
+                ? "bg-amber-500 text-white border-amber-500 shadow-sm"
+                : "bg-white text-[#1B365D] border-gray-200 hover:border-amber-400 hover:text-amber-600"
+            }`}
+          >
+            <FileText className="h-3 w-3" />
+            Has notes
+            {hasNotes && <span className="ml-0.5 opacity-75">✕</span>}
+          </button>
+
+          {activeChips.length > 0 && (
             <span className="text-xs text-[#8C757D]">
-              {[consentOnly && "consented", notContacted && "not contacted"].filter(Boolean).join(" + ")} filter active
+              Filtering by: {activeChips.join(" + ")}
             </span>
           )}
         </div>
@@ -504,7 +568,7 @@ export default function AdminAssessments() {
               <ClipboardCheck className="h-10 w-10 text-gray-200 mb-3" />
               <p className="text-sm font-medium text-[#1B365D] mb-1">No assessments found</p>
               <p className="text-xs text-[#8C757D]">
-                {(consentOnly || notContacted) ? "Try adjusting your filters." : "Share the public assessment link to start collecting leads."}
+                {activeChips.length > 0 ? "Try adjusting your filters." : "Share the public assessment link to start collecting leads."}
               </p>
             </div>
           ) : (
@@ -526,7 +590,7 @@ export default function AdminAssessments() {
                             <span className="flex items-center gap-1"><Phone className="h-3 w-3" /> Contacted</span>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs max-w-[200px]">
-                            CRM flag — mark leads your team has followed up with offline.
+                            CRM flag — mark leads your team has followed up with offline. Shows time since last contact.
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -594,6 +658,7 @@ export default function AdminAssessments() {
                         <MarkContactedButton
                           token={row.token}
                           markedContacted={(row as any).markedContacted ?? false}
+                          lastContactedAt={(row as any).lastContactedAt ?? null}
                         />
                       </td>
                       <td className="px-4 py-3">

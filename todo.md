@@ -1007,3 +1007,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Backend: adminNotes included in listAll select
 - [x] Frontend: "Not yet contacted" quick-filter chip alongside "Consented only"
 - [x] Frontend: Inline notes cell in admin table (click-to-edit textarea, save on blur/⌘↵, Esc to cancel)
+
+## Feature: Has Notes Chip + Last Contacted Timestamp
+- [x] Schema: Add `lastContactedAt` timestamp column to compliance_assessments table
+- [x] Backend: markContacted procedure auto-sets lastContactedAt when contacted=true, clears when false
+- [x] Backend: hasNotes filter added to assessment.listAll procedure (adminNotes IS NOT NULL AND != '')
+- [x] Backend: lastContactedAt included in listAll select
+- [x] Frontend: "Has notes" amber quick-filter chip (third chip alongside Consented only + Not yet contacted)
+- [x] Frontend: Relative timestamp shown under phone icon when lastContactedAt is set (e.g. "3 days ago")
