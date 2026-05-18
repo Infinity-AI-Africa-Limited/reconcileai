@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink, Copy, Check, Linkedin } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
+import jsPDF from "jspdf";
 
 const CATEGORY_LABELS: Record<string, string> = {
   reconciliation: "Reconciliation Process",
@@ -311,6 +312,190 @@ export default function ComplianceAssessmentResult() {
   const rc = riskConfig[riskLevel] ?? riskConfig.medium;
 
   const [copied, setCopied] = useState(false);
+  const [pdfDownloading, setPdfDownloading] = useState(false);
+
+  const handleDownloadPdf = () => {
+    setPdfDownloading(true);
+    try {
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pageW = 210;
+      const margin = 18;
+      const contentW = pageW - margin * 2;
+      let y = 0;
+
+      // ── Helpers ──────────────────────────────────────────────────────────
+      const addPage = () => { doc.addPage(); y = margin; };
+      const checkY = (needed: number) => { if (y + needed > 270) addPage(); };
+
+      const riskLabelMap: Record<string, string> = {
+        critical: "Critical Risk", high: "High Risk",
+        medium: "Medium Risk", low: "Low Risk",
+      };
+      const riskColMap: Record<string, [number, number, number]> = {
+        critical: [220, 38, 38], high: [234, 88, 12],
+        medium: [217, 119, 6], low: [5, 150, 105],
+      };
+      const catLabelMap: Record<string, string> = {
+        reconciliation: "Reconciliation Process",
+        exception: "Exception Management",
+        reporting: "Regulatory Reporting",
+        regulatory: "Regulatory Awareness",
+        technology: "Technology & Automation",
+      };
+
+      const rl = riskLevel as string;
+      const riskLabel = riskLabelMap[rl] ?? "Medium Risk";
+      const riskCol = riskColMap[rl] ?? [217, 119, 6];
+      const instName = (data.institutionName as string | null) ?? "";
+      const completedDate = data.completedAt
+        ? new Date(data.completedAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })
+        : "";
+
+      // ── Cover header ─────────────────────────────────────────────────────
+      doc.setFillColor(27, 54, 93); // #1B365D
+      doc.rect(0, 0, pageW, 52, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(20);
+      doc.setFont("helvetica", "bold");
+      doc.text("CBN Compliance Readiness Report", margin, 22);
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.text("ReconcileAI · Infinity AI Africa Limited", margin, 31);
+      if (instName) doc.text(instName, margin, 39);
+      if (completedDate) doc.text(`Assessment date: ${completedDate}`, margin, 47);
+      y = 62;
+
+      // ── Score + Risk Level ───────────────────────────────────────────────
+      doc.setFillColor(248, 249, 250);
+      doc.roundedRect(margin, y, contentW, 30, 3, 3, "F");
+      doc.setFontSize(36);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(riskCol[0], riskCol[1], riskCol[2]);
+      doc.text(`${overallScore}`, margin + 8, y + 21);
+      doc.setFontSize(12);
+      doc.setTextColor(100, 100, 100);
+      doc.text("/ 100", margin + 28, y + 21);
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(riskCol[0], riskCol[1], riskCol[2]);
+      doc.text(riskLabel, margin + 55, y + 21);
+      y += 38;
+
+      // ── AI Narrative ─────────────────────────────────────────────────────
+      if (data.aiNarrative) {
+        checkY(30);
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(27, 54, 93);
+        doc.text("AI Compliance Narrative", margin, y);
+        y += 6;
+        doc.setFontSize(9.5);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(60, 60, 60);
+        const narrativeLines = doc.splitTextToSize(data.aiNarrative as string, contentW);
+        checkY(narrativeLines.length * 5 + 4);
+        doc.text(narrativeLines, margin, y);
+        y += narrativeLines.length * 5 + 8;
+      }
+
+      // ── Score by Dimension ───────────────────────────────────────────────
+      checkY(20);
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(27, 54, 93);
+      doc.text("Score by Dimension", margin, y);
+      y += 6;
+      const sortedCats = Object.entries(categoryScores).sort(([, a], [, b]) => (a as number) - (b as number));
+      for (const [cat, score] of sortedCats) {
+        const s = score as number;
+        checkY(10);
+        const barColor: [number, number, number] = s >= 80 ? [16, 185, 129] : s >= 60 ? [245, 158, 11] : s >= 40 ? [249, 115, 22] : [239, 68, 68];
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(60, 60, 60);
+        doc.text(catLabelMap[cat] ?? cat, margin, y + 4);
+        doc.setTextColor(barColor[0], barColor[1], barColor[2]);
+        doc.setFont("helvetica", "bold");
+        doc.text(`${s}/100`, pageW - margin - 16, y + 4);
+        doc.setFillColor(230, 230, 230);
+        doc.roundedRect(margin + 60, y, contentW - 76, 4, 1, 1, "F");
+        doc.setFillColor(barColor[0], barColor[1], barColor[2]);
+        doc.roundedRect(margin + 60, y, (contentW - 76) * (s / 100), 4, 1, 1, "F");
+        y += 9;
+      }
+      y += 4;
+
+      // ── Top 3 Priority Actions ───────────────────────────────────────────
+      checkY(20);
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(27, 54, 93);
+      doc.text("Top 3 Priority Actions", margin, y);
+      y += 6;
+      priorityActions.forEach((action, i) => {
+        const lines = doc.splitTextToSize(`${i + 1}. ${action}`, contentW);
+        checkY(lines.length * 5 + 4);
+        doc.setFontSize(9.5);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(60, 60, 60);
+        doc.text(lines, margin, y);
+        y += lines.length * 5 + 3;
+      });
+      y += 4;
+
+      // ── Full Action Plan ─────────────────────────────────────────────────
+      checkY(20);
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(27, 54, 93);
+      doc.text("Full Action Plan by Dimension", margin, y);
+      y += 7;
+      for (const [cat, score] of sortedCats) {
+        const s = score as number;
+        checkY(16);
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(27, 54, 93);
+        doc.text(`${catLabelMap[cat] ?? cat} — ${s}/100`, margin, y);
+        y += 5;
+        const actions = ACTIONS[cat] ?? [];
+        for (const action of actions) {
+          const lines = doc.splitTextToSize(`• ${action}`, contentW - 4);
+          checkY(lines.length * 5 + 2);
+          doc.setFontSize(9);
+          doc.setFont("helvetica", "normal");
+          doc.setTextColor(80, 80, 80);
+          doc.text(lines, margin + 3, y);
+          y += lines.length * 5 + 2;
+        }
+        y += 4;
+      }
+
+      // ── Footer on every page ─────────────────────────────────────────────
+      const pageCount = doc.getNumberOfPages();
+      for (let p = 1; p <= pageCount; p++) {
+        doc.setPage(p);
+        doc.setFontSize(8);
+        doc.setTextColor(160, 160, 160);
+        doc.text(
+          `ReconcileAI CBN Compliance Report · ${instName || "Assessment"} · Page ${p} of ${pageCount}`,
+          margin, 290
+        );
+        doc.text("reconcileai.vip", pageW - margin - 22, 290);
+      }
+
+      const filename = instName
+        ? `ReconcileAI_Compliance_Report_${instName.replace(/\s+/g, "_")}.pdf`
+        : `ReconcileAI_Compliance_Report_${overallScore}.pdf`;
+      doc.save(filename);
+      toast.success("PDF downloaded!", { description: filename });
+    } catch (err) {
+      console.error("PDF generation failed:", err);
+      toast.error("PDF generation failed", { description: "Please try again or use your browser's print function." });
+    } finally {
+      setPdfDownloading(false);
+    }
+  };
 
   const handleShare = async () => {
     try {
@@ -342,6 +527,19 @@ export default function ComplianceAssessmentResult() {
               <span className="text-white font-bold text-xl cursor-pointer">ReconcileAI</span>
             </Link>
             <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownloadPdf}
+                disabled={pdfDownloading}
+                className="border-white/30 text-white hover:bg-white/10 bg-transparent h-8 text-xs transition-all duration-200 disabled:opacity-60"
+              >
+                {pdfDownloading ? (
+                  <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Generating…</>
+                ) : (
+                  <><Download className="h-3.5 w-3.5 mr-1.5" /> Download PDF</>
+                )}
+              </Button>
               <Button
                 variant="outline"
                 size="sm"

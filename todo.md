@@ -978,3 +978,9 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Add ShareBadge section to ComplianceAssessmentResult.tsx
 - [ ] LinkedIn share link with pre-filled text (score, risk level, tool URL)
 - [ ] Copy-to-clipboard embed snippet button
+
+## Feature: Download PDF + Weekly Digest (2026-05-18)
+- [x] Add Download PDF button to ComplianceAssessmentResult.tsx (jsPDF, client-side, branded A4 report)
+- [x] Add weekly Monday 8 AM WAT heartbeat cron (task_uid: cic7MqEL7sVRfdXkWdEjXb, next: 2026-05-25T07:00Z)
+- [x] Add /api/scheduled/weeklyAssessmentDigest endpoint in server/_core/index.ts
+- [x] 8 vitest tests passing (PDF filename + digest stats logic)

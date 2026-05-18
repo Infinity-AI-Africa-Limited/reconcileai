@@ -112,6 +112,61 @@ async function startServer() {
     res.status(allOk ? 200 : 503).json(body);
   });
 
+  // ── Scheduled: weekly assessment digest ─────────────────────────────────
+  app.post("/api/scheduled/weeklyAssessmentDigest", async (req, res) => {
+    try {
+      const db = await getDb();
+      if (!db) throw new Error("DB unavailable");
+
+      const { complianceAssessments } = await import("../../drizzle/schema");
+      const { sql: drizzleSql } = await import("drizzle-orm");
+      const { notifyOwner } = await import("./notification");
+
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+      // Fetch all assessments from the past 7 days
+      const recent = await db
+        .select()
+        .from(complianceAssessments)
+        .where(drizzleSql`${complianceAssessments.createdAt} >= ${sevenDaysAgo}`);
+
+      const total = recent.length;
+      const avgScore = total > 0
+        ? Math.round(recent.reduce((s, r) => s + (r.overallScore ?? 0), 0) / total)
+        : 0;
+      const highRisk = recent.filter(r => r.riskLevel === "critical" || r.riskLevel === "high").length;
+      const pendingInvites = recent.filter(r => r.consentToContact && !r.demoInviteSent).length;
+
+      if (total === 0) {
+        return res.json({ ok: true, skipped: "no assessments this week" });
+      }
+
+      const content = [
+        `**Weekly Compliance Assessment Digest — ${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}**`,
+        "",
+        `📊 **New assessments this week:** ${total}`,
+        `📈 **Average score:** ${avgScore}/100`,
+        `🚨 **High/Critical risk:** ${highRisk} institution${highRisk !== 1 ? "s" : ""}`,
+        `📧 **Pending demo invites:** ${pendingInvites} (consented but not yet invited)`,
+        "",
+        "View all assessments at reconcileai.vip/admin/assessments",
+      ].join("\n");
+
+      await notifyOwner({
+        title: `ReconcileAI Weekly Digest — ${total} new assessment${total !== 1 ? "s" : ""}`,
+        content,
+      });
+
+      res.json({ ok: true, total, avgScore, highRisk, pendingInvites });
+    } catch (err) {
+      console.error("[weeklyAssessmentDigest] error:", err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
   // OAuth callback under /api/oauth/callback
   registerOAuthRoutes(app);
   // tRPC API
