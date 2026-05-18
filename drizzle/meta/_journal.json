@@ -176,6 +176,13 @@
       "when": 1779096442175,
       "tag": "0024_living_synch",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "5",
+      "when": 1779096896190,
+      "tag": "0025_stale_excalibur",
+      "breakpoints": true
     }
   ]
 }

@@ -3383,6 +3383,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         search: z.string().optional(),
         emailOptedOut: z.boolean().optional(),
         consentOnly: z.boolean().optional(),
+        notContacted: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
@@ -3394,6 +3395,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         if (input.riskLevel) conditions.push(eq(complianceAssessments.riskLevel, input.riskLevel));
         if (input.emailOptedOut !== undefined) conditions.push(eq(complianceAssessments.emailOptedOut, input.emailOptedOut));
         if (input.consentOnly) conditions.push(eq(complianceAssessments.consentToContact, true));
+        if (input.notContacted) conditions.push(eq(complianceAssessments.markedContacted, false));
         if (input.search) {
           const q = `%${input.search}%`;
           conditions.push(
@@ -3421,6 +3423,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           demoInviteSent: complianceAssessments.demoInviteSent,
           emailOptedOut: complianceAssessments.emailOptedOut,
           markedContacted: complianceAssessments.markedContacted,
+          adminNotes: complianceAssessments.adminNotes,
           createdAt: complianceAssessments.createdAt,
         }).from(complianceAssessments)
           .where(whereClause)
@@ -3571,6 +3574,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .set({ markedContacted: input.contacted })
           .where(eq(complianceAssessments.token, input.token));
         return { success: true, contacted: input.contacted };
+      }),
+
+    // Admin: update free-text notes/memo for a single assessment
+    updateNotes: protectedProcedure
+      .input(z.object({ token: z.string().length(48), notes: z.string().max(2000) }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        await drizzle.update(complianceAssessments)
+          .set({ adminNotes: input.notes || null })
+          .where(eq(complianceAssessments.token, input.token));
+        return { success: true };
       }),
 
     // Admin: count eligible for bulk demo invite (consented, has email, not yet invited, not opted out)

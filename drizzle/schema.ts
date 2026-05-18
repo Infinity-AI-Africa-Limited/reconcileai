@@ -1069,6 +1069,8 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
   emailOptedOut: boolean("emailOptedOut").default(false).notNull(),
   // CRM flag: manually set by sales team to track offline follow-up
   markedContacted: boolean("markedContacted").default(false).notNull(),
+  // CRM notes: free-text memo field for sales team (inline editable in admin)
+  adminNotes: text("adminNotes"),
   // Optional: linked to a user account if they were logged in
   userId: int("userId"),
   completedAt: timestamp("completedAt").defaultNow().notNull(),

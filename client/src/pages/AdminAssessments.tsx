@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
@@ -39,7 +39,10 @@ import {
   Download,
   Users,
   Phone,
+  PhoneOff,
   Zap,
+  StickyNote,
+  Check,
 } from "lucide-react";
 
 const RISK_COLORS: Record<string, { badge: string; dot: string; label: string }> = {
@@ -90,30 +93,22 @@ function DemoInviteButton({ token, hasEmail, demoInviteSent }: { token: string; 
       utils.assessment.listAll.invalidate();
       toast.success("Demo invite sent", { description: "The personalised demo invitation email has been delivered." });
     },
-    onError: (err) => {
-      toast.error("Failed to send invite", { description: err.message });
-    },
+    onError: (err) => toast.error("Failed to send invite", { description: err.message }),
   });
 
-  if (!hasEmail) {
-    return <span className="text-xs text-gray-300 italic">No email</span>;
-  }
-
-  if (localSent) {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
-        <CheckCircle2 className="h-3.5 w-3.5" /> Demo invited
-      </span>
-    );
-  }
+  if (!hasEmail) return <span className="text-xs text-gray-300 italic">No email</span>;
+  if (localSent) return (
+    <span className="inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
+      <CheckCircle2 className="h-3.5 w-3.5" /> Demo invited
+    </span>
+  );
 
   return (
     <TooltipProvider delayDuration={200}>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
-            size="sm"
-            variant="outline"
+            size="sm" variant="outline"
             className="h-7 px-2.5 text-xs border-[#F47458]/40 text-[#F47458] hover:bg-[#F47458]/5 hover:border-[#F47458] hover:scale-105 transition-all duration-150 gap-1.5"
             disabled={sendInvite.isPending}
             onClick={() => sendInvite.mutate({ token })}
@@ -135,17 +130,9 @@ function MarkContactedButton({ token, markedContacted }: { token: string; marked
   const [local, setLocal] = useState(markedContacted);
 
   const toggle = trpc.assessment.markContacted.useMutation({
-    onMutate: () => {
-      setLocal(prev => !prev);
-    },
-    onSuccess: (data) => {
-      setLocal(data.contacted);
-      utils.assessment.listAll.invalidate();
-    },
-    onError: () => {
-      setLocal(prev => !prev); // rollback
-      toast.error("Failed to update contacted status");
-    },
+    onMutate: () => setLocal(prev => !prev),
+    onSuccess: (data) => { setLocal(data.contacted); utils.assessment.listAll.invalidate(); },
+    onError: () => { setLocal(prev => !prev); toast.error("Failed to update contacted status"); },
   });
 
   return (
@@ -161,15 +148,95 @@ function MarkContactedButton({ token, markedContacted }: { token: string; marked
                 : "bg-white border-gray-200 text-gray-300 hover:border-[#1B365D] hover:text-[#1B365D]"
             }`}
           >
-            {toggle.isPending ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Phone className="h-3 w-3" />
-            )}
+            {toggle.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Phone className="h-3 w-3" />}
           </button>
         </TooltipTrigger>
         <TooltipContent side="left" className="text-xs max-w-[180px]">
           {local ? "Marked as contacted — click to unmark" : "Mark as contacted (offline follow-up)"}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+function InlineNotes({ token, initialNotes }: { token: string; initialNotes: string | null }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(initialNotes ?? "");
+  const [saved, setSaved] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const saveNotes = trpc.assessment.updateNotes.useMutation({
+    onSuccess: () => {
+      setSaved(true);
+      setEditing(false);
+      setTimeout(() => setSaved(false), 2000);
+    },
+    onError: () => toast.error("Failed to save notes"),
+  });
+
+  useEffect(() => {
+    if (editing && textareaRef.current) {
+      textareaRef.current.focus();
+      // Move cursor to end
+      const len = textareaRef.current.value.length;
+      textareaRef.current.setSelectionRange(len, len);
+    }
+  }, [editing]);
+
+  const handleSave = () => {
+    if (value !== (initialNotes ?? "")) {
+      saveNotes.mutate({ token, notes: value });
+    } else {
+      setEditing(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") { setValue(initialNotes ?? ""); setEditing(false); }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSave();
+  };
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-1 min-w-[180px]">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onBlur={handleSave}
+          onKeyDown={handleKeyDown}
+          placeholder="Add a note…"
+          maxLength={2000}
+          rows={3}
+          className="w-full text-xs text-[#1B365D] border border-[#1B365D]/30 rounded-md px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-[#1B365D]/40 bg-white placeholder:text-gray-300"
+        />
+        <p className="text-[10px] text-gray-300">⌘↵ to save · Esc to cancel</p>
+      </div>
+    );
+  }
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={() => setEditing(true)}
+            className="group flex items-start gap-1.5 text-left w-full max-w-[200px]"
+          >
+            {saved ? (
+              <Check className="h-3 w-3 text-emerald-500 mt-0.5 shrink-0" />
+            ) : (
+              <StickyNote className={`h-3 w-3 mt-0.5 shrink-0 transition-colors ${value ? "text-amber-400" : "text-gray-200 group-hover:text-gray-400"}`} />
+            )}
+            {value ? (
+              <span className="text-xs text-[#1B365D]/70 line-clamp-2 leading-relaxed">{value}</span>
+            ) : (
+              <span className="text-xs text-gray-300 group-hover:text-gray-400 italic">Add note…</span>
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="left" className="text-xs max-w-[200px]">
+          {value ? "Click to edit note" : "Click to add a sales note for this lead"}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -183,6 +250,7 @@ export default function AdminAssessments() {
   const [riskFilter, setRiskFilter] = useState<string>("all");
   const [optOutFilter, setOptOutFilter] = useState<string>("all");
   const [consentOnly, setConsentOnly] = useState(false);
+  const [notContacted, setNotContacted] = useState(false);
   const [exportEnabled, setExportEnabled] = useState(false);
   const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
 
@@ -195,6 +263,7 @@ export default function AdminAssessments() {
     riskLevel: (riskFilter !== "all" ? riskFilter : undefined) as "critical" | "high" | "medium" | "low" | undefined,
     emailOptedOut: emailOptedOutParam,
     consentOnly: consentOnly || undefined,
+    notContacted: notContacted || undefined,
   });
 
   // Eligible count for bulk invite dialog
@@ -219,9 +288,7 @@ export default function AdminAssessments() {
         });
       }
     },
-    onError: (err) => {
-      toast.error("Bulk send failed", { description: err.message });
-    },
+    onError: (err) => toast.error("Bulk send failed", { description: err.message }),
   });
 
   // Export CSV query — only fires when exportEnabled is true
@@ -257,6 +324,7 @@ export default function AdminAssessments() {
   const handleRiskFilter = (val: string) => { setRiskFilter(val); setPage(1); };
   const handleOptOutFilter = (val: string) => { setOptOutFilter(val); setPage(1); };
   const handleConsentToggle = () => { setConsentOnly(prev => !prev); setPage(1); };
+  const handleNotContactedToggle = () => { setNotContacted(prev => !prev); setPage(1); };
 
   const handleOpenBulkDialog = () => {
     refetchEligible();
@@ -285,7 +353,6 @@ export default function AdminAssessments() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {/* Bulk invite button */}
             <TooltipProvider delayDuration={200}>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -304,13 +371,11 @@ export default function AdminAssessments() {
               </Tooltip>
             </TooltipProvider>
 
-            {/* Export CSV */}
             <TooltipProvider delayDuration={200}>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
-                    variant="outline"
-                    size="sm"
+                    variant="outline" size="sm"
                     className="border-[#1B365D]/20 text-[#1B365D] text-xs gap-1.5 hover:bg-[#1B365D]/5"
                     onClick={() => setExportEnabled(true)}
                     disabled={csvLoading}
@@ -388,7 +453,8 @@ export default function AdminAssessments() {
         </div>
 
         {/* Quick-filter chips */}
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          {/* Consented only chip */}
           <button
             onClick={handleConsentToggle}
             className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all duration-150 ${
@@ -401,8 +467,25 @@ export default function AdminAssessments() {
             Consented only
             {consentOnly && <span className="ml-0.5 opacity-75">✕</span>}
           </button>
-          {consentOnly && (
-            <span className="text-xs text-[#8C757D]">Showing consented respondents only</span>
+
+          {/* Not contacted chip */}
+          <button
+            onClick={handleNotContactedToggle}
+            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all duration-150 ${
+              notContacted
+                ? "bg-[#1B365D] text-white border-[#1B365D] shadow-sm"
+                : "bg-white text-[#1B365D] border-gray-200 hover:border-[#1B365D]/50 hover:text-[#1B365D]"
+            }`}
+          >
+            <PhoneOff className="h-3 w-3" />
+            Not yet contacted
+            {notContacted && <span className="ml-0.5 opacity-75">✕</span>}
+          </button>
+
+          {(consentOnly || notContacted) && (
+            <span className="text-xs text-[#8C757D]">
+              {[consentOnly && "consented", notContacted && "not contacted"].filter(Boolean).join(" + ")} filter active
+            </span>
           )}
         </div>
 
@@ -419,8 +502,10 @@ export default function AdminAssessments() {
           ) : rows.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center px-6">
               <ClipboardCheck className="h-10 w-10 text-gray-200 mb-3" />
-              <p className="text-sm font-medium text-[#1B365D] mb-1">No assessments yet</p>
-              <p className="text-xs text-[#8C757D]">Share the public assessment link to start collecting leads.</p>
+              <p className="text-sm font-medium text-[#1B365D] mb-1">No assessments found</p>
+              <p className="text-xs text-[#8C757D]">
+                {(consentOnly || notContacted) ? "Try adjusting your filters." : "Share the public assessment link to start collecting leads."}
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -445,6 +530,9 @@ export default function AdminAssessments() {
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
+                    </th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">
+                      <span className="flex items-center gap-1"><StickyNote className="h-3 w-3" /> Notes</span>
                     </th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Actions</th>
                   </tr>
@@ -506,6 +594,12 @@ export default function AdminAssessments() {
                         <MarkContactedButton
                           token={row.token}
                           markedContacted={(row as any).markedContacted ?? false}
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <InlineNotes
+                          token={row.token}
+                          initialNotes={(row as any).adminNotes ?? null}
                         />
                       </td>
                       <td className="px-4 py-3">

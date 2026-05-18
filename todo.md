@@ -999,3 +999,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: "Bulk Send Invites" button in header with confirmation dialog (shows eligible count, coral CTA)
 - [x] Frontend: "Mark as contacted" toggle column in admin table (phone icon, navy when active, optimistic update)
 - [x] Frontend: Export CSV includes markedContacted column
+
+## Feature: Contacted Filter Chip + Inline Notes Field
+- [x] Schema: Add `adminNotes` text column to compliance_assessments table
+- [x] Backend: notContacted filter added to assessment.listAll procedure
+- [x] Backend: assessment.updateNotes procedure (update adminNotes per token)
+- [x] Backend: adminNotes included in listAll select
+- [x] Frontend: "Not yet contacted" quick-filter chip alongside "Consented only"
+- [x] Frontend: Inline notes cell in admin table (click-to-edit textarea, save on blur/⌘↵, Esc to cancel)
