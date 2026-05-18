@@ -129,12 +129,16 @@ export default function AdminAssessments() {
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [riskFilter, setRiskFilter] = useState<string>("all");
+  const [optOutFilter, setOptOutFilter] = useState<string>("all");
+
+  const emailOptedOutParam = optOutFilter === "opted_out" ? true : optOutFilter === "subscribed" ? false : undefined;
 
   const { data, isLoading, error } = trpc.assessment.listAll.useQuery({
     page,
     pageSize: 20,
     search: search || undefined,
     riskLevel: (riskFilter !== "all" ? riskFilter : undefined) as "critical" | "high" | "medium" | "low" | undefined,
+    emailOptedOut: emailOptedOutParam,
   });
 
   const totalPages = data ? Math.ceil(data.total / data.pageSize) : 1;
@@ -146,6 +150,11 @@ export default function AdminAssessments() {
 
   const handleRiskFilter = (val: string) => {
     setRiskFilter(val);
+    setPage(1);
+  };
+
+  const handleOptOutFilter = (val: string) => {
+    setOptOutFilter(val);
     setPage(1);
   };
 
@@ -217,6 +226,16 @@ export default function AdminAssessments() {
               <SelectItem value="high">High</SelectItem>
               <SelectItem value="medium">Medium</SelectItem>
               <SelectItem value="low">Low</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={optOutFilter} onValueChange={handleOptOutFilter}>
+            <SelectTrigger className="w-44 h-9 text-sm border-gray-200">
+              <SelectValue placeholder="All email status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All email status</SelectItem>
+              <SelectItem value="subscribed">Subscribed</SelectItem>
+              <SelectItem value="opted_out">Opted out</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -297,6 +316,12 @@ export default function AdminAssessments() {
                           {row.followUpEmailSent && (
                             <span className="inline-flex items-center gap-1 text-xs text-blue-600">
                               <Mail className="h-3 w-3" /> Auto-email sent
+                            </span>
+                          )}
+                          {(row as any).emailOptedOut && (
+                            <span className="inline-flex items-center gap-1 text-xs text-red-500 font-medium">
+                              <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="8" cy="8" r="6"/><path d="M5 8h6"/></svg>
+                              Opted out
                             </span>
                           )}
                         </div>

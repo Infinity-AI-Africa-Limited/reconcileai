@@ -3381,6 +3381,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         pageSize: z.number().min(1).max(100).default(20),
         riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
         search: z.string().optional(),
+        emailOptedOut: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
@@ -3390,6 +3391,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const offset = (input.page - 1) * input.pageSize;
         const conditions = [];
         if (input.riskLevel) conditions.push(eq(complianceAssessments.riskLevel, input.riskLevel));
+        if (input.emailOptedOut !== undefined) conditions.push(eq(complianceAssessments.emailOptedOut, input.emailOptedOut));
         if (input.search) {
           const q = `%${input.search}%`;
           conditions.push(
@@ -3415,6 +3417,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           consentToContact: complianceAssessments.consentToContact,
           followUpEmailSent: complianceAssessments.followUpEmailSent,
           demoInviteSent: complianceAssessments.demoInviteSent,
+          emailOptedOut: complianceAssessments.emailOptedOut,
           createdAt: complianceAssessments.createdAt,
         }).from(complianceAssessments)
           .where(whereClause)
