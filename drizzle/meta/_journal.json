@@ -141,6 +141,13 @@
       "when": 1778572130064,
       "tag": "0019_daily_fenris",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "5",
+      "when": 1779086338200,
+      "tag": "0020_aberrant_bug",
+      "breakpoints": true
     }
   ]
 }

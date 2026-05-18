@@ -164,6 +164,33 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Compliance Assessment CTA */}
+      <section className="py-10 px-6 bg-[#F8F9FA] border-y border-gray-100">
+        <div className="max-w-6xl mx-auto">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-6 bg-white rounded-2xl border border-gray-100 px-8 py-6 shadow-sm">
+            <div className="flex items-start gap-4">
+              <div className="h-12 w-12 rounded-xl bg-[#F47458]/10 flex items-center justify-center shrink-0">
+                <FileCheck className="h-6 w-6 text-[#F47458]" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-bold text-[#1B365D]">Free CBN Compliance Readiness Assessment</h3>
+                  <span className="text-xs font-semibold bg-[#F47458]/10 text-[#F47458] px-2 py-0.5 rounded-full">5 min</span>
+                </div>
+                <p className="text-sm text-[#8C757D] max-w-xl">
+                  25 questions. Personalised risk score. AI-generated narrative. Know your compliance gaps before the CBN does.
+                </p>
+              </div>
+            </div>
+            <a href="/compliance-assessment" className="shrink-0">
+              <Button className="bg-[#F47458] hover:bg-[#e0644a] text-white h-10 px-6 text-sm whitespace-nowrap">
+                Take Free Assessment <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </a>
+          </div>
+        </div>
+      </section>
+
       {/* Stats */}
       <section className="py-12 bg-white border-y border-gray-200">
         <div className="max-w-5xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8">

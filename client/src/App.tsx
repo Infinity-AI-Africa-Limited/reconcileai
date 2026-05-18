@@ -40,6 +40,9 @@ import Documentation from "./pages/Documentation";
 import DocViewer from "./pages/DocViewer";
 import WoodcorePOC from "./pages/WoodcorePOC";
 import SharedReport from "./pages/SharedReport";
+import ComplianceAssessmentLanding from "./pages/ComplianceAssessmentLanding";
+import ComplianceAssessmentQuiz from "./pages/ComplianceAssessmentQuiz";
+import ComplianceAssessmentResult from "./pages/ComplianceAssessmentResult";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -87,6 +90,9 @@ function Router() {
       <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
       <Route path="/woodcore-poc" component={WoodcorePOC} />
       <Route path="/shared-report/:token" component={SharedReport} />
+      <Route path="/compliance-assessment" component={ComplianceAssessmentLanding} />
+      <Route path="/compliance-assessment/quiz" component={ComplianceAssessmentQuiz} />
+      <Route path="/compliance-assessment/result/:token" component={ComplianceAssessmentResult} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

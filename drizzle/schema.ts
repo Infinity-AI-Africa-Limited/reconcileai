@@ -1036,3 +1036,39 @@ export const securityIncidents = mysqlTable("security_incidents", {
 ]);
 export type SecurityIncident = typeof securityIncidents.$inferSelect;
 export type InsertSecurityIncident = typeof securityIncidents.$inferInsert;
+
+// ─── Compliance Readiness Assessments (Public Self-Assessment Tool) ──
+export const complianceAssessments = mysqlTable("compliance_assessments", {
+  id: int("id").autoincrement().primaryKey(),
+  // Public share token — used to retrieve results without auth
+  token: varchar("token", { length: 64 }).notNull().unique(),
+  // Respondent info (collected at end of assessment)
+  respondentName: varchar("respondentName", { length: 255 }),
+  respondentEmail: varchar("respondentEmail", { length: 320 }),
+  respondentRole: varchar("respondentRole", { length: 100 }),
+  institutionName: varchar("institutionName", { length: 255 }),
+  institutionType: mysqlEnum("institutionType", [
+    "commercial_bank", "microfinance_bank", "fintech", "payment_processor", "corporate_b2b", "other"
+  ]),
+  // Assessment answers stored as JSON array of { questionId, answer, score }
+  answers: json("answers").notNull(),
+  // Scoring
+  overallScore: int("overallScore").notNull(),          // 0–100
+  riskLevel: mysqlEnum("riskLevel", ["critical", "high", "medium", "low"]).notNull(),
+  // Category scores (JSON: { reconciliation, exception, reporting, regulatory, technology })
+  categoryScores: json("categoryScores").notNull(),
+  // AI-generated personalised narrative (1–2 paragraphs)
+  aiNarrative: text("aiNarrative"),
+  // Whether the respondent consented to be contacted
+  consentToContact: boolean("consentToContact").default(false).notNull(),
+  // Optional: linked to a user account if they were logged in
+  userId: int("userId"),
+  completedAt: timestamp("completedAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_assessments_token").on(table.token),
+  index("idx_assessments_email").on(table.respondentEmail),
+  index("idx_assessments_risk").on(table.riskLevel),
+]);
+export type ComplianceAssessment = typeof complianceAssessments.$inferSelect;
+export type InsertComplianceAssessment = typeof complianceAssessments.$inferInsert;

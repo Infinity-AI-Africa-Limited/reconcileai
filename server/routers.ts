@@ -3091,6 +3091,115 @@ Always be specific, reference actual exception IDs and amounts where available, 
         .limit(100);
     }),
   }),
+
+  // ─── Compliance Readiness Assessment (Public) ─────────────────────
+  assessment: router({
+    // Submit a completed assessment and get back a token + score
+    submit: publicProcedure
+      .input(z.object({
+        answers: z.array(z.object({
+          questionId: z.string(),
+          answer: z.union([z.string(), z.number(), z.array(z.string())]),
+          score: z.number().min(0).max(5),
+        })),
+        respondentName: z.string().optional(),
+        respondentEmail: z.string().email().optional(),
+        respondentRole: z.string().optional(),
+        institutionName: z.string().optional(),
+        institutionType: z.enum(["commercial_bank", "microfinance_bank", "fintech", "payment_processor", "corporate_b2b", "other"]).optional(),
+        consentToContact: z.boolean().default(false),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+
+        // ── Scoring ──────────────────────────────────────────────────
+        // 5 categories, each with up to 5 questions worth 0–5 pts each
+        // Max raw = 25 per category. Normalise to 0–100 overall.
+        const categories = {
+          reconciliation: ["q1","q2","q3","q4","q5"],
+          exception: ["q6","q7","q8","q9","q10"],
+          reporting: ["q11","q12","q13","q14","q15"],
+          regulatory: ["q16","q17","q18","q19","q20"],
+          technology: ["q21","q22","q23","q24","q25"],
+        };
+        const answerMap = new Map(input.answers.map(a => [a.questionId, a.score]));
+        const categoryScores: Record<string, number> = {};
+        let totalRaw = 0;
+        let totalMax = 0;
+        for (const [cat, qids] of Object.entries(categories)) {
+          const catRaw = qids.reduce((sum, qid) => sum + (answerMap.get(qid) ?? 0), 0);
+          const catMax = qids.length * 5;
+          categoryScores[cat] = Math.round((catRaw / catMax) * 100);
+          totalRaw += catRaw;
+          totalMax += catMax;
+        }
+        const overallScore = Math.round((totalRaw / totalMax) * 100);
+        const riskLevel = overallScore >= 80 ? "low" : overallScore >= 60 ? "medium" : overallScore >= 40 ? "high" : "critical";
+
+        // ── AI Narrative ─────────────────────────────────────────────
+        let aiNarrative: string | null = null;
+        try {
+          const { invokeLLM } = await import("./_core/llm");
+          const weakCategories = Object.entries(categoryScores)
+            .filter(([, s]) => s < 60)
+            .map(([cat]) => cat)
+            .join(", ");
+          const llmResp = await invokeLLM({
+            messages: [
+              { role: "system", content: "You are a CBN compliance expert writing concise, actionable risk assessments for Nigerian financial institutions. Write in second person. Be direct and specific. Maximum 120 words." },
+              { role: "user", content: `Institution type: ${input.institutionType ?? "financial institution"}. Overall compliance score: ${overallScore}/100. Risk level: ${riskLevel}. Weak categories: ${weakCategories || "none"}. Category scores: ${JSON.stringify(categoryScores)}. Write a 2-sentence personalised risk narrative that names the specific risks and the most important first action to take.` },
+            ],
+          });
+          const rawContent = llmResp?.choices?.[0]?.message?.content;
+          aiNarrative = typeof rawContent === 'string' ? rawContent : null;
+        } catch {}
+
+        // ── Persist ───────────────────────────────────────────────────
+        const token = crypto.randomBytes(24).toString("hex");
+        await drizzle.insert(complianceAssessments).values({
+          token,
+          answers: input.answers,
+          respondentName: input.respondentName,
+          respondentEmail: input.respondentEmail,
+          respondentRole: input.respondentRole,
+          institutionName: input.institutionName,
+          institutionType: input.institutionType,
+          consentToContact: input.consentToContact,
+          overallScore,
+          riskLevel,
+          categoryScores,
+          aiNarrative,
+          userId: ctx.user?.id ?? null,
+        });
+
+        // Notify owner of new assessment lead
+        if (input.respondentEmail) {
+          const { notifyOwner } = await import("./_core/notification");
+          notifyOwner({
+            title: `📋 New Compliance Assessment — ${input.institutionName ?? "Anonymous"} [${riskLevel.toUpperCase()}]`,
+            content: `Score: ${overallScore}/100\nRisk: ${riskLevel}\nType: ${input.institutionType ?? "N/A"}\nName: ${input.respondentName ?? "N/A"}\nEmail: ${input.respondentEmail}\nConsent: ${input.consentToContact}`,
+          }).catch(() => {});
+        }
+
+        return { token, overallScore, riskLevel, categoryScores, aiNarrative };
+      }),
+
+    // Retrieve a completed assessment by token (public — no auth required)
+    getByToken: publicProcedure
+      .input(z.object({ token: z.string().length(48) }))
+      .query(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        const rows = await drizzle.select().from(complianceAssessments)
+          .where(eq(complianceAssessments.token, input.token))
+          .limit(1);
+        if (!rows.length) throw new TRPCError({ code: 'NOT_FOUND', message: 'Assessment not found' });
+        return rows[0];
+      }),
+  }),
 });
 
 export type AppRouter = typeof appRouter;

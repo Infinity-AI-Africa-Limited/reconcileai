@@ -946,3 +946,25 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 ## Feature: Re-enable filter button — hover animation + tooltip
 - [x] Add Tooltip component wrapping the Re-enable filter button with descriptive text
 - [x] Add subtle hover animation (scale + icon pulse) to the button
+
+## Feature: Compliance Readiness Assessment (Public Tool)
+- [ ] Add compliance_assessments table to drizzle schema
+- [ ] Add assessment tRPC procedures (submit, getResult, getByToken)
+- [ ] Build ComplianceAssessmentLanding.tsx — landing page with CTA
+- [ ] Build ComplianceAssessmentQuiz.tsx — multi-step 5-minute assessment flow
+- [ ] Build ComplianceAssessmentResult.tsx — personalised risk score report page
+- [ ] Add Compliance Readiness Assessment CTA card to Home.tsx
+- [ ] Register routes in App.tsx
+- [ ] Write vitest tests for assessment procedures
+
+## Feature: Compliance Readiness Assessment (Public Tool)
+- [x] Add compliance_assessments table to drizzle/schema.ts and push migration
+- [x] Add assessment.submit tRPC procedure (scoring, AI narrative, token generation, DB persist)
+- [x] Add assessment.getByToken tRPC procedure (public, token-based lookup)
+- [x] Build ComplianceAssessmentLanding.tsx (dedicated landing page)
+- [x] Build ComplianceAssessmentQuiz.tsx (25-question multi-step flow with progress bar)
+- [x] Build ComplianceAssessmentResult.tsx (personalised risk score, category bars, AI narrative, action plan)
+- [x] Wire routes in App.tsx (/compliance-assessment, /compliance-assessment/quiz, /compliance-assessment/result/:token)
+- [x] Add CTA card to Home.tsx after segment cards section
+- [x] 8 vitest tests passing (scoring logic, token generation)
+- [x] TypeScript: 0 errors
