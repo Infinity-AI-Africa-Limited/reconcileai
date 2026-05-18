@@ -1067,3 +1067,12 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Submitted rows turn green with submitter name, date, and notes inline
 - [x] Frontend: Deadlines tab badge only counts unsubmitted critical deadlines
 - [x] Frontend: "Re-submit" ghost button for already-submitted rows
+
+## Feature: Submission History Panel + Email Notification on Submit
+
+- [x] Backend: notifyOwner call in markDeadlineSubmitted (framework name, period, submitter, notes)
+- [x] Frontend: Collapsible "Submission History" section at bottom of Deadlines tab
+- [x] Frontend: Table columns — Framework, Period, Submitted By, Date, Notes
+- [x] Frontend: Empty state when no submissions yet
+- [x] Frontend: Collapse/expand toggle with chevron icon and submission count badge
+- [x] Frontend: Rows sorted newest-first; submitter avatar with initial; notes truncated with full tooltip

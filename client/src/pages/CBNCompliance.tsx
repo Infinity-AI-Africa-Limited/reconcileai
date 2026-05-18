@@ -45,6 +45,9 @@ import {
   BarChart3,
   Printer,
   Send,
+  ChevronDown,
+  ChevronUp,
+  History,
 } from "lucide-react";
 
 // ─── CBN Regulatory Thresholds ────────────────────────────────────────────────
@@ -240,6 +243,7 @@ export default function CBNCompliance() {
   // Mark as submitted dialog state
   const [submitDialog, setSubmitDialog] = useState<{ open: boolean; code: string; name: string; periodLabel: string } | null>(null);
   const [submitNotes, setSubmitNotes] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
   const attestationRef = useRef<HTMLDivElement>(null);
 
   // ── Data fetching ──────────────────────────────────────────────────────────
@@ -761,6 +765,74 @@ export default function CBNCompliance() {
                   })}
                 </div>
               </CardContent>
+            </Card>
+
+            {/* ── Submission History Log ── */}
+            <Card className="border border-border/50">
+              <CardHeader className="pb-2 pt-4 px-4">
+                <button
+                  className="flex items-center justify-between w-full text-left group"
+                  onClick={() => setHistoryOpen(h => !h)}
+                >
+                  <div className="flex items-center gap-2">
+                    <History className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm font-semibold">Submission History</span>
+                    {submissionLog && submissionLog.length > 0 && (
+                      <Badge variant="secondary" className="text-[10px] h-4 px-1.5">{submissionLog.length}</Badge>
+                    )}
+                  </div>
+                  {historyOpen
+                    ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                    : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+                </button>
+              </CardHeader>
+              {historyOpen && (
+                <CardContent className="px-4 pb-4 pt-0">
+                  {!submissionLog || submissionLog.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <History className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                      <p className="text-sm">No submissions recorded yet.</p>
+                      <p className="text-xs mt-1">Use "Mark as Submitted" on any deadline row above to start the log.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border/50">
+                            <th className="text-left py-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">Framework</th>
+                            <th className="text-left py-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">Period</th>
+                            <th className="text-left py-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">Submitted By</th>
+                            <th className="text-left py-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">Date</th>
+                            <th className="text-left py-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">Notes</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[...submissionLog].sort((a, b) => (Number(b.submittedAt ?? 0)) - (Number(a.submittedAt ?? 0))).map((s, i) => (
+                            <tr key={i} className="border-b border-border/30 last:border-0 hover:bg-muted/30 transition-colors">
+                              <td className="py-2 pr-4 font-medium">{s.frameworkName ?? s.frameworkCode}</td>
+                              <td className="py-2 pr-4 text-muted-foreground">{s.periodLabel}</td>
+                              <td className="py-2 pr-4">
+                                <div className="flex items-center gap-1.5">
+                                  <div className="h-5 w-5 rounded-full bg-[#1B365D] text-white text-[10px] flex items-center justify-center font-bold flex-shrink-0">
+                                    {(s.submittedByName ?? "?").charAt(0).toUpperCase()}
+                                  </div>
+                                  <span className="text-sm">{s.submittedByName ?? "Unknown"}</span>
+                                </div>
+                              </td>
+                              <td className="py-2 pr-4 text-muted-foreground text-xs whitespace-nowrap">
+                                {s.submittedAt ? new Date(s.submittedAt).toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" }) : "—"}
+                              </td>
+                              <td className="py-2 text-muted-foreground text-xs max-w-[200px] truncate" title={s.notes ?? ""}>
+                                {s.notes ? s.notes : <span className="opacity-40 italic">No notes</span>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </CardContent>
+              )}
             </Card>
           </TabsContent>
 

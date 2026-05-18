@@ -761,7 +761,7 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
         submittedByName: ctx.user.name ?? "Unknown",
         notes: input.notes ?? null,
       });
-      await writeAuditLog(
+       await writeAuditLog(
         ctx.user.id,
         ctx.user.name,
         "deadline.submitted",
@@ -770,9 +770,18 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
         `${input.frameworkName} \u2014 ${input.periodLabel}`,
         { frameworkCode: input.frameworkCode, periodLabel: input.periodLabel },
       );
+      // Notify owner — non-fatal
+      try {
+        const { notifyOwner } = await import("../_core/notification");
+        const submittedBy = ctx.user.name ?? "Unknown";
+        const notesLine = input.notes ? `\nNotes: ${input.notes}` : "";
+        await notifyOwner({
+          title: `CBN Submission Recorded: ${input.frameworkName}`,
+          content: `Framework: ${input.frameworkName}\nPeriod: ${input.periodLabel}\nSubmitted by: ${submittedBy}\nDate: ${new Date().toLocaleDateString("en-NG", { day: "numeric", month: "long", year: "numeric" })}${notesLine}\n\nThis submission has been logged in the ReconcileAI CBN Compliance module.`,
+        });
+      } catch (_) { /* non-fatal */ }
       return { success: true };
     }),
-
   // ── List all deadline submission records ──────────────────────────────────
   listDeadlineSubmissions: protectedProcedure.query(async () => {
     const db = await getDb();
