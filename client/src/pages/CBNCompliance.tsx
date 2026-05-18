@@ -770,21 +770,52 @@ export default function CBNCompliance() {
             {/* ── Submission History Log ── */}
             <Card className="border border-border/50">
               <CardHeader className="pb-2 pt-4 px-4">
-                <button
-                  className="flex items-center justify-between w-full text-left group"
-                  onClick={() => setHistoryOpen(h => !h)}
-                >
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between w-full">
+                  <button
+                    className="flex items-center gap-2 text-left group flex-1"
+                    onClick={() => setHistoryOpen(h => !h)}
+                  >
                     <History className="h-4 w-4 text-muted-foreground" />
                     <span className="text-sm font-semibold">Submission History</span>
                     {submissionLog && submissionLog.length > 0 && (
                       <Badge variant="secondary" className="text-[10px] h-4 px-1.5">{submissionLog.length}</Badge>
                     )}
-                  </div>
-                  {historyOpen
-                    ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                    : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
-                </button>
+                    {historyOpen
+                      ? <ChevronUp className="h-4 w-4 text-muted-foreground ml-1" />
+                      : <ChevronDown className="h-4 w-4 text-muted-foreground ml-1" />}
+                  </button>
+                  {submissionLog && submissionLog.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 gap-1 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() => {
+                        const headers = ["Framework", "Period", "Submitted By", "Date", "Notes"];
+                        const rows = [...submissionLog]
+                          .sort((a, b) => Number(b.submittedAt ?? 0) - Number(a.submittedAt ?? 0))
+                          .map(s => [
+                            `"${(s.frameworkName ?? s.frameworkCode ?? "").replace(/"/g, '""')}"`,
+                            `"${(s.periodLabel ?? "").replace(/"/g, '""')}"`,
+                            `"${(s.submittedByName ?? "").replace(/"/g, '""')}"`,
+                            `"${s.submittedAt ? new Date(s.submittedAt).toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" }) : ""}"`,
+                            `"${(s.notes ?? "").replace(/"/g, '""')}"`,
+                          ]);
+                        const csv = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+                        const blob = new Blob([csv], { type: "text/csv" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `cbn-submission-log-${new Date().toISOString().slice(0, 10)}.csv`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        toast.success("Submission log downloaded");
+                      }}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download CSV
+                    </Button>
+                  )}
+                </div>
               </CardHeader>
               {historyOpen && (
                 <CardContent className="px-4 pb-4 pt-0">

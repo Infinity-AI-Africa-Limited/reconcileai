@@ -1076,3 +1076,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Empty state when no submissions yet
 - [x] Frontend: Collapse/expand toggle with chevron icon and submission count badge
 - [x] Frontend: Rows sorted newest-first; submitter avatar with initial; notes truncated with full tooltip
+
+## Feature: Submission Log CSV Export + Dashboard Compliance Badge
+
+- [x] Frontend: "Download CSV" button in Submission History panel header (client-side Blob, no new backend needed)
+- [x] Frontend: CSV columns — Framework, Period, Submitted By, Date, Notes; sorted newest-first; RFC-4180 compliant quoting
+- [x] Frontend: CBN compliance health badge on main Dashboard page (Compliant/At Risk chip)
+- [x] Frontend: Badge derives from dashboard.stats (matchRate ≥95%, exceptionRatio ≤5%, openExceptions ≤50)
+- [x] Frontend: Badge links to /cbn-compliance for drill-down; only shown when transaction data exists

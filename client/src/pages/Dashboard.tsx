@@ -2,7 +2,7 @@ import { useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardCheck, ChevronRight, Upload } from "lucide-react";
+import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardCheck, ChevronRight, Upload, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Link } from "wouter";
 import { toast } from "sonner";
 
@@ -24,11 +24,41 @@ export default function Dashboard() {
 
   const channelMap = new Map(channels?.map((c) => [c.id, c]) || []);
 
+  // CBN compliance health — derived from reconciliation stats vs CBN thresholds
+  const matchRateNum = parseFloat(matchRate);
+  const openExceptions = stats?.exceptions.open ?? 0;
+  const exceptionRatio = stats?.transactions.total
+    ? ((openExceptions / stats.transactions.total) * 100)
+    : 0;
+  const cbnCompliant =
+    matchRateNum >= 95 &&
+    exceptionRatio <= 5 &&
+    openExceptions <= 50;
+  const cbnHasData = (stats?.transactions.total ?? 0) > 0;
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-primary">Dashboard</h1>
-        <p className="text-muted-foreground mt-1">Reconciliation overview and analytics</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-primary">Dashboard</h1>
+          <p className="text-muted-foreground mt-1">Reconciliation overview and analytics</p>
+        </div>
+        {cbnHasData && (
+          <Link href="/cbn-compliance">
+            <div
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold cursor-pointer transition-opacity hover:opacity-80 ${
+                cbnCompliant
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  : "bg-red-50 text-red-700 border border-red-200"
+              }`}
+            >
+              {cbnCompliant
+                ? <ShieldCheck className="h-3.5 w-3.5" />
+                : <ShieldAlert className="h-3.5 w-3.5" />}
+              {cbnCompliant ? "CBN Compliant" : "CBN At Risk"}
+            </div>
+          </Link>
+        )}
       </div>
 
       {/* KPI Cards */}
