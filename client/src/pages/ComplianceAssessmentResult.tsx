@@ -6,6 +6,9 @@ import { toast } from "sonner";
 import { useState } from "react";
 import jsPDF from "jspdf";
 
+// ── Calendly / booking link — swap this when the real link is available ────
+const DEMO_BOOKING_URL = "https://calendly.com/reconcileai/demo";
+
 const CATEGORY_LABELS: Record<string, string> = {
   reconciliation: "Reconciliation Process",
   exception: "Exception Management",
@@ -470,6 +473,86 @@ export default function ComplianceAssessmentResult() {
         }
         y += 4;
       }
+
+      // ── Book a Demo final page ────────────────────────────────────────────
+      doc.addPage();
+      // Navy header bar
+      doc.setFillColor(27, 54, 93);
+      doc.rect(0, 0, pageW, 52, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(18);
+      doc.setFont("helvetica", "bold");
+      doc.text("Ready to close your compliance gaps?", margin, 22);
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      doc.text("Book a personalised 30-minute demo with the ReconcileAI team.", margin, 34);
+      doc.setFontSize(9);
+      doc.text("We will walk through your specific scores and show you exactly how ReconcileAI resolves each gap.", margin, 43);
+
+      // Coral CTA box
+      const ctaY = 70;
+      doc.setFillColor(244, 116, 88); // #F47458 coral
+      doc.roundedRect(margin, ctaY, contentW, 28, 3, 3, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(13);
+      doc.setFont("helvetica", "bold");
+      doc.text("Book Your Free Demo", pageW / 2, ctaY + 11, { align: "center" });
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.text(DEMO_BOOKING_URL, pageW / 2, ctaY + 21, { align: "center" });
+
+      // What to expect section
+      const expectY = ctaY + 42;
+      doc.setTextColor(27, 54, 93);
+      doc.setFontSize(12);
+      doc.setFont("helvetica", "bold");
+      doc.text("What to expect in the demo", margin, expectY);
+      doc.setDrawColor(244, 116, 88);
+      doc.setLineWidth(0.5);
+      doc.line(margin, expectY + 2, margin + 60, expectY + 2);
+
+      const bullets = [
+        "Live walkthrough of the ReconcileAI reconciliation engine on your transaction types",
+        "Side-by-side comparison: your current process vs. automated reconciliation",
+        "Specific resolution path for each gap identified in your compliance score",
+        "Pricing and implementation timeline for your institution size",
+        "Q&A with the product team — no sales pressure, just answers",
+      ];
+      let bY = expectY + 10;
+      for (const bullet of bullets) {
+        doc.setFillColor(244, 116, 88);
+        doc.circle(margin + 2, bY - 1.5, 1.2, "F");
+        const bLines = doc.splitTextToSize(bullet, contentW - 8);
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(60, 60, 60);
+        doc.text(bLines, margin + 6, bY);
+        bY += bLines.length * 5 + 3;
+      }
+
+      // Score summary reminder box
+      const summaryY = bY + 8;
+      doc.setFillColor(248, 249, 250);
+      doc.roundedRect(margin, summaryY, contentW, 22, 2, 2, "F");
+      doc.setDrawColor(220, 220, 220);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(margin, summaryY, contentW, 22, 2, 2, "S");
+      doc.setTextColor(27, 54, 93);
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "bold");
+      doc.text(`Your score: ${overallScore}/100 — ${riskLabel}`, margin + 6, summaryY + 8);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(100, 100, 100);
+      const summaryLine = instName
+        ? `${instName} · Assessment completed ${completedDate}`
+        : `Assessment completed ${completedDate}`;
+      doc.text(summaryLine, margin + 6, summaryY + 16);
+
+      // Footer note on demo page
+      doc.setFontSize(8);
+      doc.setTextColor(160, 160, 160);
+      doc.text("ReconcileAI by Infinity AI Africa Limited · reconcileai.vip · contact@reconcileai.vip", pageW / 2, 282, { align: "center" });
 
       // ── Footer on every page ─────────────────────────────────────────────
       const pageCount = doc.getNumberOfPages();
