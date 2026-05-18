@@ -3420,6 +3420,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           followUpEmailSent: complianceAssessments.followUpEmailSent,
           demoInviteSent: complianceAssessments.demoInviteSent,
           emailOptedOut: complianceAssessments.emailOptedOut,
+          markedContacted: complianceAssessments.markedContacted,
           createdAt: complianceAssessments.createdAt,
         }).from(complianceAssessments)
           .where(whereClause)
@@ -3503,6 +3504,93 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const csv = [headers.join(","), ...csvRows].join("\n");
         return { csv, count: rows.length };
       }),
+    // Admin: bulk send demo invites to all consented + not yet invited respondents
+    bulkSendDemoInvites: protectedProcedure
+      .mutation(async ({ ctx }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        // Fetch all eligible: consented, has email, not yet invited, not opted out
+        const eligible = await drizzle.select({
+          token: complianceAssessments.token,
+          respondentName: complianceAssessments.respondentName,
+          respondentEmail: complianceAssessments.respondentEmail,
+          overallScore: complianceAssessments.overallScore,
+          riskLevel: complianceAssessments.riskLevel,
+          institutionName: complianceAssessments.institutionName,
+        }).from(complianceAssessments)
+          .where(and(
+            eq(complianceAssessments.consentToContact, true),
+            eq(complianceAssessments.demoInviteSent, false),
+            eq(complianceAssessments.emailOptedOut, false),
+            sql`${complianceAssessments.respondentEmail} IS NOT NULL`,
+          ))
+          .orderBy(desc(complianceAssessments.createdAt))
+          .limit(500);
+        if (eligible.length === 0) return { sent: 0, failed: 0 };
+        let sent = 0;
+        let failed = 0;
+        for (const assessment of eligible) {
+          const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${assessment.token}`;
+          const firstName = assessment.respondentName?.split(" ")[0] ?? "there";
+          const riskLevelLabel = assessment.riskLevel === "critical" ? "Critical Risk" : assessment.riskLevel === "high" ? "High Risk" : assessment.riskLevel === "medium" ? "Medium Risk" : "Low Risk";
+          const overallScore = assessment.overallScore;
+          const institutionName = assessment.institutionName ?? "your institution";
+          const emailHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;"><tr><td style="background:#1B365D;padding:28px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">ReconcileAI</p><p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">AI-Powered Financial Reconciliation for African Banks &amp; Fintechs</p></td></tr><tr><td style="padding:32px;"><p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p><p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your score of <strong>${overallScore}/100 (${riskLevelLabel})</strong> tells us a lot about where ${institutionName} stands today.</p><p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">We'd love to show you exactly how ReconcileAI closes those gaps in a focused 20-minute demo.</p><table cellpadding="0" cellspacing="0" style="margin:0 0 16px;"><tr><td style="background:#1B365D;border-radius:8px;"><a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a></td></tr></table><table cellpadding="0" cellspacing="0" style="margin:0 0 24px;"><tr><td style="background:#F47458;border-radius:8px;"><a href="https://reconcileai.vip" style="display:inline-block;padding:12px 24px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">Book a 20-Minute Demo →</a></td></tr></table></td></tr><tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;"><p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p><p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p></td></tr></table></td></tr></table></body></html>`;
+          try {
+            const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.BUILT_IN_FORGE_API_KEY}` },
+              body: JSON.stringify({
+                to: assessment.respondentEmail,
+                subject: `${firstName}, see how ReconcileAI closes your compliance gaps — 20-min demo`,
+                html: emailHtml,
+                text: `Hi ${firstName},\n\nThank you for completing the ReconcileAI CBN Compliance Readiness Assessment.\n\nYour score: ${overallScore}/100 (${riskLevelLabel})\n\nBook a demo: https://reconcileai.vip\nView your report: ${resultUrl}\n\n— ReconcileAI by Infinity AI Africa Limited`,
+              }),
+            });
+            if (!emailRes.ok) throw new Error(`Email API returned ${emailRes.status}`);
+            await drizzle.update(complianceAssessments).set({ demoInviteSent: true }).where(eq(complianceAssessments.token, assessment.token));
+            sent++;
+          } catch {
+            failed++;
+          }
+        }
+        return { sent, failed };
+      }),
+
+    // Admin: toggle markedContacted flag on a single assessment
+    markContacted: protectedProcedure
+      .input(z.object({ token: z.string().length(48), contacted: z.boolean() }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        await drizzle.update(complianceAssessments)
+          .set({ markedContacted: input.contacted })
+          .where(eq(complianceAssessments.token, input.token));
+        return { success: true, contacted: input.contacted };
+      }),
+
+    // Admin: count eligible for bulk demo invite (consented, has email, not yet invited, not opted out)
+    countBulkEligible: protectedProcedure
+      .query(async ({ ctx }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        const [{ count }] = await drizzle.select({ count: sql`count(*)` })
+          .from(complianceAssessments)
+          .where(and(
+            eq(complianceAssessments.consentToContact, true),
+            eq(complianceAssessments.demoInviteSent, false),
+            eq(complianceAssessments.emailOptedOut, false),
+            sql`${complianceAssessments.respondentEmail} IS NOT NULL`,
+          ));
+        return { count: Number(count) };
+      }),
+
     unsubscribe: publicProcedure
       .input(z.object({ token: z.string().length(48) }))
       .mutation(async ({ input }) => {

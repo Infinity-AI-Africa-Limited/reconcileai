@@ -16,6 +16,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -30,6 +38,8 @@ import {
   SendHorizonal,
   Download,
   Users,
+  Phone,
+  Zap,
 } from "lucide-react";
 
 const RISK_COLORS: Record<string, { badge: string; dot: string; label: string }> = {
@@ -86,9 +96,7 @@ function DemoInviteButton({ token, hasEmail, demoInviteSent }: { token: string; 
   });
 
   if (!hasEmail) {
-    return (
-      <span className="text-xs text-gray-300 italic">No email</span>
-    );
+    return <span className="text-xs text-gray-300 italic">No email</span>;
   }
 
   if (localSent) {
@@ -110,16 +118,58 @@ function DemoInviteButton({ token, hasEmail, demoInviteSent }: { token: string; 
             disabled={sendInvite.isPending}
             onClick={() => sendInvite.mutate({ token })}
           >
-            {sendInvite.isPending ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <SendHorizonal className="h-3 w-3" />
-            )}
+            {sendInvite.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <SendHorizonal className="h-3 w-3" />}
             Send Demo Invite
           </Button>
         </TooltipTrigger>
         <TooltipContent side="left" className="max-w-[220px] text-xs">
           Send a personalised demo invitation email referencing this respondent's score and institution name.
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+function MarkContactedButton({ token, markedContacted }: { token: string; markedContacted: boolean }) {
+  const utils = trpc.useUtils();
+  const [local, setLocal] = useState(markedContacted);
+
+  const toggle = trpc.assessment.markContacted.useMutation({
+    onMutate: () => {
+      setLocal(prev => !prev);
+    },
+    onSuccess: (data) => {
+      setLocal(data.contacted);
+      utils.assessment.listAll.invalidate();
+    },
+    onError: () => {
+      setLocal(prev => !prev); // rollback
+      toast.error("Failed to update contacted status");
+    },
+  });
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={() => toggle.mutate({ token, contacted: !local })}
+            disabled={toggle.isPending}
+            className={`inline-flex items-center justify-center h-7 w-7 rounded-md border transition-all duration-150 ${
+              local
+                ? "bg-[#1B365D] border-[#1B365D] text-white hover:bg-[#142847]"
+                : "bg-white border-gray-200 text-gray-300 hover:border-[#1B365D] hover:text-[#1B365D]"
+            }`}
+          >
+            {toggle.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Phone className="h-3 w-3" />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="left" className="text-xs max-w-[180px]">
+          {local ? "Marked as contacted — click to unmark" : "Mark as contacted (offline follow-up)"}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -134,6 +184,7 @@ export default function AdminAssessments() {
   const [optOutFilter, setOptOutFilter] = useState<string>("all");
   const [consentOnly, setConsentOnly] = useState(false);
   const [exportEnabled, setExportEnabled] = useState(false);
+  const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
 
   const emailOptedOutParam = optOutFilter === "opted_out" ? true : optOutFilter === "subscribed" ? false : undefined;
 
@@ -146,6 +197,33 @@ export default function AdminAssessments() {
     consentOnly: consentOnly || undefined,
   });
 
+  // Eligible count for bulk invite dialog
+  const { data: eligibleData, refetch: refetchEligible } = trpc.assessment.countBulkEligible.useQuery(undefined, {
+    enabled: false,
+  });
+
+  // Bulk send mutation
+  const utils = trpc.useUtils();
+  const bulkSend = trpc.assessment.bulkSendDemoInvites.useMutation({
+    onSuccess: (result) => {
+      setBulkDialogOpen(false);
+      utils.assessment.listAll.invalidate();
+      utils.assessment.countBulkEligible.invalidate();
+      if (result.failed > 0) {
+        toast.warning(`Sent ${result.sent} invites — ${result.failed} failed`, {
+          description: "Some emails could not be delivered. Check your email service.",
+        });
+      } else {
+        toast.success(`${result.sent} demo invite${result.sent !== 1 ? "s" : ""} sent`, {
+          description: "All eligible consented respondents have been invited.",
+        });
+      }
+    },
+    onError: (err) => {
+      toast.error("Bulk send failed", { description: err.message });
+    },
+  });
+
   // Export CSV query — only fires when exportEnabled is true
   const { data: csvData, isFetching: csvLoading } = trpc.assessment.exportCsv.useQuery(
     {
@@ -154,10 +232,7 @@ export default function AdminAssessments() {
       consentOnly: consentOnly || undefined,
       search: search || undefined,
     },
-    {
-      enabled: exportEnabled,
-      staleTime: 0,
-    }
+    { enabled: exportEnabled, staleTime: 0 }
   );
 
   // Trigger download when CSV data arrives
@@ -178,28 +253,14 @@ export default function AdminAssessments() {
 
   const totalPages = data ? Math.ceil(data.total / data.pageSize) : 1;
 
-  const handleSearch = () => {
-    setSearch(searchInput);
-    setPage(1);
-  };
+  const handleSearch = () => { setSearch(searchInput); setPage(1); };
+  const handleRiskFilter = (val: string) => { setRiskFilter(val); setPage(1); };
+  const handleOptOutFilter = (val: string) => { setOptOutFilter(val); setPage(1); };
+  const handleConsentToggle = () => { setConsentOnly(prev => !prev); setPage(1); };
 
-  const handleRiskFilter = (val: string) => {
-    setRiskFilter(val);
-    setPage(1);
-  };
-
-  const handleOptOutFilter = (val: string) => {
-    setOptOutFilter(val);
-    setPage(1);
-  };
-
-  const handleConsentToggle = () => {
-    setConsentOnly(prev => !prev);
-    setPage(1);
-  };
-
-  const handleExportCsv = () => {
-    setExportEnabled(true);
+  const handleOpenBulkDialog = () => {
+    refetchEligible();
+    setBulkDialogOpen(true);
   };
 
   const rows = data?.rows ?? [];
@@ -224,6 +285,26 @@ export default function AdminAssessments() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {/* Bulk invite button */}
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    className="bg-[#F47458] hover:bg-[#e0634a] text-white text-xs gap-1.5 shadow-sm"
+                    onClick={handleOpenBulkDialog}
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    Bulk Send Invites
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs max-w-[220px]">
+                  Send demo invites to all consented respondents who haven't been invited yet.
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            {/* Export CSV */}
             <TooltipProvider delayDuration={200}>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -231,14 +312,10 @@ export default function AdminAssessments() {
                     variant="outline"
                     size="sm"
                     className="border-[#1B365D]/20 text-[#1B365D] text-xs gap-1.5 hover:bg-[#1B365D]/5"
-                    onClick={handleExportCsv}
+                    onClick={() => setExportEnabled(true)}
                     disabled={csvLoading}
                   >
-                    {csvLoading ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" />
-                    )}
+                    {csvLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                     Export CSV
                   </Button>
                 </TooltipTrigger>
@@ -247,6 +324,7 @@ export default function AdminAssessments() {
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
+
             <a href="/compliance-assessment" target="_blank" rel="noopener noreferrer">
               <Button variant="outline" size="sm" className="border-[#1B365D]/20 text-[#1B365D] text-xs">
                 <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View Public Tool
@@ -321,9 +399,7 @@ export default function AdminAssessments() {
           >
             <Users className="h-3 w-3" />
             Consented only
-            {consentOnly && (
-              <span className="ml-0.5 opacity-75">✕</span>
-            )}
+            {consentOnly && <span className="ml-0.5 opacity-75">✕</span>}
           </button>
           {consentOnly && (
             <span className="text-xs text-[#8C757D]">Showing consented respondents only</span>
@@ -344,9 +420,7 @@ export default function AdminAssessments() {
             <div className="flex flex-col items-center justify-center py-16 text-center px-6">
               <ClipboardCheck className="h-10 w-10 text-gray-200 mb-3" />
               <p className="text-sm font-medium text-[#1B365D] mb-1">No assessments yet</p>
-              <p className="text-xs text-[#8C757D]">
-                Share the public assessment link to start collecting leads.
-              </p>
+              <p className="text-xs text-[#8C757D]">Share the public assessment link to start collecting leads.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -360,6 +434,18 @@ export default function AdminAssessments() {
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Risk</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Date</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Status</th>
+                    <th className="text-center px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger className="cursor-default">
+                            <span className="flex items-center gap-1"><Phone className="h-3 w-3" /> Contacted</span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="text-xs max-w-[200px]">
+                            CRM flag — mark leads your team has followed up with offline.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-[#8C757D] uppercase tracking-wide">Actions</th>
                   </tr>
                 </thead>
@@ -416,6 +502,12 @@ export default function AdminAssessments() {
                           )}
                         </div>
                       </td>
+                      <td className="px-4 py-3 text-center">
+                        <MarkContactedButton
+                          token={row.token}
+                          markedContacted={(row as any).markedContacted ?? false}
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <DemoInviteButton
@@ -447,23 +539,11 @@ export default function AdminAssessments() {
                 Showing {((page - 1) * 20) + 1}–{Math.min(page * 20, data?.total ?? 0)} of {data?.total ?? 0} assessments
               </p>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  className="h-7 w-7 p-0 border-gray-200"
-                >
+                <Button variant="outline" size="sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="h-7 w-7 p-0 border-gray-200">
                   <ChevronLeft className="h-3.5 w-3.5" />
                 </Button>
                 <span className="text-xs text-[#8C757D]">{page} / {totalPages}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                  disabled={page >= totalPages}
-                  className="h-7 w-7 p-0 border-gray-200"
-                >
+                <Button variant="outline" size="sm" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="h-7 w-7 p-0 border-gray-200">
                   <ChevronRight className="h-3.5 w-3.5" />
                 </Button>
               </div>
@@ -471,6 +551,67 @@ export default function AdminAssessments() {
           )}
         </div>
       </div>
+
+      {/* Bulk Send Demo Invites Confirmation Dialog */}
+      <Dialog open={bulkDialogOpen} onOpenChange={setBulkDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-[#1B365D]">
+              <Zap className="h-5 w-5 text-[#F47458]" />
+              Bulk Send Demo Invites
+            </DialogTitle>
+            <DialogDescription className="text-sm text-[#8C757D] pt-1">
+              This will send a personalised demo invitation email to every respondent who:
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2 py-1">
+            {[
+              "Consented to be contacted",
+              "Has a valid email address on record",
+              "Has not yet received a demo invite",
+              "Has not opted out of emails",
+            ].map((cond) => (
+              <div key={cond} className="flex items-center gap-2 text-sm text-[#1B365D]">
+                <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+                {cond}
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-lg bg-[#F8F9FA] border border-gray-100 px-4 py-3 text-center">
+            {eligibleData === undefined ? (
+              <div className="flex items-center justify-center gap-2 text-sm text-[#8C757D]">
+                <Loader2 className="h-4 w-4 animate-spin" /> Counting eligible leads…
+              </div>
+            ) : eligibleData.count === 0 ? (
+              <p className="text-sm text-[#8C757D]">No eligible leads found — all consented respondents have already been invited.</p>
+            ) : (
+              <>
+                <p className="text-3xl font-bold text-[#1B365D]">{eligibleData.count}</p>
+                <p className="text-xs text-[#8C757D] mt-0.5">eligible lead{eligibleData.count !== 1 ? "s" : ""} will receive an invite</p>
+              </>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setBulkDialogOpen(false)} disabled={bulkSend.isPending} className="border-gray-200 text-[#1B365D]">
+              Cancel
+            </Button>
+            <Button
+              className="bg-[#F47458] hover:bg-[#e0634a] text-white gap-1.5"
+              onClick={() => bulkSend.mutate()}
+              disabled={bulkSend.isPending || !eligibleData || eligibleData.count === 0}
+            >
+              {bulkSend.isPending ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Sending…</>
+              ) : (
+                <><Zap className="h-4 w-4" /> Send {eligibleData?.count ?? ""} Invite{eligibleData?.count !== 1 ? "s" : ""}</>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </DashboardLayout>
   );
 }

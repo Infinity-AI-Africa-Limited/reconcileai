@@ -990,3 +990,12 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Backend: assessment.exportCsv procedure added (returns CSV string + count, up to 5000 rows, respects all active filters)
 - [x] Frontend: "Consented only" quick-filter chip above the table (toggleable, highlighted when active, resets pagination)
 - [x] Frontend: "Export CSV" button in header (lazy query, triggers Blob download on data arrival, shows spinner while loading)
+
+## Feature: Bulk Demo Invite + Mark as Contacted CRM Flag
+- [x] Schema: Add `markedContacted` boolean column to compliance_assessments table
+- [x] Backend: assessment.bulkSendDemoInvites procedure (sends to all consented + not yet invited, returns count)
+- [x] Backend: assessment.markContacted procedure (toggle markedContacted flag per token)
+- [x] Backend: assessment.countBulkEligible procedure (count for confirmation dialog)
+- [x] Frontend: "Bulk Send Invites" button in header with confirmation dialog (shows eligible count, coral CTA)
+- [x] Frontend: "Mark as contacted" toggle column in admin table (phone icon, navy when active, optimistic update)
+- [x] Frontend: Export CSV includes markedContacted column

@@ -169,6 +169,13 @@
       "when": 1779094400481,
       "tag": "0023_legal_wrecker",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "5",
+      "when": 1779096442175,
+      "tag": "0024_living_synch",
+      "breakpoints": true
     }
   ]
 }

@@ -1067,6 +1067,8 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
   demoInviteSent: boolean("demoInviteSent").default(false).notNull(),
   // Whether the respondent has opted out of further emails (NDPR compliance)
   emailOptedOut: boolean("emailOptedOut").default(false).notNull(),
+  // CRM flag: manually set by sales team to track offline follow-up
+  markedContacted: boolean("markedContacted").default(false).notNull(),
   // Optional: linked to a user account if they were logged in
   userId: int("userId"),
   completedAt: timestamp("completedAt").defaultNow().notNull(),

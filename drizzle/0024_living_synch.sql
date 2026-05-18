@@ -1,0 +1,1 @@
+ALTER TABLE `compliance_assessments` ADD `markedContacted` boolean DEFAULT false NOT NULL;
