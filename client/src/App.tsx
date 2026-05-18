@@ -43,6 +43,7 @@ import SharedReport from "./pages/SharedReport";
 import ComplianceAssessmentLanding from "./pages/ComplianceAssessmentLanding";
 import ComplianceAssessmentQuiz from "./pages/ComplianceAssessmentQuiz";
 import ComplianceAssessmentResult from "./pages/ComplianceAssessmentResult";
+import AdminAssessments from "./pages/AdminAssessments";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -92,7 +93,8 @@ function Router() {
       <Route path="/shared-report/:token" component={SharedReport} />
       <Route path="/compliance-assessment" component={ComplianceAssessmentLanding} />
       <Route path="/compliance-assessment/quiz" component={ComplianceAssessmentQuiz} />
-      <Route path="/compliance-assessment/result/:token" component={ComplianceAssessmentResult} />
+          <Route path="/compliance-assessment/result/:token" component={ComplianceAssessmentResult} />
+          <Route path="/admin/assessments" component={AdminAssessments} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

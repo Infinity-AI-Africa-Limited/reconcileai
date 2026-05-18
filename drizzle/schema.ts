@@ -1061,6 +1061,8 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
   aiNarrative: text("aiNarrative"),
   // Whether the respondent consented to be contacted
   consentToContact: boolean("consentToContact").default(false).notNull(),
+  // Whether a follow-up email was sent to the respondent
+  followUpEmailSent: boolean("followUpEmailSent").default(false).notNull(),
   // Optional: linked to a user account if they were logged in
   userId: int("userId"),
   completedAt: timestamp("completedAt").defaultNow().notNull(),

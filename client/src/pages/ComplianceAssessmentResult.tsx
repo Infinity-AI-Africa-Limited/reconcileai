@@ -1,7 +1,8 @@
 import { useParams, Link } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
-import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink } from "lucide-react";
+import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink, Copy, Check } from "lucide-react";
+import { useState } from "react";
 
 const CATEGORY_LABELS: Record<string, string> = {
   reconciliation: "Reconciliation Process",
@@ -183,9 +184,26 @@ export default function ComplianceAssessmentResult() {
   };
   const rc = riskConfig[riskLevel] ?? riskConfig.medium;
 
-  const handleShare = () => {
-    navigator.clipboard.writeText(window.location.href);
-    // toast handled inline
+  const [copied, setCopied] = useState(false);
+
+  const handleShare = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // Fallback for browsers that block clipboard API
+      const el = document.createElement("textarea");
+      el.value = window.location.href;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }
   };
 
   return (
@@ -202,9 +220,15 @@ export default function ComplianceAssessmentResult() {
                 variant="outline"
                 size="sm"
                 onClick={handleShare}
-                className="border-white/30 text-white hover:bg-white/10 bg-transparent h-8 text-xs"
+                className={`border-white/30 text-white hover:bg-white/10 bg-transparent h-8 text-xs transition-all duration-200 ${
+                  copied ? "bg-white/20 border-white/60" : ""
+                }`}
               >
-                <Share2 className="h-3.5 w-3.5 mr-1.5" /> Share
+                {copied ? (
+                  <><Check className="h-3.5 w-3.5 mr-1.5 text-emerald-300" /> Copied!</>
+                ) : (
+                  <><Share2 className="h-3.5 w-3.5 mr-1.5" /> Share</>
+                )}
               </Button>
             </div>
           </div>

@@ -62,12 +62,21 @@ export default function Home() {
             <img src="https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/kAWaFedmrHMvcLRx.png" alt="Infinity AI" className="h-8" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
             <span className="text-xl font-bold text-[#1B365D] tracking-tight">ReconcileAI</span>
           </div>
-          <Button
-            onClick={() => window.location.href = getLoginUrl()}
-            className="bg-[#1B365D] hover:bg-[#142847] text-white"
-          >
-            Sign In <ArrowRight className="ml-2 h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-3">
+            <a
+              href="/compliance-assessment"
+              className="hidden sm:inline-flex items-center gap-1.5 text-sm font-medium text-[#F47458] hover:text-[#e0644a] transition-colors"
+            >
+              <FileCheck className="h-4 w-4" />
+              Free Assessment
+            </a>
+            <Button
+              onClick={() => window.location.href = getLoginUrl()}
+              className="bg-[#1B365D] hover:bg-[#142847] text-white"
+            >
+              Sign In <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </nav>
 

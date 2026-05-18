@@ -5,7 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
-import { eq, or, desc, sql, isNull, and } from "drizzle-orm";
+import { eq, or, desc, sql, isNull, and, like } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -3183,6 +3183,84 @@ Always be specific, reference actual exception IDs and amounts where available, 
           }).catch(() => {});
         }
 
+        // Send follow-up email to respondent when they have consented to contact
+        if (input.consentToContact && input.respondentEmail) {
+          const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${token}`;
+          const riskLevelLabel = riskLevel === "critical" ? "Critical Risk" : riskLevel === "high" ? "High Risk" : riskLevel === "medium" ? "Medium Risk" : "Low Risk";
+          const firstName = input.respondentName?.split(" ")[0] ?? "there";
+          const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;">
+        <!-- Header -->
+        <tr><td style="background:#1B365D;padding:28px 32px;">
+          <p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;letter-spacing:-0.3px;">ReconcileAI</p>
+          <p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">CBN Compliance Readiness Assessment</p>
+        </td></tr>
+        <!-- Body -->
+        <tr><td style="padding:32px;">
+          <p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your results are ready.</p>
+          <!-- Score block -->
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:8px;margin:0 0 24px;">
+            <tr><td style="padding:20px 24px;">
+              <p style="margin:0 0 4px;font-size:12px;color:#8c757d;text-transform:uppercase;letter-spacing:0.5px;">Your Compliance Score</p>
+              <p style="margin:0;font-size:36px;font-weight:800;color:#1B365D;">${overallScore}<span style="font-size:18px;font-weight:400;color:#8c757d;"> / 100</span></p>
+              <p style="margin:8px 0 0;font-size:13px;font-weight:600;color:${riskLevel === 'low' ? '#059669' : riskLevel === 'medium' ? '#d97706' : '#dc2626'};">● ${riskLevelLabel}</p>
+            </td></tr>
+          </table>
+          ${aiNarrative ? `<p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;font-style:italic;border-left:3px solid #F47458;padding-left:16px;">${aiNarrative}</p>` : ""}
+          <p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">Your full report includes a breakdown of scores across all 5 compliance dimensions and a prioritised list of the 3 most important actions to take before your next CBN examination.</p>
+          <!-- CTA -->
+          <table cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+            <tr><td style="background:#F47458;border-radius:8px;">
+              <a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a>
+            </td></tr>
+          </table>
+          <p style="margin:0 0 8px;font-size:14px;color:#4a5568;line-height:1.6;">If you'd like to see how ReconcileAI can help you close these compliance gaps — from automated reconciliation to CBN-ready audit trails — we'd be happy to walk you through a 20-minute demo.</p>
+          <p style="margin:0;font-size:14px;color:#4a5568;line-height:1.6;"><a href="https://reconcileai.vip" style="color:#F47458;font-weight:600;text-decoration:none;">Book a demo at reconcileai.vip →</a></p>
+        </td></tr>
+        <!-- Footer -->
+        <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
+          <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
+          <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you consented to be contacted when you submitted the assessment.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+          try {
+            const emailPayload = {
+              to: input.respondentEmail,
+              subject: `Your CBN Compliance Score: ${overallScore}/100 — ${riskLevelLabel}`,
+              html: emailHtml,
+              text: `Hi ${firstName},\n\nThank you for completing the ReconcileAI CBN Compliance Readiness Assessment.\n\nYour Score: ${overallScore}/100 (${riskLevelLabel})\n\n${aiNarrative ?? ""}\n\nView your full report: ${resultUrl}\n\nIf you'd like to see how ReconcileAI can help close these compliance gaps, book a demo at https://reconcileai.vip\n\n— ReconcileAI by Infinity AI Africa Limited`,
+            };
+            const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${process.env.BUILT_IN_FORGE_API_KEY}`,
+              },
+              body: JSON.stringify(emailPayload),
+            });
+            if (emailRes.ok) {
+              // Mark follow-up email as sent
+              await drizzle.update(complianceAssessments)
+                .set({ followUpEmailSent: true })
+                .where(eq(complianceAssessments.token, token));
+            }
+          } catch {
+            // Non-fatal: email failure should not block the response
+          }
+        }
+
         return { token, overallScore, riskLevel, categoryScores, aiNarrative };
       }),
 
@@ -3198,6 +3276,56 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .limit(1);
         if (!rows.length) throw new TRPCError({ code: 'NOT_FOUND', message: 'Assessment not found' });
         return rows[0];
+      }),
+
+    // Admin: list all assessments (protected, admin only)
+    listAll: protectedProcedure
+      .input(z.object({
+        page: z.number().min(1).default(1),
+        pageSize: z.number().min(1).max(100).default(20),
+        riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
+        search: z.string().optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        const offset = (input.page - 1) * input.pageSize;
+        const conditions = [];
+        if (input.riskLevel) conditions.push(eq(complianceAssessments.riskLevel, input.riskLevel));
+        if (input.search) {
+          const q = `%${input.search}%`;
+          conditions.push(
+            or(
+              like(complianceAssessments.institutionName, q),
+              like(complianceAssessments.respondentName, q),
+              like(complianceAssessments.respondentEmail, q),
+            )
+          );
+        }
+        const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+        const rows = await drizzle.select({
+          id: complianceAssessments.id,
+          token: complianceAssessments.token,
+          institutionName: complianceAssessments.institutionName,
+          institutionType: complianceAssessments.institutionType,
+          respondentName: complianceAssessments.respondentName,
+          respondentEmail: complianceAssessments.respondentEmail,
+          respondentRole: complianceAssessments.respondentRole,
+          overallScore: complianceAssessments.overallScore,
+          riskLevel: complianceAssessments.riskLevel,
+          categoryScores: complianceAssessments.categoryScores,
+          consentToContact: complianceAssessments.consentToContact,
+          followUpEmailSent: complianceAssessments.followUpEmailSent,
+          createdAt: complianceAssessments.createdAt,
+        }).from(complianceAssessments)
+          .where(whereClause)
+          .orderBy(desc(complianceAssessments.createdAt))
+          .limit(input.pageSize)
+          .offset(offset);
+        const [{ count }] = await drizzle.select({ count: sql`count(*)` }).from(complianceAssessments).where(whereClause);
+        return { rows, total: Number(count), page: input.page, pageSize: input.pageSize };
       }),
   }),
 });

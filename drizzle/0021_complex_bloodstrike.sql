@@ -1,0 +1,1 @@
+ALTER TABLE `compliance_assessments` ADD `followUpEmailSent` boolean DEFAULT false NOT NULL;
