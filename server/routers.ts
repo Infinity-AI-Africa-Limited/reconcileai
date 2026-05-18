@@ -3326,13 +3326,17 @@ Always be specific, reference actual exception IDs and amounts where available, 
               <p style="margin:4px 0 0;font-size:13px;color:#4a5568;">${desc}</p>
             </td></tr><tr><td style="height:8px;"></td></tr>`).join("")}
           </table>
-          <table cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
-            <tr><td style="background:#F47458;border-radius:8px;">
-              <a href="https://reconcileai.vip" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">Book a 20-Minute Demo →</a>
+          <table cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+            <tr><td style="background:#1B365D;border-radius:8px;">
+              <a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a>
             </td></tr>
           </table>
-          <p style="margin:0 0 8px;font-size:14px;color:#4a5568;line-height:1.6;">You can also review your full compliance report at any time:</p>
-          <p style="margin:0;font-size:14px;"><a href="${resultUrl}" style="color:#F47458;font-weight:600;text-decoration:none;">View your assessment report →</a></p>
+          <p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Once you've reviewed your report, we'd love to walk you through exactly how ReconcileAI closes each gap in a focused 20-minute demo:</p>
+          <table cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+            <tr><td style="background:#F47458;border-radius:8px;">
+              <a href="https://reconcileai.vip" style="display:inline-block;padding:12px 24px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">Book a 20-Minute Demo →</a>
+            </td></tr>
+          </table>
         </td></tr>
         <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
           <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
