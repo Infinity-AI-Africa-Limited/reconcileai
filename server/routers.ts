@@ -3228,6 +3228,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
           <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
           <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you consented to be contacted when you submitted the assessment.</p>
+          <p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -3341,6 +3342,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
           <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
           <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you completed a compliance assessment at reconcileai.vip.</p>
+          <p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -3421,6 +3423,23 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .offset(offset);
         const [{ count }] = await drizzle.select({ count: sql`count(*)` }).from(complianceAssessments).where(whereClause);
         return { rows, total: Number(count), page: input.page, pageSize: input.pageSize };
+      }),
+
+    unsubscribe: publicProcedure
+      .input(z.object({ token: z.string().length(48) }))
+      .mutation(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        const rows = await drizzle.select({ id: complianceAssessments.id, emailOptedOut: complianceAssessments.emailOptedOut })
+          .from(complianceAssessments)
+          .where(eq(complianceAssessments.token, input.token))
+          .limit(1);
+        if (!rows.length) throw new TRPCError({ code: 'NOT_FOUND', message: 'Assessment not found' });
+        await drizzle.update(complianceAssessments)
+          .set({ emailOptedOut: true })
+          .where(eq(complianceAssessments.token, input.token));
+        return { success: true, message: 'You have been unsubscribed from all ReconcileAI assessment emails.' };
       }),
   }),
 });
