@@ -1073,6 +1073,10 @@ export const complianceAssessments = mysqlTable("compliance_assessments", {
   adminNotes: text("adminNotes"),
   // CRM: timestamp auto-set when markedContacted is toggled on; cleared when toggled off
   lastContactedAt: timestamp("lastContactedAt"),
+  // CRM: scheduled callback / follow-up date set by sales team; rows past this date surface as overdue
+  followUpDueAt: timestamp("followUpDueAt"),
+  // CRM: lead pipeline stage for funnel tracking
+  pipelineStage: mysqlEnum("pipelineStage", ["new", "contacted", "demo_booked", "proposal_sent", "closed_won", "closed_lost"]).default("new").notNull(),
   // Optional: linked to a user account if they were logged in
   userId: int("userId"),
   completedAt: timestamp("completedAt").defaultNow().notNull(),

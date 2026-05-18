@@ -1015,3 +1015,14 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Backend: lastContactedAt included in listAll select
 - [x] Frontend: "Has notes" amber quick-filter chip (third chip alongside Consented only + Not yet contacted)
 - [x] Frontend: Relative timestamp shown under phone icon when lastContactedAt is set (e.g. "3 days ago")
+
+## Feature: Follow-up Due Date + Pipeline Stage
+- [x] Schema: Add `followUpDueAt` timestamp and `pipelineStage` enum column to compliance_assessments
+- [x] Backend: assessment.setFollowUpDue procedure (set/clear followUpDueAt per token)
+- [x] Backend: assessment.setPipelineStage procedure (update pipelineStage per token)
+- [x] Backend: followUpDueAt + pipelineStage included in listAll select
+- [x] Frontend: Date picker cell per row — native date input, saves on change, clears with ✕ button
+- [x] Frontend: Overdue rows highlight amber (followUpDueAt < today and stage not Closed Won/Lost)
+- [x] Frontend: Pipeline stage dropdown per row (New → Contacted → Demo Booked → Proposal Sent → Closed Won → Closed Lost)
+- [x] Frontend: Stage badge with colour coding (grey/blue/amber/purple/emerald/red)
+- [x] Frontend: Overdue count summary card replaces Pending Demo Invites

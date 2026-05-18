@@ -3427,6 +3427,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
           markedContacted: complianceAssessments.markedContacted,
           adminNotes: complianceAssessments.adminNotes,
           lastContactedAt: complianceAssessments.lastContactedAt,
+          followUpDueAt: complianceAssessments.followUpDueAt,
+          pipelineStage: complianceAssessments.pipelineStage,
           createdAt: complianceAssessments.createdAt,
         }).from(complianceAssessments)
           .where(whereClause)
@@ -3595,6 +3597,37 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .set({ adminNotes: input.notes || null })
           .where(eq(complianceAssessments.token, input.token));
         return { success: true };
+      }),
+
+    // Admin: set or clear the follow-up due date for a single assessment
+    setFollowUpDue: protectedProcedure
+      .input(z.object({ token: z.string().length(48), dueAt: z.date().nullable() }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        await drizzle.update(complianceAssessments)
+          .set({ followUpDueAt: input.dueAt })
+          .where(eq(complianceAssessments.token, input.token));
+        return { success: true, dueAt: input.dueAt };
+      }),
+
+    // Admin: update the pipeline stage for a single assessment
+    setPipelineStage: protectedProcedure
+      .input(z.object({
+        token: z.string().length(48),
+        stage: z.enum(["new", "contacted", "demo_booked", "proposal_sent", "closed_won", "closed_lost"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        const { complianceAssessments } = await import("../drizzle/schema");
+        await drizzle.update(complianceAssessments)
+          .set({ pipelineStage: input.stage })
+          .where(eq(complianceAssessments.token, input.token));
+        return { success: true, stage: input.stage };
       }),
 
     // Admin: count eligible for bulk demo invite (consented, has email, not yet invited, not opted out)

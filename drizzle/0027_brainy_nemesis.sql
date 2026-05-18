@@ -1,0 +1,2 @@
+ALTER TABLE `compliance_assessments` ADD `followUpDueAt` timestamp;--> statement-breakpoint
+ALTER TABLE `compliance_assessments` ADD `pipelineStage` enum('new','contacted','demo_booked','proposal_sent','closed_won','closed_lost') DEFAULT 'new' NOT NULL;
