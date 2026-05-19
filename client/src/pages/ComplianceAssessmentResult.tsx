@@ -7,7 +7,7 @@ import { useState } from "react";
 import jsPDF from "jspdf";
 
 // ── Calendly / booking link — swap this when the real link is available ────
-const DEMO_BOOKING_URL = "https://calendly.com/reconcileai/demo";
+const DEMO_BOOKING_URL = "https://calendly.com/richard-infinityaiafrica/30min";
 
 const CATEGORY_LABELS: Record<string, string> = {
   reconciliation: "Reconciliation Process",
