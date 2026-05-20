@@ -10,7 +10,7 @@ import { serveStatic, setupVite } from "./vite";
 import { getLlmProviderInfo } from "./llm";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
-import { storagePut, storageGet } from "../storage";
+import { storagePut, storageGet, storageDelete } from "../storage";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -70,12 +70,13 @@ async function startServer() {
       const { url: downloadUrl } = await storageGet(key);
       const downloadMs = Date.now() - downloadStart;
 
+      // Clean up probe file — fire-and-forget, never fail the health check over it
+      storageDelete(key).catch(() => undefined);
+
       checks.storage = {
         status: "ok",
         uploadMs,
         downloadMs,
-        uploadUrl: uploadedUrl,
-        downloadUrl,
       };
     } catch (err) {
       checks.storage = {
