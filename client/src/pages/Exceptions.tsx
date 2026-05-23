@@ -1,24 +1,21 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList, FilterX, Filter } from "lucide-react";
+import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList, FilterX, Filter, CalendarDays, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 
 // ─── Template category filter persistence ───────────────────────────────────
-// "true" = auto-filter ON (default), "false" = user cleared it this session.
-// Stored in localStorage so it survives logout/login; cleared back to "true"
-// only when the user explicitly clicks "Re-enable auto-filter".
 const LS_KEY = "reconcileai_template_autofilter";
 
 function readFilterPref(): boolean {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    // Default to true if nothing stored yet
     return raw === null ? true : raw === "true";
   } catch {
     return true;
@@ -43,19 +40,44 @@ const TEMPLATE_CATEGORIES = [
 ] as const;
 type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
 
+// ─── Date helpers ────────────────────────────────────────────────────────────
+function toLocalDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function startOfDay(dateStr: string): Date {
+  const d = new Date(dateStr);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfDay(dateStr: string): Date {
+  const d = new Date(dateStr);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
 export default function Exceptions() {
+  const today = useMemo(() => toLocalDateString(new Date()), []);
+
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
   const [filters, setFilters] = useState({ status: "all", category: "all", severity: "all" });
 
-  // Auto-filter preference — read from localStorage on mount so it persists across login/logout
+  // Date range — default to today (single-day view)
+  const [dateFrom, setDateFrom] = useState<string>(today);
+  const [dateTo, setDateTo] = useState<string>(today);
+
+  // Auto-filter preference
   const [autoFilter, setAutoFilter] = useState<boolean>(true);
   useEffect(() => {
     setAutoFilter(readFilterPref());
   }, []);
 
-  // Derive the active category for the template query
   const selectedCategory: TemplateCategory | undefined =
     autoFilter && selectedEx && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory)
       ? (selectedEx.category as TemplateCategory)
@@ -65,9 +87,15 @@ export default function Exceptions() {
     selectedCategory ? { category: selectedCategory } : undefined
   );
 
+  // Stable date objects to avoid infinite re-fetch
+  const dateFromObj = useMemo(() => startOfDay(dateFrom), [dateFrom]);
+  const dateToObj = useMemo(() => endOfDay(dateTo), [dateTo]);
+
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
     status: statusFilter !== "all" ? statusFilter : undefined,
-    limit: 100,
+    dateFrom: dateFromObj,
+    dateTo: dateToObj,
+    limit: 200,
     offset: 0,
   });
 
@@ -108,6 +136,14 @@ export default function Exceptions() {
     writeFilterPref(true);
   };
 
+  const isToday = dateFrom === today && dateTo === today;
+  const isSingleDay = dateFrom === dateTo;
+
+  const handleResetToToday = () => {
+    setDateFrom(today);
+    setDateTo(today);
+  };
+
   const severityColor = (s: string) => {
     switch (s) {
       case "critical": return "bg-red-100 text-red-700";
@@ -127,6 +163,13 @@ export default function Exceptions() {
     }
   };
 
+  // Client-side filter for category and severity (date/status filtered server-side)
+  const filtered = data?.data?.filter((ex) => {
+    if (filters.category !== "all" && ex.category !== filters.category) return false;
+    if (filters.severity !== "all" && ex.severity !== filters.severity) return false;
+    return true;
+  }) ?? [];
+
   return (
     <div className="space-y-6">
       <div>
@@ -135,8 +178,40 @@ export default function Exceptions() {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-3">
-        <Select value={filters.status} onValueChange={(v) => setFilters({ ...filters, status: v === "all" ? "" : v })}>
+      <div className="flex flex-wrap gap-3 items-end">
+        {/* Date range */}
+        <div className="flex items-center gap-2 bg-muted/40 border rounded-lg px-3 py-2">
+          <CalendarDays className="h-4 w-4 text-muted-foreground shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <Input
+              type="date"
+              value={dateFrom}
+              max={dateTo}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
+            />
+            <span className="text-xs text-muted-foreground">→</span>
+            <Input
+              type="date"
+              value={dateTo}
+              min={dateFrom}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
+            />
+          </div>
+          {!isToday && (
+            <button
+              onClick={handleResetToToday}
+              className="ml-1 text-muted-foreground hover:text-foreground"
+              title="Reset to today"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        {/* Status */}
+        <Select value={filters.status} onValueChange={(v) => setFilters({ ...filters, status: v })}>
           <SelectTrigger className="w-40"><SelectValue placeholder="Status" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Statuses</SelectItem>
@@ -146,7 +221,9 @@ export default function Exceptions() {
             <SelectItem value="dismissed">Dismissed</SelectItem>
           </SelectContent>
         </Select>
-        <Select value={filters.category} onValueChange={(v) => setFilters({ ...filters, category: v === "all" ? "" : v })}>
+
+        {/* Category */}
+        <Select value={filters.category} onValueChange={(v) => setFilters({ ...filters, category: v })}>
           <SelectTrigger className="w-48"><SelectValue placeholder="Category" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Categories</SelectItem>
@@ -157,7 +234,9 @@ export default function Exceptions() {
             <SelectItem value="unmatched">Unmatched</SelectItem>
           </SelectContent>
         </Select>
-        <Select value={filters.severity} onValueChange={(v) => setFilters({ ...filters, severity: v === "all" ? "" : v })}>
+
+        {/* Severity */}
+        <Select value={filters.severity} onValueChange={(v) => setFilters({ ...filters, severity: v })}>
           <SelectTrigger className="w-36"><SelectValue placeholder="Severity" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Severity</SelectItem>
@@ -167,12 +246,17 @@ export default function Exceptions() {
             <SelectItem value="low">Low</SelectItem>
           </SelectContent>
         </Select>
+
+        {/* Date label */}
+        <span className="text-xs text-muted-foreground self-center">
+          {isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`}
+        </span>
       </div>
 
       {/* Exceptions Table */}
       {isLoading ? (
         <div className="flex items-center justify-center h-32"><Loader2 className="h-6 w-6 animate-spin" /></div>
-      ) : data?.data && data.data.length > 0 ? (
+      ) : filtered.length > 0 ? (
         <Card>
           <CardContent className="pt-6">
             <div className="overflow-x-auto">
@@ -189,7 +273,7 @@ export default function Exceptions() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.data.map((ex) => (
+                  {filtered.map((ex) => (
                     <tr key={ex.id} className="border-b last:border-0 hover:bg-muted/30">
                       <td className="py-3 px-2 font-mono text-xs">{ex.id}</td>
                       <td className="py-3 px-2">
@@ -213,7 +297,10 @@ export default function Exceptions() {
                 </tbody>
               </table>
             </div>
-            <p className="text-xs text-muted-foreground mt-3">Showing {data.data.length} of {data.total} exceptions</p>
+            <p className="text-xs text-muted-foreground mt-3">
+              Showing {filtered.length} exception{filtered.length !== 1 ? "s" : ""}{" "}
+              {isToday ? "for today" : isSingleDay ? `for ${dateFrom}` : `from ${dateFrom} to ${dateTo}`}
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -221,7 +308,14 @@ export default function Exceptions() {
           <CardContent className="flex flex-col items-center justify-center py-12">
             <CheckCircle2 className="h-12 w-12 text-green-500 mb-4" />
             <h3 className="font-semibold text-lg">No Exceptions Found</h3>
-            <p className="text-muted-foreground text-sm mt-1">All transactions are reconciled or no matching filters.</p>
+            <p className="text-muted-foreground text-sm mt-1">
+              {isToday ? "No exceptions for today." : "No exceptions match the selected date range and filters."}
+            </p>
+            {!isToday && (
+              <Button variant="outline" size="sm" className="mt-4" onClick={handleResetToToday}>
+                Reset to today
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}
@@ -252,163 +346,72 @@ export default function Exceptions() {
                     {(selectedEx.severity === "low" || !selectedEx.severity) && "Informational — minor discrepancy, auto-resolvable or monitoring only"}
                   </p>
                 </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">Status</p>
-                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(selectedEx.status || "open")}`}>{selectedEx.status}</span>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">Transaction ID</p>
-                  <p className="font-mono text-sm">{selectedEx.transactionId}</p>
-                </div>
               </div>
-
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Description</p>
                 <p className="text-sm bg-muted/50 p-3 rounded">{selectedEx.description}</p>
               </div>
-
               {selectedEx.suggestedResolution && (
                 <div>
-                  <p className="text-xs text-muted-foreground mb-1">Suggested Resolution</p>
+                  <p className="text-xs text-muted-foreground mb-1">AI Suggested Resolution</p>
                   <p className="text-sm bg-blue-50 p-3 rounded text-blue-800">{selectedEx.suggestedResolution}</p>
                 </div>
               )}
 
-              {selectedEx.aiAnalysis && (() => {
-                let parsed: any = null;
-                try { parsed = JSON.parse(selectedEx.aiAnalysis); } catch {}
-                if (parsed && typeof parsed === "object") {
-                  return (
-                    <div>
-                      <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1"><MessageSquare className="h-3 w-3" /> AI Analysis</p>
-                      <div className="bg-purple-50 p-3 rounded space-y-2">
-                        {parsed.plainLanguage && (
-                          <p className="text-sm text-purple-900">{parsed.plainLanguage}</p>
-                        )}
-                        {parsed.rootCause && (
-                          <div>
-                            <p className="text-[10px] font-semibold text-purple-700 uppercase tracking-wide">Root Cause</p>
-                            <p className="text-xs text-purple-800">{parsed.rootCause}</p>
-                          </div>
-                        )}
-                        {parsed.recommendedAction && (
-                          <div>
-                            <p className="text-[10px] font-semibold text-purple-700 uppercase tracking-wide">Recommended Action</p>
-                            <p className="text-xs text-purple-800">{parsed.recommendedAction}</p>
-                          </div>
-                        )}
-                        {parsed.confidence !== undefined && (
-                          <p className="text-[10px] text-purple-600">Confidence: {Math.round(parsed.confidence * 100)}%</p>
-                        )}
-                      </div>
-                    </div>
-                  );
-                }
-                return (
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1"><MessageSquare className="h-3 w-3" /> AI Analysis</p>
-                    <p className="text-sm bg-purple-50 p-3 rounded text-purple-800">{selectedEx.aiAnalysis}</p>
+              {/* Resolution templates */}
+              {templates && templates.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-xs text-muted-foreground">Resolution Templates</p>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={autoFilter ? handleClearFilter : handleReenableFilter}
+                            className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+                          >
+                            {autoFilter ? <FilterX className="h-3 w-3" /> : <Filter className="h-3 w-3" />}
+                            {autoFilter ? "Clear filter" : "Re-enable filter"}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          {autoFilter ? "Stop auto-filtering templates by category" : "Auto-filter templates by exception category"}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
-                );
-              })()}
-
-              {(selectedEx.status === "open" || selectedEx.status === "in_review") && (
-                <div className="space-y-3 pt-2 border-t">
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-sm font-medium block">Resolution Notes</label>
-                      <div className="flex items-center gap-1.5">
-                        {/* Re-enable auto-filter button — visible only when filter was cleared this session */}
-                        {!autoFilter && selectedCategory === undefined && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory) && (
-                          <TooltipProvider delayDuration={200}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-8 px-2 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 transition-all duration-150 hover:scale-105 group"
-                                  onClick={handleReenableFilter}
-                                >
-                                  <Filter className="h-3 w-3 mr-1 transition-transform duration-150 group-hover:rotate-12" />
-                                  Re-enable filter
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top" className="max-w-[220px] text-center">
-                                <p className="text-xs">Auto-filter is off. Click to show only templates matching <span className="font-semibold">{selectedEx.category?.replace(/_/g, " ")}</span> exceptions — your preference is saved across sessions.</p>
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    {templates.map((t: any) => (
+                      <button
+                        key={t.id}
+                        className="w-full text-left text-xs bg-muted/50 hover:bg-muted p-2 rounded border border-transparent hover:border-border"
+                        onClick={() => setResolveNotes(t.templateText)}
+                      >
+                        <span className="font-medium">{t.title}</span>
+                        {t.successRate != null && (
+                          <span className="ml-2 text-green-600">{Math.round(t.successRate * 100)}% success</span>
                         )}
-                        <Select
-                          value=""
-                          onValueChange={(val: string) => {
-                            if (val === "__clear_filter__") {
-                              handleClearFilter();
-                              return;
-                            }
-                            const template = (templates || []).find((t: any) => t.id.toString() === val);
-                            if (template) {
-                              setResolveNotes(template.templateText);
-                            }
-                          }}
-                        >
-                          <SelectTrigger className="w-[200px] h-8">
-                            <SelectValue placeholder={
-                              autoFilter && selectedCategory
-                                ? `Templates (${selectedCategory.replace(/_/g, " ")})`
-                                : "Use Template"
-                            } />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {/* Clear Filter option — only shown when auto-filter is active and a category is matched */}
-                            {autoFilter && selectedCategory && (
-                              <SelectItem value="__clear_filter__" className="text-muted-foreground text-xs border-b mb-1 pb-1">
-                                <span className="flex items-center gap-1.5">
-                                  <FilterX className="h-3 w-3" />
-                                  Clear filter — show all templates
-                                </span>
-                              </SelectItem>
-                            )}
-                            {(templates || []).length === 0 ? (
-                              <div className="px-3 py-2 text-xs text-muted-foreground">No templates for this category</div>
-                            ) : (
-                              (templates || []).map((template: any) => (
-                                <SelectItem key={template.id} value={String(template.id)}>
-                                  {template.name}
-                                </SelectItem>
-                              ))
-                            )}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-                    <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Add notes about how this was resolved..." rows={3} />
-                  </div>
-                  {selectedEx.status === "open" && (
-                    <Button
-                      variant="outline"
-                      onClick={() => handleMoveToReview(selectedEx.id)}
-                      disabled={moveToReviewMutation.isPending}
-                      className="w-full border-amber-300 text-amber-700 hover:bg-amber-50"
-                    >
-                      {moveToReviewMutation.isPending ? (
-                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                      ) : (
-                        <ClipboardList className="h-4 w-4 mr-1" />
-                      )}
-                      Move to Review Queue
-                    </Button>
-                  )}
-                  <div className="flex gap-2">
-                    <Button onClick={() => handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
-                      <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
-                    </Button>
-                    <Button variant="outline" onClick={() => handleResolve(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
-                      Dismiss
-                    </Button>
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}
+
+              <div>
+                <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
+                <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                <Button onClick={() => handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
+                  <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
+                </Button>
+                <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending} className="flex-1">
+                  <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
+                </Button>
+                <Button variant="ghost" onClick={() => handleResolve(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
+                  Dismiss
+                </Button>
+              </div>
             </div>
           )}
         </DialogContent>

@@ -689,6 +689,8 @@ export const appRouter = router({
           status: z.string().max(30).optional(),
           category: z.string().max(50).optional(),
           severity: z.string().max(20).optional(),
+          dateFrom: z.date().optional(),
+          dateTo: z.date().optional(),
           limit: z.number().int().min(1).max(500).default(50),
           offset: z.number().int().min(0).default(0),
         })

@@ -452,6 +452,8 @@ export async function getExceptions(filters: {
   status?: string;
   category?: string;
   severity?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
   limit?: number;
   offset?: number;
 }) {
@@ -463,6 +465,8 @@ export async function getExceptions(filters: {
   if (filters.status) conditions.push(eq(exceptions.status, filters.status as any));
   if (filters.category) conditions.push(eq(exceptions.category, filters.category as any));
   if (filters.severity) conditions.push(eq(exceptions.severity, filters.severity as any));
+  if (filters.dateFrom) conditions.push(gte(exceptions.createdAt, filters.dateFrom));
+  if (filters.dateTo) conditions.push(lte(exceptions.createdAt, filters.dateTo));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
   const limit = clampLimit(filters.limit);

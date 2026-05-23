@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,6 +10,7 @@ import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Downlo
 import { toast } from "sonner";
 
 export default function ReconciliationPage() {
+  const [, setLocation] = useLocation();
   const { data: channels } = trpc.channels.list.useQuery();
   const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery();
   const createMutation = trpc.reconciliation.create.useMutation();
@@ -306,7 +308,7 @@ export default function ReconciliationPage() {
                         </thead>
                         <tbody>
                           {jobDetail.exceptions.slice(0, 20).map((ex) => (
-                            <tr key={ex.id} className="border-b last:border-0">
+                            <tr key={ex.id} className="border-b last:border-0 hover:bg-muted/30">
                               <td className="py-2 px-3 font-medium">{ex.category?.replace(/_/g, " ")}</td>
                               <td className="py-2 px-3">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
@@ -318,11 +320,15 @@ export default function ReconciliationPage() {
                               </td>
                               <td className="py-2 px-3 max-w-[300px] truncate">{ex.description}</td>
                               <td className="py-2 px-3">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                  ex.status === "open" ? "bg-red-100 text-red-700" :
-                                  ex.status === "in_review" ? "bg-amber-100 text-amber-700" :
-                                  "bg-green-100 text-green-700"
-                                }`}>{ex.status}</span>
+                                <button
+                                  onClick={() => setLocation("/exceptions")}
+                                  title={`View exception #${ex.id} in Exception Management`}
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer hover:opacity-75 transition-opacity underline-offset-2 hover:underline ${
+                                    ex.status === "open" ? "bg-red-100 text-red-700" :
+                                    ex.status === "in_review" ? "bg-amber-100 text-amber-700" :
+                                    "bg-green-100 text-green-700"
+                                  }`}
+                                >{ex.status}</button>
                               </td>
                             </tr>
                           ))}

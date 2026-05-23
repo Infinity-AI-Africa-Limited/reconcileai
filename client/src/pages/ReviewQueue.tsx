@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,7 +10,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import {
   Loader2, CheckCircle2, XCircle, Eye, ClipboardList,
   AlertTriangle, Sparkles, Brain, FileText, Mail, BookOpen,
-  ChevronRight, Clock, TrendingDown, Zap
+  ChevronRight, Clock, TrendingDown, Zap, CalendarDays, X
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -25,12 +26,44 @@ type DiagnosisResult = {
   actionDrafts?: Array<{ actionType: string; subject?: string; body?: string; amount?: number; narrative?: string; instruction?: string }>;
 };
 
+// ─── Date helpers ────────────────────────────────────────────────────────────
+function toLocalDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function startOfDay(dateStr: string): Date {
+  const d = new Date(dateStr);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfDay(dateStr: string): Date {
+  const d = new Date(dateStr);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
 export default function ReviewQueuePage() {
+  const today = useMemo(() => toLocalDateString(new Date()), []);
+
+  // Date range — default to today
+  const [dateFrom, setDateFrom] = useState<string>(today);
+  const [dateTo, setDateTo] = useState<string>(today);
+
+  const dateFromObj = useMemo(() => startOfDay(dateFrom), [dateFrom]);
+  const dateToObj = useMemo(() => endOfDay(dateTo), [dateTo]);
+
   const { data: exceptions, isLoading, refetch } = trpc.exceptions.list.useQuery({
     status: "open",
-    limit: 100,
+    dateFrom: dateFromObj,
+    dateTo: dateToObj,
+    limit: 200,
     offset: 0,
   });
+
   const resolveMutation = trpc.exceptions.resolve.useMutation();
   const diagnoseMutation = trpc.superAgent.diagnose.useMutation();
 
@@ -39,6 +72,14 @@ export default function ReviewQueuePage() {
   const [diagnosisEx, setDiagnosisEx] = useState<any>(null);
   const [diagnosisResult, setDiagnosisResult] = useState<DiagnosisResult | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
+
+  const isToday = dateFrom === today && dateTo === today;
+  const isSingleDay = dateFrom === dateTo;
+
+  const handleResetToToday = () => {
+    setDateFrom(today);
+    setDateTo(today);
+  };
 
   const handleAction = async (id: number, status: "resolved" | "dismissed") => {
     try {
@@ -57,11 +98,8 @@ export default function ReviewQueuePage() {
     setDiagnosisResult(null);
     setIsDiagnosing(true);
     try {
-      // The diagnose procedure takes a transactionId — use the exception's transactionId if available,
-      // otherwise fall back to the exception id itself as a best-effort
       const txnId = ex.transactionId ?? ex.id;
       const raw = await diagnoseMutation.mutateAsync({ transactionId: txnId });
-      // Map the server response shape to our local DiagnosisResult type
       const r = raw as { diagnosis: any; actionDraft: any; memoriesUsed: number };
       const mapped: DiagnosisResult = {
         exceptionId: ex.id,
@@ -107,6 +145,42 @@ export default function ReviewQueuePage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-primary">Review Queue</h1>
         <p className="text-muted-foreground mt-1">Exceptions requiring manual review and intervention</p>
+      </div>
+
+      {/* Date range filter */}
+      <div className="flex flex-wrap gap-3 items-center">
+        <div className="flex items-center gap-2 bg-muted/40 border rounded-lg px-3 py-2">
+          <CalendarDays className="h-4 w-4 text-muted-foreground shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <Input
+              type="date"
+              value={dateFrom}
+              max={dateTo}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
+            />
+            <span className="text-xs text-muted-foreground">→</span>
+            <Input
+              type="date"
+              value={dateTo}
+              min={dateFrom}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
+            />
+          </div>
+          {!isToday && (
+            <button
+              onClick={handleResetToToday}
+              className="ml-1 text-muted-foreground hover:text-foreground"
+              title="Reset to today"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        <span className="text-xs text-muted-foreground">
+          {isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`}
+        </span>
       </div>
 
       {isLoading ? (
@@ -163,14 +237,24 @@ export default function ReviewQueuePage() {
               </CardContent>
             </Card>
           ))}
-          <p className="text-xs text-muted-foreground text-center">{exceptions.data.length} of {exceptions.total} open exceptions</p>
+          <p className="text-xs text-muted-foreground text-center">
+            {exceptions.data.length} of {exceptions.total} open exception{exceptions.total !== 1 ? "s" : ""}{" "}
+            {isToday ? "today" : isSingleDay ? `on ${dateFrom}` : `from ${dateFrom} to ${dateTo}`}
+          </p>
         </div>
       ) : (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <ClipboardList className="h-12 w-12 text-green-500 mb-4" />
             <h3 className="font-semibold text-lg">Queue is Clear</h3>
-            <p className="text-muted-foreground text-sm mt-1">No exceptions requiring manual review.</p>
+            <p className="text-muted-foreground text-sm mt-1">
+              {isToday ? "No open exceptions for today." : "No open exceptions match the selected date range."}
+            </p>
+            {!isToday && (
+              <Button variant="outline" size="sm" className="mt-4" onClick={handleResetToToday}>
+                Reset to today
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}
@@ -235,184 +319,89 @@ export default function ReviewQueuePage() {
           <SheetHeader>
             <SheetTitle className="flex items-center gap-2">
               <Brain className="h-5 w-5 text-purple-600" />
-              Super Agent Deep Diagnosis
+              Deep Diagnosis — Exception #{diagnosisEx?.id}
             </SheetTitle>
           </SheetHeader>
-
-          {diagnosisEx && (
-            <div className="mt-4 space-y-4">
-              {/* Exception summary */}
-              <div className="p-3 rounded-lg bg-muted/50 border">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${severityColor(diagnosisEx.severity || "low")}`}>
-                    {diagnosisEx.severity?.toUpperCase()}
-                  </span>
-                  <span className="text-xs text-muted-foreground">Exception #{diagnosisEx.id}</span>
+          {isDiagnosing ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-4">
+              <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
+              <p className="text-sm text-muted-foreground">Analysing exception with AI...</p>
+            </div>
+          ) : diagnosisResult ? (
+            <div className="mt-6 space-y-5">
+              {/* Root cause */}
+              <div className="rounded-lg bg-purple-50 border border-purple-200 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="h-4 w-4 text-purple-600" />
+                  <p className="text-sm font-semibold text-purple-900">Root Cause</p>
                 </div>
-                <p className="text-sm">{diagnosisEx.description}</p>
+                <p className="text-sm text-purple-800">{diagnosisResult.rootCause}</p>
+                {diagnosisResult.shortfall != null && (
+                  <p className="text-xs text-purple-700 mt-1">
+                    Shortfall: ₦{diagnosisResult.shortfall.toLocaleString()}
+                    {diagnosisResult.deductionType && ` (${diagnosisResult.deductionType})`}
+                  </p>
+                )}
               </div>
 
-              {isDiagnosing && (
-                <div className="flex flex-col items-center justify-center py-12 gap-3">
-                  <div className="relative">
-                    <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
-                    <Sparkles className="h-4 w-4 text-purple-400 absolute -top-1 -right-1" />
-                  </div>
-                  <p className="text-sm text-muted-foreground">Super Agent is analysing this exception…</p>
-                  <div className="text-xs text-muted-foreground space-y-1 text-center">
-                    <p className="flex items-center gap-1"><ChevronRight className="h-3 w-3" /> Classifying exception type</p>
-                    <p className="flex items-center gap-1"><ChevronRight className="h-3 w-3" /> Retrieving similar past cases</p>
-                    <p className="flex items-center gap-1"><ChevronRight className="h-3 w-3" /> Generating resolution drafts</p>
+              {/* Confidence + recommended action */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground mb-1">Confidence</p>
+                  <p className="text-lg font-bold text-primary">{Math.round(diagnosisResult.confidence * 100)}%</p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground mb-1">Recommended Action</p>
+                  <p className="text-xs font-medium">{diagnosisResult.recommendedAction}</p>
+                </div>
+              </div>
+
+              {/* Similar cases */}
+              {diagnosisResult.similarCases && diagnosisResult.similarCases.length > 0 && (
+                <div>
+                  <p className="text-sm font-semibold mb-2 flex items-center gap-1.5">
+                    <Clock className="h-4 w-4 text-muted-foreground" /> Similar Past Cases
+                  </p>
+                  <div className="space-y-2">
+                    {diagnosisResult.similarCases.map((c) => (
+                      <div key={c.id} className="rounded border p-3 text-xs space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">Exception #{c.id}</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${c.outcome === "resolved" ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-700"}`}>{c.outcome}</span>
+                        </div>
+                        <p className="text-muted-foreground">{c.resolution}</p>
+                        {c.reasoning && <p className="text-blue-600 italic">{c.reasoning}</p>}
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
 
-              {diagnosisResult && !isDiagnosing && (
-                <div className="space-y-4">
-                  {/* Diagnosis */}
-                  <div className="p-4 rounded-lg border border-purple-200 bg-purple-50/50">
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="font-semibold text-sm text-purple-900">Diagnosis</h3>
-                      <div className="flex items-center gap-1.5">
-                        <div className="h-1.5 w-16 rounded-full bg-purple-200">
-                          <div
-                            className="h-1.5 rounded-full bg-purple-600"
-                            style={{ width: `${(diagnosisResult.confidence ?? 0) * 100}%` }}
-                          />
-                        </div>
-                        <span className="text-[10px] text-purple-700 font-medium">
-                          {Math.round((diagnosisResult.confidence ?? 0) * 100)}% confidence
-                        </span>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <div>
-                        <p className="text-[10px] text-purple-600 uppercase tracking-wide font-medium">Category</p>
-                        <p className="text-sm font-medium text-purple-900">{diagnosisResult.category?.replace(/_/g, " ")}</p>
-                      </div>
-                      <div>
-                        <p className="text-[10px] text-purple-600 uppercase tracking-wide font-medium">Root Cause</p>
-                        <p className="text-sm text-purple-800">{diagnosisResult.rootCause}</p>
-                      </div>
-                      {diagnosisResult.shortfall != null && (
+              {/* Action drafts */}
+              {diagnosisResult.actionDrafts && diagnosisResult.actionDrafts.length > 0 && (
+                <div>
+                  <p className="text-sm font-semibold mb-2 flex items-center gap-1.5">
+                    <Zap className="h-4 w-4 text-amber-500" /> Suggested Actions
+                  </p>
+                  <div className="space-y-3">
+                    {diagnosisResult.actionDrafts.map((a, i) => (
+                      <div key={i} className="rounded border p-3 space-y-2">
                         <div className="flex items-center gap-2">
-                          <TrendingDown className="h-4 w-4 text-red-500" />
-                          <span className="text-sm text-red-700 font-medium">
-                            Shortfall: ₦{diagnosisResult.shortfall?.toLocaleString()}
-                          </span>
-                          {diagnosisResult.deductionType && (
-                            <Badge variant="outline" className="text-[10px]">{diagnosisResult.deductionType}</Badge>
-                          )}
+                          {actionTypeIcon(a.actionType)}
+                          <span className="text-xs font-semibold capitalize">{a.actionType.replace(/_/g, " ")}</span>
                         </div>
-                      )}
-                      <div>
-                        <p className="text-[10px] text-purple-600 uppercase tracking-wide font-medium">Recommended Action</p>
-                        <p className="text-sm text-purple-800">{diagnosisResult.recommendedAction}</p>
+                        {a.subject && <p className="text-xs font-medium">{a.subject}</p>}
+                        {a.body && <p className="text-xs text-muted-foreground whitespace-pre-wrap">{a.body}</p>}
+                        {a.amount != null && <p className="text-xs">Amount: ₦{a.amount.toLocaleString()}</p>}
+                        {a.narrative && <p className="text-xs text-muted-foreground">{a.narrative}</p>}
+                        {a.instruction && <p className="text-xs text-blue-600">{a.instruction}</p>}
                       </div>
-                    </div>
-                  </div>
-
-                  {/* Similar past cases */}
-                  {diagnosisResult.similarCases && diagnosisResult.similarCases.length > 0 && (
-                    <div>
-                      <h3 className="font-semibold text-sm mb-2 flex items-center gap-1.5">
-                        <Clock className="h-4 w-4 text-gray-500" />
-                        Similar Past Cases
-                      </h3>
-                      <div className="space-y-2">
-                        {diagnosisResult.similarCases.slice(0, 3).map((c, i) => (
-                          <div key={i} className="p-3 rounded-lg border bg-muted/30 text-xs space-y-1">
-                            <div className="flex items-center gap-2">
-                              <Badge variant={c.outcome === "resolved" ? "default" : "secondary"} className="text-[10px]">
-                                {c.outcome}
-                              </Badge>
-                              <span className="text-muted-foreground">Case #{c.id}</span>
-                            </div>
-                            <p className="text-foreground">{c.resolution}</p>
-                            <p className="text-muted-foreground italic">{c.reasoning}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Action drafts */}
-                  {diagnosisResult.actionDrafts && diagnosisResult.actionDrafts.length > 0 && (
-                    <div>
-                      <h3 className="font-semibold text-sm mb-2 flex items-center gap-1.5">
-                        <Zap className="h-4 w-4 text-amber-500" />
-                        Proposed Actions (Pending Your Approval)
-                      </h3>
-                      <div className="space-y-3">
-                        {diagnosisResult.actionDrafts.map((draft, i) => (
-                          <div key={i} className="p-3 rounded-lg border bg-background">
-                            <div className="flex items-center gap-2 mb-2">
-                              {actionTypeIcon(draft.actionType)}
-                              <span className="text-xs font-semibold capitalize">{draft.actionType?.replace(/_/g, " ")}</span>
-                            </div>
-                            {draft.subject && (
-                              <p className="text-xs text-muted-foreground mb-1"><strong>Subject:</strong> {draft.subject}</p>
-                            )}
-                            {draft.body && (
-                              <p className="text-xs bg-muted/50 p-2 rounded whitespace-pre-wrap leading-relaxed">{draft.body}</p>
-                            )}
-                            {draft.narrative && (
-                              <p className="text-xs bg-muted/50 p-2 rounded">{draft.narrative}</p>
-                            )}
-                            {draft.amount != null && (
-                              <p className="text-xs text-muted-foreground mt-1"><strong>Amount:</strong> ₦{draft.amount?.toLocaleString()}</p>
-                            )}
-                            <div className="flex gap-2 mt-2">
-                              <Button
-                                size="sm"
-                                className="h-7 text-xs gap-1"
-                                onClick={() => {
-                                  toast.success("Action approved", { description: "Draft sent to execution queue." });
-                                }}
-                              >
-                                <CheckCircle2 className="h-3 w-3" /> Approve
-                              </Button>
-                              <Button size="sm" variant="outline" className="h-7 text-xs">
-                                Edit Draft
-                              </Button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Resolve from panel */}
-                  <div className="pt-2 border-t">
-                    <div className="flex gap-2">
-                      <Button
-                        className="flex-1"
-                        onClick={() => {
-                          handleAction(diagnosisEx.id, "resolved");
-                          setDiagnosisEx(null);
-                          setDiagnosisResult(null);
-                        }}
-                        disabled={resolveMutation.isPending}
-                      >
-                        <CheckCircle2 className="h-4 w-4 mr-1" /> Mark Resolved
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          handleAction(diagnosisEx.id, "dismissed");
-                          setDiagnosisEx(null);
-                          setDiagnosisResult(null);
-                        }}
-                        disabled={resolveMutation.isPending}
-                      >
-                        Dismiss
-                      </Button>
-                    </div>
+                    ))}
                   </div>
                 </div>
               )}
             </div>
-          )}
+          ) : null}
         </SheetContent>
       </Sheet>
     </div>
