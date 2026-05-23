@@ -78,7 +78,7 @@ const adminMenuItems = [
   { icon: Search, label: "Transactions", path: "/transactions" },
   { icon: ClipboardList, label: "Review Queue", path: "/review" },
   { icon: Shield, label: "Audit Trail", path: "/audit" },
-  { icon: ShieldCheck, label: "Compliance", path: "/compliance" },
+  { icon: ShieldCheck, label: "Data Protection", path: "/compliance" },
   { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance" },
   { icon: Users, label: "User Management", path: "/admin/users" },
   { icon: ClipboardCheck, label: "Assessments", path: "/admin/assessments" },
