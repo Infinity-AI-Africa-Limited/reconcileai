@@ -160,7 +160,7 @@ export default function Compliance() {
           <div>
             <h1 className="text-2xl font-bold text-foreground">Data Protection</h1>
             <p className="text-sm text-muted-foreground mt-0.5">
-              Data protection settings, incident management, and regulatory compliance status
+              NDPR/GDPR data protection settings, DPO details, and breach notification management
             </p>
           </div>
         </div>
