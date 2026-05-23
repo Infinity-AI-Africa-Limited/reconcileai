@@ -1,14 +1,18 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, AlertTriangle, CheckCircle2, Eye, MessageSquare, ClipboardList, FilterX, Filter, CalendarDays, X } from "lucide-react";
+import {
+  Loader2, AlertTriangle, CheckCircle2, Eye, ClipboardList,
+  FilterX, Filter, CalendarDays, X
+} from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
+import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -29,54 +33,25 @@ function writeFilterPref(value: boolean) {
 }
 
 const TEMPLATE_CATEGORIES = [
-  "unmatched",
-  "missing_counterparty",
-  "amount_mismatch",
-  "timing_difference",
-  "duplicate_transaction",
-  "reversal_unmatched",
-  "currency_mismatch",
-  "format_error",
+  "unmatched", "missing_counterparty", "amount_mismatch", "timing_difference",
+  "duplicate_transaction", "reversal_unmatched", "currency_mismatch", "format_error",
 ] as const;
 type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
 
-// ─── Date helpers ────────────────────────────────────────────────────────────
-function toLocalDateString(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function startOfDay(dateStr: string): Date {
-  const d = new Date(dateStr);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function endOfDay(dateStr: string): Date {
-  const d = new Date(dateStr);
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
-
 export default function Exceptions() {
-  const today = useMemo(() => toLocalDateString(new Date()), []);
+  const {
+    dateFrom, dateTo, dateFromObj, dateToObj,
+    setDateFrom, setDateTo, applyPreset, resetToToday,
+    activePreset, isToday, isSingleDay, today,
+  } = useDateRange("reconcileai_exceptions_daterange");
 
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
   const [filters, setFilters] = useState({ status: "all", category: "all", severity: "all" });
-
-  // Date range — default to today (single-day view)
-  const [dateFrom, setDateFrom] = useState<string>(today);
-  const [dateTo, setDateTo] = useState<string>(today);
-
-  // Auto-filter preference
   const [autoFilter, setAutoFilter] = useState<boolean>(true);
-  useEffect(() => {
-    setAutoFilter(readFilterPref());
-  }, []);
+
+  useEffect(() => { setAutoFilter(readFilterPref()); }, []);
 
   const selectedCategory: TemplateCategory | undefined =
     autoFilter && selectedEx && TEMPLATE_CATEGORIES.includes(selectedEx.category as TemplateCategory)
@@ -86,10 +61,6 @@ export default function Exceptions() {
   const { data: templates } = trpc.resolutionTemplates.list.useQuery(
     selectedCategory ? { category: selectedCategory } : undefined
   );
-
-  // Stable date objects to avoid infinite re-fetch
-  const dateFromObj = useMemo(() => startOfDay(dateFrom), [dateFrom]);
-  const dateToObj = useMemo(() => endOfDay(dateTo), [dateTo]);
 
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
     status: statusFilter !== "all" ? statusFilter : undefined,
@@ -126,24 +97,6 @@ export default function Exceptions() {
     }
   };
 
-  const handleClearFilter = () => {
-    setAutoFilter(false);
-    writeFilterPref(false);
-  };
-
-  const handleReenableFilter = () => {
-    setAutoFilter(true);
-    writeFilterPref(true);
-  };
-
-  const isToday = dateFrom === today && dateTo === today;
-  const isSingleDay = dateFrom === dateTo;
-
-  const handleResetToToday = () => {
-    setDateFrom(today);
-    setDateTo(today);
-  };
-
   const severityColor = (s: string) => {
     switch (s) {
       case "critical": return "bg-red-100 text-red-700";
@@ -163,12 +116,13 @@ export default function Exceptions() {
     }
   };
 
-  // Client-side filter for category and severity (date/status filtered server-side)
   const filtered = data?.data?.filter((ex) => {
     if (filters.category !== "all" && ex.category !== filters.category) return false;
     if (filters.severity !== "all" && ex.severity !== filters.severity) return false;
     return true;
   }) ?? [];
+
+  const dateLabel = isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`;
 
   return (
     <div className="space-y-6">
@@ -177,9 +131,26 @@ export default function Exceptions() {
         <p className="text-muted-foreground mt-1">Review and resolve reconciliation exceptions</p>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap gap-3 items-end">
-        {/* Date range */}
+      {/* Filters row */}
+      <div className="flex flex-wrap gap-3 items-center">
+        {/* Quick-select preset pills */}
+        <div className="flex items-center gap-1 rounded-lg border bg-muted/30 p-1">
+          {DATE_PRESETS.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => applyPreset(p.key as DatePreset)}
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                activePreset === p.key
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Date range inputs */}
         <div className="flex items-center gap-2 bg-muted/40 border rounded-lg px-3 py-2">
           <CalendarDays className="h-4 w-4 text-muted-foreground shrink-0" />
           <div className="flex items-center gap-1.5">
@@ -200,11 +171,7 @@ export default function Exceptions() {
             />
           </div>
           {!isToday && (
-            <button
-              onClick={handleResetToToday}
-              className="ml-1 text-muted-foreground hover:text-foreground"
-              title="Reset to today"
-            >
+            <button onClick={resetToToday} className="ml-1 text-muted-foreground hover:text-foreground" title="Reset to today">
               <X className="h-3.5 w-3.5" />
             </button>
           )}
@@ -247,13 +214,10 @@ export default function Exceptions() {
           </SelectContent>
         </Select>
 
-        {/* Date label */}
-        <span className="text-xs text-muted-foreground self-center">
-          {isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`}
-        </span>
+        <span className="text-xs text-muted-foreground self-center">{dateLabel}</span>
       </div>
 
-      {/* Exceptions Table */}
+      {/* Table */}
       {isLoading ? (
         <div className="flex items-center justify-center h-32"><Loader2 className="h-6 w-6 animate-spin" /></div>
       ) : filtered.length > 0 ? (
@@ -298,8 +262,7 @@ export default function Exceptions() {
               </table>
             </div>
             <p className="text-xs text-muted-foreground mt-3">
-              Showing {filtered.length} exception{filtered.length !== 1 ? "s" : ""}{" "}
-              {isToday ? "for today" : isSingleDay ? `for ${dateFrom}` : `from ${dateFrom} to ${dateTo}`}
+              Showing {filtered.length} exception{filtered.length !== 1 ? "s" : ""} — {dateLabel}
             </p>
           </CardContent>
         </Card>
@@ -312,9 +275,7 @@ export default function Exceptions() {
               {isToday ? "No exceptions for today." : "No exceptions match the selected date range and filters."}
             </p>
             {!isToday && (
-              <Button variant="outline" size="sm" className="mt-4" onClick={handleResetToToday}>
-                Reset to today
-              </Button>
+              <Button variant="outline" size="sm" className="mt-4" onClick={resetToToday}>Reset to today</Button>
             )}
           </CardContent>
         </Card>
@@ -357,8 +318,6 @@ export default function Exceptions() {
                   <p className="text-sm bg-blue-50 p-3 rounded text-blue-800">{selectedEx.suggestedResolution}</p>
                 </div>
               )}
-
-              {/* Resolution templates */}
               {templates && templates.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-1">
@@ -367,7 +326,7 @@ export default function Exceptions() {
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <button
-                            onClick={autoFilter ? handleClearFilter : handleReenableFilter}
+                            onClick={() => { const v = !autoFilter; setAutoFilter(v); writeFilterPref(v); }}
                             className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1"
                           >
                             {autoFilter ? <FilterX className="h-3 w-3" /> : <Filter className="h-3 w-3" />}
@@ -396,7 +355,6 @@ export default function Exceptions() {
                   </div>
                 </div>
               )}
-
               <div>
                 <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                 <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />

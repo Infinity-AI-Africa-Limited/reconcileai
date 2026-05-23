@@ -253,6 +253,15 @@ function DashboardLayoutContent({
   const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);
   const [guestLinkCopied, setGuestLinkCopied] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Today's open exception count for sidebar badges — stable Date objects via useState
+  const [badgeDateFrom] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
+  const [badgeDateTo] = useState(() => { const d = new Date(); d.setHours(23, 59, 59, 999); return d; });
+  const { data: todayExceptions } = trpc.exceptions.list.useQuery(
+    { status: "open", dateFrom: badgeDateFrom, dateTo: badgeDateTo, limit: 1, offset: 0 },
+    { enabled: !!user && user.role === "admin", refetchInterval: 60000 }
+  );
+  const openExceptionCount = todayExceptions?.total ?? 0;
   const activateDemo = trpc.demo.activate.useMutation({
     onSuccess: (data) => {
       const mr = (data as { matchRate?: string })?.matchRate ?? "90.00";
@@ -382,6 +391,7 @@ function DashboardLayoutContent({
                 <SidebarMenu className="px-2 py-0">
                   {adminMenuItems.map((item) => {
                     const isActive = location.startsWith(item.path);
+                    const showBadge = openExceptionCount > 0 && (item.path === "/exceptions" || item.path === "/review");
                     return (
                       <SidebarMenuItem key={item.path}>
                         <SidebarMenuButton
@@ -393,7 +403,12 @@ function DashboardLayoutContent({
                           <span className="flex items-center justify-center w-4 h-4 shrink-0">
                             <item.icon className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`} />
                           </span>
-                          <span>{item.label}</span>
+                          <span className="flex-1">{item.label}</span>
+                          {showBadge && !isCollapsed && (
+                            <span className="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center leading-none">
+                              {openExceptionCount > 99 ? "99+" : openExceptionCount}
+                            </span>
+                          )}
                         </SidebarMenuButton>
                       </SidebarMenuItem>
                     );

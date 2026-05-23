@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -10,9 +10,10 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import {
   Loader2, CheckCircle2, XCircle, Eye, ClipboardList,
   AlertTriangle, Sparkles, Brain, FileText, Mail, BookOpen,
-  ChevronRight, Clock, TrendingDown, Zap, CalendarDays, X
+  Zap, CalendarDays, X
 } from "lucide-react";
 import { toast } from "sonner";
+import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
 
 type DiagnosisResult = {
   exceptionId: number;
@@ -26,35 +27,12 @@ type DiagnosisResult = {
   actionDrafts?: Array<{ actionType: string; subject?: string; body?: string; amount?: number; narrative?: string; instruction?: string }>;
 };
 
-// ─── Date helpers ────────────────────────────────────────────────────────────
-function toLocalDateString(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function startOfDay(dateStr: string): Date {
-  const d = new Date(dateStr);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function endOfDay(dateStr: string): Date {
-  const d = new Date(dateStr);
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
-
 export default function ReviewQueuePage() {
-  const today = useMemo(() => toLocalDateString(new Date()), []);
-
-  // Date range — default to today
-  const [dateFrom, setDateFrom] = useState<string>(today);
-  const [dateTo, setDateTo] = useState<string>(today);
-
-  const dateFromObj = useMemo(() => startOfDay(dateFrom), [dateFrom]);
-  const dateToObj = useMemo(() => endOfDay(dateTo), [dateTo]);
+  const {
+    dateFrom, dateTo, dateFromObj, dateToObj,
+    setDateFrom, setDateTo, applyPreset, resetToToday,
+    activePreset, isToday, isSingleDay,
+  } = useDateRange("reconcileai_reviewqueue_daterange");
 
   const { data: exceptions, isLoading, refetch } = trpc.exceptions.list.useQuery({
     status: "open",
@@ -73,13 +51,7 @@ export default function ReviewQueuePage() {
   const [diagnosisResult, setDiagnosisResult] = useState<DiagnosisResult | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
 
-  const isToday = dateFrom === today && dateTo === today;
-  const isSingleDay = dateFrom === dateTo;
-
-  const handleResetToToday = () => {
-    setDateFrom(today);
-    setDateTo(today);
-  };
+  const dateLabel = isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`;
 
   const handleAction = async (id: number, status: "resolved" | "dismissed") => {
     try {
@@ -149,6 +121,24 @@ export default function ReviewQueuePage() {
 
       {/* Date range filter */}
       <div className="flex flex-wrap gap-3 items-center">
+        {/* Quick-select preset pills */}
+        <div className="flex items-center gap-1 rounded-lg border bg-muted/30 p-1">
+          {DATE_PRESETS.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => applyPreset(p.key as DatePreset)}
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                activePreset === p.key
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Date inputs */}
         <div className="flex items-center gap-2 bg-muted/40 border rounded-lg px-3 py-2">
           <CalendarDays className="h-4 w-4 text-muted-foreground shrink-0" />
           <div className="flex items-center gap-1.5">
@@ -169,18 +159,13 @@ export default function ReviewQueuePage() {
             />
           </div>
           {!isToday && (
-            <button
-              onClick={handleResetToToday}
-              className="ml-1 text-muted-foreground hover:text-foreground"
-              title="Reset to today"
-            >
+            <button onClick={resetToToday} className="ml-1 text-muted-foreground hover:text-foreground" title="Reset to today">
               <X className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
-        <span className="text-xs text-muted-foreground">
-          {isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`}
-        </span>
+
+        <span className="text-xs text-muted-foreground">{dateLabel}</span>
       </div>
 
       {isLoading ? (
@@ -215,13 +200,11 @@ export default function ReviewQueuePage() {
                   </div>
                   <div className="flex gap-2 ml-4 flex-wrap justify-end">
                     <Button
-                      variant="outline"
-                      size="sm"
+                      variant="outline" size="sm"
                       onClick={() => handleDeepDiagnose(ex)}
                       className="gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50"
                     >
-                      <Sparkles className="h-3 w-3" />
-                      Deep Diagnose
+                      <Sparkles className="h-3 w-3" /> Deep Diagnose
                     </Button>
                     <Button variant="outline" size="sm" onClick={() => { setSelectedEx(ex); setNotes(""); }}>
                       <Eye className="h-3 w-3 mr-1" /> Review
@@ -238,8 +221,7 @@ export default function ReviewQueuePage() {
             </Card>
           ))}
           <p className="text-xs text-muted-foreground text-center">
-            {exceptions.data.length} of {exceptions.total} open exception{exceptions.total !== 1 ? "s" : ""}{" "}
-            {isToday ? "today" : isSingleDay ? `on ${dateFrom}` : `from ${dateFrom} to ${dateTo}`}
+            {exceptions.data.length} of {exceptions.total} open exception{exceptions.total !== 1 ? "s" : ""} — {dateLabel}
           </p>
         </div>
       ) : (
@@ -251,9 +233,7 @@ export default function ReviewQueuePage() {
               {isToday ? "No open exceptions for today." : "No open exceptions match the selected date range."}
             </p>
             {!isToday && (
-              <Button variant="outline" size="sm" className="mt-4" onClick={handleResetToToday}>
-                Reset to today
-              </Button>
+              <Button variant="outline" size="sm" className="mt-4" onClick={resetToToday}>Reset to today</Button>
             )}
           </CardContent>
         </Card>
@@ -329,7 +309,6 @@ export default function ReviewQueuePage() {
             </div>
           ) : diagnosisResult ? (
             <div className="mt-6 space-y-5">
-              {/* Root cause */}
               <div className="rounded-lg bg-purple-50 border border-purple-200 p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertTriangle className="h-4 w-4 text-purple-600" />
@@ -343,8 +322,6 @@ export default function ReviewQueuePage() {
                   </p>
                 )}
               </div>
-
-              {/* Confidence + recommended action */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-lg border p-3">
                   <p className="text-xs text-muted-foreground mb-1">Confidence</p>
@@ -355,13 +332,9 @@ export default function ReviewQueuePage() {
                   <p className="text-xs font-medium">{diagnosisResult.recommendedAction}</p>
                 </div>
               </div>
-
-              {/* Similar cases */}
               {diagnosisResult.similarCases && diagnosisResult.similarCases.length > 0 && (
                 <div>
-                  <p className="text-sm font-semibold mb-2 flex items-center gap-1.5">
-                    <Clock className="h-4 w-4 text-muted-foreground" /> Similar Past Cases
-                  </p>
+                  <p className="text-sm font-semibold mb-2">Similar Past Cases</p>
                   <div className="space-y-2">
                     {diagnosisResult.similarCases.map((c) => (
                       <div key={c.id} className="rounded border p-3 text-xs space-y-1">
@@ -376,8 +349,6 @@ export default function ReviewQueuePage() {
                   </div>
                 </div>
               )}
-
-              {/* Action drafts */}
               {diagnosisResult.actionDrafts && diagnosisResult.actionDrafts.length > 0 && (
                 <div>
                   <p className="text-sm font-semibold mb-2 flex items-center gap-1.5">
