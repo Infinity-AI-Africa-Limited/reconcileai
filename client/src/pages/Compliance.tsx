@@ -105,6 +105,7 @@ export default function Compliance() {
   const [ndpa, setNdpa] = useState(false);
   const [ndpr, setNdpr] = useState(false);
   const [ropa, setRopa] = useState(false);
+  const [ndprRegNum, setNdprRegNum] = useState("");
   const [notes, setNotes] = useState("");
 
   useEffect(() => {
@@ -117,6 +118,7 @@ export default function Compliance() {
       setNdpa(settings.ndpaCompliant ?? false);
       setNdpr(settings.ndprCompliant ?? false);
       setRopa(settings.ropaCompleted ?? false);
+      setNdprRegNum(settings.ndprRegistrationNumber ?? "");
       setNotes(settings.notes ?? "");
     }
   }, [settings]);
@@ -212,6 +214,11 @@ export default function Compliance() {
               </div>
             </div>
             <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">NDPR Registration Number</label>
+              <Input value={ndprRegNum} onChange={e => setNdprRegNum(e.target.value)} placeholder="e.g. NITDA/2024/DP/0001" />
+              <p className="text-xs text-muted-foreground">Your organisation's NITDA data controller registration reference.</p>
+            </div>
+            <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">Breach Notification Email</label>
               <Input value={breachEmail} onChange={e => setBreachEmail(e.target.value)} placeholder="security@organisation.com" type="email" />
               <p className="text-xs text-muted-foreground">This address receives alerts when a security incident is reported.</p>
@@ -243,6 +250,7 @@ export default function Compliance() {
                 dpoEmail: dpoEmail || undefined,
                 dpoPhone: dpoPhone || undefined,
                 breachNotificationEmail: breachEmail || undefined,
+                ndprRegistrationNumber: ndprRegNum || undefined,
                 retentionPeriodDays: Number(retentionDays) || 1825,
                 ndpaCompliant: ndpa,
                 ndprCompliant: ndpr,

@@ -2960,6 +2960,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         ndprCompliant: z.boolean().optional(),
         ropaCompleted: z.boolean().optional(),
         breachNotificationEmail: z.string().email().optional(),
+        ndprRegistrationNumber: z.string().max(100).optional(),
         notes: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {

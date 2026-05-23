@@ -1,0 +1,1 @@
+ALTER TABLE `compliance_settings` ADD `ndprRegistrationNumber` varchar(100);

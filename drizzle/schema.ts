@@ -971,6 +971,8 @@ export const complianceSettings = mysqlTable("compliance_settings", {
   nextAuditDate: timestamp("nextAuditDate"),
   // Breach notification contact (Clause 12)
   breachNotificationEmail: varchar("breachNotificationEmail", { length: 320 }),
+  // NITDA NDPR registration reference
+  ndprRegistrationNumber: varchar("ndprRegistrationNumber", { length: 100 }),
   // Notes / programme documentation reference
   notes: text("notes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
