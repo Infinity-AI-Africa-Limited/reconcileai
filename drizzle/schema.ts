@@ -1263,3 +1263,25 @@ export const cbnDeadlineSubmissions = mysqlTable("cbnDeadlineSubmissions", {
 ]);
 export type CbnDeadlineSubmission = typeof cbnDeadlineSubmissions.$inferSelect;
 export type InsertCbnDeadlineSubmission = typeof cbnDeadlineSubmissions.$inferInsert;
+
+// ─── Roadmap Access Requests ──────────────────────────────────────────────────
+export const roadmapAccessRequests = mysqlTable("roadmapAccessRequests", {
+  id: int("id").autoincrement().primaryKey(),
+  email: varchar("email", { length: 255 }).notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  company: varchar("company", { length: 255 }),
+  reason: text("reason"),
+  status: varchar("status", { length: 32 }).notNull().default("pending"), // pending | approved | rejected
+  accessToken: varchar("accessToken", { length: 128 }),  // set on approval
+  tokenExpiresAt: timestamp("tokenExpiresAt"),
+  approvedAt: timestamp("approvedAt"),
+  approvedByUserId: int("approvedByUserId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_roadmap_email").on(table.email),
+  index("idx_roadmap_status").on(table.status),
+  index("idx_roadmap_token").on(table.accessToken),
+]);
+export type RoadmapAccessRequest = typeof roadmapAccessRequests.$inferSelect;
+export type InsertRoadmapAccessRequest = typeof roadmapAccessRequests.$inferInsert;

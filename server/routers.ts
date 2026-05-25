@@ -3670,6 +3670,119 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
   }),
   cbnCompliance: cbnComplianceRouter,
+  roadmap: router({
+    // Public: submit an access request
+    requestAccess: publicProcedure
+      .input(z.object({
+        name: z.string().min(1),
+        email: z.string().email(),
+        company: z.string().optional(),
+        reason: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
+        const { roadmapAccessRequests } = await import('../drizzle/schema');
+        // Check for duplicate pending/approved request
+        const existing = await drizzle.select().from(roadmapAccessRequests)
+          .where(eq(roadmapAccessRequests.email, input.email.toLowerCase().trim()))
+          .limit(1);
+        if (existing.length > 0 && existing[0].status === 'approved') {
+          return { status: 'already_approved', token: existing[0].accessToken };
+        }
+        if (existing.length > 0 && existing[0].status === 'pending') {
+          return { status: 'already_pending' };
+        }
+        await drizzle.insert(roadmapAccessRequests).values({
+          name: input.name.trim(),
+          email: input.email.toLowerCase().trim(),
+          company: input.company?.trim() || null,
+          reason: input.reason?.trim() || null,
+          status: 'pending',
+        });
+        // Notify owner
+        const { notifyOwner } = await import('./_core/notification');
+        await notifyOwner({
+          title: `New Roadmap Access Request — ${input.name}`,
+          content: `**${input.name}** (${input.email}) from **${input.company || 'unknown company'}** has requested access to the ReconcileAI GTM Roadmap.\n\nReason: ${input.reason || 'Not provided'}\n\nApprove or reject at reconcileai.vip/admin/roadmap-access`,
+        }).catch(() => undefined);
+        return { status: 'pending' };
+      }),
+
+    // Public: verify an access token and return the roadmap URL
+    verifyToken: publicProcedure
+      .input(z.object({ token: z.string() }))
+      .query(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
+        const { roadmapAccessRequests } = await import('../drizzle/schema');
+        const rows = await drizzle.select().from(roadmapAccessRequests)
+          .where(eq(roadmapAccessRequests.accessToken, input.token))
+          .limit(1);
+        if (!rows.length || rows[0].status !== 'approved') {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid or expired access token' });
+        }
+        const req = rows[0];
+        if (req.tokenExpiresAt && req.tokenExpiresAt < new Date()) {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Access token has expired' });
+        }
+        return { valid: true, name: req.name, roadmapKey: 'roadmap_92b329c1.html' };
+      }),
+
+    // Admin: list all access requests
+    listRequests: protectedProcedure
+      .input(z.object({ status: z.enum(['pending','approved','rejected','all']).default('all') }))
+      .query(async ({ ctx, input }) => {
+        if (ctx.user.role !== 'admin') throw new TRPCError({ code: 'FORBIDDEN' });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
+        const { roadmapAccessRequests } = await import('../drizzle/schema');
+        const { desc } = await import('drizzle-orm');
+        let query = drizzle.select().from(roadmapAccessRequests).orderBy(desc(roadmapAccessRequests.createdAt));
+        if (input.status !== 'all') {
+          return (await query).filter(r => r.status === input.status);
+        }
+        return query;
+      }),
+
+    // Admin: approve or reject a request
+    updateStatus: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        action: z.enum(['approve','reject']),
+        expiryDays: z.number().int().positive().default(30),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== 'admin') throw new TRPCError({ code: 'FORBIDDEN' });
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
+        const { roadmapAccessRequests } = await import('../drizzle/schema');
+        const { randomBytes } = await import('crypto');
+        const rows = await drizzle.select().from(roadmapAccessRequests)
+          .where(eq(roadmapAccessRequests.id, input.id)).limit(1);
+        if (!rows.length) throw new TRPCError({ code: 'NOT_FOUND' });
+        const req = rows[0];
+        if (input.action === 'approve') {
+          const token = randomBytes(32).toString('hex');
+          const expiresAt = new Date(Date.now() + input.expiryDays * 24 * 60 * 60 * 1000);
+          await drizzle.update(roadmapAccessRequests)
+            .set({ status: 'approved', accessToken: token, tokenExpiresAt: expiresAt, approvedAt: new Date(), approvedByUserId: ctx.user.id })
+            .where(eq(roadmapAccessRequests.id, input.id));
+          // Notify the requester via owner notification (owner can then email them)
+          const { notifyOwner } = await import('./_core/notification');
+          await notifyOwner({
+            title: `Roadmap Access Approved — ${req.name}`,
+            content: `Send this link to **${req.name}** (${req.email}):\n\nhttps://reconcileai.vip/roadmap?token=${token}\n\nExpires: ${expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+          }).catch(() => undefined);
+          return { status: 'approved', token, expiresAt };
+        } else {
+          await drizzle.update(roadmapAccessRequests)
+            .set({ status: 'rejected' })
+            .where(eq(roadmapAccessRequests.id, input.id));
+          return { status: 'rejected' };
+        }
+      }),
+  }),
 });
 export type AppRouter = typeof appRouter;
 
