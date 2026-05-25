@@ -1285,3 +1285,26 @@ export const roadmapAccessRequests = mysqlTable("roadmapAccessRequests", {
 ]);
 export type RoadmapAccessRequest = typeof roadmapAccessRequests.$inferSelect;
 export type InsertRoadmapAccessRequest = typeof roadmapAccessRequests.$inferInsert;
+
+// ─── Shared Report Tokens ─────────────────────────────────────────────────────
+export const sharedReportTokens = mysqlTable("sharedReportTokens", {
+  id: int("id").autoincrement().primaryKey(),
+  reportId: int("reportId").notNull(),
+  token: varchar("token", { length: 128 }).notNull().unique(),
+  createdByUserId: int("createdByUserId").notNull(),
+  organizationId: int("organizationId"),
+  recipientEmail: varchar("recipientEmail", { length: 255 }),
+  recipientName: varchar("recipientName", { length: 255 }),
+  note: text("note"),
+  expiresAt: timestamp("expiresAt"),          // null = never expires
+  revokedAt: timestamp("revokedAt"),           // null = still active
+  viewCount: int("viewCount").default(0).notNull(),
+  lastViewedAt: timestamp("lastViewedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_shared_report_token").on(table.token),
+  index("idx_shared_report_reportId").on(table.reportId),
+  index("idx_shared_report_org").on(table.organizationId),
+]);
+export type SharedReportToken = typeof sharedReportTokens.$inferSelect;
+export type InsertSharedReportToken = typeof sharedReportTokens.$inferInsert;

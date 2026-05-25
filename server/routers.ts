@@ -1185,10 +1185,106 @@ export const appRouter = router({
           reportType: input.reportType,
         }, ip, ua);
 
-        return { reportId, summary };
+         return { reportId, summary };
+      }),
+
+    // ─── Share Report ─────────────────────────────────────────────
+    createShareToken: protectedProcedure
+      .input(z.object({
+        reportId: z.number().int().positive(),
+        recipientEmail: z.string().email().optional(),
+        recipientName: z.string().max(255).optional(),
+        note: z.string().max(1000).optional(),
+        expiresInDays: z.number().int().min(1).max(365).optional(), // null = never
+      }))
+      .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const report = reports.find((r) => r.id === input.reportId);
+        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
+        const crypto = await import("crypto");
+        const token = crypto.randomBytes(32).toString("hex");
+        const expiresAt = input.expiresInDays
+          ? new Date(Date.now() + input.expiresInDays * 86400 * 1000)
+          : null;
+        const dbConn = await getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { sharedReportTokens } = await import("../drizzle/schema");
+        await dbConn.insert(sharedReportTokens).values({
+          reportId: input.reportId,
+          token,
+          createdByUserId: ctx.user.id,
+          organizationId: ctx.user.organizationId ?? null,
+          recipientEmail: input.recipientEmail ?? null,
+          recipientName: input.recipientName ?? null,
+          note: input.note ?? null,
+          expiresAt: expiresAt ?? undefined,
+        });
+        return { token };
+      }),
+
+    listShareTokens: protectedProcedure
+      .input(z.object({ reportId: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const report = reports.find((r) => r.id === input.reportId);
+        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
+        const dbConn = await getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { sharedReportTokens } = await import("../drizzle/schema");
+        return dbConn.select().from(sharedReportTokens)
+          .where(eq(sharedReportTokens.reportId, input.reportId))
+          .orderBy(desc(sharedReportTokens.createdAt));
+      }),
+
+    revokeShareToken: protectedProcedure
+      .input(z.object({ tokenId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const dbConn = await getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { sharedReportTokens } = await import("../drizzle/schema");
+        await dbConn.update(sharedReportTokens)
+          .set({ revokedAt: new Date() })
+          .where(eq(sharedReportTokens.id, input.tokenId));
+        return { ok: true };
+      }),
+
+    viewShared: publicProcedure
+      .input(z.object({ token: z.string().length(64) }))
+      .query(async ({ input }) => {
+        const dbConn = await getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { sharedReportTokens, reconciliationReports } = await import("../drizzle/schema");
+        const rows = await dbConn.select().from(sharedReportTokens)
+          .where(eq(sharedReportTokens.token, input.token))
+          .limit(1);
+        const shareRow = rows[0];
+        if (!shareRow) throw new TRPCError({ code: "NOT_FOUND", message: "Link not found or has been revoked." });
+        if (shareRow.revokedAt) throw new TRPCError({ code: "FORBIDDEN", message: "This link has been revoked." });
+        if (shareRow.expiresAt && shareRow.expiresAt < new Date()) throw new TRPCError({ code: "FORBIDDEN", message: "This link has expired." });
+        // Increment view count
+        await dbConn.update(sharedReportTokens)
+          .set({ viewCount: shareRow.viewCount + 1, lastViewedAt: new Date() })
+          .where(eq(sharedReportTokens.id, shareRow.id));
+        const reportRows = await dbConn.select().from(reconciliationReports)
+          .where(eq(reconciliationReports.id, shareRow.reportId))
+          .limit(1);
+        const report = reportRows[0];
+        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found." });
+        return {
+          report: {
+            id: report.id,
+            title: report.title,
+            reportType: report.reportType,
+            format: report.format,
+            summary: report.summary,
+            createdAt: report.createdAt,
+          },
+          sharedBy: null, // intentionally omit PII
+          expiresAt: shareRow.expiresAt,
+        };
       }),
   }),
-
   // ─── Export ──────────────────────────────────────────────────────
 
   export: router({
