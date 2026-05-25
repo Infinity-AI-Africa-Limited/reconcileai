@@ -1109,6 +1109,15 @@ export const appRouter = router({
   // ─── Reports ─────────────────────────────────────────────────────
 
   reports: router({
+    get: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const report = reports.find((r) => r.id === input.id);
+        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
+        return report;
+      }),
     list: protectedProcedure.query(async ({ ctx }) => {
       const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
       return db.getReports(ctx.user.id, isAdmin);

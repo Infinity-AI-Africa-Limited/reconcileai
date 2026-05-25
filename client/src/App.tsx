@@ -47,6 +47,7 @@ import AdminAssessments from "./pages/AdminAssessments";
 import RoadmapAccess from "./pages/RoadmapAccess";
 import RoadmapViewer from "./pages/RoadmapViewer";
 import AdminRoadmapAccess from "./pages/AdminRoadmapAccess";
+import ReportDetail from "./pages/ReportDetail";
 import ComplianceAssessmentUnsubscribe from "./pages/ComplianceAssessmentUnsubscribe";
 import CBNCompliance from "./pages/CBNCompliance";
 
@@ -82,6 +83,7 @@ function Router() {
       <Route path="/cbn-compliance">{() => <DashboardPage component={CBNCompliance} />}</Route>
       <Route path="/channels">{() => <DashboardPage component={MultiChannel} />}</Route>
       <Route path="/reports">{() => <DashboardPage component={Reports} />}</Route>
+      <Route path="/reports/:id">{() => <DashboardPage component={ReportDetail} />}</Route>
       <Route path="/admin">{() => <DashboardPage component={Admin} />}</Route>
       <Route path="/sample-data">{() => <DashboardPage component={SampleData} />}</Route>
       <Route path="/integrations">{() => <DashboardPage component={Integrations} />}</Route>

@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
+import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Loader2, FileText, Download, Plus, AlertCircle } from "lucide-react";
+import { Loader2, FileText, Download, Plus, AlertCircle, Eye } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ReportsPage() {
+  const [, navigate] = useLocation();
   const { data: reports, isLoading, refetch } = trpc.reports.list.useQuery();
   const { data: jobs } = trpc.reconciliation.list.useQuery();
   const generateMutation = trpc.reports.generate.useMutation();
@@ -22,6 +24,35 @@ export default function ReportsPage() {
 
   // Completed jobs only — these have full match/exception data to report on
   const completedJobs = (jobs ?? []).filter((j) => j.status === "completed");
+
+  // Auto-populate report name when job or type changes
+  const handleJobChange = (jobId: string) => {
+    const selectedJob = completedJobs.find((j) => String(j.id) === jobId);
+    const typeLabelMap: Record<string, string> = {
+      daily: "Daily",
+      weekly: "Weekly",
+      monthly: "Monthly",
+      custom: "Custom",
+    };
+    const autoName = selectedJob
+      ? `${selectedJob.name} — ${typeLabelMap[form.type] ?? "Custom"} Report`
+      : form.name;
+    setForm({ ...form, jobId, name: autoName });
+  };
+
+  const handleTypeChange = (type: string) => {
+    const selectedJob = completedJobs.find((j) => String(j.id) === form.jobId);
+    const typeLabelMap: Record<string, string> = {
+      daily: "Daily",
+      weekly: "Weekly",
+      monthly: "Monthly",
+      custom: "Custom",
+    };
+    const autoName = selectedJob
+      ? `${selectedJob.name} — ${typeLabelMap[type] ?? "Custom"} Report`
+      : form.name;
+    setForm({ ...form, type, name: autoName });
+  };
 
   const handleGenerate = async () => {
     if (!form.name) {
@@ -73,16 +104,7 @@ export default function ReportsPage() {
               <DialogTitle>Generate Reconciliation Report</DialogTitle>
             </DialogHeader>
             <div className="space-y-4 pt-2">
-              <div>
-                <label className="text-sm font-medium mb-1 block">Report Name</label>
-                <Input
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder="e.g. Daily Reconciliation - May 2026"
-                />
-              </div>
-
-              {/* Job selector — the core fix */}
+              {/* Job selector — must be first so name auto-populates */}
               <div>
                 <label className="text-sm font-medium mb-1 block">Reconciliation Job</label>
                 {completedJobs.length === 0 ? (
@@ -91,7 +113,7 @@ export default function ReportsPage() {
                     No completed reconciliation jobs found. Run a reconciliation first.
                   </div>
                 ) : (
-                  <Select value={form.jobId} onValueChange={(v) => setForm({ ...form, jobId: v })}>
+                  <Select value={form.jobId} onValueChange={handleJobChange}>
                     <SelectTrigger>
                       <SelectValue placeholder="Select a completed job…" />
                     </SelectTrigger>
@@ -109,7 +131,7 @@ export default function ReportsPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm font-medium mb-1 block">Report Type</label>
-                  <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
+                  <Select value={form.type} onValueChange={handleTypeChange}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="daily">Daily</SelectItem>
@@ -132,6 +154,17 @@ export default function ReportsPage() {
                 </div>
               </div>
 
+              {/* Report name — auto-populated, still editable */}
+              <div>
+                <label className="text-sm font-medium mb-1 block">Report Name</label>
+                <Input
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="Select a job above to auto-fill…"
+                />
+                <p className="text-xs text-muted-foreground mt-1">Auto-filled from job + type selection. You can edit it.</p>
+              </div>
+
               <Button
                 onClick={handleGenerate}
                 disabled={generateMutation.isPending || !form.jobId || completedJobs.length === 0}
@@ -151,11 +184,11 @@ export default function ReportsPage() {
       ) : reports && reports.length > 0 ? (
         <div className="space-y-3">
           {reports.map((r) => (
-            <Card key={r.id}>
+            <Card key={r.id} className="hover:bg-muted/30 transition-colors cursor-pointer" onClick={() => navigate(`/reports/${r.id}`)}>
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-4">
-                    <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                    <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                       <FileText className="h-5 w-5 text-primary" />
                     </div>
                     <div>
@@ -165,11 +198,18 @@ export default function ReportsPage() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-green-100 text-green-700">completed</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={(e) => { e.stopPropagation(); navigate(`/reports/${r.id}`); }}
+                    >
+                      <Eye className="h-4 w-4 mr-1" /> View
+                    </Button>
                     {r.fileUrl && (
                       <Button variant="outline" size="sm" asChild>
-                        <a href={r.fileUrl} target="_blank" rel="noopener noreferrer">
+                        <a href={r.fileUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
                           <Download className="h-4 w-4 mr-1" /> Download
                         </a>
                       </Button>
