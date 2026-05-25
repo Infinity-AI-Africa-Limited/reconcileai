@@ -1,39 +1,46 @@
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Loader2, FileText, Download, Plus } from "lucide-react";
+import { Loader2, FileText, Download, Plus, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ReportsPage() {
   const { data: reports, isLoading, refetch } = trpc.reports.list.useQuery();
+  const { data: jobs } = trpc.reconciliation.list.useQuery();
   const generateMutation = trpc.reports.generate.useMutation();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
     name: "",
-    type: "daily",
-    dateFrom: "",
-    dateTo: "",
+    type: "custom",
+    jobId: "",
     format: "pdf",
   });
 
+  // Completed jobs only — these have full match/exception data to report on
+  const completedJobs = (jobs ?? []).filter((j) => j.status === "completed");
+
   const handleGenerate = async () => {
-    if (!form.name || !form.dateFrom || !form.dateTo) {
-      toast.error("Please fill in all required fields.");
+    if (!form.name) {
+      toast.error("Please enter a report name.");
+      return;
+    }
+    if (!form.jobId) {
+      toast.error("Please select a reconciliation job to report on.");
       return;
     }
     try {
       await generateMutation.mutateAsync({
         title: form.name,
         reportType: form.type as "daily" | "weekly" | "monthly" | "custom",
-        jobId: 0,
+        jobId: Number(form.jobId),
       });
       toast.success("Report generated successfully!");
       setOpen(false);
-      setForm({ name: "", type: "daily", dateFrom: "", dateTo: "", format: "pdf" });
+      setForm({ name: "", type: "custom", jobId: "", format: "pdf" });
       refetch();
     } catch (err: any) {
       toast.error(err.message || "Failed to generate report");
@@ -68,8 +75,37 @@ export default function ReportsPage() {
             <div className="space-y-4 pt-2">
               <div>
                 <label className="text-sm font-medium mb-1 block">Report Name</label>
-                <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Daily Reconciliation - Feb 13, 2026" />
+                <Input
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="e.g. Daily Reconciliation - May 2026"
+                />
               </div>
+
+              {/* Job selector — the core fix */}
+              <div>
+                <label className="text-sm font-medium mb-1 block">Reconciliation Job</label>
+                {completedJobs.length === 0 ? (
+                  <div className="flex items-center gap-2 text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    No completed reconciliation jobs found. Run a reconciliation first.
+                  </div>
+                ) : (
+                  <Select value={form.jobId} onValueChange={(v) => setForm({ ...form, jobId: v })}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a completed job…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {completedJobs.map((j) => (
+                        <SelectItem key={j.id} value={String(j.id)}>
+                          {j.name} — {new Date(j.dateFrom).toLocaleDateString()} → {new Date(j.dateTo).toLocaleDateString()}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm font-medium mb-1 block">Report Type</label>
@@ -95,18 +131,15 @@ export default function ReportsPage() {
                   </Select>
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-sm font-medium mb-1 block">Date From</label>
-                  <Input type="date" value={form.dateFrom} onChange={(e) => setForm({ ...form, dateFrom: e.target.value })} />
-                </div>
-                <div>
-                  <label className="text-sm font-medium mb-1 block">Date To</label>
-                  <Input type="date" value={form.dateTo} onChange={(e) => setForm({ ...form, dateTo: e.target.value })} />
-                </div>
-              </div>
-              <Button onClick={handleGenerate} disabled={generateMutation.isPending} className="w-full">
-                {generateMutation.isPending ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Generating...</> : <><FileText className="h-4 w-4 mr-2" /> Generate Report</>}
+
+              <Button
+                onClick={handleGenerate}
+                disabled={generateMutation.isPending || !form.jobId || completedJobs.length === 0}
+                className="w-full"
+              >
+                {generateMutation.isPending
+                  ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Generating...</>
+                  : <><FileText className="h-4 w-4 mr-2" /> Generate Report</>}
               </Button>
             </div>
           </DialogContent>
