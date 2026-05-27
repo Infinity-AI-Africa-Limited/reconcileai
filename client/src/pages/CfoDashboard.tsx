@@ -186,13 +186,11 @@ export default function CfoDashboard() {
     staleTime: 5 * 60 * 1000,
   });
 
-  // Filter out channels with zero transactions for the selected period
+  // Always filter out channels with zero transactions — no data means no row/bar
   const activeChannelHealth = useMemo(() => {
     if (!allChannelHealth) return [];
-    // When "All Time" is selected, show all channels; otherwise hide zero-data channels
-    if (datePreset === "all") return allChannelHealth;
     return allChannelHealth.filter((c) => c.volume > 0);
-  }, [allChannelHealth, datePreset]);
+  }, [allChannelHealth]);
 
   // All unique channel names (from active data only, for the filter dropdown)
   const allChannelNames = useMemo(
