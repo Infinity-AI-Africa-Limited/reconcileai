@@ -303,6 +303,9 @@ export default function AdminUsers() {
     { userId: activityUserId ?? 0 },
     { enabled: activityUserId !== null },
   );
+  const exportActivity = trpc.admin.exportUserActivity.useMutation({
+    onError: (e) => toast.error(e.message),
+  });
 
   const bulkUpdateRole = trpc.admin.bulkUpdateRole.useMutation({
     onSuccess: (r) => { toast.success(`Role updated for ${r.count} user(s).`); utils.admin.users.invalidate(); setSelectedIds(new Set()); setBulkAction("none"); },
@@ -778,6 +781,7 @@ export default function AdminUsers() {
                 email: newUser.email,
                 role: newUser.role,
                 organizationId: newUser.organizationId !== "none" ? parseInt(newUser.organizationId) : null,
+                origin: window.location.origin,
               })}
               disabled={!newUser.name.trim() || !newUser.email.trim() || addUser.isPending}
             >
@@ -897,7 +901,30 @@ export default function AdminUsers() {
               </div>
             )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="flex gap-2 justify-between sm:justify-between">
+            <Button
+              variant="outline"
+              className="gap-2"
+              disabled={activityLoading || activityData.length === 0}
+              onClick={() => {
+                exportActivity.mutate(
+                  { userId: activityUserId!, userName: activityUserName },
+                  {
+                    onSuccess: (result) => {
+                      const blob = new Blob([result.csv], { type: "text/csv" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = result.filename;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    },
+                  }
+                );
+              }}
+            >
+              {exportActivity.isPending ? "Exporting…" : "Export CSV"}
+            </Button>
             <Button variant="outline" onClick={() => setActivityUserId(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>

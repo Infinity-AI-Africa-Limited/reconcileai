@@ -1387,3 +1387,19 @@ export const s3CsvExports = mysqlTable("s3_csv_exports", {
 ]);
 export type S3CsvExport = typeof s3CsvExports.$inferSelect;
 export type InsertS3CsvExport = typeof s3CsvExports.$inferInsert;
+
+// ─── Magic Link Tokens (welcome email / passwordless login) ──────────
+export const magicLinkTokens = mysqlTable("magic_link_tokens", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  token: varchar("token", { length: 128 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  usedAt: timestamp("usedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_magic_link_token").on(table.token),
+  index("idx_magic_link_user").on(table.userId),
+  index("idx_magic_link_expires").on(table.expiresAt),
+]);
+export type MagicLinkToken = typeof magicLinkTokens.$inferSelect;
+export type InsertMagicLinkToken = typeof magicLinkTokens.$inferInsert;

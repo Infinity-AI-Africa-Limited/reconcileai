@@ -253,6 +253,13 @@
       "when": 1779895299206,
       "tag": "0035_demonic_purifiers",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "5",
+      "when": 1779913722299,
+      "tag": "0036_magenta_slipstream",
+      "breakpoints": true
     }
   ]
 }

@@ -97,6 +97,23 @@ const guestProtectedProcedure = protectedProcedure.use(({ ctx, next }) => {
   return next({ ctx });
 });
 
+// ─── Operations-Only Middleware ───────────────────────────────────────
+// Blocks CFO and Compliance/Audit roles from performing reconciliation
+// and exception mutations. Admins and Operations users are allowed.
+const operationsProcedure = protectedProcedure.use(({ ctx, next }) => {
+  const restrictedRoles = ["cfo", "compliance"];
+  if (ctx.user.isGuest) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Guest users cannot perform write operations." });
+  }
+  if (restrictedRoles.includes(ctx.user.role as string)) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `Your role (${ctx.user.role}) does not have permission to perform reconciliation or exception write operations. This is a read-only action for your role.`,
+    });
+  }
+  return next({ ctx });
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 async function logAudit(
@@ -593,7 +610,7 @@ export const appRouter = router({
   // ─── Reconciliation ─────────────────────────────────────────────
 
   reconciliation: router({
-    create: guestProtectedProcedure
+    create: operationsProcedure
       .input(
         z.object({
           name: z.string().min(1).max(MAX_NAME_LENGTH),
@@ -699,7 +716,7 @@ export const appRouter = router({
         return db.getExceptions(input);
       }),
 
-    resolve: guestProtectedProcedure
+    resolve: operationsProcedure
       .input(
         z.object({
           id: z.number().int().positive(),
@@ -724,7 +741,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    assign: guestProtectedProcedure
+    assign: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         assignedTo: z.number().int().positive(),
@@ -744,7 +761,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    bulkAssign: guestProtectedProcedure
+    bulkAssign: operationsProcedure
       .input(z.object({
         exceptionIds: z.array(z.number().int().positive()).min(1).max(100),
         assignedTo: z.number().int().positive(),
@@ -825,7 +842,7 @@ export const appRouter = router({
         return workloadData.sort((a, b) => b.currentLoad - a.currentLoad);
       }),
 
-    escalate: guestProtectedProcedure
+    escalate: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         notes: z.string().max(2000).optional(),
@@ -844,7 +861,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    moveToReview: guestProtectedProcedure
+    moveToReview: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         notes: z.string().max(2000).optional(),
@@ -2350,6 +2367,7 @@ export const appRouter = router({
         email: z.string().email(),
         role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
         organizationId: z.number().int().positive().nullable().optional(),
+        origin: z.string().url().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -2373,6 +2391,21 @@ export const appRouter = router({
         });
         const newUserId = (result as any).insertId;
         await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: input.role }, ip, ua);
+        // Send welcome email with magic login link
+        if (input.origin) {
+          try {
+            const { sendWelcomeEmail } = await import("./magicLinkService");
+            await sendWelcomeEmail({
+              userId: newUserId,
+              name: input.name,
+              email: input.email,
+              role: input.role,
+              origin: input.origin,
+            });
+          } catch (err) {
+            console.error("[addUser] Failed to send welcome email:", err);
+          }
+        }
         return { success: true, userId: newUserId };
       }),
 
@@ -2445,6 +2478,29 @@ export const appRouter = router({
       .query(async ({ input }) => {
         const { data } = await db.getAuditLogs({ userId: input.userId, limit: input.limit });
         return data;
+      }),
+
+    exportUserActivity: adminProcedure
+      .input(z.object({
+        userId: z.number().int().positive(),
+        userName: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { data } = await db.getAuditLogs({ userId: input.userId, limit: 500 });
+        // Build CSV
+        const header = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details", "IP Address", "User Agent"];
+        const rows = data.map((entry: any) => [
+          new Date(entry.createdAt).toISOString(),
+          entry.action ?? "",
+          entry.entityType ?? "",
+          entry.entityId ?? "",
+          typeof entry.details === "object" ? JSON.stringify(entry.details) : String(entry.details ?? ""),
+          entry.ipAddress ?? "",
+          entry.userAgent ?? "",
+        ]);
+        const escape = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+        const csv = [header, ...rows].map(r => r.map(escape).join(",")).join("\n");
+        return { csv, filename: `activity_${input.userName ?? input.userId}_${new Date().toISOString().slice(0, 10)}.csv` };
       }),
   }),
 
