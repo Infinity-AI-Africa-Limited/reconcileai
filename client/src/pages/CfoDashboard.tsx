@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { useState } from "react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend } from "recharts";
 
 export default function CfoDashboard() {
   const [isExporting, setIsExporting] = useState(false);
@@ -270,7 +270,8 @@ export default function CfoDashboard() {
                   textAnchor="end"
                   height={80}
                 />
-                <YAxis tick={{ fill: "#8C757D", fontSize: 12 }} />
+                <YAxis yAxisId="left" tick={{ fill: "#8C757D", fontSize: 12 }} />
+                <YAxis yAxisId="right" orientation="right" tick={{ fill: "#10B981", fontSize: 12 }} domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
                 <Tooltip 
                   contentStyle={{ 
                     backgroundColor: "#FFFFFF", 
@@ -278,12 +279,13 @@ export default function CfoDashboard() {
                     borderRadius: "8px"
                   }}
                   formatter={(value: any, name: string) => {
-                    if (name === "matchRate") return [formatPercentage(value), "Match Rate"];
-                    return [formatNumber(value), name === "total" ? "Total Transactions" : "Exceptions"];
+                    if (name === "Match Rate") return [`${Number(value).toFixed(1)}%`, "Match Rate"];
+                    return [formatNumber(value), "Exceptions"];
                   }}
                 />
-                <Bar dataKey="matchRate" fill="#10B981" name="Match Rate (%)" />
-                <Bar dataKey="exceptions" fill="#F47458" name="Exceptions" />
+                <Legend />
+                <Bar yAxisId="right" dataKey="matchRate" fill="#10B981" name="Match Rate" />
+                <Bar yAxisId="left" dataKey="exceptions" fill="#F47458" name="Exceptions" />
               </BarChart>
             </ResponsiveContainer>
           </div>
