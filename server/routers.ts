@@ -1373,30 +1373,41 @@ export const appRouter = router({
       };
     }),
 
-    cfoChannelHealth: protectedProcedure.query(async ({ ctx }) => {
-      const channels = await db.getChannels();
-      const channelStats = await Promise.all(
-        channels.map(async (channel) => {
-          const { data: transactions } = await db.getTransactions({
-            channelId: channel.id,
-            limit: 10000,
-          });
-          const matched = transactions.filter((t) => t.status === "matched").length;
-          const total = transactions.length;
-          const matchRate = total > 0 ? (matched / total) * 100 : 0;
-          const exceptions = transactions.filter((t) => t.status === "exception").length;
+    cfoChannelHealth: protectedProcedure
+      .input(z.object({
+        dateFrom: z.date().optional(),
+        dateTo: z.date().optional(),
+        channelCodes: z.array(z.string()).optional(),
+      }).optional())
+      .query(async ({ ctx, input }) => {
+        const channels = await db.getChannels();
+        const filteredChannels = input?.channelCodes && input.channelCodes.length > 0
+          ? channels.filter((c) => input.channelCodes!.includes(c.code))
+          : channels;
+        const channelStats = await Promise.all(
+          filteredChannels.map(async (channel) => {
+            const { data: transactions } = await db.getTransactions({
+              channelId: channel.id,
+              limit: 10000,
+              dateFrom: input?.dateFrom,
+              dateTo: input?.dateTo,
+            });
+            const matched = transactions.filter((t) => t.status === "matched").length;
+            const total = transactions.length;
+            const matchRate = total > 0 ? (matched / total) * 100 : 0;
+            const exceptions = transactions.filter((t) => t.status === "exception").length;
 
-          return {
-            channel: channel.name,
-            channelCode: channel.code,
-            volume: total,
-            matchRate: parseFloat(matchRate.toFixed(1)),
-            exceptions,
-          };
-        })
-      );
-      return channelStats;
-    }),
+            return {
+              channel: channel.name,
+              channelCode: channel.code,
+              volume: total,
+              matchRate: parseFloat(matchRate.toFixed(1)),
+              exceptions,
+            };
+          })
+        );
+        return channelStats;
+      }),
 
     // Operations Dashboard Endpoints
     operationsQueue: protectedProcedure
