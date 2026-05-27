@@ -1308,3 +1308,49 @@ export const sharedReportTokens = mysqlTable("sharedReportTokens", {
 ]);
 export type SharedReportToken = typeof sharedReportTokens.$inferSelect;
 export type InsertSharedReportToken = typeof sharedReportTokens.$inferInsert;
+
+// ─── CFO Weekly Report Schedules ────────────────────────────────────
+export const cfoReportSchedules = mysqlTable("cfo_report_schedules", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  organizationId: int("organizationId"),
+  // Heartbeat cron task UID (null until first scheduled)
+  scheduleCronTaskUid: varchar("scheduleCronTaskUid", { length: 65 }),
+  isActive: boolean("isActive").default(true).notNull(),
+  // Cron expression (6-field UTC): default Monday 08:00 UTC
+  cronExpression: varchar("cronExpression", { length: 64 }).default("0 0 8 * * 1").notNull(),
+  // Comma-separated list of recipient emails (stored as JSON array)
+  recipients: json("recipients").notNull(), // string[]
+  // Date range to include in the report ("7d" | "30d" | "mtd")
+  reportPeriod: varchar("reportPeriod", { length: 10 }).default("7d").notNull(),
+  lastSentAt: timestamp("lastSentAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_cfo_schedule_user").on(table.userId),
+  index("idx_cfo_schedule_org").on(table.organizationId),
+  index("idx_cfo_schedule_task_uid").on(table.scheduleCronTaskUid),
+]);
+export type CfoReportSchedule = typeof cfoReportSchedules.$inferSelect;
+export type InsertCfoReportSchedule = typeof cfoReportSchedules.$inferInsert;
+
+// ─── Channel Alert Settings (per-channel thresholds) ─────────────────
+export const channelAlertSettings = mysqlTable("channel_alert_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  organizationId: int("organizationId"),
+  channelCode: varchar("channelCode", { length: 64 }).notNull(),
+  // Match rate threshold (0-100). Alert fires when rate drops below this.
+  threshold: decimal("threshold", { precision: 5, scale: 2 }).default("95.00").notNull(),
+  alertEnabled: boolean("alertEnabled").default(true).notNull(),
+  // Last time an alert was sent for this channel (to avoid spam)
+  lastAlertSentAt: timestamp("lastAlertSentAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_channel_alert_user").on(table.userId),
+  index("idx_channel_alert_org").on(table.organizationId),
+  uniqueIndex("uq_channel_alert_user_channel").on(table.userId, table.channelCode),
+]);
+export type ChannelAlertSetting = typeof channelAlertSettings.$inferSelect;
+export type InsertChannelAlertSetting = typeof channelAlertSettings.$inferInsert;

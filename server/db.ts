@@ -28,6 +28,8 @@ import {
   moduleConfigurations, InsertModuleConfiguration,
   distributors,
   dashboardStatsCache,
+  cfoReportSchedules, InsertCfoReportSchedule, CfoReportSchedule,
+  channelAlertSettings, InsertChannelAlertSetting, ChannelAlertSetting,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -1430,4 +1432,83 @@ export async function getDistributorStats(organizationId: number) {
     pendingConfirmation: all.filter((d) => d.status === "pending_confirmation").length,
     flagged: all.filter((d) => d.status === "flagged").length,
   };
+}
+
+// ─── CFO Report Schedules ────────────────────────────────────────────
+
+export async function getCfoReportSchedule(userId: number): Promise<CfoReportSchedule | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(cfoReportSchedules).where(eq(cfoReportSchedules.userId, userId)).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function getCfoReportScheduleByTaskUid(taskUid: string): Promise<CfoReportSchedule | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(cfoReportSchedules).where(eq(cfoReportSchedules.scheduleCronTaskUid, taskUid)).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function upsertCfoReportSchedule(userId: number, data: Partial<InsertCfoReportSchedule>): Promise<CfoReportSchedule | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const existing = await getCfoReportSchedule(userId);
+  if (existing) {
+    await db.update(cfoReportSchedules).set({ ...data, updatedAt: new Date() }).where(eq(cfoReportSchedules.userId, userId));
+    return getCfoReportSchedule(userId);
+  } else {
+    await db.insert(cfoReportSchedules).values({ userId, recipients: [], ...data } as InsertCfoReportSchedule);
+    return getCfoReportSchedule(userId);
+  }
+}
+
+export async function updateCfoReportScheduleLastSent(userId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(cfoReportSchedules).set({ lastSentAt: new Date() }).where(eq(cfoReportSchedules.userId, userId));
+}
+
+// ─── Channel Alert Settings ──────────────────────────────────────────
+
+export async function getChannelAlertSettings(userId: number): Promise<ChannelAlertSetting[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(channelAlertSettings).where(eq(channelAlertSettings.userId, userId));
+}
+
+export async function getChannelAlertSetting(userId: number, channelCode: string): Promise<ChannelAlertSetting | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(channelAlertSettings)
+    .where(and(eq(channelAlertSettings.userId, userId), eq(channelAlertSettings.channelCode, channelCode)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function upsertChannelAlertSetting(userId: number, channelCode: string, data: { threshold?: number; alertEnabled?: boolean }): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  const existing = await getChannelAlertSetting(userId, channelCode);
+  if (existing) {
+    await db.update(channelAlertSettings).set({
+      ...(data.threshold !== undefined && { threshold: String(data.threshold) }),
+      ...(data.alertEnabled !== undefined && { alertEnabled: data.alertEnabled }),
+      updatedAt: new Date(),
+    }).where(and(eq(channelAlertSettings.userId, userId), eq(channelAlertSettings.channelCode, channelCode)));
+  } else {
+    await db.insert(channelAlertSettings).values({
+      userId,
+      channelCode,
+      threshold: String(data.threshold ?? 95),
+      alertEnabled: data.alertEnabled ?? true,
+    } as InsertChannelAlertSetting);
+  }
+}
+
+export async function updateChannelAlertLastSent(userId: number, channelCode: string): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(channelAlertSettings).set({ lastAlertSentAt: new Date() })
+    .where(and(eq(channelAlertSettings.userId, userId), eq(channelAlertSettings.channelCode, channelCode)));
 }

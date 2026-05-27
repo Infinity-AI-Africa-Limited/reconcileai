@@ -3948,6 +3948,86 @@ Always be specific, reference actual exception IDs and amounts where available, 
         }
       }),
   }),
+
+  // ─── CFO Report Schedule + Alerts ──────────────────────────────────
+  cfoReports: router({
+    // Get current schedule settings
+    getSchedule: protectedProcedure.query(async ({ ctx }) => {
+      const schedule = await db.getCfoReportSchedule(ctx.user.id);
+      return schedule;
+    }),
+
+    // Upsert schedule (recipients, period, cron)
+    saveSchedule: protectedProcedure
+      .input(z.object({
+        recipients: z.array(z.string().email()).min(1).max(20),
+        reportPeriod: z.enum(["7d", "30d", "mtd"]).default("7d"),
+        isActive: z.boolean().default(true),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const schedule = await db.upsertCfoReportSchedule(ctx.user.id, {
+          recipients: input.recipients,
+          reportPeriod: input.reportPeriod,
+          isActive: input.isActive,
+        });
+        return schedule;
+      }),
+
+    // Send report now (manual trigger)
+    sendNow: protectedProcedure
+      .input(z.object({ period: z.enum(["7d", "30d", "mtd"]).default("7d") }))
+      .mutation(async ({ ctx, input }) => {
+        const { sendWeeklyChannelReport } = await import("./cfoReportService");
+        return sendWeeklyChannelReport(ctx.user.id, input.period);
+      }),
+
+    // Export CSV (returns CSV string)
+    exportCsv: protectedProcedure
+      .input(z.object({
+        period: z.enum(["7d", "30d", "mtd", "all"]).default("7d"),
+        channelCodes: z.array(z.string()).optional(),
+      }))
+      .query(async ({ input }) => {
+        const { buildChannelMetrics, buildCsvContent } = await import("./cfoReportService");
+        const rows = await buildChannelMetrics(input.period, input.channelCodes);
+        const csv = buildCsvContent(rows, input.period);
+        return { csv, rowCount: rows.length };
+      }),
+
+    // Get channel alert settings
+    getAlertSettings: protectedProcedure.query(async ({ ctx }) => {
+      return db.getChannelAlertSettings(ctx.user.id);
+    }),
+
+    // Upsert a single channel alert threshold
+    saveAlertSetting: protectedProcedure
+      .input(z.object({
+        channelCode: z.string(),
+        threshold: z.number().min(0).max(100),
+        alertEnabled: z.boolean().default(true),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await db.upsertChannelAlertSetting(ctx.user.id, input.channelCode, {
+          threshold: input.threshold,
+          alertEnabled: input.alertEnabled,
+        });
+        return { ok: true };
+      }),
+
+    // Run threshold breach check now
+    checkBreaches: protectedProcedure.mutation(async ({ ctx }) => {
+      const { checkChannelThresholdBreaches } = await import("./cfoReportService");
+      return checkChannelThresholdBreaches(ctx.user.id);
+    }),
+
+    // Channel 30-day drill-down
+    channelDrillDown: protectedProcedure
+      .input(z.object({ channelCode: z.string() }))
+      .query(async ({ input }) => {
+        const { getChannelDrillDown } = await import("./cfoReportService");
+        return getChannelDrillDown(input.channelCode);
+      }),
+  }),
 });
 export type AppRouter = typeof appRouter;
 

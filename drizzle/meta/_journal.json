@@ -232,6 +232,13 @@
       "when": 1779695668000,
       "tag": "0032_massive_enchantress",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "5",
+      "when": 1779885123698,
+      "tag": "0033_stale_black_bird",
+      "breakpoints": true
     }
   ]
 }

@@ -169,6 +169,61 @@ async function startServer() {
     }
   });
 
+  // ── Scheduled: weekly CFO channel metrics report ──────────────────────────
+  app.post("/api/scheduled/weeklyChannelReport", async (req, res) => {
+    try {
+      // Authenticate the cron caller via task UID header (no §5c patches needed)
+      const taskUid = req.headers["x-manus-cron-task-uid"] as string | undefined;
+      if (!taskUid) return res.status(403).json({ error: "cron-only" });
+
+      // Look up the schedule row by task UID
+      const schedule = await (await import("../db")).getCfoReportScheduleByTaskUid(taskUid);
+      if (!schedule) return res.json({ ok: true, skipped: "orphan" });
+      if (!schedule.isActive) return res.json({ ok: true, skipped: "inactive" });
+
+      const { sendWeeklyChannelReport } = await import("../cfoReportService");
+      const result = await sendWeeklyChannelReport(schedule.userId, schedule.reportPeriod);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error("[weeklyChannelReport] error:", err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+        context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
+  // ── Scheduled: daily threshold breach check ─────────────────────────────
+  app.post("/api/scheduled/channelThresholdCheck", async (req, res) => {
+    try {
+      const taskUid = req.headers["x-manus-cron-task-uid"] as string | undefined;
+      if (!taskUid) return res.status(403).json({ error: "cron-only" });
+
+      // Run for all users who have alert settings configured
+      const dbModule = await import("../db");
+      const users = await dbModule.getAllUsers();
+      const { checkChannelThresholdBreaches } = await import("../cfoReportService");
+
+      let totalBreaches = 0;
+      let totalAlerts = 0;
+      for (const user of users) {
+        const result = await checkChannelThresholdBreaches(user.id);
+        totalBreaches += result.breachesFound;
+        totalAlerts += result.alertsSent;
+      }
+
+      res.json({ ok: true, totalBreaches, totalAlerts, usersChecked: users.length });
+    } catch (err) {
+      console.error("[channelThresholdCheck] error:", err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+        context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
   // Storage proxy — serves /manus-storage/* assets via signed S3 URLs
   registerStorageProxy(app);
   // OAuth callback under /api/oauth/callback
