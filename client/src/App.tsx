@@ -48,6 +48,7 @@ import AdminAssessments from "./pages/AdminAssessments";
 import RoadmapAccess from "./pages/RoadmapAccess";
 import RoadmapViewer from "./pages/RoadmapViewer";
 import AdminRoadmapAccess from "./pages/AdminRoadmapAccess";
+import AdminUsers from "./pages/AdminUsers";
 import ReportDetail from "./pages/ReportDetail";
 import ComplianceAssessmentUnsubscribe from "./pages/ComplianceAssessmentUnsubscribe";
 import CBNCompliance from "./pages/CBNCompliance";
@@ -107,6 +108,7 @@ function Router() {
           <Route path="/compliance-assessment/result/:token" component={ComplianceAssessmentResult} />
           <Route path="/admin/assessments" component={AdminAssessments} />
           <Route path="/admin/roadmap-access" component={AdminRoadmapAccess} />
+          <Route path="/admin/users" component={AdminUsers} />
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/404" component={NotFound} />

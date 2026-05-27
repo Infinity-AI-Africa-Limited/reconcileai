@@ -6,7 +6,7 @@ import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
-import { eq, or, desc, sql, isNull, and, like } from "drizzle-orm";
+import { eq, or, desc, asc, sql, isNull, and, like } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -66,7 +66,7 @@ import {
   getPrewarmOrgId,
   DEMO_PREWARM_OPEN_ID,
 } from "./prewarmDemoUser";
-import { agentActionDrafts, agentMemory } from "../drizzle/schema";
+import { agentActionDrafts, agentMemory, organizations, users } from "../drizzle/schema";
 import { getDb } from "./db";
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -2298,6 +2298,68 @@ export const appRouter = router({
         }, ip, ua);
         return { success: true };
       }),
+
+    toggleActive: adminProcedure
+      .input(z.object({
+        userId: z.number().int().positive(),
+        isActive: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.userId === ctx.user.id) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot deactivate your own account." });
+        }
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        await drizzle.update(users).set({ isActive: input.isActive }).where(eq(users.id, input.userId));
+        await logAudit(ctx.user.id, input.isActive ? "activate_user" : "deactivate_user", "user", input.userId, {
+          isActive: input.isActive,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    deleteUser: adminProcedure
+      .input(z.object({
+        userId: z.number().int().positive(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.userId === ctx.user.id) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot delete your own account." });
+        }
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        // Soft-delete: deactivate and clear PII
+        await drizzle.update(users)
+          .set({ isActive: false, name: "[Deleted User]", email: null })
+          .where(eq(users.id, input.userId));
+        await logAudit(ctx.user.id, "delete_user", "user", input.userId, {}, ip, ua);
+        return { success: true };
+      }),
+
+    updateOrganization: adminProcedure
+      .input(z.object({
+        userId: z.number().int().positive(),
+        organizationId: z.number().int().positive().nullable(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        await drizzle.update(users)
+          .set({ organizationId: input.organizationId })
+          .where(eq(users.id, input.userId));
+        await logAudit(ctx.user.id, "update_user_org", "user", input.userId, {
+          organizationId: input.organizationId,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    organizations: adminProcedure.query(async () => {
+      const drizzle = await getDb();
+      if (!drizzle) return [];
+      return drizzle.select().from(organizations).orderBy(asc(organizations.name));
+    }),
   }),
 
   // ─── Super Agent ─────────────────────────────────────────────────────
