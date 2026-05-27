@@ -1409,6 +1409,55 @@ export const appRouter = router({
         return channelStats;
       }),
 
+    // CFO Channel 7-day trend (daily match rates per channel)
+    cfoChannelTrend: protectedProcedure
+      .input(z.object({
+        channelCodes: z.array(z.string()).optional(),
+      }).optional())
+      .query(async ({ ctx, input }) => {
+        const channels = await db.getChannels();
+        const filteredChannels = input?.channelCodes && input.channelCodes.length > 0
+          ? channels.filter((c) => input.channelCodes!.includes(c.code))
+          : channels;
+
+        const now = new Date();
+        // Build 7 daily buckets (day-6 … day-0)
+        const days = Array.from({ length: 7 }, (_, i) => {
+          const d = new Date(now);
+          d.setDate(d.getDate() - (6 - i));
+          d.setHours(0, 0, 0, 0);
+          return d;
+        });
+
+        const result: Record<string, { day: string; matchRate: number }[]> = {};
+
+        await Promise.all(
+          filteredChannels.map(async (channel) => {
+            const dayRates: { day: string; matchRate: number }[] = [];
+            for (let i = 0; i < days.length; i++) {
+              const from = days[i];
+              const to = new Date(from);
+              to.setHours(23, 59, 59, 999);
+              const { data: txns } = await db.getTransactions({
+                channelId: channel.id,
+                dateFrom: from,
+                dateTo: to,
+                limit: 5000,
+              });
+              const total = txns.length;
+              const matched = txns.filter((t) => t.status === "matched").length;
+              dayRates.push({
+                day: from.toISOString().slice(5, 10), // MM-DD
+                matchRate: total > 0 ? parseFloat(((matched / total) * 100).toFixed(1)) : 0,
+              });
+            }
+            result[channel.code] = dayRates;
+          })
+        );
+
+        return result;
+      }),
+
     // Operations Dashboard Endpoints
     operationsQueue: protectedProcedure
       .input(z.object({
