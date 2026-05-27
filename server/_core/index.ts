@@ -224,6 +224,29 @@ async function startServer() {
     }
   });
 
+  // ── Scheduled: daily S3 CSV export cleanup ──────────────────────────────
+  // Heartbeat cron: runs daily (e.g. "0 0 2 * * *" — 02:00 UTC)
+  // Deletes CSV files from S3 whose age exceeds their configured retentionDays.
+  app.post("/api/scheduled/s3CsvCleanup", async (req, res) => {
+    try {
+      const taskUid = req.headers["x-manus-cron-task-uid"] as string | undefined;
+      if (!taskUid) return res.status(403).json({ error: "cron-only" });
+
+      const { purgeExpiredCsvExports } = await import("../s3CleanupService");
+      const result = await purgeExpiredCsvExports();
+
+      console.log(`[s3CsvCleanup] checked=${result.checked} deleted=${result.deleted} failed=${result.failed}`);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error("[s3CsvCleanup] error:", err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+        context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
   // Storage proxy — serves /manus-storage/* assets via signed S3 URLs
   registerStorageProxy(app);
   // OAuth callback under /api/oauth/callback

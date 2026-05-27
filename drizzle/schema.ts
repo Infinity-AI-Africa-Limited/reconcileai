@@ -1354,3 +1354,36 @@ export const channelAlertSettings = mysqlTable("channel_alert_settings", {
 ]);
 export type ChannelAlertSetting = typeof channelAlertSettings.$inferSelect;
 export type InsertChannelAlertSetting = typeof channelAlertSettings.$inferInsert;
+
+// ─── S3 CSV Export Tracking (for retention-based cleanup) ────────────
+export const s3CsvExports = mysqlTable("s3_csv_exports", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  organizationId: int("organizationId"),
+  // S3 key (relative path) — used by storageDelete
+  s3Key: varchar("s3Key", { length: 512 }).notNull(),
+  // Public URL returned by storagePut
+  s3Url: text("s3Url").notNull(),
+  // Human-readable filename for UI display
+  filename: varchar("filename", { length: 255 }).notNull(),
+  // Source module: "cbn" | "cfo" | "reconciliation"
+  sourceModule: varchar("sourceModule", { length: 32 }).notNull(),
+  // Optional reference ID (e.g. submissionId, jobId)
+  sourceId: int("sourceId"),
+  // File size in bytes (0 if unknown)
+  sizeBytes: int("sizeBytes").default(0).notNull(),
+  // Retention window in days — cleanup job deletes files older than this
+  retentionDays: int("retentionDays").default(7).notNull(),
+  // Set to true once storageDelete has been called successfully
+  deleted: boolean("deleted").default(false).notNull(),
+  deletedAt: timestamp("deletedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_s3csv_user").on(table.userId),
+  index("idx_s3csv_org").on(table.organizationId),
+  index("idx_s3csv_module").on(table.sourceModule),
+  index("idx_s3csv_created").on(table.createdAt),
+  index("idx_s3csv_deleted").on(table.deleted),
+]);
+export type S3CsvExport = typeof s3CsvExports.$inferSelect;
+export type InsertS3CsvExport = typeof s3CsvExports.$inferInsert;

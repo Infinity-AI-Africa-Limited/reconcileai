@@ -691,7 +691,11 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
 
   // ── Export submission as CSV text ─────────────────────────────────────────
   exportSubmissionCsv: protectedProcedure
-    .input(z.object({ submissionId: z.number() }))
+    .input(z.object({
+      submissionId: z.number(),
+      /** Retention window in days before the S3 file is auto-deleted. Defaults to 7. */
+      retentionDays: z.number().int().min(1).max(365).default(7),
+    }))
     .query(async ({ ctx, input }) => {
       const drizzle = await getDb();
       if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -730,7 +734,29 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
         `"AI Gap Analysis"`,
         `"${(submission.aiGapAnalysis ?? "").replace(/"/g, '""')}"`,
       ];
-      return { csv: csvLines.join("\n"), filename: `CBN_${frameworkCode}_${submission.reportingPeriodLabel ?? submission.id}_${new Date().toISOString().slice(0, 10)}.csv` };
+      const csvContent = csvLines.join("\n");
+      const filename = `CBN_${frameworkCode}_${submission.reportingPeriodLabel ?? submission.id}_${new Date().toISOString().slice(0, 10)}.csv`;
+
+      // Upload to S3 and track for retention-based cleanup
+      let s3Url: string | null = null;
+      try {
+        const { trackAndUploadCsvExport } = await import("../s3CleanupService");
+        const uploaded = await trackAndUploadCsvExport({
+          userId: ctx.user.id,
+          organizationId: orgId,
+          filename,
+          csvContent,
+          sourceModule: "cbn",
+          sourceId: input.submissionId,
+          retentionDays: input.retentionDays,
+        });
+        s3Url = uploaded.s3Url;
+      } catch (uploadErr) {
+        // Non-fatal: fall back to inline CSV if S3 upload fails
+        console.warn("[CBN Export] S3 upload failed, returning inline CSV:", uploadErr);
+      }
+
+      return { csv: csvContent, filename, s3Url };
     }),
 
   // ── Mark a regulatory deadline as submitted ───────────────────────────────
