@@ -2288,7 +2288,7 @@ export const appRouter = router({
     updateRole: adminProcedure
       .input(z.object({
         userId: z.number().int().positive(),
-        role: z.enum(["user", "admin"]),
+        role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -2297,6 +2297,83 @@ export const appRouter = router({
           newRole: input.role,
         }, ip, ua);
         return { success: true };
+      }),
+    bulkUpdateRole: adminProcedure
+      .input(z.object({
+        userIds: z.array(z.number().int().positive()),
+        role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        for (const userId of input.userIds) {
+          await drizzle.update(users).set({ role: input.role }).where(eq(users.id, userId));
+          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua);
+        }
+        return { success: true, count: input.userIds.length };
+      }),
+    bulkToggleActive: adminProcedure
+      .input(z.object({
+        userIds: z.array(z.number().int().positive()),
+        isActive: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const safeIds = input.userIds.filter(id => id !== ctx.user.id);
+        for (const userId of safeIds) {
+          await drizzle.update(users).set({ isActive: input.isActive }).where(eq(users.id, userId));
+          await logAudit(ctx.user.id, input.isActive ? "activate_user" : "deactivate_user", "user", userId, { isActive: input.isActive }, ip, ua);
+        }
+        return { success: true, count: safeIds.length };
+      }),
+    bulkUpdateOrganization: adminProcedure
+      .input(z.object({
+        userIds: z.array(z.number().int().positive()),
+        organizationId: z.number().int().positive().nullable(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        for (const userId of input.userIds) {
+          await drizzle.update(users).set({ organizationId: input.organizationId }).where(eq(users.id, userId));
+          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua);
+        }
+        return { success: true, count: input.userIds.length };
+      }),
+    addUser: adminProcedure
+      .input(z.object({
+        name: z.string().min(1).max(200),
+        email: z.string().email(),
+        role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
+        organizationId: z.number().int().positive().nullable().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        // Check if email already exists
+        const existing = await drizzle.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
+        if (existing.length > 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "A user with this email already exists." });
+        }
+        // Create user with a synthetic openId (they will link via OAuth on first login)
+        const openId = `manual_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const [result] = await drizzle.insert(users).values({
+          openId,
+          name: input.name,
+          email: input.email,
+          role: input.role,
+          organizationId: input.organizationId ?? null,
+          isActive: true,
+          loginMethod: "invite",
+        });
+        const newUserId = (result as any).insertId;
+        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: input.role }, ip, ua);
+        return { success: true, userId: newUserId };
       }),
 
     toggleActive: adminProcedure

@@ -155,7 +155,7 @@ export async function getAllUsers() {
   return db.select().from(users).orderBy(desc(users.createdAt)).limit(MAX_QUERY_LIMIT);
 }
 
-export async function updateUserRole(userId: number, role: "user" | "admin") {
+export async function updateUserRole(userId: number, role: "admin" | "cfo" | "operations" | "compliance" | "user") {
   const db = await getDb();
   if (!db) return;
   await db.update(users).set({ role }).where(eq(users.id, userId));

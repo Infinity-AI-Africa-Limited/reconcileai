@@ -37,7 +37,7 @@ export const users = mysqlTable("users", {
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
-  role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  role: mysqlEnum("role", ["admin", "cfo", "operations", "compliance", "user"]).default("user").notNull(),
   organizationId: int("organizationId"),
   isGuest: boolean("isGuest").default(false).notNull(),
   isActive: boolean("isActive").default(true).notNull(),
