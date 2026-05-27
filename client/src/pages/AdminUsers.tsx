@@ -26,6 +26,7 @@ import {
   MoreHorizontal, Search, Users, Shield, UserCheck, UserX,
   Trash2, Building2, RefreshCw, ChevronUp, ChevronDown,
   ChevronsUpDown, UserPlus, CheckSquare, CheckCircle2, XCircle,
+  Activity, Clock,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -253,6 +254,9 @@ export default function AdminUsers() {
 
   // Add User dialog
   const [addUserOpen, setAddUserOpen] = useState(false);
+  // Activity modal
+  const [activityUserId, setActivityUserId] = useState<number | null>(null);
+  const [activityUserName, setActivityUserName] = useState<string>("");
   const [newUser, setNewUser] = useState({
     name: "",
     email: "",
@@ -281,15 +285,25 @@ export default function AdminUsers() {
     onSuccess: () => { toast.success("Organisation updated."); utils.admin.users.invalidate(); setOrgDialog(null); },
     onError: (e) => toast.error(e.message),
   });
+  const notifyOwner = trpc.system.notifyOwner.useMutation();
   const addUser = trpc.admin.addUser.useMutation({
-    onSuccess: () => {
-      toast.success("User added successfully.");
+    onSuccess: (_, vars) => {
+      toast.success(`${vars.name} has been added. A welcome notification has been sent.`);
       utils.admin.users.invalidate();
       setAddUserOpen(false);
       setNewUser({ name: "", email: "", role: "operations", organizationId: "none" });
+      notifyOwner.mutate({
+        title: `New portal user added: ${vars.name}`,
+        content: `Admin added ${vars.name} (${vars.email}) with role: ${ROLE_META[vars.role as PortalRole]?.label ?? vars.role}. They can log in at ${window.location.origin}.`,
+      });
     },
     onError: (e) => toast.error(e.message),
   });
+  const { data: activityData = [], isFetching: activityLoading } = trpc.admin.getUserActivity.useQuery(
+    { userId: activityUserId ?? 0 },
+    { enabled: activityUserId !== null },
+  );
+
   const bulkUpdateRole = trpc.admin.bulkUpdateRole.useMutation({
     onSuccess: (r) => { toast.success(`Role updated for ${r.count} user(s).`); utils.admin.users.invalidate(); setSelectedIds(new Set()); setBulkAction("none"); },
     onError: (e) => toast.error(e.message),
@@ -631,6 +645,11 @@ export default function AdminUsers() {
                             Assign Organisation
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => { setActivityUserId(u.id); setActivityUserName(u.name ?? u.email ?? "User"); }}>
+                            <Activity className="h-3.5 w-3.5 mr-2 text-blue-600" />
+                            <span className="text-blue-600">View Activity</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
                           {u.isActive ? (
                             <DropdownMenuItem onClick={() => setConfirmDialog({ type: "deactivate", userId: u.id, userName: u.name ?? u.email ?? "User" })}>
                               <UserX className="h-3.5 w-3.5 mr-2 text-amber-600" />
@@ -834,6 +853,52 @@ export default function AdminUsers() {
             >
               {isMutating ? "Saving…" : "Save"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* ── Activity Modal ── */}
+      <Dialog open={activityUserId !== null} onOpenChange={() => setActivityUserId(null)}>
+        <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Activity className="h-5 w-5 text-blue-600" />
+              Activity — {activityUserName}
+            </DialogTitle>
+            <DialogDescription>Recent audit trail entries for this user.</DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            {activityLoading ? (
+              <p className="text-sm text-muted-foreground text-center py-8">Loading activity…</p>
+            ) : activityData.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-8">No activity recorded for this user.</p>
+            ) : (
+              <div className="space-y-2">
+                {activityData.map((entry: { id: number; action: string; entityType?: string | null; entityId?: number | null; details?: unknown; createdAt: Date | string | null }) => (
+                  <div key={entry.id} className="flex gap-3 rounded-lg border bg-muted/20 p-3">
+                    <Clock className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium capitalize">{entry.action.replace(/_/g, " ")}</span>
+                        {entry.entityType && (
+                          <span className="text-xs bg-muted px-1.5 py-0.5 rounded">{entry.entityType}{entry.entityId ? ` #${entry.entityId}` : ""}</span>
+                        )}
+                      </div>
+                      {entry.details != null && (
+                        <p className="text-xs text-muted-foreground mt-0.5 break-all">
+                          {String(typeof entry.details === "string" ? entry.details : JSON.stringify(entry.details))}
+                        </p>
+                      )}
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "—"}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActivityUserId(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

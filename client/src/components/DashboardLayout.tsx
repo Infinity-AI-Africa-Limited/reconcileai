@@ -58,41 +58,54 @@ import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2 } from "lucide-react";
 
-const menuItems = [
+type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[] };
+
+// roles: admin | cfo | operations | compliance | user
+// If roles is omitted, item is visible to ALL roles.
+const menuItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
   { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
   { icon: Database, label: "Woodcore POC", path: "/woodcore-poc" },
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
-  { icon: Upload, label: "Upload Data", path: "/upload" },
-  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
+  // Upload & Reconciliation: admin + operations only
+  { icon: Upload, label: "Upload Data", path: "/upload", roles: ["admin", "operations"] },
+  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation", roles: ["admin", "operations"] },
   { icon: FileText, label: "Reports", path: "/reports" },
-  { icon: Calendar, label: "Schedules", path: "/schedules" },
+  { icon: Calendar, label: "Schedules", path: "/schedules", roles: ["admin", "operations"] },
   { icon: Activity, label: "Monitor", path: "/monitor" },
   { icon: BookOpen, label: "Documentation", path: "/documentation" },
 ];
 
-const adminMenuItems = [
-  { icon: Layers, label: "Multi-Channel", path: "/channels" },
-  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
-  { icon: Search, label: "Transactions", path: "/transactions" },
-  { icon: ClipboardList, label: "Review Queue", path: "/review" },
-  { icon: Shield, label: "Audit Trail", path: "/audit" },
-  { icon: ShieldCheck, label: "Data Protection", path: "/compliance" },
-  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance" },
-  { icon: Users, label: "User Management", path: "/admin/users" },
-  { icon: ClipboardCheck, label: "Assessments", path: "/admin/assessments" },
-  { icon: Settings2, label: "Module Configuration", path: "/modules" },
-  { icon: Mail, label: "Email Settings", path: "/email-settings" },
+const adminMenuItems: NavItem[] = [
+  { icon: Layers, label: "Multi-Channel", path: "/channels", roles: ["admin", "operations"] },
+  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions", roles: ["admin", "operations"] },
+  { icon: Search, label: "Transactions", path: "/transactions", roles: ["admin", "operations"] },
+  { icon: ClipboardList, label: "Review Queue", path: "/review", roles: ["admin", "operations"] },
+  // Audit Trail: admin + compliance + cfo
+  { icon: Shield, label: "Audit Trail", path: "/audit", roles: ["admin", "compliance", "cfo"] },
+  { icon: ShieldCheck, label: "Data Protection", path: "/compliance", roles: ["admin", "compliance"] },
+  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance", roles: ["admin", "compliance", "cfo"] },
+  // User Management: admin only
+  { icon: Users, label: "User Management", path: "/admin/users", roles: ["admin"] },
+  { icon: ClipboardCheck, label: "Assessments", path: "/admin/assessments", roles: ["admin"] },
+  { icon: Settings2, label: "Module Configuration", path: "/modules", roles: ["admin"] },
+  { icon: Mail, label: "Email Settings", path: "/email-settings", roles: ["admin"] },
 ];
 
-const adminAdvancedItems = [
-  { icon: Beaker, label: "Sample Data", path: "/sample-data" },
-  { icon: Plug, label: "Integrations", path: "/integrations" },
-  { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
-  { icon: Server, label: "SFTP Config", path: "/sftp-config" },
-  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
+const adminAdvancedItems: NavItem[] = [
+  { icon: Beaker, label: "Sample Data", path: "/sample-data", roles: ["admin"] },
+  { icon: Plug, label: "Integrations", path: "/integrations", roles: ["admin"] },
+  { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
+  { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
+  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
 ];
+
+function canAccessNav(item: NavItem, userRole: string | undefined): boolean {
+  if (!item.roles) return true;
+  if (!userRole) return false;
+  return item.roles.includes(userRole);
+}
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 260;
@@ -224,7 +237,10 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const allItems = user?.role === "admin" ? [...menuItems, ...adminMenuItems] : menuItems;
+  const visibleMenuItems = menuItems.filter(item => canAccessNav(item, user?.role));
+  const visibleAdminItems = adminMenuItems.filter(item => canAccessNav(item, user?.role));
+  const visibleAdvancedItems = adminAdvancedItems.filter(item => canAccessNav(item, user?.role));
+  const allItems = [...visibleMenuItems, ...visibleAdminItems];
   const activeMenuItem = allItems.find((item) => location.startsWith(item.path));
   const isMobile = useIsMobile();
 
@@ -356,7 +372,7 @@ function DashboardLayoutContent({
 
           <SidebarContent className="gap-0">
             <SidebarMenu className="px-2 py-1">
-              {menuItems.map((item) => {
+              {visibleMenuItems.map((item) => {
                 const isActive = location.startsWith(item.path);
                 return (
                   <SidebarMenuItem key={item.path}>
@@ -376,7 +392,7 @@ function DashboardLayoutContent({
               })}
             </SidebarMenu>
 
-            {user?.role === "admin" && (
+            {visibleAdminItems.length > 0 && (
               <>
                 <div className="px-4 py-4 mt-2">
                   <div className="h-px bg-sidebar-border" />
@@ -389,7 +405,7 @@ function DashboardLayoutContent({
                   )}
                 </div>
                 <SidebarMenu className="px-2 py-0">
-                  {adminMenuItems.map((item) => {
+                  {visibleAdminItems.map((item) => {
                     const isActive = location.startsWith(item.path);
                     const showBadge = openExceptionCount > 0 && (item.path === "/exceptions" || item.path === "/review");
                     return (
@@ -427,7 +443,7 @@ function DashboardLayoutContent({
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   )}
-                  {showAdvanced && adminAdvancedItems.map((item) => {
+                  {showAdvanced && visibleAdvancedItems.map((item) => {
                     const isActive = location.startsWith(item.path);
                     return (
                       <SidebarMenuItem key={item.path}>
@@ -527,7 +543,7 @@ function DashboardLayoutContent({
                       {user?.name || "-"}
                     </p>
                     <p className="text-xs text-sidebar-foreground/60 truncate mt-1.5">
-                      {user?.role === "admin" ? "Administrator" : "User"}
+                      {{ admin: "Administrator", cfo: "CFO", operations: "Operations User", compliance: "Compliance / Audit", user: "User" }[user?.role ?? "user"] ?? "User"}
                     </p>
                   </div>
                 </button>

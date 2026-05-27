@@ -2437,6 +2437,15 @@ export const appRouter = router({
       if (!drizzle) return [];
       return drizzle.select().from(organizations).orderBy(asc(organizations.name));
     }),
+    getUserActivity: adminProcedure
+      .input(z.object({
+        userId: z.number().int().positive(),
+        limit: z.number().int().min(1).max(100).default(50),
+      }))
+      .query(async ({ input }) => {
+        const { data } = await db.getAuditLogs({ userId: input.userId, limit: input.limit });
+        return data;
+      }),
   }),
 
   // ─── Super Agent ─────────────────────────────────────────────────────
