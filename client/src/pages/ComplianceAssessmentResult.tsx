@@ -1,7 +1,7 @@
 import { useParams, Link } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
-import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink, Copy, Check, Linkedin } from "lucide-react";
+import { Shield, AlertTriangle, TrendingUp, CheckCircle2, ArrowRight, Download, Share2, Loader2, ExternalLink, Copy, Check, Linkedin, Calendar } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 import jsPDF from "jspdf";
@@ -765,6 +765,34 @@ export default function ComplianceAssessmentResult() {
           </div>
         </div>
 
+        {/* Book a Demo CTA — prominent standalone card */}
+        <div className="bg-gradient-to-br from-[#F47458] to-[#e05a3a] rounded-2xl p-8 mb-6 shadow-lg text-center">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-white/20 mb-4">
+            <Calendar className="h-7 w-7 text-white" />
+          </div>
+          <h2 className="text-xl font-bold text-white mb-2">
+            Book a Free 30-Minute Demo
+          </h2>
+          <p className="text-white/85 text-sm mb-6 max-w-md mx-auto leading-relaxed">
+            See exactly how ReconcileAI closes the gaps identified in your report — live, on your transaction types, with no sales pressure.
+          </p>
+          <button
+            onClick={() => {
+              window.open(DEMO_BOOKING_URL, "_blank", "noopener,noreferrer");
+              toast.success("Opening Calendly…", {
+                description: "Pick a time that works for you — it only takes 30 seconds.",
+                duration: 4000,
+              });
+            }}
+            className="inline-flex items-center justify-center gap-2 bg-white text-[#F47458] font-bold text-base px-8 py-3.5 rounded-xl shadow-md hover:bg-white/90 active:scale-95 transition-all duration-150"
+          >
+            <Calendar className="h-5 w-5" />
+            Book a Demo
+            <ArrowRight className="h-4 w-4" />
+          </button>
+          <p className="text-white/60 text-xs mt-4">Free · No commitment · 30 minutes</p>
+        </div>
+
         {/* CTA */}
         <div className="bg-[#1B365D] rounded-2xl p-8 text-center">
           <h2 className="text-xl font-bold text-white mb-2">
@@ -780,6 +808,18 @@ export default function ComplianceAssessmentResult() {
                 See ReconcileAI in Action <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             </Link>
+            <button
+              onClick={() => {
+                window.open(DEMO_BOOKING_URL, "_blank", "noopener,noreferrer");
+                toast.success("Opening Calendly…", {
+                  description: "Pick a time that works for you — it only takes 30 seconds.",
+                  duration: 4000,
+                });
+              }}
+              className="inline-flex items-center justify-center gap-2 border border-white/30 text-white hover:bg-white/10 bg-transparent h-11 px-6 rounded-md text-sm font-medium transition-colors"
+            >
+              <Calendar className="h-4 w-4" /> Book a Demo
+            </button>
             <Button
               variant="outline"
               onClick={() => window.location.href = "mailto:hello@reconcileai.ng?subject=Compliance Assessment Follow-up"}
