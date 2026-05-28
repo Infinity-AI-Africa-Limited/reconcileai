@@ -3,49 +3,71 @@ import { useLocation } from "wouter";
 import { Loader2, CheckCircle2, XCircle, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getLoginUrl } from "@/const";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
 
-type State = "loading" | "success" | "error";
+type State = "checking_session" | "loading" | "success" | "error";
 
 const ERROR_MESSAGES: Record<string, string> = {
   invalid_magic_link: "The login link is missing or malformed.",
-  expired_magic_link: "This login link has already been used or has expired (links are valid for 72 hours).",
-  account_inactive: "Your account has been deactivated. Please contact your administrator.",
-  login_failed: "An unexpected error occurred during login. Please try again or contact support.",
+  expired_magic_link:
+    "This login link has already been used or has expired (links are valid for 72 hours).",
+  account_inactive:
+    "Your account has been deactivated. Please contact your administrator.",
+  login_failed:
+    "An unexpected error occurred during login. Please try again or contact support.",
 };
 
 export default function MagicLogin() {
   const [, setLocation] = useLocation();
-  const [state, setState] = useState<State>("loading");
+  const [state, setState] = useState<State>("checking_session");
   const [errorMsg, setErrorMsg] = useState<string>("");
 
+  // Check whether the user already has an active session.
+  // We use `enabled: false` initially and trigger manually once we know we need to.
+  const meQuery = trpc.auth.me.useQuery(undefined, {
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+
   useEffect(() => {
+    // Wait until the session check resolves
+    if (meQuery.isLoading) return;
+
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
     const errorCode = params.get("error");
 
-    // If the backend already redirected here with an error param (shouldn't
-    // normally happen since the backend redirects to /?error=..., but handle it)
+    // ── Already authenticated: skip the magic-link flow ──────────────────
+    if (meQuery.data) {
+      toast.success("You are already signed in.", { id: "already-signed-in" });
+      setLocation("/dashboard");
+      return;
+    }
+
+    // ── Error param from backend redirect ────────────────────────────────
     if (errorCode) {
-      setErrorMsg(ERROR_MESSAGES[errorCode] ?? "An unexpected error occurred.");
+      setErrorMsg(
+        ERROR_MESSAGES[errorCode] ?? "An unexpected error occurred."
+      );
       setState("error");
       return;
     }
 
+    // ── No token ─────────────────────────────────────────────────────────
     if (!token) {
       setErrorMsg(ERROR_MESSAGES.invalid_magic_link);
       setState("error");
       return;
     }
 
-    // Redirect to the backend magic-login endpoint which sets the cookie and
-    // redirects to /dashboard on success, or /?error=... on failure.
-    // We navigate directly so the browser follows the redirect chain and the
-    // session cookie is set correctly.
+    // ── Valid token: hand off to the backend endpoint ─────────────────────
+    // The backend sets the cookie and redirects to /dashboard on success,
+    // or to /?error=... on failure.
+    setState("loading");
     window.location.href = `/api/magic-login?token=${encodeURIComponent(token)}`;
-  }, []);
+  }, [meQuery.isLoading, meQuery.data]);
 
-  // This page is only briefly visible while the redirect happens.
-  // If we reach "error" state it means the token param was missing entirely.
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#1B365D] to-[#0f2240] px-4">
       <div className="bg-white rounded-2xl shadow-2xl p-10 max-w-md w-full text-center space-y-6">
@@ -57,13 +79,19 @@ export default function MagicLogin() {
           <h1 className="text-xl font-bold text-[#1B365D]">ReconcileAI</h1>
         </div>
 
-        {state === "loading" && (
+        {(state === "checking_session" || state === "loading") && (
           <>
             <Loader2 className="h-10 w-10 text-[#F47458] animate-spin mx-auto" />
             <div>
-              <p className="text-lg font-semibold text-gray-800">Signing you in…</p>
+              <p className="text-lg font-semibold text-gray-800">
+                {state === "checking_session"
+                  ? "Checking session…"
+                  : "Signing you in…"}
+              </p>
               <p className="text-sm text-gray-500 mt-1">
-                Please wait while we verify your login link.
+                {state === "checking_session"
+                  ? "Just a moment while we check your login status."
+                  : "Please wait while we verify your login link."}
               </p>
             </div>
           </>
@@ -73,8 +101,12 @@ export default function MagicLogin() {
           <>
             <CheckCircle2 className="h-10 w-10 text-green-500 mx-auto" />
             <div>
-              <p className="text-lg font-semibold text-gray-800">Login successful!</p>
-              <p className="text-sm text-gray-500 mt-1">Redirecting you to the dashboard…</p>
+              <p className="text-lg font-semibold text-gray-800">
+                Login successful!
+              </p>
+              <p className="text-sm text-gray-500 mt-1">
+                Redirecting you to the dashboard…
+              </p>
             </div>
           </>
         )}
@@ -89,7 +121,9 @@ export default function MagicLogin() {
                   <XCircle className="h-8 w-8 text-red-500" />
                 )}
               </div>
-              <p className="text-lg font-semibold text-gray-800">Login link invalid</p>
+              <p className="text-lg font-semibold text-gray-800">
+                Login link invalid
+              </p>
               <p className="text-sm text-gray-500 leading-relaxed">{errorMsg}</p>
             </div>
             <div className="flex flex-col gap-3 pt-2">

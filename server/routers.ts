@@ -2409,6 +2409,38 @@ export const appRouter = router({
         return { success: true, userId: newUserId };
       }),
 
+    resendWelcomeLink: adminProcedure
+      .input(z.object({
+        userId: z.number().int().positive(),
+        origin: z.string().url(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        // Fetch user to get name/email/role
+        const userRows = await drizzle.select().from(users).where(eq(users.id, input.userId)).limit(1);
+        if (userRows.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+        const target = userRows[0];
+        if (!target.isActive) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot resend link to an inactive user" });
+        if (!target.email) throw new TRPCError({ code: "BAD_REQUEST", message: "User has no email address" });
+        try {
+          const { sendWelcomeEmail } = await import("./magicLinkService");
+          const { magicLink } = await sendWelcomeEmail({
+            userId: target.id,
+            name: target.name ?? target.email,
+            email: target.email,
+            role: target.role,
+            origin: input.origin,
+          });
+          await logAudit(ctx.user.id, "resend_welcome_link", "user", target.id, { email: target.email }, ip, ua);
+          return { success: true, magicLink };
+        } catch (err: any) {
+          console.error("[resendWelcomeLink] Failed:", err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to send welcome link" });
+        }
+      }),
+
     toggleActive: adminProcedure
       .input(z.object({
         userId: z.number().int().positive(),

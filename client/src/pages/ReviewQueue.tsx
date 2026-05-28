@@ -7,13 +7,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import {
-  Loader2, CheckCircle2, XCircle, Eye, ClipboardList,
+import { Loader2, CheckCircle2, XCircle, Eye, ClipboardList,
   AlertTriangle, Sparkles, Brain, FileText, Mail, BookOpen,
-  Zap, CalendarDays, X
+  Zap, CalendarDays, X, Lock
 } from "lucide-react";
 import { toast } from "sonner";
 import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 type DiagnosisResult = {
   exceptionId: number;
@@ -28,6 +29,8 @@ type DiagnosisResult = {
 };
 
 export default function ReviewQueuePage() {
+  const { user } = useAuth();
+  const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
   const {
     dateFrom, dateTo, dateFromObj, dateToObj,
     setDateFrom, setDateTo, applyPreset, resetToToday,
@@ -119,6 +122,17 @@ export default function ReviewQueuePage() {
         <p className="text-muted-foreground mt-1">Exceptions requiring manual review and intervention</p>
       </div>
 
+      {/* Read-only role banner */}
+      {isReadOnly && (
+        <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <Lock className="h-4 w-4 shrink-0 text-amber-600" />
+          <span>
+            <span className="font-semibold">Read-only access.</span>{" "}
+            Your role ({user?.role === "cfo" ? "CFO" : "Compliance / Audit"}) can view the review queue but cannot resolve, dismiss, or take action on exceptions.
+          </span>
+        </div>
+      )}
+
       {/* Date range filter */}
       <div className="flex flex-wrap gap-3 items-center">
         {/* Quick-select preset pills */}
@@ -201,20 +215,43 @@ export default function ReviewQueuePage() {
                   <div className="flex gap-2 ml-4 flex-wrap justify-end">
                     <Button
                       variant="outline" size="sm"
-                      onClick={() => handleDeepDiagnose(ex)}
-                      className="gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50"
+                      onClick={() => !isReadOnly && handleDeepDiagnose(ex)}
+                      disabled={isReadOnly}
+                      className={`gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50 ${isReadOnly ? "opacity-50 cursor-not-allowed" : ""}`}
                     >
                       <Sparkles className="h-3 w-3" /> Deep Diagnose
                     </Button>
                     <Button variant="outline" size="sm" onClick={() => { setSelectedEx(ex); setNotes(""); }}>
-                      <Eye className="h-3 w-3 mr-1" /> Review
+                      <Eye className="h-3 w-3 mr-1" /> View
                     </Button>
-                    <Button size="sm" onClick={() => handleAction(ex.id, "resolved")} disabled={resolveMutation.isPending}>
-                      <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => handleAction(ex.id, "dismissed")} disabled={resolveMutation.isPending}>
-                      <XCircle className="h-3 w-3 mr-1" /> Dismiss
-                    </Button>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span>
+                            <Button size="sm" onClick={() => handleAction(ex.id, "resolved")} disabled={resolveMutation.isPending || isReadOnly} className={isReadOnly ? "opacity-50 cursor-not-allowed" : ""}>
+                              <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        {isReadOnly && (
+                          <TooltipContent>Your role has read-only access to this module</TooltipContent>
+                        )}
+                      </Tooltip>
+                    </TooltipProvider>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span>
+                            <Button variant="ghost" size="sm" onClick={() => handleAction(ex.id, "dismissed")} disabled={resolveMutation.isPending || isReadOnly} className={isReadOnly ? "opacity-50 cursor-not-allowed" : ""}>
+                              <XCircle className="h-3 w-3 mr-1" /> Dismiss
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        {isReadOnly && (
+                          <TooltipContent>Your role has read-only access to this module</TooltipContent>
+                        )}
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
                 </div>
               </CardContent>
@@ -280,14 +317,27 @@ export default function ReviewQueuePage() {
                 <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                 <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
               </div>
-              <div className="flex gap-2">
-                <Button onClick={() => handleAction(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
-                  <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
-                </Button>
-                <Button variant="outline" onClick={() => handleAction(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
-                  Dismiss
-                </Button>
-              </div>
+              {isReadOnly ? (
+                <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <Lock className="h-4 w-4 shrink-0 text-amber-600" />
+                  <span>Your role has <strong>read-only access</strong> to this queue. Contact an Operations user to resolve or dismiss this exception.</span>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
+                    <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
+                  </div>
+                  <div className="flex gap-2">
+                    <Button onClick={() => handleAction(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
+                      <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
+                    </Button>
+                    <Button variant="outline" onClick={() => handleAction(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
+                      Dismiss
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </DialogContent>

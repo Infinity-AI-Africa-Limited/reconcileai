@@ -26,7 +26,7 @@ import {
   MoreHorizontal, Search, Users, Shield, UserCheck, UserX,
   Trash2, Building2, RefreshCw, ChevronUp, ChevronDown,
   ChevronsUpDown, UserPlus, CheckSquare, CheckCircle2, XCircle,
-  Activity, Clock,
+  Activity, Clock, Send,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -304,6 +304,12 @@ export default function AdminUsers() {
     { enabled: activityUserId !== null },
   );
   const exportActivity = trpc.admin.exportUserActivity.useMutation({
+    onError: (e) => toast.error(e.message),
+  });
+  const resendWelcomeLink = trpc.admin.resendWelcomeLink.useMutation({
+    onSuccess: (_, vars) => {
+      toast.success("Welcome link resent successfully.");
+    },
     onError: (e) => toast.error(e.message),
   });
 
@@ -651,6 +657,14 @@ export default function AdminUsers() {
                           <DropdownMenuItem onClick={() => { setActivityUserId(u.id); setActivityUserName(u.name ?? u.email ?? "User"); }}>
                             <Activity className="h-3.5 w-3.5 mr-2 text-blue-600" />
                             <span className="text-blue-600">View Activity</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onClick={() => resendWelcomeLink.mutate({ userId: u.id, origin: window.location.origin })}
+                            disabled={resendWelcomeLink.isPending || !u.isActive}
+                          >
+                            <Send className="h-3.5 w-3.5 mr-2 text-indigo-600" />
+                            <span className="text-indigo-600">Resend Welcome Link</span>
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           {u.isActive ? (
