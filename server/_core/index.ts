@@ -12,6 +12,7 @@ import { getLlmProviderInfo } from "./llm";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
 import { storagePut, storageGet, storageDelete } from "../storage";
+import { sdk } from "./sdk";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -244,6 +245,66 @@ async function startServer() {
         context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
         timestamp: new Date().toISOString(),
       });
+    }
+  });
+
+  // ── Magic-link login ─────────────────────────────────────────────────────
+  // GET /api/magic-login?token=<hex>
+  // Consumes a single-use welcome token, creates a session cookie, and
+  // redirects the user to the dashboard. On error, redirects to /?error=...
+  app.get("/api/magic-login", async (req, res) => {
+    const token = typeof req.query.token === "string" ? req.query.token.trim() : "";
+    if (!token) {
+      return res.redirect(302, "/?error=invalid_magic_link");
+    }
+    try {
+      const { consumeMagicLinkToken } = await import("../magicLinkService");
+      const { getUserById, upsertUser, createAuditLog } = await import("../db");
+      const { COOKIE_NAME, ONE_YEAR_MS } = await import("@shared/const");
+
+      const userId = await consumeMagicLinkToken(token);
+      if (!userId) {
+        return res.redirect(302, "/?error=expired_magic_link");
+      }
+
+      const user = await getUserById(userId);
+      if (!user || !user.isActive) {
+        return res.redirect(302, "/?error=account_inactive");
+      }
+
+      // Create a JWT session token using the user's openId (same as OAuth flow)
+      const sessionToken = await sdk.createSessionToken(user.openId, {
+        name: user.name || "",
+        expiresInMs: ONE_YEAR_MS,
+      });
+
+      // Update lastSignedIn
+      await upsertUser({ openId: user.openId, lastSignedIn: new Date() });
+
+      // Audit log
+      try {
+        const ip =
+          (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+          req.socket?.remoteAddress ||
+          "unknown";
+        await createAuditLog({
+          userId: user.id,
+          organizationId: user.organizationId ?? null,
+          action: "magic_link_login",
+          entityType: "user_session",
+          details: JSON.stringify({ email: user.email }),
+          ipAddress: ip,
+          userAgent: (req.headers["user-agent"] || "unknown").substring(0, 500),
+        });
+      } catch (_) { /* audit logging must never crash the login flow */ }
+
+      const { getSessionCookieOptions } = await import("./cookies");
+      const cookieOptions = getSessionCookieOptions(req);
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      return res.redirect(302, "/dashboard");
+    } catch (err) {
+      console.error("[magic-login] error:", err);
+      return res.redirect(302, "/?error=login_failed");
     }
   });
 

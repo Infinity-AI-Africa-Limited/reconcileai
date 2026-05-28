@@ -13,6 +13,8 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { Lock } from "lucide-react";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -39,6 +41,8 @@ const TEMPLATE_CATEGORIES = [
 type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
 
 export default function Exceptions() {
+  const { user } = useAuth();
+  const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
   const {
     dateFrom, dateTo, dateFromObj, dateToObj,
     setDateFrom, setDateTo, applyPreset, resetToToday,
@@ -130,6 +134,17 @@ export default function Exceptions() {
         <h1 className="text-2xl font-bold tracking-tight text-primary">Exception Management</h1>
         <p className="text-muted-foreground mt-1">Review and resolve reconciliation exceptions</p>
       </div>
+
+      {/* Read-only role banner */}
+      {isReadOnly && (
+        <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <Lock className="h-4 w-4 shrink-0 text-amber-600" />
+          <span>
+            <span className="font-semibold">Read-only access.</span>{" "}
+            Your role ({user?.role === "cfo" ? "CFO" : "Compliance / Audit"}) can view exceptions but cannot resolve, assign, or escalate them.
+          </span>
+        </div>
+      )}
 
       {/* Filters row */}
       <div className="flex flex-wrap gap-3 items-center">
@@ -355,21 +370,30 @@ export default function Exceptions() {
                   </div>
                 </div>
               )}
-              <div>
-                <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
-                <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
-              </div>
-              <div className="flex gap-2 flex-wrap">
-                <Button onClick={() => handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
-                  <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
-                </Button>
-                <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending} className="flex-1">
-                  <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
-                </Button>
-                <Button variant="ghost" onClick={() => handleResolve(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
-                  Dismiss
-                </Button>
-              </div>
+              {isReadOnly ? (
+                <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <Lock className="h-4 w-4 shrink-0 text-amber-600" />
+                  <span>Your role has <strong>read-only access</strong> to exception management. Contact an Operations user to resolve or escalate this exception.</span>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
+                    <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    <Button onClick={() => handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
+                      <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
+                    </Button>
+                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending} className="flex-1">
+                      <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
+                    </Button>
+                    <Button variant="ghost" onClick={() => handleResolve(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
+                      Dismiss
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </DialogContent>

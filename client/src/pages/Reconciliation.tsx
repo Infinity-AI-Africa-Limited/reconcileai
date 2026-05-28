@@ -6,11 +6,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Download } from "lucide-react";
+import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Download, Lock } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 export default function ReconciliationPage() {
   const [, setLocation] = useLocation();
+  const { user } = useAuth();
+  const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
   const { data: channels } = trpc.channels.list.useQuery();
   const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery();
   const createMutation = trpc.reconciliation.create.useMutation();
@@ -73,15 +77,32 @@ export default function ReconciliationPage() {
 
   return (
     <div className="space-y-6">
+      {/* Read-only role banner */}
+      {isReadOnly && (
+        <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <Lock className="h-4 w-4 shrink-0 text-amber-600" />
+          <span>
+            <span className="font-semibold">Read-only access.</span>{" "}
+            Your role ({user?.role === "cfo" ? "CFO" : "Compliance / Audit"}) can view reconciliation jobs but cannot create or modify them.
+          </span>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-primary">Reconciliation</h1>
           <p className="text-muted-foreground mt-1">Create and manage reconciliation jobs</p>
         </div>
-        <Dialog open={open} onOpenChange={setOpen}>
-          <DialogTrigger asChild>
-            <Button><Play className="h-4 w-4 mr-2" /> New Reconciliation</Button>
-          </DialogTrigger>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <Dialog open={isReadOnly ? false : open} onOpenChange={isReadOnly ? undefined : setOpen}>
+                  <DialogTrigger asChild>
+                    <Button disabled={isReadOnly} className={isReadOnly ? "opacity-50 cursor-not-allowed" : ""}>
+                      {isReadOnly ? <Lock className="h-4 w-4 mr-2" /> : <Play className="h-4 w-4 mr-2" />}
+                      New Reconciliation
+                    </Button>
+                  </DialogTrigger>
           <DialogContent className="max-w-lg">
             <DialogHeader>
               <DialogTitle>Create Reconciliation Job</DialogTitle>
@@ -156,7 +177,16 @@ export default function ReconciliationPage() {
               </Button>
             </div>
           </DialogContent>
-        </Dialog>
+                </Dialog>
+              </span>
+            </TooltipTrigger>
+            {isReadOnly && (
+              <TooltipContent side="bottom">
+                Your role has read-only access to this module
+              </TooltipContent>
+            )}
+          </Tooltip>
+        </TooltipProvider>
       </div>
 
       {/* Jobs List */}

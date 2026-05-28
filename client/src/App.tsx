@@ -52,6 +52,7 @@ import AdminUsers from "./pages/AdminUsers";
 import ReportDetail from "./pages/ReportDetail";
 import ComplianceAssessmentUnsubscribe from "./pages/ComplianceAssessmentUnsubscribe";
 import CBNCompliance from "./pages/CBNCompliance";
+import MagicLogin from "./pages/MagicLogin";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -111,6 +112,7 @@ function Router() {
           <Route path="/admin/users" component={AdminUsers} />
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
+      <Route path="/magic-login" component={MagicLogin} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>
