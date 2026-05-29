@@ -1359,6 +1359,162 @@ export const appRouter = router({
 
         return { url, fileName, rowCount: csvContent.split("\n").length - 1 };
       }),
+
+    xlsx: protectedProcedure
+      .input(z.object({
+        jobId: z.number().int().positive(),
+        type: z.enum(["matches", "exceptions", "transactions", "full"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const report = await db.getFullReconciliationReport(input.jobId);
+        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+
+        const ExcelJS = await import("exceljs");
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = "ReconcileAI";
+        workbook.created = new Date();
+
+        const headerStyle = {
+          font: { bold: true, color: { argb: "FFFFFFFF" } },
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF1B365D" } },
+          alignment: { horizontal: "left" as const },
+        };
+        const altRow = {
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } },
+        };
+
+        const addSheet = (name: string, columns: { header: string; key: string; width: number }[], rows: Record<string, unknown>[]) => {
+          const ws = workbook.addWorksheet(name);
+          ws.columns = columns;
+          ws.getRow(1).eachCell((cell) => { Object.assign(cell, headerStyle); cell.style = headerStyle; });
+          rows.forEach((row, i) => {
+            const r = ws.addRow(row);
+            if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+          });
+          ws.getRow(1).height = 20;
+          return ws;
+        };
+
+        if (input.type === "matches" || input.type === "full") {
+          addSheet("Matches", [
+            { header: "Match ID", key: "id", width: 12 },
+            { header: "Source Txn ID", key: "sourceTransactionId", width: 16 },
+            { header: "Target Txn ID", key: "targetTransactionId", width: 16 },
+            { header: "Match Type", key: "matchType", width: 18 },
+            { header: "Confidence", key: "confidenceScore", width: 12 },
+            { header: "Amount Diff", key: "amountDifference", width: 14 },
+            { header: "Date Diff (days)", key: "dateDifference", width: 16 },
+            { header: "Reason", key: "matchReason", width: 40 },
+            { header: "Status", key: "status", width: 14 },
+          ], report.matches.map((m) => ({
+            id: m.id,
+            sourceTransactionId: m.sourceTransactionId,
+            targetTransactionId: m.targetTransactionId,
+            matchType: m.matchType,
+            confidenceScore: m.confidenceScore,
+            amountDifference: m.amountDifference ?? 0,
+            dateDifference: m.dateDifference ?? 0,
+            matchReason: m.matchReason ?? "",
+            status: m.status,
+          })));
+        }
+
+        if (input.type === "exceptions" || input.type === "full") {
+          addSheet("Exceptions", [
+            { header: "Exception ID", key: "id", width: 14 },
+            { header: "Transaction ID", key: "transactionId", width: 16 },
+            { header: "Category", key: "category", width: 24 },
+            { header: "Severity", key: "severity", width: 12 },
+            { header: "Description", key: "description", width: 50 },
+            { header: "AI Suggestion", key: "aiSuggestion", width: 50 },
+            { header: "Status", key: "status", width: 14 },
+            { header: "Resolution Notes", key: "resolutionNotes", width: 40 },
+            { header: "Created At", key: "createdAt", width: 22 },
+          ], report.exceptions.map((e: any) => ({
+            id: e.id,
+            transactionId: e.transactionId,
+            category: e.category,
+            severity: e.severity,
+            description: e.description ?? "",
+            aiSuggestion: e.aiSuggestion ?? "",
+            status: e.status,
+            resolutionNotes: e.resolutionNotes ?? "",
+            createdAt: e.createdAt ? new Date(e.createdAt).toISOString() : "",
+          })));
+        }
+
+        if (input.type === "transactions" || input.type === "full") {
+          addSheet("Transactions", [
+            { header: "ID", key: "id", width: 10 },
+            { header: "Reference", key: "transactionRef", width: 24 },
+            { header: "External Ref", key: "externalRef", width: 24 },
+            { header: "Amount", key: "amount", width: 16 },
+            { header: "Currency", key: "currency", width: 10 },
+            { header: "Date", key: "transactionDate", width: 22 },
+            { header: "Direction", key: "debitCredit", width: 12 },
+            { header: "Counterparty", key: "counterparty", width: 30 },
+            { header: "Description", key: "description", width: 40 },
+            { header: "Status", key: "status", width: 14 },
+            { header: "Channel ID", key: "channelId", width: 12 },
+          ], report.transactions.map((t: any) => ({
+            id: t.id,
+            transactionRef: t.transactionRef ?? "",
+            externalRef: t.externalRef ?? "",
+            amount: t.amount,
+            currency: t.currency,
+            transactionDate: new Date(t.transactionDate).toISOString(),
+            debitCredit: t.debitCredit,
+            counterparty: t.counterparty ?? "",
+            description: t.description ?? "",
+            status: t.status,
+            channelId: t.channelId,
+          })));
+        }
+
+        // Summary sheet (always included)
+        const summaryWs = workbook.addWorksheet("Summary");
+        summaryWs.columns = [
+          { header: "Field", key: "field", width: 30 },
+          { header: "Value", key: "value", width: 40 },
+        ];
+        summaryWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        const job = report.job;
+        [
+          { field: "Job ID", value: job.id },
+          { field: "Job Name", value: job.name },
+          { field: "Status", value: job.status },
+          { field: "Module Type", value: job.moduleType ?? "" },
+          { field: "Total Transactions", value: (job as any).totalTransactions ?? 0 },
+          { field: "Matched", value: job.matchedCount ?? 0 },
+          { field: "Unmatched", value: job.unmatchedCount ?? 0 },
+          { field: "Exceptions", value: job.exceptionCount ?? 0 },
+          { field: "Match Rate (%)", value: job.matchRate ?? 0 },
+          { field: "Processing Time (ms)", value: job.processingTimeMs ?? 0 },
+          { field: "Created At", value: job.createdAt ? new Date(job.createdAt).toISOString() : "" },
+          { field: "Completed At", value: job.completedAt ? new Date(job.completedAt).toISOString() : "" },
+          { field: "Exported At", value: new Date().toISOString() },
+          { field: "Exported By", value: ctx.user.email ?? ctx.user.name ?? "" },
+        ].forEach((row, i) => {
+          const r = summaryWs.addRow(row);
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const fileName = `reconciliation-export-${input.jobId}-${input.type}-${Date.now()}.xlsx`;
+        const { url } = await storagePut(
+          `exports/${ctx.user.id}/${fileName}`,
+          Buffer.from(buffer),
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+
+        await logAudit(ctx.user.id, "export_xlsx", "reconciliation_job", input.jobId, {
+          type: input.type,
+          fileName,
+        }, ip, ua);
+
+        return { url, fileName };
+      }),
   }),
 
   // ─── Dashboard ───────────────────────────────────────────────────

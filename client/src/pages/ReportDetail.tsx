@@ -220,6 +220,7 @@ function ShareModal({ reportId, onClose }: { reportId: number; onClose: () => vo
 }
 
 export default function ReportDetail() {
+  const exportXlsxMutation = trpc.export.xlsx.useMutation();
   const params = useParams<{ id: string }>();
   const [, navigate] = useLocation();
   const [showShare, setShowShare] = useState(false);
@@ -308,10 +309,24 @@ export default function ReportDetail() {
             <Share2 className="h-4 w-4 mr-2" /> Share
           </Button>
           {report.fileUrl && (
-            <Button size="sm" asChild>
+            <Button size="sm" asChild variant="outline">
               <a href={report.fileUrl} target="_blank" rel="noopener noreferrer">
-                <Download className="h-4 w-4 mr-2" /> Download
+                <Download className="h-4 w-4 mr-2" /> PDF
               </a>
+            </Button>
+          )}
+          {report.jobId && (
+            <Button size="sm" onClick={async () => {
+              try {
+                const res = await exportXlsxMutation.mutateAsync({ jobId: report.jobId!, type: "full" });
+                window.open(res.url, "_blank");
+                toast.success("Excel export ready");
+              } catch (err: any) { toast.error(err.message || "Excel export failed"); }
+            }} disabled={exportXlsxMutation.isPending}>
+              {exportXlsxMutation.isPending
+                ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                : <Download className="h-4 w-4 mr-2" />}
+              Excel
             </Button>
           )}
         </div>

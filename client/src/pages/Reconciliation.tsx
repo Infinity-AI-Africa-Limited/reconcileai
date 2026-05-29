@@ -19,6 +19,7 @@ export default function ReconciliationPage() {
   const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery();
   const createMutation = trpc.reconciliation.create.useMutation();
   const exportMutation = trpc.export.csv.useMutation();
+  const exportXlsxMutation = trpc.export.xlsx.useMutation();
 
   const [open, setOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState<number | null>(null);
@@ -226,16 +227,28 @@ export default function ReconciliationPage() {
                       <Eye className="h-4 w-4 mr-1" /> View
                     </Button>
                     {job.status === "completed" && (
-                      <Button variant="outline" size="sm" onClick={async (e) => {
-                        e.stopPropagation();
-                        try {
-                          const res = await exportMutation.mutateAsync({ jobId: job.id, type: "full" });
-                          window.open(res.url, "_blank");
-                          toast.success(`Export ready: ${res.fileName}`);
-                        } catch (err: any) { toast.error(err.message || "Export failed"); }
-                      }}>
-                        <Download className="h-4 w-4 mr-1" /> Export
-                      </Button>
+                      <>
+                        <Button variant="outline" size="sm" onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            const res = await exportMutation.mutateAsync({ jobId: job.id, type: "full" });
+                            window.open(res.url, "_blank");
+                            toast.success(`CSV ready: ${res.fileName}`);
+                          } catch (err: any) { toast.error(err.message || "Export failed"); }
+                        }} disabled={exportMutation.isPending}>
+                          {exportMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Download className="h-4 w-4 mr-1" />} CSV
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            const res = await exportXlsxMutation.mutateAsync({ jobId: job.id, type: "full" });
+                            window.open(res.url, "_blank");
+                            toast.success(`Excel ready: ${res.fileName}`);
+                          } catch (err: any) { toast.error(err.message || "Excel export failed"); }
+                        }} disabled={exportXlsxMutation.isPending}>
+                          {exportXlsxMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Download className="h-4 w-4 mr-1" />} Excel
+                        </Button>
+                      </>
                     )}
                   </div>
                 </div>

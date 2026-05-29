@@ -1084,3 +1084,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: CBN compliance health badge on main Dashboard page (Compliant/At Risk chip)
 - [x] Frontend: Badge derives from dashboard.stats (matchRate ≥95%, exceptionRatio ≤5%, openExceptions ≤50)
 - [x] Frontend: Badge links to /cbn-compliance for drill-down; only shown when transaction data exists
+
+## Feature 35: Excel Export for Reports and Exceptions (P0 — Pre-Pilot)
+- [x] Install exceljs dependency
+- [x] Backend: Add Excel export endpoint for reconciliation reports (xlsx with match summary, exception breakdown, channel performance)
+- [x] Backend: Add Excel export endpoint for exception reports (xlsx with all exception fields, AI suggestions, resolution notes)
+- [x] Frontend: Update reconciliation report export button to offer PDF / Excel choice (CSV + Excel buttons on job list; PDF + Excel on ReportDetail)
+- [x] Frontend: Update exception export button to offer PDF / Excel choice
+- [ ] Tests: Excel export endpoint tests
