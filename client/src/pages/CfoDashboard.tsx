@@ -1,12 +1,13 @@
-import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   TrendingUp, AlertCircle, Clock, Activity, Download, Filter, X, Settings2,
-  FileDown, Bell, BellRing, Mail, ChevronRight, Calendar, RefreshCw,
+  FileDown, Bell, BellRing, Mail, ChevronRight, Calendar, RefreshCw, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useState, useMemo, useCallback } from "react";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine,
@@ -421,6 +422,7 @@ export default function CfoDashboard() {
   const [globalThreshold, setGlobalThreshold] = useState(DEFAULT_THRESHOLD);
   const [channelThresholds, setChannelThresholds] = useState<Record<string, number>>({});
   const [drillDownChannel, setDrillDownChannel] = useState<{ code: string; name: string } | null>(null);
+  const exportXlsxMutation = trpc.cfoReports.exportXlsx.useMutation();
 
   const dateRange = useMemo(() => getDateRange(datePreset), [datePreset]);
 
@@ -622,6 +624,24 @@ export default function CfoDashboard() {
           <Button variant="outline" size="sm" onClick={exportToCSV}
             className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8]">
             <FileDown className="h-4 w-4" />Export CSV
+          </Button>
+          <Button variant="outline" size="sm"
+            className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8]"
+            disabled={exportXlsxMutation.isPending}
+            onClick={async () => {
+              try {
+                const res = await exportXlsxMutation.mutateAsync({
+                  period: datePreset as any,
+                  channelCodes: selectedChannels.length > 0 ? selectedChannels : undefined,
+                });
+                window.open(res.url, "_blank");
+                toast.success(`Excel export ready — ${res.fileName}`);
+              } catch (err: any) { toast.error(err.message || "Excel export failed"); }
+            }}>
+            {exportXlsxMutation.isPending
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <FileDown className="h-4 w-4" />}
+            Export Excel
           </Button>
           <Button variant="outline" size="sm" onClick={() => setShowSchedulePanel(true)}
             className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8]">

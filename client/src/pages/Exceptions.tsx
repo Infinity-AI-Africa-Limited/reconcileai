@@ -8,13 +8,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, AlertTriangle, CheckCircle2, Eye, ClipboardList,
-  FilterX, Filter, CalendarDays, X
+  FilterX, Filter, CalendarDays, X, Download, Lock
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Lock } from "lucide-react";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -76,6 +75,7 @@ export default function Exceptions() {
 
   const resolveMutation = trpc.exceptions.resolve.useMutation();
   const moveToReviewMutation = trpc.exceptions.moveToReview.useMutation();
+  const exportXlsxMutation = trpc.exceptions.exportXlsx.useMutation();
 
   const handleResolve = async (id: number, status: "resolved" | "dismissed") => {
     try {
@@ -130,9 +130,32 @@ export default function Exceptions() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-primary">Exception Management</h1>
-        <p className="text-muted-foreground mt-1">Review and resolve reconciliation exceptions</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-primary">Exception Management</h1>
+          <p className="text-muted-foreground mt-1">Review and resolve reconciliation exceptions</p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={async () => {
+            try {
+              const res = await exportXlsxMutation.mutateAsync({
+                status: filters.status !== "all" ? filters.status : undefined,
+                severity: filters.severity !== "all" ? filters.severity : undefined,
+                category: filters.category !== "all" ? filters.category : undefined,
+              });
+              window.open(res.url, "_blank");
+              toast.success(`Excel export ready: ${res.fileName}`);
+            } catch (err: any) { toast.error(err.message || "Excel export failed"); }
+          }}
+          disabled={exportXlsxMutation.isPending}
+        >
+          {exportXlsxMutation.isPending
+            ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            : <Download className="h-4 w-4 mr-2" />}
+          Export to Excel
+        </Button>
       </div>
 
       {/* Read-only role banner */}

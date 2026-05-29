@@ -882,6 +882,89 @@ export const appRouter = router({
         dispatchWebhook("exception.in_review", { exceptionId: input.id, reviewedBy: ctx.user.id });
         return { success: true };
       }),
+
+    exportXlsx: protectedProcedure
+      .input(z.object({
+        jobId: z.number().int().positive().optional(),
+        status: z.string().max(30).optional(),
+        severity: z.string().max(20).optional(),
+        category: z.string().max(50).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const exceptions = await db.getExceptions({
+          jobId: input.jobId,
+          status: input.status,
+          severity: input.severity,
+          category: input.category,
+          limit: 5000,
+          offset: 0,
+        });
+
+        const ExcelJS = await import("exceljs");
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = "ReconcileAI";
+        workbook.created = new Date();
+
+        const headerStyle = {
+          font: { bold: true, color: { argb: "FFFFFFFF" } },
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF1B365D" } },
+          alignment: { horizontal: "left" as const },
+        };
+        const altRow = {
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } },
+        };
+
+        const ws = workbook.addWorksheet("Exceptions");
+        ws.columns = [
+          { header: "Exception ID", key: "id", width: 14 },
+          { header: "Job ID", key: "jobId", width: 12 },
+          { header: "Transaction ID", key: "transactionId", width: 16 },
+          { header: "Category", key: "category", width: 28 },
+          { header: "Severity", key: "severity", width: 12 },
+          { header: "Status", key: "status", width: 16 },
+          { header: "Description", key: "description", width: 55 },
+          { header: "AI Suggestion", key: "aiSuggestion", width: 55 },
+          { header: "Resolution Notes", key: "resolutionNotes", width: 45 },
+          { header: "Assigned To", key: "assignedTo", width: 16 },
+          { header: "Resolved By", key: "resolvedBy", width: 16 },
+          { header: "Resolved At", key: "resolvedAt", width: 22 },
+          { header: "Created At", key: "createdAt", width: 22 },
+        ];
+        ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        ws.getRow(1).height = 20;
+        (exceptions.data ?? []).forEach((e: any, i: number) => {
+          const r = ws.addRow({
+            id: e.id,
+            jobId: e.jobId ?? "",
+            transactionId: e.transactionId ?? "",
+            category: e.category ?? "",
+            severity: e.severity ?? "",
+            status: e.status ?? "",
+            description: e.description ?? "",
+            aiSuggestion: e.aiSuggestion ?? "",
+            resolutionNotes: e.resolutionNotes ?? "",
+            assignedTo: e.assignedTo ?? "",
+            resolvedBy: e.resolvedBy ?? "",
+            resolvedAt: e.resolvedAt ? new Date(e.resolvedAt).toISOString() : "",
+            createdAt: e.createdAt ? new Date(e.createdAt).toISOString() : "",
+          });
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+        (ws as any).autoFilter = ws.dimensions;
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const fileName = `exceptions-export-${Date.now()}.xlsx`;
+        const { url } = await storagePut(
+          `exports/${ctx.user.id}/${fileName}`,
+          Buffer.from(buffer),
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        await logAudit(ctx.user.id, "export_exceptions_xlsx", "exception", undefined, {
+          filters: input, count: exceptions.data?.length ?? 0,
+        }, ip, ua);
+        return { url, fileName };
+      }),
   }),
 
   // ─── Resolution Templates ────────────────────────────────────────
@@ -1393,6 +1476,8 @@ export const appRouter = router({
             if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
           });
           ws.getRow(1).height = 20;
+          // Enable native Excel column filter dropdowns on the header row
+          (ws as any).autoFilter = ws.dimensions;
           return ws;
         };
 
@@ -4385,6 +4470,98 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const rows = await buildChannelMetrics(input.period, input.channelCodes);
         const csv = buildCsvContent(rows, input.period);
         return { csv, rowCount: rows.length };
+      }),
+
+    // Export XLSX (returns S3 URL)
+    exportXlsx: protectedProcedure
+      .input(z.object({
+        period: z.enum(["7d", "30d", "mtd", "all"]).default("7d"),
+        channelCodes: z.array(z.string()).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const { buildChannelMetrics } = await import("./cfoReportService");
+        const rows = await buildChannelMetrics(input.period, input.channelCodes);
+
+        const ExcelJS = await import("exceljs");
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = "ReconcileAI";
+        workbook.created = new Date();
+
+        const headerStyle = {
+          font: { bold: true, color: { argb: "FFFFFFFF" } },
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF1B365D" } },
+          alignment: { horizontal: "left" as const },
+        };
+        const altRow = {
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } },
+        };
+        const periodLabels: Record<string, string> = {
+          "7d": "Last 7 Days", "30d": "Last 30 Days", "mtd": "Month to Date", "all": "All Time",
+        };
+
+        // Channel Metrics sheet
+        const ws = workbook.addWorksheet("Channel Metrics");
+        ws.columns = [
+          { header: "Channel", key: "channel", width: 28 },
+          { header: "Channel Code", key: "channelCode", width: 18 },
+          { header: "Total Volume", key: "volume", width: 16 },
+          { header: "Matched", key: "matched", width: 14 },
+          { header: "Exceptions", key: "exceptions", width: 14 },
+          { header: "Match Rate (%)", key: "matchRate", width: 16 },
+        ];
+        ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        ws.getRow(1).height = 20;
+        rows.forEach((row, i) => {
+          const r = ws.addRow({
+            channel: row.channel,
+            channelCode: row.channelCode,
+            volume: row.volume,
+            matched: row.matched,
+            exceptions: row.exceptions,
+            matchRate: row.matchRate,
+          });
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+        (ws as any).autoFilter = ws.dimensions;
+
+        // Summary sheet
+        const summaryWs = workbook.addWorksheet("Summary");
+        summaryWs.columns = [
+          { header: "Field", key: "field", width: 28 },
+          { header: "Value", key: "value", width: 32 },
+        ];
+        summaryWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        summaryWs.getRow(1).height = 20;
+        const totalVolume = rows.reduce((s, r) => s + r.volume, 0);
+        const totalMatched = rows.reduce((s, r) => s + r.matched, 0);
+        const totalExceptions = rows.reduce((s, r) => s + r.exceptions, 0);
+        const avgMatchRate = rows.length > 0 ? (rows.reduce((s, r) => s + r.matchRate, 0) / rows.length).toFixed(1) : "0.0";
+        [
+          { field: "Report Period", value: periodLabels[input.period] ?? input.period },
+          { field: "Channels Included", value: rows.length },
+          { field: "Total Transaction Volume", value: totalVolume },
+          { field: "Total Matched", value: totalMatched },
+          { field: "Total Exceptions", value: totalExceptions },
+          { field: "Average Match Rate (%)", value: avgMatchRate },
+          { field: "Exported At", value: new Date().toISOString() },
+          { field: "Exported By", value: ctx.user.email ?? ctx.user.name ?? "" },
+        ].forEach((row, i) => {
+          const r = summaryWs.addRow(row);
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const fileName = `cfo-channel-metrics-${input.period}-${Date.now()}.xlsx`;
+        const { url } = await storagePut(
+          `exports/${ctx.user.id}/${fileName}`,
+          Buffer.from(buffer),
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        await logAudit(ctx.user.id, "export_cfo_report_xlsx", "cfo_report", undefined, {
+          period: input.period, rowCount: rows.length,
+        }, ip, ua);
+        return { url, fileName };
       }),
 
     // Get channel alert settings
