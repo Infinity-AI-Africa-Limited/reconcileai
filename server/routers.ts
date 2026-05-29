@@ -1695,6 +1695,126 @@ export const appRouter = router({
 
         return { url, fileName };
       }),
+
+    exportAllXlsx: protectedProcedure
+      .input(z.object({
+        dateFrom: z.string().optional(),
+        dateTo: z.string().optional(),
+        limit: z.number().int().min(1).max(200).default(100),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const allJobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+
+        // Filter by date range and status
+        let filtered = allJobs.filter((j: any) => j.status === "completed");
+        if (input.dateFrom) {
+          const from = new Date(input.dateFrom).getTime();
+          filtered = filtered.filter((j: any) => j.completedAt && new Date(j.completedAt).getTime() >= from);
+        }
+        if (input.dateTo) {
+          const to = new Date(input.dateTo).getTime() + 86400000; // inclusive
+          filtered = filtered.filter((j: any) => j.completedAt && new Date(j.completedAt).getTime() <= to);
+        }
+        filtered = filtered.slice(0, input.limit);
+
+        if (filtered.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "No completed reconciliation runs found for the selected period" });
+
+        const ExcelJS = await import("exceljs");
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = "ReconcileAI";
+        workbook.created = new Date();
+
+        const headerStyle = {
+          font: { bold: true, color: { argb: "FFFFFFFF" } },
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF1B365D" } },
+          alignment: { horizontal: "left" as const },
+        };
+        const altRow = { fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } } };
+
+        // Sheet 1: Reconciliation Runs Summary
+        const runsWs = workbook.addWorksheet("Reconciliation Runs");
+        runsWs.columns = [
+          { header: "Job ID", key: "id", width: 10 },
+          { header: "Job Name", key: "name", width: 36 },
+          { header: "Module Type", key: "moduleType", width: 22 },
+          { header: "Status", key: "status", width: 14 },
+          { header: "Date From", key: "dateFrom", width: 18 },
+          { header: "Date To", key: "dateTo", width: 18 },
+          { header: "Completed At", key: "completedAt", width: 22 },
+          { header: "Total Source Txns", key: "totalSourceTxns", width: 18 },
+          { header: "Total Target Txns", key: "totalTargetTxns", width: 18 },
+          { header: "Matched", key: "matchedCount", width: 12 },
+          { header: "Exceptions", key: "exceptionCount", width: 14 },
+          { header: "Unmatched", key: "unmatchedCount", width: 14 },
+          { header: "Match Rate (%)", key: "matchRate", width: 16 },
+          { header: "Processing Time (ms)", key: "processingTimeMs", width: 20 },
+        ];
+        runsWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        runsWs.getRow(1).height = 20;
+        filtered.forEach((j: any, i: number) => {
+          const r = runsWs.addRow({
+            id: j.id,
+            name: j.name,
+            moduleType: (j.moduleType ?? "").replace(/_/g, " "),
+            status: j.status,
+            dateFrom: j.dateFrom ? new Date(j.dateFrom).toLocaleDateString("en-NG") : "",
+            dateTo: j.dateTo ? new Date(j.dateTo).toLocaleDateString("en-NG") : "",
+            completedAt: j.completedAt ? new Date(j.completedAt).toLocaleDateString("en-NG") : "",
+            totalSourceTxns: j.totalSourceTxns ?? 0,
+            totalTargetTxns: j.totalTargetTxns ?? 0,
+            matchedCount: j.matchedCount ?? 0,
+            exceptionCount: j.exceptionCount ?? 0,
+            unmatchedCount: j.unmatchedCount ?? 0,
+            matchRate: j.matchRate != null ? parseFloat(String(j.matchRate)).toFixed(2) : "0.00",
+            processingTimeMs: j.processingTimeMs ?? 0,
+          });
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+        (runsWs as any).autoFilter = runsWs.dimensions;
+        runsWs.views = [{ state: "frozen", ySplit: 1 }];
+
+        // Sheet 2: Export Metadata
+        const metaWs = workbook.addWorksheet("Export Info");
+        metaWs.columns = [
+          { header: "Field", key: "field", width: 30 },
+          { header: "Value", key: "value", width: 40 },
+        ];
+        metaWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        [
+          { field: "Exported By", value: ctx.user.email ?? ctx.user.name ?? "" },
+          { field: "Exported At", value: new Date().toISOString() },
+          { field: "Total Runs Included", value: filtered.length },
+          { field: "Date Filter From", value: input.dateFrom ?? "(all)" },
+          { field: "Date Filter To", value: input.dateTo ?? "(all)" },
+          { field: "Row Limit", value: input.limit },
+        ].forEach((row, i) => {
+          const r = metaWs.addRow(row);
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+        metaWs.views = [{ state: "frozen", ySplit: 1 }];
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const dateSuffix = input.dateFrom && input.dateTo
+          ? `${input.dateFrom}_to_${input.dateTo}`
+          : `all_${new Date().toISOString().slice(0, 10)}`;
+        const fileName = `reconciliation-all-runs-${dateSuffix}-${Date.now()}.xlsx`;
+        const { url } = await storagePut(
+          `exports/${ctx.user.id}/${fileName}`,
+          Buffer.from(buffer),
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+
+        await logAudit(ctx.user.id, "export_all_xlsx", "reconciliation_job", undefined, {
+          count: filtered.length,
+          dateFrom: input.dateFrom,
+          dateTo: input.dateTo,
+          fileName,
+        }, ip, ua);
+
+        return { url, fileName, count: filtered.length };
+      }),
   }),
 
   // ─── Dashboard ───────────────────────────────────────────────────

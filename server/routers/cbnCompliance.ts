@@ -759,6 +759,151 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
       return { csv: csvContent, filename, s3Url };
     }),
 
+  // ── Export submission as Excel workbook ─────────────────────────────────────
+  exportSubmissionXlsx: protectedProcedure
+    .input(z.object({
+      submissionId: z.number(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const drizzle = await getDb();
+      if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const orgId = ctx.user.organizationId ?? null;
+
+      // Fetch submission with framework info
+      const rows = await drizzle
+        .select({ submission: cbnReportSubmissions, frameworkName: cbnReportFrameworks.name, frameworkCode: cbnReportFrameworks.code })
+        .from(cbnReportSubmissions)
+        .leftJoin(cbnReportFrameworks, eq(cbnReportSubmissions.frameworkId, cbnReportFrameworks.id))
+        .where(and(
+          eq(cbnReportSubmissions.id, input.submissionId),
+          orgId ? eq(cbnReportSubmissions.organizationId, orgId) : isNull(cbnReportSubmissions.organizationId)
+        ))
+        .limit(1);
+      if (!rows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Submission not found" });
+      const { submission, frameworkName, frameworkCode } = rows[0];
+      const sections = FRAMEWORK_SECTIONS[frameworkCode ?? ""] ?? [];
+      const reportData = (submission.reportData as Record<string, { value?: string; narrative?: string }>) ?? {};
+
+      // Fetch findings for this submission
+      const findings = await drizzle
+        .select()
+        .from(cbnReportFindings)
+        .where(eq(cbnReportFindings.submissionId, input.submissionId))
+        .orderBy(asc(cbnReportFindings.severity));
+
+      const ExcelJS = await import("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "ReconcileAI";
+      workbook.created = new Date();
+
+      const headerStyle = {
+        font: { bold: true, color: { argb: "FFFFFFFF" } },
+        fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF1B365D" } },
+        alignment: { horizontal: "left" as const },
+      };
+      const altRowFill = { fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } } };
+
+      // ── Sheet 1: Report Data ──────────────────────────────────────────────────
+      const ws = workbook.addWorksheet("Report Data");
+      ws.columns = [
+        { header: "Section", key: "section", width: 40 },
+        { header: "Response", key: "response", width: 32 },
+        { header: "Narrative", key: "narrative", width: 50 },
+        { header: "Required", key: "required", width: 12 },
+      ];
+      ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+      ws.getRow(1).height = 20;
+      ws.views = [{ state: "frozen", ySplit: 1 }];
+      (ws as any).autoFilter = ws.dimensions;
+
+      sections.forEach((s, i) => {
+        const d = reportData[s.key] ?? {};
+        const row = ws.addRow({
+          section: s.label,
+          response: d.value ?? "",
+          narrative: d.narrative ?? "",
+          required: s.required ? "Yes" : "No",
+        });
+        if (i % 2 === 1) row.eachCell((cell) => { cell.style = altRowFill; });
+      });
+
+      // ── Sheet 2: Summary ──────────────────────────────────────────────────────
+      const summaryWs = workbook.addWorksheet("Summary");
+      summaryWs.columns = [
+        { header: "Field", key: "field", width: 32 },
+        { header: "Value", key: "value", width: 40 },
+      ];
+      summaryWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+      summaryWs.getRow(1).height = 20;
+      summaryWs.views = [{ state: "frozen", ySplit: 1 }];
+
+      [
+        { field: "Framework", value: frameworkName ?? "" },
+        { field: "Framework Code", value: frameworkCode ?? "" },
+        { field: "Reporting Period", value: submission.reportingPeriodLabel ?? "" },
+        { field: "Status", value: submission.status },
+        { field: "Compliance Score", value: `${submission.complianceScore ?? "N/A"}/100` },
+        { field: "CBN Reference Number", value: submission.cbNReferenceNumber ?? "" },
+        { field: "Submitted At", value: submission.submittedAt ? new Date(submission.submittedAt).toISOString() : "" },
+        { field: "AI Gap Analysis", value: submission.aiGapAnalysis ?? "" },
+        { field: "Exported By", value: ctx.user.name ?? "" },
+        { field: "Exported At (UTC)", value: new Date().toISOString() },
+      ].forEach((item, i) => {
+        const r = summaryWs.addRow(item);
+        if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRowFill; });
+      });
+
+      // ── Sheet 3: Findings ─────────────────────────────────────────────────────
+      if (findings.length > 0) {
+        const findingsWs = workbook.addWorksheet("Findings");
+        findingsWs.columns = [
+          { header: "Title", key: "title", width: 36 },
+          { header: "Severity", key: "severity", width: 14 },
+          { header: "Type", key: "findingType", width: 18 },
+          { header: "Description", key: "description", width: 50 },
+          { header: "Status", key: "status", width: 14 },
+          { header: "Due Date", key: "dueDate", width: 16 },
+          { header: "Remediation Owner", key: "remediationOwner", width: 24 },
+        ];
+        findingsWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        findingsWs.getRow(1).height = 20;
+        findingsWs.views = [{ state: "frozen", ySplit: 1 }];
+        (findingsWs as any).autoFilter = findingsWs.dimensions;
+
+        findings.forEach((f, i) => {
+          const row = findingsWs.addRow({
+            title: f.title,
+            severity: f.severity,
+            findingType: f.category,
+            description: f.description ?? "",
+            status: f.status,
+            dueDate: f.dueDate ? new Date(f.dueDate).toLocaleDateString("en-NG") : "",
+            remediationOwner: f.source ?? "",
+          });
+          if (i % 2 === 1) row.eachCell((cell) => { cell.style = altRowFill; });
+        });
+      }
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const filename = `CBN_${frameworkCode}_${submission.reportingPeriodLabel ?? submission.id}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+      // Upload to S3
+      const { storagePut } = await import("../storage");
+      const { url } = await storagePut(
+        `exports/cbn/${filename}`,
+        Buffer.from(buffer),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      );
+
+      await writeAuditLog(
+        ctx.user.id, ctx.user.name,
+        "export.xlsx", "cbn_submission", input.submissionId,
+        `${frameworkName} — ${submission.reportingPeriodLabel ?? submission.id}`,
+      );
+
+      return { url, filename };
+    }),
+
   // ── Mark a regulatory deadline as submitted ───────────────────────────────
   markDeadlineSubmitted: protectedProcedure
     .input(z.object({

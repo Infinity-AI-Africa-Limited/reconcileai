@@ -70,6 +70,21 @@ export default function ReportsPage() {
   const generateMutation = trpc.reports.generate.useMutation();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", type: "custom", jobId: "", format: "pdf" });
+  const [exportAllOpen, setExportAllOpen] = useState(false);
+  const [exportDateFrom, setExportDateFrom] = useState("");
+  const [exportDateTo, setExportDateTo] = useState("");
+  const exportAllMutation = trpc.export.exportAllXlsx.useMutation({
+    onSuccess: (data) => {
+      const a = document.createElement("a");
+      a.href = data.url;
+      a.download = data.fileName;
+      a.target = "_blank";
+      a.click();
+      toast.success(`Excel workbook downloaded`, { description: `${data.count} run${data.count !== 1 ? "s" : ""} exported — ${data.fileName}` });
+      setExportAllOpen(false);
+    },
+    onError: (e) => toast.error("Export failed", { description: e.message }),
+  });
 
   // Completed jobs only
   const completedJobs = (jobs ?? []).filter((j) => j.status === "completed");
@@ -137,7 +152,45 @@ export default function ReportsPage() {
           <h1 className="text-2xl font-bold tracking-tight text-primary">Reports</h1>
           <p className="text-muted-foreground mt-1">Generate and download reconciliation reports</p>
         </div>
-        <Dialog open={open} onOpenChange={setOpen}>
+        <div className="flex items-center gap-2">
+          <Dialog open={exportAllOpen} onOpenChange={setExportAllOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="gap-2">
+                <Download className="h-4 w-4" />
+                Export All to Excel
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Export All Reconciliation Runs to Excel</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 pt-2">
+                <p className="text-sm text-muted-foreground">Optionally filter by date range. Leave blank to export all completed runs (up to 100).</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Date From</label>
+                    <Input type="date" value={exportDateFrom} onChange={(e) => setExportDateFrom(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Date To</label>
+                    <Input type="date" value={exportDateTo} onChange={(e) => setExportDateTo(e.target.value)} />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setExportAllOpen(false)}>Cancel</Button>
+                  <Button
+                    onClick={() => exportAllMutation.mutate({ dateFrom: exportDateFrom || undefined, dateTo: exportDateTo || undefined })}
+                    disabled={exportAllMutation.isPending}
+                    className="gap-2"
+                  >
+                    {exportAllMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    {exportAllMutation.isPending ? "Preparing…" : "Download Excel"}
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
             <Button><Plus className="h-4 w-4 mr-2" /> Generate Report</Button>
           </DialogTrigger>
@@ -214,7 +267,8 @@ export default function ReportsPage() {
               </Button>
             </div>
           </DialogContent>
-        </Dialog>
+          </Dialog>
+        </div>
       </div>
 
       {isLoading ? (
@@ -284,3 +338,4 @@ export default function ReportsPage() {
     </div>
   );
 }
+

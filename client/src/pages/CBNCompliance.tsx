@@ -251,6 +251,61 @@ export default function CBNCompliance() {
   const { data: jobs, isLoading: jobsLoading } = trpc.reconciliation.list.useQuery();
   const { data: anomalies, isLoading: anomaliesLoading } = trpc.anomalies.getFlagged.useQuery({ reviewStatus: "pending", limit: 200 });
   const { data: submissionLog, refetch: refetchLog } = trpc.cbnCompliance.listDeadlineSubmissions.useQuery();
+  const exportXlsxMutation = trpc.cbnCompliance.exportSubmissionXlsx.useMutation({
+    onSuccess: (data) => {
+      const a = document.createElement("a");
+      a.href = data.url;
+      a.download = data.filename;
+      a.target = "_blank";
+      a.click();
+      toast.success("Excel workbook downloaded", { description: data.filename });
+    },
+    onError: (e) => toast.error("Export failed", { description: e.message }),
+  });
+
+  const [isExportingXlsx, setIsExportingXlsx] = useState(false);
+
+  async function handleExportCBNReturnsXlsx() {
+    if (!completedJobs.length) { toast.error("No completed reconciliation runs in the selected period"); return; }
+    setIsExportingXlsx(true);
+    try {
+      // Build workbook client-side from completedJobs (no per-submission ID needed)
+      // We use the first submission if available, otherwise show a toast
+      toast.info("Preparing Excel workbook…");
+      // Trigger client-side Excel generation via a helper
+      const headers = ["Run ID","Run Name","Module Type","Period From","Period To","Completed At","Total Source Txns","Total Target Txns","Matched Count","Exception Count","Unmatched Count","Match Rate (%)","CBN Threshold (%)","Threshold Status","Exception Ratio (%)","CBN Exception Threshold (%)","Exception Status"];
+      const rows = completedJobs.map(j => {
+        const mr = parseFloat(String(j.matchRate ?? 0));
+        const exRatio = j.totalSourceTxns > 0 ? (j.exceptionCount / j.totalSourceTxns) * 100 : 0;
+        return [
+          j.id, j.name, j.moduleType.replace(/_/g," "),
+          new Date(j.dateFrom).toLocaleDateString("en-NG"),
+          new Date(j.dateTo).toLocaleDateString("en-NG"),
+          j.completedAt ? new Date(j.completedAt).toLocaleDateString("en-NG") : "",
+          j.totalSourceTxns, j.totalTargetTxns, j.matchedCount, j.exceptionCount, j.unmatchedCount,
+          mr.toFixed(2), CBN_THRESHOLDS.minMatchRate,
+          mr >= CBN_THRESHOLDS.minMatchRate ? "Compliant" : "Breach",
+          exRatio.toFixed(2), CBN_THRESHOLDS.maxExceptionRatio,
+          exRatio <= CBN_THRESHOLDS.maxExceptionRatio ? "Within Threshold" : "Exceeds Threshold",
+        ];
+      });
+      // Use SheetJS-style CSV-to-Excel via Blob (no extra dependency needed)
+      const tsv = [headers.join("\t"), ...rows.map(r => r.join("\t"))].join("\n");
+      const blob = new Blob(["\uFEFF" + tsv], { type: "application/vnd.ms-excel;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `CBN_Returns_${exportPeriod}_${new Date().toISOString().slice(0,10)}.xls`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Excel file downloaded", { description: `${completedJobs.length} run${completedJobs.length !== 1 ? "s" : ""} exported` });
+    } catch (err) {
+      toast.error("Export failed");
+    } finally {
+      setIsExportingXlsx(false);
+    }
+  }
+
   const markSubmittedMutation = trpc.cbnCompliance.markDeadlineSubmitted.useMutation({
     onSuccess: () => {
       toast.success("Submission recorded", { description: `${submitDialog?.name} — ${submitDialog?.periodLabel}` });
@@ -644,9 +699,13 @@ export default function CBNCompliance() {
                       <SelectItem value="last_180">Last 180 days (Half-year)</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Button onClick={handleExportCBNReturns} disabled={isExporting || jobsLoading} className="gap-2">
+                  <Button onClick={handleExportCBNReturns} disabled={isExporting || jobsLoading} variant="outline" className="gap-2">
                     <Download className="h-4 w-4" />
                     {isExporting ? "Exporting…" : `Export ${completedJobs.length} Run${completedJobs.length !== 1 ? "s" : ""} to CSV`}
+                  </Button>
+                  <Button onClick={handleExportCBNReturnsXlsx} disabled={isExportingXlsx || jobsLoading} className="gap-2">
+                    <Download className="h-4 w-4" />
+                    {isExportingXlsx ? "Preparing…" : `Export ${completedJobs.length} Run${completedJobs.length !== 1 ? "s" : ""} to Excel`}
                   </Button>
                 </div>
                 {jobsLoading ? (
