@@ -4,7 +4,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Shield, ChevronLeft, ChevronRight } from "lucide-react";
+import { Loader2, Shield, ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { toast } from "sonner";
 
 export default function AuditTrailPage() {
   const [filters, setFilters] = useState({ action: "", entityType: "", dateFrom: "", dateTo: "" });
@@ -16,6 +17,24 @@ export default function AuditTrailPage() {
     limit,
     offset: page * limit,
   });
+
+  const exportXlsxMutation = trpc.audit.exportXlsx.useMutation();
+
+  const handleExportXlsx = async () => {
+    try {
+      const res = await exportXlsxMutation.mutateAsync({
+        entityType: filters.entityType || undefined,
+        action: filters.action || undefined,
+        dateFrom: filters.dateFrom || undefined,
+        dateTo: filters.dateTo || undefined,
+        limit: 10000,
+      });
+      window.open(res.url, "_blank");
+      toast.success(`Audit Trail exported — ${res.rowCount.toLocaleString()} rows`);
+    } catch (err: any) {
+      toast.error(err.message || "Export failed");
+    }
+  };
 
   const actionColor = (a: string) => {
     if (a.includes("create") || a.includes("upload")) return "bg-blue-100 text-blue-700";
@@ -32,7 +51,8 @@ export default function AuditTrailPage() {
         <p className="text-muted-foreground mt-1">Complete log of all system actions for CBN compliance</p>
       </div>
 
-      <div className="flex flex-wrap gap-3">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex flex-wrap gap-3">
         <Select value={filters.action} onValueChange={(v) => { setFilters({ ...filters, action: v === "all" ? "" : v }); setPage(0); }}>
           <SelectTrigger className="w-48"><SelectValue placeholder="All Actions" /></SelectTrigger>
           <SelectContent>
@@ -60,6 +80,18 @@ export default function AuditTrailPage() {
         </Select>
         <Input type="date" className="w-40" value={filters.dateFrom} onChange={(e) => { setFilters({ ...filters, dateFrom: e.target.value }); setPage(0); }} />
         <Input type="date" className="w-40" value={filters.dateTo} onChange={(e) => { setFilters({ ...filters, dateTo: e.target.value }); setPage(0); }} />
+        </div>
+        <Button
+          variant="outline" size="sm"
+          className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8] shrink-0"
+          disabled={exportXlsxMutation.isPending}
+          onClick={handleExportXlsx}
+        >
+          {exportXlsxMutation.isPending
+            ? <Loader2 className="h-4 w-4 animate-spin" />
+            : <Download className="h-4 w-4" />}
+          Export to Excel
+        </Button>
       </div>
 
       {isLoading ? (

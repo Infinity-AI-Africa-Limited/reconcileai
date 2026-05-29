@@ -933,6 +933,7 @@ export const appRouter = router({
         ];
         ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
         ws.getRow(1).height = 20;
+        ws.views = [{ state: "frozen", ySplit: 1 }];
         (exceptions.data ?? []).forEach((e: any, i: number) => {
           const r = ws.addRow({
             id: e.id,
@@ -1203,6 +1204,98 @@ export const appRouter = router({
           ...input,
           userId: isAdmin ? undefined : ctx.user.id,
         });
+      }),
+
+    exportXlsx: protectedProcedure
+      .input(z.object({
+        entityType: z.string().max(50).optional(),
+        action: z.string().max(100).optional(),
+        dateFrom: z.string().optional(),
+        dateTo: z.string().optional(),
+        limit: z.number().int().min(1).max(10000).default(5000),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+
+        // Fetch up to 10K rows for export
+        const { data } = await db.getAuditLogs({
+          entityType: input.entityType,
+          limit: input.limit,
+          userId: isAdmin ? undefined : ctx.user.id,
+        });
+
+        // Optional client-side action filter (db layer doesn't support it directly)
+        const filtered = input.action
+          ? data.filter((e: any) => e.action?.toLowerCase().includes(input.action!.toLowerCase()))
+          : data;
+
+        // Optional date range filter
+        const dateFiltered = filtered.filter((e: any) => {
+          if (!input.dateFrom && !input.dateTo) return true;
+          const ts = new Date(e.createdAt).getTime();
+          if (input.dateFrom && ts < new Date(input.dateFrom).getTime()) return false;
+          if (input.dateTo && ts > new Date(input.dateTo + "T23:59:59Z").getTime()) return false;
+          return true;
+        });
+
+        const ExcelJS = await import("exceljs");
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = "ReconcileAI";
+        workbook.created = new Date();
+
+        const headerStyle = {
+          font: { bold: true, color: { argb: "FFFFFFFF" } },
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF1B365D" } },
+          alignment: { horizontal: "left" as const },
+        };
+        const altRow = {
+          fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } },
+        };
+
+        const ws = workbook.addWorksheet("Audit Trail");
+        ws.columns = [
+          { header: "ID", key: "id", width: 10 },
+          { header: "Timestamp (UTC)", key: "createdAt", width: 24 },
+          { header: "User ID", key: "userId", width: 12 },
+          { header: "Action", key: "action", width: 36 },
+          { header: "Entity Type", key: "entityType", width: 20 },
+          { header: "Entity ID", key: "entityId", width: 12 },
+          { header: "Details", key: "details", width: 60 },
+          { header: "IP Address", key: "ipAddress", width: 18 },
+          { header: "User Agent", key: "userAgent", width: 50 },
+        ];
+        ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        ws.getRow(1).height = 20;
+        ws.views = [{ state: "frozen", ySplit: 1 }];
+        (ws as any).autoFilter = ws.dimensions;
+
+        dateFiltered.forEach((e: any, i: number) => {
+          const r = ws.addRow({
+            id: e.id,
+            createdAt: e.createdAt ? new Date(e.createdAt).toISOString() : "",
+            userId: e.userId ?? "",
+            action: e.action ?? "",
+            entityType: e.entityType ?? "",
+            entityId: e.entityId ?? "",
+            details: e.details ? JSON.stringify(e.details) : "",
+            ipAddress: e.ipAddress ?? "",
+            userAgent: e.userAgent ?? "",
+          });
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const fileName = `audit-trail-export-${Date.now()}.xlsx`;
+        const { url } = await storagePut(
+          `exports/${ctx.user.id}/${fileName}`,
+          Buffer.from(buffer),
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        await logAudit(ctx.user.id, "export_audit_trail_xlsx", "audit_log", undefined, {
+          rowCount: dateFiltered.length, filters: input,
+        }, ip, ua);
+        return { url, fileName, rowCount: dateFiltered.length };
       }),
   }),
 
@@ -1478,6 +1571,8 @@ export const appRouter = router({
           ws.getRow(1).height = 20;
           // Enable native Excel column filter dropdowns on the header row
           (ws as any).autoFilter = ws.dimensions;
+          // Freeze the header row so it stays visible when scrolling
+          ws.views = [{ state: "frozen", ySplit: 1 }];
           return ws;
         };
 
@@ -4524,6 +4619,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
         });
         (ws as any).autoFilter = ws.dimensions;
+        ws.views = [{ state: "frozen", ySplit: 1 }];
 
         // Summary sheet
         const summaryWs = workbook.addWorksheet("Summary");

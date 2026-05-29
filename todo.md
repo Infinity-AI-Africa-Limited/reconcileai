@@ -1092,3 +1092,9 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Update reconciliation report export button to offer PDF / Excel choice (CSV + Excel buttons on job list; PDF + Excel on ReportDetail)
 - [x] Frontend: Update exception export button to offer PDF / Excel choice
 - [ ] Tests: Excel export endpoint tests
+
+## Feature 36: Audit Trail Excel Export + Freeze Row + Scheduled Excel Email
+- [ ] Freeze top row (ws.views frozen) on all existing xlsx workbook sheets
+- [ ] Backend: Add auditTrail.exportXlsx procedure (date range, action filter, up to 10K rows)
+- [ ] Frontend: Add Export to Excel button to Audit Trail page
+- [ ] Backend: Extend CFO report scheduler to generate and attach Excel workbook to scheduled emails
