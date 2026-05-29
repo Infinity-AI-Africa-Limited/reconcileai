@@ -163,6 +163,11 @@ export async function sendWeeklyChannelReport(
       ws.getRow(1).height = 20;
       ws.views = [{ state: "frozen", ySplit: 1 }];
       (ws as any).autoFilter = ws.dimensions;
+      // Number formatting
+      ws.getColumn("volume").numFmt = "#,##0";
+      ws.getColumn("matched").numFmt = "#,##0";
+      ws.getColumn("exceptions").numFmt = "#,##0";
+      ws.getColumn("matchRate").numFmt = "0.00";
 
       rows.forEach((r, i) => {
         const status = r.matchRate >= 95 ? "✅ Good" : r.matchRate >= 85 ? "⚠️ Warning" : "🔴 Critical";

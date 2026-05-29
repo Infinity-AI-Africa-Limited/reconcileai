@@ -934,6 +934,9 @@ export const appRouter = router({
         ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
         ws.getRow(1).height = 20;
         ws.views = [{ state: "frozen", ySplit: 1 }];
+        // Apply number formatting to numeric columns
+        ws.getColumn("id").numFmt = "#,##0";
+        ws.getColumn("jobId").numFmt = "#,##0";
         (exceptions.data ?? []).forEach((e: any, i: number) => {
           const r = ws.addRow({
             id: e.id,
@@ -1560,6 +1563,10 @@ export const appRouter = router({
           fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } },
         };
 
+        // Number format keys: columns whose header contains these keywords get numFmt applied
+        const COUNT_KEYS = new Set(["id", "sourceTransactionId", "targetTransactionId", "channelId", "transactionId"]);
+        const RATE_KEYS = new Set(["confidenceScore", "matchRate"]);
+        const AMOUNT_KEYS = new Set(["amountDifference", "amount"]);
         const addSheet = (name: string, columns: { header: string; key: string; width: number }[], rows: Record<string, unknown>[]) => {
           const ws = workbook.addWorksheet(name);
           ws.columns = columns;
@@ -1569,6 +1576,13 @@ export const appRouter = router({
             if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
           });
           ws.getRow(1).height = 20;
+          // Apply column-level number formats
+          columns.forEach((col) => {
+            const k = col.key;
+            if (COUNT_KEYS.has(k)) ws.getColumn(k).numFmt = "#,##0";
+            else if (RATE_KEYS.has(k)) ws.getColumn(k).numFmt = "0.00";
+            else if (AMOUNT_KEYS.has(k)) ws.getColumn(k).numFmt = "#,##0.00";
+          });
           // Enable native Excel column filter dropdowns on the header row
           (ws as any).autoFilter = ws.dimensions;
           // Freeze the header row so it stays visible when scrolling
@@ -1753,6 +1767,14 @@ export const appRouter = router({
         ];
         runsWs.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
         runsWs.getRow(1).height = 20;
+        // Number formatting
+        runsWs.getColumn("id").numFmt = "#,##0";
+        runsWs.getColumn("totalSourceTxns").numFmt = "#,##0";
+        runsWs.getColumn("totalTargetTxns").numFmt = "#,##0";
+        runsWs.getColumn("matchedCount").numFmt = "#,##0";
+        runsWs.getColumn("exceptionCount").numFmt = "#,##0";
+        runsWs.getColumn("unmatchedCount").numFmt = "#,##0";
+        runsWs.getColumn("processingTimeMs").numFmt = "#,##0";
         filtered.forEach((j: any, i: number) => {
           const r = runsWs.addRow({
             id: j.id,
@@ -4727,6 +4749,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
         ];
         ws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
         ws.getRow(1).height = 20;
+        // Number formatting for CFO channel metrics
+        ws.getColumn("volume").numFmt = "#,##0";
+        ws.getColumn("matched").numFmt = "#,##0";
+        ws.getColumn("exceptions").numFmt = "#,##0";
+        ws.getColumn("matchRate").numFmt = "0.00";
         rows.forEach((row, i) => {
           const r = ws.addRow({
             channel: row.channel,
