@@ -122,8 +122,19 @@ const financialServicesMenuItems: NavItem[] = [
   { icon: ShieldCheck, label: "Data Protection", path: "/compliance" },
   { icon: Activity, label: "Monitor", path: "/monitor" },
   { icon: Users, label: "User Management", path: "/admin/users" },
+  { icon: Settings2, label: "Module Configuration", path: "/modules" },
+  { icon: Mail, label: "Email Settings", path: "/email-settings" },
   { icon: Calendar, label: "Schedules", path: "/schedules" },
   { icon: Upload, label: "Upload Data", path: "/upload" },
+];
+
+// Financial Services portal — Advanced Tools dropdown items
+const financialServicesAdvancedItems: NavItem[] = [
+  { icon: Beaker, label: "Sample Data", path: "/sample-data" },
+  { icon: Plug, label: "Integrations", path: "/integrations" },
+  { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
+  { icon: Server, label: "SFTP Config", path: "/sftp-config" },
+  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
 ];
 
 // Corporate B2B portal nav (shown when super_admin enters a corporate_b2b org)
@@ -299,9 +310,14 @@ function DashboardLayoutContent({
         : menuItems
     : null;
 
+  // Advanced items for portal context (Financial Services gets the full advanced tools set)
+  const portalAdvancedItems = isViewingAs && viewAsOrg?.segment === "financial_services"
+    ? financialServicesAdvancedItems
+    : null;
+
   const visibleMenuItems = portalMenuItems ?? menuItems.filter(item => canAccessNav(item, user?.role));
   const visibleAdminItems = portalMenuItems ? [] : adminMenuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdvancedItems = portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role));
+  const visibleAdvancedItems = portalAdvancedItems ?? (portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role)));
   const visibleSuperAdminItems = portalMenuItems ? [] : superAdminItems.filter(item => canAccessNav(item, user?.role));
   const allItems = [...visibleMenuItems, ...visibleAdminItems, ...visibleSuperAdminItems];
   const activeMenuItem = allItems.find((item) => location.startsWith(item.path));
@@ -468,85 +484,91 @@ function DashboardLayoutContent({
               })}
             </SidebarMenu>
 
-            {visibleAdminItems.length > 0 && (
+            {(visibleAdminItems.length > 0 || visibleAdvancedItems.length > 0) && (
               <>
                 <div className="px-4 py-4 mt-2">
                   <div className="h-px bg-sidebar-border" />
                 </div>
-                {!isCollapsed ? (
-                  <button
-                    onClick={() => setShowAdmin((v) => !v)}
-                    className="w-full flex items-center justify-between px-4 pb-2 pt-1 group"
-                  >
-                    <span className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider group-hover:text-sidebar-foreground/80 transition-colors">
-                      Admin
-                    </span>
-                    <ChevronDown
-                      className={`h-3 w-3 text-sidebar-foreground/40 transition-transform group-hover:text-sidebar-foreground/60 ${showAdmin ? "" : "-rotate-90"}`}
-                    />
-                  </button>
-                ) : <div className="pb-1" />}
-                {(showAdmin || isCollapsed) && (
-                <>
-                <SidebarMenu className="px-2 py-0">
-                  {visibleAdminItems.map((item) => {
-                    const isActive = location.startsWith(item.path);
-                    const showBadge = openExceptionCount > 0 && (item.path === "/exceptions" || item.path === "/review");
-                    return (
-                      <SidebarMenuItem key={item.path}>
-                        <SidebarMenuButton
-                          isActive={isActive}
-                          onClick={() => setLocation(item.path)}
-                          tooltip={item.label}
-                          className="h-8 transition-all font-normal"
-                        >
-                          <span className="flex items-center justify-center w-4 h-4 shrink-0">
-                            <item.icon className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`} />
-                          </span>
-                          <span className="flex-1">{item.label}</span>
-                          {showBadge && !isCollapsed && (
-                            <span className="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center leading-none">
-                              {openExceptionCount > 99 ? "99+" : openExceptionCount}
-                            </span>
-                          )}
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                  {/* Advanced toggle */}
-                  {!isCollapsed && (
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        onClick={() => setShowAdvanced((v) => !v)}
-                        className="h-8 transition-all font-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/80"
+                {visibleAdminItems.length > 0 && (
+                  <>
+                    {!isCollapsed ? (
+                      <button
+                        onClick={() => setShowAdmin((v) => !v)}
+                        className="w-full flex items-center justify-between px-4 pb-2 pt-1 group"
                       >
+                        <span className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider group-hover:text-sidebar-foreground/80 transition-colors">
+                          Admin
+                        </span>
                         <ChevronDown
-                          className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-180" : ""}`}
+                          className={`h-3 w-3 text-sidebar-foreground/40 transition-transform group-hover:text-sidebar-foreground/60 ${showAdmin ? "" : "-rotate-90"}`}
                         />
-                        <span className="text-xs">{showAdvanced ? "Hide advanced" : "Advanced tools"}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  )}
-                  {showAdvanced && visibleAdvancedItems.map((item) => {
-                    const isActive = location.startsWith(item.path);
-                    return (
-                      <SidebarMenuItem key={item.path}>
+                      </button>
+                    ) : <div className="pb-1" />}
+                    {(showAdmin || isCollapsed) && (
+                      <SidebarMenu className="px-2 py-0">
+                        {visibleAdminItems.map((item) => {
+                          const isActive = location.startsWith(item.path);
+                          const showBadge = openExceptionCount > 0 && (item.path === "/exceptions" || item.path === "/review");
+                          return (
+                            <SidebarMenuItem key={item.path}>
+                              <SidebarMenuButton
+                                isActive={isActive}
+                                onClick={() => setLocation(item.path)}
+                                tooltip={item.label}
+                                className="h-8 transition-all font-normal"
+                              >
+                                <span className="flex items-center justify-center w-4 h-4 shrink-0">
+                                  <item.icon className={`h-4 w-4 ${isActive ? "text-sidebar-primary" : ""}`} />
+                                </span>
+                                <span className="flex-1">{item.label}</span>
+                                {showBadge && !isCollapsed && (
+                                  <span className="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center leading-none">
+                                    {openExceptionCount > 99 ? "99+" : openExceptionCount}
+                                  </span>
+                                )}
+                              </SidebarMenuButton>
+                            </SidebarMenuItem>
+                          );
+                        })}
+                      </SidebarMenu>
+                    )}
+                  </>
+                )}
+                {/* Advanced Tools — shown for normal users when admin items exist, OR always shown in Financial Services portal */}
+                {visibleAdvancedItems.length > 0 && (
+                  <SidebarMenu className="px-2 py-0">
+                    {!isCollapsed && (
+                      <SidebarMenuItem>
                         <SidebarMenuButton
-                          isActive={isActive}
-                          onClick={() => setLocation(item.path)}
-                          tooltip={item.label}
-                          className="h-8 transition-all font-normal pl-6"
+                          onClick={() => setShowAdvanced((v) => !v)}
+                          className="h-8 transition-all font-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/80"
                         >
-                          <span className="flex items-center justify-center w-4 h-4 shrink-0">
-                            <item.icon className={`h-3.5 w-3.5 ${isActive ? "text-sidebar-primary" : "text-sidebar-foreground/60"}`} />
-                          </span>
-                          <span className="text-sidebar-foreground/70">{item.label}</span>
+                          <ChevronDown
+                            className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-180" : ""}`}
+                          />
+                          <span className="text-xs">{showAdvanced ? "Hide advanced" : "Advanced tools"}</span>
                         </SidebarMenuButton>
                       </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-                </>
+                    )}
+                    {(showAdvanced || isCollapsed) && visibleAdvancedItems.map((item) => {
+                      const isActive = location.startsWith(item.path);
+                      return (
+                        <SidebarMenuItem key={item.path}>
+                          <SidebarMenuButton
+                            isActive={isActive}
+                            onClick={() => setLocation(item.path)}
+                            tooltip={item.label}
+                            className="h-8 transition-all font-normal pl-6"
+                          >
+                            <span className="flex items-center justify-center w-4 h-4 shrink-0">
+                              <item.icon className={`h-3.5 w-3.5 ${isActive ? "text-sidebar-primary" : "text-sidebar-foreground/60"}`} />
+                            </span>
+                            <span className="text-sidebar-foreground/70">{item.label}</span>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      );
+                    })}
+                  </SidebarMenu>
                 )}
               </>
             )}

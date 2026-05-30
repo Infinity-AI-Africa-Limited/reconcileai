@@ -1134,3 +1134,11 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Update ModuleConfiguration.tsx: 2 modules, merged content, Per-Institution button for super_admin
 - [x] Per-Institution dialog: force ON/OFF per org with optional reason, clear override option
 - [x] Update reconciliation job create default moduleType to settlement
+
+## Financial Services Portal — Email Settings & Advanced Tools
+- [x] Add Email Settings (/email-settings) to financialServicesMenuItems
+- [x] Add Module Configuration (/modules) to financialServicesMenuItems
+- [x] Create financialServicesAdvancedItems array with all 5 Advanced Tools (Sample Data, Integrations, API Ingestion, SFTP Config, Anomaly Detection)
+- [x] Update portal nav logic: portalAdvancedItems resolves to financialServicesAdvancedItems when in Financial Services portal
+- [x] Refactor Admin section rendering to support portal-only advanced items (no admin section header needed)
+- [x] Advanced Tools dropdown visible in Financial Services portal with collapse/expand toggle
