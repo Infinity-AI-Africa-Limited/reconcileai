@@ -1098,3 +1098,18 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Backend: Add auditTrail.exportXlsx procedure (date range, action filter, up to 10K rows)
 - [ ] Frontend: Add Export to Excel button to Audit Trail page
 - [ ] Backend: Extend CFO report scheduler to generate and attach Excel workbook to scheduled emails
+
+## Feature: Three-Portal Architecture (Segment-Scoped Instances)
+- [x] Schema: Add `segment` field to `organizations` table (financial_services | corporate_b2b | super_admin)
+- [x] Schema: Add `super_admin` to `users.role` enum (Infinity AI internal staff)
+- [x] Backend: `superAdminProcedure` middleware — throws FORBIDDEN for all non-super_admin roles
+- [x] Backend: Updated `adminProcedure` to allow `super_admin` role (elevated access)
+- [x] Backend: `superAdmin` tRPC router with platformStats, allOrganizations, allUsers, createOrganization, updateOrganizationSegment, promoteToSuperAdmin procedures
+- [x] Backend: `db.updateUserRole` updated to accept `super_admin` role
+- [x] Frontend: DashboardLayout — `super_admin` nav section (Infinity AI branding, violet accent)
+- [x] Frontend: DashboardLayout — `canAccessNav` updated so super_admin sees all nav items + super_admin-only items
+- [x] Frontend: DashboardLayout — role label shows "Infinity AI Staff" for super_admin
+- [x] Frontend: SuperAdminDashboard page (`/admin/super-admin`) — platform stats, org management, user management, segment assignment, promote-to-super-admin
+- [x] Frontend: AdminUsers — `PortalRole` type and `ROLE_META` updated to include `super_admin` entry
+- [x] Frontend: AdminUsers — `RoleBadge` renders "Infinity AI Staff" badge for super_admin role
+- [x] Tests: 10 superAdmin.test.ts tests — FORBIDDEN enforcement for all non-super_admin roles, elevated access for super_admin

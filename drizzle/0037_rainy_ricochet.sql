@@ -1,0 +1,2 @@
+ALTER TABLE `users` MODIFY COLUMN `role` enum('super_admin','admin','cfo','operations','compliance','user') NOT NULL DEFAULT 'user';--> statement-breakpoint
+ALTER TABLE `organizations` ADD `segment` enum('financial_services','corporate_b2b','super_admin') DEFAULT 'financial_services' NOT NULL;

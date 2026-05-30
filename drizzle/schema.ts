@@ -21,6 +21,11 @@ export const organizations = mysqlTable("organizations", {
   code: varchar("code", { length: 50 }).notNull().unique(),
   country: varchar("country", { length: 3 }).default("NGA").notNull(), // ISO 3166-1 alpha-3
   baseCurrency: varchar("baseCurrency", { length: 3 }).default("NGN").notNull(),
+  // Segment determines which portal instance this org belongs to:
+  // - financial_services: banks, MFBs, fintechs, payment processors
+  // - corporate_b2b: FMCG distributors, corporate treasury, B2B payments
+  // - super_admin: Infinity AI internal (cross-tenant visibility)
+  segment: mysqlEnum("segment", ["financial_services", "corporate_b2b", "super_admin"]).default("financial_services").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -37,7 +42,8 @@ export const users = mysqlTable("users", {
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
-  role: mysqlEnum("role", ["admin", "cfo", "operations", "compliance", "user"]).default("user").notNull(),
+  // super_admin: Infinity AI staff only — cross-tenant visibility, hidden from client users
+  role: mysqlEnum("role", ["super_admin", "admin", "cfo", "operations", "compliance", "user"]).default("user").notNull(),
   organizationId: int("organizationId"),
   isGuest: boolean("isGuest").default(false).notNull(),
   isActive: boolean("isActive").default(true).notNull(),

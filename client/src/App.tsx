@@ -53,6 +53,7 @@ import ReportDetail from "./pages/ReportDetail";
 import ComplianceAssessmentUnsubscribe from "./pages/ComplianceAssessmentUnsubscribe";
 import CBNCompliance from "./pages/CBNCompliance";
 import MagicLogin from "./pages/MagicLogin";
+import SuperAdminDashboard from "./pages/SuperAdminDashboard";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -110,6 +111,7 @@ function Router() {
           <Route path="/admin/assessments" component={AdminAssessments} />
           <Route path="/admin/roadmap-access" component={AdminRoadmapAccess} />
           <Route path="/admin/users" component={AdminUsers} />
+          <Route path="/admin/super-admin">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/magic-login" component={MagicLogin} />

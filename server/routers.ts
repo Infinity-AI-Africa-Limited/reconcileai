@@ -76,10 +76,22 @@ const MAX_SEARCH_LENGTH = 100;
 const MAX_NAME_LENGTH = 255;
 const MAX_QUERY_LIMIT = 500;
 
+// ─── Super Admin Procedure ───────────────────────────────────────────
+// Only Infinity AI staff (super_admin role) can access these procedures.
+// Cross-tenant visibility: can see ALL organisations, instances, and users.
+
+const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.user.role !== "super_admin") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin access required. This action is restricted to Infinity AI staff." });
+  }
+  return next({ ctx });
+});
+
 // ─── Admin Procedure ─────────────────────────────────────────────────
+// Allows both super_admin (Infinity AI) and admin (org-level admin) roles.
 
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
-  if (ctx.user.role !== "admin") {
+  if (ctx.user.role !== "admin" && ctx.user.role !== "super_admin") {
     throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
   }
   return next({ ctx });
@@ -2783,7 +2795,7 @@ export const appRouter = router({
     updateRole: adminProcedure
       .input(z.object({
         userId: z.number().int().positive(),
-        role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
+        role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -2796,7 +2808,7 @@ export const appRouter = router({
     bulkUpdateRole: adminProcedure
       .input(z.object({
         userIds: z.array(z.number().int().positive()),
-        role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
+        role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -2843,7 +2855,7 @@ export const appRouter = router({
       .input(z.object({
         name: z.string().min(1).max(200),
         email: z.string().email(),
-        role: z.enum(["admin", "cfo", "operations", "compliance", "user"]),
+        role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
         organizationId: z.number().int().positive().nullable().optional(),
         origin: z.string().url().optional(),
       }))
@@ -3012,6 +3024,111 @@ export const appRouter = router({
         const csv = [header, ...rows].map(r => r.map(escape).join(",")).join("\n");
         return { csv, filename: `activity_${input.userName ?? input.userId}_${new Date().toISOString().slice(0, 10)}.csv` };
       }),
+  }),
+
+  // ─── Super Admin Router ───────────────────────────────────────────────────
+  // Infinity AI staff only — cross-tenant visibility across ALL deployed instances.
+  // Hidden from all client-facing portals (FS + B2B).
+
+  superAdmin: router({
+    // List ALL organisations across all segments
+    allOrganizations: superAdminProcedure.query(async () => {
+      const drizzle = await getDb();
+      if (!drizzle) return [];
+      const { organizations } = await import("../drizzle/schema");
+      const { asc } = await import("drizzle-orm");
+      return drizzle.select().from(organizations).orderBy(asc(organizations.name));
+    }),
+
+    // List ALL users across all organisations
+    allUsers: superAdminProcedure.query(async () => {
+      return db.getAllUsers();
+    }),
+
+    // Update an organisation's segment
+    updateOrganizationSegment: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        segment: z.enum(["financial_services", "corporate_b2b", "super_admin"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        const { eq } = await import("drizzle-orm");
+        await drizzle.update(organizations)
+          .set({ segment: input.segment })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_segment", "organization", input.organizationId, {
+          segment: input.segment,
+        });
+        return { success: true };
+      }),
+
+    // Create a new organisation (for onboarding a new client instance)
+    createOrganization: superAdminProcedure
+      .input(z.object({
+        name: z.string().min(1).max(255),
+        code: z.string().min(1).max(50),
+        segment: z.enum(["financial_services", "corporate_b2b", "super_admin"]),
+        country: z.string().length(3).default("NGA"),
+        baseCurrency: z.string().length(3).default("NGN"),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        const [result] = await drizzle.insert(organizations).values({
+          name: input.name,
+          code: input.code.toUpperCase(),
+          segment: input.segment,
+          country: input.country,
+          baseCurrency: input.baseCurrency,
+          isActive: true,
+        });
+        const newOrgId = (result as any).insertId;
+        await logAudit(ctx.user.id, "create_organization", "organization", newOrgId, {
+          name: input.name,
+          segment: input.segment,
+        });
+        return { success: true, organizationId: newOrgId };
+      }),
+
+    // Promote a user to super_admin (Infinity AI staff only)
+    promoteToSuperAdmin: superAdminProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        await drizzle.update(users).set({ role: "super_admin" }).where(eq(users.id, input.userId));
+        await logAudit(ctx.user.id, "promote_to_super_admin", "user", input.userId, {});
+        return { success: true };
+      }),
+
+    // Get platform-wide statistics (cross-tenant)
+    platformStats: superAdminProcedure.query(async () => {
+      const drizzle = await getDb();
+      if (!drizzle) return { totalOrgs: 0, totalUsers: 0, totalJobs: 0, segmentBreakdown: {} };
+      const { organizations, users, reconciliationJobs } = await import("../drizzle/schema");
+      const { count, eq } = await import("drizzle-orm");
+      const [orgCount] = await drizzle.select({ count: count() }).from(organizations);
+      const [userCount] = await drizzle.select({ count: count() }).from(users);
+      const [jobCount] = await drizzle.select({ count: count() }).from(reconciliationJobs);
+      // Segment breakdown
+      const fsOrgs = await drizzle.select({ count: count() }).from(organizations).where(eq(organizations.segment, "financial_services"));
+      const b2bOrgs = await drizzle.select({ count: count() }).from(organizations).where(eq(organizations.segment, "corporate_b2b"));
+      const saOrgs = await drizzle.select({ count: count() }).from(organizations).where(eq(organizations.segment, "super_admin"));
+      return {
+        totalOrgs: orgCount.count,
+        totalUsers: userCount.count,
+        totalJobs: jobCount.count,
+        segmentBreakdown: {
+          financial_services: fsOrgs[0].count,
+          corporate_b2b: b2bOrgs[0].count,
+          super_admin: saOrgs[0].count,
+        },
+      };
+    }),
   }),
 
   // ─── Super Agent ─────────────────────────────────────────────────────

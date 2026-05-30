@@ -49,6 +49,9 @@ import {
   Building2,
   ShieldCheck,
   ClipboardCheck,
+  Globe,
+  BarChart3,
+  Network,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -58,10 +61,12 @@ import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2 } from "lucide-react";
 
-type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[] };
+type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: string[] };
 
-// roles: admin | cfo | operations | compliance | user
+// roles: admin | cfo | operations | compliance | user | super_admin
+// segments: financial_services | corporate_b2b | super_admin (org segment gate)
 // If roles is omitted, item is visible to ALL roles.
+// If segments is omitted, item is visible across ALL segments.
 const menuItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
@@ -101,9 +106,19 @@ const adminAdvancedItems: NavItem[] = [
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
 ];
 
+// Super Admin items — only visible to super_admin role (Infinity AI staff)
+const superAdminItems: NavItem[] = [
+  { icon: Globe, label: "Platform Overview", path: "/admin/super-admin", roles: ["super_admin"] },
+  { icon: Network, label: "All Organisations", path: "/admin/super-admin/orgs", roles: ["super_admin"] },
+  { icon: Users, label: "All Users", path: "/admin/super-admin/users", roles: ["super_admin"] },
+  { icon: BarChart3, label: "Platform Analytics", path: "/admin/super-admin/analytics", roles: ["super_admin"] },
+];
+
 function canAccessNav(item: NavItem, userRole: string | undefined): boolean {
   if (!item.roles) return true;
   if (!userRole) return false;
+  // super_admin can see everything (except super_admin-only items are still gated)
+  if (userRole === "super_admin" && !item.roles.includes("super_admin")) return true;
   return item.roles.includes(userRole);
 }
 
@@ -240,7 +255,8 @@ function DashboardLayoutContent({
   const visibleMenuItems = menuItems.filter(item => canAccessNav(item, user?.role));
   const visibleAdminItems = adminMenuItems.filter(item => canAccessNav(item, user?.role));
   const visibleAdvancedItems = adminAdvancedItems.filter(item => canAccessNav(item, user?.role));
-  const allItems = [...visibleMenuItems, ...visibleAdminItems];
+  const visibleSuperAdminItems = superAdminItems.filter(item => canAccessNav(item, user?.role));
+  const allItems = [...visibleMenuItems, ...visibleAdminItems, ...visibleSuperAdminItems];
   const activeMenuItem = allItems.find((item) => location.startsWith(item.path));
   const isMobile = useIsMobile();
 
@@ -464,6 +480,40 @@ function DashboardLayoutContent({
                 </SidebarMenu>
               </>
             )}
+            {visibleSuperAdminItems.length > 0 && (
+              <>
+                <div className="px-4 py-4 mt-2">
+                  <div className="h-px bg-sidebar-border" />
+                </div>
+                <div className="px-4 pb-2 pt-1">
+                  {!isCollapsed && (
+                    <span className="text-xs font-semibold text-violet-500/80 uppercase tracking-wider">
+                      Infinity AI
+                    </span>
+                  )}
+                </div>
+                <SidebarMenu className="px-2 py-0">
+                  {visibleSuperAdminItems.map((item) => {
+                    const isActive = location.startsWith(item.path);
+                    return (
+                      <SidebarMenuItem key={item.path}>
+                        <SidebarMenuButton
+                          isActive={isActive}
+                          onClick={() => setLocation(item.path)}
+                          tooltip={item.label}
+                          className="h-8 transition-all font-normal"
+                        >
+                          <span className="flex items-center justify-center w-4 h-4 shrink-0">
+                            <item.icon className={`h-4 w-4 ${isActive ? "text-violet-500" : "text-violet-400/70"}`} />
+                          </span>
+                          <span className="text-violet-700 dark:text-violet-300">{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </>
+            )}
           </SidebarContent>
 
           <SidebarFooter className="p-3">
@@ -543,7 +593,7 @@ function DashboardLayoutContent({
                       {user?.name || "-"}
                     </p>
                     <p className="text-xs text-sidebar-foreground/60 truncate mt-1.5">
-                      {{ admin: "Administrator", cfo: "CFO", operations: "Operations User", compliance: "Compliance / Audit", user: "User" }[user?.role ?? "user"] ?? "User"}
+                      {{ super_admin: "Infinity AI Staff", admin: "Administrator", cfo: "CFO", operations: "Operations User", compliance: "Compliance / Audit", user: "User" }[user?.role ?? "user"] ?? "User"}
                     </p>
                   </div>
                 </button>

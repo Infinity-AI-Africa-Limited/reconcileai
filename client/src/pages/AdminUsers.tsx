@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type PortalRole = "admin" | "cfo" | "operations" | "compliance" | "user";
+type PortalRole = "super_admin" | "admin" | "cfo" | "operations" | "compliance" | "user";
 type SortField = "name" | "email" | "role" | "isActive" | "createdAt" | "lastSignedIn";
 type SortDir = "asc" | "desc";
 
@@ -42,6 +42,27 @@ const ROLE_META: Record<PortalRole, {
   responsibilities: string[];
   access: Record<string, boolean>;
 }> = {
+  super_admin: {
+    label: "Infinity AI Staff",
+    color: "bg-violet-100 text-violet-800 border-violet-200",
+    description: "Infinity AI internal staff. Cross-tenant visibility across all deployed ReconcileAI instances. Not assignable to client users.",
+    responsibilities: [
+      "Cross-tenant visibility: view all organisations, users, and reconciliation jobs",
+      "Onboard new client organisations and assign segments",
+      "Promote users to super_admin for internal staff access",
+      "Access platform-wide analytics and operational metrics",
+    ],
+    access: {
+      "Reconciliation": true,
+      "CFO Dashboard": true,
+      "CBN / Compliance Reports": true,
+      "Audit Trail": true,
+      "User Management": true,
+      "System Settings": true,
+      "Schedules & Channels": true,
+      "Data Upload": true,
+    },
+  },
   admin: {
     label: "Admin",
     color: "bg-red-100 text-red-800 border-red-200",
@@ -163,6 +184,13 @@ const ACCESS_MODULES = [
 ] as const;
 
 function RoleBadge({ role }: { role: PortalRole }) {
+  if (role === "super_admin") {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-violet-100 text-violet-800 border-violet-200">
+        Infinity AI Staff
+      </span>
+    );
+  }
   const meta = ROLE_META[role] ?? ROLE_META.user;
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${meta.color}`}>
