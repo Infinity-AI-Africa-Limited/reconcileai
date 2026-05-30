@@ -48,6 +48,7 @@ import {
   type ReconciliationConfig,
 } from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
+import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
   diagnoseException,
@@ -3975,9 +3976,211 @@ Always be specific, reference actual exception IDs and amounts where available, 
           }));
         return { run, exceptions, layer3Results, sharedBy: shareRow.createdBy, expiresAt: shareRow.expiresAt };
       }),
-  }),
 
-  // ─── Compliance (NDPA/NDPR — NDA Clause 11, 7, 12) ──────────────────
+    // ─── LIVE DATA: Direct queries against Woodcore test tenant ──────────────
+    liveStats: publicProcedure.query(async () => {
+      const [glRow] = await woodcoreQuery<{ cnt: number }>(
+        "SELECT COUNT(*) AS cnt FROM acc_gl_journal_entry WHERE reversed = 0"
+      );
+      const [savingsRow] = await woodcoreQuery<{ cnt: number }>(
+        "SELECT COUNT(*) AS cnt FROM m_savings_account_transaction WHERE is_reversed = 0"
+      );
+      const [archiveRow] = await woodcoreQuery<{ cnt: number }>(
+        "SELECT COUNT(*) AS cnt FROM m_savings_account_transaction_archive"
+      );
+      const [loanRow] = await woodcoreQuery<{ cnt: number }>(
+        "SELECT COUNT(*) AS cnt FROM m_loan_transaction WHERE is_reversed = 0"
+      );
+      const [acctRow] = await woodcoreQuery<{ cnt: number }>(
+        "SELECT COUNT(*) AS cnt FROM m_savings_account"
+      );
+      const [loanAcctRow] = await woodcoreQuery<{ cnt: number }>(
+        "SELECT COUNT(*) AS cnt FROM m_loan"
+      );
+      return {
+        glEntries: Number(glRow?.cnt ?? 0),
+        savingsTransactions: Number(savingsRow?.cnt ?? 0) + Number(archiveRow?.cnt ?? 0),
+        savingsAccounts: Number(acctRow?.cnt ?? 0),
+        loanAccounts: Number(loanAcctRow?.cnt ?? 0),
+        loanTransactions: Number(loanRow?.cnt ?? 0),
+        dataSource: "live" as const,
+        asOf: new Date().toISOString(),
+      };
+    }),
+
+    liveGlReconciliation: publicProcedure
+      .input(z.object({
+        days: z.number().min(1).max(90).default(7),
+        currency: z.string().default("NGN"),
+      }))
+      .query(async ({ input }) => {
+        const rows = await woodcoreQuery<{
+          entry_date: string;
+          total_debits: string;
+          total_credits: string;
+          variance: string;
+          debit_count: number;
+          credit_count: number;
+        }>(
+          `SELECT
+            entry_date,
+            SUM(CASE WHEN type_enum = 1 THEN amount ELSE 0 END) AS total_debits,
+            SUM(CASE WHEN type_enum = 2 THEN amount ELSE 0 END) AS total_credits,
+            SUM(CASE WHEN type_enum = 1 THEN amount ELSE 0 END) - SUM(CASE WHEN type_enum = 2 THEN amount ELSE 0 END) AS variance,
+            COUNT(CASE WHEN type_enum = 1 THEN 1 END) AS debit_count,
+            COUNT(CASE WHEN type_enum = 2 THEN 1 END) AS credit_count
+          FROM acc_gl_journal_entry
+          WHERE entry_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+            AND reversed = 0
+            AND currency_code = ?
+          GROUP BY entry_date
+          ORDER BY entry_date DESC`,
+          [input.days, input.currency]
+        );
+        return rows.map(r => ({
+          date: r.entry_date,
+          totalDebits: parseFloat(r.total_debits ?? "0"),
+          totalCredits: parseFloat(r.total_credits ?? "0"),
+          variance: parseFloat(r.variance ?? "0"),
+          debitCount: Number(r.debit_count),
+          creditCount: Number(r.credit_count),
+          status: Math.abs(parseFloat(r.variance ?? "0")) < 0.01 ? "BALANCED" : "VARIANCE",
+        }));
+      }),
+
+    liveSavingsReconciliation: publicProcedure
+      .input(z.object({ days: z.number().min(1).max(90).default(30) }))
+      .query(async ({ input }) => {
+        const rows = await woodcoreQuery<{
+          txn_date: string;
+          savings_txns: number;
+          gl_linked_savings: number;
+          unmatched_savings: number;
+          savings_total: string;
+          gl_debit_total: string;
+        }>(
+          `SELECT
+            DATE(sat.transaction_date) AS txn_date,
+            COUNT(DISTINCT sat.id) AS savings_txns,
+            COUNT(DISTINCT gl.savings_transaction_id) AS gl_linked_savings,
+            COUNT(DISTINCT sat.id) - COUNT(DISTINCT gl.savings_transaction_id) AS unmatched_savings,
+            SUM(sat.amount) AS savings_total,
+            SUM(CASE WHEN gl.type_enum = 1 THEN gl.amount ELSE 0 END) AS gl_debit_total
+          FROM m_savings_account_transaction sat
+          LEFT JOIN acc_gl_journal_entry gl ON gl.savings_transaction_id = sat.id AND gl.reversed = 0
+          WHERE sat.is_reversed = 0
+            AND sat.transaction_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          GROUP BY DATE(sat.transaction_date)
+          ORDER BY txn_date DESC
+          LIMIT 30`,
+          [input.days]
+        );
+        return rows.map(r => ({
+          date: r.txn_date,
+          savingsTxns: Number(r.savings_txns),
+          glLinked: Number(r.gl_linked_savings),
+          unmatched: Number(r.unmatched_savings),
+          savingsTotal: parseFloat(r.savings_total ?? "0"),
+          glDebitTotal: parseFloat(r.gl_debit_total ?? "0"),
+          matchRate: r.savings_txns > 0 ? (Number(r.gl_linked_savings) / Number(r.savings_txns)) * 100 : 100,
+        }));
+      }),
+
+    liveLoanReconciliation: publicProcedure
+      .input(z.object({ days: z.number().min(1).max(90).default(30) }))
+      .query(async ({ input }) => {
+        const rows = await woodcoreQuery<{
+          txn_date: string;
+          loan_txns: number;
+          gl_linked_loans: number;
+          unmatched_loans: number;
+          loan_total: string;
+          gl_debit_total: string;
+        }>(
+          `SELECT
+            DATE(lt.transaction_date) AS txn_date,
+            COUNT(DISTINCT lt.id) AS loan_txns,
+            COUNT(DISTINCT gl.loan_transaction_id) AS gl_linked_loans,
+            COUNT(DISTINCT lt.id) - COUNT(DISTINCT gl.loan_transaction_id) AS unmatched_loans,
+            SUM(lt.amount) AS loan_total,
+            SUM(CASE WHEN gl.type_enum = 1 THEN gl.amount ELSE 0 END) AS gl_debit_total
+          FROM m_loan_transaction lt
+          LEFT JOIN acc_gl_journal_entry gl ON gl.loan_transaction_id = lt.id AND gl.reversed = 0
+          WHERE lt.is_reversed = 0
+            AND lt.transaction_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          GROUP BY DATE(lt.transaction_date)
+          ORDER BY txn_date DESC
+          LIMIT 30`,
+          [input.days]
+        );
+        return rows.map(r => ({
+          date: r.txn_date,
+          loanTxns: Number(r.loan_txns),
+          glLinked: Number(r.gl_linked_loans),
+          unmatched: Number(r.unmatched_loans),
+          loanTotal: parseFloat(r.loan_total ?? "0"),
+          glDebitTotal: parseFloat(r.gl_debit_total ?? "0"),
+          matchRate: r.loan_txns > 0 ? (Number(r.gl_linked_loans) / Number(r.loan_txns)) * 100 : 100,
+        }));
+      }),
+
+    liveSavingsTxns: publicProcedure
+      .input(z.object({ limit: z.number().min(1).max(100).default(20), offset: z.number().default(0) }))
+      .query(async ({ input }) => {
+        const rows = await woodcoreQuery<{
+          id: number;
+          savings_account_id: number;
+          transaction_type_enum: number;
+          transaction_date: string;
+          amount: string;
+          running_balance_derived: string;
+          is_reversed: number;
+        }>(
+          `SELECT id, savings_account_id, transaction_type_enum, transaction_date, amount, running_balance_derived, is_reversed
+           FROM m_savings_account_transaction
+           WHERE is_reversed = 0
+           ORDER BY transaction_date DESC, id DESC
+           LIMIT ? OFFSET ?`,
+          [input.limit, input.offset]
+        );
+        return rows.map(r => ({
+          id: Number(r.id),
+          accountId: Number(r.savings_account_id),
+          type: SAVINGS_TXN_TYPE[Number(r.transaction_type_enum)] ?? `Type ${r.transaction_type_enum}`,
+          date: r.transaction_date,
+          amount: parseFloat(r.amount ?? "0"),
+          runningBalance: parseFloat(r.running_balance_derived ?? "0"),
+        }));
+      }),
+
+    liveLoanTxns: publicProcedure
+      .input(z.object({ limit: z.number().min(1).max(100).default(20), offset: z.number().default(0) }))
+      .query(async ({ input }) => {
+        const rows = await woodcoreQuery<{
+          id: number;
+          loan_id: number;
+          transaction_type_enum: number;
+          transaction_date: string;
+          amount: string;
+          is_reversed: number;
+        }>(
+          `SELECT id, loan_id, transaction_type_enum, transaction_date, amount, is_reversed
+           FROM m_loan_transaction
+           WHERE is_reversed = 0
+           ORDER BY transaction_date DESC, id DESC
+           LIMIT ? OFFSET ?`,
+          [input.limit, input.offset]
+        );
+        return rows.map(r => ({
+          id: Number(r.id),
+          loanId: Number(r.loan_id),
+          type: LOAN_TXN_TYPE[Number(r.transaction_type_enum)] ?? `Type ${r.transaction_type_enum}`,
+          date: r.transaction_date,
+          amount: parseFloat(r.amount ?? "0"),
+        }));
+      }),
+  }),
+  // ─── Compliance (NDPA/NDPR — NDA Clause 11, 7, 12) ───────────────────
   compliance: router({
     // Get compliance settings for the current org
     getSettings: protectedProcedure.query(async ({ ctx }) => {

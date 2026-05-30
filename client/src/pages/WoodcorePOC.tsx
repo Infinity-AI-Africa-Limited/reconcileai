@@ -1567,6 +1567,13 @@ function POCModePanel({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function WoodcorePOC() {
   const [activeMode, setActiveMode] = useState<"SAVINGS" | "LOAN" | null>(null);
+  const [liveTab, setLiveTab] = useState<"gl" | "savings" | "loans">("gl");
+  const [glDays, setGlDays] = useState(14);
+  const liveStatsQuery = trpc.woodcore.liveStats.useQuery();
+  const liveGlQuery = trpc.woodcore.liveGlReconciliation.useQuery({ days: glDays, currency: "NGN" });
+  const liveSavingsQuery = trpc.woodcore.liveSavingsReconciliation.useQuery({ days: 30 });
+  const liveLoanQuery = trpc.woodcore.liveLoanReconciliation.useQuery({ days: 30 });
+  const liveStats = liveStatsQuery.data;
 
   if (activeMode !== null) {
     return (
@@ -1618,10 +1625,159 @@ export default function WoodcorePOC() {
         </div>
       </div>
 
-      <div className="max-w-4xl mx-auto px-6 py-16 space-y-8">
+      <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
+        {/* Live stats from test tenant */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
+            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Live Woodcore Test Tenant — Real-time Data</h2>
+            {liveStatsQuery.isLoading && <span className="text-xs text-gray-400">Connecting…</span>}
+            {liveStatsQuery.error && <span className="text-xs text-red-500">Connection error — check credentials</span>}
+          </div>
+          <div className="grid grid-cols-5 gap-3">
+            {[
+              { label: "GL Entries", value: liveStats?.glEntries },
+              { label: "Savings Txns", value: liveStats?.savingsTransactions },
+              { label: "Savings Accounts", value: liveStats?.savingsAccounts },
+              { label: "Loan Accounts", value: liveStats?.loanAccounts },
+              { label: "Loan Txns", value: liveStats?.loanTransactions },
+            ].map(s => (
+              <div key={s.label} className="bg-white rounded-xl border border-gray-200 p-4 text-center shadow-sm">
+                <p className="text-xl font-bold text-gray-900">{liveStatsQuery.isLoading ? "…" : (s.value?.toLocaleString() ?? "—")}</p>
+                <p className="text-xs text-gray-500 mt-1">{s.label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Live reconciliation tables */}
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="flex border-b border-gray-100">
+            {(["gl", "savings", "loans"] as const).map(t => (
+              <button key={t} onClick={() => setLiveTab(t)}
+                className={`px-5 py-3 text-sm font-medium transition-colors ${
+                  liveTab === t ? "border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" : "text-gray-500 hover:text-gray-700"
+                }`}>
+                {t === "gl" ? "GL Balance Reconciliation" : t === "savings" ? "Savings vs GL" : "Loans vs GL"}
+              </button>
+            ))}
+            {liveTab === "gl" && (
+              <div className="ml-auto flex items-center pr-4 gap-2">
+                <select value={glDays} onChange={e => setGlDays(Number(e.target.value))}
+                  className="text-xs border rounded px-2 py-1 text-gray-600">
+                  <option value={7}>Last 7 days</option>
+                  <option value={14}>Last 14 days</option>
+                  <option value={30}>Last 30 days</option>
+                  <option value={60}>Last 60 days</option>
+                </select>
+              </div>
+            )}
+          </div>
+          <div className="p-4 overflow-auto">
+            {liveTab === "gl" && (
+              liveGlQuery.isLoading ? <p className="text-center py-8 text-gray-400">Loading live GL data…</p> :
+              liveGlQuery.error ? <p className="text-center py-8 text-red-400">Error: {liveGlQuery.error.message}</p> :
+              !liveGlQuery.data?.length ? <p className="text-center py-8 text-gray-400">No GL entries in this period</p> : (
+                <table className="w-full text-sm">
+                  <thead><tr className="text-xs text-gray-500 border-b">
+                    <th className="text-left py-2 pr-4">Date</th>
+                    <th className="text-right py-2 pr-4">Total Debits (NGN)</th>
+                    <th className="text-right py-2 pr-4">Total Credits (NGN)</th>
+                    <th className="text-right py-2 pr-4">Variance</th>
+                    <th className="text-right py-2 pr-4">Entries</th>
+                    <th className="text-center py-2">Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {liveGlQuery.data.map(r => (
+                      <tr key={r.date} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-2 pr-4 font-mono text-gray-700">{r.date}</td>
+                        <td className="py-2 pr-4 text-right text-gray-700">{r.totalDebits.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="py-2 pr-4 text-right text-gray-700">{r.totalCredits.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className={`py-2 pr-4 text-right font-medium ${Math.abs(r.variance) < 0.01 ? "text-green-600" : "text-red-600"}`}>
+                          {r.variance >= 0 ? "+" : ""}{r.variance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-2 pr-4 text-right text-gray-500">{(r.debitCount + r.creditCount).toLocaleString()}</td>
+                        <td className="py-2 text-center">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            r.status === "BALANCED" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+                          }`}>{r.status}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            )}
+            {liveTab === "savings" && (
+              liveSavingsQuery.isLoading ? <p className="text-center py-8 text-gray-400">Loading savings reconciliation…</p> :
+              liveSavingsQuery.error ? <p className="text-center py-8 text-red-400">Error: {liveSavingsQuery.error.message}</p> :
+              !liveSavingsQuery.data?.length ? <p className="text-center py-8 text-gray-400">No savings transactions in this period</p> : (
+                <table className="w-full text-sm">
+                  <thead><tr className="text-xs text-gray-500 border-b">
+                    <th className="text-left py-2 pr-4">Date</th>
+                    <th className="text-right py-2 pr-4">CBS Txns</th>
+                    <th className="text-right py-2 pr-4">GL Linked</th>
+                    <th className="text-right py-2 pr-4">Unmatched</th>
+                    <th className="text-right py-2 pr-4">Match Rate</th>
+                    <th className="text-right py-2">CBS Total (NGN)</th>
+                  </tr></thead>
+                  <tbody>
+                    {liveSavingsQuery.data.map(r => (
+                      <tr key={r.date} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-2 pr-4 font-mono text-gray-700">{r.date}</td>
+                        <td className="py-2 pr-4 text-right">{r.savingsTxns.toLocaleString()}</td>
+                        <td className="py-2 pr-4 text-right text-green-600">{r.glLinked.toLocaleString()}</td>
+                        <td className={`py-2 pr-4 text-right font-medium ${r.unmatched > 0 ? "text-red-600" : "text-gray-400"}`}>{r.unmatched}</td>
+                        <td className="py-2 pr-4 text-right">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            r.matchRate >= 99 ? "bg-green-100 text-green-700" : r.matchRate >= 90 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700"
+                          }`}>{r.matchRate.toFixed(1)}%</span>
+                        </td>
+                        <td className="py-2 text-right text-gray-600">{r.savingsTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            )}
+            {liveTab === "loans" && (
+              liveLoanQuery.isLoading ? <p className="text-center py-8 text-gray-400">Loading loan reconciliation…</p> :
+              liveLoanQuery.error ? <p className="text-center py-8 text-red-400">Error: {liveLoanQuery.error.message}</p> :
+              !liveLoanQuery.data?.length ? <p className="text-center py-8 text-gray-400">No loan transactions in this period</p> : (
+                <table className="w-full text-sm">
+                  <thead><tr className="text-xs text-gray-500 border-b">
+                    <th className="text-left py-2 pr-4">Date</th>
+                    <th className="text-right py-2 pr-4">CBS Txns</th>
+                    <th className="text-right py-2 pr-4">GL Linked</th>
+                    <th className="text-right py-2 pr-4">Unmatched</th>
+                    <th className="text-right py-2 pr-4">Match Rate</th>
+                    <th className="text-right py-2">CBS Total (NGN)</th>
+                  </tr></thead>
+                  <tbody>
+                    {liveLoanQuery.data.map(r => (
+                      <tr key={r.date} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-2 pr-4 font-mono text-gray-700">{r.date}</td>
+                        <td className="py-2 pr-4 text-right">{r.loanTxns.toLocaleString()}</td>
+                        <td className="py-2 pr-4 text-right text-green-600">{r.glLinked.toLocaleString()}</td>
+                        <td className={`py-2 pr-4 text-right font-medium ${r.unmatched > 0 ? "text-red-600" : "text-gray-400"}`}>{r.unmatched}</td>
+                        <td className="py-2 pr-4 text-right">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            r.matchRate >= 99 ? "bg-green-100 text-green-700" : r.matchRate >= 90 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700"
+                          }`}>{r.matchRate.toFixed(1)}%</span>
+                        </td>
+                        <td className="py-2 text-right text-gray-600">{r.loanTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            )}
+          </div>
+        </div>
+
         <div className="text-center space-y-2">
-          <h1 className="text-2xl font-bold text-gray-900">Select a Reconciliation POC</h1>
-          <p className="text-gray-500 text-sm">Choose a product type to run the AI reconciliation engine against the live Woodcore CBS dataset.</p>
+          <h1 className="text-2xl font-bold text-gray-900">Run AI Reconciliation POC</h1>
+          <p className="text-gray-500 text-sm">Choose a product type to run the three-layer AI reconciliation engine against the live Woodcore CBS dataset.</p>
         </div>
         <div className="grid grid-cols-2 gap-6">
           {/* Savings card */}

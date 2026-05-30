@@ -12,4 +12,10 @@ export const ENV = {
   directLlmApiKey: process.env.DIRECT_LLM_API_KEY ?? "",
   directLlmApiUrl: process.env.DIRECT_LLM_API_URL ?? "",   // e.g. https://api.anthropic.com or https://api.openai.com
   directLlmModel: process.env.DIRECT_LLM_MODEL ?? "",       // e.g. gpt-4o, claude-3-5-sonnet-20241022
+  // Woodcore (Fineract) test tenant
+  woodcoreDbHost: process.env.WOODCORE_DB_HOST ?? "",
+  woodcoreDbPort: parseInt(process.env.WOODCORE_DB_PORT ?? "3306", 10),
+  woodcoreDbUser: process.env.WOODCORE_DB_USER ?? "",
+  woodcoreDbPassword: process.env.WOODCORE_DB_PASSWORD ?? "",
+  woodcoreDbName: process.env.WOODCORE_DB_NAME ?? "",
 };
