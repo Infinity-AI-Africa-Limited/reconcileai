@@ -135,7 +135,13 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     textFields.forEach(assignNullable);
     if (user.lastSignedIn !== undefined) { values.lastSignedIn = user.lastSignedIn; updateSet.lastSignedIn = user.lastSignedIn; }
     if (user.role !== undefined) { values.role = user.role; updateSet.role = user.role; }
-    else if (user.openId === ENV.ownerOpenId) { values.role = 'admin'; updateSet.role = 'admin'; }
+    else if (user.openId === ENV.ownerOpenId) {
+      // Only set admin role on INSERT (first creation). On UPDATE (subsequent logins),
+      // do NOT overwrite the role — this allows the owner to be promoted to super_admin
+      // or any other role without it being reset on every login.
+      values.role = 'admin'; // used only if this is a new row (INSERT)
+      // Intentionally NOT added to updateSet, so existing role is preserved on conflict
+    }
     if (!values.lastSignedIn) values.lastSignedIn = new Date();
     if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
     await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
