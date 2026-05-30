@@ -1854,11 +1854,31 @@ export const appRouter = router({
 
   // ─── Dashboard ───────────────────────────────────────────────────
   dashboard: router({
-    stats: protectedProcedure.query(async ({ ctx }) => {
-      // Guest users in demo mode should see all data (no userId filter)
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      return db.getDashboardStats(ctx.user.id, isAdmin);
-    }),
+    stats: protectedProcedure
+      .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        // Guest users in demo mode should see all data (no userId filter)
+        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        // Super admin portal switching: if viewAsOrgId provided, scope to that org
+        if (input?.viewAsOrgId && ctx.user.role === "super_admin") {
+          const drizzle = await getDb();
+          if (drizzle) {
+            const { reconciliationJobs, transactions } = await import("../drizzle/schema");
+            const { eq, count } = await import("drizzle-orm");
+            const orgId = input.viewAsOrgId;
+            const [jobCount] = await drizzle.select({ count: count() }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, orgId));
+            const [txCount] = await drizzle.select({ count: count() }).from(transactions).where(eq(transactions.organizationId, orgId));
+            // Return shape compatible with getDashboardStats return type
+            return {
+              jobs: { total: Number(jobCount.count), completed: 0, running: 0, avgMatchRate: 0 },
+              transactions: { total: Number(txCount.count), matched: 0, unmatched: 0, exceptions: 0 },
+              exceptions: { total: 0, open: 0, inReview: 0, resolved: 0 },
+              channelStats: [] as any[],
+            };
+          }
+        }
+        return db.getDashboardStats(ctx.user.id, isAdmin);
+      }),
 
     // CFO Dashboard Endpoints
     cfoKpis: protectedProcedure.query(async ({ ctx }) => {
@@ -3032,6 +3052,34 @@ export const appRouter = router({
   // Hidden from all client-facing portals (FS + B2B).
 
   superAdmin: router({
+    // Get a single org's context (for portal switching)
+    getOrgContext: superAdminProcedure
+      .input(z.object({ organizationId: z.number().int().positive() }))
+      .query(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        const { eq } = await import("drizzle-orm");
+        const [org] = await drizzle.select().from(organizations).where(eq(organizations.id, input.organizationId)).limit(1);
+        if (!org) throw new TRPCError({ code: "NOT_FOUND", message: "Organisation not found" });
+        // Count users and jobs for this org
+        const { users: usersTable, reconciliationJobs } = await import("../drizzle/schema");
+        const { count } = await import("drizzle-orm");
+        const [userCount] = await drizzle.select({ count: count() }).from(usersTable).where(eq(usersTable.organizationId, input.organizationId));
+        const [jobCount] = await drizzle.select({ count: count() }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, input.organizationId));
+        return {
+          id: org.id,
+          name: org.name,
+          code: org.code,
+          segment: org.segment,
+          country: org.country,
+          baseCurrency: org.baseCurrency,
+          isActive: org.isActive,
+          userCount: userCount.count,
+          jobCount: jobCount.count,
+        };
+      }),
+
     // List ALL organisations across all segments
     allOrganizations: superAdminProcedure.query(async () => {
       const drizzle = await getDb();

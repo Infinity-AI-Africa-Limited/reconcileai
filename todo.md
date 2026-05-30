@@ -1113,3 +1113,14 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: AdminUsers — `PortalRole` type and `ROLE_META` updated to include `super_admin` entry
 - [x] Frontend: AdminUsers — `RoleBadge` renders "Infinity AI Staff" badge for super_admin role
 - [x] Tests: 10 superAdmin.test.ts tests — FORBIDDEN enforcement for all non-super_admin roles, elevated access for super_admin
+
+## Portal Context Switcher (Super Admin)
+- [x] Add `superAdmin.getOrgContext` tRPC procedure — returns org details + segment by orgId
+- [x] Create `client/src/contexts/PortalContext.tsx` — viewAsOrg state (id, name, segment), enterPortal(org), exitPortal(), persisted in sessionStorage
+- [x] Add "Enter Portal" button on each org row in SuperAdminDashboard organisations tab
+- [x] Add persistent portal banner in DashboardLayout — "Viewing as: {orgName} · {segment}" + Exit button
+- [x] Implement segment-aware sidebar: Financial Services shows banking nav; Corporate B2B shows FMCG/distributor nav
+- [x] Scope all data queries (reconciliation, exceptions, etc.) to viewAs org when portal context is active
+- [x] Create demo org for Corporate B2B segment (BrightGoods Nigeria) in database
+- [x] Ensure Financial Services org (Globus Bank Nigeria Demo) has correct segment label
+- [ ] Save checkpoint and push to both GitHub accounts

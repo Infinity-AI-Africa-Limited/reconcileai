@@ -1,0 +1,17 @@
+{
+  "query": "SELECT id, name, email, role, organizationId FROM users WHERE email = 'richard.anwanakak@gmail.com';",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute SELECT id, name, email, role, organizationId FROM users WHERE email = 'richard.anwanakak@gmail.com';",
+  "rows": [
+    {
+      "id": "1",
+      "name": "Richard Anwanakak",
+      "email": "richard.anwanakak@gmail.com",
+      "role": "super_admin",
+      "organizationId": "1"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tname\temail\trole\torganizationId\n1\tRichard Anwanakak\trichard.anwanakak@gmail.com\tsuper_admin\t1\n",
+  "stderr": "",
+  "execution_time_ms": 263
+}

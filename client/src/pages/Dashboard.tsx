@@ -5,9 +5,13 @@ import { Button } from "@/components/ui/button";
 import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardCheck, ChevronRight, Upload, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Link } from "wouter";
 import { toast } from "sonner";
+import { usePortalContext } from "@/contexts/PortalContext";
 
 export default function Dashboard() {
-  const { data: stats, isLoading } = trpc.dashboard.stats.useQuery();
+  const { viewAsOrg, isViewingAs } = usePortalContext();
+  const { data: stats, isLoading } = trpc.dashboard.stats.useQuery(
+    isViewingAs && viewAsOrg ? { viewAsOrgId: viewAsOrg.id } : undefined
+  );
   const { data: channels } = trpc.channels.list.useQuery();
 
   if (isLoading) {

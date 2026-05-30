@@ -1,0 +1,90 @@
+{
+  "query": "DESCRIBE organizations;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute DESCRIBE organizations;",
+  "rows": [
+    {
+      "Field": "id",
+      "Type": "int",
+      "Null": "NO",
+      "Key": "PRI",
+      "Default": "NULL",
+      "Extra": "auto_increment"
+    },
+    {
+      "Field": "name",
+      "Type": "varchar(255)",
+      "Null": "NO",
+      "Key": "",
+      "Default": "NULL",
+      "Extra": ""
+    },
+    {
+      "Field": "code",
+      "Type": "varchar(50)",
+      "Null": "NO",
+      "Key": "UNI",
+      "Default": "NULL",
+      "Extra": ""
+    },
+    {
+      "Field": "country",
+      "Type": "varchar(3)",
+      "Null": "NO",
+      "Key": "",
+      "Default": "NGA",
+      "Extra": ""
+    },
+    {
+      "Field": "baseCurrency",
+      "Type": "varchar(3)",
+      "Null": "NO",
+      "Key": "",
+      "Default": "NGN",
+      "Extra": ""
+    },
+    {
+      "Field": "settings",
+      "Type": "json",
+      "Null": "YES",
+      "Key": "",
+      "Default": "NULL",
+      "Extra": ""
+    },
+    {
+      "Field": "isActive",
+      "Type": "tinyint(1)",
+      "Null": "NO",
+      "Key": "",
+      "Default": "1",
+      "Extra": ""
+    },
+    {
+      "Field": "createdAt",
+      "Type": "timestamp",
+      "Null": "NO",
+      "Key": "",
+      "Default": "CURRENT_TIMESTAMP",
+      "Extra": ""
+    },
+    {
+      "Field": "updatedAt",
+      "Type": "timestamp",
+      "Null": "NO",
+      "Key": "",
+      "Default": "CURRENT_TIMESTAMP",
+      "Extra": "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+    },
+    {
+      "Field": "segment",
+      "Type": "enum('financial_services','corporate_b2b','super_admin')",
+      "Null": "NO",
+      "Key": "",
+      "Default": "financial_services",
+      "Extra": ""
+    }
+  ],
+  "messages": [],
+  "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\tauto_increment\nname\tvarchar(255)\tNO\t\tNULL\t\ncode\tvarchar(50)\tNO\tUNI\tNULL\t\ncountry\tvarchar(3)\tNO\t\tNGA\t\nbaseCurrency\tvarchar(3)\tNO\t\tNGN\t\nsettings\tjson\tYES\t\tNULL\t\nisActive\ttinyint(1)\tNO\t\t1\t\ncreatedAt\ttimestamp\tNO\t\tCURRENT_TIMESTAMP\t\nupdatedAt\ttimestamp\tNO\t\tCURRENT_TIMESTAMP\tDEFAULT_GENERATED on update CURRENT_TIMESTAMP\nsegment\tenum('financial_services','corporate_b2b','super_admin')\tNO\t\tfinancial_services\t\n",
+  "stderr": "",
+  "execution_time_ms": 272
+}

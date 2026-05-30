@@ -1,0 +1,19 @@
+{
+  "query": "SELECT id, name, code, segment, country, isActive, createdAt FROM organizations ORDER BY createdAt ASC LIMIT 20;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute SELECT id, name, code, segment, country, isActive, createdAt FROM organizations ORDER BY createdAt ASC LIMIT 20;",
+  "rows": [
+    {
+      "id": "1",
+      "name": "Globus Bank Nigeria (Demo)",
+      "code": "GLOBUS_DEMO",
+      "segment": "financial_services",
+      "country": "NGA",
+      "isActive": "1",
+      "createdAt": "2026-04-12 21:01:54"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tname\tcode\tsegment\tcountry\tisActive\tcreatedAt\n1\tGlobus Bank Nigeria (Demo)\tGLOBUS_DEMO\tfinancial_services\tNGA\t1\t2026-04-12 21:01:54\n",
+  "stderr": "",
+  "execution_time_ms": 261
+}

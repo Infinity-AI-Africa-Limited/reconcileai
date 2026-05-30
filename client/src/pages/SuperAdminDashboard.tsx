@@ -47,7 +47,9 @@ import {
   Crown,
   ChevronLeft,
   ChevronRight,
+  LogIn,
 } from "lucide-react";
+import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
 
 type Segment = "financial_services" | "corporate_b2b" | "super_admin";
 
@@ -225,6 +227,8 @@ function OrganisationsTable() {
   const [search, setSearch] = useState("");
   const [segmentFilter, setSegmentFilter] = useState<string>("all");
   const [showCreate, setShowCreate] = useState(false);
+  const { enterPortal } = usePortalContext();
+  const [, setLocation] = useLocation();
 
   const updateSegment = trpc.superAdmin.updateOrganizationSegment.useMutation({
     onSuccess: () => {
@@ -329,20 +333,44 @@ function OrganisationsTable() {
                       </span>
                     </TableCell>
                     <TableCell className="text-right pr-4">
-                      <Select
-                        value={org.segment ?? "financial_services"}
-                        onValueChange={(v) => updateSegment.mutate({ organizationId: org.id, segment: v as Segment })}
-                        disabled={updateSegment.isPending}
-                      >
-                        <SelectTrigger className="h-7 text-xs w-36">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="financial_services">Financial Services</SelectItem>
-                          <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                          <SelectItem value="super_admin">Infinity AI</SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <div className="flex items-center justify-end gap-2">
+                        {/* Enter Portal button — only for non-super_admin segments */}
+                        {org.segment !== "super_admin" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs gap-1 px-2"
+                            onClick={() => {
+                              enterPortal({
+                                id: org.id,
+                                name: org.name,
+                                code: org.code ?? "",
+                                segment: org.segment as OrgSegment,
+                                country: org.country ?? "NGA",
+                                baseCurrency: org.baseCurrency ?? "NGN",
+                              });
+                              setLocation("/dashboard");
+                            }}
+                          >
+                            <LogIn className="h-3 w-3" />
+                            Enter Portal
+                          </Button>
+                        )}
+                        <Select
+                          value={org.segment ?? "financial_services"}
+                          onValueChange={(v) => updateSegment.mutate({ organizationId: org.id, segment: v as Segment })}
+                          disabled={updateSegment.isPending}
+                        >
+                          <SelectTrigger className="h-7 text-xs w-36">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="financial_services">Financial Services</SelectItem>
+                            <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
+                            <SelectItem value="super_admin">Infinity AI</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))

@@ -59,7 +59,8 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2 } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon } from "lucide-react";
+import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } from "@/contexts/PortalContext";
 
 type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: string[] };
 
@@ -104,6 +105,41 @@ const adminAdvancedItems: NavItem[] = [
   { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
   { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
+];
+
+// ─── Segment-specific nav items ─────────────────────────────────────────────
+// Financial Services portal nav (shown when super_admin enters a financial_services org)
+const financialServicesMenuItems: NavItem[] = [
+  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
+  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
+  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
+  { icon: Search, label: "Transactions", path: "/transactions" },
+  { icon: Layers, label: "Multi-Channel", path: "/channels" },
+  { icon: ClipboardList, label: "Review Queue", path: "/review" },
+  { icon: FileText, label: "Reports", path: "/reports" },
+  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance" },
+  { icon: Shield, label: "Audit Trail", path: "/audit" },
+  { icon: ShieldCheck, label: "Data Protection", path: "/compliance" },
+  { icon: Activity, label: "Monitor", path: "/monitor" },
+  { icon: Users, label: "User Management", path: "/admin/users" },
+  { icon: Calendar, label: "Schedules", path: "/schedules" },
+  { icon: Upload, label: "Upload Data", path: "/upload" },
+];
+
+// Corporate B2B portal nav (shown when super_admin enters a corporate_b2b org)
+const corporateB2BMenuItems: NavItem[] = [
+  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
+  { icon: Building2, label: "Distributor Registry", path: "/distributors" },
+  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
+  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
+  { icon: Search, label: "Transactions", path: "/transactions" },
+  { icon: FileText, label: "Reports", path: "/reports" },
+  { icon: ClipboardList, label: "Review Queue", path: "/review" },
+  { icon: Shield, label: "Audit Trail", path: "/audit" },
+  { icon: Activity, label: "Monitor", path: "/monitor" },
+  { icon: Users, label: "User Management", path: "/admin/users" },
+  { icon: Upload, label: "Upload Data", path: "/upload" },
+  { icon: Calendar, label: "Schedules", path: "/schedules" },
 ];
 
 // Super Admin items — only visible to super_admin role (Infinity AI staff)
@@ -252,10 +288,21 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const visibleMenuItems = menuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdminItems = adminMenuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdvancedItems = adminAdvancedItems.filter(item => canAccessNav(item, user?.role));
-  const visibleSuperAdminItems = superAdminItems.filter(item => canAccessNav(item, user?.role));
+  const { viewAsOrg, isViewingAs, exitPortal } = usePortalContext();
+
+  // When viewing as another org, show that org's segment-specific nav instead of the default nav
+  const portalMenuItems = isViewingAs && viewAsOrg
+    ? viewAsOrg.segment === "financial_services"
+      ? financialServicesMenuItems
+      : viewAsOrg.segment === "corporate_b2b"
+        ? corporateB2BMenuItems
+        : menuItems
+    : null;
+
+  const visibleMenuItems = portalMenuItems ?? menuItems.filter(item => canAccessNav(item, user?.role));
+  const visibleAdminItems = portalMenuItems ? [] : adminMenuItems.filter(item => canAccessNav(item, user?.role));
+  const visibleAdvancedItems = portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role));
+  const visibleSuperAdminItems = portalMenuItems ? [] : superAdminItems.filter(item => canAccessNav(item, user?.role));
   const allItems = [...visibleMenuItems, ...visibleAdminItems, ...visibleSuperAdminItems];
   const activeMenuItem = allItems.find((item) => location.startsWith(item.path));
   const isMobile = useIsMobile();
@@ -380,9 +427,20 @@ function DashboardLayoutContent({
               </button>
               {!isCollapsed ? (
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="font-bold tracking-tight truncate text-sidebar-foreground text-lg">
-                    ReconcileAI
-                  </span>
+                  {isViewingAs && viewAsOrg ? (
+                    <div className="flex flex-col min-w-0">
+                      <span className="font-bold tracking-tight truncate text-sidebar-foreground text-sm leading-tight">
+                        {viewAsOrg.name.replace(" (Demo)", "")}
+                      </span>
+                      <span className={`text-[10px] font-medium truncate ${SEGMENT_COLORS[viewAsOrg.segment as OrgSegment]?.text ?? "text-sidebar-foreground/60"}`}>
+                        {SEGMENT_LABELS[viewAsOrg.segment as OrgSegment] ?? viewAsOrg.segment}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="font-bold tracking-tight truncate text-sidebar-foreground text-lg">
+                      ReconcileAI
+                    </span>
+                  )}
                 </div>
               ) : null}
             </div>
@@ -677,6 +735,31 @@ function DashboardLayoutContent({
             </p>
           </div>
         )}
+        {/* Portal Context Banner — shown when super_admin is viewing as another org */}
+        {isViewingAs && viewAsOrg && (() => {
+          const seg = viewAsOrg.segment as OrgSegment;
+          const colors = SEGMENT_COLORS[seg];
+          return (
+            <div className={`sticky top-14 z-30 flex items-center gap-3 ${colors.bg} border-b ${colors.border} px-6 py-2.5`}>
+              <LogIn className={`h-4 w-4 shrink-0 ${colors.text}`} />
+              <p className={`text-xs flex-1 ${colors.text}`}>
+                <span className="font-semibold">Viewing as portal:</span>{" "}
+                <span className="font-bold">{viewAsOrg.name.replace(" (Demo)", "")}</span>
+                {" "}&middot;{" "}
+                <span className="font-medium">{SEGMENT_LABELS[seg]}</span>
+                {" "}&middot;{" "}
+                <span className="opacity-75">{viewAsOrg.code}</span>
+              </p>
+              <button
+                onClick={() => { exitPortal(); setLocation("/admin/super-admin"); }}
+                className={`flex items-center gap-1.5 text-xs font-semibold ${colors.text} hover:opacity-80 transition-opacity whitespace-nowrap`}
+              >
+                <ExitIcon className="h-3.5 w-3.5" />
+                Exit Portal
+              </button>
+            </div>
+          );
+        })()}
         {isDemoActive && (
           <div className="sticky top-14 z-30 flex items-center gap-3 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 px-6 py-2.5">
             <FlaskConical className="h-4 w-4 text-amber-600 shrink-0" />
