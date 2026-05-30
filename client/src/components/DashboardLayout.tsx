@@ -284,6 +284,7 @@ function DashboardLayoutContent({
   }, [isGuest, demoStatus?.active, seedingComplete]);
   const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);
   const [guestLinkCopied, setGuestLinkCopied] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showInfinityAI, setShowInfinityAI] = useState(false);
 
@@ -414,13 +415,21 @@ function DashboardLayoutContent({
                 <div className="px-4 py-4 mt-2">
                   <div className="h-px bg-sidebar-border" />
                 </div>
-                <div className="px-4 pb-2 pt-1">
-                  {!isCollapsed && (
-                    <span className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider">
+                {!isCollapsed ? (
+                  <button
+                    onClick={() => setShowAdmin((v) => !v)}
+                    className="w-full flex items-center justify-between px-4 pb-2 pt-1 group"
+                  >
+                    <span className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider group-hover:text-sidebar-foreground/80 transition-colors">
                       Admin
                     </span>
-                  )}
-                </div>
+                    <ChevronDown
+                      className={`h-3 w-3 text-sidebar-foreground/40 transition-transform group-hover:text-sidebar-foreground/60 ${showAdmin ? "" : "-rotate-90"}`}
+                    />
+                  </button>
+                ) : <div className="pb-1" />}
+                {(showAdmin || isCollapsed) && (
+                <>
                 <SidebarMenu className="px-2 py-0">
                   {visibleAdminItems.map((item) => {
                     const isActive = location.startsWith(item.path);
@@ -479,6 +488,8 @@ function DashboardLayoutContent({
                     );
                   })}
                 </SidebarMenu>
+                </>
+                )}
               </>
             )}
             {visibleSuperAdminItems.length > 0 && (
