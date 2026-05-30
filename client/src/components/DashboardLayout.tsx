@@ -386,7 +386,7 @@ function DashboardLayoutContent({
             </div>
           </SidebarHeader>
 
-          <SidebarContent className="gap-0">
+          <SidebarContent className="gap-0 flex-1 min-h-0 overflow-y-auto">
             <SidebarMenu className="px-2 py-1">
               {visibleMenuItems.map((item) => {
                 const isActive = location.startsWith(item.path);
@@ -516,7 +516,7 @@ function DashboardLayoutContent({
             )}
           </SidebarContent>
 
-          <SidebarFooter className="p-3">
+          <SidebarFooter className="p-3 shrink-0 border-t border-sidebar-border">
             {/* Demo Mode Toggle */}
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
               <button
