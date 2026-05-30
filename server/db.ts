@@ -30,6 +30,7 @@ import {
   dashboardStatsCache,
   cfoReportSchedules, InsertCfoReportSchedule, CfoReportSchedule,
   channelAlertSettings, InsertChannelAlertSetting, ChannelAlertSetting,
+  platformAuditLogs, InsertPlatformAuditLog, PlatformAuditLog,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -1524,4 +1525,33 @@ export async function updateChannelAlertLastSent(userId: number, channelCode: st
   if (!db) return;
   await db.update(channelAlertSettings).set({ lastAlertSentAt: new Date() })
     .where(and(eq(channelAlertSettings.userId, userId), eq(channelAlertSettings.channelCode, channelCode)));
+}
+
+// ─── Platform Audit Log helpers ──────────────────────────────────────────────
+export async function logPlatformEvent(event: InsertPlatformAuditLog): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.insert(platformAuditLogs).values(event);
+}
+
+export async function getPlatformAuditLogs(opts?: {
+  eventType?: PlatformAuditLog["eventType"];
+  limit?: number;
+  offset?: number;
+}): Promise<{ logs: PlatformAuditLog[]; total: number }> {
+  const db = await getDb();
+  if (!db) return { logs: [], total: 0 };
+  const limit = Math.min(opts?.limit ?? 50, 200);
+  const offset = opts?.offset ?? 0;
+  const conditions = opts?.eventType ? [eq(platformAuditLogs.eventType, opts.eventType)] : [];
+  const [logs, countResult] = await Promise.all([
+    db.select().from(platformAuditLogs)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(platformAuditLogs.createdAt))
+      .limit(limit)
+      .offset(offset),
+    db.select({ count: sql<number>`count(*)` }).from(platformAuditLogs)
+      .where(conditions.length ? and(...conditions) : undefined),
+  ]);
+  return { logs, total: Number(countResult[0]?.count ?? 0) };
 }

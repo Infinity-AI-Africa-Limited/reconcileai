@@ -1409,3 +1409,37 @@ export const magicLinkTokens = mysqlTable("magic_link_tokens", {
 ]);
 export type MagicLinkToken = typeof magicLinkTokens.$inferSelect;
 export type InsertMagicLinkToken = typeof magicLinkTokens.$inferInsert;
+
+// ─── Platform Audit Log (Super Admin — cross-tenant events) ──────────────────
+// Tracks platform-level events: org creation, user role changes, segment updates,
+// and super_admin promotions. Only accessible via superAdminProcedure.
+export const platformAuditLogs = mysqlTable("platform_audit_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  // Who performed the action (super_admin user id)
+  actorId: int("actorId").notNull(),
+  actorName: varchar("actorName", { length: 255 }),
+  // What happened
+  eventType: mysqlEnum("eventType", [
+    "org_created",
+    "org_segment_updated",
+    "user_role_updated",
+    "user_promoted_super_admin",
+  ]).notNull(),
+  // Target entity
+  targetType: mysqlEnum("targetType", ["organization", "user"]).notNull(),
+  targetId: int("targetId").notNull(),
+  targetName: varchar("targetName", { length: 255 }),
+  // Before/after values stored as JSON strings
+  previousValue: text("previousValue"),
+  newValue: text("newValue"),
+  // Extra context (e.g. org name when updating a user)
+  metadata: text("metadata"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_pal_actor").on(table.actorId),
+  index("idx_pal_event").on(table.eventType),
+  index("idx_pal_target").on(table.targetType, table.targetId),
+  index("idx_pal_created").on(table.createdAt),
+]);
+export type PlatformAuditLog = typeof platformAuditLogs.$inferSelect;
+export type InsertPlatformAuditLog = typeof platformAuditLogs.$inferInsert;

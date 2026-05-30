@@ -40,6 +40,13 @@ import {
   Network,
   Layers,
   AlertCircle,
+  ClipboardList,
+  UserCog,
+  PlusCircle,
+  ArrowRightLeft,
+  Crown,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 
 type Segment = "financial_services" | "corporate_b2b" | "super_admin";
@@ -496,7 +503,7 @@ function AllUsersTable() {
 export default function SuperAdminDashboard() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
-  const [activeTab, setActiveTab] = useState<"overview" | "orgs" | "users">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "orgs" | "users" | "audit">("overview");
 
   if (user?.role !== "super_admin") {
     return (
@@ -541,6 +548,7 @@ export default function SuperAdminDashboard() {
           { key: "overview", label: "Overview", icon: Globe },
           { key: "orgs", label: "Organisations", icon: Building2 },
           { key: "users", label: "Users", icon: Users },
+          { key: "audit", label: "Audit Log", icon: ClipboardList },
         ].map((tab) => (
           <button
             key={tab.key}
@@ -653,6 +661,150 @@ export default function SuperAdminDashboard() {
 
       {activeTab === "orgs" && <OrganisationsTable />}
       {activeTab === "users" && <AllUsersTable />}
+      {activeTab === "audit" && <AuditLogTable />}
+    </div>
+  );
+}
+
+// ─── Audit Log Table ──────────────────────────────────────────────────────────
+const EVENT_META: Record<string, { label: string; icon: React.ElementType; color: string }> = {
+  org_created: { label: "Org Created", icon: PlusCircle, color: "text-emerald-600 dark:text-emerald-400" },
+  org_segment_updated: { label: "Segment Updated", icon: ArrowRightLeft, color: "text-blue-600 dark:text-blue-400" },
+  user_role_updated: { label: "Role Updated", icon: UserCog, color: "text-amber-600 dark:text-amber-400" },
+  user_promoted_super_admin: { label: "Promoted to Super Admin", icon: Crown, color: "text-violet-600 dark:text-violet-400" },
+};
+
+function AuditLogTable() {
+  const [page, setPage] = useState(0);
+  const [filterEvent, setFilterEvent] = useState<string>("all");
+  const PAGE_SIZE = 20;
+
+  const { data, isLoading, refetch } = trpc.superAdmin.auditLogs.useQuery({
+    eventType: filterEvent === "all" ? undefined : filterEvent as any,
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE,
+  });
+
+  const logs = data?.logs ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  return (
+    <div className="space-y-4">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <ClipboardList className="h-4 w-4 text-violet-500" />
+          <span className="text-sm font-semibold">Platform Audit Log</span>
+          <Badge variant="secondary" className="ml-1">{total}</Badge>
+        </div>
+        <div className="flex items-center gap-2">
+          <Select value={filterEvent} onValueChange={(v) => { setFilterEvent(v); setPage(0); }}>
+            <SelectTrigger className="h-8 w-52 text-xs">
+              <SelectValue placeholder="Filter by event" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Events</SelectItem>
+              <SelectItem value="org_created">Org Created</SelectItem>
+              <SelectItem value="org_segment_updated">Segment Updated</SelectItem>
+              <SelectItem value="user_role_updated">Role Updated</SelectItem>
+              <SelectItem value="user_promoted_super_admin">Promoted to Super Admin</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button variant="outline" size="sm" className="h-8 gap-1" onClick={() => refetch()}>
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="rounded-lg border border-border/60 overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow className="bg-muted/40">
+              <TableHead className="text-xs">Event</TableHead>
+              <TableHead className="text-xs">Target</TableHead>
+              <TableHead className="text-xs">Actor</TableHead>
+              <TableHead className="text-xs">Before</TableHead>
+              <TableHead className="text-xs">After</TableHead>
+              <TableHead className="text-xs">Timestamp</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {isLoading ? (
+              <TableRow>
+                <TableCell colSpan={6} className="text-center py-8 text-muted-foreground text-sm">
+                  Loading audit log...
+                </TableCell>
+              </TableRow>
+            ) : logs.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground text-sm">
+                  <ClipboardList className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                  <p>No audit events recorded yet.</p>
+                  <p className="text-xs mt-1">Events appear here when organisations are created or user roles are updated.</p>
+                </TableCell>
+              </TableRow>
+            ) : (
+              logs.map((log: any) => {
+                const meta = EVENT_META[log.eventType] ?? { label: log.eventType, icon: ClipboardList, color: "text-muted-foreground" };
+                const Icon = meta.icon;
+                return (
+                  <TableRow key={log.id} className="text-xs">
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <Icon className={`h-3.5 w-3.5 shrink-0 ${meta.color}`} />
+                        <span className="font-medium">{meta.label}</span>
+                      </div>
+                      <span className="text-muted-foreground capitalize">{log.targetType}</span>
+                    </TableCell>
+                    <TableCell>
+                      <span className="font-medium">{log.targetName ?? `ID ${log.targetId}`}</span>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-muted-foreground">{log.actorName ?? `User ${log.actorId}`}</span>
+                    </TableCell>
+                    <TableCell>
+                      {log.previousValue ? (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300 font-mono">
+                          {log.previousValue}
+                        </span>
+                      ) : <span className="text-muted-foreground">—</span>}
+                    </TableCell>
+                    <TableCell>
+                      {log.newValue ? (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 font-mono">
+                          {log.newValue.length > 40 ? log.newValue.slice(0, 40) + "…" : log.newValue}
+                        </span>
+                      ) : <span className="text-muted-foreground">—</span>}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground whitespace-nowrap">
+                      {new Date(log.createdAt).toLocaleString()}
+                    </TableCell>
+                  </TableRow>
+                );
+              })
+            )}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total} events</span>
+          <div className="flex items-center gap-1">
+            <Button variant="outline" size="sm" className="h-7 w-7 p-0" disabled={page === 0} onClick={() => setPage(p => p - 1)}>
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </Button>
+            <span className="px-2">{page + 1} / {totalPages}</span>
+            <Button variant="outline" size="sm" className="h-7 w-7 p-0" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -285,6 +285,7 @@ function DashboardLayoutContent({
   const [activatedMatchRate, setActivatedMatchRate] = useState<string | null>(null);
   const [guestLinkCopied, setGuestLinkCopied] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showInfinityAI, setShowInfinityAI] = useState(false);
 
   // Today's open exception count for sidebar badges — stable Date objects via useState
   const [badgeDateFrom] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
@@ -485,15 +486,22 @@ function DashboardLayoutContent({
                 <div className="px-4 py-4 mt-2">
                   <div className="h-px bg-sidebar-border" />
                 </div>
-                <div className="px-4 pb-2 pt-1">
-                  {!isCollapsed && (
-                    <span className="text-xs font-semibold text-violet-500/80 uppercase tracking-wider">
-                      Infinity AI
-                    </span>
-                  )}
-                </div>
                 <SidebarMenu className="px-2 py-0">
-                  {visibleSuperAdminItems.map((item) => {
+                  {/* Infinity AI toggle — mirrors the Advanced tools pattern */}
+                  {!isCollapsed && (
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => setShowInfinityAI((v) => !v)}
+                        className="h-8 transition-all font-normal text-violet-500/70 hover:text-violet-500"
+                      >
+                        <ChevronDown
+                          className={`h-3.5 w-3.5 transition-transform ${showInfinityAI ? "rotate-180" : ""}`}
+                        />
+                        <span className="text-xs font-semibold uppercase tracking-wider">{showInfinityAI ? "Hide Infinity AI" : "Infinity AI"}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )}
+                  {showInfinityAI && visibleSuperAdminItems.map((item) => {
                     const isActive = location.startsWith(item.path);
                     return (
                       <SidebarMenuItem key={item.path}>
@@ -501,10 +509,10 @@ function DashboardLayoutContent({
                           isActive={isActive}
                           onClick={() => setLocation(item.path)}
                           tooltip={item.label}
-                          className="h-8 transition-all font-normal"
+                          className="h-8 transition-all font-normal pl-6"
                         >
                           <span className="flex items-center justify-center w-4 h-4 shrink-0">
-                            <item.icon className={`h-4 w-4 ${isActive ? "text-violet-500" : "text-violet-400/70"}`} />
+                            <item.icon className={`h-3.5 w-3.5 ${isActive ? "text-violet-500" : "text-violet-400/70"}`} />
                           </span>
                           <span className="text-violet-700 dark:text-violet-300">{item.label}</span>
                         </SidebarMenuButton>

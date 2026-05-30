@@ -3062,6 +3062,17 @@ export const appRouter = router({
         await logAudit(ctx.user.id, "update_org_segment", "organization", input.organizationId, {
           segment: input.segment,
         });
+        // Get org name for audit context
+        const updatedOrg = await drizzle.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, input.organizationId)).limit(1);
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_segment_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          targetName: updatedOrg[0]?.name ?? undefined,
+          newValue: input.segment,
+        });
         return { success: true };
       }),
 
@@ -3091,6 +3102,15 @@ export const appRouter = router({
           name: input.name,
           segment: input.segment,
         });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_created",
+          targetType: "organization",
+          targetId: newOrgId,
+          targetName: input.name,
+          newValue: JSON.stringify({ segment: input.segment, country: input.country, currency: input.baseCurrency }),
+        });
         return { success: true, organizationId: newOrgId };
       }),
 
@@ -3100,11 +3120,36 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const targetUser = await db.getUserById(input.userId);
         await drizzle.update(users).set({ role: "super_admin" }).where(eq(users.id, input.userId));
         await logAudit(ctx.user.id, "promote_to_super_admin", "user", input.userId, {});
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "user_promoted_super_admin",
+          targetType: "user",
+          targetId: input.userId,
+          targetName: targetUser?.name ?? undefined,
+          previousValue: targetUser?.role ?? undefined,
+          newValue: "super_admin",
+        });
         return { success: true };
       }),
 
+    // Get platform audit logs
+    auditLogs: superAdminProcedure
+      .input(z.object({
+        eventType: z.enum(["org_created", "org_segment_updated", "user_role_updated", "user_promoted_super_admin"]).optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        offset: z.number().int().min(0).default(0),
+      }))
+      .query(async ({ input }) => {
+        return db.getPlatformAuditLogs({
+          eventType: input.eventType,
+          limit: input.limit,
+          offset: input.offset,
+        });
+      }),
     // Get platform-wide statistics (cross-tenant)
     platformStats: superAdminProcedure.query(async () => {
       const drizzle = await getDb();
