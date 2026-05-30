@@ -1,0 +1,9 @@
+{
+  "query": "ALTER TABLE `module_configurations` MODIFY COLUMN `moduleType` enum('settlement','account_level') NOT NULL;\nCREATE INDEX `idx_module_override_org` ON `module_overrides` (`organizationId`);",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2U6jhwFfN2yGLAb.f7a69d7f761e --database fGjDi9wkBzgbvTayKYVoMB --execute ALTER TABLE `module_configurations` MODIFY COLUMN `moduleType` enum('settlement','account_level') NOT NULL;\nCREATE INDEX `idx_module_override_org` ON `module_overrides` (`organizationId`);",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 701
+}

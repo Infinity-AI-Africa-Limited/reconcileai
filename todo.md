@@ -1123,4 +1123,14 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Scope all data queries (reconciliation, exceptions, etc.) to viewAs org when portal context is active
 - [x] Create demo org for Corporate B2B segment (BrightGoods Nigeria) in database
 - [x] Ensure Financial Services org (Globus Bank Nigeria Demo) has correct segment label
-- [ ] Save checkpoint and push to both GitHub accounts
+- [x] Save checkpoint and push to both GitHub accounts
+
+## Module Consolidation (Settlement + Account Level only)
+- [x] Merge Transaction Integrity into Settlement Reconciliation (capabilities + metrics combined)
+- [x] Reduce modules to 2: Settlement Reconciliation and Account-Level Reconciliation
+- [x] Update schema: module_configurations enum to settlement|account_level only
+- [x] Add module_overrides table for super admin per-institution control
+- [x] Add superAdmin.listOrgOverrides, setOrgModuleOverride, clearOrgModuleOverride procedures
+- [x] Update ModuleConfiguration.tsx: 2 modules, merged content, Per-Institution button for super_admin
+- [x] Per-Institution dialog: force ON/OFF per org with optional reason, clear override option
+- [x] Update reconciliation job create default moduleType to settlement

@@ -274,6 +274,20 @@
       "when": 1780143831545,
       "tag": "0038_remarkable_beyonder",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "5",
+      "when": 1780171442739,
+      "tag": "0039_ordinary_multiple_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "5",
+      "when": 1780171714167,
+      "tag": "0040_married_earthquake",
+      "breakpoints": true
     }
   ]
 }

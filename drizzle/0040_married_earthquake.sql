@@ -1,0 +1,1 @@
+ALTER TABLE `reconciliation_jobs` MODIFY COLUMN `moduleType` enum('transaction_integrity','settlement','account_level') NOT NULL DEFAULT 'settlement';

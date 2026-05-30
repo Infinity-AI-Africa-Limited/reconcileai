@@ -164,8 +164,9 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
   organizationId: int("organizationId"),
+  // transaction_integrity kept for backward compat with existing job records; new jobs use settlement or account_level
   moduleType: mysqlEnum("moduleType", ["transaction_integrity", "settlement", "account_level"])
-    .default("transaction_integrity")
+    .default("settlement")
     .notNull(),
   name: varchar("name", { length: 255 }).notNull(),
   sourceChannelId: int("sourceChannelId").notNull(),
@@ -783,7 +784,7 @@ export type InsertResolutionTemplate = typeof resolutionTemplates.$inferInsert;
 export const moduleConfigurations = mysqlTable("module_configurations", {
   id: int("id").autoincrement().primaryKey(),
   organizationId: int("organizationId").notNull(),
-  moduleType: mysqlEnum("moduleType", ["transaction_integrity", "settlement", "account_level"]).notNull(),
+  moduleType: mysqlEnum("moduleType", ["settlement", "account_level"]).notNull(),
   isEnabled: boolean("isEnabled").default(true).notNull(),
   configuration: json("configuration"), // Module-specific settings
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -796,6 +797,26 @@ export const moduleConfigurations = mysqlTable("module_configurations", {
 
 export type ModuleConfiguration = typeof moduleConfigurations.$inferSelect;
 export type InsertModuleConfiguration = typeof moduleConfigurations.$inferInsert;
+
+// ─── Super Admin Module Overrides (per-institution control) ──────────────────
+// Infinity AI staff can force-enable or force-disable a module for any org,
+// overriding the org's own toggle. If no override exists, the org's own setting applies.
+export const moduleOverrides = mysqlTable("module_overrides", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  moduleType: mysqlEnum("moduleType", ["settlement", "account_level"]).notNull(),
+  isEnabled: boolean("isEnabled").notNull(), // super admin forced value
+  reason: varchar("reason", { length: 500 }), // optional note from super admin
+  setByUserId: int("setByUserId").notNull(), // super admin user id
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_module_override_org").on(table.organizationId),
+  uniqueIndex("unique_org_module_override").on(table.organizationId, table.moduleType),
+]);
+
+export type ModuleOverride = typeof moduleOverrides.$inferSelect;
+export type InsertModuleOverride = typeof moduleOverrides.$inferInsert;
 
 // ─── Distributor Identity Registry ──────────────────────────────────
 export const distributors = mysqlTable("distributors", {

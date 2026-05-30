@@ -627,7 +627,7 @@ export const appRouter = router({
       .input(
         z.object({
           name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]).default("transaction_integrity"),
+          moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]).default("settlement"),
           sourceChannelId: z.number().int().positive(),
           targetChannelId: z.number().int().positive(),
           dateFrom: z.string().min(1),
@@ -1109,7 +1109,7 @@ export const appRouter = router({
 
     toggle: adminProcedure
       .input(z.object({
-        moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]),
+        moduleType: z.enum(["settlement", "account_level"]),
         isEnabled: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -1117,7 +1117,6 @@ export const appRouter = router({
         const dbConn = await db.getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         
-        // Check if configuration exists
         const existing = await dbConn.select()
           .from(db.moduleConfigurations)
           .where(
@@ -1129,12 +1128,10 @@ export const appRouter = router({
           .limit(1);
         
         if (existing.length > 0) {
-          // Update existing
           await dbConn.update(db.moduleConfigurations)
             .set({ isEnabled: input.isEnabled, updatedAt: new Date() })
             .where(eq(db.moduleConfigurations.id, existing[0].id));
         } else {
-          // Insert new
           await dbConn.insert(db.moduleConfigurations).values({
             organizationId: ctx.user.organizationId || 0,
             moduleType: input.moduleType,
@@ -1151,7 +1148,7 @@ export const appRouter = router({
 
     updateConfig: adminProcedure
       .input(z.object({
-        moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]),
+        moduleType: z.enum(["settlement", "account_level"]),
         configuration: z.record(z.string(), z.any()),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -1169,6 +1166,95 @@ export const appRouter = router({
           );
         
         await logAudit(ctx.user.id, "update_module_config", "module_configuration", undefined, {
+          moduleType: input.moduleType,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    // Super admin: list all orgs with their module override states
+    listOrgOverrides: superAdminProcedure
+      .input(z.object({ organizationId: z.number().int().positive().optional() }))
+      .query(async ({ input }) => {
+        const dbConn = await db.getDb();
+        if (!dbConn) return [];
+        const { moduleOverrides, organizations } = await import("../drizzle/schema");
+        const { eq } = await import("drizzle-orm");
+        let query = dbConn.select({
+          id: moduleOverrides.id,
+          organizationId: moduleOverrides.organizationId,
+          orgName: organizations.name,
+          moduleType: moduleOverrides.moduleType,
+          isEnabled: moduleOverrides.isEnabled,
+          reason: moduleOverrides.reason,
+          setByUserId: moduleOverrides.setByUserId,
+          updatedAt: moduleOverrides.updatedAt,
+        })
+        .from(moduleOverrides)
+        .leftJoin(organizations, eq(moduleOverrides.organizationId, organizations.id));
+        if (input?.organizationId) {
+          return (await query).filter(r => r.organizationId === input.organizationId);
+        }
+        return query;
+      }),
+
+    // Super admin: set or clear a per-institution module override
+    setOrgModuleOverride: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        moduleType: z.enum(["settlement", "account_level"]),
+        isEnabled: z.boolean(),
+        reason: z.string().max(500).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { moduleOverrides } = await import("../drizzle/schema");
+        const { eq, and } = await import("drizzle-orm");
+        const existing = await dbConn.select().from(moduleOverrides)
+          .where(and(
+            eq(moduleOverrides.organizationId, input.organizationId),
+            eq(moduleOverrides.moduleType, input.moduleType)
+          )).limit(1);
+        if (existing.length > 0) {
+          await dbConn.update(moduleOverrides)
+            .set({ isEnabled: input.isEnabled, reason: input.reason ?? null, setByUserId: ctx.user.id, updatedAt: new Date() })
+            .where(eq(moduleOverrides.id, existing[0].id));
+        } else {
+          await dbConn.insert(moduleOverrides).values({
+            organizationId: input.organizationId,
+            moduleType: input.moduleType,
+            isEnabled: input.isEnabled,
+            reason: input.reason ?? null,
+            setByUserId: ctx.user.id,
+          });
+        }
+        await logAudit(ctx.user.id, "set_org_module_override", "module_override", input.organizationId, {
+          moduleType: input.moduleType,
+          isEnabled: input.isEnabled,
+          reason: input.reason,
+        }, ip, ua);
+        return { success: true };
+      }),
+
+    // Super admin: remove a per-institution override (revert to org's own setting)
+    clearOrgModuleOverride: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        moduleType: z.enum(["settlement", "account_level"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const dbConn = await db.getDb();
+        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { moduleOverrides } = await import("../drizzle/schema");
+        const { eq, and } = await import("drizzle-orm");
+        await dbConn.delete(moduleOverrides)
+          .where(and(
+            eq(moduleOverrides.organizationId, input.organizationId),
+            eq(moduleOverrides.moduleType, input.moduleType)
+          ));
+        await logAudit(ctx.user.id, "clear_org_module_override", "module_override", input.organizationId, {
           moduleType: input.moduleType,
         }, ip, ua);
         return { success: true };
