@@ -10,7 +10,7 @@
 
 **ReconcileAI** is an AI-powered financial reconciliation platform for African banks and microfinance banks (MFBs). It automates the matching of transactions across payment channels, classifies exceptions by severity, and resolves them using an AI Super Agent that learns from historical patterns.
 
-**Owner:** Richard Anwanakak — Founder & CEO, Infinity AI Africa Limited; Divisional Head, Systegra Products (Mobile Financial Services), Interswitch.
+**Owner:** Richard Anwanakak — Founder & CEO, Infinity AI Africa Limited.
 
 **Live prototype:** https://reconcileai.vip
 
