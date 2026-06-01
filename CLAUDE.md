@@ -335,18 +335,132 @@ EMAIL_FROM=noreply@reconcileai.vip
 
 ## 12. Deployment — reconcileai.vip
 
-The production domain is `reconcileai.vip`. DNS is already configured with Cloudflare.
+The production domain is `reconcileai.vip`. DNS is managed via Cloudflare. The platform is a standard Node.js application and can be deployed to any Node.js-compatible host (Railway, Render, Fly.io, DigitalOcean App Platform, AWS App Runner, Google Cloud Run, or a self-managed VPS).
 
-**To publish on Rocket.new or any Node.js host:**
-1. Import the GitHub repository (`Infinity-AI-Africa-Limited/reconcileai`)
-2. Set all environment variables from Section 11
-3. Build command: `pnpm build`
-4. Start command: `node dist/server/index.js` (or `pnpm start`)
-5. Port: the server reads `PORT` from environment (defaults to 3000)
-6. In your hosting provider's domain settings, add a custom domain: `reconcileai.vip`
-7. In Cloudflare DNS, set a CNAME record: `reconcileai.vip → <your-hosting-provider-cname>`
+### Application Build
 
-**Do not hardcode the port number** — the server uses `process.env.PORT` for Cloud Run compatibility.
+```bash
+# Install dependencies
+pnpm install
+
+# Build frontend and backend
+pnpm build
+
+# Start production server
+pnpm start
+# or: node dist/server/index.js
+```
+
+**Build output:**
+- Frontend: `dist/client/` (static assets served by Express)
+- Backend: `dist/server/` (compiled Express + tRPC server)
+
+**Port:** The server reads `PORT` from the environment (defaults to 3000). Never hardcode the port — hosting platforms inject it at runtime.
+
+### Environment Variables
+Set all variables from Section 11 in your hosting platform's environment/secrets panel before deploying. The most critical ones that will cause startup failures if missing:
+- `DATABASE_URL` — main ReconcileAI database
+- `JWT_SECRET` — session signing (generate a 64-character random string)
+- `DIRECT_LLM_API_KEY` — Anthropic API key (without this, LLM features fail silently)
+
+### DNS Configuration for reconcileai.vip
+
+DNS is managed in Cloudflare. Once your hosting provider gives you a deployment URL or IP:
+
+**Option A — CNAME (for platforms that provide a hostname, e.g. Railway, Render, Fly.io):**
+```
+Type: CNAME
+Name: @  (or reconcileai.vip)
+Target: <your-platform-provided-hostname>  e.g. reconcileai.up.railway.app
+Proxy status: Proxied (orange cloud)
+```
+
+**Option B — A Record (for VPS or fixed IP deployments):**
+```
+Type: A
+Name: @
+Value: <your-server-IP>
+Proxy status: Proxied (orange cloud)
+```
+
+**www redirect (already configured):**
+```
+Type: CNAME
+Name: www
+Target: reconcileai.vip
+Proxy status: Proxied
+```
+
+**SSL:** Cloudflare handles TLS termination automatically when proxy is enabled. Set SSL/TLS mode to **Full (strict)** in the Cloudflare dashboard.
+
+### Recommended Hosting Platforms (in order of preference)
+
+| Platform | Best for | Notes |
+|---|---|---|
+| **Railway** | Simplest deployment, automatic GitHub deploys | Connect GitHub repo, set env vars, deploy in < 5 min |
+| **Render** | Free tier available, auto-deploys from GitHub | Set `pnpm build` as build command, `pnpm start` as start command |
+| **Fly.io** | Low-latency, close to Nigerian users (has Johannesburg region) | Requires `fly.toml` config file |
+| **DigitalOcean App Platform** | Straightforward, predictable pricing | Good for production workloads |
+| **Self-managed VPS (DigitalOcean Droplet / Hetzner)** | Full control, cheapest at scale | Use PM2 for process management, Nginx as reverse proxy |
+
+### Self-Managed VPS Deployment (Nginx + PM2)
+
+If deploying to a VPS (Ubuntu 22.04):
+
+```bash
+# 1. Install Node.js 22 and pnpm
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+npm install -g pnpm pm2
+
+# 2. Clone and build
+git clone https://github.com/Infinity-AI-Africa-Limited/reconcileai.git
+cd reconcileai
+pnpm install
+pnpm build
+
+# 3. Set environment variables
+cp docs/env.example.md .env
+# Edit .env with production values
+
+# 4. Start with PM2
+pm2 start dist/server/index.js --name reconcileai
+pm2 save
+pm2 startup  # auto-start on reboot
+
+# 5. Nginx reverse proxy config
+# /etc/nginx/sites-available/reconcileai.vip
+server {
+    listen 80;
+    server_name reconcileai.vip www.reconcileai.vip;
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+
+# 6. Enable SSL with Certbot (if not using Cloudflare proxy)
+sudo certbot --nginx -d reconcileai.vip -d www.reconcileai.vip
+```
+
+### Database
+The application uses MySQL (Drizzle ORM). In production, use a managed MySQL service:
+- **PlanetScale** (serverless MySQL, generous free tier)
+- **TiDB Cloud** (MySQL-compatible, current dev DB)
+- **Railway MySQL** (simplest if already on Railway)
+- **AWS RDS MySQL** or **Google Cloud SQL** (enterprise)
+
+After setting `DATABASE_URL`, run migrations:
+```bash
+pnpm db:push
+```
+
+### Background Jobs
+The current prototype runs reconciliation jobs in-process (synchronous). For production, add **BullMQ + Redis** before going live with high transaction volumes. This is listed as a known technical debt item.
 
 ---
 
