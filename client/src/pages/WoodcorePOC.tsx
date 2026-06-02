@@ -1569,10 +1569,10 @@ export default function WoodcorePOC() {
   const [activeMode, setActiveMode] = useState<"SAVINGS" | "LOAN" | null>(null);
   const [liveTab, setLiveTab] = useState<"gl" | "savings" | "loans">("gl");
   const [glDays, setGlDays] = useState(14);
-  const liveStatsQuery = trpc.woodcore.liveStats.useQuery();
-  const liveGlQuery = trpc.woodcore.liveGlReconciliation.useQuery({ days: glDays, currency: "NGN" });
-  const liveSavingsQuery = trpc.woodcore.liveSavingsReconciliation.useQuery({ days: 30 });
-  const liveLoanQuery = trpc.woodcore.liveLoanReconciliation.useQuery({ days: 30 });
+  const liveStatsQuery = trpc.woodcore.liveStats.useQuery(undefined, { retry: 1, retryDelay: 2000, staleTime: 60_000 });
+  const liveGlQuery = trpc.woodcore.liveGlReconciliation.useQuery({ days: glDays, currency: "NGN" }, { retry: 1, retryDelay: 2000, staleTime: 60_000 });
+  const liveSavingsQuery = trpc.woodcore.liveSavingsReconciliation.useQuery({ days: 30 }, { retry: 1, retryDelay: 2000, staleTime: 60_000 });
+  const liveLoanQuery = trpc.woodcore.liveLoanReconciliation.useQuery({ days: 30 }, { retry: 1, retryDelay: 2000, staleTime: 60_000 });
   const liveStats = liveStatsQuery.data;
 
   if (activeMode !== null) {

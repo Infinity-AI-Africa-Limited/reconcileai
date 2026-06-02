@@ -1,26 +1,32 @@
 /**
  * Woodcore (Fineract) test tenant MySQL connection helper.
- * Uses mysql2/promise for async queries.
- * Connection is pooled and reused across requests.
+ * Uses mysql2/promise with a connection pool.
+ * Pool is recreated automatically on fatal connection errors.
  */
 import mysql from "mysql2/promise";
 import { ENV } from "./_core/env";
 
 let pool: mysql.Pool | null = null;
 
+function createPool(): mysql.Pool {
+  return mysql.createPool({
+    host: ENV.woodcoreDbHost,
+    port: ENV.woodcoreDbPort,
+    user: ENV.woodcoreDbUser,
+    password: ENV.woodcoreDbPassword,
+    database: ENV.woodcoreDbName,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+    connectTimeout: 15000,
+    // Allow connections from any IP — the MySQL user grant controls access
+    multipleStatements: false,
+  });
+}
+
 export function getWoodcorePool(): mysql.Pool {
   if (!pool) {
-    pool = mysql.createPool({
-      host: ENV.woodcoreDbHost,
-      port: ENV.woodcoreDbPort,
-      user: ENV.woodcoreDbUser,
-      password: ENV.woodcoreDbPassword,
-      database: ENV.woodcoreDbName,
-      waitForConnections: true,
-      connectionLimit: 5,
-      queueLimit: 0,
-      connectTimeout: 10000,
-    });
+    pool = createPool();
   }
   return pool;
 }
@@ -29,9 +35,21 @@ export async function woodcoreQuery<T = Record<string, unknown>>(
   sql: string,
   params: unknown[] = []
 ): Promise<T[]> {
-  const p = getWoodcorePool();
-  const [rows] = await p.execute(sql, params);
-  return rows as T[];
+  try {
+    const p = getWoodcorePool();
+    const [rows] = await p.execute(sql, params);
+    return rows as T[];
+  } catch (err: unknown) {
+    // If the pool has gone stale (e.g. server restarted), recreate it and retry once
+    const code = (err as { code?: string }).code;
+    if (code === "ECONNRESET" || code === "PROTOCOL_CONNECTION_LOST" || code === "ECONNREFUSED") {
+      pool = null;
+      const p = getWoodcorePool();
+      const [rows] = await p.execute(sql, params);
+      return rows as T[];
+    }
+    throw err;
+  }
 }
 
 // ─── Enum maps (derived from r_enum_value) ───────────────────────────────────

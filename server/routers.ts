@@ -4148,30 +4148,22 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
     // ─── LIVE DATA: Direct queries against Woodcore test tenant ──────────────
     liveStats: publicProcedure.query(async () => {
-      const [glRow] = await woodcoreQuery<{ cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM acc_gl_journal_entry WHERE reversed = 0"
-      );
-      const [savingsRow] = await woodcoreQuery<{ cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM m_savings_account_transaction WHERE is_reversed = 0"
-      );
-      const [archiveRow] = await woodcoreQuery<{ cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM m_savings_account_transaction_archive"
-      );
-      const [loanRow] = await woodcoreQuery<{ cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM m_loan_transaction WHERE is_reversed = 0"
-      );
-      const [acctRow] = await woodcoreQuery<{ cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM m_savings_account"
-      );
-      const [loanAcctRow] = await woodcoreQuery<{ cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM m_loan"
-      );
+      // Run all count queries in parallel for speed
+      const [glRow, savingsRow, archiveRow, loanRow, acctRow, loanAcctRow] = await Promise.all([
+        woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM acc_gl_journal_entry WHERE reversed = 0"),
+        woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM m_savings_account_transaction WHERE is_reversed = 0"),
+        woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM m_savings_account_transaction_archive"),
+        woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM m_loan_transaction WHERE is_reversed = 0"),
+        woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM m_savings_account"),
+        woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM m_loan"),
+      ]);
       return {
-        glEntries: Number(glRow?.cnt ?? 0),
-        savingsTransactions: Number(savingsRow?.cnt ?? 0) + Number(archiveRow?.cnt ?? 0),
-        savingsAccounts: Number(acctRow?.cnt ?? 0),
-        loanAccounts: Number(loanAcctRow?.cnt ?? 0),
-        loanTransactions: Number(loanRow?.cnt ?? 0),
+        glEntries: Number(glRow[0]?.cnt ?? 0),
+        // Full savings = active table UNION archive table
+        savingsTransactions: Number(savingsRow[0]?.cnt ?? 0) + Number(archiveRow[0]?.cnt ?? 0),
+        savingsAccounts: Number(acctRow[0]?.cnt ?? 0),
+        loanAccounts: Number(loanAcctRow[0]?.cnt ?? 0),
+        loanTransactions: Number(loanRow[0]?.cnt ?? 0),
         dataSource: "live" as const,
         asOf: new Date().toISOString(),
       };
@@ -4220,6 +4212,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     liveSavingsReconciliation: publicProcedure
       .input(z.object({ days: z.number().min(1).max(90).default(30) }))
       .query(async ({ input }) => {
+        // UNION active + archive tables for full savings transaction history
         const rows = await woodcoreQuery<{
           txn_date: string;
           savings_txns: number;
@@ -4235,14 +4228,22 @@ Always be specific, reference actual exception IDs and amounts where available, 
             COUNT(DISTINCT sat.id) - COUNT(DISTINCT gl.savings_transaction_id) AS unmatched_savings,
             SUM(sat.amount) AS savings_total,
             SUM(CASE WHEN gl.type_enum = 1 THEN gl.amount ELSE 0 END) AS gl_debit_total
-          FROM m_savings_account_transaction sat
+          FROM (
+            SELECT id, savings_account_id, transaction_date, amount, is_reversed
+            FROM m_savings_account_transaction
+            WHERE is_reversed = 0
+              AND transaction_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+            UNION ALL
+            SELECT id, savings_account_id, transaction_date, amount, is_reversed
+            FROM m_savings_account_transaction_archive
+            WHERE is_reversed = 0
+              AND transaction_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+          ) sat
           LEFT JOIN acc_gl_journal_entry gl ON gl.savings_transaction_id = sat.id AND gl.reversed = 0
-          WHERE sat.is_reversed = 0
-            AND sat.transaction_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
           GROUP BY DATE(sat.transaction_date)
           ORDER BY txn_date DESC
           LIMIT 30`,
-          [input.days]
+          [input.days, input.days]
         );
         return rows.map(r => ({
           date: r.txn_date,
@@ -4293,6 +4294,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         }));
       }),
 
+    // Full savings transactions: UNION of active + archive tables
     liveSavingsTxns: publicProcedure
       .input(z.object({ limit: z.number().min(1).max(100).default(20), offset: z.number().default(0) }))
       .query(async ({ input }) => {
@@ -4303,10 +4305,16 @@ Always be specific, reference actual exception IDs and amounts where available, 
           transaction_date: string;
           amount: string;
           running_balance_derived: string;
-          is_reversed: number;
+          source: string;
         }>(
-          `SELECT id, savings_account_id, transaction_type_enum, transaction_date, amount, running_balance_derived, is_reversed
+          `SELECT id, savings_account_id, transaction_type_enum, transaction_date, amount,
+                  running_balance_derived, 'active' AS source
            FROM m_savings_account_transaction
+           WHERE is_reversed = 0
+           UNION ALL
+           SELECT id, savings_account_id, transaction_type_enum, transaction_date, amount,
+                  running_balance_derived, 'archive' AS source
+           FROM m_savings_account_transaction_archive
            WHERE is_reversed = 0
            ORDER BY transaction_date DESC, id DESC
            LIMIT ? OFFSET ?`,
@@ -4319,6 +4327,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           date: r.transaction_date,
           amount: parseFloat(r.amount ?? "0"),
           runningBalance: parseFloat(r.running_balance_derived ?? "0"),
+          source: r.source as "active" | "archive",
         }));
       }),
 
