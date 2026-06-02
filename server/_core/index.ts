@@ -39,6 +39,13 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  // ── Liveness probe ─────────────────────────────────────────────────────────
+  // GET /api/healthz — returns 200 whenever the process is alive. Used as the
+  // platform healthcheck (e.g. Railway) so a degraded dependency (storage, LLM)
+  // never causes an endless deploy/restart loop. Deep readiness is /api/health.
+  app.get("/api/healthz", (_req, res) => {
+    res.status(200).json({ status: "ok", uptime: Math.floor(process.uptime()) });
+  });
   // ── Health check ─────────────────────────────────────────────────────────
   // GET /api/health
   // Returns DB connectivity, LLM provider mode/model, and app version.

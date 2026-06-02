@@ -21,6 +21,13 @@ export const ENV = {
   emailFromName: process.env.EMAIL_FROM_NAME ?? "ReconcileAI",
   ownerEmail: process.env.OWNER_EMAIL ?? "",               // recipient for owner/system notifications
   appUrl: process.env.APP_URL ?? "",                       // canonical app origin, e.g. https://reconcileai.vip
+  // File storage — AWS S3 or S3-compatible (Cloudflare R2). Replaces the Manus storage proxy.
+  // Tolerates both AWS_S3_* and the alternate names used across the docs.
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "",
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "",
+  awsRegion: process.env.AWS_REGION ?? "auto",
+  awsS3Bucket: process.env.AWS_S3_BUCKET ?? process.env.AWS_BUCKET_NAME ?? "",
+  awsS3Endpoint: process.env.AWS_S3_ENDPOINT ?? process.env.AWS_ENDPOINT_URL ?? "", // set for R2 / S3-compatible
   // Woodcore (Fineract) test tenant
   woodcoreDbHost: process.env.WOODCORE_DB_HOST ?? "",
   woodcoreDbPort: parseInt(process.env.WOODCORE_DB_PORT ?? "3306", 10),
