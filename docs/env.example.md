@@ -26,20 +26,30 @@ Used to sign and verify JWT session cookies. Must be kept secret and rotated if 
 ## LLM Provider (replaces Manus Forge)
 
 ```bash
-DIRECT_LLM_API_KEY=sk-...
-DIRECT_LLM_API_URL=https://api.openai.com/v1/chat/completions
-DIRECT_LLM_MODEL=gpt-4o-mini
+# Recommended: Anthropic Claude (native Messages API adapter)
+DIRECT_LLM_API_KEY=sk-ant-...
+DIRECT_LLM_API_URL=https://api.anthropic.com
+DIRECT_LLM_MODEL=claude-sonnet-4-5
+# Optional explicit selector: "anthropic" | "openai".
+# Auto-detected from the model name ("claude…") or URL when omitted.
+DIRECT_LLM_PROVIDER=anthropic
 ```
 
-When `DIRECT_LLM_API_KEY` is set, the Manus Forge gateway is bypassed automatically — no code changes needed.
+When `DIRECT_LLM_API_KEY` is set, the Manus Forge gateway is bypassed automatically.
+`DIRECT_LLM_API_URL` is a **base URL** — the correct path (`/v1/messages` for Anthropic,
+`/v1/chat/completions` for OpenAI) is appended for you. Values that already include a
+trailing `/v1` or the full path are also accepted.
 
-| Provider | API URL | Model |
+| Provider | `DIRECT_LLM_API_URL` (base) | Model |
 |---|---|---|
-| OpenAI (recommended) | `https://api.openai.com/v1/chat/completions` | `gpt-4o-mini` or `gpt-4o` |
-| Anthropic | `https://api.anthropic.com/v1/messages` | `claude-3-5-sonnet-20241022` |
-| Google (via OpenAI compat) | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.0-flash` |
+| Anthropic (recommended) | `https://api.anthropic.com` | `claude-sonnet-4-5` (Super Agent: `claude-opus-4`) |
+| OpenAI | `https://api.openai.com` | `gpt-4o-mini` or `gpt-4o` |
+| OpenAI-compatible proxy (LiteLLM) | `https://your-litellm-proxy.com` | provider-prefixed model |
 
-**Note for Anthropic:** The current `server/_core/llm.ts` uses OpenAI message format. If using Anthropic directly, either use a proxy (LiteLLM) or update the helper to handle Anthropic's format.
+**Anthropic is now first-class:** `server/_core/llm.ts` ships a **native Anthropic Messages
+adapter** (no LiteLLM proxy required). It translates the OpenAI-shaped request/response so all
+existing call sites are unchanged, and maps structured-output requests (`response_format` /
+`outputSchema`) onto Anthropic tool-use automatically.
 
 ## File Storage (AWS S3 or S3-compatible)
 
@@ -65,10 +75,17 @@ AWS_S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
 RESEND_API_KEY=re_...
 EMAIL_FROM=noreply@reconcileai.vip
 EMAIL_FROM_NAME=ReconcileAI
+# Recipient for platform-owner / system notifications (digests, fallbacks).
+# Falls back to EMAIL_FROM when unset.
+OWNER_EMAIL=ops@reconcileai.vip
 ```
 
 Resend is recommended. Requires SPF, DKIM, and DMARC records on `reconcileai.vip`.
-Alternative: `SENDGRID_API_KEY=SG....`
+All transactional email (magic-link sign-in, user invites, CFO scheduled reports with
+Excel attachment, channel-threshold alerts, owner notifications) routes through Resend
+via `server/_core/email.ts`. **If `RESEND_API_KEY` / `EMAIL_FROM` are unset, email sending
+is a safe no-op (logged, never throws)** — sign-in links will not be delivered, so set these
+before onboarding external users.
 
 ## Application
 

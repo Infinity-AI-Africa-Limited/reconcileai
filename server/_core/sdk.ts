@@ -18,6 +18,11 @@ import type {
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
+// Fallback app identifier used when VITE_APP_ID is unset (e.g. production builds
+// that removed the Manus OAuth app id). Sessions must still carry a stable,
+// non-empty appId so verifySession accepts them.
+const DEFAULT_APP_ID = "reconcileai";
+
 export type SessionPayload = {
   openId: string;
   appId: string;
@@ -171,7 +176,7 @@ class SDKServer {
     return this.signSession(
       {
         openId,
-        appId: ENV.appId,
+        appId: ENV.appId || DEFAULT_APP_ID,
         name: options.name || "",
       },
       options
@@ -189,7 +194,7 @@ class SDKServer {
 
     return new SignJWT({
       openId: payload.openId,
-      appId: payload.appId,
+      appId: payload.appId || DEFAULT_APP_ID,
       name: payload.name,
     })
       .setProtectedHeader({ alg: "HS256", typ: "JWT" })
@@ -212,19 +217,18 @@ class SDKServer {
       });
       const { openId, appId, name } = payload as Record<string, unknown>;
 
-      if (
-        !isNonEmptyString(openId) ||
-        !isNonEmptyString(appId) ||
-        !isNonEmptyString(name)
-      ) {
-        console.warn("[Auth] Session payload missing required fields");
+      // Only openId is strictly required. appId and name are defaulted so that
+      // sessions remain valid for users without a display name, and after
+      // VITE_APP_ID has been removed in production.
+      if (!isNonEmptyString(openId)) {
+        console.warn("[Auth] Session payload missing openId");
         return null;
       }
 
       return {
         openId,
-        appId,
-        name,
+        appId: isNonEmptyString(appId) ? appId : DEFAULT_APP_ID,
+        name: isNonEmptyString(name) ? name : "",
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -270,8 +274,14 @@ class SDKServer {
     const signedInAt = new Date();
     let user = await db.getUserByOpenId(sessionUserId);
 
-    // If user not in DB, sync from OAuth server automatically
+    // If the session is valid but the user is not in the DB, the only legacy
+    // recovery path was a Manus OAuth sync. With magic-link auth (no OAuth
+    // server configured) there is nothing to sync — fail cleanly instead of
+    // attempting a Manus network call.
     if (!user) {
+      if (!ENV.oAuthServerUrl || ENV.oAuthServerUrl.trim().length === 0) {
+        throw ForbiddenError("User not found");
+      }
       try {
         const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
         await db.upsertUser({

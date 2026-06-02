@@ -99,18 +99,26 @@ client/src/pages/          ← All 40+ frontend pages
 The prototype uses **Manus Forge** (`BUILT_IN_FORGE_API_KEY`), which routes to `gemini-2.5-flash`. This key is injected automatically by the Manus platform and will **not be available** outside Manus.
 
 ### Production Configuration (Claude Code / Rocket.new)
-Set these environment variables to switch to Anthropic Claude with **zero code changes**:
+Set these environment variables to switch to Anthropic Claude:
 
 ```bash
 # Primary: Anthropic Claude API key
 DIRECT_LLM_API_KEY=sk-ant-api03-...
 
-# Anthropic OpenAI-compatible endpoint
-DIRECT_LLM_API_URL=https://api.anthropic.com/v1
+# Anthropic API base URL (the native /v1/messages path is appended automatically)
+DIRECT_LLM_API_URL=https://api.anthropic.com
 
 # Model selection — see below
 DIRECT_LLM_MODEL=claude-sonnet-4-5
+
+# Optional explicit selector ("anthropic" | "openai"); auto-detected when omitted
+DIRECT_LLM_PROVIDER=anthropic
 ```
+
+> `server/_core/llm.ts` includes a **native Anthropic Messages-API adapter** — no
+> OpenAI-compat shim or LiteLLM proxy is required for Claude. `DIRECT_LLM_API_URL` is a
+> **base URL**; the helper appends `/v1/messages` (Anthropic) or `/v1/chat/completions`
+> (OpenAI) for you, and also tolerates a trailing `/v1` or a full path.
 
 ### Model Selection by Use Case
 
@@ -125,11 +133,14 @@ DIRECT_LLM_MODEL=claude-sonnet-4-5
 **Why Claude over OpenAI:** All primary LLM use cases in ReconcileAI are reasoning-heavy, context-long, instruction-following tasks. Claude 3.5 Sonnet and Claude Opus 4 outperform GPT-4o on these benchmarks. Claude also supports 200K token context windows, which is critical when feeding large reconciliation batches or full audit trails to the model.
 
 ### How the Provider Switch Works
-The `invokeLLM()` function in `server/_core/llm.ts` checks at runtime:
-- If `DIRECT_LLM_API_KEY` is set and non-empty → uses direct provider (Anthropic/OpenAI-compatible)
-- Otherwise → uses Manus Forge
+The `invokeLLM()` function in `server/_core/llm.ts` resolves the provider at runtime:
+- If `DIRECT_LLM_API_KEY` is set and non-empty → uses the direct provider. The provider
+  *kind* (native Anthropic vs OpenAI-compatible) is auto-detected from the model name
+  (`claude…` → Anthropic) or the URL host, and can be forced with `DIRECT_LLM_PROVIDER`.
+- Otherwise → uses Manus Forge.
 
-No code changes are needed. All 20+ call sites use `invokeLLM()` identically.
+All 20+ call sites use `invokeLLM()` identically and keep the OpenAI-shaped response, so
+no call-site changes are needed regardless of provider.
 
 ### LLM Call Sites in the Codebase
 Search for `invokeLLM(` to find all usage. Key locations:
@@ -148,29 +159,37 @@ DIRECT_LLM_MODEL=anthropic/claude-sonnet-4-5
 
 ## 5. Authentication — Replacement Roadmap
 
-### Current State (Prototype — DO NOT USE IN PRODUCTION)
-The prototype uses **Manus OAuth** (`/api/oauth/callback`). This is a Manus-platform-specific OAuth2 flow that will not work outside Manus. It must be replaced before any external user can log in.
+### Current State — Phase 1 IMPLEMENTED ✅ (email / magic link)
+Manus OAuth has been **replaced** with passwordless email/magic-link authentication.
+The Manus `/api/oauth/callback` now simply redirects to `/login`. The session layer
+(JWT HS256 via `jose`, cookie `app_session_id`) is provider-agnostic and unchanged.
+
+**Implemented flow:**
+1. `/login` page (`client/src/pages/Login.tsx`) — user enters email
+2. `auth.requestMagicLink` tRPC procedure → `magicLinkService.sendLoginLinkEmail()` looks up
+   the active user, mints a single-use 72h token, and emails a link via Resend
+   (`server/_core/email.ts`). Always returns generic success (no account enumeration).
+3. User clicks `<origin>/magic-login?token=…` → `MagicLogin.tsx` hands off to the existing
+   `GET /api/magic-login` route → token consumed, JWT session cookie set, redirect to `/dashboard`.
+
+> **Production note:** sessions no longer require `VITE_APP_ID`. `sdk.ts` defaults `appId`
+> to `"reconcileai"` and `verifySession` requires only `openId`, so removing the Manus env
+> vars does not invalidate logins. Set `RESEND_API_KEY` + `EMAIL_FROM` or links won't send.
 
 ### Production Authentication Roadmap
 
-| Phase | Method | Target Segment | Priority |
+| Phase | Method | Target Segment | Status |
 |---|---|---|---|
-| **Phase 1 — Immediate** | Email / Magic Link | Lapo MFB pilot, all early users | Build first — unblocks all pilots |
-| **Phase 2 — Q1** | Google OAuth2 | Fintechs, startups on Google Workspace | Broadens self-serve adoption |
-| **Phase 3 — Q2** | Microsoft Entra ID (Azure AD) OAuth2 | Commercial banks, tier-2/tier-1 institutions | Required by enterprise IT security policy |
+| **Phase 1** | Email / Magic Link | Lapo MFB pilot, all early users | ✅ Implemented |
+| **Phase 2 — Q1** | Google OAuth2 | Fintechs, startups on Google Workspace | Pending |
+| **Phase 3 — Q2** | Microsoft Entra ID (Azure AD) OAuth2 | Commercial banks, tier-2/tier-1 institutions | Pending |
 
-**Phase 1 implementation notes:**
-- The `magicLinkTokens` table already exists in `drizzle/schema.ts` — the schema is ready
-- Build: `/api/auth/request-magic-link` (POST email) → send email via Resend → `/api/auth/verify?token=xxx` → set JWT session cookie
-- JWT secret is already configured via `JWT_SECRET` environment variable
-- Session cookie logic lives in `server/_core/context.ts`
+**Phase 2 & 3:** Standard OAuth2 PKCE flow. Use `passport.js` with `passport-google-oauth20` and `passport-azure-ad` respectively. Map the external account to the existing `users` row on first login (reuse `sdk.createSessionToken`).
 
-**Phase 2 & 3:** Standard OAuth2 PKCE flow. Use `passport.js` with `passport-google-oauth20` and `passport-azure-ad` respectively.
-
-### What to Remove
-- `server/_core/oauth.ts` — Manus OAuth callback handler (replace entirely)
-- `client/src/const.ts` — `getLoginUrl()` function (replace with magic link request)
-- `client/src/contexts/AuthContext.tsx` — update to use new auth endpoints
+### Already done (de-Manus-ing)
+- `server/_core/oauth.ts` — Manus callback neutralized → redirects to `/login`
+- `client/src/const.ts` — `getLoginUrl()` now returns `/login`
+- `client/src/_core/hooks/useAuth.ts` — drives auth state via `auth.me` (no AuthContext.tsx exists)
 
 ---
 
@@ -306,11 +325,13 @@ WOODCORE_DB_NAME=fineract_default
 
 # LLM — SET THIS to activate Claude (replaces Manus Forge)
 DIRECT_LLM_API_KEY=sk-ant-api03-...
-DIRECT_LLM_API_URL=https://api.anthropic.com/v1
+DIRECT_LLM_API_URL=https://api.anthropic.com   # base URL; /v1/messages appended automatically
 DIRECT_LLM_MODEL=claude-sonnet-4-5
+DIRECT_LLM_PROVIDER=anthropic                   # optional; auto-detected when omitted
 
-# Auth (replace Manus OAuth)
+# Auth (replace Manus OAuth) — email/magic-link is implemented
 JWT_SECRET=<generate 64-char random string>
+APP_URL=https://reconcileai.vip                 # used to build magic-link URLs
 
 # File Storage (Cloudflare R2 recommended)
 AWS_ACCESS_KEY_ID=...
@@ -319,9 +340,12 @@ AWS_REGION=auto
 AWS_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
 AWS_BUCKET_NAME=reconcileai-storage
 
-# Email (for magic link auth and notifications)
+# Email (magic-link sign-in, invites, CFO reports, alerts, owner notices)
+# Without these, ALL email is a safe no-op (logged, never throws).
 RESEND_API_KEY=re_...
 EMAIL_FROM=noreply@reconcileai.vip
+EMAIL_FROM_NAME=ReconcileAI
+OWNER_EMAIL=ops@reconcileai.vip                 # owner/system notifications; falls back to EMAIL_FROM
 
 # Manus-specific (DO NOT set in production — these are Manus-injected)
 # BUILT_IN_FORGE_API_KEY  ← Manus only

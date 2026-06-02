@@ -8,10 +8,19 @@ export const ENV = {
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
   // Direct LLM provider (production / Rocket.new / self-hosted)
-  // Set DIRECT_LLM_API_KEY to switch away from Manus Forge with zero code changes.
+  // Set DIRECT_LLM_API_KEY to switch away from Manus Forge.
   directLlmApiKey: process.env.DIRECT_LLM_API_KEY ?? "",
-  directLlmApiUrl: process.env.DIRECT_LLM_API_URL ?? "",   // e.g. https://api.anthropic.com or https://api.openai.com
-  directLlmModel: process.env.DIRECT_LLM_MODEL ?? "",       // e.g. gpt-4o, claude-3-5-sonnet-20241022
+  directLlmApiUrl: process.env.DIRECT_LLM_API_URL ?? "",   // base URL, e.g. https://api.anthropic.com or https://api.openai.com
+  directLlmModel: process.env.DIRECT_LLM_MODEL ?? "",       // e.g. claude-sonnet-4-5, gpt-4o
+  // Optional explicit provider selector: "anthropic" | "openai". When empty, auto-detected
+  // from the model name ("claude…" → anthropic) or the URL (contains "anthropic").
+  directLlmProvider: (process.env.DIRECT_LLM_PROVIDER ?? "").toLowerCase(),
+  // Transactional email (Resend). When unset, email sending is a no-op (logs a warning).
+  resendApiKey: process.env.RESEND_API_KEY ?? "",
+  emailFrom: process.env.EMAIL_FROM ?? "",                 // e.g. noreply@reconcileai.vip
+  emailFromName: process.env.EMAIL_FROM_NAME ?? "ReconcileAI",
+  ownerEmail: process.env.OWNER_EMAIL ?? "",               // recipient for owner/system notifications
+  appUrl: process.env.APP_URL ?? "",                       // canonical app origin, e.g. https://reconcileai.vip
   // Woodcore (Fineract) test tenant
   woodcoreDbHost: process.env.WOODCORE_DB_HOST ?? "",
   woodcoreDbPort: parseInt(process.env.WOODCORE_DB_PORT ?? "3306", 10),

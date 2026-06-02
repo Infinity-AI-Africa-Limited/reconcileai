@@ -139,29 +139,67 @@ export type ResponseFormat =
 
 // ─── Provider resolution ─────────────────────────────────────────────────────
 
+type ProviderKind = "forge" | "openai" | "anthropic";
+
 type ProviderConfig = {
   mode: "forge" | "direct";
+  kind: ProviderKind;
   apiUrl: string;
   apiKey: string;
   model: string;
 };
 
+/**
+ * Decide whether the direct provider speaks Anthropic's Messages API or an
+ * OpenAI-compatible Chat Completions API. Explicit DIRECT_LLM_PROVIDER wins;
+ * otherwise auto-detect from the model name ("claude…") or the URL host.
+ */
+function detectDirectKind(): "openai" | "anthropic" {
+  const explicit = ENV.directLlmProvider;
+  if (explicit === "anthropic") return "anthropic";
+  if (explicit === "openai") return "openai";
+  const model = ENV.directLlmModel.trim().toLowerCase();
+  const url = ENV.directLlmApiUrl.trim().toLowerCase();
+  if (model.startsWith("claude") || url.includes("anthropic")) return "anthropic";
+  return "openai";
+}
+
+/**
+ * Resolve the exact endpoint, tolerating every shape the docs have used:
+ *   ""                                    → default base + correct path
+ *   "https://api.anthropic.com"           → + "/v1/messages"
+ *   "https://api.anthropic.com/v1"        → strip "/v1", + "/v1/messages"
+ *   "https://api.anthropic.com/v1/messages" → used as-is
+ *   "https://api.openai.com/v1/chat/completions" → used as-is
+ */
+function resolveDirectEndpoint(rawUrl: string, kind: "openai" | "anthropic"): string {
+  const path = kind === "anthropic" ? "/v1/messages" : "/v1/chat/completions";
+  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    const base = kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com";
+    return base + path;
+  }
+  if (/\/(messages|chat\/completions)$/.test(trimmed)) return trimmed;
+  const base = trimmed.replace(/\/v1$/, "");
+  return base + path;
+}
+
 function resolveProvider(): ProviderConfig {
   const directKey = ENV.directLlmApiKey;
 
   if (directKey && directKey.trim().length > 0) {
-    // Mode 2: Direct provider (Anthropic / OpenAI / any OpenAI-compatible API)
-    const apiUrl =
-      ENV.directLlmApiUrl && ENV.directLlmApiUrl.trim().length > 0
-        ? `${ENV.directLlmApiUrl.replace(/\/$/, "")}/v1/chat/completions`
-        : "https://api.openai.com/v1/chat/completions";
+    // Mode 2: Direct provider (Anthropic native, or OpenAI-compatible API)
+    const kind = detectDirectKind();
+    const apiUrl = resolveDirectEndpoint(ENV.directLlmApiUrl, kind);
 
     const model =
       ENV.directLlmModel && ENV.directLlmModel.trim().length > 0
-        ? ENV.directLlmModel
-        : "gpt-4o";
+        ? ENV.directLlmModel.trim()
+        : kind === "anthropic"
+          ? "claude-3-5-sonnet-latest"
+          : "gpt-4o";
 
-    return { mode: "direct", apiUrl, apiKey: directKey, model };
+    return { mode: "direct", kind, apiUrl, apiKey: directKey, model };
   }
 
   // Mode 1: Manus Forge (default)
@@ -179,6 +217,7 @@ function resolveProvider(): ProviderConfig {
 
   return {
     mode: "forge",
+    kind: "forge",
     apiUrl,
     apiKey: ENV.forgeApiKey,
     model: "gemini-2.5-flash",
@@ -291,6 +330,11 @@ const normalizeResponseFormat = ({
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   const provider = resolveProvider();
 
+  // Anthropic speaks the Messages API, not OpenAI Chat Completions — translate.
+  if (provider.kind === "anthropic") {
+    return invokeAnthropic(params, provider);
+  }
+
   const {
     messages,
     tools,
@@ -367,4 +411,232 @@ export function getLlmProviderInfo(): {
 } {
   const { mode, model, apiUrl } = resolveProvider();
   return { mode, model, apiUrl };
+}
+
+// ─── Anthropic Messages API adapter ────────────────────────────────────────────
+//
+// Translates the OpenAI-shaped InvokeParams into Anthropic's native Messages API
+// and maps the response back into the OpenAI-shaped InvokeResult, so every
+// existing caller of invokeLLM() keeps working byte-for-byte unchanged.
+//
+// Key differences handled here:
+//  • system prompts are a top-level `system` field, not a message with role "system"
+//  • `max_tokens` is required
+//  • structured output (response_format / outputSchema) has no direct equivalent —
+//    we synthesise a single forced tool ("emit_result") whose input_schema is the
+//    requested JSON schema, then return the tool input as the message content so
+//    callers that JSON.parse(choices[0].message.content) keep working.
+
+const ANTHROPIC_VERSION = "2023-06-01";
+const EMIT_TOOL_NAME = "emit_result";
+
+type AnthropicTextBlock = { type: "text"; text: string };
+type AnthropicToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown };
+type AnthropicContentBlock = AnthropicTextBlock | AnthropicToolUseBlock;
+
+export type AnthropicResponse = {
+  id: string;
+  model: string;
+  stop_reason: string | null;
+  content: AnthropicContentBlock[];
+  usage?: { input_tokens: number; output_tokens: number };
+};
+
+function extractPlainText(content: MessageContent | MessageContent[]): string {
+  return ensureArray(content)
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part.type === "text") return part.text;
+      return "";
+    })
+    .join("\n")
+    .trim();
+}
+
+function toAnthropicContent(
+  content: MessageContent | MessageContent[]
+): string | Array<Record<string, unknown>> {
+  const parts = ensureArray(content).map(normalizeContentPart);
+  if (parts.length === 1 && parts[0].type === "text") return parts[0].text;
+  return parts.map((p) => {
+    if (p.type === "text") return { type: "text", text: p.text };
+    if (p.type === "image_url") return { type: "image", source: { type: "url", url: p.image_url.url } };
+    // Anthropic has no generic file block on this path — degrade to a text note.
+    return { type: "text", text: `[attachment: ${(p as FileContent).file_url.url}]` };
+  });
+}
+
+/**
+ * Build the Anthropic Messages API request body from OpenAI-shaped params.
+ * Exported for unit testing (no network). Returns `forcedEmit` so the response
+ * mapper knows to read the result from the forced tool call.
+ */
+export function buildAnthropicPayload(
+  params: InvokeParams,
+  model: string
+): { payload: Record<string, unknown>; forcedEmit: boolean } {
+  const systemTexts: string[] = [];
+  const messages: Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }> = [];
+
+  for (const m of params.messages) {
+    if (m.role === "system") {
+      const text = extractPlainText(m.content);
+      if (text) systemTexts.push(text);
+      continue;
+    }
+    if (m.role === "tool" || m.role === "function") {
+      // No current caller uses tool results; carry the text as a user turn.
+      const text = ensureArray(m.content)
+        .map((p) => (typeof p === "string" ? p : JSON.stringify(p)))
+        .join("\n");
+      messages.push({ role: "user", content: text });
+      continue;
+    }
+    messages.push({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: toAnthropicContent(m.content),
+    });
+  }
+
+  const payload: Record<string, unknown> = {
+    model,
+    max_tokens: params.maxTokens ?? params.max_tokens ?? 4096,
+    messages,
+  };
+  if (systemTexts.length > 0) payload.system = systemTexts.join("\n\n");
+
+  // Structured output → forced single-tool call.
+  const rf = normalizeResponseFormat({
+    responseFormat: params.responseFormat,
+    response_format: params.response_format,
+    outputSchema: params.outputSchema,
+    output_schema: params.output_schema,
+  });
+
+  let forcedEmit = false;
+  if (rf && (rf.type === "json_schema" || rf.type === "json_object")) {
+    forcedEmit = true;
+    const inputSchema =
+      rf.type === "json_schema"
+        ? (rf.json_schema.schema as Record<string, unknown>)
+        : { type: "object", additionalProperties: true };
+    payload.tools = [
+      {
+        name: EMIT_TOOL_NAME,
+        description: "Return the result strictly as structured data matching the schema.",
+        input_schema: inputSchema,
+      },
+    ];
+    payload.tool_choice = { type: "tool", name: EMIT_TOOL_NAME };
+  } else if (params.tools && params.tools.length > 0) {
+    // Pass-through for callers that supply real tools.
+    payload.tools = params.tools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters ?? { type: "object" },
+    }));
+    const tc = normalizeToolChoice(params.toolChoice || params.tool_choice, params.tools);
+    if (tc === "auto") payload.tool_choice = { type: "auto" };
+    else if (tc && typeof tc === "object") payload.tool_choice = { type: "tool", name: tc.function.name };
+  }
+
+  return { payload, forcedEmit };
+}
+
+function mapStopReason(stop: string | null): string {
+  switch (stop) {
+    case "end_turn":
+    case "stop_sequence":
+      return "stop";
+    case "max_tokens":
+      return "length";
+    case "tool_use":
+      return "tool_calls";
+    default:
+      return stop ?? "stop";
+  }
+}
+
+/**
+ * Map an Anthropic Messages response into the OpenAI-shaped InvokeResult.
+ * Exported for unit testing. When `forcedEmit`, the structured tool input is
+ * serialised into `choices[0].message.content`.
+ */
+export function mapAnthropicResponse(
+  data: AnthropicResponse,
+  forcedEmit: boolean,
+  fallbackModel: string
+): InvokeResult {
+  const blocks = Array.isArray(data.content) ? data.content : [];
+  const textBlocks = blocks.filter((b): b is AnthropicTextBlock => b.type === "text");
+  const toolUseBlocks = blocks.filter((b): b is AnthropicToolUseBlock => b.type === "tool_use");
+
+  let content = "";
+  let toolCalls: ToolCall[] | undefined;
+
+  if (forcedEmit) {
+    const emit = toolUseBlocks.find((b) => b.name === EMIT_TOOL_NAME) ?? toolUseBlocks[0];
+    content = emit ? JSON.stringify(emit.input) : textBlocks.map((b) => b.text).join("");
+  } else {
+    content = textBlocks.map((b) => b.text).join("");
+    if (toolUseBlocks.length > 0) {
+      toolCalls = toolUseBlocks.map((b) => ({
+        id: b.id,
+        type: "function" as const,
+        function: { name: b.name, arguments: JSON.stringify(b.input) },
+      }));
+    }
+  }
+
+  return {
+    id: data.id,
+    created: Math.floor(Date.now() / 1000),
+    model: data.model ?? fallbackModel,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content,
+          ...(toolCalls ? { tool_calls: toolCalls } : {}),
+        },
+        finish_reason: mapStopReason(data.stop_reason),
+      },
+    ],
+    usage: data.usage
+      ? {
+          prompt_tokens: data.usage.input_tokens,
+          completion_tokens: data.usage.output_tokens,
+          total_tokens: data.usage.input_tokens + data.usage.output_tokens,
+        }
+      : undefined,
+  };
+}
+
+async function invokeAnthropic(
+  params: InvokeParams,
+  provider: ProviderConfig
+): Promise<InvokeResult> {
+  const { payload, forcedEmit } = buildAnthropicPayload(params, provider.model);
+
+  const response = await fetch(provider.apiUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": provider.apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `LLM invoke failed [anthropic/${provider.model}]: ` +
+        `${response.status} ${response.statusText} – ${errorText}`
+    );
+  }
+
+  const data = (await response.json()) as AnthropicResponse;
+  return mapAnthropicResponse(data, forcedEmit, provider.model);
 }

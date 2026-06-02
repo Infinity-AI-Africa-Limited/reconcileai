@@ -358,15 +358,21 @@ DIRECT_LLM_MODEL=gpt-4o
 
 **No code changes required.** The `invokeLLM()` helper will automatically switch to the direct provider.
 
-**Step 2 — For Anthropic instead of OpenAI:**
+**Step 2 — For Anthropic (recommended, native):**
 
 ```bash
 DIRECT_LLM_API_KEY=sk-ant-...
-DIRECT_LLM_API_URL=https://api.anthropic.com/v1/messages
-DIRECT_LLM_MODEL=claude-3-5-sonnet-20241022
+DIRECT_LLM_API_URL=https://api.anthropic.com   # base URL; /v1/messages appended automatically
+DIRECT_LLM_MODEL=claude-sonnet-4-5
+DIRECT_LLM_PROVIDER=anthropic                   # optional; auto-detected from model/URL
 ```
 
-Note: Anthropic's API format differs slightly from OpenAI. The current `invokeLLM()` implementation uses the OpenAI-compatible format. If using Anthropic directly, either use an OpenAI-compatible proxy (e.g., LiteLLM) or update `server/_core/llm.ts` to handle Anthropic's message format.
+`server/_core/llm.ts` now ships a **native Anthropic Messages-API adapter** (`invokeAnthropic`),
+so no OpenAI-compatibility proxy is required. It extracts `system` prompts, sets the required
+`max_tokens`, maps structured-output requests (`response_format` / `outputSchema`) onto a forced
+Anthropic tool-use call, and translates the response back into the OpenAI-shaped `InvokeResult`
+that every existing `invokeLLM()` caller expects. The exported helpers `buildAnthropicPayload()`
+and `mapAnthropicResponse()` are unit-tested in `server/llm.anthropic.test.ts`.
 
 **Step 3 — Recommended: Use LiteLLM as a unified proxy**
 

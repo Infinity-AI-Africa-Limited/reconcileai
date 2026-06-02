@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { ENV } from "./env";
+import { sendEmail, renderBrandedHtml, markdownToBasicHtml } from "./email";
 
 export type NotificationPayload = {
   title: string;
@@ -58,57 +59,64 @@ const validatePayload = (input: NotificationPayload): NotificationPayload => {
 };
 
 /**
- * Dispatches a project-owner notification through the Manus Notification Service.
- * Returns `true` if the request was accepted, `false` when the upstream service
- * cannot be reached (callers can fall back to email/slack). Validation errors
- * bubble up as TRPC errors so callers can fix the payload.
+ * Dispatches a platform-owner notification.
+ *
+ * Preferred path (production): a real email via Resend to OWNER_EMAIL (falling
+ * back to EMAIL_FROM). Legacy path (Manus prototype): the Manus Notification
+ * Service. If neither is configured it warns and returns `false` — it never
+ * throws on a missing transport, so cron jobs and digests degrade gracefully.
+ * Validation errors (empty title/content) still bubble up as TRPC errors.
+ *
+ * Returns `true` when the notification was accepted/sent.
  */
 export async function notifyOwner(
   payload: NotificationPayload
 ): Promise<boolean> {
   const { title, content } = validatePayload(payload);
 
-  if (!ENV.forgeApiUrl) {
-    throw new TRPCError({
-      code: "INTERNAL_SERVER_ERROR",
-      message: "Notification service URL is not configured.",
-    });
+  // Preferred: real email via Resend.
+  if (ENV.resendApiKey.trim().length > 0 && ENV.emailFrom.trim().length > 0) {
+    const to = ENV.ownerEmail.trim() || ENV.emailFrom.trim();
+    const html = renderBrandedHtml(title, markdownToBasicHtml(content));
+    const result = await sendEmail({ to, subject: title, html, text: content });
+    return result.success;
   }
 
-  if (!ENV.forgeApiKey) {
-    throw new TRPCError({
-      code: "INTERNAL_SERVER_ERROR",
-      message: "Notification service API key is not configured.",
-    });
-  }
+  // Legacy: Manus Forge notification service (prototype only).
+  if (ENV.forgeApiUrl && ENV.forgeApiKey) {
+    const endpoint = buildEndpointUrl(ENV.forgeApiUrl);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${ENV.forgeApiKey}`,
+          "content-type": "application/json",
+          "connect-protocol-version": "1",
+        },
+        body: JSON.stringify({ title, content }),
+      });
 
-  const endpoint = buildEndpointUrl(ENV.forgeApiUrl);
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        console.warn(
+          `[Notification] Failed to notify owner (${response.status} ${response.statusText})${
+            detail ? `: ${detail}` : ""
+          }`
+        );
+        return false;
+      }
 
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${ENV.forgeApiKey}`,
-        "content-type": "application/json",
-        "connect-protocol-version": "1",
-      },
-      body: JSON.stringify({ title, content }),
-    });
-
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      console.warn(
-        `[Notification] Failed to notify owner (${response.status} ${response.statusText})${
-          detail ? `: ${detail}` : ""
-        }`
-      );
+      return true;
+    } catch (error) {
+      console.warn("[Notification] Error calling notification service:", error);
       return false;
     }
-
-    return true;
-  } catch (error) {
-    console.warn("[Notification] Error calling notification service:", error);
-    return false;
   }
+
+  console.warn(
+    "[Notification] No delivery channel configured — set RESEND_API_KEY + EMAIL_FROM " +
+      "(recommended) or BUILT_IN_FORGE_API_* (legacy). Skipping owner notification."
+  );
+  return false;
 }

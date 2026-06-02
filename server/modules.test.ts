@@ -57,10 +57,10 @@ describe("Module Configuration", () => {
       const caller = appRouter.createCaller(adminContext);
       
       const result = await caller.modules.toggle({
-        moduleType: "transaction_integrity",
+        moduleType: "settlement",
         isEnabled: true,
       });
-      
+
       expect(result.success).toBe(true);
     });
 
@@ -80,7 +80,7 @@ describe("Module Configuration", () => {
       
       await expect(
         caller.modules.toggle({
-          moduleType: "transaction_integrity",
+          moduleType: "settlement",
           isEnabled: true,
         })
       ).rejects.toThrow();
@@ -126,7 +126,7 @@ describe("Module Configuration", () => {
       
       await expect(
         caller.modules.updateConfig({
-          moduleType: "transaction_integrity",
+          moduleType: "settlement",
           configuration: { test: true },
         })
       ).rejects.toThrow();
@@ -153,7 +153,7 @@ describe("Module Configuration", () => {
       // The error confirms the input was accepted and validation proceeded
     });
 
-    it("should default to transaction_integrity if moduleType not provided", async () => {
+    it("should default to settlement if moduleType not provided", async () => {
       const caller = appRouter.createCaller(adminContext);
       
       // This will fail due to missing channels, but validates the default

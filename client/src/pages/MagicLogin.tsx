@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { Loader2, CheckCircle2, XCircle, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getLoginUrl } from "@/const";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
@@ -129,9 +128,9 @@ export default function MagicLogin() {
             <div className="flex flex-col gap-3 pt-2">
               <Button
                 className="w-full bg-[#1B365D] hover:bg-[#152a4a] text-white"
-                onClick={() => (window.location.href = getLoginUrl())}
+                onClick={() => setLocation("/login")}
               >
-                Sign in with Manus
+                Back to sign in
               </Button>
               <Button
                 variant="outline"

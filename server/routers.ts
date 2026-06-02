@@ -286,6 +286,12 @@ const distributorRouter = router({
     }),
 });
 
+// In-memory throttle for self-service magic-link requests, keyed by normalised
+// email. Prevents inbox flooding / abuse. Adequate for the single-process pilot
+// deployment; move to a shared store (Redis) when scaling horizontally.
+const magicLinkRequestCooldown = new Map<string, number>();
+const MAGIC_LINK_COOLDOWN_MS = 60_000;
+
 // ─── Router ──────────────────────────────────────────────────────────────
 
 export const appRouter = router({
@@ -293,6 +299,35 @@ export const appRouter = router({
 
   auth: router({
     me: publicProcedure.query((opts) => opts.ctx.user),
+    // Self-service passwordless sign-in: emails a single-use magic link to an
+    // existing active user. Always returns a generic success so the endpoint
+    // never reveals whether an email is registered (no account enumeration).
+    requestMagicLink: publicProcedure
+      .input(z.object({
+        email: z.string().email(),
+        origin: z.string().url().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const email = input.email.trim().toLowerCase();
+        const now = Date.now();
+        const last = magicLinkRequestCooldown.get(email);
+
+        if (!last || now - last > MAGIC_LINK_COOLDOWN_MS) {
+          magicLinkRequestCooldown.set(email, now);
+          const host = ctx.req.get("host");
+          const origin =
+            input.origin ||
+            (host ? `${ctx.req.protocol}://${host}` : "https://reconcileai.vip");
+          try {
+            const { sendLoginLinkEmail } = await import("./magicLinkService");
+            await sendLoginLinkEmail({ email, origin });
+          } catch (err) {
+            console.error("[auth.requestMagicLink] Failed to send login link:", err);
+          }
+        }
+
+        return { success: true } as const;
+      }),
     logout: publicProcedure.mutation(async ({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       // Audit: log logout before clearing the cookie
