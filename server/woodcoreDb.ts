@@ -19,7 +19,10 @@ function createPool(): mysql.Pool {
     connectionLimit: 5,
     queueLimit: 0,
     connectTimeout: 15000,
-    // Allow connections from any IP — the MySQL user grant controls access
+    // Force all DATE/DATETIME columns to return as strings, not JS Date objects.
+    // This prevents React "Objects are not valid as a React child" errors when
+    // rendering date fields directly in JSX.
+    dateStrings: true,
     multipleStatements: false,
   });
 }

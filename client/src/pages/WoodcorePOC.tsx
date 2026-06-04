@@ -814,7 +814,7 @@ function ComparisonPanel({ runs }: { runs: RunRecord[] }) {
               <SelectContent>
                 {runs.map((r) => (
                   <SelectItem key={r.id} value={r.id.toString()}>
-                    Run #{r.id} — {r.periodStart} → {r.periodEnd} ({r.status})
+                    Run #{r.id} — {String(r.periodStart)} → {String(r.periodEnd)} ({r.status})
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -829,7 +829,7 @@ function ComparisonPanel({ runs }: { runs: RunRecord[] }) {
               <SelectContent>
                 {runs.map((r) => (
                   <SelectItem key={r.id} value={r.id.toString()}>
-                    Run #{r.id} — {r.periodStart} → {r.periodEnd} ({r.status})
+                    Run #{r.id} — {String(r.periodStart)} → {String(r.periodEnd)} ({r.status})
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -1264,7 +1264,7 @@ function POCModePanel({
                     <div key={run.id} className="flex items-center gap-3 text-sm py-2 border-b last:border-0">
                       <span className="font-mono text-gray-500 text-xs">Run #{run.id}</span>
                       <span className="text-gray-700">{run.productName}</span>
-                      <span className="text-gray-400">{run.periodStart} → {run.periodEnd}</span>
+                      <span className="text-gray-400">{String(run.periodStart)} → {String(run.periodEnd)}</span>
                       <Badge className={`ml-auto text-xs ${run.status === "BALANCED" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
                         {run.status}
                       </Badge>
@@ -1689,9 +1689,9 @@ export default function WoodcorePOC() {
                   </tr></thead>
                   <tbody>
                     {liveGlQuery.data.map(r => (
-                      <tr key={r.date} className="border-b last:border-0 hover:bg-gray-50">
-                        <td className="py-2 pr-4 font-mono text-gray-700">{r.date}</td>
-                        <td className="py-2 pr-4 text-right text-gray-700">{r.totalDebits.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      <tr key={String(r.date)} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-2 pr-4 font-mono text-gray-700">{String(r.date)}</td>
+                        <td className="py-2 pr-4 text-right">{r.totalDebits.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         <td className="py-2 pr-4 text-right text-gray-700">{r.totalCredits.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         <td className={`py-2 pr-4 text-right font-medium ${Math.abs(r.variance) < 0.01 ? "text-green-600" : "text-red-600"}`}>
                           {r.variance >= 0 ? "+" : ""}{r.variance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
@@ -1723,8 +1723,8 @@ export default function WoodcorePOC() {
                   </tr></thead>
                   <tbody>
                     {liveSavingsQuery.data.map(r => (
-                      <tr key={r.date} className="border-b last:border-0 hover:bg-gray-50">
-                        <td className="py-2 pr-4 font-mono text-gray-700">{r.date}</td>
+                      <tr key={String(r.date)} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-2 pr-4 font-mono text-gray-700">{String(r.date)}</td>
                         <td className="py-2 pr-4 text-right">{r.savingsTxns.toLocaleString()}</td>
                         <td className="py-2 pr-4 text-right text-green-600">{r.glLinked.toLocaleString()}</td>
                         <td className={`py-2 pr-4 text-right font-medium ${r.unmatched > 0 ? "text-red-600" : "text-gray-400"}`}>{r.unmatched}</td>
@@ -1755,8 +1755,8 @@ export default function WoodcorePOC() {
                   </tr></thead>
                   <tbody>
                     {liveLoanQuery.data.map(r => (
-                      <tr key={r.date} className="border-b last:border-0 hover:bg-gray-50">
-                        <td className="py-2 pr-4 font-mono text-gray-700">{r.date}</td>
+                      <tr key={String(r.date)} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-2 pr-4 font-mono text-gray-700">{String(r.date)}</td>
                         <td className="py-2 pr-4 text-right">{r.loanTxns.toLocaleString()}</td>
                         <td className="py-2 pr-4 text-right text-green-600">{r.glLinked.toLocaleString()}</td>
                         <td className={`py-2 pr-4 text-right font-medium ${r.unmatched > 0 ? "text-red-600" : "text-gray-400"}`}>{r.unmatched}</td>
