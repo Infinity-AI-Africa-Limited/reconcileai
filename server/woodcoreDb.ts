@@ -20,6 +20,11 @@ export function getWoodcorePool(): mysql.Pool {
       connectionLimit: 5,
       queueLimit: 0,
       connectTimeout: 10000,
+      // Return DATE/DATETIME columns as strings, not JS Date objects. The live*
+      // procedures pass these straight to the UI, which renders them as text;
+      // a raw Date would trigger React error #31 ("objects are not valid as a
+      // React child"). Keeps the API contract (date: string) honest.
+      dateStrings: true,
     });
   }
   return pool;
