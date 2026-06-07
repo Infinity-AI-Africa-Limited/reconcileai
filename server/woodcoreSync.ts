@@ -117,7 +117,19 @@ async function syncOne(spec: TableSpec): Promise<TableResult> {
       [lastId, spec.batch]
     );
     if (rows.length === 0) break;
-    const values = rows.map((r) => present.map((c) => (r as Record<string, unknown>)[c] ?? null));
+    const values = rows.map((r) => {
+      const rr = r as Record<string, unknown>;
+      return present.map((c) => {
+        const v = rr[c];
+        // The mirror's created_date is NOT NULL, but some live rows have it null.
+        // It's metadata (the engine reconciles on transaction_date/entry_date),
+        // so fall back to those rather than fail the insert.
+        if (v == null && c === "created_date") {
+          return rr["transaction_date"] ?? rr["entry_date"] ?? "2000-01-01 00:00:00";
+        }
+        return v ?? null;
+      });
+    });
     await tidb.query(`INSERT INTO \`${spec.mirror}\` (${colSql}) VALUES ?`, [values]);
     copied += rows.length;
     lastId = Number((rows[rows.length - 1] as Record<string, unknown>).id);
@@ -144,11 +156,19 @@ export async function syncWoodcoreMirror(): Promise<SyncState> {
 
   const startedAt = Date.now();
   try {
+    // Per-table isolation: a failure in one table must not abort the rest
+    // (e.g. the heavy GL table should still sync if a smaller table errors).
     for (const spec of SPECS) {
-      const result = await syncOne(spec);
       const idx = syncState.tables.findIndex((t) => t.mirror === spec.mirror);
-      if (idx >= 0) syncState.tables[idx] = result;
-      console.log(`[woodcoreSync] ${result.mirror}: ${result.status} copied=${result.copied}${result.reason ? ` (${result.reason})` : ""}`);
+      try {
+        const result = await syncOne(spec);
+        if (idx >= 0) syncState.tables[idx] = result;
+        console.log(`[woodcoreSync] ${result.mirror}: ${result.status} copied=${result.copied}${result.reason ? ` (${result.reason})` : ""}`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (idx >= 0) syncState.tables[idx] = { mirror: spec.mirror, status: "error", copied: syncState.tables[idx]?.copied ?? 0, reason: msg };
+        console.error(`[woodcoreSync] ${spec.mirror} failed: ${msg}`);
+      }
     }
   } catch (e) {
     syncState.error = e instanceof Error ? e.message : String(e);
