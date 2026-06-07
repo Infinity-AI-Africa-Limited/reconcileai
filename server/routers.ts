@@ -3965,6 +3965,41 @@ Always be specific, reference actual exception IDs and amounts where available, 
       return getWoodcoreStats();
     }),
 
+    // List reconcilable products (have a GL mapping + transactions) for the run picker.
+    // Used by the live POC so the engine targets a real product instead of a hardcoded id.
+    listProducts: publicProcedure
+      .input(z.object({ type: z.enum(["SAVINGS", "LOAN"]) }))
+      .query(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { sql } = await import("drizzle-orm");
+        const q = input.type === "LOAN"
+          ? sql`
+              SELECT p.id AS id, p.name AS name, COUNT(DISTINCT lt.id) AS txn_count
+              FROM wc_m_product_loan p
+              JOIN wc_acc_product_mapping m ON m.product_id = p.id AND m.product_type = 1
+              LEFT JOIN wc_m_loan l ON l.product_id = p.id
+              LEFT JOIN wc_m_loan_transaction lt ON lt.loan_id = l.id
+              GROUP BY p.id, p.name
+              HAVING COUNT(DISTINCT lt.id) > 0
+              ORDER BY txn_count DESC
+              LIMIT 100`
+          : sql`
+              SELECT p.id AS id, p.name AS name, COUNT(DISTINCT st.id) AS txn_count
+              FROM wc_m_savings_product p
+              JOIN wc_acc_product_mapping m ON m.product_id = p.id AND m.product_type = 2
+              LEFT JOIN wc_m_savings_account a ON a.product_id = p.id
+              LEFT JOIN wc_m_savings_account_transaction st ON st.savings_account_id = a.id
+              GROUP BY p.id, p.name
+              HAVING COUNT(DISTINCT st.id) > 0
+              ORDER BY txn_count DESC
+              LIMIT 100`;
+        const r = await db2.execute(q);
+        const rows = (r as any)[0] as Array<{ id: number; name: string; txn_count: number }>;
+        return rows.map((x) => ({ id: Number(x.id), name: String(x.name), txnCount: Number(x.txn_count) }));
+      }),
+
     // Get all reconciliation runs
     getRuns: publicProcedure.query(async () => {
       return getLatestRuns(20);

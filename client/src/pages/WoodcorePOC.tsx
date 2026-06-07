@@ -5,7 +5,7 @@
  *           exception status tracking (Acknowledged / Resolved / Escalated), PDF export.
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { LineChart, Line, Tooltip, ResponsiveContainer } from "recharts";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
@@ -1080,9 +1080,17 @@ function POCModePanel({
   const [bulkNote, setBulkNote] = useState("");
   const [shareToken, setShareToken] = useState<string | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
+  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
 
   const statsQuery = trpc.woodcore.stats.useQuery();
   const runsQuery = trpc.woodcore.getRuns.useQuery();
+  const productsQuery = trpc.woodcore.listProducts.useQuery({ type: mode });
+  // Default to the most active product once the list loads.
+  useEffect(() => {
+    if (selectedProductId == null && productsQuery.data && productsQuery.data.length > 0) {
+      setSelectedProductId(productsQuery.data[0].id);
+    }
+  }, [productsQuery.data, selectedProductId]);
 
   const bulkAcknowledge = trpc.woodcore.bulkAcknowledge.useMutation({
     onSuccess: () => {
@@ -1137,8 +1145,8 @@ function POCModePanel({
   }, []);
 
   const handleRunPOC = () => {
-    const productId = mode === "LOAN" ? 1 : 2;
-    runPOC.mutate({ productId, productType: mode, currencyCode: "NGN", periodStart, periodEnd, varianceThreshold: 1.0 });
+    if (!selectedProductId) return;
+    runPOC.mutate({ productId: selectedProductId, productType: mode, currencyCode: "NGN", periodStart, periodEnd, varianceThreshold: 1.0 });
     setShowDatePanel(false);
   };
 
@@ -1171,7 +1179,7 @@ function POCModePanel({
           </Button>
           <Button
             onClick={handleRunPOC}
-            disabled={isRunning}
+            disabled={isRunning || !selectedProductId}
             className="bg-white text-gray-800 hover:bg-gray-100 gap-2 text-sm font-semibold"
           >
             {isRunning
@@ -1206,13 +1214,13 @@ function POCModePanel({
             <div className="flex items-end gap-3">
               <div className="space-y-1">
                 <Label className="text-xs text-gray-500">From</Label>
-                <Input type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} className="h-8 text-sm w-40" min="2025-04-01" max="2025-07-31" />
+                <Input type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} className="h-8 text-sm w-40" min="2024-01-01" max="2026-12-31" />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs text-gray-500">To</Label>
-                <Input type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} className="h-8 text-sm w-40" min="2025-04-01" max="2025-07-31" />
+                <Input type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} className="h-8 text-sm w-40" min="2024-01-01" max="2026-12-31" />
               </div>
-              <Button size="sm" onClick={handleRunPOC} disabled={isRunning} className={`${accentClass} text-white gap-1.5`}>
+              <Button size="sm" onClick={handleRunPOC} disabled={isRunning || !selectedProductId} className={`${accentClass} text-white gap-1.5`}>
                 <Play className="h-3.5 w-3.5" /> Run
               </Button>
             </div>
@@ -1221,6 +1229,33 @@ function POCModePanel({
       )}
 
       <div className="max-w-6xl mx-auto px-6 py-6 space-y-6">
+        {/* Product selector — pick a live product to reconcile */}
+        <div className="bg-white border rounded-xl px-4 py-3 flex items-center gap-3">
+          <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">
+            {isSavings ? "Savings Product" : "Loan Product"}
+          </Label>
+          <Select
+            value={selectedProductId?.toString() ?? ""}
+            onValueChange={(v) => setSelectedProductId(Number(v))}
+          >
+            <SelectTrigger className="max-w-lg">
+              <SelectValue placeholder={productsQuery.isLoading ? "Loading products…" : "Select a product to reconcile…"} />
+            </SelectTrigger>
+            <SelectContent>
+              {(productsQuery.data ?? []).map((p) => (
+                <SelectItem key={p.id} value={p.id.toString()}>
+                  {p.name} · #{p.id} · {p.txnCount.toLocaleString()} txns
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {productsQuery.data && productsQuery.data.length === 0 && (
+            <span className="text-xs text-amber-600">
+              No reconcilable {isSavings ? "savings" : "loan"} products found in the live data.
+            </span>
+          )}
+        </div>
+
         {/* Dataset stats */}
         <div className="grid grid-cols-3 gap-4">
           {isSavings ? (
