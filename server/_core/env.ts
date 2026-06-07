@@ -21,6 +21,9 @@ export const ENV = {
   emailFromName: process.env.EMAIL_FROM_NAME ?? "ReconcileAI",
   ownerEmail: process.env.OWNER_EMAIL ?? "",               // recipient for owner/system notifications
   appUrl: process.env.APP_URL ?? "",                       // canonical app origin, e.g. https://reconcileai.vip
+  // Shared secret guarding maintenance/cron endpoints (e.g. Woodcore mirror sync).
+  // Falls back to JWT_SECRET when unset, so no extra var is strictly required.
+  cronSecret: process.env.CRON_SECRET ?? "",
   // File storage — AWS S3 or S3-compatible (Cloudflare R2). Replaces the Manus storage proxy.
   // Tolerates both AWS_S3_* and the alternate names used across the docs.
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "",

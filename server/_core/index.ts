@@ -13,6 +13,7 @@ import { getDb } from "../db";
 import { sql } from "drizzle-orm";
 import { storagePut, storageGet, storageDelete } from "../storage";
 import { sdk } from "./sdk";
+import { ENV } from "./env";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -313,6 +314,31 @@ async function startServer() {
       console.error("[magic-login] error:", err);
       return res.redirect(302, "/?error=login_failed");
     }
+  });
+
+  // ── Woodcore live → mirror sync ────────────────────────────────────────────
+  // POST /api/woodcore/sync  — start a full mirror refresh (async; poll GET for progress)
+  // GET  /api/woodcore/sync  — current sync state
+  // Guarded by a shared secret (header x-sync-secret == CRON_SECRET, falling back
+  // to JWT_SECRET). Lets a scheduler (Railway Cron) or an operator trigger it
+  // without an authenticated session.
+  const syncSecret = () => ENV.cronSecret || ENV.cookieSecret;
+  const syncAuthorized = (req: import("express").Request) => {
+    const secret = syncSecret();
+    const provided = (req.headers["x-sync-secret"] as string) || "";
+    return Boolean(secret) && provided === secret;
+  };
+  app.post("/api/woodcore/sync", async (req, res) => {
+    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    const { syncWoodcoreMirror, syncState } = await import("../woodcoreSync");
+    if (syncState.running) return res.status(409).json({ error: "already running", state: syncState });
+    syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", e));
+    res.status(202).json({ started: true });
+  });
+  app.get("/api/woodcore/sync", async (req, res) => {
+    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    const { syncState } = await import("../woodcoreSync");
+    res.json(syncState);
   });
 
   // Storage proxy — serves /manus-storage/* assets via signed S3 URLs
