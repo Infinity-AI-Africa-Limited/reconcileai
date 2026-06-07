@@ -1,0 +1,33 @@
+name: Woodcore mirror sync
+
+# Refreshes the wc_* mirror tables in TiDB from the live Woodcore tenant by
+# triggering the app's POST /api/woodcore/sync endpoint. The sync runs on the
+# Railway server (this job just kicks it off and returns).
+#
+# Setup:
+#   1. In Railway, set CRON_SECRET to a strong random value.
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
+#      WOODCORE_SYNC_SECRET with the SAME value.
+#   3. (After DNS cutover) update SYNC_URL below to https://reconcileai.vip/...
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # daily at 02:00 UTC
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  trigger-sync:
+    runs-on: ubuntu-latest
+    env:
+      SYNC_URL: "https://reconcileai-production.up.railway.app/api/woodcore/sync"
+    steps:
+      - name: Trigger mirror sync
+        run: |
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
+            -H "x-sync-secret: ${{ secrets.WOODCORE_SYNC_SECRET }}" \
+            "$SYNC_URL")
+          echo "HTTP $code"; cat /tmp/resp; echo
+          # 202 = started, 409 = a sync is already running — both are fine.
+          if [ "$code" != "202" ] && [ "$code" != "409" ]; then
+            echo "Unexpected status $code"; exit 1
+          fi
