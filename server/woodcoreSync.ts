@@ -34,7 +34,8 @@ const SPECS: TableSpec[] = [
   { live: "m_loan_transaction", mirror: "wc_m_loan_transaction", batch: 5000, cols: ["id", "loan_id", "transaction_type_enum", "is_reversed", "transaction_date", "amount", "principal_portion_derived", "interest_portion_derived", "created_date"] },
   // Bridge tables — currently SELECT-denied for `reconcileai`; skipped + preserved until granted.
   { live: "acc_to_gl_journal_entry", mirror: "wc_acc_to_gl_journal_entry", batch: 5000, cols: ["id", "transaction_id", "reversed_transaction_id", "reversed"] },
-  { live: "acc_to_gl_journal_entry_savings", mirror: "wc_acc_to_gl_journal_entry_savings", batch: 5000, cols: ["id", "acc_to_gl_transaction_id", "savings_id", "savings_transaction_id", "reversed"] },
+  // Live table is acc_to_gl_journal_entry_savings_transaction (not _savings — confirmed against tenant).
+  { live: "acc_to_gl_journal_entry_savings_transaction", mirror: "wc_acc_to_gl_journal_entry_savings", batch: 5000, cols: ["id", "acc_to_gl_transaction_id", "savings_id", "savings_transaction_id", "reversed"] },
   // The heavy one — kept last so the rest refresh quickly even if this is slow.
   { live: "acc_gl_journal_entry", mirror: "wc_acc_gl_journal_entry", batch: 5000, cols: ["id", "account_id", "office_id", "reversal_id", "currency_code", "transaction_id", "loan_transaction_id", "savings_transaction_id", "reversed", "ref_num", "manual_entry", "entry_date", "type_enum", "amount", "description", "created_date", "unique_ref_key"] },
 ];
