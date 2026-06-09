@@ -8,7 +8,7 @@ name: Woodcore mirror sync
 #   1. In Railway, set CRON_SECRET to a strong random value.
 #   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
 #      WOODCORE_SYNC_SECRET with the SAME value.
-#   3. (After DNS cutover) update SYNC_URL below to https://reconcileai.vip/...
+#   3. After DNS cutover, update SYNC_URL below to https://reconcileaiafrica.com/...
 
 on:
   schedule:
@@ -19,7 +19,7 @@ jobs:
   trigger-sync:
     runs-on: ubuntu-latest
     env:
-      SYNC_URL: "https://reconcileai-production.up.railway.app/api/woodcore/sync"
+      SYNC_URL: "https://reconcileaiafrica.com/api/woodcore/sync"
     steps:
       - name: Trigger mirror sync
         run: |
