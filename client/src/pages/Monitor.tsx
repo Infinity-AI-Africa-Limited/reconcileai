@@ -48,20 +48,23 @@ function formatTimeAgo(date: string | Date | null): string {
 
 export default function Monitor() {
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const utils = trpc.useUtils();
 
+  // Real-time updates now come from the SSE stream (see effect below); these
+  // intervals are a slow fallback in case the stream drops.
   const {
     data: stats,
     isLoading: statsLoading,
     refetch: refetchStats,
   } = trpc.monitoring.stats.useQuery(undefined, {
-    refetchInterval: autoRefresh ? 5000 : false,
+    refetchInterval: autoRefresh ? 15000 : false,
   });
 
   const {
     data: activeJobs,
     refetch: refetchActive,
   } = trpc.monitoring.activeJobs.useQuery(undefined, {
-    refetchInterval: autoRefresh ? 3000 : false,
+    refetchInterval: autoRefresh ? 15000 : false,
   });
 
   const {
@@ -69,8 +72,22 @@ export default function Monitor() {
     refetch: refetchRecent,
   } = trpc.monitoring.recentActivity.useQuery(
     { limit: 15 },
-    { refetchInterval: autoRefresh ? 10000 : false }
+    { refetchInterval: autoRefresh ? 30000 : false }
   );
+
+  // Live job-progress stream — refetch immediately on each server event so the
+  // dashboard updates in real time instead of waiting on a timer. EventSource
+  // auto-reconnects on error; the fallback intervals above cover any gap.
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const es = new EventSource("/api/monitoring/stream");
+    es.onmessage = () => {
+      utils.monitoring.stats.invalidate();
+      utils.monitoring.activeJobs.invalidate();
+      utils.monitoring.recentActivity.invalidate();
+    };
+    return () => es.close();
+  }, [autoRefresh, utils]);
 
   const refreshAll = () => {
     refetchStats();

@@ -341,6 +341,39 @@ async function startServer() {
     res.json(syncState);
   });
 
+  // ── Live monitoring stream (SSE) ───────────────────────────────────────────
+  // GET /api/monitoring/stream — relays reconciliation job-progress events to the
+  // dashboard in real time (replaces timer polling). Auth via session cookie.
+  app.get("/api/monitoring/stream", async (req, res) => {
+    try {
+      await sdk.authenticateRequest(req);
+    } catch {
+      res.status(401).end();
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no", // don't let any proxy buffer the stream
+    });
+    res.write("retry: 5000\n\n");
+    res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
+
+    const { jobEvents } = await import("../jobEvents");
+    const onProgress = (payload: unknown) => {
+      res.write(`data: ${JSON.stringify({ type: "progress", ...(payload as object) })}\n\n`);
+    };
+    jobEvents.on("progress", onProgress);
+    const heartbeat = setInterval(() => res.write(": ping\n\n"), 25000);
+
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      jobEvents.off("progress", onProgress);
+      res.end();
+    });
+  });
+
   // Storage proxy — serves /manus-storage/* assets via signed S3 URLs
   registerStorageProxy(app);
   // OAuth callback under /api/oauth/callback
