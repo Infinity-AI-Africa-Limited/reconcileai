@@ -19,7 +19,9 @@ jobs:
   trigger-sync:
     runs-on: ubuntu-latest
     env:
-      SYNC_URL: "https://reconcileaiafrica.com/api/woodcore/sync"
+      # Use www directly — the bare domain goes through GoDaddy forwarding which
+      # strips the POST method on redirect (301 → GET), causing a 405 on the API.
+      SYNC_URL: "https://www.reconcileaiafrica.com/api/woodcore/sync"
     steps:
       - name: Trigger mirror sync
         run: |
