@@ -1,4 +1,4 @@
-import { eq, and, gte, lte, like, or, desc, asc, sql, inArray } from "drizzle-orm";
+import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import * as schema from "../drizzle/schema";
 import {
@@ -504,6 +504,24 @@ export async function updateException(id: number, data: Partial<InsertException>
   const db = await getDb();
   if (!db) return;
   await db.update(exceptions).set(data).where(eq(exceptions.id, id));
+}
+
+// High/critical exceptions for a job that still need an AI narrative (aiAnalysis
+// null). Backs the deferred, out-of-hot-path AI pass; restartable because it
+// re-queries the DB rather than relying on in-memory state.
+export async function getJobExceptionsNeedingAi(jobId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(exceptions)
+    .where(
+      and(
+        eq(exceptions.jobId, jobId),
+        isNull(exceptions.aiAnalysis),
+        inArray(exceptions.severity, ["high", "critical"] as any)
+      )
+    );
 }
 
 // ─── Audit Logs ──────────────────────────────────────────────────────

@@ -5415,6 +5415,37 @@ export type AppRouter = typeof appRouter;
 
 // ─── Background Reconciliation Runner ────────────────────────────────
 
+/**
+ * Deferred AI analysis pass — runs OUT of the reconciliation hot path.
+ * Re-queries the job's high/critical exceptions whose aiAnalysis is still null,
+ * generates a Claude narrative for each, and persists it. Restartable: safe to
+ * re-run since it only touches exceptions that still lack analysis.
+ */
+async function runDeferredAiAnalysis(jobId: number): Promise<void> {
+  const pending = await db.getJobExceptionsNeedingAi(jobId);
+  if (pending.length === 0) return;
+
+  const txnIds = pending
+    .map((e) => e.transactionId)
+    .filter((id): id is number => id != null);
+  const txns = await db.getTransactionsByIds(txnIds);
+  const txnById = new Map(txns.map((t) => [t.id, t]));
+
+  for (const exc of pending) {
+    const txn = exc.transactionId != null ? txnById.get(exc.transactionId) : undefined;
+    if (!txn) continue;
+    try {
+      const analysis = await getAIAnalysis(
+        { category: exc.category, description: exc.description ?? "" },
+        txn as any
+      );
+      await db.updateException(exc.id, { aiAnalysis: analysis });
+    } catch (err) {
+      console.error(`[AI pass] exception ${exc.id} failed:`, err);
+    }
+  }
+}
+
 async function runReconciliation(
   jobId: number,
   sourceChannelId: number,
@@ -5488,11 +5519,8 @@ async function runReconciliation(
     for (const txn of unmatchedTxns) {
       const exceptionInfo = categorizeException(txn, targetTxns, config);
 
-      let aiAnalysis: string | undefined;
-      if (exceptionInfo.severity === "high" || exceptionInfo.severity === "critical") {
-        aiAnalysis = await getAIAnalysis(exceptionInfo, txn);
-      }
-
+      // AI narrative is deferred to a background pass (runDeferredAiAnalysis) that
+      // runs AFTER the job completes — keeps LLM latency out of the hot path.
       await db.insertException({
         jobId,
         transactionId: txn.id,
@@ -5500,7 +5528,7 @@ async function runReconciliation(
         severity: exceptionInfo.severity,
         description: exceptionInfo.description,
         suggestedResolution: exceptionInfo.suggestedResolution,
-        aiAnalysis: aiAnalysis || null,
+        aiAnalysis: null,
         status: "open",
       });
 
@@ -5570,6 +5598,13 @@ async function runReconciliation(
     // Send email alerts based on user preferences
     checkAndSendAlerts(jobId, userId).catch((err) =>
       console.error("[EmailReport] Alert check failed:", err)
+    );
+
+    // Deferred AI analysis — fire-and-forget so the job is already "completed".
+    // High/critical exceptions get their Claude narrative filled in shortly after,
+    // keeping LLM latency entirely out of the reconciliation hot path.
+    runDeferredAiAnalysis(jobId).catch((err) =>
+      console.error("[AI pass] deferred analysis failed:", err)
     );
 
   } catch (error) {
