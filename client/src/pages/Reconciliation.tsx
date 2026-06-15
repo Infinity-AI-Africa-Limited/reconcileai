@@ -25,7 +25,8 @@ export default function ReconciliationPage() {
   const [selectedJob, setSelectedJob] = useState<number | null>(null);
   const [form, setForm] = useState({
     name: "",
-    moduleType: "transaction_integrity" as "transaction_integrity" | "settlement" | "account_level",
+    // Transaction Integrity is merged into Settlement — only two selectable modules.
+    moduleType: "settlement" as "settlement" | "account_level",
     sourceChannelId: "",
     targetChannelId: "",
     dateFrom: "",
@@ -59,7 +60,7 @@ export default function ReconciliationPage() {
       });
       toast.success("Reconciliation job created and running!");
       setOpen(false);
-      setForm({ name: "", moduleType: "transaction_integrity", sourceChannelId: "", targetChannelId: "", dateFrom: "", dateTo: "", amountTolerance: "0.005", dateWindowDays: "3" });
+      setForm({ name: "", moduleType: "settlement", sourceChannelId: "", targetChannelId: "", dateFrom: "", dateTo: "", amountTolerance: "0.005", dateWindowDays: "3" });
       refetch();
     } catch (err: any) {
       toast.error(err.message || "Failed to create job");
@@ -118,14 +119,12 @@ export default function ReconciliationPage() {
                 <Select value={form.moduleType} onValueChange={(v: any) => setForm({ ...form, moduleType: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="transaction_integrity">Transaction Integrity</SelectItem>
                     <SelectItem value="settlement">Settlement</SelectItem>
                     <SelectItem value="account_level">Account-Level</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-gray-500 mt-1">
-                  {form.moduleType === "transaction_integrity" && "Internal system validation - ensure all transactions are accounted for"}
-                  {form.moduleType === "settlement" && "External settlement validation - validate bulk settlement amounts"}
+                  {form.moduleType === "settlement" && "Validate bulk settlement amounts against detailed transaction reports — includes transaction-integrity checks (multi-source ingestion, duplicate detection, timestamp normalisation)"}
                   {form.moduleType === "account_level" && "Account balance validation - match money in accounts to transaction reports"}
                 </p>
               </div>
