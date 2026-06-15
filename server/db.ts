@@ -1,4 +1,4 @@
-import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull } from "drizzle-orm";
+import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import * as schema from "../drizzle/schema";
 import {
@@ -167,6 +167,24 @@ export async function getAllUsers() {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(users).orderBy(desc(users.createdAt)).limit(MAX_QUERY_LIMIT);
+}
+
+// Tenant-scoped user list. Used so org admins (and super-admin portal-view) only
+// see users in a single organisation, optionally excluding Infinity AI super admins.
+export async function getUsersByOrg(
+  orgId: number,
+  opts: { excludeSuperAdmins?: boolean } = {}
+) {
+  const db = await getDb();
+  if (!db) return [];
+  const conditions = [eq(users.organizationId, orgId)];
+  if (opts.excludeSuperAdmins) conditions.push(ne(users.role, "super_admin"));
+  return db
+    .select()
+    .from(users)
+    .where(and(...conditions))
+    .orderBy(desc(users.createdAt))
+    .limit(MAX_QUERY_LIMIT);
 }
 
 export async function updateUserRole(userId: number, role: "super_admin" | "admin" | "cfo" | "operations" | "compliance" | "user") {

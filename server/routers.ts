@@ -6,7 +6,7 @@ import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
-import { eq, or, desc, asc, sql, isNull, and, like } from "drizzle-orm";
+import { eq, or, desc, asc, sql, isNull, and, like, inArray } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -97,6 +97,31 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   }
   return next({ ctx });
 });
+
+// Tenancy guard for user-management mutations. Super admins (Infinity AI) may act
+// on anyone. Org admins may only act on non-super-admin users within their OWN
+// organisation — they can neither see nor touch Infinity AI staff or other orgs.
+async function assertCanManageUsers(
+  ctx: { user: { role: string; organizationId: number | null } },
+  userIds: number[]
+): Promise<void> {
+  if (ctx.user.role === "super_admin") return;
+  if (userIds.length === 0) return;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+  const targets = await drizzle
+    .select({ id: users.id, role: users.role, organizationId: users.organizationId })
+    .from(users)
+    .where(inArray(users.id, userIds));
+  for (const t of targets) {
+    if (t.role === "super_admin" || t.organizationId !== ctx.user.organizationId) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "You can only manage users within your own organisation.",
+      });
+    }
+  }
+}
 
 // ─── Guest Protection Middleware ─────────────────────────────────────
 
@@ -2930,9 +2955,20 @@ export const appRouter = router({
   // ─── Admin ─────────────────────────────────────
 
   admin: router({
-    users: adminProcedure.query(async () => {
-      return db.getAllUsers();
-    }),
+    users: adminProcedure
+      .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        if (ctx.user.role === "super_admin") {
+          // Portal-view: scope to the viewed org and hide Infinity AI super admins.
+          if (input?.viewAsOrgId) return db.getUsersByOrg(input.viewAsOrgId, { excludeSuperAdmins: true });
+          // Super-admin home: full cross-tenant list.
+          return db.getAllUsers();
+        }
+        // Org admin: only their own organisation's users, never super admins.
+        return ctx.user.organizationId
+          ? db.getUsersByOrg(ctx.user.organizationId, { excludeSuperAdmins: true })
+          : [];
+      }),
 
     updateRole: adminProcedure
       .input(z.object({
@@ -2940,6 +2976,10 @@ export const appRouter = router({
         role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
+        if (input.role === "super_admin" && ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can assign the super admin role." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
@@ -2953,6 +2993,10 @@ export const appRouter = router({
         role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, input.userIds);
+        if (input.role === "super_admin" && ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can assign the super admin role." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -2968,6 +3012,7 @@ export const appRouter = router({
         isActive: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, input.userIds);
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -2984,6 +3029,9 @@ export const appRouter = router({
         organizationId: z.number().int().positive().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can move users between organisations." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3060,6 +3108,7 @@ export const appRouter = router({
         origin: z.string().url(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3092,6 +3141,7 @@ export const appRouter = router({
         isActive: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         if (input.userId === ctx.user.id) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot deactivate your own account." });
         }
@@ -3110,6 +3160,7 @@ export const appRouter = router({
         userId: z.number().int().positive(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         if (input.userId === ctx.user.id) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot delete your own account." });
         }
@@ -3130,6 +3181,9 @@ export const appRouter = router({
         organizationId: z.number().int().positive().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can move users between organisations." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3142,17 +3196,23 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    organizations: adminProcedure.query(async () => {
+    organizations: adminProcedure.query(async ({ ctx }) => {
       const drizzle = await getDb();
       if (!drizzle) return [];
-      return drizzle.select().from(organizations).orderBy(asc(organizations.name));
+      // Super admins see every org (for cross-tenant assignment); org admins only their own.
+      if (ctx.user.role === "super_admin") {
+        return drizzle.select().from(organizations).orderBy(asc(organizations.name));
+      }
+      if (!ctx.user.organizationId) return [];
+      return drizzle.select().from(organizations).where(eq(organizations.id, ctx.user.organizationId));
     }),
     getUserActivity: adminProcedure
       .input(z.object({
         userId: z.number().int().positive(),
         limit: z.number().int().min(1).max(100).default(50),
       }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         const { data } = await db.getAuditLogs({ userId: input.userId, limit: input.limit });
         return data;
       }),
@@ -3162,7 +3222,8 @@ export const appRouter = router({
         userId: z.number().int().positive(),
         userName: z.string().optional(),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         const { data } = await db.getAuditLogs({ userId: input.userId, limit: 500 });
         // Build CSV
         const header = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details", "IP Address", "User Agent"];
