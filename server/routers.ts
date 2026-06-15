@@ -3005,6 +3005,19 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+        // Role-scoped creation. Super admins (Infinity AI) can create users for ANY
+        // organisation and assign any role. Org admins may only create users within
+        // their OWN organisation and may not mint super admins.
+        let targetRole = input.role;
+        let targetOrgId: number | null = input.organizationId ?? null;
+        if (ctx.user.role !== "super_admin") {
+          if (targetRole === "super_admin") {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can create super admin users." });
+          }
+          targetOrgId = ctx.user.organizationId ?? null;
+        }
+
         // Check if email already exists
         const existing = await drizzle.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
         if (existing.length > 0) {
@@ -3016,13 +3029,13 @@ export const appRouter = router({
           openId,
           name: input.name,
           email: input.email,
-          role: input.role,
-          organizationId: input.organizationId ?? null,
+          role: targetRole,
+          organizationId: targetOrgId,
           isActive: true,
           loginMethod: "invite",
         });
         const newUserId = (result as any).insertId;
-        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: input.role }, ip, ua);
+        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua);
         // Send welcome email with magic login link
         if (input.origin) {
           try {
@@ -3031,7 +3044,7 @@ export const appRouter = router({
               userId: newUserId,
               name: input.name,
               email: input.email,
-              role: input.role,
+              role: targetRole,
               origin: input.origin,
             });
           } catch (err) {

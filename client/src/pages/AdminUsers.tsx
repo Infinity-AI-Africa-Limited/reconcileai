@@ -252,6 +252,10 @@ function RoleCard({ role, selected, onSelect }: { role: PortalRole; selected: bo
 export default function AdminUsers() {
   const { user: currentUser } = useAuth();
   const utils = trpc.useUtils();
+  // Super admins (Infinity AI) and org admins can manage users. Super admins can
+  // create users for any org and assign any role; org admins are scoped to their own.
+  const isSuperAdmin = currentUser?.role === "super_admin";
+  const canManageUsers = currentUser?.role === "admin" || isSuperAdmin;
 
   // ── Data ──────────────────────────────────────────────────────────────
   const { data: allUsers = [], isLoading, refetch } = trpc.admin.users.useQuery();
@@ -454,7 +458,7 @@ export default function AdminUsers() {
               <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`} />
               Refresh
             </Button>
-            {currentUser?.role === "admin" && (
+            {canManageUsers && (
               <Button size="sm" onClick={() => setAddUserOpen(true)}>
                 <UserPlus className="h-4 w-4 mr-2" />
                 Add User
@@ -653,7 +657,7 @@ export default function AdminUsers() {
                     {u.organizationId ? (orgMap[u.organizationId] ?? `Org #${u.organizationId}`) : "—"}
                   </TableCell>
                   <TableCell>
-                    {currentUser?.role === "admin" && u.id !== currentUser.id && (
+                    {canManageUsers && u.id !== currentUser.id && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-7 w-7">
@@ -759,24 +763,35 @@ export default function AdminUsers() {
               </div>
             </div>
 
-            {/* Organisation */}
-            <div className="space-y-1.5">
-              <Label>Organisation <span className="text-muted-foreground text-xs">(optional)</span></Label>
-              <Select
-                value={newUser.organizationId}
-                onValueChange={v => setNewUser(p => ({ ...p, organizationId: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="No organisation" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No organisation</SelectItem>
-                  {orgList.map(o => (
-                    <SelectItem key={o.id} value={String(o.id)}>{o.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {/* Organisation — super admins choose any org; org admins are locked to their own. */}
+            {isSuperAdmin ? (
+              <div className="space-y-1.5">
+                <Label>Organisation</Label>
+                <Select
+                  value={newUser.organizationId}
+                  onValueChange={v => setNewUser(p => ({ ...p, organizationId: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="No organisation" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No organisation</SelectItem>
+                    {orgList.map(o => (
+                      <SelectItem key={o.id} value={String(o.id)}>{o.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">As Infinity AI staff, you can assign this user to any organisation you onboard.</p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label>Organisation</Label>
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-foreground">
+                  {currentUser?.organizationId ? (orgMap[currentUser.organizationId] ?? `Org #${currentUser.organizationId}`) : "Your organisation"}
+                </div>
+                <p className="text-xs text-muted-foreground">New users are added to your organisation.</p>
+              </div>
+            )}
 
             {/* Role selection */}
             <div className="space-y-2">
@@ -786,7 +801,9 @@ export default function AdminUsers() {
                 <XCircle className="h-3 w-3 inline text-gray-400" /> cannot access that module.
               </p>
               <div className="grid grid-cols-1 gap-2 mt-2">
-                {(Object.keys(ROLE_META) as PortalRole[]).map(r => (
+                {(Object.keys(ROLE_META) as PortalRole[])
+                  .filter(r => isSuperAdmin || r !== "super_admin")
+                  .map(r => (
                   <RoleCard
                     key={r}
                     role={r}
