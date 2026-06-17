@@ -1356,8 +1356,8 @@ export const cfoReportSchedules = mysqlTable("cfo_report_schedules", {
   cronExpression: varchar("cronExpression", { length: 64 }).default("0 0 8 * * 1").notNull(),
   // Comma-separated list of recipient emails (stored as JSON array)
   recipients: json("recipients").notNull(), // string[]
-  // Date range to include in the report ("7d" | "30d" | "mtd")
-  reportPeriod: varchar("reportPeriod", { length: 10 }).default("7d").notNull(),
+  // Date range to include in the report ("7d" | "30d" | "mtd" | "quarterly" | "last_quarter")
+  reportPeriod: varchar("reportPeriod", { length: 16 }).default("7d").notNull(),
   lastSentAt: timestamp("lastSentAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

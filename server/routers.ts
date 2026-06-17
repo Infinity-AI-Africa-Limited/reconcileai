@@ -5454,7 +5454,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     saveSchedule: protectedProcedure
       .input(z.object({
         recipients: z.array(z.string().email()).min(1).max(20),
-        reportPeriod: z.enum(["7d", "30d", "mtd"]).default("7d"),
+        reportPeriod: z.enum(["7d", "30d", "mtd", "quarterly", "last_quarter"]).default("7d"),
         isActive: z.boolean().default(true),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -5468,7 +5468,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
     // Send report now (manual trigger)
     sendNow: protectedProcedure
-      .input(z.object({ period: z.enum(["7d", "30d", "mtd"]).default("7d") }))
+      .input(z.object({ period: z.enum(["7d", "30d", "mtd", "quarterly", "last_quarter"]).default("7d") }))
       .mutation(async ({ ctx, input }) => {
         const { sendWeeklyChannelReport } = await import("./cfoReportService");
         return sendWeeklyChannelReport(ctx.user.id, input.period);
@@ -5477,7 +5477,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // Export CSV (returns CSV string)
     exportCsv: protectedProcedure
       .input(z.object({
-        period: z.enum(["7d", "30d", "mtd", "all"]).default("7d"),
+        period: z.enum(["7d", "30d", "mtd", "all", "quarterly", "last_quarter"]).default("7d"),
         channelCodes: z.array(z.string()).optional(),
       }))
       .query(async ({ input }) => {
@@ -5490,7 +5490,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // Export XLSX (returns S3 URL)
     exportXlsx: protectedProcedure
       .input(z.object({
-        period: z.enum(["7d", "30d", "mtd", "all"]).default("7d"),
+        period: z.enum(["7d", "30d", "mtd", "all", "quarterly", "last_quarter"]).default("7d"),
         channelCodes: z.array(z.string()).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
