@@ -146,6 +146,18 @@ function amountDifferencePercent(a1: number, a2: number): number {
   return Math.abs(a1 - a2) / base;
 }
 
+// First index `i` in a sorted ascending array where arr[i] >= target (lower bound).
+function lowerBound(arr: number[], target: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 // ─── Duplicate Detection ────────────────────────────────────────────
 
 function detectDuplicates(txns: Transaction[]): DuplicateGroup[] {
@@ -260,6 +272,13 @@ export function runMatchingEngine(
   // Build hash indexes for O(1) lookups
   const targetIndex = buildIndex(targetTxns);
 
+  // Sorted numeric view of the target amount index, built once, for O(log n + band)
+  // tolerance-band scans in Pass 2 (replaces per-source brute-force amount enumeration).
+  const sortedAmountKeys = Array.from(targetIndex.byAmount.keys())
+    .map((key) => ({ key, num: parseFloat(key) }))
+    .sort((a, b) => a.num - b.num);
+  const sortedAmountNums = sortedAmountKeys.map((e) => e.num);
+
   let pass1Count = 0;
   let pass2Count = 0;
   let pass3Count = 0;
@@ -304,23 +323,20 @@ export function runMatchingEngine(
     const srcDate = new Date(src.transactionDate);
     let bestCandidate: MatchCandidate | null = null;
 
-    // Use amount index to narrow candidates instead of scanning all targets
-    // Check exact amount first, then nearby amounts
-    const amtKey = srcAmt.toFixed(2);
-    const toleranceAmt = srcAmt * config.amountTolerance;
-    const candidateAmounts = new Set<string>();
-    candidateAmounts.add(amtKey);
-
-    // Generate nearby amount keys within tolerance
-    for (let delta = -toleranceAmt; delta <= toleranceAmt; delta += 0.01) {
-      candidateAmounts.add((srcAmt + delta).toFixed(2));
-    }
-    // Cap the number of candidate amounts to prevent excessive iteration
-    const candidateAmtArray = Array.from(candidateAmounts).slice(0, 200);
+    // Scan only the target amounts within the tolerance band [srcAmt-band, srcAmt+band]
+    // using binary search over the pre-sorted amount index. The band is widened slightly
+    // (×1.5 + 0.01) so it is a strict superset of anything that can satisfy the exact
+    // `amtDiffPct <= tolerance` predicate below — results are identical to a full scan,
+    // but cost is O(log n + band size) instead of O(amount). Previously this enumerated
+    // every 0.01 increment, which built a Set of ~srcAmt entries and threw RangeError
+    // ("Set maximum size exceeded") for amounts above ~₦16.78m.
+    const band = srcAmt * config.amountTolerance * 1.5 + 0.01;
+    const lo = srcAmt - band;
+    const hi = srcAmt + band;
 
     const checkedTargets = new Set<number>();
-    for (const candAmt of candidateAmtArray) {
-      const targets = targetIndex.byAmount.get(candAmt);
+    for (let ai = lowerBound(sortedAmountNums, lo); ai < sortedAmountNums.length && sortedAmountNums[ai] <= hi; ai++) {
+      const targets = targetIndex.byAmount.get(sortedAmountKeys[ai].key);
       if (!targets) continue;
 
       for (const tgt of targets) {
