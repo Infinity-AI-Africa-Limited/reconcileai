@@ -72,10 +72,100 @@ import { getDb } from "./db";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
-const MAX_UPLOAD_TRANSACTIONS = 10000;
+// Max transactions accepted in a SINGLE upload request (one chunk). The client splits
+// large files into chunks of this size and streams them via createBatch + appendBatch,
+// so total file size is effectively unbounded while each request stays well under the
+// 50 MB Express body limit (~25k rows ≈ 4 MB of JSON).
+const MAX_UPLOAD_TRANSACTIONS = 25000;
 const MAX_SEARCH_LENGTH = 100;
 const MAX_NAME_LENGTH = 255;
 const MAX_QUERY_LIMIT = 500;
+
+// Shared shape + validation for uploaded transaction rows, reused by the single-shot
+// createBatch path and the chunked appendBatch path.
+const uploadTxnSchema = z.object({
+  transactionRef: z.string().max(255).optional(),
+  externalRef: z.string().max(255).optional(),
+  description: z.string().max(1000).optional(),
+  amount: z.string().min(1).max(30),
+  currency: z.string().length(3).default("NGN"),
+  transactionDate: z.string().min(1),
+  valueDate: z.string().optional(),
+  debitCredit: z.enum(["debit", "credit"]),
+  counterparty: z.string().max(255).optional(),
+  rawData: z.any().optional(),
+});
+type UploadTxnInput = z.infer<typeof uploadTxnSchema>;
+
+/**
+ * Validate a batch of raw upload rows and shape them for insertion. Pure (no I/O) so it
+ * can be called per-chunk. `rowOffset` keeps error row numbers correct across chunks.
+ */
+function buildValidTransactions(
+  rawTxns: UploadTxnInput[],
+  owner: { batchId: number; channelId: number; userId: number },
+  rowOffset = 0,
+) {
+  let validRows = 0;
+  let invalidRows = 0;
+  const validTxns: any[] = [];
+  const errors: string[] = [];
+
+  for (let i = 0; i < rawTxns.length; i++) {
+    const txn = rawTxns[i];
+    const rowNo = rowOffset + i + 1;
+    try {
+      const amount = parseFloat(txn.amount);
+      if (isNaN(amount) || !isFinite(amount)) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Invalid amount '${txn.amount}'`);
+        continue;
+      }
+      if (amount < 0) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Negative amount not allowed`);
+        continue;
+      }
+      if (amount > 999999999999.99) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Amount exceeds maximum`);
+        continue;
+      }
+      const txnDate = new Date(txn.transactionDate);
+      if (isNaN(txnDate.getTime())) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Invalid date '${txn.transactionDate}'`);
+        continue;
+      }
+      if (txn.currency && !(SUPPORTED_CURRENCIES as readonly string[]).includes(txn.currency)) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Unsupported currency '${txn.currency}'`);
+        continue;
+      }
+      validTxns.push({
+        batchId: owner.batchId,
+        channelId: owner.channelId,
+        userId: owner.userId,
+        transactionRef: txn.transactionRef || null,
+        externalRef: txn.externalRef || null,
+        description: txn.description || null,
+        amount: txn.amount,
+        currency: txn.currency,
+        transactionDate: txnDate,
+        valueDate: txn.valueDate ? new Date(txn.valueDate) : null,
+        debitCredit: txn.debitCredit,
+        counterparty: txn.counterparty || null,
+        rawData: txn.rawData ? JSON.stringify(txn.rawData) : null,
+      });
+      validRows++;
+    } catch {
+      invalidRows++;
+      errors.push(`Row ${rowNo}: Unexpected parsing error`);
+    }
+  }
+
+  return { validTxns, validRows, invalidRows, errors };
+}
 
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.
@@ -489,21 +579,12 @@ export const appRouter = router({
           channelCode: z.string().min(1).max(50),
           fileName: z.string().min(1).max(500),
           fileHash: z.string().max(64).optional(),
-          transactions: z.array(
-            z.object({
-              transactionRef: z.string().max(255).optional(),
-              externalRef: z.string().max(255).optional(),
-              description: z.string().max(1000).optional(),
-              amount: z.string().min(1).max(30),
-              currency: z.string().length(3).default("NGN"),
-              transactionDate: z.string().min(1),
-              valueDate: z.string().optional(),
-              debitCredit: z.enum(["debit", "credit"]),
-              counterparty: z.string().max(255).optional(),
-              rawData: z.any().optional(),
-            })
-          ).max(MAX_UPLOAD_TRANSACTIONS, {
-            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per upload`,
+          // Full row count of the whole file (may exceed this chunk for chunked uploads).
+          totalRows: z.number().int().min(0).optional(),
+          // When false, the batch is left "processing" for subsequent appendBatch calls.
+          finalize: z.boolean().default(true),
+          transactions: z.array(uploadTxnSchema).max(MAX_UPLOAD_TRANSACTIONS, {
+            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per request`,
           }),
         })
       )
@@ -514,7 +595,7 @@ export const appRouter = router({
           throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
         }
 
-        // Idempotency check: if fileHash provided, check for duplicate upload
+        // Idempotency: a previously COMPLETED upload of the same file short-circuits.
         if (input.fileHash) {
           const existing = await db.getUploadBatchByHash(input.fileHash);
           if (existing) {
@@ -533,7 +614,7 @@ export const appRouter = router({
           channelId: channel.id,
           fileName: sanitizeInput(input.fileName, 500),
           fileHash: input.fileHash || null,
-          totalRows: input.transactions.length,
+          totalRows: input.totalRows ?? input.transactions.length,
           validRows: 0,
           invalidRows: 0,
           status: "processing",
@@ -543,98 +624,133 @@ export const appRouter = router({
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create upload batch" });
         }
 
-        let validRows = 0;
-        let invalidRows = 0;
-        const validTxns: any[] = [];
-        const errors: string[] = [];
-
-        for (let i = 0; i < input.transactions.length; i++) {
-          const txn = input.transactions[i];
-          try {
-            const amount = parseFloat(txn.amount);
-            if (isNaN(amount) || !isFinite(amount)) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Invalid amount '${txn.amount}'`);
-              continue;
-            }
-            if (amount < 0) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Negative amount not allowed`);
-              continue;
-            }
-            if (amount > 999999999999.99) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Amount exceeds maximum`);
-              continue;
-            }
-            const txnDate = new Date(txn.transactionDate);
-            if (isNaN(txnDate.getTime())) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Invalid date '${txn.transactionDate}'`);
-              continue;
-            }
-            // Validate currency
-            if (txn.currency && !(SUPPORTED_CURRENCIES as readonly string[]).includes(txn.currency)) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Unsupported currency '${txn.currency}'`);
-              continue;
-            }
-            validTxns.push({
-              batchId,
-              channelId: channel.id,
-              userId: ctx.user.id,
-              transactionRef: txn.transactionRef || null,
-              externalRef: txn.externalRef || null,
-              description: txn.description || null,
-              amount: txn.amount,
-              currency: txn.currency,
-              transactionDate: txnDate,
-              valueDate: txn.valueDate ? new Date(txn.valueDate) : null,
-              debitCredit: txn.debitCredit,
-              counterparty: txn.counterparty || null,
-              rawData: txn.rawData ? JSON.stringify(txn.rawData) : null,
-            });
-            validRows++;
-          } catch {
-            invalidRows++;
-            errors.push(`Row ${i + 1}: Unexpected parsing error`);
-          }
-        }
+        const { validTxns, validRows, invalidRows, errors } = buildValidTransactions(
+          input.transactions,
+          { batchId, channelId: channel.id, userId: ctx.user.id },
+        );
 
         if (validTxns.length > 0) {
           await db.insertTransactions(validTxns);
         }
+        await db.incrementUploadBatchCounts(batchId, validRows, invalidRows);
 
-        await db.updateUploadBatch(batchId, {
-          validRows,
-          invalidRows,
-          status: validRows > 0 ? "completed" : "failed",
-          errorMessage: errors.length > 0 ? errors.slice(0, 20).join("; ") : null,
-          completedAt: new Date(),
-        });
+        if (input.finalize) {
+          await db.updateUploadBatch(batchId, {
+            status: validRows > 0 ? "completed" : "failed",
+            errorMessage: errors.length > 0 ? errors.slice(0, 20).join("; ") : null,
+            completedAt: new Date(),
+          });
 
-        await logAudit(ctx.user.id, "upload_batch", "upload_batch", batchId, {
-          channel: input.channelCode,
-          fileName: input.fileName,
-          totalRows: input.transactions.length,
-          validRows,
-          invalidRows,
-        }, ip, ua);
+          await logAudit(ctx.user.id, "upload_batch", "upload_batch", batchId, {
+            channel: input.channelCode,
+            fileName: input.fileName,
+            totalRows: input.totalRows ?? input.transactions.length,
+            validRows,
+            invalidRows,
+          }, ip, ua);
 
-        // Dispatch webhook
-        dispatchWebhook("upload.completed", {
-          batchId,
-          channel: input.channelCode,
-          validRows,
-          invalidRows,
-        });
+          dispatchWebhook("upload.completed", {
+            batchId,
+            channel: input.channelCode,
+            validRows,
+            invalidRows,
+          });
+        }
 
         return {
           batchId,
           validRows,
           invalidRows,
-          totalRows: input.transactions.length,
+          totalRows: input.totalRows ?? input.transactions.length,
           errors: errors.slice(0, 20),
+          deduplicated: false,
+        };
+      }),
+
+    // Append a chunk of rows to an in-progress batch (used by chunked large uploads).
+    appendBatch: guestProtectedProcedure
+      .input(
+        z.object({
+          batchId: z.number().int().positive(),
+          channelCode: z.string().min(1).max(50),
+          rowOffset: z.number().int().min(0).default(0),
+          transactions: z.array(uploadTxnSchema).max(MAX_UPLOAD_TRANSACTIONS, {
+            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per request`,
+          }),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const channel = await db.getChannelByCode(input.channelCode);
+        if (!channel) {
+          throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
+        }
+        const batch = await db.getUploadBatchById(input.batchId);
+        if (!batch) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Upload batch not found" });
+        }
+        if (batch.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Cannot append to another user's batch" });
+        }
+        if (batch.status !== "processing") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Batch is already finalized" });
+        }
+
+        const { validTxns, validRows, invalidRows, errors } = buildValidTransactions(
+          input.transactions,
+          { batchId: input.batchId, channelId: channel.id, userId: ctx.user.id },
+          input.rowOffset,
+        );
+
+        if (validTxns.length > 0) {
+          await db.insertTransactions(validTxns);
+        }
+        await db.incrementUploadBatchCounts(input.batchId, validRows, invalidRows);
+
+        return { batchId: input.batchId, validRows, invalidRows, errors: errors.slice(0, 20) };
+      }),
+
+    // Finalize a chunked batch once all chunks are uploaded.
+    finalizeBatch: guestProtectedProcedure
+      .input(z.object({ batchId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const batch = await db.getUploadBatchById(input.batchId);
+        if (!batch) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Upload batch not found" });
+        }
+        if (batch.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Cannot finalize another user's batch" });
+        }
+
+        const validRows = batch.validRows ?? 0;
+        const invalidRows = batch.invalidRows ?? 0;
+
+        await db.updateUploadBatch(input.batchId, {
+          status: validRows > 0 ? "completed" : "failed",
+          completedAt: new Date(),
+        });
+
+        const channel = await db.getChannelById(batch.channelId);
+        await logAudit(ctx.user.id, "upload_batch", "upload_batch", input.batchId, {
+          channel: channel?.code ?? String(batch.channelId),
+          fileName: batch.fileName,
+          totalRows: batch.totalRows,
+          validRows,
+          invalidRows,
+        }, ip, ua);
+
+        dispatchWebhook("upload.completed", {
+          batchId: input.batchId,
+          channel: channel?.code ?? String(batch.channelId),
+          validRows,
+          invalidRows,
+        });
+
+        return {
+          batchId: input.batchId,
+          validRows,
+          invalidRows,
+          totalRows: batch.totalRows,
           deduplicated: false,
         };
       }),
@@ -5554,77 +5670,85 @@ async function runReconciliation(
       totalCount: sourceTxns.length,
     });
 
-    // Insert matches
+    // ── Persist matches (batched) ─────────────────────────────────────
     await trackProgress(jobId, "duplicate_detection", {
-      message: `Processing ${result.duplicates.length} duplicate groups`,
+      message: `Recording ${result.matches.length} matches and ${result.duplicates.length} duplicate groups`,
     });
-    let matchedCount = 0;
-    for (const match of result.matches) {
-      const status = match.confidenceScore >= 85 ? "confirmed" : "pending_review";
-      const matchId = await db.insertMatch({
-        jobId,
-        sourceTransactionId: match.sourceId,
-        targetTransactionId: match.targetId,
-        matchType: match.matchType,
-        confidenceScore: String(match.confidenceScore),
-        amountDifference: String(match.amountDifference),
-        dateDifference: Math.round(match.dateDifference),
-        matchReason: match.matchReason,
-        status,
-      });
 
-      if (matchId) {
-        const txnStatus = status === "confirmed" ? "matched" : "exception";
-        await db.updateTransactionStatus(match.sourceId, txnStatus, matchId);
-        await db.updateTransactionStatus(match.targetId, txnStatus, matchId);
-        if (status === "confirmed") matchedCount++;
+    // High-confidence (>=85) matches auto-confirm; the rest go to manual review. Note:
+    // transactions.matchId (a denormalized, unread column) is no longer populated here —
+    // the `matches` table is the source of truth for source/target linkage. That lets us
+    // set transaction statuses with two bulk IN(...) updates instead of ~3 round-trips
+    // per match (the old per-row path was O(n) DB calls and unusable at 500k).
+    const matchRows = result.matches.map((m) => ({
+      jobId,
+      sourceTransactionId: m.sourceId,
+      targetTransactionId: m.targetId,
+      matchType: m.matchType,
+      confidenceScore: String(m.confidenceScore),
+      amountDifference: String(m.amountDifference),
+      dateDifference: Math.round(m.dateDifference),
+      matchReason: m.matchReason,
+      status: m.confidenceScore >= 85 ? ("confirmed" as const) : ("pending_review" as const),
+    }));
+    await db.insertMatchesBatch(matchRows);
+
+    const confirmedTxnIds: number[] = [];
+    const reviewTxnIds: number[] = [];
+    let matchedCount = 0;
+    for (const m of result.matches) {
+      if (m.confidenceScore >= 85) {
+        confirmedTxnIds.push(m.sourceId, m.targetId);
+        matchedCount++;
+      } else {
+        reviewTxnIds.push(m.sourceId, m.targetId);
       }
     }
+    await db.updateTransactionStatusBulk(confirmedTxnIds, "matched");
+    await db.updateTransactionStatusBulk(reviewTxnIds, "exception");
 
+    // ── Persist exceptions (batched) ──────────────────────────────────
     await trackProgress(jobId, "exception_categorization", {
       message: `Categorizing ${result.unmatchedSource.length + result.unmatchedTarget.length} unmatched transactions`,
       totalCount: result.unmatchedSource.length + result.unmatchedTarget.length,
     });
-    // Process unmatched transactions as exceptions
     let exceptionCount = 0;
     const allUnmatched = [...result.unmatchedSource, ...result.unmatchedTarget];
     const unmatchedTxns = await db.getTransactionsByIds(allUnmatched);
 
-    for (const txn of unmatchedTxns) {
-      const exceptionInfo = categorizeException(txn, targetTxns, config);
-
-      // AI narrative is deferred to a background pass (runDeferredAiAnalysis) that
-      // runs AFTER the job completes — keeps LLM latency out of the hot path.
-      await db.insertException({
+    // AI narrative is deferred to a background pass (runDeferredAiAnalysis) that runs
+    // AFTER the job completes — keeps LLM latency out of the hot path.
+    const exceptionRows = unmatchedTxns.map((txn) => {
+      const info = categorizeException(txn, targetTxns, config);
+      return {
         jobId,
         transactionId: txn.id,
-        category: exceptionInfo.category,
-        severity: exceptionInfo.severity,
-        description: exceptionInfo.description,
-        suggestedResolution: exceptionInfo.suggestedResolution,
+        category: info.category,
+        severity: info.severity,
+        description: info.description,
+        suggestedResolution: info.suggestedResolution,
         aiAnalysis: null,
-        status: "open",
-      });
+        status: "open" as const,
+      };
+    });
+    await db.insertExceptionsBatch(exceptionRows);
+    await db.updateTransactionStatusBulk(unmatchedTxns.map((t) => t.id), "exception");
+    exceptionCount += exceptionRows.length;
 
-      await db.updateTransactionStatus(txn.id, "exception");
-      exceptionCount++;
-    }
-
-    // Create exceptions for detected duplicates
-    for (const dupGroup of result.duplicates) {
-      for (const txnId of dupGroup.transactionIds) {
-        await db.insertException({
-          jobId,
-          transactionId: txnId,
-          category: "duplicate_transaction",
-          severity: "medium",
-          description: dupGroup.reason,
-          suggestedResolution: "Review and remove duplicate transactions. Verify with the source system whether these are genuine separate transactions or data entry errors.",
-          status: "open",
-        });
-        exceptionCount++;
-      }
-    }
+    // Exceptions for detected duplicates (batched).
+    const duplicateRows = result.duplicates.flatMap((dupGroup) =>
+      dupGroup.transactionIds.map((txnId) => ({
+        jobId,
+        transactionId: txnId,
+        category: "duplicate_transaction" as const,
+        severity: "medium" as const,
+        description: dupGroup.reason,
+        suggestedResolution: "Review and remove duplicate transactions. Verify with the source system whether these are genuine separate transactions or data entry errors.",
+        status: "open" as const,
+      }))
+    );
+    await db.insertExceptionsBatch(duplicateRows);
+    exceptionCount += duplicateRows.length;
 
     await trackProgress(jobId, "finalizing", { message: "Finalizing reconciliation results" });
     const totalTxns = sourceTxns.length + targetTxns.length;

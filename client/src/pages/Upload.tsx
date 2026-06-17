@@ -8,9 +8,12 @@ import { toast } from "sonner";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
-const MAX_FILE_SIZE_MB = 10;
+const MAX_FILE_SIZE_MB = 200;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
-const MAX_TRANSACTIONS = 10000;
+const MAX_TRANSACTIONS = 500000;
+// Rows per upload request. Large files are streamed to the server in chunks of this size
+// so no single request approaches the 50 MB Express body limit (~20k rows ≈ 3 MB JSON).
+const UPLOAD_CHUNK_SIZE = 20000;
 const SUPPORTED_CURRENCIES = [
   "NGN", "GHS", "KES", "TZS", "UGX", "ZAR", "EGP", "XOF", "XAF",
   "RWF", "ETB", "MAD", "USD", "EUR", "GBP",
@@ -158,6 +161,8 @@ function parseCSV(text: string): { rows: ParsedRow[]; errors: ValidationError[] 
 export default function UploadPage() {
   const { data: channels, isLoading: channelsLoading } = trpc.channels.list.useQuery();
   const uploadMutation = trpc.upload.createBatch.useMutation();
+  const appendMutation = trpc.upload.appendBatch.useMutation();
+  const finalizeMutation = trpc.upload.finalizeBatch.useMutation();
   const { data: history, refetch: refetchHistory } = trpc.upload.history.useQuery();
 
   const [selectedChannel, setSelectedChannel] = useState<string>("");
@@ -166,6 +171,7 @@ export default function UploadPage() {
   const [fileName, setFileName] = useState<string>("");
   const [fileHash, setFileHash] = useState<string>("");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [result, setResult] = useState<{ validRows: number; invalidRows: number; totalRows: number; deduplicated?: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -262,24 +268,78 @@ export default function UploadPage() {
       return;
     }
     setUploading(true);
+    setUploadProgress(null);
     try {
-      const res = await uploadMutation.mutateAsync({
-        channelCode: selectedChannel,
-        fileName,
-        fileHash: fileHash || undefined,
-        transactions: parsedData,
-      });
-      setResult(res);
-      if (res.deduplicated) {
-        toast.info("This file was already uploaded. Returning existing batch.");
+      // Small files go up in a single request (unchanged behavior). Large files are
+      // streamed in chunks so we never hit the server body-size limit.
+      if (parsedData.length <= UPLOAD_CHUNK_SIZE) {
+        const res = await uploadMutation.mutateAsync({
+          channelCode: selectedChannel,
+          fileName,
+          fileHash: fileHash || undefined,
+          transactions: parsedData,
+        });
+        setResult(res);
+        if (res.deduplicated) {
+          toast.info("This file was already uploaded. Returning existing batch.");
+        } else {
+          toast.success(`Upload complete: ${res.validRows} valid, ${res.invalidRows} invalid`);
+        }
       } else {
-        toast.success(`Upload complete: ${res.validRows} valid, ${res.invalidRows} invalid`);
+        const total = parsedData.length;
+        setUploadProgress({ done: 0, total });
+
+        // First chunk creates the batch but leaves it open (finalize: false).
+        const firstChunk = parsedData.slice(0, UPLOAD_CHUNK_SIZE);
+        const created = await uploadMutation.mutateAsync({
+          channelCode: selectedChannel,
+          fileName,
+          fileHash: fileHash || undefined,
+          totalRows: total,
+          finalize: false,
+          transactions: firstChunk,
+        });
+
+        if (created.deduplicated) {
+          setResult(created);
+          toast.info("This file was already uploaded. Returning existing batch.");
+          return;
+        }
+
+        const batchId = created.batchId;
+        let validRows = created.validRows;
+        let invalidRows = created.invalidRows;
+        setUploadProgress({ done: firstChunk.length, total });
+
+        // Remaining chunks append to the same batch.
+        for (let offset = UPLOAD_CHUNK_SIZE; offset < total; offset += UPLOAD_CHUNK_SIZE) {
+          const chunk = parsedData.slice(offset, offset + UPLOAD_CHUNK_SIZE);
+          const r = await appendMutation.mutateAsync({
+            batchId,
+            channelCode: selectedChannel,
+            rowOffset: offset,
+            transactions: chunk,
+          });
+          validRows += r.validRows;
+          invalidRows += r.invalidRows;
+          setUploadProgress({ done: Math.min(offset + chunk.length, total), total });
+        }
+
+        // Flip the batch to completed.
+        const fin = await finalizeMutation.mutateAsync({ batchId });
+        setResult({
+          validRows: fin.validRows ?? validRows,
+          invalidRows: fin.invalidRows ?? invalidRows,
+          totalRows: fin.totalRows ?? total,
+        });
+        toast.success(`Upload complete: ${fin.validRows ?? validRows} valid, ${fin.invalidRows ?? invalidRows} invalid`);
       }
       refetchHistory();
     } catch (err: any) {
       toast.error(err.message || "Upload failed. Please try again.");
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -469,7 +529,11 @@ export default function UploadPage() {
                 className="w-full"
               >
                 {uploading ? (
-                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Uploading {parsedData.length.toLocaleString()} transactions...</>
+                  uploadProgress ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Uploading {uploadProgress.done.toLocaleString()} / {uploadProgress.total.toLocaleString()} ({Math.round((uploadProgress.done / uploadProgress.total) * 100)}%)…</>
+                  ) : (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Uploading {parsedData.length.toLocaleString()} transactions...</>
+                  )
                 ) : (
                   <><UploadIcon className="h-4 w-4 mr-2" /> Upload {parsedData.length.toLocaleString()} Transactions</>
                 )}

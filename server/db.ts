@@ -38,7 +38,10 @@ import { ENV } from './_core/env';
 
 const MAX_QUERY_LIMIT = 500;
 const DEFAULT_QUERY_LIMIT = 50;
-const BATCH_INSERT_SIZE = 100;
+// Rows per multi-row INSERT/UPDATE. 1000 keeps placeholder counts well under MySQL's
+// 65,535 limit (widest table here is ~13 cols → ~13k placeholders) while cutting the
+// round-trip count 10x versus the old value of 100 — important for 500k-row jobs.
+const BATCH_INSERT_SIZE = 1000;
 
 // ─── Database Connection ────────────────────────────────────────────
 
@@ -251,6 +254,26 @@ export async function updateUploadBatch(id: number, data: Partial<InsertUploadBa
   await db.update(uploadBatches).set(data).where(eq(uploadBatches.id, id));
 }
 
+export async function getUploadBatchById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(uploadBatches).where(eq(uploadBatches.id, id)).limit(1);
+  return result[0];
+}
+
+// Atomically add to a batch's running valid/invalid counts. Used by chunked uploads so
+// each chunk accumulates onto the batch row without a read-modify-write race.
+export async function incrementUploadBatchCounts(id: number, addValid: number, addInvalid: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(uploadBatches)
+    .set({
+      validRows: sql`${uploadBatches.validRows} + ${addValid}`,
+      invalidRows: sql`${uploadBatches.invalidRows} + ${addInvalid}`,
+    })
+    .where(eq(uploadBatches.id, id));
+}
+
 export async function getUploadBatches(userId: number, isAdmin: boolean) {
   const db = await getDb();
   if (!db) return [];
@@ -354,6 +377,17 @@ export async function updateTransactionStatus(id: number, status: string, matchI
   const updateData: any = { status };
   if (matchId !== undefined) updateData.matchId = matchId;
   await db.update(transactions).set(updateData).where(eq(transactions.id, id));
+}
+
+// Bulk-set the status of many transactions in chunked IN(...) updates. Replaces per-row
+// status writes in the reconciliation hot path (which were O(n) round-trips at scale).
+export async function updateTransactionStatusBulk(ids: number[], status: string) {
+  const db = await getDb();
+  if (!db || ids.length === 0) return;
+  for (let i = 0; i < ids.length; i += BATCH_INSERT_SIZE) {
+    const batch = ids.slice(i, i + BATCH_INSERT_SIZE);
+    await db.update(transactions).set({ status: status as any }).where(inArray(transactions.id, batch));
+  }
 }
 
 export async function getTransactionsForReconciliation(channelId: number, dateFrom: Date, dateTo: Date) {
