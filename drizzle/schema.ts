@@ -287,6 +287,11 @@ export const auditLogs = mysqlTable("audit_logs", {
   details: json("details"),
   ipAddress: varchar("ipAddress", { length: 45 }),
   userAgent: varchar("userAgent", { length: 500 }),
+  // Tamper-evidence: per-org hash chain. recordHash = SHA-256(canonical(entry) + prevRecordHash);
+  // any altered/removed row breaks the chain at verification time.
+  sequenceNumber: int("sequenceNumber"),
+  recordHash: varchar("recordHash", { length: 64 }),
+  prevRecordHash: varchar("prevRecordHash", { length: 64 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_audit_user").on(table.userId),
@@ -294,6 +299,7 @@ export const auditLogs = mysqlTable("audit_logs", {
   index("idx_audit_entity").on(table.entityType, table.entityId),
   index("idx_audit_action").on(table.action),
   index("idx_audit_created").on(table.createdAt),
+  index("idx_audit_org_seq").on(table.organizationId, table.sequenceNumber),
 ]);
 
 export type AuditLog = typeof auditLogs.$inferSelect;

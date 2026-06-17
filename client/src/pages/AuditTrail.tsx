@@ -4,7 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Shield, ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { Loader2, Shield, ShieldCheck, ShieldAlert, ChevronLeft, ChevronRight, Download } from "lucide-react";
 import { toast } from "sonner";
 
 export default function AuditTrailPage() {
@@ -19,6 +19,24 @@ export default function AuditTrailPage() {
   });
 
   const exportXlsxMutation = trpc.audit.exportXlsx.useMutation();
+  const [integrity, setIntegrity] = useState<{ valid: boolean; signedRows: number; reason: string | null } | null>(null);
+  const verifyChainQuery = trpc.audit.verifyChain.useQuery(undefined, { enabled: false });
+
+  const handleVerifyIntegrity = async () => {
+    try {
+      const res = await verifyChainQuery.refetch();
+      const r = res.data;
+      if (!r) throw new Error("No result");
+      setIntegrity({ valid: r.valid, signedRows: r.signedRows, reason: r.reason });
+      if (r.valid) {
+        toast.success(`Audit chain intact — ${r.signedRows.toLocaleString()} entries verified${r.unsignedRows ? `, ${r.unsignedRows} legacy` : ""}`);
+      } else {
+        toast.error(`Tampering detected: ${r.reason}`);
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Verification failed");
+    }
+  };
 
   const handleExportXlsx = async () => {
     try {
@@ -81,17 +99,35 @@ export default function AuditTrailPage() {
         <Input type="date" className="w-40" value={filters.dateFrom} onChange={(e) => { setFilters({ ...filters, dateFrom: e.target.value }); setPage(0); }} />
         <Input type="date" className="w-40" value={filters.dateTo} onChange={(e) => { setFilters({ ...filters, dateTo: e.target.value }); setPage(0); }} />
         </div>
-        <Button
-          variant="outline" size="sm"
-          className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8] shrink-0"
-          disabled={exportXlsxMutation.isPending}
-          onClick={handleExportXlsx}
-        >
-          {exportXlsxMutation.isPending
-            ? <Loader2 className="h-4 w-4 animate-spin" />
-            : <Download className="h-4 w-4" />}
-          Export to Excel
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          {integrity && (
+            <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${integrity.valid ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+              {integrity.valid ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+              {integrity.valid ? `Chain intact (${integrity.signedRows.toLocaleString()})` : "Tampering detected"}
+            </span>
+          )}
+          <Button
+            variant="outline" size="sm"
+            className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8]"
+            disabled={verifyChainQuery.isFetching}
+            onClick={handleVerifyIntegrity}
+            title="Recompute the per-organization hash chain to detect any altered or removed audit entry"
+          >
+            {verifyChainQuery.isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+            Verify Integrity
+          </Button>
+          <Button
+            variant="outline" size="sm"
+            className="gap-2 border-[#1B365D] text-[#1B365D] bg-white hover:bg-[#EEF2F8]"
+            disabled={exportXlsxMutation.isPending}
+            onClick={handleExportXlsx}
+          >
+            {exportXlsxMutation.isPending
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <Download className="h-4 w-4" />}
+            Export to Excel
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (

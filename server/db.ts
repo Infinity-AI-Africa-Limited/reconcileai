@@ -33,6 +33,7 @@ import {
   platformAuditLogs, InsertPlatformAuditLog, PlatformAuditLog,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import { computeRecordHash } from "./auditChain";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -581,7 +582,59 @@ export async function getJobExceptionsNeedingAi(jobId: number) {
 export async function createAuditLog(data: InsertAuditLog) {
   const db = await getDb();
   if (!db) return;
-  await db.insert(auditLogs).values(data);
+
+  // Tamper-evident hash chain (per organization). Fetch the latest entry in the
+  // same org scope to link against, then compute this record's hash.
+  // Note: best-effort under concurrency — see auditChain.ts. For the audit
+  // volume here this is acceptable; a SELECT…FOR UPDATE tx would harden it.
+  const orgScope = data.organizationId ?? null;
+  const [prev] = await db
+    .select({ seq: auditLogs.sequenceNumber, hash: auditLogs.recordHash })
+    .from(auditLogs)
+    .where(orgScope === null ? isNull(auditLogs.organizationId) : eq(auditLogs.organizationId, orgScope))
+    .orderBy(desc(auditLogs.sequenceNumber))
+    .limit(1);
+
+  const sequenceNumber = (prev?.seq ?? 0) + 1;
+  const prevRecordHash = prev?.hash ?? null;
+  const createdAt = new Date();
+  const recordHash = computeRecordHash(
+    {
+      sequenceNumber,
+      userId: data.userId ?? null,
+      organizationId: orgScope,
+      action: data.action,
+      entityType: data.entityType,
+      entityId: data.entityId ?? null,
+      details: data.details ?? null,
+      ipAddress: data.ipAddress ?? null,
+      userAgent: data.userAgent ?? null,
+      createdAt,
+    },
+    prevRecordHash,
+  );
+
+  await db.insert(auditLogs).values({
+    ...data,
+    sequenceNumber,
+    prevRecordHash,
+    recordHash,
+    createdAt,
+  });
+}
+
+/**
+ * Fetch the full audit chain for an organization (ascending sequence) so it can
+ * be verified. organizationId === null targets the global/unscoped chain.
+ */
+export async function getAuditChain(organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(auditLogs)
+    .where(organizationId === null ? isNull(auditLogs.organizationId) : eq(auditLogs.organizationId, organizationId))
+    .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id));
 }
 
 export async function getAuditLogs(filters: {

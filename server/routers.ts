@@ -1497,6 +1497,24 @@ export const appRouter = router({
         });
       }),
 
+    // Verify the tamper-evident hash chain for the caller's organization. Returns
+    // whether the audit trail is intact and, if not, the first broken sequence.
+    verifyChain: protectedProcedure
+      .query(async ({ ctx }) => {
+        const isAdmin = ctx.user.role === "admin" || ctx.user.role === "super_admin";
+        if (!isAdmin) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Audit chain verification is restricted to administrators" });
+        }
+        const { verifyChain } = await import("./auditChain");
+        const rows = await db.getAuditChain(ctx.user.organizationId ?? null);
+        const result = verifyChain(rows as any);
+        return {
+          ...result,
+          organizationId: ctx.user.organizationId ?? null,
+          verifiedAt: new Date().toISOString(),
+        };
+      }),
+
     exportXlsx: protectedProcedure
       .input(z.object({
         entityType: z.string().max(50).optional(),
