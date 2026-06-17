@@ -1172,6 +1172,13 @@ export const cbnReportSubmissions = mysqlTable("cbnReportSubmissions", {
   aiGapGeneratedAt: timestamp("aiGapGeneratedAt"),
   // Internal notes
   internalNotes: text("internalNotes"),
+  // Cryptographic signature (Ed25519) computed when the report is submitted/approved.
+  // Makes the "timestamped, digitally signed" attestation literally true and tamper-evident.
+  contentHash: varchar("contentHash", { length: 64 }),          // SHA-256 of the canonical signed payload
+  signature: text("signature"),                                  // base64 Ed25519 signature over contentHash
+  signingKeyFingerprint: varchar("signingKeyFingerprint", { length: 64 }), // SHA-256 fp of the public key
+  signedByUserId: int("signedByUserId"),
+  signedAt: timestamp("signedAt"),
   // Who created / last updated
   createdByUserId: int("createdByUserId"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

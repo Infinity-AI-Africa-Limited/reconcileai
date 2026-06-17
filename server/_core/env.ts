@@ -31,6 +31,9 @@ export const ENV = {
   // Shared secret guarding maintenance/cron endpoints (e.g. Woodcore mirror sync).
   // Falls back to JWT_SECRET when unset, so no extra var is strictly required.
   cronSecret: process.env.CRON_SECRET ?? "",
+  // Ed25519 PKCS#8 PEM private key used to digitally sign CBN examination reports.
+  // When unset, an ephemeral key is generated per-process (dev/demo only).
+  cbnSigningPrivateKey: process.env.CBN_SIGNING_PRIVATE_KEY ?? "",
   // File storage — AWS S3 or S3-compatible (Cloudflare R2). Replaces the Manus storage proxy.
   // Tolerates both AWS_S3_* and the alternate names used across the docs.
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "",

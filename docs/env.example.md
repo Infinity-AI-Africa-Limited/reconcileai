@@ -134,6 +134,22 @@ SFTP_ENCRYPTION_KEY=<32-character random string>
 
 Used to encrypt SFTP credentials stored in the `sftp_credentials` database table.
 
+## CBN Report Signing (Ed25519)
+
+```bash
+# PKCS#8 PEM Ed25519 private key used to digitally sign CBN examination reports
+# and compliance attestations. When unset, an EPHEMERAL key is generated per
+# process (dev/demo only) and signatures won't verify after a restart.
+CBN_SIGNING_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+# Generate: openssl genpkey -algorithm ed25519 -out cbn_signing.pem
+#           (paste the file contents, newlines as \n, into the env var)
+```
+
+Signed submissions persist `contentHash`, `signature`, `signingKeyFingerprint`,
+`signedByUserId`, and `signedAt`. `compliance.verifySubmission` recomputes the hash
+and verifies the signature (tamper-evidence); `compliance.signingPublicKey` exposes
+the public key (PEM) for third-party verification. Signing logic: `server/signing.ts`.
+
 ## Woodcore Integration (pending IP whitelist)
 
 ```bash
