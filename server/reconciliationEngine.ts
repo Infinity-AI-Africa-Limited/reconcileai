@@ -298,10 +298,10 @@ export function runMatchingEngine(
     arr.push(t);
   }
   const dayAmountIndex = new Map<number, { nums: number[]; txns: Transaction[] }>();
-  for (const [day, arr] of dayBuckets) {
+  dayBuckets.forEach((arr, day) => {
     arr.sort((a, b) => (tgtAmtById.get(a.id) as number) - (tgtAmtById.get(b.id) as number));
     dayAmountIndex.set(day, { nums: arr.map((t) => tgtAmtById.get(t.id) as number), txns: arr });
-  }
+  });
 
   let pass1Count = 0;
   let pass2Count = 0;

@@ -42,6 +42,15 @@ const CHUNK = parseInt(process.env.SMOKE_CHUNK || "20000", 10);
 const MATCH_RATE = 0.97; // fraction of rows that form exact source/target pairs
 const POLL_TIMEOUT_MS = parseInt(process.env.SMOKE_TIMEOUT_MS || "900000", 10); // 15 min
 const RUN_ID = Date.now().toString(36);
+// Defensible engine-time ceiling for the headline "500k in ~1 minute" claim.
+// The matching engine (Pass 1–3) must finish within this budget for the TOTAL row
+// count (both channels). Defaults to 60s for 500k total, scaled linearly otherwise.
+const TOTAL_ROWS = ROWS_PER_CHANNEL * 2;
+const MAX_ENGINE_MS = parseInt(
+  process.env.SMOKE_MAX_ENGINE_MS || String(Math.round((TOTAL_ROWS / 500_000) * 60_000)),
+  10,
+);
+const RESULTS_PATH = process.env.SMOKE_RESULTS_PATH || "bench-results.json";
 
 if (!BASE_URL || !COOKIE) {
   console.error("ERROR: set SMOKE_BASE_URL and SMOKE_COOKIE (app_session_id=<jwt>) env vars.");
@@ -229,8 +238,28 @@ async function main() {
   console.log(`exceptions:      ${job.exceptionCount}`);
   console.log(`unmatched:       ${job.unmatchedCount}`);
   console.log(`match rate:      ${job.matchRate}%`);
-  console.log(`engine time:     ${job.processingTimeMs} ms`);
+  console.log(`engine time:     ${job.processingTimeMs} ms  (budget ${MAX_ENGINE_MS} ms for ${TOTAL_ROWS.toLocaleString()} rows)`);
   console.log(`recon wall time: ${reconSecs}s (incl. persistence)`);
+
+  // ── Record a defensible, reproducible artifact for the deck/PR ──
+  const results = {
+    runId: RUN_ID,
+    recordedAt: new Date().toISOString(),
+    baseUrl: BASE_URL,
+    rowsPerChannel: ROWS_PER_CHANNEL,
+    totalRows: TOTAL_ROWS,
+    matchRateConfig: MATCH_RATE,
+    status: job.status,
+    matchedCount: job.matchedCount,
+    exceptionCount: job.exceptionCount,
+    unmatchedCount: job.unmatchedCount,
+    matchRatePct: job.matchRate,
+    engineTimeMs: job.processingTimeMs,
+    engineBudgetMs: MAX_ENGINE_MS,
+    reconWallTimeSec: Number(reconSecs),
+  };
+  writeFileSync(RESULTS_PATH, JSON.stringify(results, null, 2));
+  console.log(`wrote ${RESULTS_PATH}`);
 
   // ── Assertions ──
   const expectedMatches = Math.floor(ROWS_PER_CHANNEL * MATCH_RATE);
@@ -239,12 +268,19 @@ async function main() {
   if (!(job.matchedCount > expectedMatches * 0.9)) {
     errors.push(`matchedCount ${job.matchedCount} is below 90% of expected ${expectedMatches}`);
   }
+  // The headline performance claim: assert the engine met its time budget. This is
+  // what makes "500k in ~1 minute" a validated number rather than an aspiration.
+  if (typeof job.processingTimeMs === "number" && job.processingTimeMs > MAX_ENGINE_MS) {
+    errors.push(
+      `engine time ${job.processingTimeMs} ms exceeded budget ${MAX_ENGINE_MS} ms for ${TOTAL_ROWS} rows`,
+    );
+  }
   if (errors.length) {
     console.error("\nFAIL:\n - " + errors.join("\n - "));
     process.exit(1);
   }
-  console.log("\nPASS ✅  500k pipeline completed end-to-end.");
-  console.log(`(artifacts: smoke-${srcCode}.csv, smoke-${tgtCode}.csv — channels can be deleted in the UI)`);
+  console.log("\nPASS ✅  500k pipeline completed end-to-end within the engine time budget.");
+  console.log(`(artifacts: ${RESULTS_PATH}, smoke-${srcCode}.csv, smoke-${tgtCode}.csv — channels can be deleted in the UI)`);
 }
 
 main().catch((err) => {
