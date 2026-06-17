@@ -132,29 +132,17 @@ export async function buildChannelMetrics(
   const rows: ChannelMetricRow[] = [];
   await Promise.all(
     filtered.map(async (channel) => {
-      const { data: txns } = await db.getTransactions({
-        channelId: channel.id,
-        dateFrom,
-        dateTo,
-        limit: 10000,
-      });
-      const total = txns.length;
-      if (total === 0) return; // skip zero-data channels
-      const matched = txns.filter((t) => t.status === "matched").length;
-      const exceptionTxns = txns.filter((t) => t.status === "exception");
-      const exceptions = exceptionTxns.length;
-      const exceptionAmount = exceptionTxns.reduce((s, t) => {
-        const a = parseFloat(String(t.amount));
-        return s + (Number.isFinite(a) ? Math.abs(a) : 0);
-      }, 0);
+      // Exact SQL aggregate — not capped by the 500-row list limit.
+      const agg = await db.getChannelTxnAggregate(channel.id, dateFrom, dateTo);
+      if (agg.total === 0) return; // skip zero-data channels
       rows.push({
         channel: channel.name,
         channelCode: channel.code,
-        volume: total,
-        matched,
-        exceptions,
-        matchRate: parseFloat(((matched / total) * 100).toFixed(1)),
-        exceptionAmount: parseFloat(exceptionAmount.toFixed(2)),
+        volume: agg.total,
+        matched: agg.matched,
+        exceptions: agg.exceptions,
+        matchRate: parseFloat(((agg.matched / agg.total) * 100).toFixed(1)),
+        exceptionAmount: parseFloat(agg.exceptionAmount.toFixed(2)),
       });
     })
   );
@@ -181,19 +169,17 @@ export async function buildBoardSummary(period: string): Promise<BoardSummary> {
     critical: rows.filter((r) => r.matchRate < 85).length,
   };
 
-  // Exception severity breakdown across the period.
+  // Exception severity breakdown across the period. Use the DB's exact COUNT
+  // (via getExceptions().total) per severity rather than fetching rows — list
+  // queries are clamped to MAX_QUERY_LIMIT, which would silently undercount.
   const exceptionsBySeverity = { critical: 0, high: 0, medium: 0, low: 0 };
   try {
-    const { data: exceptions } = await db.getExceptions({ limit: 10000 });
-    for (const e of exceptions) {
-      const created = new Date(e.createdAt);
-      if (created < dateFrom || created > dateTo) continue;
-      const sev = String(e.severity ?? "").toLowerCase();
-      if (sev === "critical") exceptionsBySeverity.critical++;
-      else if (sev === "high") exceptionsBySeverity.high++;
-      else if (sev === "medium") exceptionsBySeverity.medium++;
-      else if (sev === "low") exceptionsBySeverity.low++;
-    }
+    await Promise.all(
+      (["critical", "high", "medium", "low"] as const).map(async (sev) => {
+        const { total } = await db.getExceptions({ severity: sev, dateFrom, dateTo, limit: 1 });
+        exceptionsBySeverity[sev] = total;
+      }),
+    );
   } catch (err) {
     console.error("[CfoReport] severity breakdown unavailable (non-fatal):", err);
   }

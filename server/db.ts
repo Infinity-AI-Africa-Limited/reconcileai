@@ -359,6 +359,37 @@ export async function getTransactions(filters: {
   return { data, total };
 }
 
+/**
+ * Exact per-channel transaction aggregates for a period, computed in SQL so they
+ * are NOT subject to the row-limit clamp that caps getTransactions() at 500. Used
+ * by CFO / board reporting where accurate totals matter.
+ */
+export async function getChannelTxnAggregate(channelId: number, dateFrom: Date, dateTo: Date) {
+  const db = await getDb();
+  if (!db) return { total: 0, matched: 0, exceptions: 0, exceptionAmount: 0 };
+  const [row] = await db
+    .select({
+      total: sql<number>`count(*)`,
+      matched: sql<number>`sum(case when ${transactions.status} = 'matched' then 1 else 0 end)`,
+      exceptions: sql<number>`sum(case when ${transactions.status} = 'exception' then 1 else 0 end)`,
+      exceptionAmount: sql<number>`coalesce(sum(case when ${transactions.status} = 'exception' then abs(${transactions.amount}) else 0 end), 0)`,
+    })
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.channelId, channelId),
+        gte(transactions.transactionDate, dateFrom),
+        lte(transactions.transactionDate, dateTo),
+      ),
+    );
+  return {
+    total: Number(row?.total || 0),
+    matched: Number(row?.matched || 0),
+    exceptions: Number(row?.exceptions || 0),
+    exceptionAmount: Number(row?.exceptionAmount || 0),
+  };
+}
+
 export async function getTransactionsByIds(ids: number[]) {
   const db = await getDb();
   if (!db || ids.length === 0) return [];
