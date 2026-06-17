@@ -579,6 +579,8 @@ export const appRouter = router({
           channelCode: z.string().min(1).max(50),
           fileName: z.string().min(1).max(500),
           fileHash: z.string().max(64).optional(),
+          // Connector that parsed this file client-side (e.g. nibss_nip, interswitch_settlement, generic).
+          format: z.string().max(64).optional(),
           // Full row count of the whole file (may exceed this chunk for chunked uploads).
           totalRows: z.number().int().min(0).optional(),
           // When false, the batch is left "processing" for subsequent appendBatch calls.
@@ -614,6 +616,7 @@ export const appRouter = router({
           channelId: channel.id,
           fileName: sanitizeInput(input.fileName, 500),
           fileHash: input.fileHash || null,
+          detectedFormat: input.format ? sanitizeInput(input.format, 64) : null,
           totalRows: input.totalRows ?? input.transactions.length,
           validRows: 0,
           invalidRows: 0,

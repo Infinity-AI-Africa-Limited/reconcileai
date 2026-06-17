@@ -5,6 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, Upload as UploadIcon, FileSpreadsheet, CheckCircle2, AlertCircle, X, Info } from "lucide-react";
 import { toast } from "sonner";
+import {
+  type ConnectorFormat,
+  normalizeHeader,
+  detectFormat,
+  formatById,
+  resolveField,
+  hasField,
+} from "@/lib/connectors/formats";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -77,20 +85,25 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
-function parseCSV(text: string): { rows: ParsedRow[]; errors: ValidationError[] } {
+function parseCSV(
+  text: string,
+  forcedFormatId?: string | null,
+): { rows: ParsedRow[]; errors: ValidationError[]; format: ConnectorFormat } {
   const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) return { rows: [], errors: [{ row: 0, field: "file", message: "File must have a header row and at least one data row" }] };
+  // Detect the connector format from the header row so known rails (NIBSS NIP,
+  // Interswitch settlement) map automatically; a per-channel override wins.
+  const detectFallback = detectFormat([]); // generic
+  if (lines.length < 2) return { rows: [], errors: [{ row: 0, field: "file", message: "File must have a header row and at least one data row" }], format: detectFallback };
 
-  const headers = parseCSVLine(lines[0]).map((h) => h.toLowerCase().replace(/['"]/g, "").replace(/\s+/g, "_"));
+  const headers = parseCSVLine(lines[0]).map(normalizeHeader);
+  const format = formatById(forcedFormatId) ?? detectFormat(headers);
   const rows: ParsedRow[] = [];
   const errors: ValidationError[] = [];
 
-  // Validate required headers exist
-  const hasAmount = headers.some((h) => ["amount", "transaction_amount", "value", "txn_amount"].includes(h));
-  const hasDate = headers.some((h) => ["date", "transaction_date", "transactiondate", "txn_date", "posting_date"].includes(h));
-  if (!hasAmount) errors.push({ row: 0, field: "headers", message: "Missing required column: amount (or transaction_amount, value)" });
-  if (!hasDate) errors.push({ row: 0, field: "headers", message: "Missing required column: date (or transaction_date, txn_date)" });
-  if (errors.length > 0) return { rows, errors };
+  // Validate required headers exist (using the chosen format's aliases + generic fallback)
+  if (!hasField(headers, format, "amount")) errors.push({ row: 0, field: "headers", message: "Missing required column: amount (or transaction_amount, value)" });
+  if (!hasField(headers, format, "transactionDate")) errors.push({ row: 0, field: "headers", message: "Missing required column: date (or transaction_date, txn_date)" });
+  if (errors.length > 0) return { rows, errors, format };
 
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue; // skip empty lines
@@ -100,7 +113,7 @@ function parseCSV(text: string): { rows: ParsedRow[]; errors: ValidationError[] 
     headers.forEach((h, idx) => { row[h] = values[idx] || ""; });
 
     // Parse amount
-    const amountStr = row.amount || row.transaction_amount || row.value || row.txn_amount || "";
+    const amountStr = resolveField(row, format, "amount");
     const cleanedAmount = amountStr.replace(/[,\s]/g, ""); // Remove commas and spaces
     const amountNum = parseFloat(cleanedAmount);
     if (isNaN(amountNum) || !isFinite(amountNum)) {
@@ -113,7 +126,7 @@ function parseCSV(text: string): { rows: ParsedRow[]; errors: ValidationError[] 
     }
 
     // Parse date
-    const dateStr = row.date || row.transaction_date || row.transactiondate || row.txn_date || row.posting_date || "";
+    const dateStr = resolveField(row, format, "transactionDate");
     if (!dateStr) {
       errors.push({ row: i + 1, field: "date", message: "Missing transaction date" });
       continue;
@@ -125,7 +138,7 @@ function parseCSV(text: string): { rows: ParsedRow[]; errors: ValidationError[] 
     }
 
     // Parse direction
-    const dirStr = (row.type || row.debit_credit || row.debitcredit || row.direction || row.dr_cr || "").toLowerCase();
+    const dirStr = resolveField(row, format, "debitCredit").toLowerCase();
     const dc: "debit" | "credit" = dirStr.includes("credit") || dirStr === "cr" || dirStr === "c"
       ? "credit"
       : dirStr.includes("debit") || dirStr === "dr" || dirStr === "d"
@@ -133,27 +146,27 @@ function parseCSV(text: string): { rows: ParsedRow[]; errors: ValidationError[] 
         : amountNum >= 0 ? "credit" : "debit";
 
     // Parse currency
-    const currency = (row.currency || row.ccy || "NGN").toUpperCase().trim();
+    const currency = (resolveField(row, format, "currency") || "NGN").toUpperCase().trim();
     if (!SUPPORTED_CURRENCIES.includes(currency)) {
       errors.push({ row: i + 1, field: "currency", message: `Unsupported currency: "${currency}". Supported: ${SUPPORTED_CURRENCIES.join(", ")}` });
       continue;
     }
 
     rows.push({
-      transactionRef: row.reference || row.ref || row.transaction_ref || row.txn_ref || row.transaction_reference || "",
-      externalRef: row.external_ref || row.ext_ref || row.counterparty_ref || row.session_id || "",
-      description: row.description || row.narration || row.memo || row.details || row.remarks || "",
+      transactionRef: resolveField(row, format, "transactionRef"),
+      externalRef: resolveField(row, format, "externalRef"),
+      description: resolveField(row, format, "description"),
       amount: String(Math.abs(amountNum)),
       currency,
       transactionDate: parsedDate.toISOString(),
-      valueDate: row.value_date || row.valuedate || row.settlement_date || "",
+      valueDate: resolveField(row, format, "valueDate"),
       debitCredit: dc,
-      counterparty: row.counterparty || row.beneficiary || row.sender || row.other_party || row.account_name || "",
+      counterparty: resolveField(row, format, "counterparty"),
       rawData: row,
     });
   }
 
-  return { rows, errors };
+  return { rows, errors, format };
 }
 
 // ─── Component ──────────────────────────────────────────────────────
@@ -173,6 +186,7 @@ export default function UploadPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [detectedFormat, setDetectedFormat] = useState<ConnectorFormat | null>(null);
   const [result, setResult] = useState<{ validRows: number; invalidRows: number; totalRows: number; deduplicated?: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -203,9 +217,16 @@ export default function UploadPage() {
       const hash = await computeFileHash(text);
       setFileHash(hash);
 
-      const { rows, errors } = parseCSV(text);
+      // A channel can pin an expected format (channel.fileFormat.formatId); that
+      // overrides header auto-detection. Otherwise we auto-detect from the headers.
+      const channelOverride = (channels?.find((c) => c.code === selectedChannel)?.fileFormat as
+        | { formatId?: string }
+        | null
+        | undefined)?.formatId;
+      const { rows, errors, format } = parseCSV(text, channelOverride);
       setParsedData(rows);
       setValidationErrors(errors);
+      setDetectedFormat(format);
 
       if (rows.length > MAX_TRANSACTIONS) {
         toast.error(`File contains ${rows.length} transactions. Maximum is ${MAX_TRANSACTIONS.toLocaleString()}.`);
@@ -213,17 +234,18 @@ export default function UploadPage() {
         return;
       }
 
+      const detail = format.id !== "generic" ? ` (${format.label})` : "";
       if (rows.length === 0 && errors.length > 0) {
         toast.error(`No valid transactions found. ${errors.length} validation error(s).`);
       } else if (errors.length > 0) {
-        toast.warning(`Parsed ${rows.length} transactions with ${errors.length} error(s).`);
+        toast.warning(`Parsed ${rows.length} transactions with ${errors.length} error(s).${detail}`);
       } else {
-        toast.success(`Parsed ${rows.length} transactions from ${file.name}`);
+        toast.success(`Parsed ${rows.length} transactions from ${file.name}${detail}`);
       }
     };
     reader.onerror = () => toast.error("Failed to read file. Please try again.");
     reader.readAsText(file);
-  }, []);
+  }, [channels, selectedChannel]);
 
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -258,6 +280,7 @@ export default function UploadPage() {
     setValidationErrors([]);
     setFileName("");
     setFileHash("");
+    setDetectedFormat(null);
     setResult(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
@@ -277,6 +300,7 @@ export default function UploadPage() {
           channelCode: selectedChannel,
           fileName,
           fileHash: fileHash || undefined,
+          format: detectedFormat?.id,
           transactions: parsedData,
         });
         setResult(res);
@@ -295,6 +319,7 @@ export default function UploadPage() {
           channelCode: selectedChannel,
           fileName,
           fileHash: fileHash || undefined,
+          format: detectedFormat?.id,
           totalRows: total,
           finalize: false,
           transactions: firstChunk,
@@ -420,6 +445,11 @@ export default function UploadPage() {
                         <FileSpreadsheet className="h-10 w-10 text-primary" />
                         <span className="font-medium">{fileName}</span>
                         <span className="text-sm text-muted-foreground">{parsedData.length} valid transactions parsed</span>
+                        {detectedFormat && detectedFormat.id !== "generic" && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 bg-emerald-100 dark:bg-emerald-900 dark:text-emerald-300 rounded-full px-2 py-0.5">
+                            <CheckCircle2 className="h-3 w-3" /> Detected: {detectedFormat.label}
+                          </span>
+                        )}
                         {validationErrors.length > 0 && (
                           <span className="text-sm text-amber-600">{validationErrors.length} row(s) with errors</span>
                         )}

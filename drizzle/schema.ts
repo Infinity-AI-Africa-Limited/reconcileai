@@ -95,6 +95,7 @@ export const uploadBatches = mysqlTable("upload_batches", {
   fileName: varchar("fileName", { length: 500 }).notNull(),
   fileUrl: text("fileUrl"),
   fileHash: varchar("fileHash", { length: 64 }), // SHA-256 for idempotency
+  detectedFormat: varchar("detectedFormat", { length: 64 }), // connector that parsed this file (e.g. nibss_nip, interswitch_settlement, generic)
   totalRows: int("totalRows").default(0).notNull(),
   validRows: int("validRows").default(0).notNull(),
   invalidRows: int("invalidRows").default(0).notNull(),
