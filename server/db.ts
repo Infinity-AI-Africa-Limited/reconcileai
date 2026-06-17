@@ -454,6 +454,17 @@ export async function getReconciliationJob(id: number) {
   return result[0];
 }
 
+/** All child jobs belonging to a single multi-channel run (ascending creation). */
+export async function getReconciliationJobsByMultiRun(multiRunId: string) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(reconciliationJobs)
+    .where(eq(reconciliationJobs.multiRunId, multiRunId))
+    .orderBy(asc(reconciliationJobs.createdAt));
+}
+
 // ─── Matches ─────────────────────────────────────────────────────────
 
 export async function insertMatch(data: InsertMatch) {

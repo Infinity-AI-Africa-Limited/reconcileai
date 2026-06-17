@@ -178,6 +178,8 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   dateWindowDays: int("dateWindowDays").default(3).notNull(),
   // Engine configuration snapshot
   engineConfig: json("engineConfig"), // Frozen config at run time
+  // Groups child jobs created by a single multi-channel run (one source vs. many targets).
+  multiRunId: varchar("multiRunId", { length: 36 }),
   status: mysqlEnum("status", ["pending", "running", "completed", "failed", "cancelled"])
     .default("pending")
     .notNull(),
@@ -199,6 +201,7 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   index("idx_jobs_source").on(table.sourceChannelId),
   index("idx_jobs_target").on(table.targetChannelId),
   index("idx_jobs_created").on(table.createdAt),
+  index("idx_jobs_multirun").on(table.multiRunId),
 ]);
 
 export type ReconciliationJob = typeof reconciliationJobs.$inferSelect;
