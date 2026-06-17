@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { notifyOwner } from "./notification";
+import { describeResidencyPosture } from "./egress";
 import { adminProcedure, publicProcedure, router } from "./trpc";
 
 export const systemRouter = router({
@@ -12,6 +13,10 @@ export const systemRouter = router({
     .query(() => ({
       ok: true,
     })),
+
+  // Data-residency posture, so operators (and the customer's own security team)
+  // can verify at runtime whether external egress is enforced. Non-sensitive.
+  residencyStatus: publicProcedure.query(() => describeResidencyPosture()),
 
   notifyOwner: adminProcedure
     .input(

@@ -8,6 +8,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { assertResidencyStartupConfig, describeResidencyPosture } from "./egress";
 import { getLlmProviderInfo } from "./llm";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
@@ -35,6 +36,17 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  // Data residency: log the enforced posture and fail fast if on-premise mode is
+  // misconfigured in a way that would leak data off-box (e.g. Forge enabled).
+  const posture = describeResidencyPosture();
+  console.log(
+    `[residency] mode=${posture.mode}` +
+      (posture.enforced
+        ? ` (enforced; egress allowlist: ${posture.egressAllowlist.length ? posture.egressAllowlist.join(", ") : "none"})`
+        : ""),
+  );
+  assertResidencyStartupConfig();
+
   const app = express();
   const server = createServer(app);
   // Configure body parser with larger size limit for file uploads

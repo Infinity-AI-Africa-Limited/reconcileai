@@ -14,9 +14,19 @@
  *    Optional:  DIRECT_LLM_API_URL      (defaults to OpenAI-compatible endpoint)
  *               DIRECT_LLM_MODEL        (defaults to gpt-4o)
  *
+ *    Three LLM postures are supported under Mode 2:
+ *      (a) Internet Anthropic Claude — default cloud option (api.anthropic.com).
+ *      (b) Local Anthropic-Messages-compatible endpoint — set DIRECT_LLM_API_URL
+ *          to an in-VPC gateway + DIRECT_LLM_PROVIDER=anthropic.
+ *      (c) Local OpenAI-compatible endpoint (Ollama / vLLM) — set DIRECT_LLM_API_URL
+ *          to the local server + DIRECT_LLM_PROVIDER=openai.
+ *    In DEPLOYMENT_MODE=on_premise, only (b) and (c) are permitted; (a) and Forge
+ *    are blocked by the egress guard so transaction data never leaves the box.
+ *
  * Selection logic:
  *   If DIRECT_LLM_API_KEY is set and non-empty → use direct provider (Mode 2)
  *   Otherwise                                  → use Manus Forge (Mode 1)
+ *   (on_premise mode disables Forge — a local direct provider is required.)
  *
  * Zero code changes are needed between environments — only environment
  * variables differ. All callers use `invokeLLM()` identically in both modes.
@@ -24,6 +34,7 @@
  */
 
 import { ENV } from "./env";
+import { assertEgressAllowed, isOnPremise } from "./egress";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -202,6 +213,17 @@ function resolveProvider(): ProviderConfig {
     return { mode: "direct", kind, apiUrl, apiKey: directKey, model };
   }
 
+  // On-premise mode forbids Manus Forge — it would route prompts to forge.manus.im.
+  // A local direct provider (Anthropic-compatible or OpenAI-compatible) is required.
+  if (isOnPremise()) {
+    throw new Error(
+      "On-premise mode requires a local LLM. Set DIRECT_LLM_API_KEY and point " +
+      "DIRECT_LLM_API_URL at an in-infrastructure endpoint (Anthropic-Messages-compatible " +
+      "with DIRECT_LLM_PROVIDER=anthropic, or OpenAI-compatible such as Ollama/vLLM with " +
+      "DIRECT_LLM_PROVIDER=openai). Manus Forge and internet Anthropic are disabled in this mode."
+    );
+  }
+
   // Mode 1: Manus Forge (default)
   if (!ENV.forgeApiKey || ENV.forgeApiKey.trim().length === 0) {
     throw new Error(
@@ -378,6 +400,9 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   if (normalizedResponseFormat) {
     payload.response_format = normalizedResponseFormat;
   }
+
+  // Data residency: in on-premise mode this throws unless apiUrl is local/allowlisted.
+  assertEgressAllowed(provider.apiUrl, "LLM call");
 
   const response = await fetch(provider.apiUrl, {
     method: "POST",
@@ -618,6 +643,10 @@ async function invokeAnthropic(
   provider: ProviderConfig
 ): Promise<InvokeResult> {
   const { payload, forcedEmit } = buildAnthropicPayload(params, provider.model);
+
+  // Data residency: in on-premise mode this throws unless apiUrl is local/allowlisted
+  // (a local Anthropic-Messages-compatible gateway is allowed; api.anthropic.com is not).
+  assertEgressAllowed(provider.apiUrl, "LLM call");
 
   const response = await fetch(provider.apiUrl, {
     method: "POST",

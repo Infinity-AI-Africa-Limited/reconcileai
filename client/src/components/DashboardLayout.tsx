@@ -336,6 +336,12 @@ function DashboardLayoutContent({
     // Poll only if guest, data not yet active, and we haven't exceeded the safety-net limit
     refetchInterval: (isGuest && !seedingComplete && pollCount < MAX_POLL_ATTEMPTS) ? 5000 : false,
   });
+  // Data-residency posture — surfaces an "On-Premise" badge so the customer's
+  // security team can visually confirm external egress is enforced.
+  const { data: residency } = trpc.system.residencyStatus.useQuery(undefined, {
+    enabled: !!user,
+    staleTime: 5 * 60 * 1000,
+  });
   // Stop polling once demo data is confirmed active for guest; increment poll counter
   useEffect(() => {
     if (!isGuest || seedingComplete) return;
@@ -745,6 +751,14 @@ function DashboardLayoutContent({
               <span className="tracking-tight text-foreground font-medium text-lg">
                 {activeMenuItem?.label ?? "ReconcileAI"}
               </span>
+              {residency?.enforced && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                  title={`On-premise mode — external egress blocked.${residency.egressAllowlist?.length ? ` Allowlist: ${residency.egressAllowlist.join(", ")}` : ""}`}
+                >
+                  <ShieldCheck className="h-3 w-3" /> On-Premise · Egress Blocked
+                </span>
+              )}
             </div>
             <RoleSwitcher location={location} setLocation={setLocation} />
           </div>

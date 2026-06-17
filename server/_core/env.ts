@@ -5,6 +5,13 @@ export const ENV = {
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   isProduction: process.env.NODE_ENV === "production",
+  // Data-residency posture. "on_premise" enforces that no transaction data leaves
+  // the deployment: all outbound calls are blocked except to loopback/private hosts
+  // and EGRESS_ALLOWLIST. "cloud" (default) keeps today's behaviour (internet LLM, etc.).
+  deploymentMode: (process.env.DEPLOYMENT_MODE ?? "cloud").toLowerCase(),
+  // Comma-separated hostnames explicitly permitted to receive outbound calls in
+  // on_premise mode (e.g. an in-VPC LLM gateway, or the Exception Intelligence pool).
+  egressAllowlist: process.env.EGRESS_ALLOWLIST ?? "",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
   // Direct LLM provider (production / Rocket.new / self-hosted)

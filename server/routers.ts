@@ -48,6 +48,7 @@ import {
   type ReconciliationConfig,
 } from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
+import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "./_core/egress";
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
@@ -291,6 +292,15 @@ async function dispatchWebhook(event: string, payload: any) {
   try {
     const webhookList = await db.getActiveWebhooksByEvent(event);
     for (const webhook of webhookList) {
+      // Data residency: user-configured webhooks can carry reconciliation payloads.
+      // In on-premise mode, only deliver to in-VPC / allowlisted hosts.
+      if (!isEgressAllowed(webhook.url as string)) {
+        console.warn(
+          `[Webhook] on-premise mode: blocked delivery to external host ${webhook.url} (event ${event}). ` +
+            "Add the host to EGRESS_ALLOWLIST to permit it.",
+        );
+        continue;
+      }
       const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
       const signature = crypto.createHmac("sha256", webhook.secret).update(body).digest("hex");
 
@@ -4888,6 +4898,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
               text: `Hi ${firstName},\n\nThank you for completing the ReconcileAI CBN Compliance Readiness Assessment.\n\nYour Score: ${overallScore}/100 (${riskLevelLabel})\n\n${aiNarrative ?? ""}\n\nView your full report: ${resultUrl}\n\nIf you'd like to see how ReconcileAI can help close these compliance gaps, book a demo here: https://calendly.com/richard-infinityaiafrica/30min\n\n— ReconcileAI by Infinity AI Africa Limited`,
 
             };
+            // Data residency: legacy Forge email relay is external egress; blocked on-premise.
+            assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
             const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
               method: "POST",
               headers: {
@@ -4997,6 +5009,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
 </html>`;
 
         try {
+          // Data residency: legacy Forge email relay is external egress; blocked on-premise.
+          assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
           const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
             method: "POST",
             headers: {
@@ -5193,6 +5207,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
           const institutionName = assessment.institutionName ?? "your institution";
           const emailHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;"><tr><td style="background:#1B365D;padding:28px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">ReconcileAI</p><p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">AI-Powered Financial Reconciliation for African Banks &amp; Fintechs</p></td></tr><tr><td style="padding:32px;"><p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p><p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your score of <strong>${overallScore}/100 (${riskLevelLabel})</strong> tells us a lot about where ${institutionName} stands today.</p><p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">We'd love to show you exactly how ReconcileAI closes those gaps in a focused 30-minute demo.</p><table cellpadding="0" cellspacing="0" style="margin:0 0 16px;"><tr><td style="background:#1B365D;border-radius:8px;"><a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a></td></tr></table><table cellpadding="0" cellspacing="0" style="margin:0 0 24px;"><tr><td style="background:#F47458;border-radius:8px;"><a href="https://calendly.com/richard-infinityaiafrica/30min" style="display:inline-block;padding:12px 24px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">📅 Book a Free 30-Minute Demo →</a></td></tr></table></td></tr><tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;"><p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p><p style="margin:8px 0 0;font-size:12px;color:#8c757d;">Ready to book? Pick a time directly: <a href="https://calendly.com/richard-infinityaiafrica/30min" style="color:#F47458;text-decoration:underline;font-weight:600;">calendly.com/richard-infinityaiafrica/30min</a></p><p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p></td></tr></table></td></tr></table></body></html>`;
           try {
+            // Data residency: legacy Forge email relay is external egress; blocked on-premise.
+            assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
             const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
               method: "POST",
               headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.BUILT_IN_FORGE_API_KEY}` },
