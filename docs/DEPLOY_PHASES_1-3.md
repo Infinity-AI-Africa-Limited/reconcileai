@@ -39,14 +39,31 @@ CBN_SIGNING_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-
 For the standard cloud deployment of reconcileai.vip, only `CBN_SIGNING_PRIVATE_KEY`
 is worth setting now; everything else defaults correctly.
 
-## 2. Run the database migration (BEFORE deploying new code)
+## 2. Run the database migration (DO THIS FIRST)
+
+> ⚠️ **Railway auto-deploys from `main`.** Because `railway.json` does **not** run
+> migrations on release, pushing this release builds and starts the new code while
+> the prod schema is still on the old version. The change is **additive**, so reads
+> and audit-logged writes keep working (`logAudit` swallows errors), but the
+> new-column **write** paths (upload `detectedFormat`, CBN signing, audit chain,
+> `multiRunId`) will error until the migration runs. **Apply it now.**
+
+Run the migration against the production DB. The Railway CLI injects the prod
+`DATABASE_URL` into your local shell (where `drizzle-kit` is installed):
 
 ```bash
-pnpm db:push      # drizzle-kit generate && drizzle-kit migrate
+railway link               # select the reconcileai project/service (once)
+railway run pnpm db:push   # drizzle-kit generate && migrate, against prod
 ```
 
-Applies migration `0041` against `DATABASE_URL`. Additive only — safe to run on the
-live DB. Verify it reports the 3 new tables + altered columns.
+Or, if you have the prod `DATABASE_URL` directly:
+
+```bash
+DATABASE_URL='mysql://…prod…' pnpm db:push
+```
+
+Applies migration `0041` (3 new tables + ADD COLUMN + a safe `varchar` widening).
+Additive only — safe on the live DB. After it completes, the new features work.
 
 ## 3. Deploy the application code
 
