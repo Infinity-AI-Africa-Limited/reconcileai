@@ -302,6 +302,13 @@
       "when": 1781798800893,
       "tag": "0042_ei_default_off",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "5",
+      "when": 1781825283346,
+      "tag": "0043_poc_tables",
+      "breakpoints": true
     }
   ]
 }

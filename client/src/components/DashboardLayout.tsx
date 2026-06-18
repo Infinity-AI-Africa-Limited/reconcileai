@@ -73,7 +73,6 @@ const menuItems: NavItem[] = [
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
   { icon: Network, label: "Exception Intelligence", path: "/exception-intelligence" },
   { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
-  { icon: Database, label: "Woodcore POC", path: "/woodcore-poc" },
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
   // Upload & Reconciliation: admin + operations only
   { icon: Upload, label: "Upload Data", path: "/upload", roles: ["admin", "operations"] },
@@ -162,6 +161,7 @@ const superAdminItems: NavItem[] = [
   { icon: Network, label: "All Organisations", path: "/admin/super-admin/orgs", roles: ["super_admin"] },
   { icon: Users, label: "All Users", path: "/admin/super-admin/users", roles: ["super_admin"] },
   { icon: BarChart3, label: "Platform Analytics", path: "/admin/super-admin/analytics", roles: ["super_admin"] },
+  { icon: FlaskConical, label: "POC Hub", path: "/admin/poc", roles: ["super_admin"] },
 ];
 
 function canAccessNav(item: NavItem, userRole: string | undefined): boolean {

@@ -478,6 +478,14 @@ function extractPlainText(content: MessageContent | MessageContent[]): string {
     .trim();
 }
 
+/** Parse a `data:<media>;base64,<data>` URL into its parts, or null if not one. */
+function parseDataUrl(url: string): { mediaType: string; base64: string } | null {
+  // [\s\S] instead of the dotAll `s` flag (which needs an es2018+ target).
+  const m = /^data:([^;,]+);base64,([\s\S]*)$/.exec(url);
+  if (!m) return null;
+  return { mediaType: m[1], base64: m[2] };
+}
+
 function toAnthropicContent(
   content: MessageContent | MessageContent[]
 ): string | Array<Record<string, unknown>> {
@@ -485,9 +493,24 @@ function toAnthropicContent(
   if (parts.length === 1 && parts[0].type === "text") return parts[0].text;
   return parts.map((p) => {
     if (p.type === "text") return { type: "text", text: p.text };
-    if (p.type === "image_url") return { type: "image", source: { type: "url", url: p.image_url.url } };
-    // Anthropic has no generic file block on this path — degrade to a text note.
-    return { type: "text", text: `[attachment: ${(p as FileContent).file_url.url}]` };
+    if (p.type === "image_url") {
+      const data = parseDataUrl(p.image_url.url);
+      return data
+        ? { type: "image", source: { type: "base64", media_type: data.mediaType, data: data.base64 } }
+        : { type: "image", source: { type: "url", url: p.image_url.url } };
+    }
+    // PDF documents: Anthropic supports a `document` block (base64 or URL source).
+    // Claude reads the PDF natively, including scanned/image-only statements.
+    const fileUrl = (p as FileContent).file_url.url;
+    const mime = (p as FileContent).file_url.mime_type;
+    if (mime === "application/pdf" || /\.pdf($|\?)/i.test(fileUrl) || /^data:application\/pdf;/.test(fileUrl)) {
+      const data = parseDataUrl(fileUrl);
+      return data
+        ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: data.base64 } }
+        : { type: "document", source: { type: "url", url: fileUrl } };
+    }
+    // Any other attachment type — degrade to a text note.
+    return { type: "text", text: `[attachment: ${fileUrl}]` };
   });
 }
 
