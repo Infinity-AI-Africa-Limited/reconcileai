@@ -150,6 +150,19 @@ Signed submissions persist `contentHash`, `signature`, `signingKeyFingerprint`,
 and verifies the signature (tamper-evidence); `compliance.signingPublicKey` exposes
 the public key (PEM) for third-party verification. Signing logic: `server/signing.ts`.
 
+## Exception Intelligence Layer (anonymized network effect)
+
+```bash
+# Central pool endpoint. ONLY anonymized, non-personal pattern signatures are sent
+# (no transaction data / PII). Unset → local-only (cloud aggregates in-place; on-prem
+# does not sync). In on_premise mode, add this host to EGRESS_ALLOWLIST.
+EXCEPTION_INTEL_ENDPOINT=https://intel.reconcileai.vip
+```
+
+Per-org opt-out lives in the app (Exception Intelligence settings page). Privacy controls
+(field allowlist, runtime PII-scrub, k-anonymity) are documented in
+`docs/exception-intelligence-dpia.md` and enforced in `server/exceptionIntelligence.ts`.
+
 ## Woodcore Integration (pending IP whitelist)
 
 ```bash

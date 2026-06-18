@@ -928,6 +928,78 @@ export const agentMemory = mysqlTable("agent_memory", {
 export type AgentMemoryRecord = typeof agentMemory.$inferSelect;
 export type InsertAgentMemoryRecord = typeof agentMemory.$inferInsert;
 
+// ─── Exception Intelligence Layer (anonymized network effect) ────────
+// Shares only coarse, non-personal categorical PATTERN signatures — never
+// transaction data, amounts, references, names, or free text. See
+// docs/exception-intelligence-dpia.md and server/exceptionIntelligence.ts.
+
+// An org's locally-derived pattern signatures (its contributions to the pool).
+export const exceptionPatternSignatures = mysqlTable("exception_pattern_signatures", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  // Deterministic hash of the categorical tuple below (the shareable identity).
+  signatureHash: varchar("signatureHash", { length: 64 }).notNull(),
+  exceptionCategory: varchar("exceptionCategory", { length: 64 }).notNull(),
+  amountBucket: mysqlEnum("amountBucket", ["0-100k", "100k-1m", "1m+"]).notNull(),
+  counterpartyType: varchar("counterpartyType", { length: 64 }).notNull(),
+  deductionType: varchar("deductionType", { length: 64 }),
+  // Fixed enum action class — NOT the free-text resolution.
+  resolutionActionClass: varchar("resolutionActionClass", { length: 48 }).notNull(),
+  outcome: mysqlEnum("outcome", ["resolved", "escalated", "rejected"]).notNull(),
+  // How many times this org has observed/resolved this pattern.
+  observationCount: int("observationCount").default(1).notNull(),
+  sharedAt: timestamp("sharedAt"), // null until contributed to the pool
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_eps_org").on(table.organizationId),
+  index("idx_eps_sig").on(table.signatureHash),
+  index("idx_eps_org_sig").on(table.organizationId, table.signatureHash),
+]);
+export type ExceptionPatternSignature = typeof exceptionPatternSignatures.$inferSelect;
+export type InsertExceptionPatternSignature = typeof exceptionPatternSignatures.$inferInsert;
+
+// Per-org opt-in/out for the intelligence layer (default ON).
+export const exceptionIntelligenceSettings = mysqlTable("exception_intelligence_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull().unique(),
+  shareEnabled: boolean("shareEnabled").default(true).notNull(),   // contribute anonymized patterns
+  consumeEnabled: boolean("consumeEnabled").default(true).notNull(), // benefit from the pool
+  // Stable pseudonym for this contributor — the pool never sees the org id/name.
+  contributorPseudonym: varchar("contributorPseudonym", { length: 64 }),
+  lastSharedAt: timestamp("lastSharedAt"),
+  lastConsumedAt: timestamp("lastConsumedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_eis_org").on(table.organizationId),
+]);
+export type ExceptionIntelligenceSettings = typeof exceptionIntelligenceSettings.$inferSelect;
+export type InsertExceptionIntelligenceSettings = typeof exceptionIntelligenceSettings.$inferInsert;
+
+// Aggregated patterns received FROM the pool (consumed). In a multi-tenant cloud
+// these mirror cross-org aggregates; in on-prem they are pulled from the
+// EXCEPTION_INTEL_ENDPOINT. contributorCount is the k (distinct orgs) — only
+// patterns meeting the k-anonymity threshold are stored/served.
+export const sharedExceptionPatterns = mysqlTable("shared_exception_patterns", {
+  id: int("id").autoincrement().primaryKey(),
+  signatureHash: varchar("signatureHash", { length: 64 }).notNull().unique(),
+  exceptionCategory: varchar("exceptionCategory", { length: 64 }).notNull(),
+  amountBucket: mysqlEnum("amountBucket", ["0-100k", "100k-1m", "1m+"]).notNull(),
+  counterpartyType: varchar("counterpartyType", { length: 64 }).notNull(),
+  deductionType: varchar("deductionType", { length: 64 }),
+  resolutionActionClass: varchar("resolutionActionClass", { length: 48 }).notNull(),
+  outcome: mysqlEnum("outcome", ["resolved", "escalated", "rejected"]).notNull(),
+  contributorCount: int("contributorCount").default(0).notNull(), // k — distinct orgs
+  observationCount: int("observationCount").default(0).notNull(),  // total observations across orgs
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_sep_sig").on(table.signatureHash),
+  index("idx_sep_category").on(table.exceptionCategory),
+]);
+export type SharedExceptionPattern = typeof sharedExceptionPatterns.$inferSelect;
+export type InsertSharedExceptionPattern = typeof sharedExceptionPatterns.$inferInsert;
+
 // ─── Guest Demo Tokens ───────────────────────────────────────────────
 export const guestTokens = mysqlTable("guest_tokens", {
   id: int("id").autoincrement().primaryKey(),

@@ -4058,6 +4058,27 @@ Always be specific, reference actual exception IDs and amounts where available, 
           resolvedBy: userId,
         });
 
+        // Exception Intelligence: record the anonymized pattern signature (coarse
+        // categorical tuple only — never the transaction). Powers the network
+        // effect; sharing/consumption are gated by per-org settings + residency.
+        try {
+          const ei = await import("./exceptionIntelligence");
+          const sig = ei.deriveSignature({
+            exceptionCategory: input.exceptionCategory,
+            amount: input.amountRange === "1m+" ? 1_000_000 : input.amountRange === "100k-1m" ? 100_000 : 0,
+            counterpartyType: "distributor",
+            deductionType: input.deductionType ?? null,
+            resolution: input.resolution,
+            outcome: input.outcome,
+          });
+          // amountRange is already bucketed; trust it over the synthetic amount.
+          sig.amountBucket = input.amountRange;
+          sig.signatureHash = ei.signatureHashOf(sig);
+          await ei.recordLocalSignature(orgId, sig);
+        } catch (err) {
+          console.error("[ExceptionIntelligence] signature record failed (non-fatal):", err);
+        }
+
         await logAudit(userId, 'super_agent_memory_added', 'agent_memory', undefined, {
           category: input.exceptionCategory,
           outcome: input.outcome,
@@ -4120,7 +4141,21 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .sort((a, b) => b.similarity - a.similarity)
           .slice(0, input.topK);
 
-        return { cases: results };
+        // Exception Intelligence: augment with cross-institution recommendations
+        // from the shared pool (k-anonymized, non-personal). The category is
+        // parsed from the embedding text's `category:<x>` token.
+        let sharedRecommendations: Array<{ resolutionActionClass: string; outcome: string; contributorCount: number; observationCount: number }> = [];
+        try {
+          const catMatch = input.embeddingText.match(/category:([a-z0-9_]+)/i);
+          if (catMatch) {
+            const ei = await import("./exceptionIntelligence");
+            sharedRecommendations = await ei.getSharedRecommendations(orgId, catMatch[1]);
+          }
+        } catch (err) {
+          console.error("[ExceptionIntelligence] shared recommendation lookup failed (non-fatal):", err);
+        }
+
+        return { cases: results, sharedRecommendations };
       }),
   }),
 
@@ -5602,6 +5637,67 @@ Always be specific, reference actual exception IDs and amounts where available, 
           return { status: 'rejected' };
         }
       }),
+  }),
+
+  // ─── Exception Intelligence Layer ──────────────────────────────────
+  exceptionIntelligence: router({
+    // Per-org settings + transparency: what is shared and the current posture.
+    getSettings: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const ei = await import("./exceptionIntelligence");
+      const settings = await ei.getSettings(orgId);
+      return {
+        shareEnabled: settings?.shareEnabled ?? true,
+        consumeEnabled: settings?.consumeEnabled ?? true,
+        lastSharedAt: settings?.lastSharedAt ?? null,
+        lastConsumedAt: settings?.lastConsumedAt ?? null,
+        kAnonymityThreshold: ei.K_ANON_THRESHOLD,
+        sharedFields: ei.ALLOWED_SIGNATURE_KEYS,
+        endpointConfigured: !!process.env.EXCEPTION_INTEL_ENDPOINT,
+      };
+    }),
+
+    updateSettings: protectedProcedure
+      .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? 0;
+        const ei = await import("./exceptionIntelligence");
+        const updated = await ei.updateSettings(orgId, input);
+        await logAudit(ctx.user.id, "exception_intelligence_settings_updated", "exception_intelligence", orgId, input);
+        return { shareEnabled: updated?.shareEnabled ?? true, consumeEnabled: updated?.consumeEnabled ?? true };
+      }),
+
+    // Local contribution stats (what this org has observed).
+    status: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const drizzle = await getDb();
+      if (!drizzle) return { localSignatures: 0, localObservations: 0, sharedPatternsAvailable: 0 };
+      const { exceptionPatternSignatures: eps, sharedExceptionPatterns: sep } = await import("../drizzle/schema");
+      const ei = await import("./exceptionIntelligence");
+      const [local] = await drizzle
+        .select({ sigs: sql<number>`count(*)`, obs: sql<number>`coalesce(sum(${eps.observationCount}),0)` })
+        .from(eps)
+        .where(eq(eps.organizationId, orgId));
+      const [shared] = await drizzle
+        .select({ n: sql<number>`count(*)` })
+        .from(sep)
+        .where(sql`${sep.contributorCount} >= ${ei.K_ANON_THRESHOLD}`);
+      return {
+        localSignatures: Number(local?.sigs || 0),
+        localObservations: Number(local?.obs || 0),
+        sharedPatternsAvailable: Number(shared?.n || 0),
+      };
+    }),
+
+    // Admin: rebuild the shared pool aggregate (cloud) and/or push to the pool (on-prem).
+    sync: adminProcedure.mutation(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const ei = await import("./exceptionIntelligence");
+      const aggregated = await ei.aggregateSharedPatterns();
+      const pushed = await ei.syncToPool(orgId);
+      await logAudit(ctx.user.id, "exception_intelligence_sync", "exception_intelligence", orgId, { aggregated, pushed });
+      return { aggregatedPatterns: aggregated.patterns, pushed };
+    }),
   }),
 
   // ─── CFO Report Schedule + Alerts ──────────────────────────────────

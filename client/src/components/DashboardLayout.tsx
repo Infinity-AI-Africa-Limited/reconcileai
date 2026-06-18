@@ -71,6 +71,7 @@ type NavItem = { icon: React.ElementType; label: string; path: string; roles?: s
 const menuItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
+  { icon: Network, label: "Exception Intelligence", path: "/exception-intelligence" },
   { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
   { icon: Database, label: "Woodcore POC", path: "/woodcore-poc" },
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
