@@ -220,9 +220,14 @@ export async function getSettings(organizationId: number) {
     .where(eq(exceptionIntelligenceSettings.organizationId, organizationId))
     .limit(1);
   if (row) return row;
-  // Default-on, created lazily.
+  // Opt-in: created lazily, OFF by default (both directions).
   const pseudonym = contributorPseudonymFor(organizationId, ENV.cookieSecret || "reconcileai");
-  await db.insert(exceptionIntelligenceSettings).values({ organizationId, contributorPseudonym: pseudonym });
+  await db.insert(exceptionIntelligenceSettings).values({
+    organizationId,
+    contributorPseudonym: pseudonym,
+    shareEnabled: false,
+    consumeEnabled: false,
+  });
   const [created] = await db
     .select()
     .from(exceptionIntelligenceSettings)
@@ -238,9 +243,14 @@ export async function updateSettings(
   const db = await getDb();
   if (!db) return null;
   await getSettings(organizationId); // ensure row exists
+  // Reciprocity: contribution and consumption are coupled — a bank benefits from
+  // the pool only if it also contributes, and vice versa. Whichever toggle the
+  // caller set determines a single participation value applied to BOTH.
+  const participate = patch.shareEnabled ?? patch.consumeEnabled;
+  if (participate === undefined) return getSettings(organizationId);
   await db
     .update(exceptionIntelligenceSettings)
-    .set(patch)
+    .set({ shareEnabled: participate, consumeEnabled: participate })
     .where(eq(exceptionIntelligenceSettings.organizationId, organizationId));
   return getSettings(organizationId);
 }
@@ -391,7 +401,10 @@ export async function getSharedRecommendations(
   const db = await getDb();
   if (!db) return [];
   const settings = await getSettings(organizationId);
-  if (settings && settings.consumeEnabled === false) return [];
+  // Reciprocity is enforced server-side: a bank only benefits from the pool if it
+  // also contributes. Both flags are kept equal, but we require BOTH defensively
+  // so no configuration can free-ride on the shared pool.
+  if (!settings || settings.shareEnabled !== true || settings.consumeEnabled !== true) return [];
 
   const conds = [
     eq(sharedExceptionPatterns.exceptionCategory, exceptionCategory),

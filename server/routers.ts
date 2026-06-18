@@ -5656,8 +5656,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
       const ei = await import("./exceptionIntelligence");
       const settings = await ei.getSettings(orgId);
       return {
-        shareEnabled: settings?.shareEnabled ?? true,
-        consumeEnabled: settings?.consumeEnabled ?? true,
+        shareEnabled: settings?.shareEnabled ?? false,
+        consumeEnabled: settings?.consumeEnabled ?? false,
         lastSharedAt: settings?.lastSharedAt ?? null,
         lastConsumedAt: settings?.lastConsumedAt ?? null,
         kAnonymityThreshold: ei.K_ANON_THRESHOLD,
@@ -5673,7 +5673,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const ei = await import("./exceptionIntelligence");
         const updated = await ei.updateSettings(orgId, input);
         await logAudit(ctx.user.id, "exception_intelligence_settings_updated", "exception_intelligence", orgId, input);
-        return { shareEnabled: updated?.shareEnabled ?? true, consumeEnabled: updated?.consumeEnabled ?? true };
+        return { shareEnabled: updated?.shareEnabled ?? false, consumeEnabled: updated?.consumeEnabled ?? false };
       }),
 
     // Local contribution stats (what this org has observed).

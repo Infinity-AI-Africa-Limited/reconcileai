@@ -295,6 +295,13 @@
       "when": 1781746267782,
       "tag": "0041_late_microbe",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "5",
+      "when": 1781798800893,
+      "tag": "0042_ei_default_off",
+      "breakpoints": true
     }
   ]
 }

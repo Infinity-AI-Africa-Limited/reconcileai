@@ -28,7 +28,9 @@ function loadKeys(): { privateKey: crypto.KeyObject; publicKey: crypto.KeyObject
     return { privateKey: cachedPrivateKey, publicKey: cachedPublicKey };
   }
 
-  const pem = ENV.cbnSigningPrivateKey.trim();
+  // Accept both a real multi-line PEM and a single-line value with escaped "\n"
+  // (the latter is what is easiest to paste into a hosting provider's variable field).
+  const pem = ENV.cbnSigningPrivateKey.trim().replace(/\\n/g, "\n");
   if (pem) {
     const privateKey = crypto.createPrivateKey(pem);
     if (privateKey.asymmetricKeyType !== "ed25519") {
