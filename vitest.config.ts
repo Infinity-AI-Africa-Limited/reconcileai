@@ -14,6 +14,11 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["server/**/*.test.ts", "server/**/*.spec.ts"],
+    include: [
+      "server/**/*.test.ts",
+      "server/**/*.spec.ts",
+      // Pure (non-DOM) client libraries — e.g. settlement-file connectors.
+      "client/src/lib/**/*.test.ts",
+    ],
   },
 });

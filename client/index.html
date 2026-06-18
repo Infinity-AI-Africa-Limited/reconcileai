@@ -15,10 +15,12 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script
-      defer
-      src="%VITE_ANALYTICS_ENDPOINT%/umami"
-      data-website-id="%VITE_ANALYTICS_WEBSITE_ID%"></script>
+    <!--
+      Manus analytics (umami) removed for production — the %VITE_ANALYTICS_*%
+      placeholders only resolve inside the Manus platform and otherwise ship a
+      broken <script> tag. To re-enable analytics, drop a PostHog or Plausible
+      snippet here (see docs/CONTEXT_HANDOFF.md §3.6).
+    -->
   </body>
 
 </html>

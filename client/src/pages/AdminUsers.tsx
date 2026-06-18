@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
@@ -252,9 +253,22 @@ function RoleCard({ role, selected, onSelect }: { role: PortalRole; selected: bo
 export default function AdminUsers() {
   const { user: currentUser } = useAuth();
   const utils = trpc.useUtils();
+  const { viewAsOrg, isViewingAs } = usePortalContext();
+  // Super admins (Infinity AI) and org admins can manage users. In portal-view a
+  // super admin is simulating an org admin, so we treat them as scoped: they must
+  // NOT see Infinity AI staff, the super_admin role, or other organisations.
+  const isSuperAdmin = currentUser?.role === "super_admin";
+  const canSeeSuperAdmin = isSuperAdmin && !isViewingAs;
+  const canManageUsers = currentUser?.role === "admin" || isSuperAdmin;
+  // The single organisation a scoped (org-admin / portal-view) actor is confined to.
+  const scopedOrgId = canSeeSuperAdmin
+    ? null
+    : (isViewingAs && viewAsOrg ? viewAsOrg.id : currentUser?.organizationId ?? null);
 
   // ── Data ──────────────────────────────────────────────────────────────
-  const { data: allUsers = [], isLoading, refetch } = trpc.admin.users.useQuery();
+  const { data: allUsers = [], isLoading, refetch } = trpc.admin.users.useQuery(
+    isViewingAs && viewAsOrg ? { viewAsOrgId: viewAsOrg.id } : undefined
+  );
   const { data: orgList = [] } = trpc.admin.organizations.useQuery();
 
   // ── Local state ───────────────────────────────────────────────────────
@@ -454,7 +468,7 @@ export default function AdminUsers() {
               <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`} />
               Refresh
             </Button>
-            {currentUser?.role === "admin" && (
+            {canManageUsers && (
               <Button size="sm" onClick={() => setAddUserOpen(true)}>
                 <UserPlus className="h-4 w-4 mr-2" />
                 Add User
@@ -500,7 +514,7 @@ export default function AdminUsers() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All roles</SelectItem>
-              {(Object.keys(ROLE_META) as PortalRole[]).map(r => (
+              {(Object.keys(ROLE_META) as PortalRole[]).filter(r => canSeeSuperAdmin || r !== "super_admin").map(r => (
                 <SelectItem key={r} value={r}>{ROLE_META[r].label}</SelectItem>
               ))}
             </SelectContent>
@@ -535,7 +549,7 @@ export default function AdminUsers() {
                   <SelectItem value="activate">Activate</SelectItem>
                   <SelectItem value="deactivate">Deactivate</SelectItem>
                   <SelectItem value="role">Change role</SelectItem>
-                  <SelectItem value="org">Assign organisation</SelectItem>
+                  {canSeeSuperAdmin && <SelectItem value="org">Assign organisation</SelectItem>}
                 </SelectContent>
               </Select>
               {bulkAction === "role" && (
@@ -544,7 +558,7 @@ export default function AdminUsers() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {(Object.keys(ROLE_META) as PortalRole[]).map(r => (
+                    {(Object.keys(ROLE_META) as PortalRole[]).filter(r => canSeeSuperAdmin || r !== "super_admin").map(r => (
                       <SelectItem key={r} value={r}>{ROLE_META[r].label}</SelectItem>
                     ))}
                   </SelectContent>
@@ -653,7 +667,7 @@ export default function AdminUsers() {
                     {u.organizationId ? (orgMap[u.organizationId] ?? `Org #${u.organizationId}`) : "—"}
                   </TableCell>
                   <TableCell>
-                    {currentUser?.role === "admin" && u.id !== currentUser.id && (
+                    {canManageUsers && u.id !== currentUser.id && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-7 w-7">
@@ -664,7 +678,7 @@ export default function AdminUsers() {
                           <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
                             Change Role
                           </div>
-                          {(Object.keys(ROLE_META) as PortalRole[]).filter(r => r !== u.role).map(r => (
+                          {(Object.keys(ROLE_META) as PortalRole[]).filter(r => r !== u.role && (canSeeSuperAdmin || r !== "super_admin")).map(r => (
                             <DropdownMenuItem
                               key={r}
                               onClick={() => setConfirmDialog({ type: "role", userId: u.id, userName: u.name ?? u.email ?? "User", newRole: r })}
@@ -674,6 +688,7 @@ export default function AdminUsers() {
                             </DropdownMenuItem>
                           ))}
                           <DropdownMenuSeparator />
+                          {canSeeSuperAdmin && (<>
                           <DropdownMenuItem onClick={() => {
                             setOrgDialog({ userId: u.id, userName: u.name ?? u.email ?? "User", currentOrgId: u.organizationId ?? null });
                             setSelectedOrgId(u.organizationId ? String(u.organizationId) : "none");
@@ -682,6 +697,7 @@ export default function AdminUsers() {
                             Assign Organisation
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
+                          </>)}
                           <DropdownMenuItem onClick={() => { setActivityUserId(u.id); setActivityUserName(u.name ?? u.email ?? "User"); }}>
                             <Activity className="h-3.5 w-3.5 mr-2 text-blue-600" />
                             <span className="text-blue-600">View Activity</span>
@@ -759,24 +775,35 @@ export default function AdminUsers() {
               </div>
             </div>
 
-            {/* Organisation */}
-            <div className="space-y-1.5">
-              <Label>Organisation <span className="text-muted-foreground text-xs">(optional)</span></Label>
-              <Select
-                value={newUser.organizationId}
-                onValueChange={v => setNewUser(p => ({ ...p, organizationId: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="No organisation" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No organisation</SelectItem>
-                  {orgList.map(o => (
-                    <SelectItem key={o.id} value={String(o.id)}>{o.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {/* Organisation — super admins choose any org; org admins (and portal-view) are locked to one. */}
+            {canSeeSuperAdmin ? (
+              <div className="space-y-1.5">
+                <Label>Organisation</Label>
+                <Select
+                  value={newUser.organizationId}
+                  onValueChange={v => setNewUser(p => ({ ...p, organizationId: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="No organisation" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No organisation</SelectItem>
+                    {orgList.map(o => (
+                      <SelectItem key={o.id} value={String(o.id)}>{o.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">As Infinity AI staff, you can assign this user to any organisation you onboard.</p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label>Organisation</Label>
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-foreground">
+                  {scopedOrgId ? (orgMap[scopedOrgId] ?? viewAsOrg?.name ?? `Org #${scopedOrgId}`) : "Your organisation"}
+                </div>
+                <p className="text-xs text-muted-foreground">New users are added to this organisation.</p>
+              </div>
+            )}
 
             {/* Role selection */}
             <div className="space-y-2">
@@ -786,7 +813,9 @@ export default function AdminUsers() {
                 <XCircle className="h-3 w-3 inline text-gray-400" /> cannot access that module.
               </p>
               <div className="grid grid-cols-1 gap-2 mt-2">
-                {(Object.keys(ROLE_META) as PortalRole[]).map(r => (
+                {(Object.keys(ROLE_META) as PortalRole[])
+                  .filter(r => canSeeSuperAdmin || r !== "super_admin")
+                  .map(r => (
                   <RoleCard
                     key={r}
                     role={r}
@@ -822,7 +851,9 @@ export default function AdminUsers() {
                 name: newUser.name,
                 email: newUser.email,
                 role: newUser.role,
-                organizationId: newUser.organizationId !== "none" ? parseInt(newUser.organizationId) : null,
+                organizationId: canSeeSuperAdmin
+                  ? (newUser.organizationId !== "none" ? parseInt(newUser.organizationId) : null)
+                  : scopedOrgId,
                 origin: window.location.origin,
               })}
               disabled={!newUser.name.trim() || !newUser.email.trim() || addUser.isPending}

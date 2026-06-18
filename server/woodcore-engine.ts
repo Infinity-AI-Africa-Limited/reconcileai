@@ -521,7 +521,7 @@ export async function runLayer2Loan(
       description: `Loan repayment principal ₦${principalAmt.toLocaleString("en-NG", { minimumFractionDigits: 2 })} — no GL entry found`,
       refNum: null,
       accountId: portfolioLedgerAccountId,
-      accountName: "SME Loan Portfolio Account",
+      accountName: layer1.portfolioLedgerName,
     });
   }
 
@@ -581,7 +581,7 @@ export async function runLayer2Loan(
       description: `Loan disbursement ₦${principalAmt.toLocaleString("en-NG", { minimumFractionDigits: 2 })} — not debited to portfolio account`,
       refNum: null,
       accountId: portfolioLedgerAccountId,
-      accountName: "SME Loan Portfolio Account",
+      accountName: layer1.portfolioLedgerName,
     });
   }
 
@@ -763,7 +763,7 @@ export async function runLayer2(
 
 const EXCEPTION_ACTIONS: Record<string, string> = {
   // Loan-specific exception actions
-  DISBURSEMENT_MISPOSTING: "Raise with the CBS administrator to investigate the disbursement posting rule for the SME Loan product. The disbursement was posted to the wrong GL account — it should debit the Loan Portfolio Account (117083) but was posted elsewhere. Raise a correcting journal entry to move the debit to the correct account. Verify the product-to-ledger mapping in the CBS configuration.",
+  DISBURSEMENT_MISPOSTING: "Raise with the CBS administrator to investigate the disbursement posting rule for the SME Loan product. The disbursement was posted to the wrong GL account — it should debit the loan portfolio account but was posted elsewhere. Raise a correcting journal entry to move the debit to the correct account. Verify the product-to-ledger mapping in the CBS configuration.",
   DISBURSEMENT_NOT_POSTED: "The loan disbursement was recorded in the CBS loan transaction table but no corresponding GL debit was posted to the Loan Portfolio Account. This is a critical control failure — the GL balance understates outstanding principal. Raise with the CBS DBA immediately to investigate the posting engine failure and post the missing GL entry.",
   REPAYMENT_NOT_POSTED: "A loan repayment principal portion was recorded in the CBS loan transaction table but no corresponding GL credit was posted to the Loan Portfolio Account. The GL balance overstates outstanding principal. Raise with the CBS DBA to investigate the posting engine and post the missing GL credit entry.",
   PRINCIPAL_ADJUSTMENT_ANOMALY: "A manual entry was posted directly to the Loan Portfolio Account without a corresponding loan transaction record. Manual adjustments to the principal balance require dual authorisation and a supporting loan transaction. Obtain the authorisation documentation, verify the business justification, and raise a correcting entry if the adjustment was not properly approved.",
@@ -824,13 +824,13 @@ export async function runLayer3(
     // ── Loan-specific exception explanations ────────────────────────────────
     if (exc.exceptionCategory === "DISBURSEMENT_MISPOSTING") {
       confidence = 95;
-      agentExplanation = `A loan disbursement of ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })} recorded on ${exc.glEntryDate} was not debited to the SME Loan Portfolio Account (GL 117083). The disbursement transaction exists in the CBS loan transaction table (ref: ${exc.linkedTransactionId ?? exc.refNum ?? "N/A"}) but the corresponding GL debit was posted to the wrong account — most likely the Fund Source Account (GL 113938). This means the Loan Portfolio Account balance understates the true outstanding principal by ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })}. A correcting journal entry is required to debit the Portfolio Account and credit the Fund Source Account.`;
+      agentExplanation = `A loan disbursement of ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })} recorded on ${exc.glEntryDate} was not debited to the ${layer1.portfolioLedgerName} (GL ${layer1.portfolioLedgerGlCode}). The disbursement transaction exists in the CBS loan transaction table (ref: ${exc.linkedTransactionId ?? exc.refNum ?? "N/A"}) but the corresponding GL debit was posted to a different account (commonly the fund source account). This means the portfolio account balance understates the true outstanding principal by ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })}. A correcting journal entry is required to debit the portfolio account and credit the originating account.`;
     } else if (exc.exceptionCategory === "DISBURSEMENT_NOT_POSTED") {
       confidence = 97;
       agentExplanation = `A loan disbursement of ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })} was recorded in the CBS loan transaction table on ${exc.glEntryDate} (ref: ${exc.linkedTransactionId ?? "N/A"}) but no GL entry was posted to the Loan Portfolio Account. This is a critical posting engine failure — the outstanding principal balance in the GL is understated by ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })}. Immediate investigation is required to determine why the GL posting did not fire and to post the missing debit entry.`;
     } else if (exc.exceptionCategory === "REPAYMENT_NOT_POSTED") {
       confidence = 97;
-      agentExplanation = `A loan repayment principal portion of ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })} was recorded in the CBS loan transaction table on ${exc.glEntryDate} (ref: ${exc.linkedTransactionId ?? "N/A"}) but no corresponding GL credit was posted to the Loan Portfolio Account (GL 117083). The GL balance overstates outstanding principal by ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })}. The CBS posting engine failed to generate the GL credit for this repayment. Post the missing credit entry and investigate why the automated posting did not fire.`;
+      agentExplanation = `A loan repayment principal portion of ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })} was recorded in the CBS loan transaction table on ${exc.glEntryDate} (ref: ${exc.linkedTransactionId ?? "N/A"}) but no corresponding GL credit was posted to the ${layer1.portfolioLedgerName} (GL ${layer1.portfolioLedgerGlCode}). The GL balance overstates outstanding principal by ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })}. The CBS posting engine failed to generate the GL credit for this repayment. Post the missing credit entry and investigate why the automated posting did not fire.`;
     } else if (exc.exceptionCategory === "PRINCIPAL_ADJUSTMENT_ANOMALY") {
       confidence = 90;
       agentExplanation = `A manual journal entry of ₦${exc.glEntryAmount.toLocaleString("en-NG", { minimumFractionDigits: 2 })} (${exc.glEntryType}) was posted directly to the Loan Portfolio Account on ${exc.glEntryDate} with description: "${exc.description ?? "No description"}". This entry has no linked loan transaction ID — it bypassed the CBS posting engine entirely. Manual adjustments to the principal balance are a high-risk control failure: they alter the outstanding loan balance without a corresponding CBS transaction record, making it impossible to trace the adjustment back to a specific loan or borrower. Obtain the authorisation documentation and verify the business justification immediately.`;

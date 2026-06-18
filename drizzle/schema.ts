@@ -95,6 +95,7 @@ export const uploadBatches = mysqlTable("upload_batches", {
   fileName: varchar("fileName", { length: 500 }).notNull(),
   fileUrl: text("fileUrl"),
   fileHash: varchar("fileHash", { length: 64 }), // SHA-256 for idempotency
+  detectedFormat: varchar("detectedFormat", { length: 64 }), // connector that parsed this file (e.g. nibss_nip, interswitch_settlement, generic)
   totalRows: int("totalRows").default(0).notNull(),
   validRows: int("validRows").default(0).notNull(),
   invalidRows: int("invalidRows").default(0).notNull(),
@@ -177,6 +178,8 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   dateWindowDays: int("dateWindowDays").default(3).notNull(),
   // Engine configuration snapshot
   engineConfig: json("engineConfig"), // Frozen config at run time
+  // Groups child jobs created by a single multi-channel run (one source vs. many targets).
+  multiRunId: varchar("multiRunId", { length: 36 }),
   status: mysqlEnum("status", ["pending", "running", "completed", "failed", "cancelled"])
     .default("pending")
     .notNull(),
@@ -198,6 +201,7 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   index("idx_jobs_source").on(table.sourceChannelId),
   index("idx_jobs_target").on(table.targetChannelId),
   index("idx_jobs_created").on(table.createdAt),
+  index("idx_jobs_multirun").on(table.multiRunId),
 ]);
 
 export type ReconciliationJob = typeof reconciliationJobs.$inferSelect;
@@ -286,6 +290,11 @@ export const auditLogs = mysqlTable("audit_logs", {
   details: json("details"),
   ipAddress: varchar("ipAddress", { length: 45 }),
   userAgent: varchar("userAgent", { length: 500 }),
+  // Tamper-evidence: per-org hash chain. recordHash = SHA-256(canonical(entry) + prevRecordHash);
+  // any altered/removed row breaks the chain at verification time.
+  sequenceNumber: int("sequenceNumber"),
+  recordHash: varchar("recordHash", { length: 64 }),
+  prevRecordHash: varchar("prevRecordHash", { length: 64 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_audit_user").on(table.userId),
@@ -293,6 +302,7 @@ export const auditLogs = mysqlTable("audit_logs", {
   index("idx_audit_entity").on(table.entityType, table.entityId),
   index("idx_audit_action").on(table.action),
   index("idx_audit_created").on(table.createdAt),
+  index("idx_audit_org_seq").on(table.organizationId, table.sequenceNumber),
 ]);
 
 export type AuditLog = typeof auditLogs.$inferSelect;
@@ -918,6 +928,78 @@ export const agentMemory = mysqlTable("agent_memory", {
 export type AgentMemoryRecord = typeof agentMemory.$inferSelect;
 export type InsertAgentMemoryRecord = typeof agentMemory.$inferInsert;
 
+// ─── Exception Intelligence Layer (anonymized network effect) ────────
+// Shares only coarse, non-personal categorical PATTERN signatures — never
+// transaction data, amounts, references, names, or free text. See
+// docs/exception-intelligence-dpia.md and server/exceptionIntelligence.ts.
+
+// An org's locally-derived pattern signatures (its contributions to the pool).
+export const exceptionPatternSignatures = mysqlTable("exception_pattern_signatures", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  // Deterministic hash of the categorical tuple below (the shareable identity).
+  signatureHash: varchar("signatureHash", { length: 64 }).notNull(),
+  exceptionCategory: varchar("exceptionCategory", { length: 64 }).notNull(),
+  amountBucket: mysqlEnum("amountBucket", ["0-100k", "100k-1m", "1m+"]).notNull(),
+  counterpartyType: varchar("counterpartyType", { length: 64 }).notNull(),
+  deductionType: varchar("deductionType", { length: 64 }),
+  // Fixed enum action class — NOT the free-text resolution.
+  resolutionActionClass: varchar("resolutionActionClass", { length: 48 }).notNull(),
+  outcome: mysqlEnum("outcome", ["resolved", "escalated", "rejected"]).notNull(),
+  // How many times this org has observed/resolved this pattern.
+  observationCount: int("observationCount").default(1).notNull(),
+  sharedAt: timestamp("sharedAt"), // null until contributed to the pool
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_eps_org").on(table.organizationId),
+  index("idx_eps_sig").on(table.signatureHash),
+  index("idx_eps_org_sig").on(table.organizationId, table.signatureHash),
+]);
+export type ExceptionPatternSignature = typeof exceptionPatternSignatures.$inferSelect;
+export type InsertExceptionPatternSignature = typeof exceptionPatternSignatures.$inferInsert;
+
+// Per-org opt-in/out for the intelligence layer (default ON).
+export const exceptionIntelligenceSettings = mysqlTable("exception_intelligence_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull().unique(),
+  shareEnabled: boolean("shareEnabled").default(true).notNull(),   // contribute anonymized patterns
+  consumeEnabled: boolean("consumeEnabled").default(true).notNull(), // benefit from the pool
+  // Stable pseudonym for this contributor — the pool never sees the org id/name.
+  contributorPseudonym: varchar("contributorPseudonym", { length: 64 }),
+  lastSharedAt: timestamp("lastSharedAt"),
+  lastConsumedAt: timestamp("lastConsumedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_eis_org").on(table.organizationId),
+]);
+export type ExceptionIntelligenceSettings = typeof exceptionIntelligenceSettings.$inferSelect;
+export type InsertExceptionIntelligenceSettings = typeof exceptionIntelligenceSettings.$inferInsert;
+
+// Aggregated patterns received FROM the pool (consumed). In a multi-tenant cloud
+// these mirror cross-org aggregates; in on-prem they are pulled from the
+// EXCEPTION_INTEL_ENDPOINT. contributorCount is the k (distinct orgs) — only
+// patterns meeting the k-anonymity threshold are stored/served.
+export const sharedExceptionPatterns = mysqlTable("shared_exception_patterns", {
+  id: int("id").autoincrement().primaryKey(),
+  signatureHash: varchar("signatureHash", { length: 64 }).notNull().unique(),
+  exceptionCategory: varchar("exceptionCategory", { length: 64 }).notNull(),
+  amountBucket: mysqlEnum("amountBucket", ["0-100k", "100k-1m", "1m+"]).notNull(),
+  counterpartyType: varchar("counterpartyType", { length: 64 }).notNull(),
+  deductionType: varchar("deductionType", { length: 64 }),
+  resolutionActionClass: varchar("resolutionActionClass", { length: 48 }).notNull(),
+  outcome: mysqlEnum("outcome", ["resolved", "escalated", "rejected"]).notNull(),
+  contributorCount: int("contributorCount").default(0).notNull(), // k — distinct orgs
+  observationCount: int("observationCount").default(0).notNull(),  // total observations across orgs
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_sep_sig").on(table.signatureHash),
+  index("idx_sep_category").on(table.exceptionCategory),
+]);
+export type SharedExceptionPattern = typeof sharedExceptionPatterns.$inferSelect;
+export type InsertSharedExceptionPattern = typeof sharedExceptionPatterns.$inferInsert;
+
 // ─── Guest Demo Tokens ───────────────────────────────────────────────
 export const guestTokens = mysqlTable("guest_tokens", {
   id: int("id").autoincrement().primaryKey(),
@@ -1171,6 +1253,13 @@ export const cbnReportSubmissions = mysqlTable("cbnReportSubmissions", {
   aiGapGeneratedAt: timestamp("aiGapGeneratedAt"),
   // Internal notes
   internalNotes: text("internalNotes"),
+  // Cryptographic signature (Ed25519) computed when the report is submitted/approved.
+  // Makes the "timestamped, digitally signed" attestation literally true and tamper-evident.
+  contentHash: varchar("contentHash", { length: 64 }),          // SHA-256 of the canonical signed payload
+  signature: text("signature"),                                  // base64 Ed25519 signature over contentHash
+  signingKeyFingerprint: varchar("signingKeyFingerprint", { length: 64 }), // SHA-256 fp of the public key
+  signedByUserId: int("signedByUserId"),
+  signedAt: timestamp("signedAt"),
   // Who created / last updated
   createdByUserId: int("createdByUserId"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -1348,8 +1437,8 @@ export const cfoReportSchedules = mysqlTable("cfo_report_schedules", {
   cronExpression: varchar("cronExpression", { length: 64 }).default("0 0 8 * * 1").notNull(),
   // Comma-separated list of recipient emails (stored as JSON array)
   recipients: json("recipients").notNull(), // string[]
-  // Date range to include in the report ("7d" | "30d" | "mtd")
-  reportPeriod: varchar("reportPeriod", { length: 10 }).default("7d").notNull(),
+  // Date range to include in the report ("7d" | "30d" | "mtd" | "quarterly" | "last_quarter")
+  reportPeriod: varchar("reportPeriod", { length: 16 }).default("7d").notNull(),
   lastSentAt: timestamp("lastSentAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

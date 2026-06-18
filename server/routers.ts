@@ -6,7 +6,7 @@ import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
-import { eq, or, desc, asc, sql, isNull, and, like } from "drizzle-orm";
+import { eq, or, desc, asc, sql, isNull, and, like, inArray } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -48,6 +48,7 @@ import {
   type ReconciliationConfig,
 } from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
+import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "./_core/egress";
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
@@ -72,10 +73,100 @@ import { getDb } from "./db";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
-const MAX_UPLOAD_TRANSACTIONS = 10000;
+// Max transactions accepted in a SINGLE upload request (one chunk). The client splits
+// large files into chunks of this size and streams them via createBatch + appendBatch,
+// so total file size is effectively unbounded while each request stays well under the
+// 50 MB Express body limit (~25k rows ≈ 4 MB of JSON).
+const MAX_UPLOAD_TRANSACTIONS = 25000;
 const MAX_SEARCH_LENGTH = 100;
 const MAX_NAME_LENGTH = 255;
 const MAX_QUERY_LIMIT = 500;
+
+// Shared shape + validation for uploaded transaction rows, reused by the single-shot
+// createBatch path and the chunked appendBatch path.
+const uploadTxnSchema = z.object({
+  transactionRef: z.string().max(255).optional(),
+  externalRef: z.string().max(255).optional(),
+  description: z.string().max(1000).optional(),
+  amount: z.string().min(1).max(30),
+  currency: z.string().length(3).default("NGN"),
+  transactionDate: z.string().min(1),
+  valueDate: z.string().optional(),
+  debitCredit: z.enum(["debit", "credit"]),
+  counterparty: z.string().max(255).optional(),
+  rawData: z.any().optional(),
+});
+type UploadTxnInput = z.infer<typeof uploadTxnSchema>;
+
+/**
+ * Validate a batch of raw upload rows and shape them for insertion. Pure (no I/O) so it
+ * can be called per-chunk. `rowOffset` keeps error row numbers correct across chunks.
+ */
+function buildValidTransactions(
+  rawTxns: UploadTxnInput[],
+  owner: { batchId: number; channelId: number; userId: number },
+  rowOffset = 0,
+) {
+  let validRows = 0;
+  let invalidRows = 0;
+  const validTxns: any[] = [];
+  const errors: string[] = [];
+
+  for (let i = 0; i < rawTxns.length; i++) {
+    const txn = rawTxns[i];
+    const rowNo = rowOffset + i + 1;
+    try {
+      const amount = parseFloat(txn.amount);
+      if (isNaN(amount) || !isFinite(amount)) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Invalid amount '${txn.amount}'`);
+        continue;
+      }
+      if (amount < 0) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Negative amount not allowed`);
+        continue;
+      }
+      if (amount > 999999999999.99) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Amount exceeds maximum`);
+        continue;
+      }
+      const txnDate = new Date(txn.transactionDate);
+      if (isNaN(txnDate.getTime())) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Invalid date '${txn.transactionDate}'`);
+        continue;
+      }
+      if (txn.currency && !(SUPPORTED_CURRENCIES as readonly string[]).includes(txn.currency)) {
+        invalidRows++;
+        errors.push(`Row ${rowNo}: Unsupported currency '${txn.currency}'`);
+        continue;
+      }
+      validTxns.push({
+        batchId: owner.batchId,
+        channelId: owner.channelId,
+        userId: owner.userId,
+        transactionRef: txn.transactionRef || null,
+        externalRef: txn.externalRef || null,
+        description: txn.description || null,
+        amount: txn.amount,
+        currency: txn.currency,
+        transactionDate: txnDate,
+        valueDate: txn.valueDate ? new Date(txn.valueDate) : null,
+        debitCredit: txn.debitCredit,
+        counterparty: txn.counterparty || null,
+        rawData: txn.rawData ? JSON.stringify(txn.rawData) : null,
+      });
+      validRows++;
+    } catch {
+      invalidRows++;
+      errors.push(`Row ${rowNo}: Unexpected parsing error`);
+    }
+  }
+
+  return { validTxns, validRows, invalidRows, errors };
+}
 
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.
@@ -97,6 +188,31 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   }
   return next({ ctx });
 });
+
+// Tenancy guard for user-management mutations. Super admins (Infinity AI) may act
+// on anyone. Org admins may only act on non-super-admin users within their OWN
+// organisation — they can neither see nor touch Infinity AI staff or other orgs.
+async function assertCanManageUsers(
+  ctx: { user: { role: string; organizationId: number | null } },
+  userIds: number[]
+): Promise<void> {
+  if (ctx.user.role === "super_admin") return;
+  if (userIds.length === 0) return;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+  const targets = await drizzle
+    .select({ id: users.id, role: users.role, organizationId: users.organizationId })
+    .from(users)
+    .where(inArray(users.id, userIds));
+  for (const t of targets) {
+    if (t.role === "super_admin" || t.organizationId !== ctx.user.organizationId) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "You can only manage users within your own organisation.",
+      });
+    }
+  }
+}
 
 // ─── Guest Protection Middleware ─────────────────────────────────────
 
@@ -176,6 +292,15 @@ async function dispatchWebhook(event: string, payload: any) {
   try {
     const webhookList = await db.getActiveWebhooksByEvent(event);
     for (const webhook of webhookList) {
+      // Data residency: user-configured webhooks can carry reconciliation payloads.
+      // In on-premise mode, only deliver to in-VPC / allowlisted hosts.
+      if (!isEgressAllowed(webhook.url as string)) {
+        console.warn(
+          `[Webhook] on-premise mode: blocked delivery to external host ${webhook.url} (event ${event}). ` +
+            "Add the host to EGRESS_ALLOWLIST to permit it.",
+        );
+        continue;
+      }
       const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
       const signature = crypto.createHmac("sha256", webhook.secret).update(body).digest("hex");
 
@@ -464,21 +589,14 @@ export const appRouter = router({
           channelCode: z.string().min(1).max(50),
           fileName: z.string().min(1).max(500),
           fileHash: z.string().max(64).optional(),
-          transactions: z.array(
-            z.object({
-              transactionRef: z.string().max(255).optional(),
-              externalRef: z.string().max(255).optional(),
-              description: z.string().max(1000).optional(),
-              amount: z.string().min(1).max(30),
-              currency: z.string().length(3).default("NGN"),
-              transactionDate: z.string().min(1),
-              valueDate: z.string().optional(),
-              debitCredit: z.enum(["debit", "credit"]),
-              counterparty: z.string().max(255).optional(),
-              rawData: z.any().optional(),
-            })
-          ).max(MAX_UPLOAD_TRANSACTIONS, {
-            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per upload`,
+          // Connector that parsed this file client-side (e.g. nibss_nip, interswitch_settlement, generic).
+          format: z.string().max(64).optional(),
+          // Full row count of the whole file (may exceed this chunk for chunked uploads).
+          totalRows: z.number().int().min(0).optional(),
+          // When false, the batch is left "processing" for subsequent appendBatch calls.
+          finalize: z.boolean().default(true),
+          transactions: z.array(uploadTxnSchema).max(MAX_UPLOAD_TRANSACTIONS, {
+            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per request`,
           }),
         })
       )
@@ -489,7 +607,7 @@ export const appRouter = router({
           throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
         }
 
-        // Idempotency check: if fileHash provided, check for duplicate upload
+        // Idempotency: a previously COMPLETED upload of the same file short-circuits.
         if (input.fileHash) {
           const existing = await db.getUploadBatchByHash(input.fileHash);
           if (existing) {
@@ -508,7 +626,8 @@ export const appRouter = router({
           channelId: channel.id,
           fileName: sanitizeInput(input.fileName, 500),
           fileHash: input.fileHash || null,
-          totalRows: input.transactions.length,
+          detectedFormat: input.format ? sanitizeInput(input.format, 64) : null,
+          totalRows: input.totalRows ?? input.transactions.length,
           validRows: 0,
           invalidRows: 0,
           status: "processing",
@@ -518,98 +637,133 @@ export const appRouter = router({
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create upload batch" });
         }
 
-        let validRows = 0;
-        let invalidRows = 0;
-        const validTxns: any[] = [];
-        const errors: string[] = [];
-
-        for (let i = 0; i < input.transactions.length; i++) {
-          const txn = input.transactions[i];
-          try {
-            const amount = parseFloat(txn.amount);
-            if (isNaN(amount) || !isFinite(amount)) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Invalid amount '${txn.amount}'`);
-              continue;
-            }
-            if (amount < 0) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Negative amount not allowed`);
-              continue;
-            }
-            if (amount > 999999999999.99) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Amount exceeds maximum`);
-              continue;
-            }
-            const txnDate = new Date(txn.transactionDate);
-            if (isNaN(txnDate.getTime())) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Invalid date '${txn.transactionDate}'`);
-              continue;
-            }
-            // Validate currency
-            if (txn.currency && !(SUPPORTED_CURRENCIES as readonly string[]).includes(txn.currency)) {
-              invalidRows++;
-              errors.push(`Row ${i + 1}: Unsupported currency '${txn.currency}'`);
-              continue;
-            }
-            validTxns.push({
-              batchId,
-              channelId: channel.id,
-              userId: ctx.user.id,
-              transactionRef: txn.transactionRef || null,
-              externalRef: txn.externalRef || null,
-              description: txn.description || null,
-              amount: txn.amount,
-              currency: txn.currency,
-              transactionDate: txnDate,
-              valueDate: txn.valueDate ? new Date(txn.valueDate) : null,
-              debitCredit: txn.debitCredit,
-              counterparty: txn.counterparty || null,
-              rawData: txn.rawData ? JSON.stringify(txn.rawData) : null,
-            });
-            validRows++;
-          } catch {
-            invalidRows++;
-            errors.push(`Row ${i + 1}: Unexpected parsing error`);
-          }
-        }
+        const { validTxns, validRows, invalidRows, errors } = buildValidTransactions(
+          input.transactions,
+          { batchId, channelId: channel.id, userId: ctx.user.id },
+        );
 
         if (validTxns.length > 0) {
           await db.insertTransactions(validTxns);
         }
+        await db.incrementUploadBatchCounts(batchId, validRows, invalidRows);
 
-        await db.updateUploadBatch(batchId, {
-          validRows,
-          invalidRows,
-          status: validRows > 0 ? "completed" : "failed",
-          errorMessage: errors.length > 0 ? errors.slice(0, 20).join("; ") : null,
-          completedAt: new Date(),
-        });
+        if (input.finalize) {
+          await db.updateUploadBatch(batchId, {
+            status: validRows > 0 ? "completed" : "failed",
+            errorMessage: errors.length > 0 ? errors.slice(0, 20).join("; ") : null,
+            completedAt: new Date(),
+          });
 
-        await logAudit(ctx.user.id, "upload_batch", "upload_batch", batchId, {
-          channel: input.channelCode,
-          fileName: input.fileName,
-          totalRows: input.transactions.length,
-          validRows,
-          invalidRows,
-        }, ip, ua);
+          await logAudit(ctx.user.id, "upload_batch", "upload_batch", batchId, {
+            channel: input.channelCode,
+            fileName: input.fileName,
+            totalRows: input.totalRows ?? input.transactions.length,
+            validRows,
+            invalidRows,
+          }, ip, ua);
 
-        // Dispatch webhook
-        dispatchWebhook("upload.completed", {
-          batchId,
-          channel: input.channelCode,
-          validRows,
-          invalidRows,
-        });
+          dispatchWebhook("upload.completed", {
+            batchId,
+            channel: input.channelCode,
+            validRows,
+            invalidRows,
+          });
+        }
 
         return {
           batchId,
           validRows,
           invalidRows,
-          totalRows: input.transactions.length,
+          totalRows: input.totalRows ?? input.transactions.length,
           errors: errors.slice(0, 20),
+          deduplicated: false,
+        };
+      }),
+
+    // Append a chunk of rows to an in-progress batch (used by chunked large uploads).
+    appendBatch: guestProtectedProcedure
+      .input(
+        z.object({
+          batchId: z.number().int().positive(),
+          channelCode: z.string().min(1).max(50),
+          rowOffset: z.number().int().min(0).default(0),
+          transactions: z.array(uploadTxnSchema).max(MAX_UPLOAD_TRANSACTIONS, {
+            message: `Maximum ${MAX_UPLOAD_TRANSACTIONS} transactions per request`,
+          }),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const channel = await db.getChannelByCode(input.channelCode);
+        if (!channel) {
+          throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
+        }
+        const batch = await db.getUploadBatchById(input.batchId);
+        if (!batch) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Upload batch not found" });
+        }
+        if (batch.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Cannot append to another user's batch" });
+        }
+        if (batch.status !== "processing") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Batch is already finalized" });
+        }
+
+        const { validTxns, validRows, invalidRows, errors } = buildValidTransactions(
+          input.transactions,
+          { batchId: input.batchId, channelId: channel.id, userId: ctx.user.id },
+          input.rowOffset,
+        );
+
+        if (validTxns.length > 0) {
+          await db.insertTransactions(validTxns);
+        }
+        await db.incrementUploadBatchCounts(input.batchId, validRows, invalidRows);
+
+        return { batchId: input.batchId, validRows, invalidRows, errors: errors.slice(0, 20) };
+      }),
+
+    // Finalize a chunked batch once all chunks are uploaded.
+    finalizeBatch: guestProtectedProcedure
+      .input(z.object({ batchId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const batch = await db.getUploadBatchById(input.batchId);
+        if (!batch) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Upload batch not found" });
+        }
+        if (batch.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Cannot finalize another user's batch" });
+        }
+
+        const validRows = batch.validRows ?? 0;
+        const invalidRows = batch.invalidRows ?? 0;
+
+        await db.updateUploadBatch(input.batchId, {
+          status: validRows > 0 ? "completed" : "failed",
+          completedAt: new Date(),
+        });
+
+        const channel = await db.getChannelById(batch.channelId);
+        await logAudit(ctx.user.id, "upload_batch", "upload_batch", input.batchId, {
+          channel: channel?.code ?? String(batch.channelId),
+          fileName: batch.fileName,
+          totalRows: batch.totalRows,
+          validRows,
+          invalidRows,
+        }, ip, ua);
+
+        dispatchWebhook("upload.completed", {
+          batchId: input.batchId,
+          channel: channel?.code ?? String(batch.channelId),
+          validRows,
+          invalidRows,
+        });
+
+        return {
+          batchId: input.batchId,
+          validRows,
+          invalidRows,
+          totalRows: batch.totalRows,
           deduplicated: false,
         };
       }),
@@ -723,6 +877,150 @@ export const appRouter = router({
         ).catch(err => console.error("[Reconciliation] Job failed:", err));
 
         return { jobId };
+      }),
+
+    // ── Multi-channel single run ──────────────────────────────────────────
+    // Reconcile one source against MANY target channels in a single action.
+    // Fans out to one child job per target (sharing a multiRunId) so results
+    // aggregate into a single combined report — "reconcile across all of the
+    // institution's channels in one run".
+    createMultiChannel: operationsProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(MAX_NAME_LENGTH),
+          moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]).default("settlement"),
+          sourceChannelId: z.number().int().positive(),
+          // Explicit target channels, or omit + set allActiveTargets to use every
+          // other active channel.
+          targetChannelIds: z.array(z.number().int().positive()).max(50).optional(),
+          allActiveTargets: z.boolean().default(false),
+          dateFrom: z.string().min(1),
+          dateTo: z.string().min(1),
+          amountTolerance: z.number().min(0).max(0.1).default(0.005),
+          dateWindowDays: z.number().int().min(0).max(30).default(3),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+
+        const sourceChannel = await db.getChannelById(input.sourceChannelId);
+        if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
+
+        const dateFrom = new Date(input.dateFrom);
+        const dateTo = new Date(input.dateTo);
+        if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid date range" });
+        }
+        if (dateFrom > dateTo) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
+        }
+
+        // Resolve the target set.
+        let targets: { id: number; name: string; code: string }[] = [];
+        if (input.allActiveTargets) {
+          const all = await db.getChannels();
+          targets = all.filter((c) => c.isActive && c.id !== input.sourceChannelId);
+        } else {
+          const ids = (input.targetChannelIds ?? []).filter((id) => id !== input.sourceChannelId);
+          if (ids.length === 0) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Provide at least one target channel (or set allActiveTargets)" });
+          }
+          for (const id of ids) {
+            const ch = await db.getChannelById(id);
+            if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: `Target channel ${id} not found` });
+            targets.push(ch);
+          }
+        }
+        if (targets.length === 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "No eligible target channels for this run" });
+        }
+
+        const multiRunId = crypto.randomUUID();
+        const jobIds: number[] = [];
+
+        for (const target of targets) {
+          const jobId = await db.createReconciliationJob({
+            userId: ctx.user.id,
+            name: sanitizeInput(`${input.name} — ${target.name}`, MAX_NAME_LENGTH),
+            moduleType: input.moduleType,
+            sourceChannelId: input.sourceChannelId,
+            targetChannelId: target.id,
+            dateFrom,
+            dateTo,
+            amountTolerance: String(input.amountTolerance),
+            dateWindowDays: input.dateWindowDays,
+            multiRunId,
+            engineConfig: JSON.stringify({
+              amountTolerance: input.amountTolerance,
+              dateWindowDays: input.dateWindowDays,
+              sourceChannel: sourceChannel.code,
+              targetChannel: target.code,
+              multiRunId,
+            }),
+            status: "pending",
+          });
+          if (jobId) {
+            jobIds.push(jobId);
+            runReconciliation(jobId, input.sourceChannelId, target.id, dateFrom, dateTo,
+              { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+              ctx.user.id
+            ).catch((err) => console.error("[Reconciliation] Multi-channel child job failed:", err));
+          }
+        }
+
+        await logAudit(ctx.user.id, "create_multichannel_reconciliation", "reconciliation_job", jobIds[0] ?? 0,
+          { multiRunId, source: sourceChannel.code, targetCount: targets.length }, ip, ua);
+
+        return { multiRunId, jobIds, targetCount: targets.length };
+      }),
+
+    // Aggregate a multi-channel run into one combined view.
+    getMultiRun: protectedProcedure
+      .input(z.object({ multiRunId: z.string().min(1).max(36) }))
+      .query(async ({ input }) => {
+        const jobs = await db.getReconciliationJobsByMultiRun(input.multiRunId);
+        if (jobs.length === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Multi-channel run not found" });
+        }
+        const channels = await db.getChannels();
+        const nameFor = (id: number) => channels.find((c) => c.id === id)?.name ?? `Channel ${id}`;
+
+        const totals = jobs.reduce(
+          (acc, j) => {
+            acc.totalSourceTxns += j.totalSourceTxns;
+            acc.totalTargetTxns += j.totalTargetTxns;
+            acc.matchedCount += j.matchedCount;
+            acc.exceptionCount += j.exceptionCount;
+            acc.unmatchedCount += j.unmatchedCount;
+            return acc;
+          },
+          { totalSourceTxns: 0, totalTargetTxns: 0, matchedCount: 0, exceptionCount: 0, unmatchedCount: 0 },
+        );
+        const denom = totals.matchedCount + totals.exceptionCount + totals.unmatchedCount;
+        const overallMatchRate = denom > 0 ? parseFloat(((totals.matchedCount / denom) * 100).toFixed(2)) : 0;
+
+        const allDone = jobs.every((j) => j.status === "completed");
+        const anyFailed = jobs.some((j) => j.status === "failed");
+        const anyRunning = jobs.some((j) => j.status === "pending" || j.status === "running");
+        const status = anyRunning ? "running" : allDone ? "completed" : anyFailed ? "completed_with_failures" : "completed";
+
+        return {
+          multiRunId: input.multiRunId,
+          status,
+          jobCount: jobs.length,
+          completedCount: jobs.filter((j) => j.status === "completed").length,
+          ...totals,
+          overallMatchRate,
+          channels: jobs.map((j) => ({
+            jobId: j.id,
+            channel: nameFor(j.targetChannelId),
+            status: j.status,
+            matchedCount: j.matchedCount,
+            exceptionCount: j.exceptionCount,
+            unmatchedCount: j.unmatchedCount,
+            matchRate: j.matchRate,
+          })),
+        };
       }),
 
     list: protectedProcedure.query(async ({ ctx }) => {
@@ -1341,6 +1639,24 @@ export const appRouter = router({
           ...input,
           userId: isAdmin ? undefined : ctx.user.id,
         });
+      }),
+
+    // Verify the tamper-evident hash chain for the caller's organization. Returns
+    // whether the audit trail is intact and, if not, the first broken sequence.
+    verifyChain: protectedProcedure
+      .query(async ({ ctx }) => {
+        const isAdmin = ctx.user.role === "admin" || ctx.user.role === "super_admin";
+        if (!isAdmin) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Audit chain verification is restricted to administrators" });
+        }
+        const { verifyChain } = await import("./auditChain");
+        const rows = await db.getAuditChain(ctx.user.organizationId ?? null);
+        const result = verifyChain(rows as any);
+        return {
+          ...result,
+          organizationId: ctx.user.organizationId ?? null,
+          verifiedAt: new Date().toISOString(),
+        };
       }),
 
     exportXlsx: protectedProcedure
@@ -2930,9 +3246,20 @@ export const appRouter = router({
   // ─── Admin ─────────────────────────────────────
 
   admin: router({
-    users: adminProcedure.query(async () => {
-      return db.getAllUsers();
-    }),
+    users: adminProcedure
+      .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        if (ctx.user.role === "super_admin") {
+          // Portal-view: scope to the viewed org and hide Infinity AI super admins.
+          if (input?.viewAsOrgId) return db.getUsersByOrg(input.viewAsOrgId, { excludeSuperAdmins: true });
+          // Super-admin home: full cross-tenant list.
+          return db.getAllUsers();
+        }
+        // Org admin: only their own organisation's users, never super admins.
+        return ctx.user.organizationId
+          ? db.getUsersByOrg(ctx.user.organizationId, { excludeSuperAdmins: true })
+          : [];
+      }),
 
     updateRole: adminProcedure
       .input(z.object({
@@ -2940,6 +3267,10 @@ export const appRouter = router({
         role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
+        if (input.role === "super_admin" && ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can assign the super admin role." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
@@ -2953,6 +3284,10 @@ export const appRouter = router({
         role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, input.userIds);
+        if (input.role === "super_admin" && ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can assign the super admin role." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -2968,6 +3303,7 @@ export const appRouter = router({
         isActive: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, input.userIds);
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -2984,6 +3320,9 @@ export const appRouter = router({
         organizationId: z.number().int().positive().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can move users between organisations." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3005,6 +3344,19 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+        // Role-scoped creation. Super admins (Infinity AI) can create users for ANY
+        // organisation and assign any role. Org admins may only create users within
+        // their OWN organisation and may not mint super admins.
+        let targetRole = input.role;
+        let targetOrgId: number | null = input.organizationId ?? null;
+        if (ctx.user.role !== "super_admin") {
+          if (targetRole === "super_admin") {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can create super admin users." });
+          }
+          targetOrgId = ctx.user.organizationId ?? null;
+        }
+
         // Check if email already exists
         const existing = await drizzle.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
         if (existing.length > 0) {
@@ -3016,13 +3368,13 @@ export const appRouter = router({
           openId,
           name: input.name,
           email: input.email,
-          role: input.role,
-          organizationId: input.organizationId ?? null,
+          role: targetRole,
+          organizationId: targetOrgId,
           isActive: true,
           loginMethod: "invite",
         });
         const newUserId = (result as any).insertId;
-        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: input.role }, ip, ua);
+        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua);
         // Send welcome email with magic login link
         if (input.origin) {
           try {
@@ -3031,7 +3383,7 @@ export const appRouter = router({
               userId: newUserId,
               name: input.name,
               email: input.email,
-              role: input.role,
+              role: targetRole,
               origin: input.origin,
             });
           } catch (err) {
@@ -3047,6 +3399,7 @@ export const appRouter = router({
         origin: z.string().url(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3079,6 +3432,7 @@ export const appRouter = router({
         isActive: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         if (input.userId === ctx.user.id) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot deactivate your own account." });
         }
@@ -3097,6 +3451,7 @@ export const appRouter = router({
         userId: z.number().int().positive(),
       }))
       .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         if (input.userId === ctx.user.id) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot delete your own account." });
         }
@@ -3117,6 +3472,9 @@ export const appRouter = router({
         organizationId: z.number().int().positive().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "super_admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can move users between organisations." });
+        }
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3129,17 +3487,23 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    organizations: adminProcedure.query(async () => {
+    organizations: adminProcedure.query(async ({ ctx }) => {
       const drizzle = await getDb();
       if (!drizzle) return [];
-      return drizzle.select().from(organizations).orderBy(asc(organizations.name));
+      // Super admins see every org (for cross-tenant assignment); org admins only their own.
+      if (ctx.user.role === "super_admin") {
+        return drizzle.select().from(organizations).orderBy(asc(organizations.name));
+      }
+      if (!ctx.user.organizationId) return [];
+      return drizzle.select().from(organizations).where(eq(organizations.id, ctx.user.organizationId));
     }),
     getUserActivity: adminProcedure
       .input(z.object({
         userId: z.number().int().positive(),
         limit: z.number().int().min(1).max(100).default(50),
       }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         const { data } = await db.getAuditLogs({ userId: input.userId, limit: input.limit });
         return data;
       }),
@@ -3149,7 +3513,8 @@ export const appRouter = router({
         userId: z.number().int().positive(),
         userName: z.string().optional(),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
+        await assertCanManageUsers(ctx, [input.userId]);
         const { data } = await db.getAuditLogs({ userId: input.userId, limit: 500 });
         // Build CSV
         const header = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details", "IP Address", "User Agent"];
@@ -3693,6 +4058,27 @@ Always be specific, reference actual exception IDs and amounts where available, 
           resolvedBy: userId,
         });
 
+        // Exception Intelligence: record the anonymized pattern signature (coarse
+        // categorical tuple only — never the transaction). Powers the network
+        // effect; sharing/consumption are gated by per-org settings + residency.
+        try {
+          const ei = await import("./exceptionIntelligence");
+          const sig = ei.deriveSignature({
+            exceptionCategory: input.exceptionCategory,
+            amount: input.amountRange === "1m+" ? 1_000_000 : input.amountRange === "100k-1m" ? 100_000 : 0,
+            counterpartyType: "distributor",
+            deductionType: input.deductionType ?? null,
+            resolution: input.resolution,
+            outcome: input.outcome,
+          });
+          // amountRange is already bucketed; trust it over the synthetic amount.
+          sig.amountBucket = input.amountRange;
+          sig.signatureHash = ei.signatureHashOf(sig);
+          await ei.recordLocalSignature(orgId, sig);
+        } catch (err) {
+          console.error("[ExceptionIntelligence] signature record failed (non-fatal):", err);
+        }
+
         await logAudit(userId, 'super_agent_memory_added', 'agent_memory', undefined, {
           category: input.exceptionCategory,
           outcome: input.outcome,
@@ -3755,7 +4141,21 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .sort((a, b) => b.similarity - a.similarity)
           .slice(0, input.topK);
 
-        return { cases: results };
+        // Exception Intelligence: augment with cross-institution recommendations
+        // from the shared pool (k-anonymized, non-personal). The category is
+        // parsed from the embedding text's `category:<x>` token.
+        let sharedRecommendations: Array<{ resolutionActionClass: string; outcome: string; contributorCount: number; observationCount: number }> = [];
+        try {
+          const catMatch = input.embeddingText.match(/category:([a-z0-9_]+)/i);
+          if (catMatch) {
+            const ei = await import("./exceptionIntelligence");
+            sharedRecommendations = await ei.getSharedRecommendations(orgId, catMatch[1]);
+          }
+        } catch (err) {
+          console.error("[ExceptionIntelligence] shared recommendation lookup failed (non-fatal):", err);
+        }
+
+        return { cases: results, sharedRecommendations };
       }),
   }),
 
@@ -3964,6 +4364,41 @@ Always be specific, reference actual exception IDs and amounts where available, 
     stats: publicProcedure.query(async () => {
       return getWoodcoreStats();
     }),
+
+    // List reconcilable products (have a GL mapping + transactions) for the run picker.
+    // Used by the live POC so the engine targets a real product instead of a hardcoded id.
+    listProducts: publicProcedure
+      .input(z.object({ type: z.enum(["SAVINGS", "LOAN"]) }))
+      .query(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { sql } = await import("drizzle-orm");
+        const q = input.type === "LOAN"
+          ? sql`
+              SELECT p.id AS id, p.name AS name, COUNT(DISTINCT lt.id) AS txn_count
+              FROM wc_m_product_loan p
+              JOIN wc_acc_product_mapping m ON m.product_id = p.id AND m.product_type = 1
+              LEFT JOIN wc_m_loan l ON l.product_id = p.id
+              LEFT JOIN wc_m_loan_transaction lt ON lt.loan_id = l.id
+              GROUP BY p.id, p.name
+              HAVING COUNT(DISTINCT lt.id) > 0
+              ORDER BY txn_count DESC
+              LIMIT 100`
+          : sql`
+              SELECT p.id AS id, p.name AS name, COUNT(DISTINCT st.id) AS txn_count
+              FROM wc_m_savings_product p
+              JOIN wc_acc_product_mapping m ON m.product_id = p.id AND m.product_type = 2
+              LEFT JOIN wc_m_savings_account a ON a.product_id = p.id
+              LEFT JOIN wc_m_savings_account_transaction st ON st.savings_account_id = a.id
+              GROUP BY p.id, p.name
+              HAVING COUNT(DISTINCT st.id) > 0
+              ORDER BY txn_count DESC
+              LIMIT 100`;
+        const r = await db2.execute(q);
+        const rows = (r as any)[0] as Array<{ id: number; name: string; txn_count: number }>;
+        return rows.map((x) => ({ id: Number(x.id), name: String(x.name), txnCount: Number(x.txn_count) }));
+      }),
 
     // Get all reconciliation runs
     getRuns: publicProcedure.query(async () => {
@@ -4669,6 +5104,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
               text: `Hi ${firstName},\n\nThank you for completing the ReconcileAI CBN Compliance Readiness Assessment.\n\nYour Score: ${overallScore}/100 (${riskLevelLabel})\n\n${aiNarrative ?? ""}\n\nView your full report: ${resultUrl}\n\nIf you'd like to see how ReconcileAI can help close these compliance gaps, book a demo here: https://calendly.com/richard-infinityaiafrica/30min\n\n— ReconcileAI by Infinity AI Africa Limited`,
 
             };
+            // Data residency: legacy Forge email relay is external egress; blocked on-premise.
+            assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
             const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
               method: "POST",
               headers: {
@@ -4778,6 +5215,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
 </html>`;
 
         try {
+          // Data residency: legacy Forge email relay is external egress; blocked on-premise.
+          assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
           const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
             method: "POST",
             headers: {
@@ -4974,6 +5413,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
           const institutionName = assessment.institutionName ?? "your institution";
           const emailHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;"><tr><td style="background:#1B365D;padding:28px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">ReconcileAI</p><p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">AI-Powered Financial Reconciliation for African Banks &amp; Fintechs</p></td></tr><tr><td style="padding:32px;"><p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p><p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your score of <strong>${overallScore}/100 (${riskLevelLabel})</strong> tells us a lot about where ${institutionName} stands today.</p><p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">We'd love to show you exactly how ReconcileAI closes those gaps in a focused 30-minute demo.</p><table cellpadding="0" cellspacing="0" style="margin:0 0 16px;"><tr><td style="background:#1B365D;border-radius:8px;"><a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a></td></tr></table><table cellpadding="0" cellspacing="0" style="margin:0 0 24px;"><tr><td style="background:#F47458;border-radius:8px;"><a href="https://calendly.com/richard-infinityaiafrica/30min" style="display:inline-block;padding:12px 24px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">📅 Book a Free 30-Minute Demo →</a></td></tr></table></td></tr><tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;"><p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p><p style="margin:8px 0 0;font-size:12px;color:#8c757d;">Ready to book? Pick a time directly: <a href="https://calendly.com/richard-infinityaiafrica/30min" style="color:#F47458;text-decoration:underline;font-weight:600;">calendly.com/richard-infinityaiafrica/30min</a></p><p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p></td></tr></table></td></tr></table></body></html>`;
           try {
+            // Data residency: legacy Forge email relay is external egress; blocked on-premise.
+            assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
             const emailRes = await fetch(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, {
               method: "POST",
               headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.BUILT_IN_FORGE_API_KEY}` },
@@ -5207,6 +5648,67 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
   }),
 
+  // ─── Exception Intelligence Layer ──────────────────────────────────
+  exceptionIntelligence: router({
+    // Per-org settings + transparency: what is shared and the current posture.
+    getSettings: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const ei = await import("./exceptionIntelligence");
+      const settings = await ei.getSettings(orgId);
+      return {
+        shareEnabled: settings?.shareEnabled ?? true,
+        consumeEnabled: settings?.consumeEnabled ?? true,
+        lastSharedAt: settings?.lastSharedAt ?? null,
+        lastConsumedAt: settings?.lastConsumedAt ?? null,
+        kAnonymityThreshold: ei.K_ANON_THRESHOLD,
+        sharedFields: ei.ALLOWED_SIGNATURE_KEYS,
+        endpointConfigured: !!process.env.EXCEPTION_INTEL_ENDPOINT,
+      };
+    }),
+
+    updateSettings: protectedProcedure
+      .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? 0;
+        const ei = await import("./exceptionIntelligence");
+        const updated = await ei.updateSettings(orgId, input);
+        await logAudit(ctx.user.id, "exception_intelligence_settings_updated", "exception_intelligence", orgId, input);
+        return { shareEnabled: updated?.shareEnabled ?? true, consumeEnabled: updated?.consumeEnabled ?? true };
+      }),
+
+    // Local contribution stats (what this org has observed).
+    status: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const drizzle = await getDb();
+      if (!drizzle) return { localSignatures: 0, localObservations: 0, sharedPatternsAvailable: 0 };
+      const { exceptionPatternSignatures: eps, sharedExceptionPatterns: sep } = await import("../drizzle/schema");
+      const ei = await import("./exceptionIntelligence");
+      const [local] = await drizzle
+        .select({ sigs: sql<number>`count(*)`, obs: sql<number>`coalesce(sum(${eps.observationCount}),0)` })
+        .from(eps)
+        .where(eq(eps.organizationId, orgId));
+      const [shared] = await drizzle
+        .select({ n: sql<number>`count(*)` })
+        .from(sep)
+        .where(sql`${sep.contributorCount} >= ${ei.K_ANON_THRESHOLD}`);
+      return {
+        localSignatures: Number(local?.sigs || 0),
+        localObservations: Number(local?.obs || 0),
+        sharedPatternsAvailable: Number(shared?.n || 0),
+      };
+    }),
+
+    // Admin: rebuild the shared pool aggregate (cloud) and/or push to the pool (on-prem).
+    sync: adminProcedure.mutation(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const ei = await import("./exceptionIntelligence");
+      const aggregated = await ei.aggregateSharedPatterns();
+      const pushed = await ei.syncToPool(orgId);
+      await logAudit(ctx.user.id, "exception_intelligence_sync", "exception_intelligence", orgId, { aggregated, pushed });
+      return { aggregatedPatterns: aggregated.patterns, pushed };
+    }),
+  }),
+
   // ─── CFO Report Schedule + Alerts ──────────────────────────────────
   cfoReports: router({
     // Get current schedule settings
@@ -5219,7 +5721,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     saveSchedule: protectedProcedure
       .input(z.object({
         recipients: z.array(z.string().email()).min(1).max(20),
-        reportPeriod: z.enum(["7d", "30d", "mtd"]).default("7d"),
+        reportPeriod: z.enum(["7d", "30d", "mtd", "quarterly", "last_quarter"]).default("7d"),
         isActive: z.boolean().default(true),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -5233,7 +5735,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
     // Send report now (manual trigger)
     sendNow: protectedProcedure
-      .input(z.object({ period: z.enum(["7d", "30d", "mtd"]).default("7d") }))
+      .input(z.object({ period: z.enum(["7d", "30d", "mtd", "quarterly", "last_quarter"]).default("7d") }))
       .mutation(async ({ ctx, input }) => {
         const { sendWeeklyChannelReport } = await import("./cfoReportService");
         return sendWeeklyChannelReport(ctx.user.id, input.period);
@@ -5242,7 +5744,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // Export CSV (returns CSV string)
     exportCsv: protectedProcedure
       .input(z.object({
-        period: z.enum(["7d", "30d", "mtd", "all"]).default("7d"),
+        period: z.enum(["7d", "30d", "mtd", "all", "quarterly", "last_quarter"]).default("7d"),
         channelCodes: z.array(z.string()).optional(),
       }))
       .query(async ({ input }) => {
@@ -5255,7 +5757,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // Export XLSX (returns S3 URL)
     exportXlsx: protectedProcedure
       .input(z.object({
-        period: z.enum(["7d", "30d", "mtd", "all"]).default("7d"),
+        period: z.enum(["7d", "30d", "mtd", "all", "quarterly", "last_quarter"]).default("7d"),
         channelCodes: z.array(z.string()).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -5389,6 +5891,37 @@ export type AppRouter = typeof appRouter;
 
 // ─── Background Reconciliation Runner ────────────────────────────────
 
+/**
+ * Deferred AI analysis pass — runs OUT of the reconciliation hot path.
+ * Re-queries the job's high/critical exceptions whose aiAnalysis is still null,
+ * generates a Claude narrative for each, and persists it. Restartable: safe to
+ * re-run since it only touches exceptions that still lack analysis.
+ */
+async function runDeferredAiAnalysis(jobId: number): Promise<void> {
+  const pending = await db.getJobExceptionsNeedingAi(jobId);
+  if (pending.length === 0) return;
+
+  const txnIds = pending
+    .map((e) => e.transactionId)
+    .filter((id): id is number => id != null);
+  const txns = await db.getTransactionsByIds(txnIds);
+  const txnById = new Map(txns.map((t) => [t.id, t]));
+
+  for (const exc of pending) {
+    const txn = exc.transactionId != null ? txnById.get(exc.transactionId) : undefined;
+    if (!txn) continue;
+    try {
+      const analysis = await getAIAnalysis(
+        { category: exc.category, description: exc.description ?? "" },
+        txn as any
+      );
+      await db.updateException(exc.id, { aiAnalysis: analysis });
+    } catch (err) {
+      console.error(`[AI pass] exception ${exc.id} failed:`, err);
+    }
+  }
+}
+
 async function runReconciliation(
   jobId: number,
   sourceChannelId: number,
@@ -5423,80 +5956,85 @@ async function runReconciliation(
       totalCount: sourceTxns.length,
     });
 
-    // Insert matches
+    // ── Persist matches (batched) ─────────────────────────────────────
     await trackProgress(jobId, "duplicate_detection", {
-      message: `Processing ${result.duplicates.length} duplicate groups`,
+      message: `Recording ${result.matches.length} matches and ${result.duplicates.length} duplicate groups`,
     });
-    let matchedCount = 0;
-    for (const match of result.matches) {
-      const status = match.confidenceScore >= 85 ? "confirmed" : "pending_review";
-      const matchId = await db.insertMatch({
-        jobId,
-        sourceTransactionId: match.sourceId,
-        targetTransactionId: match.targetId,
-        matchType: match.matchType,
-        confidenceScore: String(match.confidenceScore),
-        amountDifference: String(match.amountDifference),
-        dateDifference: Math.round(match.dateDifference),
-        matchReason: match.matchReason,
-        status,
-      });
 
-      if (matchId) {
-        const txnStatus = status === "confirmed" ? "matched" : "exception";
-        await db.updateTransactionStatus(match.sourceId, txnStatus, matchId);
-        await db.updateTransactionStatus(match.targetId, txnStatus, matchId);
-        if (status === "confirmed") matchedCount++;
+    // High-confidence (>=85) matches auto-confirm; the rest go to manual review. Note:
+    // transactions.matchId (a denormalized, unread column) is no longer populated here —
+    // the `matches` table is the source of truth for source/target linkage. That lets us
+    // set transaction statuses with two bulk IN(...) updates instead of ~3 round-trips
+    // per match (the old per-row path was O(n) DB calls and unusable at 500k).
+    const matchRows = result.matches.map((m) => ({
+      jobId,
+      sourceTransactionId: m.sourceId,
+      targetTransactionId: m.targetId,
+      matchType: m.matchType,
+      confidenceScore: String(m.confidenceScore),
+      amountDifference: String(m.amountDifference),
+      dateDifference: Math.round(m.dateDifference),
+      matchReason: m.matchReason,
+      status: m.confidenceScore >= 85 ? ("confirmed" as const) : ("pending_review" as const),
+    }));
+    await db.insertMatchesBatch(matchRows);
+
+    const confirmedTxnIds: number[] = [];
+    const reviewTxnIds: number[] = [];
+    let matchedCount = 0;
+    for (const m of result.matches) {
+      if (m.confidenceScore >= 85) {
+        confirmedTxnIds.push(m.sourceId, m.targetId);
+        matchedCount++;
+      } else {
+        reviewTxnIds.push(m.sourceId, m.targetId);
       }
     }
+    await db.updateTransactionStatusBulk(confirmedTxnIds, "matched");
+    await db.updateTransactionStatusBulk(reviewTxnIds, "exception");
 
+    // ── Persist exceptions (batched) ──────────────────────────────────
     await trackProgress(jobId, "exception_categorization", {
       message: `Categorizing ${result.unmatchedSource.length + result.unmatchedTarget.length} unmatched transactions`,
       totalCount: result.unmatchedSource.length + result.unmatchedTarget.length,
     });
-    // Process unmatched transactions as exceptions
     let exceptionCount = 0;
     const allUnmatched = [...result.unmatchedSource, ...result.unmatchedTarget];
     const unmatchedTxns = await db.getTransactionsByIds(allUnmatched);
 
-    for (const txn of unmatchedTxns) {
-      const exceptionInfo = categorizeException(txn, targetTxns, config);
-
-      let aiAnalysis: string | undefined;
-      if (exceptionInfo.severity === "high" || exceptionInfo.severity === "critical") {
-        aiAnalysis = await getAIAnalysis(exceptionInfo, txn);
-      }
-
-      await db.insertException({
+    // AI narrative is deferred to a background pass (runDeferredAiAnalysis) that runs
+    // AFTER the job completes — keeps LLM latency out of the hot path.
+    const exceptionRows = unmatchedTxns.map((txn) => {
+      const info = categorizeException(txn, targetTxns, config);
+      return {
         jobId,
         transactionId: txn.id,
-        category: exceptionInfo.category,
-        severity: exceptionInfo.severity,
-        description: exceptionInfo.description,
-        suggestedResolution: exceptionInfo.suggestedResolution,
-        aiAnalysis: aiAnalysis || null,
-        status: "open",
-      });
+        category: info.category,
+        severity: info.severity,
+        description: info.description,
+        suggestedResolution: info.suggestedResolution,
+        aiAnalysis: null,
+        status: "open" as const,
+      };
+    });
+    await db.insertExceptionsBatch(exceptionRows);
+    await db.updateTransactionStatusBulk(unmatchedTxns.map((t) => t.id), "exception");
+    exceptionCount += exceptionRows.length;
 
-      await db.updateTransactionStatus(txn.id, "exception");
-      exceptionCount++;
-    }
-
-    // Create exceptions for detected duplicates
-    for (const dupGroup of result.duplicates) {
-      for (const txnId of dupGroup.transactionIds) {
-        await db.insertException({
-          jobId,
-          transactionId: txnId,
-          category: "duplicate_transaction",
-          severity: "medium",
-          description: dupGroup.reason,
-          suggestedResolution: "Review and remove duplicate transactions. Verify with the source system whether these are genuine separate transactions or data entry errors.",
-          status: "open",
-        });
-        exceptionCount++;
-      }
-    }
+    // Exceptions for detected duplicates (batched).
+    const duplicateRows = result.duplicates.flatMap((dupGroup) =>
+      dupGroup.transactionIds.map((txnId) => ({
+        jobId,
+        transactionId: txnId,
+        category: "duplicate_transaction" as const,
+        severity: "medium" as const,
+        description: dupGroup.reason,
+        suggestedResolution: "Review and remove duplicate transactions. Verify with the source system whether these are genuine separate transactions or data entry errors.",
+        status: "open" as const,
+      }))
+    );
+    await db.insertExceptionsBatch(duplicateRows);
+    exceptionCount += duplicateRows.length;
 
     await trackProgress(jobId, "finalizing", { message: "Finalizing reconciliation results" });
     const totalTxns = sourceTxns.length + targetTxns.length;
@@ -5544,6 +6082,13 @@ async function runReconciliation(
     // Send email alerts based on user preferences
     checkAndSendAlerts(jobId, userId).catch((err) =>
       console.error("[EmailReport] Alert check failed:", err)
+    );
+
+    // Deferred AI analysis — fire-and-forget so the job is already "completed".
+    // High/critical exceptions get their Claude narrative filled in shortly after,
+    // keeping LLM latency entirely out of the reconciliation hot path.
+    runDeferredAiAnalysis(jobId).catch((err) =>
+      console.error("[AI pass] deferred analysis failed:", err)
     );
 
   } catch (error) {

@@ -4,6 +4,7 @@
  * Provides polling-based progress updates for the monitoring dashboard.
  */
 import * as db from "./db";
+import { emitJobProgress } from "./jobEvents";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -76,6 +77,16 @@ export async function trackProgress(
   const message = options.message || PHASE_LABELS[phase];
 
   await db.insertJobProgressEvent({
+    jobId,
+    phase,
+    progress,
+    message,
+    processedCount: options.processedCount || 0,
+    totalCount: options.totalCount || 0,
+  });
+
+  // Push to the live SSE stream for real-time dashboard updates.
+  emitJobProgress({
     jobId,
     phase,
     progress,
