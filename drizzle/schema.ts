@@ -963,8 +963,10 @@ export type InsertExceptionPatternSignature = typeof exceptionPatternSignatures.
 export const exceptionIntelligenceSettings = mysqlTable("exception_intelligence_settings", {
   id: int("id").autoincrement().primaryKey(),
   organizationId: int("organizationId").notNull().unique(),
-  shareEnabled: boolean("shareEnabled").default(true).notNull(),   // contribute anonymized patterns
-  consumeEnabled: boolean("consumeEnabled").default(true).notNull(), // benefit from the pool
+  // Opt-in (default OFF). Contribution and consumption are coupled (reciprocity):
+  // they are always equal — a bank benefits from the pool only if it also contributes.
+  shareEnabled: boolean("shareEnabled").default(false).notNull(),   // contribute anonymized patterns
+  consumeEnabled: boolean("consumeEnabled").default(false).notNull(), // benefit from the pool
   // Stable pseudonym for this contributor — the pool never sees the org id/name.
   contributorPseudonym: varchar("contributorPseudonym", { length: 64 }),
   lastSharedAt: timestamp("lastSharedAt"),

@@ -2,7 +2,7 @@ import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
-import { Loader2, Network, ShieldCheck, Share2, Download, RefreshCw } from "lucide-react";
+import { Loader2, Network, ShieldCheck, Share2, Download, RefreshCw, Info } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ExceptionIntelligencePage() {
@@ -23,6 +23,10 @@ export default function ExceptionIntelligencePage() {
     },
     onError: (e) => toast.error(e.message || "Sync failed"),
   });
+
+  // Contribution and consumption are coupled (reciprocity) and default OFF.
+  // Show "on" if either is set; toggling either applies the same value to both.
+  const participating = !!(settings?.shareEnabled || settings?.consumeEnabled);
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -63,9 +67,18 @@ export default function ExceptionIntelligencePage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Participation</CardTitle>
-            <CardDescription>You can opt out of either direction at any time.</CardDescription>
+            <CardDescription>Off by default — you opt in. Both options move together (see below).</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
+            {/* Reciprocity: the two toggles are linked and always match. */}
+            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-900/80 dark:text-amber-200/80">
+              <Info className="h-4 w-4 mt-0.5 shrink-0 text-amber-600" />
+              <p>
+                <strong>Contributing and benefiting go together.</strong> If you turn one on, the other turns on
+                too; turn one off, and both turn off. It's a fair exchange — you can draw on the shared pool only
+                if you also help build it, and if you choose to benefit, you contribute in return.
+              </p>
+            </div>
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-start gap-3">
                 <Share2 className="h-4 w-4 mt-0.5 text-muted-foreground" />
@@ -75,8 +88,8 @@ export default function ExceptionIntelligencePage() {
                 </div>
               </div>
               <Switch
-                checked={settings?.shareEnabled ?? true}
-                onCheckedChange={(v) => update.mutate({ shareEnabled: v })}
+                checked={participating}
+                onCheckedChange={(v) => update.mutate({ shareEnabled: v, consumeEnabled: v })}
                 disabled={update.isPending}
               />
             </div>
@@ -89,8 +102,8 @@ export default function ExceptionIntelligencePage() {
                 </div>
               </div>
               <Switch
-                checked={settings?.consumeEnabled ?? true}
-                onCheckedChange={(v) => update.mutate({ consumeEnabled: v })}
+                checked={participating}
+                onCheckedChange={(v) => update.mutate({ shareEnabled: v, consumeEnabled: v })}
                 disabled={update.isPending}
               />
             </div>
