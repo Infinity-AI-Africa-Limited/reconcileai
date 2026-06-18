@@ -4,6 +4,8 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Loader2, Network, ShieldCheck, Share2, Download, RefreshCw, Info } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { usePortalContext } from "@/contexts/PortalContext";
 
 export default function ExceptionIntelligencePage() {
   const utils = trpc.useUtils();
@@ -27,6 +29,12 @@ export default function ExceptionIntelligencePage() {
   // Contribution and consumption are coupled (reciprocity) and default OFF.
   // Show "on" if either is set; toggling either applies the same value to both.
   const participating = !!(settings?.shareEnabled || settings?.consumeEnabled);
+
+  // The pool stats + manual refresh are platform-operator tooling — show them
+  // only in the super-admin portal, not in organization portals.
+  const { user } = useAuth();
+  const { isViewingAs } = usePortalContext();
+  const isSuperAdminPortal = user?.role === "super_admin" && !isViewingAs;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -111,31 +119,35 @@ export default function ExceptionIntelligencePage() {
         </Card>
       )}
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-3">
-        <Card><CardContent className="pt-6">
-          <p className="text-2xl font-bold text-primary">{status?.localSignatures ?? 0}</p>
-          <p className="text-xs text-muted-foreground mt-1">Local pattern signatures</p>
-        </CardContent></Card>
-        <Card><CardContent className="pt-6">
-          <p className="text-2xl font-bold text-primary">{status?.localObservations ?? 0}</p>
-          <p className="text-xs text-muted-foreground mt-1">Resolutions observed</p>
-        </CardContent></Card>
-        <Card><CardContent className="pt-6">
-          <p className="text-2xl font-bold text-primary">{status?.sharedPatternsAvailable ?? 0}</p>
-          <p className="text-xs text-muted-foreground mt-1">Pool patterns available (k≥{settings?.kAnonymityThreshold ?? 3})</p>
-        </CardContent></Card>
-      </div>
+      {/* Pool stats + manual refresh — super-admin (platform operator) portal only. */}
+      {isSuperAdminPortal && (
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            <Card><CardContent className="pt-6">
+              <p className="text-2xl font-bold text-primary">{status?.localSignatures ?? 0}</p>
+              <p className="text-xs text-muted-foreground mt-1">Local pattern signatures</p>
+            </CardContent></Card>
+            <Card><CardContent className="pt-6">
+              <p className="text-2xl font-bold text-primary">{status?.localObservations ?? 0}</p>
+              <p className="text-xs text-muted-foreground mt-1">Resolutions observed</p>
+            </CardContent></Card>
+            <Card><CardContent className="pt-6">
+              <p className="text-2xl font-bold text-primary">{status?.sharedPatternsAvailable ?? 0}</p>
+              <p className="text-xs text-muted-foreground mt-1">Pool patterns available (k≥{settings?.kAnonymityThreshold ?? 3})</p>
+            </CardContent></Card>
+          </div>
 
-      <div className="flex items-center gap-3">
-        <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate()}>
-          {sync.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          Refresh shared pool
-        </Button>
-        <span className="text-xs text-muted-foreground">
-          {settings?.endpointConfigured ? "On-premise sync endpoint configured." : "Cloud mode — patterns aggregated in-place."}
-        </span>
-      </div>
+          <div className="flex items-center gap-3">
+            <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate()}>
+              {sync.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Refresh shared pool
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {settings?.endpointConfigured ? "On-premise sync endpoint configured." : "Cloud mode — patterns aggregated in-place."}
+            </span>
+          </div>
+        </>
+      )}
     </div>
   );
 }
