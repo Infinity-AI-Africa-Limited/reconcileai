@@ -18,6 +18,25 @@ export interface ChannelMetricRow {
   matched: number;
   exceptions: number;
   matchRate: number;
+  /** Sum of amounts of exception-status transactions — the at-risk value for this channel. */
+  exceptionAmount: number;
+}
+
+export interface BoardSummary {
+  period: string;
+  periodLabel: string;
+  generatedAt: string;
+  channelsReported: number;
+  totalVolume: number;
+  totalMatched: number;
+  totalExceptions: number;
+  /** Volume-weighted overall match rate across all channels. */
+  overallMatchRate: number;
+  /** Total at-risk value (sum of exception transaction amounts). */
+  estimatedExposure: number;
+  channelHealth: { good: number; warning: number; critical: number };
+  exceptionsBySeverity: { critical: number; high: number; medium: number; low: number };
+  topChannelsByExceptions: { channel: string; exceptions: number; matchRate: number }[];
 }
 
 export interface ChannelDrillDown {
@@ -33,6 +52,16 @@ export interface ChannelDrillDown {
 
 // ─── Date helpers ────────────────────────────────────────────────────
 
+/** 0-based quarter index (Jan–Mar = 0) for a date. */
+function quarterOf(d: Date): number {
+  return Math.floor(d.getMonth() / 3);
+}
+
+/** Human label for a quarter, e.g. "Q2 2026". */
+function quarterLabel(year: number, q: number): string {
+  return `Q${q + 1} ${year}`;
+}
+
 function getDateRange(period: string): { dateFrom: Date; dateTo: Date } {
   const now = new Date();
   const dateTo = new Date(now);
@@ -45,12 +74,47 @@ function getDateRange(period: string): { dateFrom: Date; dateTo: Date } {
     dateFrom.setDate(dateFrom.getDate() - 30);
   } else if (period === "mtd") {
     dateFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+  } else if (period === "quarterly" || period === "qtd") {
+    // Current quarter to date.
+    dateFrom = new Date(now.getFullYear(), quarterOf(now) * 3, 1);
+  } else if (period === "last_quarter") {
+    // The previous complete calendar quarter.
+    const q = quarterOf(now);
+    if (q === 0) {
+      dateFrom = new Date(now.getFullYear() - 1, 9, 1); // Q4 last year
+      return { dateFrom, dateTo: new Date(now.getFullYear(), 0, 1) };
+    }
+    dateFrom = new Date(now.getFullYear(), (q - 1) * 3, 1);
+    return { dateFrom, dateTo: new Date(now.getFullYear(), q * 3, 1) };
   } else {
     // Default: last 7 days
     dateFrom = new Date(now);
     dateFrom.setDate(dateFrom.getDate() - 7);
   }
   return { dateFrom, dateTo };
+}
+
+/** Single source of truth for period labels (used by CSV, Excel, email). */
+export function periodLabel(period: string): string {
+  const now = new Date();
+  switch (period) {
+    case "7d": return "Last 7 Days";
+    case "30d": return "Last 30 Days";
+    case "mtd": return "Month to Date";
+    case "quarterly":
+    case "qtd":
+      return `${quarterLabel(now.getFullYear(), quarterOf(now))} (to date)`;
+    case "last_quarter": {
+      const q = quarterOf(now);
+      return q === 0 ? quarterLabel(now.getFullYear() - 1, 3) : quarterLabel(now.getFullYear(), q - 1);
+    }
+    default: return period;
+  }
+}
+
+/** Quarterly periods get the board-level executive treatment. */
+export function isBoardPeriod(period: string): boolean {
+  return period === "quarterly" || period === "qtd" || period === "last_quarter";
 }
 
 // ─── Build channel metrics for a period ─────────────────────────────
@@ -68,38 +132,83 @@ export async function buildChannelMetrics(
   const rows: ChannelMetricRow[] = [];
   await Promise.all(
     filtered.map(async (channel) => {
-      const { data: txns } = await db.getTransactions({
-        channelId: channel.id,
-        dateFrom,
-        dateTo,
-        limit: 10000,
-      });
-      const total = txns.length;
-      if (total === 0) return; // skip zero-data channels
-      const matched = txns.filter((t) => t.status === "matched").length;
-      const exceptions = txns.filter((t) => t.status === "exception").length;
+      // Exact SQL aggregate — not capped by the 500-row list limit.
+      const agg = await db.getChannelTxnAggregate(channel.id, dateFrom, dateTo);
+      if (agg.total === 0) return; // skip zero-data channels
       rows.push({
         channel: channel.name,
         channelCode: channel.code,
-        volume: total,
-        matched,
-        exceptions,
-        matchRate: parseFloat(((matched / total) * 100).toFixed(1)),
+        volume: agg.total,
+        matched: agg.matched,
+        exceptions: agg.exceptions,
+        matchRate: parseFloat(((agg.matched / agg.total) * 100).toFixed(1)),
+        exceptionAmount: parseFloat(agg.exceptionAmount.toFixed(2)),
       });
     })
   );
   return rows.sort((a, b) => b.volume - a.volume);
 }
 
+// ─── Board-level executive summary (quarterly) ───────────────────────
+
+export async function buildBoardSummary(period: string): Promise<BoardSummary> {
+  const rows = await buildChannelMetrics(period);
+  const { dateFrom, dateTo } = getDateRange(period);
+
+  const totalVolume = rows.reduce((s, r) => s + r.volume, 0);
+  const totalMatched = rows.reduce((s, r) => s + r.matched, 0);
+  const totalExceptions = rows.reduce((s, r) => s + r.exceptions, 0);
+  const estimatedExposure = parseFloat(rows.reduce((s, r) => s + r.exceptionAmount, 0).toFixed(2));
+  // Volume-weighted overall match rate (a board cares about the blended figure,
+  // not the simple average of channel rates).
+  const overallMatchRate = totalVolume > 0 ? parseFloat(((totalMatched / totalVolume) * 100).toFixed(1)) : 0;
+
+  const channelHealth = {
+    good: rows.filter((r) => r.matchRate >= 95).length,
+    warning: rows.filter((r) => r.matchRate >= 85 && r.matchRate < 95).length,
+    critical: rows.filter((r) => r.matchRate < 85).length,
+  };
+
+  // Exception severity breakdown across the period. Use the DB's exact COUNT
+  // (via getExceptions().total) per severity rather than fetching rows — list
+  // queries are clamped to MAX_QUERY_LIMIT, which would silently undercount.
+  const exceptionsBySeverity = { critical: 0, high: 0, medium: 0, low: 0 };
+  try {
+    await Promise.all(
+      (["critical", "high", "medium", "low"] as const).map(async (sev) => {
+        const { total } = await db.getExceptions({ severity: sev, dateFrom, dateTo, limit: 1 });
+        exceptionsBySeverity[sev] = total;
+      }),
+    );
+  } catch (err) {
+    console.error("[CfoReport] severity breakdown unavailable (non-fatal):", err);
+  }
+
+  const topChannelsByExceptions = [...rows]
+    .sort((a, b) => b.exceptions - a.exceptions)
+    .slice(0, 3)
+    .map((r) => ({ channel: r.channel, exceptions: r.exceptions, matchRate: r.matchRate }));
+
+  return {
+    period,
+    periodLabel: periodLabel(period),
+    generatedAt: new Date().toISOString(),
+    channelsReported: rows.length,
+    totalVolume,
+    totalMatched,
+    totalExceptions,
+    overallMatchRate,
+    estimatedExposure,
+    channelHealth,
+    exceptionsBySeverity,
+    topChannelsByExceptions,
+  };
+}
+
 // ─── Generate CSV string ─────────────────────────────────────────────
 
 export function buildCsvContent(rows: ChannelMetricRow[], period: string): string {
-  const periodLabels: Record<string, string> = {
-    "7d": "Last 7 Days",
-    "30d": "Last 30 Days",
-    mtd: "Month to Date",
-  };
-  const label = periodLabels[period] ?? period;
+  const label = periodLabel(period);
   const header = ["Channel", "Total Transactions", "Matched", "Exceptions", "Match Rate (%)", "Period"];
   const lines = [
     header.map((h) => `"${h}"`).join(","),
@@ -122,12 +231,9 @@ export async function sendWeeklyChannelReport(
       return { success: true, channelsReported: 0 };
     }
 
-    const periodLabels: Record<string, string> = {
-      "7d": "Last 7 Days",
-      "30d": "Last 30 Days",
-      mtd: "Month to Date",
-    };
-    const label = periodLabels[period] ?? period;
+    const label = periodLabel(period);
+    const boardMode = isBoardPeriod(period);
+    const board = boardMode ? await buildBoardSummary(period) : null;
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-NG", { day: "numeric", month: "long", year: "numeric" });
 
@@ -150,7 +256,45 @@ export async function sendWeeklyChannelReport(
         fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF8F9FA" } },
       };
 
-      // Sheet 1: Channel Metrics
+      // Sheet 0 (board reports only): Board Executive Summary — the headline KPIs
+      // a board/audit committee reads first.
+      if (board) {
+        const bws = workbook.addWorksheet("Board Executive Summary");
+        bws.columns = [
+          { header: "Metric", key: "metric", width: 36 },
+          { header: "Value", key: "value", width: 34 },
+        ];
+        bws.getRow(1).eachCell((cell) => { cell.style = headerStyle; });
+        bws.getRow(1).height = 20;
+        bws.views = [{ state: "frozen", ySplit: 1 }];
+        const ngn = (n: number) => `₦${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        const boardRows = [
+          { metric: "Reporting Period", value: board.periodLabel },
+          { metric: "Generated At (UTC)", value: board.generatedAt },
+          { metric: "Overall Match Rate (volume-weighted)", value: `${board.overallMatchRate}%` },
+          { metric: "Total Transactions Reconciled", value: board.totalVolume },
+          { metric: "Total Matched", value: board.totalMatched },
+          { metric: "Total Exceptions", value: board.totalExceptions },
+          { metric: "Estimated Financial Exposure (at-risk)", value: ngn(board.estimatedExposure) },
+          { metric: "Channels — Healthy (≥95%)", value: board.channelHealth.good },
+          { metric: "Channels — Warning (85–95%)", value: board.channelHealth.warning },
+          { metric: "Channels — Critical (<85%)", value: board.channelHealth.critical },
+          { metric: "Exceptions — Critical severity", value: board.exceptionsBySeverity.critical },
+          { metric: "Exceptions — High severity", value: board.exceptionsBySeverity.high },
+          { metric: "Exceptions — Medium severity", value: board.exceptionsBySeverity.medium },
+          { metric: "Exceptions — Low severity", value: board.exceptionsBySeverity.low },
+          ...board.topChannelsByExceptions.map((c, i) => ({
+            metric: `Top Exception Channel #${i + 1}`,
+            value: `${c.channel} — ${c.exceptions} exceptions (${c.matchRate}% match)`,
+          })),
+        ];
+        boardRows.forEach((item, i) => {
+          const r = bws.addRow(item);
+          if (i % 2 === 1) r.eachCell((cell) => { cell.style = altRow; });
+        });
+      }
+
+      // Sheet: Channel Metrics
       const ws = workbook.addWorksheet("Channel Metrics");
       ws.columns = [
         { header: "Channel", key: "channel", width: 28 },
@@ -234,8 +378,21 @@ export async function sendWeeklyChannelReport(
     }
 
     // ── Build markdown notification ─────────────────────────────────────
-    let content = `# Weekly Channel Performance Report\n\n`;
+    let content = board
+      ? `# Quarterly Board Reconciliation Report\n\n`
+      : `# Weekly Channel Performance Report\n\n`;
     content += `**Period:** ${label}  |  **Generated:** ${dateStr}\n\n`;
+
+    if (board) {
+      content += `## Board Executive Summary\n\n`;
+      content += `- **Overall match rate (volume-weighted):** ${board.overallMatchRate}%\n`;
+      content += `- **Total transactions reconciled:** ${board.totalVolume.toLocaleString()}\n`;
+      content += `- **Total exceptions:** ${board.totalExceptions.toLocaleString()}\n`;
+      content += `- **Estimated financial exposure (at-risk):** ₦${board.estimatedExposure.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+      content += `- **Channel health:** ${board.channelHealth.good} healthy · ${board.channelHealth.warning} warning · ${board.channelHealth.critical} critical\n`;
+      content += `- **Exceptions by severity:** ${board.exceptionsBySeverity.critical} critical · ${board.exceptionsBySeverity.high} high · ${board.exceptionsBySeverity.medium} medium · ${board.exceptionsBySeverity.low} low\n\n`;
+    }
+
     content += `| Channel | Total | Matched | Exceptions | Match Rate |\n`;
     content += `|---|---|---|---|---|\n`;
     for (const r of rows) {
@@ -257,7 +414,9 @@ export async function sendWeeklyChannelReport(
 
     content += `\n\n---\n*This report was automatically generated by ReconcileAI. ${rows.length} channels with data.*`;
 
-    const title = `📊 Weekly Channel Report — ${label} (${dateStr})`;
+    const title = board
+      ? `🏛️ Quarterly Board Report — ${label} (${dateStr})`
+      : `📊 Weekly Channel Report — ${label} (${dateStr})`;
 
     // Deliver to the schedule owner's email (with the Excel attached); fall back
     // to a platform-owner notification if the owner has no email on file.

@@ -17,6 +17,7 @@
  */
 
 import { ENV } from "./env";
+import { isEgressAllowed } from "./egress";
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
@@ -69,6 +70,18 @@ export async function sendEmail(params: SendEmailParams): Promise<SendEmailResul
         `"${Array.isArray(params.to) ? params.to.join(", ") : params.to}" (subject: "${params.subject}")`
     );
     return { success: false, skipped: true, error: "email_not_configured" };
+  }
+
+  // Data residency: in on-premise mode, Resend (api.resend.com) is external egress.
+  // Skip rather than throw so auth/cron flows degrade gracefully; operators who run
+  // an in-VPC SMTP relay can allowlist it. Magic-link links can still be surfaced
+  // in-app where email is unavailable.
+  if (!isEgressAllowed(RESEND_ENDPOINT)) {
+    console.warn(
+      "[Email] on-premise mode: external email provider blocked — skipping send. " +
+        "Add the provider host to EGRESS_ALLOWLIST to enable outbound email.",
+    );
+    return { success: false, skipped: true, error: "egress_blocked_on_premise" };
   }
 
   const body: Record<string, unknown> = {

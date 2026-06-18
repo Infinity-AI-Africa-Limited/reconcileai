@@ -42,14 +42,44 @@ trailing `/v1` or the full path are also accepted.
 
 | Provider | `DIRECT_LLM_API_URL` (base) | Model |
 |---|---|---|
-| Anthropic (recommended) | `https://api.anthropic.com` | `claude-sonnet-4-5` (Super Agent: `claude-opus-4`) |
+| Anthropic (recommended, cloud) | `https://api.anthropic.com` | `claude-sonnet-4-5` (Super Agent: `claude-opus-4`) |
 | OpenAI | `https://api.openai.com` | `gpt-4o-mini` or `gpt-4o` |
 | OpenAI-compatible proxy (LiteLLM) | `https://your-litellm-proxy.com` | provider-prefixed model |
+| **Local Anthropic-compatible** (on-prem) | `http://llm.internal:8080` + `DIRECT_LLM_PROVIDER=anthropic` | self-hosted Claude-compatible gateway |
+| **Local OpenAI-compatible** (on-prem) | `http://localhost:11434` + `DIRECT_LLM_PROVIDER=openai` | Ollama / vLLM model |
 
 **Anthropic is now first-class:** `server/_core/llm.ts` ships a **native Anthropic Messages
 adapter** (no LiteLLM proxy required). It translates the OpenAI-shaped request/response so all
 existing call sites are unchanged, and maps structured-output requests (`response_format` /
 `outputSchema`) onto Anthropic tool-use automatically.
+
+## Data Residency / On-Premise Mode
+
+For customers (e.g. Premium Trust Bank) who require that transaction data **never leaves their
+infrastructure**, the app enforces residency in code — it is not just a deployment convention.
+
+```bash
+# "cloud" (default) keeps current behaviour. "on_premise" hard-blocks all outbound
+# calls except to loopback/private hosts and the EGRESS_ALLOWLIST.
+DEPLOYMENT_MODE=on_premise
+# Comma-separated hostnames explicitly permitted to receive outbound calls in
+# on_premise mode (e.g. an in-VPC LLM gateway, an internal SMTP relay, or the
+# ReconcileAI Exception Intelligence pool).
+EGRESS_ALLOWLIST=llm.internal,smtp.internal
+```
+
+In `on_premise` mode:
+- **LLM** must be a local endpoint — set `DIRECT_LLM_API_KEY` + `DIRECT_LLM_API_URL` to an
+  in-VPC Anthropic-compatible (`DIRECT_LLM_PROVIDER=anthropic`) or OpenAI-compatible
+  (`DIRECT_LLM_PROVIDER=openai`, e.g. Ollama/vLLM) server. Manus Forge and `api.anthropic.com`
+  are **blocked**.
+- **Email** (Resend), **webhooks**, and the legacy Forge relays are blocked unless their host
+  is on `EGRESS_ALLOWLIST`. Email degrades to a logged no-op rather than throwing.
+- The server **refuses to start** if it detects a leaky config (Forge key set, or an external
+  `DIRECT_LLM_API_URL`). The enforced posture is logged at boot and exposed via
+  `system.residencyStatus` (an "On-Premise · Egress Blocked" badge appears in the app header).
+
+The egress guard lives in `server/_core/egress.ts`; every outbound call site routes through it.
 
 ## File Storage (AWS S3 or S3-compatible)
 
@@ -103,6 +133,35 @@ SFTP_ENCRYPTION_KEY=<32-character random string>
 ```
 
 Used to encrypt SFTP credentials stored in the `sftp_credentials` database table.
+
+## CBN Report Signing (Ed25519)
+
+```bash
+# PKCS#8 PEM Ed25519 private key used to digitally sign CBN examination reports
+# and compliance attestations. When unset, an EPHEMERAL key is generated per
+# process (dev/demo only) and signatures won't verify after a restart.
+CBN_SIGNING_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+# Generate: openssl genpkey -algorithm ed25519 -out cbn_signing.pem
+#           (paste the file contents, newlines as \n, into the env var)
+```
+
+Signed submissions persist `contentHash`, `signature`, `signingKeyFingerprint`,
+`signedByUserId`, and `signedAt`. `compliance.verifySubmission` recomputes the hash
+and verifies the signature (tamper-evidence); `compliance.signingPublicKey` exposes
+the public key (PEM) for third-party verification. Signing logic: `server/signing.ts`.
+
+## Exception Intelligence Layer (anonymized network effect)
+
+```bash
+# Central pool endpoint. ONLY anonymized, non-personal pattern signatures are sent
+# (no transaction data / PII). Unset → local-only (cloud aggregates in-place; on-prem
+# does not sync). In on_premise mode, add this host to EGRESS_ALLOWLIST.
+EXCEPTION_INTEL_ENDPOINT=https://intel.reconcileai.vip
+```
+
+Per-org opt-out lives in the app (Exception Intelligence settings page). Privacy controls
+(field allowlist, runtime PII-scrub, k-anonymity) are documented in
+`docs/exception-intelligence-dpia.md` and enforced in `server/exceptionIntelligence.ts`.
 
 ## Woodcore Integration (pending IP whitelist)
 

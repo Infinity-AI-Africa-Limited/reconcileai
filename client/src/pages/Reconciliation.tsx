@@ -18,11 +18,14 @@ export default function ReconciliationPage() {
   const { data: channels } = trpc.channels.list.useQuery();
   const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery();
   const createMutation = trpc.reconciliation.create.useMutation();
+  const createMultiMutation = trpc.reconciliation.createMultiChannel.useMutation();
   const exportMutation = trpc.export.csv.useMutation();
   const exportXlsxMutation = trpc.export.xlsx.useMutation();
 
   const [open, setOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState<number | null>(null);
+  const [multiChannel, setMultiChannel] = useState(false);
+  const [targetChannelIds, setTargetChannelIds] = useState<number[]>([]);
   const [form, setForm] = useState({
     name: "",
     // Transaction Integrity is merged into Settlement — only two selectable modules.
@@ -42,29 +45,54 @@ export default function ReconciliationPage() {
 
   const channelMap = useMemo(() => new Map(channels?.map((c) => [c.id, c]) || []), [channels]);
 
+  const resetForm = () => {
+    setForm({ name: "", moduleType: "settlement", sourceChannelId: "", targetChannelId: "", dateFrom: "", dateTo: "", amountTolerance: "0.005", dateWindowDays: "3" });
+    setMultiChannel(false);
+    setTargetChannelIds([]);
+  };
+
   const handleCreate = async () => {
-    if (!form.name || !form.sourceChannelId || !form.targetChannelId || !form.dateFrom || !form.dateTo) {
-      toast.error("Please fill in all required fields.");
+    const baseValid = form.name && form.sourceChannelId && form.dateFrom && form.dateTo;
+    if (!baseValid || (multiChannel ? targetChannelIds.length === 0 : !form.targetChannelId)) {
+      toast.error(multiChannel ? "Pick a source, at least one target channel, and a date range." : "Please fill in all required fields.");
       return;
     }
     try {
-      await createMutation.mutateAsync({
-        name: form.name,
-        moduleType: form.moduleType,
-        sourceChannelId: parseInt(form.sourceChannelId),
-        targetChannelId: parseInt(form.targetChannelId),
-        dateFrom: form.dateFrom,
-        dateTo: form.dateTo,
-        amountTolerance: parseFloat(form.amountTolerance),
-        dateWindowDays: parseInt(form.dateWindowDays),
-      });
-      toast.success("Reconciliation job created and running!");
+      if (multiChannel) {
+        const res = await createMultiMutation.mutateAsync({
+          name: form.name,
+          moduleType: form.moduleType,
+          sourceChannelId: parseInt(form.sourceChannelId),
+          targetChannelIds,
+          dateFrom: form.dateFrom,
+          dateTo: form.dateTo,
+          amountTolerance: parseFloat(form.amountTolerance),
+          dateWindowDays: parseInt(form.dateWindowDays),
+        });
+        toast.success(`Multi-channel run started across ${res.targetCount} channels (${res.jobIds.length} jobs).`);
+      } else {
+        await createMutation.mutateAsync({
+          name: form.name,
+          moduleType: form.moduleType,
+          sourceChannelId: parseInt(form.sourceChannelId),
+          targetChannelId: parseInt(form.targetChannelId),
+          dateFrom: form.dateFrom,
+          dateTo: form.dateTo,
+          amountTolerance: parseFloat(form.amountTolerance),
+          dateWindowDays: parseInt(form.dateWindowDays),
+        });
+        toast.success("Reconciliation job created and running!");
+      }
       setOpen(false);
-      setForm({ name: "", moduleType: "settlement", sourceChannelId: "", targetChannelId: "", dateFrom: "", dateTo: "", amountTolerance: "0.005", dateWindowDays: "3" });
+      resetForm();
       refetch();
     } catch (err: any) {
       toast.error(err.message || "Failed to create job");
     }
+  };
+
+  const toggleTarget = (id: number) => {
+    setTargetChannelIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
   const statusIcon = (status: string) => {
@@ -110,6 +138,23 @@ export default function ReconciliationPage() {
               <DialogTitle>Create Reconciliation Job</DialogTitle>
             </DialogHeader>
             <div className="space-y-4 pt-2">
+              {/* Single vs multi-channel mode */}
+              <div className="flex rounded-lg border p-1 text-sm">
+                <button
+                  type="button"
+                  onClick={() => setMultiChannel(false)}
+                  className={`flex-1 rounded-md py-1.5 font-medium transition-colors ${!multiChannel ? "bg-[#1B365D] text-white" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  Single Channel Pair
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMultiChannel(true)}
+                  className={`flex-1 rounded-md py-1.5 font-medium transition-colors ${multiChannel ? "bg-[#1B365D] text-white" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  Multi-Channel (single run)
+                </button>
+              </div>
               <div>
                 <label className="text-sm font-medium mb-1 block">Job Name</label>
                 <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. NIBSS vs Core Banking - Feb 2026" />
@@ -140,18 +185,50 @@ export default function ReconciliationPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div>
-                  <label className="text-sm font-medium mb-1 block">Target Channel</label>
-                  <Select value={form.targetChannelId} onValueChange={(v) => setForm({ ...form, targetChannelId: v })}>
-                    <SelectTrigger><SelectValue placeholder="Select..." /></SelectTrigger>
-                    <SelectContent>
-                      {channels?.map((ch) => (
-                        <SelectItem key={ch.id} value={String(ch.id)}>{ch.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                {!multiChannel && (
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Target Channel</label>
+                    <Select value={form.targetChannelId} onValueChange={(v) => setForm({ ...form, targetChannelId: v })}>
+                      <SelectTrigger><SelectValue placeholder="Select..." /></SelectTrigger>
+                      <SelectContent>
+                        {channels?.map((ch) => (
+                          <SelectItem key={ch.id} value={String(ch.id)}>{ch.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
+              {multiChannel && (
+                <div>
+                  <label className="text-sm font-medium mb-1 block">
+                    Target Channels <span className="text-muted-foreground font-normal">— reconciled against the source in one run ({targetChannelIds.length} selected)</span>
+                  </label>
+                  <div className="max-h-40 overflow-y-auto rounded-md border divide-y">
+                    {channels?.filter((ch) => String(ch.id) !== form.sourceChannelId).map((ch) => (
+                      <label key={ch.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-muted/50">
+                        <input
+                          type="checkbox"
+                          checked={targetChannelIds.includes(ch.id)}
+                          onChange={() => toggleTarget(ch.id)}
+                          className="h-4 w-4"
+                        />
+                        {ch.name}
+                      </label>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-1 text-xs text-[#1B365D] font-medium hover:underline"
+                    onClick={() => {
+                      const eligible = (channels ?? []).filter((ch) => String(ch.id) !== form.sourceChannelId).map((ch) => ch.id);
+                      setTargetChannelIds((prev) => (prev.length === eligible.length ? [] : eligible));
+                    }}
+                  >
+                    {targetChannelIds.length === (channels ?? []).filter((ch) => String(ch.id) !== form.sourceChannelId).length ? "Clear all" : "Select all channels"}
+                  </button>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm font-medium mb-1 block">Date From</label>
@@ -172,8 +249,10 @@ export default function ReconciliationPage() {
                   <Input type="number" value={form.dateWindowDays} onChange={(e) => setForm({ ...form, dateWindowDays: e.target.value })} />
                 </div>
               </div>
-              <Button onClick={handleCreate} disabled={createMutation.isPending} className="w-full">
-                {createMutation.isPending ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Creating...</> : <><Play className="h-4 w-4 mr-2" /> Run Reconciliation</>}
+              <Button onClick={handleCreate} disabled={createMutation.isPending || createMultiMutation.isPending} className="w-full">
+                {(createMutation.isPending || createMultiMutation.isPending)
+                  ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Creating...</>
+                  : <><Play className="h-4 w-4 mr-2" /> {multiChannel ? `Run Across ${targetChannelIds.length || ""} Channels` : "Run Reconciliation"}</>}
               </Button>
             </div>
           </DialogContent>

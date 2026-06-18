@@ -163,7 +163,7 @@ function SchedulePanel({ onClose }: { onClose: () => void }) {
 
   const [recipients, setRecipients] = useState<string[]>((schedule?.recipients as string[]) ?? []);
   const [emailInput, setEmailInput] = useState("");
-  const [period, setPeriod] = useState<"7d" | "30d" | "mtd">((schedule?.reportPeriod as any) ?? "7d");
+  const [period, setPeriod] = useState<"7d" | "30d" | "mtd" | "quarterly">((schedule?.reportPeriod as any) ?? "7d");
   const [isActive, setIsActive] = useState(schedule?.isActive ?? true);
   const [sendResult, setSendResult] = useState<string | null>(null);
 
@@ -186,7 +186,7 @@ function SchedulePanel({ onClose }: { onClose: () => void }) {
     setSendResult(result.success ? `✅ Report sent (${result.channelsReported} channels)` : `❌ ${result.error}`);
   };
 
-  const periodLabels = { "7d": "Last 7 Days", "30d": "Last 30 Days", mtd: "Month to Date" };
+  const periodLabels = { "7d": "Last 7 Days", "30d": "Last 30 Days", mtd: "Month to Date", quarterly: "Quarterly (Board)" };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-end">
@@ -214,14 +214,19 @@ function SchedulePanel({ onClose }: { onClose: () => void }) {
           {/* Report period */}
           <div>
             <label className="block text-xs font-semibold text-[#1B365D] mb-2">Report Period</label>
-            <div className="flex gap-2">
-              {(["7d", "30d", "mtd"] as const).map((p) => (
+            <div className="flex gap-2 flex-wrap">
+              {(["7d", "30d", "mtd", "quarterly"] as const).map((p) => (
                 <button key={p} onClick={() => setPeriod(p)}
                   className={`flex-1 py-1.5 rounded-md text-xs font-medium border transition-colors ${period === p ? "bg-[#1B365D] text-white border-[#1B365D]" : "border-gray-200 text-[#8C757D] hover:border-[#1B365D]"}`}>
                   {periodLabels[p]}
                 </button>
               ))}
             </div>
+            {period === "quarterly" && (
+              <p className="mt-2 text-[11px] text-[#8C757D]">
+                Quarterly produces a board-level executive report (overall match rate, financial exposure, channel health, exceptions by severity) as the first sheet.
+              </p>
+            )}
           </div>
 
           {/* Recipients */}

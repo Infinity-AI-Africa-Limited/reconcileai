@@ -17,6 +17,7 @@ import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { invokeLLM } from "../_core/llm";
+import { signReport, verifyReport, publicKeyFingerprint, publicKeyPem } from "../signing";
 import {
   cbnReportFrameworks,
   cbnReportSubmissions,
@@ -27,6 +28,27 @@ import {
 } from "../../drizzle/schema";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * The canonical, signature-covered view of a submission. Only the substantive
+ * report content + identity/period are signed (volatile/derived columns like
+ * updatedAt and the signature fields themselves are excluded), so re-reading and
+ * re-hashing is deterministic and any later edit to reportData breaks the seal.
+ */
+function buildSignablePayload(row: typeof cbnReportSubmissions.$inferSelect) {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    frameworkId: row.frameworkId,
+    periodStart: row.periodStart instanceof Date ? row.periodStart.toISOString() : row.periodStart,
+    periodEnd: row.periodEnd instanceof Date ? row.periodEnd.toISOString() : row.periodEnd,
+    reportingPeriodLabel: row.reportingPeriodLabel ?? null,
+    status: row.status,
+    submissionChannel: row.submissionChannel ?? null,
+    reportData: row.reportData ?? null,
+    complianceScore: row.complianceScore ?? null,
+  };
+}
 
 async function writeAuditLog(
   userId: number | null | undefined,
@@ -381,8 +403,99 @@ export const cbnComplianceRouter = router({
           eq(cbnReportSubmissions.id, id),
           orgId ? eq(cbnReportSubmissions.organizationId, orgId) : isNull(cbnReportSubmissions.organizationId)
         ));
-      await writeAuditLog(ctx.user.id, ctx.user.name, `submission.${rest.status ?? "updated"}`, "submission", id, `Submission #${id}`, { status: rest.status, score }, orgId);
-      return { success: true, complianceScore: score };
+
+      // Digitally sign the report when it is approved or submitted, so the CBN
+      // attestation ("timestamped, digitally signed") is literally true and the
+      // report becomes tamper-evident. We re-read the persisted row so the
+      // signature covers the canonical, post-update content.
+      let signed: { signedAt: Date; signingKeyFingerprint: string } | undefined;
+      if (rest.status === "approved" || rest.status === "submitted") {
+        const [row] = await drizzle.select().from(cbnReportSubmissions).where(eq(cbnReportSubmissions.id, id)).limit(1);
+        if (row) {
+          const sig = signReport(buildSignablePayload(row));
+          await drizzle.update(cbnReportSubmissions)
+            .set({
+              contentHash: sig.contentHash,
+              signature: sig.signature,
+              signingKeyFingerprint: sig.signingKeyFingerprint,
+              signedByUserId: ctx.user.id,
+              signedAt: sig.signedAt,
+            } as any)
+            .where(eq(cbnReportSubmissions.id, id));
+          signed = { signedAt: sig.signedAt, signingKeyFingerprint: sig.signingKeyFingerprint };
+        }
+      }
+
+      await writeAuditLog(ctx.user.id, ctx.user.name, `submission.${rest.status ?? "updated"}`, "submission", id, `Submission #${id}`, { status: rest.status, score, signed: !!signed }, orgId);
+      return { success: true, complianceScore: score, signed };
+    }),
+
+  // ── Verify a submission's digital signature (tamper-evidence) ─────────────
+  verifySubmission: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ ctx, input }) => {
+      const drizzle = await getDb();
+      if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const orgId = ctx.user.organizationId ?? null;
+      const [row] = await drizzle.select().from(cbnReportSubmissions).where(and(
+        eq(cbnReportSubmissions.id, input.id),
+        orgId ? eq(cbnReportSubmissions.organizationId, orgId) : isNull(cbnReportSubmissions.organizationId)
+      )).limit(1);
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Submission not found" });
+      if (!row.signature || !row.contentHash) {
+        return { signed: false as const, valid: false, reason: "Report has not been signed (sign by approving/submitting it)." };
+      }
+      const result = verifyReport({
+        payload: buildSignablePayload(row),
+        contentHash: row.contentHash,
+        signature: row.signature,
+        signingKeyFingerprint: row.signingKeyFingerprint,
+      });
+      return {
+        signed: true as const,
+        ...result,
+        contentHash: row.contentHash,
+        signingKeyFingerprint: row.signingKeyFingerprint,
+        signedAt: row.signedAt,
+        signedByUserId: row.signedByUserId,
+        currentKeyFingerprint: publicKeyFingerprint(),
+      };
+    }),
+
+  // ── Public signing key (PEM) for third-party verification ─────────────────
+  signingPublicKey: protectedProcedure.query(() => ({
+    fingerprint: publicKeyFingerprint(),
+    publicKeyPem: publicKeyPem(),
+    algorithm: "Ed25519",
+  })),
+
+  // ── Sign a standalone compliance attestation document ─────────────────────
+  // Returns a real Ed25519 signature block to embed in the printed attestation,
+  // so the "timestamped, digitally signed" statement is true for that artifact.
+  signAttestation: protectedProcedure
+    .input(z.object({
+      institution: z.string(),
+      reportingPeriod: z.string(),
+      overallStatus: z.string(),
+      generatedAt: z.string(),
+      thresholds: z.array(z.object({
+        label: z.string(),
+        threshold: z.union([z.number(), z.string()]),
+        value: z.union([z.number(), z.string(), z.null()]),
+        unit: z.string(),
+        ok: z.boolean(),
+      })),
+    }))
+    .mutation(({ ctx, input }) => {
+      const payload = { ...input, organizationId: ctx.user.organizationId ?? null, signedByUserId: ctx.user.id };
+      const sig = signReport(payload);
+      return {
+        contentHash: sig.contentHash,
+        signature: sig.signature,
+        signingKeyFingerprint: sig.signingKeyFingerprint,
+        signedAt: sig.signedAt.toISOString(),
+        algorithm: "Ed25519",
+      };
     }),
 
   // ── AI Gap Analysis ───────────────────────────────────────────────────────

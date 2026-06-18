@@ -135,15 +135,28 @@ function stringSimilarity(a: string, b: string): number {
   return 1 - distance / maxLen;
 }
 
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
 function daysDifference(d1: Date, d2: Date): number {
-  const ms = Math.abs(d1.getTime() - d2.getTime());
-  return ms / (1000 * 60 * 60 * 24);
+  return Math.abs(d1.getTime() - d2.getTime()) / MS_PER_DAY;
 }
 
 function amountDifferencePercent(a1: number, a2: number): number {
   if (a1 === 0 && a2 === 0) return 0;
   const base = Math.max(Math.abs(a1), Math.abs(a2));
   return Math.abs(a1 - a2) / base;
+}
+
+// First index `i` in a sorted ascending array where arr[i] >= target (lower bound).
+function lowerBound(arr: number[], target: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 // ─── Duplicate Detection ────────────────────────────────────────────
@@ -260,6 +273,36 @@ export function runMatchingEngine(
   // Build hash indexes for O(1) lookups
   const targetIndex = buildIndex(targetTxns);
 
+  // Pre-parse each target's amount (number) and date (epoch ms) once.
+  const tgtAmtById = new Map<number, number>();
+  const tgtDateMsById = new Map<number, number>();
+  for (const t of targetTxns) {
+    tgtAmtById.set(t.id, parseFloat(String(t.amount)));
+    tgtDateMsById.set(t.id, new Date(t.transactionDate).getTime());
+  }
+
+  // Pass 2 index: bucket targets by calendar day, and within each day keep them sorted by
+  // amount. Pass 2 scans only the ±dateWindow day buckets and binary-searches the amount
+  // band inside each — so it visits only targets that can match on BOTH amount and date,
+  // instead of every target in the amount band across the whole period (the real Pass 2
+  // cost: dense amount bands meant hundreds of same-amount candidates were visited per
+  // source only to be rejected on date).
+  const dayBuckets = new Map<number, Transaction[]>();
+  for (const t of targetTxns) {
+    const day = Math.floor((tgtDateMsById.get(t.id) as number) / MS_PER_DAY);
+    let arr = dayBuckets.get(day);
+    if (!arr) {
+      arr = [];
+      dayBuckets.set(day, arr);
+    }
+    arr.push(t);
+  }
+  const dayAmountIndex = new Map<number, { nums: number[]; txns: Transaction[] }>();
+  dayBuckets.forEach((arr, day) => {
+    arr.sort((a, b) => (tgtAmtById.get(a.id) as number) - (tgtAmtById.get(b.id) as number));
+    dayAmountIndex.set(day, { nums: arr.map((t) => tgtAmtById.get(t.id) as number), txns: arr });
+  });
+
   let pass1Count = 0;
   let pass2Count = 0;
   let pass3Count = 0;
@@ -301,62 +344,80 @@ export function runMatchingEngine(
   for (const src of sourceTxns) {
     if (matchedSourceIds.has(src.id)) continue;
     const srcAmt = parseFloat(String(src.amount));
-    const srcDate = new Date(src.transactionDate);
+    const srcDateMs = new Date(src.transactionDate).getTime();
     let bestCandidate: MatchCandidate | null = null;
 
-    // Use amount index to narrow candidates instead of scanning all targets
-    // Check exact amount first, then nearby amounts
-    const amtKey = srcAmt.toFixed(2);
-    const toleranceAmt = srcAmt * config.amountTolerance;
-    const candidateAmounts = new Set<string>();
-    candidateAmounts.add(amtKey);
+    // Scan only the target amounts within the tolerance band [srcAmt-band, srcAmt+band]
+    // using binary search over the pre-sorted amount index. The band is widened slightly
+    // (×1.5 + 0.01) so it is a strict superset of anything that can satisfy the exact
+    // `amtDiffPct <= tolerance` predicate below — results are identical to a full scan,
+    // but cost is O(log n + band size) instead of O(amount). Previously this enumerated
+    // every 0.01 increment, which built a Set of ~srcAmt entries and threw RangeError
+    // ("Set maximum size exceeded") for amounts above ~₦16.78m.
+    const band = srcAmt * config.amountTolerance * 1.5 + 0.01;
+    const lo = srcAmt - band;
+    const hi = srcAmt + band;
+    const srcDay = Math.floor(srcDateMs / MS_PER_DAY);
+    // +1 covers the day-bucket boundary; the exact dateDiff check below stays authoritative,
+    // so a slightly wider day sweep only adds a few candidates that get filtered — never
+    // changes which pairs match.
+    const dayRadius = Math.ceil(config.dateWindowDays) + 1;
 
-    // Generate nearby amount keys within tolerance
-    for (let delta = -toleranceAmt; delta <= toleranceAmt; delta += 0.01) {
-      candidateAmounts.add((srcAmt + delta).toFixed(2));
-    }
-    // Cap the number of candidate amounts to prevent excessive iteration
-    const candidateAmtArray = Array.from(candidateAmounts).slice(0, 200);
+    // Pick the best candidate by amount+date "base" confidence during the scan. Reference
+    // similarity is a Levenshtein distance, but it only adds a ≤5-point nudge and never
+    // decides whether a pair qualifies — so we defer it and compute it once, for the winner,
+    // after the scan. Each target lives in exactly one day bucket and the buckets swept are
+    // distinct, so no target is visited twice (no de-dup Set needed).
+    let bestBase = -1;
+    let bestTgt: Transaction | null = null;
+    let bestAmtDiffPct = 0;
+    let bestDateDiff = 0;
 
-    const checkedTargets = new Set<number>();
-    for (const candAmt of candidateAmtArray) {
-      const targets = targetIndex.byAmount.get(candAmt);
-      if (!targets) continue;
+    for (let day = srcDay - dayRadius; day <= srcDay + dayRadius; day++) {
+      const bucket = dayAmountIndex.get(day);
+      if (!bucket) continue;
+      const { nums, txns } = bucket;
 
-      for (const tgt of targets) {
+      for (let ai = lowerBound(nums, lo); ai < nums.length && nums[ai] <= hi; ai++) {
+        const tgt = txns[ai];
         if (matchedTargetIds.has(tgt.id)) continue;
-        if (checkedTargets.has(tgt.id)) continue;
-        checkedTargets.add(tgt.id);
 
-        const tgtAmt = parseFloat(String(tgt.amount));
-        const amtDiffPct = amountDifferencePercent(srcAmt, tgtAmt);
-        const tgtDate = new Date(tgt.transactionDate);
-        const dateDiff = daysDifference(srcDate, tgtDate);
+        const amtDiffPct = amountDifferencePercent(srcAmt, nums[ai]);
+        if (amtDiffPct > config.amountTolerance) continue;
+        const dateDiff = Math.abs(srcDateMs - (tgtDateMsById.get(tgt.id) as number)) / MS_PER_DAY;
+        if (dateDiff > config.dateWindowDays) continue;
 
-        if (amtDiffPct <= config.amountTolerance && dateDiff <= config.dateWindowDays) {
-          let confidence = 70;
-          confidence += (1 - amtDiffPct / config.amountTolerance) * 15;
-          confidence += (1 - dateDiff / config.dateWindowDays) * 10;
-          if (src.transactionRef && tgt.transactionRef) {
-            const refSim = stringSimilarity(src.transactionRef, tgt.transactionRef);
-            confidence += refSim * 5;
-          }
-          confidence = Math.min(99, Math.round(confidence * 100) / 100);
-          const matchType = amtDiffPct === 0 ? "date_window" : "amount_tolerance";
+        const base =
+          70 +
+          (1 - amtDiffPct / config.amountTolerance) * 15 +
+          (1 - dateDiff / config.dateWindowDays) * 10;
 
-          if (!bestCandidate || confidence > bestCandidate.confidenceScore) {
-            bestCandidate = {
-              sourceId: src.id,
-              targetId: tgt.id,
-              matchType,
-              confidenceScore: confidence,
-              amountDifference: Math.round((srcAmt - tgtAmt) * 100) / 100,
-              dateDifference: Math.round(dateDiff * 100) / 100,
-              matchReason: `${matchType === "date_window" ? "Date window" : "Amount tolerance"} match: amount diff ${(amtDiffPct * 100).toFixed(2)}%, date diff ${dateDiff.toFixed(1)} days`,
-            };
-          }
+        if (base > bestBase) {
+          bestBase = base;
+          bestTgt = tgt;
+          bestAmtDiffPct = amtDiffPct;
+          bestDateDiff = dateDiff;
         }
       }
+    }
+
+    if (bestTgt) {
+      let confidence = bestBase;
+      if (src.transactionRef && bestTgt.transactionRef) {
+        confidence += stringSimilarity(src.transactionRef, bestTgt.transactionRef) * 5;
+      }
+      confidence = Math.min(99, Math.round(confidence * 100) / 100);
+      const matchType = bestAmtDiffPct === 0 ? "date_window" : "amount_tolerance";
+      const bestTgtAmt = tgtAmtById.get(bestTgt.id) ?? parseFloat(String(bestTgt.amount));
+      bestCandidate = {
+        sourceId: src.id,
+        targetId: bestTgt.id,
+        matchType,
+        confidenceScore: confidence,
+        amountDifference: Math.round((srcAmt - bestTgtAmt) * 100) / 100,
+        dateDifference: Math.round(bestDateDiff * 100) / 100,
+        matchReason: `${matchType === "date_window" ? "Date window" : "Amount tolerance"} match: amount diff ${(bestAmtDiffPct * 100).toFixed(2)}%, date diff ${bestDateDiff.toFixed(1)} days`,
+      };
     }
 
     if (bestCandidate) {

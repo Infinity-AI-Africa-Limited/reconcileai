@@ -33,12 +33,16 @@ import {
   platformAuditLogs, InsertPlatformAuditLog, PlatformAuditLog,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import { computeRecordHash } from "./auditChain";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
 const MAX_QUERY_LIMIT = 500;
 const DEFAULT_QUERY_LIMIT = 50;
-const BATCH_INSERT_SIZE = 100;
+// Rows per multi-row INSERT/UPDATE. 1000 keeps placeholder counts well under MySQL's
+// 65,535 limit (widest table here is ~13 cols → ~13k placeholders) while cutting the
+// round-trip count 10x versus the old value of 100 — important for 500k-row jobs.
+const BATCH_INSERT_SIZE = 1000;
 
 // ─── Database Connection ────────────────────────────────────────────
 
@@ -251,6 +255,26 @@ export async function updateUploadBatch(id: number, data: Partial<InsertUploadBa
   await db.update(uploadBatches).set(data).where(eq(uploadBatches.id, id));
 }
 
+export async function getUploadBatchById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(uploadBatches).where(eq(uploadBatches.id, id)).limit(1);
+  return result[0];
+}
+
+// Atomically add to a batch's running valid/invalid counts. Used by chunked uploads so
+// each chunk accumulates onto the batch row without a read-modify-write race.
+export async function incrementUploadBatchCounts(id: number, addValid: number, addInvalid: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(uploadBatches)
+    .set({
+      validRows: sql`${uploadBatches.validRows} + ${addValid}`,
+      invalidRows: sql`${uploadBatches.invalidRows} + ${addInvalid}`,
+    })
+    .where(eq(uploadBatches.id, id));
+}
+
 export async function getUploadBatches(userId: number, isAdmin: boolean) {
   const db = await getDb();
   if (!db) return [];
@@ -335,6 +359,37 @@ export async function getTransactions(filters: {
   return { data, total };
 }
 
+/**
+ * Exact per-channel transaction aggregates for a period, computed in SQL so they
+ * are NOT subject to the row-limit clamp that caps getTransactions() at 500. Used
+ * by CFO / board reporting where accurate totals matter.
+ */
+export async function getChannelTxnAggregate(channelId: number, dateFrom: Date, dateTo: Date) {
+  const db = await getDb();
+  if (!db) return { total: 0, matched: 0, exceptions: 0, exceptionAmount: 0 };
+  const [row] = await db
+    .select({
+      total: sql<number>`count(*)`,
+      matched: sql<number>`sum(case when ${transactions.status} = 'matched' then 1 else 0 end)`,
+      exceptions: sql<number>`sum(case when ${transactions.status} = 'exception' then 1 else 0 end)`,
+      exceptionAmount: sql<number>`coalesce(sum(case when ${transactions.status} = 'exception' then abs(${transactions.amount}) else 0 end), 0)`,
+    })
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.channelId, channelId),
+        gte(transactions.transactionDate, dateFrom),
+        lte(transactions.transactionDate, dateTo),
+      ),
+    );
+  return {
+    total: Number(row?.total || 0),
+    matched: Number(row?.matched || 0),
+    exceptions: Number(row?.exceptions || 0),
+    exceptionAmount: Number(row?.exceptionAmount || 0),
+  };
+}
+
 export async function getTransactionsByIds(ids: number[]) {
   const db = await getDb();
   if (!db || ids.length === 0) return [];
@@ -354,6 +409,17 @@ export async function updateTransactionStatus(id: number, status: string, matchI
   const updateData: any = { status };
   if (matchId !== undefined) updateData.matchId = matchId;
   await db.update(transactions).set(updateData).where(eq(transactions.id, id));
+}
+
+// Bulk-set the status of many transactions in chunked IN(...) updates. Replaces per-row
+// status writes in the reconciliation hot path (which were O(n) round-trips at scale).
+export async function updateTransactionStatusBulk(ids: number[], status: string) {
+  const db = await getDb();
+  if (!db || ids.length === 0) return;
+  for (let i = 0; i < ids.length; i += BATCH_INSERT_SIZE) {
+    const batch = ids.slice(i, i + BATCH_INSERT_SIZE);
+    await db.update(transactions).set({ status: status as any }).where(inArray(transactions.id, batch));
+  }
 }
 
 export async function getTransactionsForReconciliation(channelId: number, dateFrom: Date, dateTo: Date) {
@@ -417,6 +483,17 @@ export async function getReconciliationJob(id: number) {
   if (!db) return undefined;
   const result = await db.select().from(reconciliationJobs).where(eq(reconciliationJobs.id, id)).limit(1);
   return result[0];
+}
+
+/** All child jobs belonging to a single multi-channel run (ascending creation). */
+export async function getReconciliationJobsByMultiRun(multiRunId: string) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(reconciliationJobs)
+    .where(eq(reconciliationJobs.multiRunId, multiRunId))
+    .orderBy(asc(reconciliationJobs.createdAt));
 }
 
 // ─── Matches ─────────────────────────────────────────────────────────
@@ -547,7 +624,59 @@ export async function getJobExceptionsNeedingAi(jobId: number) {
 export async function createAuditLog(data: InsertAuditLog) {
   const db = await getDb();
   if (!db) return;
-  await db.insert(auditLogs).values(data);
+
+  // Tamper-evident hash chain (per organization). Fetch the latest entry in the
+  // same org scope to link against, then compute this record's hash.
+  // Note: best-effort under concurrency — see auditChain.ts. For the audit
+  // volume here this is acceptable; a SELECT…FOR UPDATE tx would harden it.
+  const orgScope = data.organizationId ?? null;
+  const [prev] = await db
+    .select({ seq: auditLogs.sequenceNumber, hash: auditLogs.recordHash })
+    .from(auditLogs)
+    .where(orgScope === null ? isNull(auditLogs.organizationId) : eq(auditLogs.organizationId, orgScope))
+    .orderBy(desc(auditLogs.sequenceNumber))
+    .limit(1);
+
+  const sequenceNumber = (prev?.seq ?? 0) + 1;
+  const prevRecordHash = prev?.hash ?? null;
+  const createdAt = new Date();
+  const recordHash = computeRecordHash(
+    {
+      sequenceNumber,
+      userId: data.userId ?? null,
+      organizationId: orgScope,
+      action: data.action,
+      entityType: data.entityType,
+      entityId: data.entityId ?? null,
+      details: data.details ?? null,
+      ipAddress: data.ipAddress ?? null,
+      userAgent: data.userAgent ?? null,
+      createdAt,
+    },
+    prevRecordHash,
+  );
+
+  await db.insert(auditLogs).values({
+    ...data,
+    sequenceNumber,
+    prevRecordHash,
+    recordHash,
+    createdAt,
+  });
+}
+
+/**
+ * Fetch the full audit chain for an organization (ascending sequence) so it can
+ * be verified. organizationId === null targets the global/unscoped chain.
+ */
+export async function getAuditChain(organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(auditLogs)
+    .where(organizationId === null ? isNull(auditLogs.organizationId) : eq(auditLogs.organizationId, organizationId))
+    .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id));
 }
 
 export async function getAuditLogs(filters: {

@@ -151,8 +151,11 @@ describe("runMatchingEngine - Pass 3: Fuzzy Matching", () => {
   const config = { amountTolerance: 0.005, dateWindowDays: 3 };
 
   it("fuzzy matches on similar descriptions", () => {
+    // Amount differs by ~0.7% — beyond the 0.5% Pass-2 tolerance but within the 2× band
+    // Pass 3 allows — so the ONLY signal that can match these is description/counterparty
+    // similarity. (At ≤0.5% this is correctly an amount_tolerance match, not fuzzy.)
     const source = [makeTxn({ id: 1, transactionRef: null, amount: "5000.00", description: "Payment to Dangote Cement Ltd", counterparty: "Dangote Cement" })];
-    const target = [makeTxn({ id: 2, transactionRef: null, amount: "5010.00", description: "Payment to Dangote Cement Limited", counterparty: "Dangote Cement Ltd" })];
+    const target = [makeTxn({ id: 2, transactionRef: null, amount: "5035.00", description: "Payment to Dangote Cement Limited", counterparty: "Dangote Cement Ltd" })];
     const result = runMatchingEngine(source, target, config);
 
     expect(result.matches).toHaveLength(1);
