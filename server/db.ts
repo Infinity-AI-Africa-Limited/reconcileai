@@ -31,6 +31,7 @@ import {
   cfoReportSchedules, InsertCfoReportSchedule, CfoReportSchedule,
   channelAlertSettings, InsertChannelAlertSetting, ChannelAlertSetting,
   platformAuditLogs, InsertPlatformAuditLog, PlatformAuditLog,
+  exceptionAgingSettings,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 import { computeRecordHash } from "./auditChain";
@@ -599,6 +600,63 @@ export async function updateException(id: number, data: Partial<InsertException>
   const db = await getDb();
   if (!db) return;
   await db.update(exceptions).set(data).where(eq(exceptions.id, id));
+}
+
+// ─── Exception Age / Escalation Tracker ──────────────────────────────
+
+/**
+ * Open (unresolved) exceptions joined to their transaction (for amount) and job,
+ * oldest first — the input to the age/escalation tracker. Resolved/dismissed
+ * items are excluded since they no longer age.
+ */
+export async function getOpenExceptionsForAging(limit = 2000) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      id: exceptions.id,
+      jobId: exceptions.jobId,
+      category: exceptions.category,
+      severity: exceptions.severity,
+      status: exceptions.status,
+      description: exceptions.description,
+      assignedTo: exceptions.assignedTo,
+      createdAt: exceptions.createdAt,
+      amount: transactions.amount,
+      transactionRef: transactions.transactionRef,
+      transactionDate: transactions.transactionDate,
+      jobName: reconciliationJobs.name,
+      assigneeName: users.name,
+    })
+    .from(exceptions)
+    .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
+    .leftJoin(reconciliationJobs, eq(exceptions.jobId, reconciliationJobs.id))
+    .leftJoin(users, eq(exceptions.assignedTo, users.id))
+    .where(inArray(exceptions.status, ["open", "in_review", "escalated"]))
+    .orderBy(asc(exceptions.createdAt))
+    .limit(limit);
+}
+
+export async function getAgingSettings(organizationId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const [row] = await db
+    .select()
+    .from(exceptionAgingSettings)
+    .where(eq(exceptionAgingSettings.organizationId, organizationId))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function upsertAgingSettings(organizationId: number, slaDays: number) {
+  const db = await getDb();
+  if (!db) return;
+  const existing = await getAgingSettings(organizationId);
+  if (existing) {
+    await db.update(exceptionAgingSettings).set({ slaDays }).where(eq(exceptionAgingSettings.organizationId, organizationId));
+  } else {
+    await db.insert(exceptionAgingSettings).values({ organizationId, slaDays });
+  }
 }
 
 // High/critical exceptions for a job that still need an AI narrative (aiAnalysis
