@@ -44,6 +44,7 @@ import PaymentProcessorsLanding from "./pages/PaymentProcessorsLanding";
 import Documentation from "./pages/Documentation";
 import DocViewer from "./pages/DocViewer";
 import WoodcorePOC from "./pages/WoodcorePOC";
+import LapoPOC from "./pages/LapoPOC";
 import SharedReport from "./pages/SharedReport";
 import SharedReportPublic from "./pages/SharedReportPublic";
 import ComplianceAssessmentLanding from "./pages/ComplianceAssessmentLanding";
