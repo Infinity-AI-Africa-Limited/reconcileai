@@ -59,7 +59,7 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock } from "lucide-react";
 import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } from "@/contexts/PortalContext";
 
 type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: string[] };
@@ -86,6 +86,7 @@ const menuItems: NavItem[] = [
 const adminMenuItems: NavItem[] = [
   { icon: Layers, label: "Multi-Channel", path: "/channels", roles: ["admin", "operations"] },
   { icon: AlertTriangle, label: "Exceptions", path: "/exceptions", roles: ["admin", "operations"] },
+  { icon: Clock, label: "Age Tracker", path: "/age-tracker", roles: ["admin", "operations"] },
   { icon: Search, label: "Transactions", path: "/transactions", roles: ["admin", "operations"] },
   { icon: ClipboardList, label: "Review Queue", path: "/review", roles: ["admin", "operations"] },
   // Audit Trail: admin + compliance + cfo
@@ -113,6 +114,7 @@ const financialServicesMenuItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
   { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
+  { icon: Clock, label: "Age Tracker", path: "/age-tracker" },
   { icon: Search, label: "Transactions", path: "/transactions" },
   { icon: Layers, label: "Multi-Channel", path: "/channels" },
   { icon: ClipboardList, label: "Review Queue", path: "/review" },
@@ -144,6 +146,7 @@ const corporateB2BMenuItems: NavItem[] = [
   { icon: Building2, label: "Distributor Registry", path: "/distributors" },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
   { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
+  { icon: Clock, label: "Age Tracker", path: "/age-tracker" },
   { icon: Search, label: "Transactions", path: "/transactions" },
   { icon: FileText, label: "Reports", path: "/reports" },
   { icon: ClipboardList, label: "Review Queue", path: "/review" },

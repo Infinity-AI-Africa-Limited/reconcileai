@@ -308,6 +308,21 @@ export const auditLogs = mysqlTable("audit_logs", {
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type InsertAuditLog = typeof auditLogs.$inferInsert;
 
+// ─── Exception Age / Escalation Tracker settings ─────────────────────
+// Per-org SLA target (days) for exception resolution. Items open longer than
+// this are "over-aged" and escalate in the Age Tracker. Default 7 days.
+export const exceptionAgingSettings = mysqlTable("exception_aging_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull().unique(),
+  slaDays: int("slaDays").default(7).notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_aging_settings_org").on(table.organizationId),
+]);
+export type ExceptionAgingSettings = typeof exceptionAgingSettings.$inferSelect;
+export type InsertExceptionAgingSettings = typeof exceptionAgingSettings.$inferInsert;
+
 // ─── Reconciliation Reports ─────────────────────────────────────────
 export const reconciliationReports = mysqlTable("reconciliation_reports", {
   id: int("id").autoincrement().primaryKey(),

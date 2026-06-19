@@ -4,6 +4,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { pocRouter } from "./routers/poc";
+import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
@@ -1040,6 +1041,102 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua);
         return { job, matches: jobMatches, exceptions: jobExceptions };
+      }),
+  }),
+
+  // ─── Exception Age / Escalation Tracker ──────────────────────────
+  ageTracker: router({
+    // Ops control-centre summary: aging buckets + ₦ exposure + over-aged tally.
+    summary: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const settings = orgId ? await db.getAgingSettings(orgId) : null;
+      const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
+      const rows = await db.getOpenExceptionsForAging();
+      const now = new Date();
+      const items = rows.map((r) => ({
+        ageDays: ageTracker.ageDays(r.createdAt, now),
+        amount: Math.abs(parseFloat(String(r.amount)) || 0),
+      }));
+      return ageTracker.computeSummary(items, slaDays);
+    }),
+
+    // The aging list, oldest first; optionally only the over-aged items.
+    list: protectedProcedure
+      .input(z.object({ onlyOverAged: z.boolean().default(false), limit: z.number().int().min(1).max(1000).default(200) }))
+      .query(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? 0;
+        const settings = orgId ? await db.getAgingSettings(orgId) : null;
+        const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
+        const rows = await db.getOpenExceptionsForAging();
+        const now = new Date();
+        let items = rows.map((r) => {
+          const age = ageTracker.ageDays(r.createdAt, now);
+          return {
+            id: r.id,
+            jobId: r.jobId,
+            jobName: r.jobName ?? null,
+            category: r.category,
+            severity: r.severity,
+            status: r.status,
+            description: r.description,
+            assignedTo: r.assignedTo,
+            assigneeName: r.assigneeName ?? null,
+            reference: r.transactionRef ?? null,
+            amount: Math.abs(parseFloat(String(r.amount)) || 0),
+            createdAt: r.createdAt,
+            ageDays: age,
+            escalationLevel: ageTracker.escalationLevel(age, slaDays),
+            overAged: ageTracker.isOverAged(age, slaDays),
+          };
+        });
+        if (input.onlyOverAged) items = items.filter((i) => i.overAged);
+        return { slaDays, items: items.slice(0, input.limit) };
+      }),
+
+    // Escalate a single over-aged exception (visible workflow action).
+    escalate: operationsProcedure
+      .input(z.object({ id: z.number().int().positive(), note: z.string().max(2000).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        await db.updateException(input.id, {
+          status: "escalated",
+          ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
+        });
+        await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua);
+        dispatchWebhook("exception.escalated", { exceptionId: input.id });
+        return { success: true };
+      }),
+
+    // One-click: escalate every over-aged item still open (ops bulk action).
+    bulkEscalateOverAged: operationsProcedure.mutation(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const settings = orgId ? await db.getAgingSettings(orgId) : null;
+      const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
+      const rows = await db.getOpenExceptionsForAging();
+      const now = new Date();
+      const overAged = rows.filter(
+        (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
+      );
+      await Promise.all(overAged.map((r) => db.updateException(r.id, { status: "escalated" })));
+      const { ip, ua } = getClientInfo(ctx);
+      await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
+      return { success: true, count: overAged.length };
+    }),
+
+    getSettings: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const settings = orgId ? await db.getAgingSettings(orgId) : null;
+      return { slaDays: settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS };
+    }),
+
+    saveSettings: operationsProcedure
+      .input(z.object({ slaDays: z.number().int().min(1).max(365) }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId ?? 0;
+        if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization context for SLA settings" });
+        await db.upsertAgingSettings(orgId, input.slaDays);
+        await logAudit(ctx.user.id, "update_aging_sla", "exception_aging_settings", orgId, { slaDays: input.slaDays });
+        return { slaDays: input.slaDays };
       }),
   }),
 

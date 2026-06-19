@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "894dc668-8f93-4018-b815-c986caa18e2b",
+  "id": "ce5c53d4-bc31-4f64-9113-399dc011ec92",
   "prevId": "794782bb-5cec-43c0-8891-9ecb40cc2f0b",
   "tables": {
     "agent_action_drafts": {
@@ -3454,6 +3454,77 @@
         }
       },
       "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "exception_aging_settings": {
+      "name": "exception_aging_settings",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slaDays": {
+          "name": "slaDays",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 7
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "onUpdate": true,
+          "default": "(now())"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(now())"
+        }
+      },
+      "indexes": {
+        "idx_aging_settings_org": {
+          "name": "idx_aging_settings_org",
+          "columns": [
+            "organizationId"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "exception_aging_settings_id": {
+          "name": "exception_aging_settings_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {
+        "exception_aging_settings_organizationId_unique": {
+          "name": "exception_aging_settings_organizationId_unique",
+          "columns": [
+            "organizationId"
+          ]
+        }
+      },
       "checkConstraint": {}
     },
     "exception_intelligence_settings": {
@@ -9136,116 +9207,6 @@
       "compositePrimaryKeys": {
         "poc_exceptions_id": {
           "name": "poc_exceptions_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
-    "poc_file_uploads": {
-      "name": "poc_file_uploads",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "pocSlug": {
-          "name": "pocSlug",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "fileRole": {
-          "name": "fileRole",
-          "type": "varchar(32)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "originalName": {
-          "name": "originalName",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "mimeType": {
-          "name": "mimeType",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "sizeBytes": {
-          "name": "sizeBytes",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "s3Key": {
-          "name": "s3Key",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "visitorId": {
-          "name": "visitorId",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "userAgent": {
-          "name": "userAgent",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "runId": {
-          "name": "runId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        }
-      },
-      "indexes": {
-        "idx_poc_file_slug": {
-          "name": "idx_poc_file_slug",
-          "columns": [
-            "pocSlug"
-          ],
-          "isUnique": false
-        },
-        "idx_poc_file_created": {
-          "name": "idx_poc_file_created",
-          "columns": [
-            "createdAt"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "poc_file_uploads_id": {
-          "name": "poc_file_uploads_id",
           "columns": [
             "id"
           ]
