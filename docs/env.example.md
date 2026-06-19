@@ -81,6 +81,17 @@ In `on_premise` mode:
 
 The egress guard lives in `server/_core/egress.ts`; every outbound call site routes through it.
 
+## Company POC pages (public)
+
+The Woodcore and Salad Africa POC pages (`/woodcore-poc`, `/salad-africa-poc`)
+are **public (no login)** by design, so prospects can use them directly — the
+super-admin **POC Hub** (`/admin/poc`) indexes them. POC data is isolated in the
+`poc_*` tables and never touches real tenant data.
+
+The Salad Africa POC extracts transactions from any file (Excel/CSV/PDF, incl.
+scans) using **Claude's document reading** — it requires the Anthropic provider
+(`DIRECT_LLM_API_KEY` / `claude-*` model), which production already uses.
+
 ## File Storage (AWS S3 or S3-compatible)
 
 ```bash

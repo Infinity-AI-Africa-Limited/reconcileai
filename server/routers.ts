@@ -3,6 +3,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { cbnComplianceRouter } from "./routers/cbnCompliance";
+import { pocRouter } from "./routers/poc";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
@@ -5534,6 +5535,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
   }),
   cbnCompliance: cbnComplianceRouter,
+  poc: pocRouter,
   roadmap: router({
     // Public: submit an access request
     requestAccess: publicProcedure

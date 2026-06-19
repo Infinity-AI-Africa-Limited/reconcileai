@@ -22,6 +22,9 @@ import Integrations from "./pages/Integrations";
 import Schedules from "./pages/Schedules";
 import Monitor from "./pages/Monitor";
 import ExceptionIntelligence from "./pages/ExceptionIntelligence";
+import SaladAfricaPOC from "./pages/SaladAfricaPOC";
+import PocHub from "./pages/PocHub";
+import PocSharedReport from "./pages/PocSharedReport";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
@@ -105,6 +108,9 @@ function Router() {
       <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
       <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
       <Route path="/woodcore-poc" component={WoodcorePOC} />
+      <Route path="/salad-africa-poc" component={SaladAfricaPOC} />
+      <Route path="/poc-report/:token" component={PocSharedReport} />
+      <Route path="/admin/poc">{() => <DashboardPage component={PocHub} />}</Route>
       <Route path="/shared-report/:token" component={SharedReport} />
       <Route path="/r/:token" component={SharedReportPublic} />
       <Route path="/compliance-assessment" component={ComplianceAssessmentLanding} />
