@@ -28,6 +28,24 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+// ─── LAPO MFB Brand Tokens (extracted from https://www.lapo-nigeria.org/) ────
+const LAPO_GREEN        = "#00954B"; // Primary brand green
+const LAPO_DARK_GREEN   = "#0E3622"; // Deep accent
+const LAPO_FOREST       = "#34423B"; // Body text / dark surfaces
+const LAPO_ORANGE       = "#E78020"; // Accent / highlights
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const LAPO_LIGHT_ORANGE = "#F99650"; // Secondary accent
+const LAPO_LOGO_URL     = "/lapo_logo.svg";
+
+// Inject Hanken Grotesk + Inter from Google Fonts if not already loaded
+if (typeof document !== "undefined" && !document.getElementById("lapo-fonts")) {
+  const link = document.createElement("link");
+  link.id = "lapo-fonts";
+  link.rel = "stylesheet";
+  link.href = "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap";
+  document.head.appendChild(link);
+}
+
 const POC_SLUG = "lapo_mfb";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -867,10 +885,11 @@ export default function LapoPOC() {
                         return (
                           <button key={s} onClick={() => setFilterStatus(s)}
                             className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                              filterStatus === s
-                                ? "bg-[#003087] text-white border-[#003087]"
-                                : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
-                            }`}>
+                               filterStatus === s
+                                 ? "text-white"
+                                 : "bg-white text-gray-600 border-gray-200 hover:border-green-400"
+                             }`}
+                            style={filterStatus === s ? { background: LAPO_GREEN, borderColor: LAPO_GREEN } : {}}>
                             {s === "ALL" ? "All" : REVIEW_STATUS_CONFIG[s].label} ({count})
                           </button>
                         );
