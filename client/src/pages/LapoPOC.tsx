@@ -194,12 +194,13 @@ function ProgressBar({ stage, fileName }: { stage: ParseStage; fileName?: string
       {fileName && <p className="text-xs text-muted-foreground truncate">{fileName}</p>}
       <div className="flex items-center gap-2">
         <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-          <div className={`h-full rounded-full transition-all duration-300 ${isError ? "bg-red-500" : stage === "verifying" ? "bg-blue-500" : "bg-blue-600"}`}
-            style={{ width: `${displayPct}%` }} />
+          <div className={`h-full rounded-full transition-all duration-300 ${isError ? "bg-red-500" : ""}`}
+            style={{ width: `${displayPct}%`, ...(!isError ? { background: "#00954B" } : {}) }} />
         </div>
         <span className="text-[10px] text-muted-foreground tabular-nums w-7 text-right shrink-0">{displayPct}%</span>
       </div>
-      <p className={`text-xs font-medium flex items-center gap-1.5 ${isError ? "text-red-600" : "text-blue-700"}`}>
+      <p className={`text-xs font-medium flex items-center gap-1.5 ${isError ? "text-red-600" : ""}`}
+        style={!isError ? { color: "#00954B" } : {}}>
         {!isError && <Loader2 className="h-3 w-3 animate-spin" />}
         {STAGE_LABELS[stage]}
       </p>
@@ -250,15 +251,15 @@ function UploadSlot({
     <Card className="flex-1 overflow-hidden">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
-          <DefaultIcon className="h-4 w-4 text-blue-700" />
+          <DefaultIcon className="h-4 w-4" style={{ color: "#00954B" }} />
           {label}
         </CardTitle>
       </CardHeader>
       <CardContent>
         {state ? (
           <div className="space-y-3">
-            <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
-              <CheckCircle2 className="h-5 w-5 text-blue-600 mt-0.5 shrink-0" />
+            <div className="flex items-start gap-3 rounded-lg p-3" style={{ border: "1px solid #00954B40", background: "#00954B0d" }}>
+              <CheckCircle2 className="h-5 w-5 mt-0.5 shrink-0" style={{ color: "#00954B" }} />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium truncate">{state.fileName}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">{state.notes}</p>
@@ -297,22 +298,22 @@ function UploadSlot({
           <div onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDragOver={handleDragOver} onDrop={handleDrop} className="relative space-y-2">
             <label className={[
               "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 cursor-pointer transition-all duration-200 select-none",
-              isBusy ? "opacity-70 pointer-events-none border-blue-300 bg-blue-50/40"
+              isBusy ? "opacity-70 pointer-events-none"
                 : isDragOver
-                  ? "border-blue-500 bg-blue-50 scale-[1.01] ring-2 ring-blue-300"
-                  : "border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50/30",
+                  ? "scale-[1.01]"
+                  : "border-gray-300 bg-gray-50 hover:bg-green-50/20",
             ].join(" ")}>
               <input type="file" accept={accept} className="sr-only" onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = ""; }} disabled={isBusy} />
               {isDragOver ? (
                 <>
-                  <DragIcon className="h-8 w-8 text-blue-500" />
-                  <p className="text-sm font-medium text-blue-700">Drop to upload</p>
-                  {dragFileName && <p className="text-xs text-blue-500 truncate max-w-[180px]">{dragFileName}</p>}
+                  <DragIcon className="h-8 w-8" style={{ color: "#00954B" }} />
+                  <p className="text-sm font-medium" style={{ color: "#00954B" }}>Drop to upload</p>
+                  {dragFileName && <p className="text-xs truncate max-w-[180px]" style={{ color: "#00954B" }}>{dragFileName}</p>}
                 </>
               ) : (
                 <>
                   <UploadIcon className="h-7 w-7 text-gray-400" />
-                  <p className="text-sm text-gray-600">Drag & drop or <span className="text-blue-600 font-medium">browse</span></p>
+                  <p className="text-sm text-gray-600">Drag & drop or <span className="font-medium" style={{ color: "#00954B" }}>browse</span></p>
                   <p className="text-xs text-muted-foreground text-center">{hint}</p>
                 </>
               )}
@@ -323,7 +324,7 @@ function UploadSlot({
               <span className="text-[10px] text-muted-foreground">or</span>
               <div className="flex-1 h-px bg-border" />
             </div>
-            <Button variant="outline" size="sm" className="w-full gap-2 text-xs border-blue-200 text-blue-700 hover:bg-blue-50" onClick={onLoadDemo} disabled={isBusy}>
+            <Button variant="outline" size="sm" className="w-full gap-2 text-xs" style={{ borderColor: "#00954B60", color: "#00954B" }} onClick={onLoadDemo} disabled={isBusy}>
               <Download className="h-3.5 w-3.5" /> Load demo dataset
             </Button>
           </div>
@@ -339,13 +340,13 @@ function ColumnMappingRef() {
   return (
     <div className="rounded-lg border bg-white">
       <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
-        <span className="flex items-center gap-2"><Info className="h-4 w-4 text-blue-600" /> Interswitch column mapping reference</span>
+        <span className="flex items-center gap-2"><Info className="h-4 w-4" style={{ color: "#00954B" }} /> Interswitch column mapping reference</span>
         {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
       </button>
       {open && (
         <div className="px-4 pb-4 grid md:grid-cols-2 gap-4 border-t pt-4">
           <div>
-            <p className="text-xs font-semibold text-blue-800 mb-2">Interswitch Settlement File</p>
+            <p className="text-xs font-semibold mb-2" style={{ color: "#0E3622" }}>Interswitch Settlement File</p>
             <div className="overflow-x-auto rounded border bg-white">
               <table className="w-full text-[11px]">
                 <thead><tr className="bg-muted/50 border-b">
@@ -356,7 +357,7 @@ function ColumnMappingRef() {
                 <tbody>
                   {ISW_COLUMNS.map((c, i) => (
                     <tr key={i} className="border-b last:border-0">
-                      <td className="px-2 py-1 font-mono text-blue-700">{c.field}</td>
+                      <td className="px-2 py-1 font-mono" style={{ color: "#00954B" }}>{c.field}</td>
                       <td className="px-2 py-1 text-muted-foreground">{c.maps}</td>
                       <td className="px-2 py-1 text-center">{c.required ? "✓" : ""}</td>
                     </tr>
@@ -366,7 +367,7 @@ function ColumnMappingRef() {
             </div>
           </div>
           <div>
-            <p className="text-xs font-semibold text-blue-800 mb-2">CBS Card Settlement GL</p>
+            <p className="text-xs font-semibold mb-2" style={{ color: "#0E3622" }}>CBS Card Settlement GL</p>
             <div className="overflow-x-auto rounded border bg-white">
               <table className="w-full text-[11px]">
                 <thead><tr className="bg-muted/50 border-b">
@@ -377,7 +378,7 @@ function ColumnMappingRef() {
                 <tbody>
                   {CBS_COLUMNS.map((c, i) => (
                     <tr key={i} className="border-b last:border-0">
-                      <td className="px-2 py-1 font-mono text-blue-700">{c.field}</td>
+                      <td className="px-2 py-1 font-mono" style={{ color: "#00954B" }}>{c.field}</td>
                       <td className="px-2 py-1 text-muted-foreground">{c.maps}</td>
                       <td className="px-2 py-1 text-center">{c.required ? "✓" : ""}</td>
                     </tr>
@@ -410,14 +411,14 @@ function ResolutionTracker({ statuses }: { statuses: Record<string, ReviewStatus
     <div className="rounded-lg border bg-white p-4 space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <ClipboardCheck className="h-4 w-4 text-blue-700" />
+          <ClipboardCheck className="h-4 w-4" style={{ color: "#00954B" }} />
           <span className="text-sm font-semibold text-gray-800">Resolution Progress</span>
         </div>
         <span className="text-sm font-bold text-gray-900">{resolved}/{total} resolved</span>
       </div>
       {/* Progress bar */}
-      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-        <div className="h-full bg-green-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: "#00954B" }} />
       </div>
       {/* Breakdown pills */}
       <div className="flex flex-wrap gap-2 text-xs">
@@ -485,7 +486,7 @@ function ExceptionReviewCard({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <Badge variant="outline" className="border-blue-300 text-blue-700 text-[11px]">{catLabel}</Badge>
+              <Badge variant="outline" className="text-[11px]" style={{ borderColor: "#00954B60", color: "#0E3622" }}>{catLabel}</Badge>
               <Badge className={`text-[11px] ${PRIORITY_COLORS[e.priorityLevel] ?? ""}`}>{e.priorityLevel}</Badge>
               <Badge variant="outline" className={`text-[11px] ${statusCfg.color} flex items-center gap-1`}>
                 <StatusIcon className="h-3 w-3" /> {statusCfg.label}
@@ -500,7 +501,7 @@ function ExceptionReviewCard({
             {showAgent && !expanded && (
               <div className="mt-2 space-y-1">
                 <p className="text-xs"><span className="font-medium">Why: </span>{e.agentExplanation}</p>
-                <p className="text-xs"><span className="font-medium text-blue-700">Recommended: </span>{e.recommendedAction}</p>
+                <p className="text-xs"><span className="font-medium" style={{ color: "#00954B" }}>Recommended: </span>{e.recommendedAction}</p>
               </div>
             )}
           </div>
@@ -508,7 +509,10 @@ function ExceptionReviewCard({
             <span className="font-mono text-sm font-semibold">{ngn(e.amount)}</span>
             <button
               onClick={() => setExpanded((v) => !v)}
-              className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 transition-colors"
+              className="text-xs flex items-center gap-1 transition-colors"
+              style={{ color: "#00954B" }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "#0E3622")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "#00954B")}
             >
               {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
               {expanded ? "Collapse" : "Review"}
@@ -520,12 +524,12 @@ function ExceptionReviewCard({
         {expanded && (
           <div className="mt-4 pt-4 border-t space-y-4">
             {/* AI explanation always shown in review panel */}
-            <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 space-y-1.5">
-              <p className="text-xs font-semibold text-blue-800 flex items-center gap-1.5">
+            <div className="rounded-lg p-3 space-y-1.5" style={{ background: "#00954B0d", border: "1px solid #00954B30" }}>
+              <p className="text-xs font-semibold flex items-center gap-1.5" style={{ color: "#0E3622" }}>
                 <Bot className="h-3.5 w-3.5" /> AI Agent Analysis
               </p>
-              <p className="text-xs text-blue-900">{e.agentExplanation}</p>
-              <p className="text-xs"><span className="font-medium text-blue-700">Recommended action: </span>{e.recommendedAction}</p>
+              <p className="text-xs" style={{ color: "#34423B" }}>{e.agentExplanation}</p>
+              <p className="text-xs"><span className="font-medium" style={{ color: "#00954B" }}>Recommended action: </span>{e.recommendedAction}</p>
               <p className="text-xs text-muted-foreground">Confidence: {e.agentConfidence}%</p>
             </div>
 
@@ -537,7 +541,8 @@ function ExceptionReviewCard({
                 value={reviewer}
                 onChange={(e) => setReviewer(e.target.value)}
                 placeholder="e.g. Amaka Obi"
-                className="w-full rounded-md border border-gray-200 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+                className="w-full rounded-md border border-gray-200 px-3 py-1.5 text-sm focus:outline-none focus:ring-2"
+                style={{ "--tw-ring-color": "#00954B40" } as React.CSSProperties}
               />
             </div>
 
@@ -563,7 +568,10 @@ function ExceptionReviewCard({
                 </Button>
               )}
               {status !== "RESOLVED" && (
-                <Button size="sm" className="gap-1.5 text-xs bg-green-600 hover:bg-green-700 text-white"
+                <Button size="sm" className="gap-1.5 text-xs text-white"
+                  style={{ background: "#00954B" }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "#0E3622")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "#00954B")}
                   onClick={() => handleAction("RESOLVED")} disabled={saving}>
                   {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
                   Mark Resolved
@@ -757,14 +765,35 @@ export default function LapoPOC() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Branding banner */}
-      <div className="bg-gradient-to-r from-[#003087] via-[#0050b3] to-[#1677ff] px-6 py-3 flex items-center gap-4">
-        <CreditCard className="h-6 w-6 text-white" />
-        <div>
-          <p className="text-white text-sm font-semibold leading-none">LAPO MFB — Interswitch Card Settlement POC</p>
-          <p className="text-blue-200 text-xs mt-0.5">Powered by ReconcileAI · CBS vs Interswitch · Confidential</p>
+      {/* LAPO MFB Official Branding Banner */}
+      <div style={{ background: `linear-gradient(135deg, #0E3622 0%, #00954B 55%, #00b85a 100%)`, fontFamily: "'Hanken Grotesk', sans-serif" }} className="px-6 py-4 flex items-center gap-4 shadow-md">
+        {/* Official LAPO Logo */}
+        <div className="flex items-center gap-3 shrink-0">
+          <img
+            src="/lapo_logo.svg"
+            alt="LAPO Microfinance Bank"
+            className="h-10 w-auto object-contain"
+            style={{ filter: "brightness(0) invert(1)" }}
+          />
         </div>
-        <span className="ml-auto text-xs text-blue-50 bg-white/10 px-2.5 py-1 rounded-full border border-white/20">POC Environment</span>
+        {/* Divider */}
+        <div className="h-8 w-px bg-white/30 shrink-0" />
+        <div className="min-w-0">
+          <p className="text-white text-sm font-semibold leading-none" style={{ fontFamily: "'Hanken Grotesk', sans-serif" }}>
+            Interswitch Card Settlement Reconciliation
+          </p>
+          <p className="text-green-100 text-xs mt-0.5" style={{ fontFamily: "'Inter', sans-serif" }}>
+            Powered by ReconcileAI &nbsp;·&nbsp; CBS vs Interswitch &nbsp;·&nbsp; Confidential
+          </p>
+        </div>
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          <span
+            className="text-xs px-2.5 py-1 rounded-full border font-medium"
+            style={{ background: "rgba(231,128,32,0.2)", borderColor: "#E78020", color: "#fff", fontFamily: "'Inter', sans-serif" }}
+          >
+            POC Environment
+          </span>
+        </div>
       </div>
 
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
@@ -806,13 +835,16 @@ export default function LapoPOC() {
         {/* Run */}
         <div className="flex items-center gap-3 flex-wrap">
           <Button onClick={handleRun} disabled={!cbs || !isw || run.isPending}
-            className="gap-2 bg-[#003087] hover:bg-[#002060]">
+            className="gap-2 text-white font-semibold"
+            style={{ background: "#00954B", fontFamily: "'Hanken Grotesk', sans-serif" }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "#0E3622")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "#00954B")}>
             {run.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             Run reconciliation
           </Button>
           {(!cbs || !isw) && <span className="text-xs text-muted-foreground">Load or upload both files to run.</span>}
           {run.isPending && (
-            <span className="text-xs text-blue-700 flex items-center gap-1.5">
+            <span className="text-xs flex items-center gap-1.5" style={{ color: "#00954B" }}>
               <Loader2 className="h-3 w-3 animate-spin" /> Running 3-layer card settlement engine…
             </span>
           )}
@@ -839,7 +871,8 @@ export default function LapoPOC() {
                   <CardContent className="pt-6">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="font-semibold">Layer 1 — Balance</h3>
-                      <Badge className={l1.status === "BALANCED" ? "bg-blue-100 text-blue-700" : "bg-red-100 text-red-700"}>
+                      <Badge className={l1.status === "BALANCED" ? "" : "bg-red-100 text-red-700"}
+                      style={l1.status === "BALANCED" ? { background: "#00954B15", color: "#00954B" } : {}}>
                         {l1.status === "BALANCED" ? "Balanced" : "Variance detected"}
                       </Badge>
                     </div>
@@ -856,7 +889,8 @@ export default function LapoPOC() {
                         <p className="text-xs font-semibold text-muted-foreground mb-2">Exception breakdown by category</p>
                         <div className="flex flex-wrap gap-2">
                           {Object.entries(byCategory).map(([cat, count]) => (
-                            <span key={cat} className="text-xs bg-blue-50 border border-blue-200 text-blue-700 px-2 py-0.5 rounded-full">
+                            <span key={cat} className="text-xs px-2 py-0.5 rounded-full"
+                              style={{ background: "#00954B12", border: "1px solid #00954B40", color: "#0E3622" }}>
                               {CARD_CATEGORY_LABELS[cat] ?? cat}: {String(count)}
                             </span>
                           ))}
@@ -871,7 +905,7 @@ export default function LapoPOC() {
               <TabsContent value="review" className="space-y-3">
                 {exceptions.length === 0 ? (
                   <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
-                    <CheckCircle2 className="h-8 w-8 text-blue-500 mx-auto mb-2" />
+                    <CheckCircle2 className="h-8 w-8 mx-auto mb-2" style={{ color: "#00954B" }} />
                     No exceptions — everything reconciled.
                   </CardContent></Card>
                 ) : (
@@ -920,7 +954,7 @@ export default function LapoPOC() {
               <TabsContent value="agent" className="space-y-3">
                 {exceptions.length === 0 ? (
                   <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
-                    <CheckCircle2 className="h-8 w-8 text-blue-500 mx-auto mb-2" />
+                    <CheckCircle2 className="h-8 w-8 mx-auto mb-2" style={{ color: "#00954B" }} />
                     No exceptions — everything reconciled.
                   </CardContent></Card>
                 ) : exceptions.map((e, i) => (
@@ -942,7 +976,7 @@ export default function LapoPOC() {
         {result && (
           <div className="flex items-center gap-3 pt-2">
             <Button variant="outline" className="gap-2" onClick={handleShare} disabled={share.isPending}>
-              {copied ? <Check className="h-4 w-4 text-blue-600" /> : <Copy className="h-4 w-4" />}
+              {copied ? <Check className="h-4 w-4" style={{ color: "#00954B" }} /> : <Copy className="h-4 w-4" />}
               {shareUrl ? "Copy share link again" : "Create shareable link"}
             </Button>
             {shareUrl && <span className="text-xs text-muted-foreground truncate max-w-[420px]">{shareUrl}</span>}
@@ -955,7 +989,8 @@ export default function LapoPOC() {
           <div className="grid md:grid-cols-2 gap-x-6 gap-y-2">
             {Object.entries(CARD_CATEGORY_DESCRIPTIONS).map(([cat, desc]) => (
               <div key={cat} className="flex gap-2">
-                <Badge variant="outline" className="shrink-0 text-[10px] border-blue-200 text-blue-700 self-start mt-0.5">
+                <Badge variant="outline" className="shrink-0 text-[10px] self-start mt-0.5"
+                  style={{ borderColor: "#00954B60", color: "#0E3622" }}>
                   {CARD_CATEGORY_LABELS[cat] ?? cat}
                 </Badge>
                 <p className="text-xs text-muted-foreground">{desc}</p>
