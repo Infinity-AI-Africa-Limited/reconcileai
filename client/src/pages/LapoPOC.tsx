@@ -7,6 +7,8 @@
  *   • Self-service upload (drag-and-drop, Excel/CSV/PDF, AI extraction)
  *   • 3-layer reconciliation engine (Balance → Exception → AI Agent)
  *   • Card-specific exception categories (chargeback, settlement shortfall, etc.)
+ *   • Exception review & resolution workflow (OPEN → IN_REVIEW → RESOLVED | ESCALATED)
+ *   • Resolution progress tracker with live stats
  *   • Shareable public report link
  *   • Interswitch column-mapping reference for analysts
  */
@@ -16,10 +18,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, Upload as UploadIcon, FileSpreadsheet, FileText, CheckCircle2,
   Play, Scale, AlertTriangle, Bot, Copy, Check, CreditCard,
   FileImage, File as FileIcon, X, Download, Info, ChevronDown, ChevronUp,
+  ClipboardCheck, MessageSquare, ChevronRight, CircleCheck, CircleAlert,
+  ArrowUpRight, RotateCcw, Filter,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -35,17 +40,15 @@ type UploadState = {
   preview: Array<{ date: string; description: string; amount: number; direction: string; reference?: string }>;
 };
 type ParseStage = "idle" | "reading" | "extracting" | "verifying" | "done" | "error";
+type ReviewStatus = "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "ESCALATED";
 
 // ─── Card-specific exception categories ──────────────────────────────────────
-// Extends the generic set with the full spectrum of card scheme exceptions
 const CARD_CATEGORY_LABELS: Record<string, string> = {
-  // Generic
   IN_LEDGER_NOT_IN_BANK:    "In CBS, not in Interswitch",
   IN_BANK_NOT_IN_LEDGER:    "In Interswitch, not in CBS",
   AMOUNT_MISMATCH:          "Amount mismatch",
   DUPLICATE:                "Duplicate RRN",
   REVERSAL:                 "Reversal / net-off",
-  // Card-specific
   CHARGEBACK:               "Chargeback",
   SETTLEMENT_SHORTFALL:     "Settlement shortfall",
   LATE_PRESENTMENT:         "Late presentment",
@@ -75,6 +78,13 @@ const PRIORITY_COLORS: Record<string, string> = {
   HIGH:     "bg-orange-100 text-orange-700",
   MEDIUM:   "bg-amber-100 text-amber-700",
   LOW:      "bg-gray-100 text-gray-600",
+};
+
+const REVIEW_STATUS_CONFIG: Record<ReviewStatus, { label: string; color: string; icon: React.ElementType }> = {
+  OPEN:         { label: "Open",        color: "bg-red-100 text-red-700 border-red-200",       icon: CircleAlert },
+  ACKNOWLEDGED: { label: "In Review",   color: "bg-amber-100 text-amber-700 border-amber-200", icon: MessageSquare },
+  RESOLVED:     { label: "Resolved",    color: "bg-green-100 text-green-700 border-green-200", icon: CircleCheck },
+  ESCALATED:    { label: "Escalated",   color: "bg-purple-100 text-purple-700 border-purple-200", icon: ArrowUpRight },
 };
 
 // ─── Interswitch column mapping reference ─────────────────────────────────────
@@ -270,42 +280,34 @@ function UploadSlot({
             <label className={[
               "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 cursor-pointer transition-all duration-200 select-none",
               isBusy ? "opacity-70 pointer-events-none border-blue-300 bg-blue-50/40"
-                : isDragOver ? "border-blue-500 bg-blue-50 scale-[1.01] shadow-sm"
-                : "border-gray-200 hover:border-blue-400 hover:bg-gray-50",
+                : isDragOver
+                  ? "border-blue-500 bg-blue-50 scale-[1.01] ring-2 ring-blue-300"
+                  : "border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50/30",
             ].join(" ")}>
-              <div className={["flex items-center justify-center w-12 h-12 rounded-full transition-all duration-200", isDragOver ? "bg-blue-100 scale-110" : "bg-gray-100"].join(" ")}>
-                {isBusy ? <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
-                  : isDragOver ? <DragIcon className="h-6 w-6 text-blue-600" />
-                  : <UploadIcon className="h-6 w-6 text-gray-400" />}
-              </div>
-              <div className="text-center">
-                {isDragOver ? (
-                  <>
-                    <p className="text-sm font-semibold text-blue-700">Drop to upload</p>
-                    {dragFileName && <p className="text-xs text-blue-600 mt-0.5 truncate max-w-[180px]">{dragFileName}</p>}
-                  </>
-                ) : isBusy ? (
-                  <p className="text-sm font-medium text-blue-700">{STAGE_LABELS[stage]}</p>
-                ) : (
-                  <>
-                    <p className="text-sm font-medium text-gray-700">Drag & drop or <span className="text-blue-600 underline underline-offset-2">browse</span></p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>
-                  </>
-                )}
-              </div>
-              <input type="file" accept={accept} className="hidden" disabled={isBusy}
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.currentTarget.value = ""; }} />
+              <input type="file" accept={accept} className="sr-only" onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = ""; }} disabled={isBusy} />
+              {isDragOver ? (
+                <>
+                  <DragIcon className="h-8 w-8 text-blue-500" />
+                  <p className="text-sm font-medium text-blue-700">Drop to upload</p>
+                  {dragFileName && <p className="text-xs text-blue-500 truncate max-w-[180px]">{dragFileName}</p>}
+                </>
+              ) : (
+                <>
+                  <UploadIcon className="h-7 w-7 text-gray-400" />
+                  <p className="text-sm text-gray-600">Drag & drop or <span className="text-blue-600 font-medium">browse</span></p>
+                  <p className="text-xs text-muted-foreground text-center">{hint}</p>
+                </>
+              )}
             </label>
-            {isDragOver && <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400 ring-offset-1 pointer-events-none" />}
-            {/* Demo data button */}
-            {!isBusy && (
-              <button onClick={onLoadDemo}
-                className="w-full flex items-center justify-center gap-1.5 text-xs text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md py-2 transition-colors">
-                <Download className="h-3.5 w-3.5" />
-                Load demo: {demoFileName}
-              </button>
-            )}
             <ProgressBar stage={stage} fileName={pendingFileName} />
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-px bg-border" />
+              <span className="text-[10px] text-muted-foreground">or</span>
+              <div className="flex-1 h-px bg-border" />
+            </div>
+            <Button variant="outline" size="sm" className="w-full gap-2 text-xs border-blue-200 text-blue-700 hover:bg-blue-50" onClick={onLoadDemo} disabled={isBusy}>
+              <Download className="h-3.5 w-3.5" /> Load demo dataset
+            </Button>
           </div>
         )}
       </CardContent>
@@ -317,14 +319,13 @@ function UploadSlot({
 function ColumnMappingRef() {
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-lg border border-blue-200 bg-blue-50/50 overflow-hidden">
-      <button onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-blue-800 hover:bg-blue-100/50 transition-colors">
-        <span className="flex items-center gap-2"><Info className="h-4 w-4" /> Interswitch & CBS column mapping reference</span>
+    <div className="rounded-lg border bg-white">
+      <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+        <span className="flex items-center gap-2"><Info className="h-4 w-4 text-blue-600" /> Interswitch column mapping reference</span>
         {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
       </button>
       {open && (
-        <div className="px-4 pb-4 grid md:grid-cols-2 gap-4">
+        <div className="px-4 pb-4 grid md:grid-cols-2 gap-4 border-t pt-4">
           <div>
             <p className="text-xs font-semibold text-blue-800 mb-2">Interswitch Settlement File</p>
             <div className="overflow-x-auto rounded border bg-white">
@@ -376,34 +377,196 @@ function ColumnMappingRef() {
   );
 }
 
-// ─── Exception Card ───────────────────────────────────────────────────────────
-function ExceptionCard({ e, showAgent }: { e: any; showAgent?: boolean }) {
+// ─── Resolution Progress Tracker ─────────────────────────────────────────────
+function ResolutionTracker({ statuses }: { statuses: Record<string, ReviewStatus> }) {
+  const all = Object.values(statuses);
+  const total = all.length;
+  if (total === 0) return null;
+  const resolved  = all.filter((s) => s === "RESOLVED").length;
+  const inReview  = all.filter((s) => s === "ACKNOWLEDGED").length;
+  const escalated = all.filter((s) => s === "ESCALATED").length;
+  const open      = all.filter((s) => s === "OPEN").length;
+  const pct = Math.round((resolved / total) * 100);
+
+  return (
+    <div className="rounded-lg border bg-white p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ClipboardCheck className="h-4 w-4 text-blue-700" />
+          <span className="text-sm font-semibold text-gray-800">Resolution Progress</span>
+        </div>
+        <span className="text-sm font-bold text-gray-900">{resolved}/{total} resolved</span>
+      </div>
+      {/* Progress bar */}
+      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div className="h-full bg-green-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      {/* Breakdown pills */}
+      <div className="flex flex-wrap gap-2 text-xs">
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">
+          <CircleAlert className="h-3 w-3" /> {open} open
+        </span>
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+          <MessageSquare className="h-3 w-3" /> {inReview} in review
+        </span>
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
+          <CircleCheck className="h-3 w-3" /> {resolved} resolved
+        </span>
+        {escalated > 0 && (
+          <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+            <ArrowUpRight className="h-3 w-3" /> {escalated} escalated
+          </span>
+        )}
+      </div>
+      {resolved === total && (
+        <p className="text-xs font-medium text-green-700 flex items-center gap-1.5">
+          <CheckCircle2 className="h-3.5 w-3.5" /> All exceptions resolved — reconciliation complete.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── Exception Review Card ────────────────────────────────────────────────────
+function ExceptionReviewCard({
+  e, index, status, onStatusChange, showAgent,
+}: {
+  e: any;
+  index: number;
+  status: ReviewStatus;
+  onStatusChange: (id: string, status: ReviewStatus, note: string, reviewer: string) => void;
+  showAgent?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [note, setNote] = useState("");
+  const [reviewer, setReviewer] = useState("");
+  const [saving, setSaving] = useState(false);
+
   const catLabel = CARD_CATEGORY_LABELS[e.category] ?? e.category;
   const catDesc  = CARD_CATEGORY_DESCRIPTIONS[e.category];
+  const statusCfg = REVIEW_STATUS_CONFIG[status];
+  const StatusIcon = statusCfg.icon;
+
+  const handleAction = async (newStatus: ReviewStatus) => {
+    setSaving(true);
+    await onStatusChange(String(index), newStatus, note, reviewer);
+    setSaving(false);
+    if (newStatus !== "ACKNOWLEDGED") setExpanded(false);
+  };
+
   return (
-    <Card>
+    <Card className={`overflow-hidden transition-all duration-200 ${status === "RESOLVED" ? "opacity-70" : ""}`}>
+      {/* Status accent bar */}
+      <div className={`h-1 ${
+        status === "RESOLVED" ? "bg-green-500" :
+        status === "ACKNOWLEDGED" ? "bg-amber-400" :
+        status === "ESCALATED" ? "bg-purple-500" : "bg-red-400"
+      }`} />
       <CardContent className="pt-4">
+        {/* Header row */}
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <Badge variant="outline" className="border-blue-300 text-blue-700">{catLabel}</Badge>
-              <Badge className={PRIORITY_COLORS[e.priorityLevel] ?? ""}>{e.priorityLevel}</Badge>
+              <Badge variant="outline" className="border-blue-300 text-blue-700 text-[11px]">{catLabel}</Badge>
+              <Badge className={`text-[11px] ${PRIORITY_COLORS[e.priorityLevel] ?? ""}`}>{e.priorityLevel}</Badge>
+              <Badge variant="outline" className={`text-[11px] ${statusCfg.color} flex items-center gap-1`}>
+                <StatusIcon className="h-3 w-3" /> {statusCfg.label}
+              </Badge>
               <span className="text-xs text-muted-foreground">{e.side}</span>
             </div>
-            <p className="text-sm mt-1 truncate">{e.description || e.reference || "—"}</p>
-            <p className="text-xs text-muted-foreground">{e.txnDate}{e.reference ? ` · ${e.reference}` : ""}</p>
-            {catDesc && !showAgent && (
+            <p className="text-sm mt-1.5 font-medium truncate">{e.description || e.reference || "—"}</p>
+            <p className="text-xs text-muted-foreground">{e.txnDate}{e.reference ? ` · Ref: ${e.reference}` : ""}</p>
+            {catDesc && !showAgent && !expanded && (
               <p className="text-xs text-muted-foreground mt-1 italic">{catDesc}</p>
             )}
-            {showAgent && (
+            {showAgent && !expanded && (
               <div className="mt-2 space-y-1">
                 <p className="text-xs"><span className="font-medium">Why: </span>{e.agentExplanation}</p>
                 <p className="text-xs"><span className="font-medium text-blue-700">Recommended: </span>{e.recommendedAction}</p>
               </div>
             )}
           </div>
-          <span className="font-mono text-sm font-semibold shrink-0">{ngn(e.amount)}</span>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <span className="font-mono text-sm font-semibold">{ngn(e.amount)}</span>
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 transition-colors"
+            >
+              {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              {expanded ? "Collapse" : "Review"}
+            </button>
+          </div>
         </div>
+
+        {/* Expanded review panel */}
+        {expanded && (
+          <div className="mt-4 pt-4 border-t space-y-4">
+            {/* AI explanation always shown in review panel */}
+            <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 space-y-1.5">
+              <p className="text-xs font-semibold text-blue-800 flex items-center gap-1.5">
+                <Bot className="h-3.5 w-3.5" /> AI Agent Analysis
+              </p>
+              <p className="text-xs text-blue-900">{e.agentExplanation}</p>
+              <p className="text-xs"><span className="font-medium text-blue-700">Recommended action: </span>{e.recommendedAction}</p>
+              <p className="text-xs text-muted-foreground">Confidence: {e.agentConfidence}%</p>
+            </div>
+
+            {/* Reviewer name */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-gray-700">Reviewer name (optional)</label>
+              <input
+                type="text"
+                value={reviewer}
+                onChange={(e) => setReviewer(e.target.value)}
+                placeholder="e.g. Amaka Obi"
+                className="w-full rounded-md border border-gray-200 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+              />
+            </div>
+
+            {/* Resolution note */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-gray-700">Resolution note</label>
+              <Textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Describe the action taken, e.g. 'Confirmed with Interswitch — fee deduction is within contracted rate. No further action required.'"
+                rows={3}
+                className="text-xs resize-none"
+              />
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex flex-wrap gap-2">
+              {status !== "ACKNOWLEDGED" && (
+                <Button size="sm" variant="outline" className="gap-1.5 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                  onClick={() => handleAction("ACKNOWLEDGED")} disabled={saving}>
+                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <MessageSquare className="h-3 w-3" />}
+                  Mark In Review
+                </Button>
+              )}
+              {status !== "RESOLVED" && (
+                <Button size="sm" className="gap-1.5 text-xs bg-green-600 hover:bg-green-700 text-white"
+                  onClick={() => handleAction("RESOLVED")} disabled={saving}>
+                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
+                  Mark Resolved
+                </Button>
+              )}
+              {status !== "ESCALATED" && (
+                <Button size="sm" variant="outline" className="gap-1.5 text-xs border-purple-300 text-purple-700 hover:bg-purple-50"
+                  onClick={() => handleAction("ESCALATED")} disabled={saving}>
+                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowUpRight className="h-3 w-3" />}
+                  Escalate
+                </Button>
+              )}
+              {status !== "OPEN" && (
+                <Button size="sm" variant="ghost" className="gap-1.5 text-xs text-muted-foreground hover:text-red-600"
+                  onClick={() => handleAction("OPEN")} disabled={saving}>
+                  <RotateCcw className="h-3 w-3" /> Reopen
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -430,10 +593,15 @@ export default function LapoPOC() {
   const [result, setResult] = useState<any>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Local review status map: index (string) → ReviewStatus
+  // This allows instant UI updates without a round-trip query
+  const [reviewStatuses, setReviewStatuses] = useState<Record<string, ReviewStatus>>({});
+  const [filterStatus, setFilterStatus] = useState<ReviewStatus | "ALL">("ALL");
 
   const extract = trpc.poc.extract.useMutation();
   const run     = trpc.poc.run.useMutation();
   const share   = trpc.poc.createShareToken.useMutation();
+  const updateStatus = trpc.poc.updateExceptionStatus.useMutation();
 
   const setStage = (side: "cbs" | "isw", s: ParseStage) => {
     if (side === "cbs") setCbsStage(s); else setIswStage(s);
@@ -474,7 +642,6 @@ export default function LapoPOC() {
     }
   };
 
-  // Load demo CSV from /public/ directly
   const handleLoadDemo = async (side: "cbs" | "isw") => {
     const fileName = side === "cbs"
       ? "lapo_cbs_ledger_sample.csv"
@@ -493,21 +660,25 @@ export default function LapoPOC() {
   const handleClear = (side: "cbs" | "isw") => {
     if (side === "cbs") { setCbs(null); setCbsStage("idle"); }
     else { setIsw(null); setIswStage("idle"); }
-    setResult(null); setShareUrl(null);
+    setResult(null); setShareUrl(null); setReviewStatuses({});
   };
 
   const handleRun = async () => {
     if (!cbs || !isw) return;
-    setResult(null); setShareUrl(null);
+    setResult(null); setShareUrl(null); setReviewStatuses({});
     try {
       const res = await run.mutateAsync({
         pocSlug: POC_SLUG,
         ledgerUploadId: cbs.uploadId,
         statementUploadId: isw.uploadId,
-        amountTolerance: 0.02,   // 2% tolerance for interchange/scheme fee variances
-        dateWindowDays: 5,        // card settlement can be T+3 to T+5
+        amountTolerance: 0.02,
+        dateWindowDays: 5,
       });
       setResult(res);
+      // Initialise all exceptions as OPEN
+      const initial: Record<string, ReviewStatus> = {};
+      (res.layer3 ?? []).forEach((_: any, i: number) => { initial[String(i)] = "OPEN"; });
+      setReviewStatuses(initial);
       toast.success("Reconciliation complete");
     } catch (e: any) {
       toast.error(e.message || "Reconciliation failed.");
@@ -528,6 +699,30 @@ export default function LapoPOC() {
     }
   };
 
+  const handleStatusChange = async (id: string, newStatus: ReviewStatus, note: string, reviewer: string) => {
+    // Optimistic update
+    setReviewStatuses((prev) => ({ ...prev, [id]: newStatus }));
+    const exception = (result?.layer3 ?? [])[Number(id)];
+    if (!exception?.id) {
+      // No DB id yet (in-memory only run) — just update local state
+      toast.success(`Exception ${Number(id) + 1} marked as ${REVIEW_STATUS_CONFIG[newStatus].label}`);
+      return;
+    }
+    try {
+      await updateStatus.mutateAsync({
+        exceptionId: exception.id,
+        reviewStatus: newStatus,
+        reviewedBy: reviewer || undefined,
+        reviewNote: note || undefined,
+      });
+      toast.success(`Exception marked as ${REVIEW_STATUS_CONFIG[newStatus].label}`);
+    } catch (e: any) {
+      // Rollback on error
+      setReviewStatuses((prev) => ({ ...prev, [id]: "OPEN" }));
+      toast.error("Could not save status: " + (e.message || "unknown error"));
+    }
+  };
+
   const l1 = result?.layer1;
   const exceptions = (result?.layer3 ?? []) as any[];
 
@@ -536,6 +731,11 @@ export default function LapoPOC() {
     acc[e.category] = (acc[e.category] ?? 0) + 1;
     return acc;
   }, {});
+
+  // Filtered exceptions for review tab
+  const filteredExceptions = filterStatus === "ALL"
+    ? exceptions
+    : exceptions.filter((_, i) => reviewStatuses[String(i)] === filterStatus);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -556,6 +756,7 @@ export default function LapoPOC() {
             Upload your CBS card settlement GL extract and the Interswitch settlement file (CSV or Excel).
             The AI extracts all transactions, then the 3-layer engine reconciles them and flags every
             card-specific exception — chargebacks, shortfalls, late presentments, duplicates, and more.
+            Analysts can then review and resolve each exception inline.
           </p>
         </div>
 
@@ -601,65 +802,121 @@ export default function LapoPOC() {
 
         {/* Results */}
         {result && (
-          <Tabs defaultValue="balance" className="mt-2">
-            <TabsList>
-              <TabsTrigger value="balance" className="gap-1.5"><Scale className="h-4 w-4" /> Balance</TabsTrigger>
-              <TabsTrigger value="exceptions" className="gap-1.5">
-                <AlertTriangle className="h-4 w-4" /> Exceptions ({exceptions.length})
-              </TabsTrigger>
-              <TabsTrigger value="agent" className="gap-1.5"><Bot className="h-4 w-4" /> AI Agent</TabsTrigger>
-            </TabsList>
+          <>
+            {/* Resolution progress tracker — always visible once results are shown */}
+            <ResolutionTracker statuses={reviewStatuses} />
 
-            {/* Layer 1 */}
-            <TabsContent value="balance" className="space-y-4">
-              <Card>
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-semibold">Layer 1 — Balance</h3>
-                    <Badge className={l1.status === "BALANCED" ? "bg-blue-100 text-blue-700" : "bg-red-100 text-red-700"}>
-                      {l1.status === "BALANCED" ? "Balanced" : "Variance detected"}
-                    </Badge>
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
-                    <Stat label="CBS transactions" value={l1.ledgerCount} />
-                    <Stat label="Interswitch transactions" value={l1.statementCount} />
-                    <Stat label="Matched" value={result.matchedCount} />
-                    <Stat label="CBS net" value={ngn(l1.ledgerNet)} />
-                    <Stat label="Interswitch net" value={ngn(l1.statementNet)} />
-                    <Stat label="Variance" value={ngn(l1.varianceAmount)} highlight={l1.status !== "BALANCED"} />
-                  </div>
-                  {/* Exception breakdown by card category */}
-                  {exceptions.length > 0 && (
-                    <div className="mt-4 pt-4 border-t">
-                      <p className="text-xs font-semibold text-muted-foreground mb-2">Exception breakdown by category</p>
-                      <div className="flex flex-wrap gap-2">
-                        {Object.entries(byCategory).map(([cat, count]) => (
-                          <span key={cat} className="text-xs bg-blue-50 border border-blue-200 text-blue-700 px-2 py-0.5 rounded-full">
-                            {CARD_CATEGORY_LABELS[cat] ?? cat}: {String(count)}
-                          </span>
-                        ))}
-                      </div>
+            <Tabs defaultValue="review" className="mt-2">
+              <TabsList>
+                <TabsTrigger value="balance" className="gap-1.5"><Scale className="h-4 w-4" /> Balance</TabsTrigger>
+                <TabsTrigger value="review" className="gap-1.5">
+                  <ClipboardCheck className="h-4 w-4" /> Review & Resolve ({exceptions.length})
+                </TabsTrigger>
+                <TabsTrigger value="agent" className="gap-1.5"><Bot className="h-4 w-4" /> AI Agent</TabsTrigger>
+              </TabsList>
+
+              {/* Layer 1 — Balance */}
+              <TabsContent value="balance" className="space-y-4">
+                <Card>
+                  <CardContent className="pt-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="font-semibold">Layer 1 — Balance</h3>
+                      <Badge className={l1.status === "BALANCED" ? "bg-blue-100 text-blue-700" : "bg-red-100 text-red-700"}>
+                        {l1.status === "BALANCED" ? "Balanced" : "Variance detected"}
+                      </Badge>
                     </div>
-                  )}
-                </CardContent>
-              </Card>
-            </TabsContent>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+                      <Stat label="CBS transactions" value={l1.ledgerCount} />
+                      <Stat label="Interswitch transactions" value={l1.statementCount} />
+                      <Stat label="Matched" value={result.matchedCount} />
+                      <Stat label="CBS net" value={ngn(l1.ledgerNet)} />
+                      <Stat label="Interswitch net" value={ngn(l1.statementNet)} />
+                      <Stat label="Variance" value={ngn(l1.varianceAmount)} highlight={l1.status !== "BALANCED"} />
+                    </div>
+                    {exceptions.length > 0 && (
+                      <div className="mt-4 pt-4 border-t">
+                        <p className="text-xs font-semibold text-muted-foreground mb-2">Exception breakdown by category</p>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(byCategory).map(([cat, count]) => (
+                            <span key={cat} className="text-xs bg-blue-50 border border-blue-200 text-blue-700 px-2 py-0.5 rounded-full">
+                              {CARD_CATEGORY_LABELS[cat] ?? cat}: {String(count)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
 
-            {/* Layer 2 */}
-            <TabsContent value="exceptions" className="space-y-3">
-              {exceptions.length === 0 ? (
-                <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
-                  <CheckCircle2 className="h-8 w-8 text-blue-500 mx-auto mb-2" />
-                  No exceptions — everything reconciled.
-                </CardContent></Card>
-              ) : exceptions.map((e, i) => <ExceptionCard key={i} e={e} />)}
-            </TabsContent>
+              {/* Review & Resolve tab */}
+              <TabsContent value="review" className="space-y-3">
+                {exceptions.length === 0 ? (
+                  <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-8 w-8 text-blue-500 mx-auto mb-2" />
+                    No exceptions — everything reconciled.
+                  </CardContent></Card>
+                ) : (
+                  <>
+                    {/* Filter bar */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-xs text-muted-foreground">Filter:</span>
+                      {(["ALL", "OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED"] as const).map((s) => {
+                        const count = s === "ALL" ? exceptions.length : exceptions.filter((_, i) => reviewStatuses[String(i)] === s).length;
+                        return (
+                          <button key={s} onClick={() => setFilterStatus(s)}
+                            className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                              filterStatus === s
+                                ? "bg-[#003087] text-white border-[#003087]"
+                                : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
+                            }`}>
+                            {s === "ALL" ? "All" : REVIEW_STATUS_CONFIG[s].label} ({count})
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {filteredExceptions.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4 text-center">No exceptions match this filter.</p>
+                    ) : (
+                      filteredExceptions.map((e, filteredIdx) => {
+                        // Map back to original index for status tracking
+                        const originalIdx = exceptions.indexOf(e);
+                        return (
+                          <ExceptionReviewCard
+                            key={originalIdx}
+                            e={e}
+                            index={originalIdx}
+                            status={reviewStatuses[String(originalIdx)] ?? "OPEN"}
+                            onStatusChange={handleStatusChange}
+                          />
+                        );
+                      })
+                    )}
+                  </>
+                )}
+              </TabsContent>
 
-            {/* Layer 3 */}
-            <TabsContent value="agent" className="space-y-3">
-              {exceptions.map((e, i) => <ExceptionCard key={i} e={e} showAgent />)}
-            </TabsContent>
-          </Tabs>
+              {/* AI Agent tab — same cards but with agent analysis visible */}
+              <TabsContent value="agent" className="space-y-3">
+                {exceptions.length === 0 ? (
+                  <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-8 w-8 text-blue-500 mx-auto mb-2" />
+                    No exceptions — everything reconciled.
+                  </CardContent></Card>
+                ) : exceptions.map((e, i) => (
+                  <ExceptionReviewCard
+                    key={i}
+                    e={e}
+                    index={i}
+                    status={reviewStatuses[String(i)] ?? "OPEN"}
+                    onStatusChange={handleStatusChange}
+                    showAgent
+                  />
+                ))}
+              </TabsContent>
+            </Tabs>
+          </>
         )}
 
         {/* Share */}
