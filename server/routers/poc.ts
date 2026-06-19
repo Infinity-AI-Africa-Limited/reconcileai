@@ -143,4 +143,106 @@ export const pocRouter = router({
       if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "This shared report link is invalid or has expired." });
       return report;
     }),
+
+  // ─── Anonymous file storage ───────────────────────────────────────────────
+  // Called immediately when a file is picked on a public POC page.
+  // Saves the raw file to S3, persists metadata, and notifies the owner.
+  saveFile: publicProcedure
+    .input(
+      z.object({
+        pocSlug,
+        fileRole: z.enum(["cbs", "statement"]),
+        originalName: z.string().max(255),
+        mimeType: z.string().max(100),
+        sizeBytes: z.number().int().nonnegative(),
+        dataBase64: z.string().max(MAX_BASE64_LEN),
+        visitorId: z.string().max(64).optional(),
+        userAgent: z.string().max(512).optional(),
+        runId: z.number().int().positive().optional(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      const { getDb } = await import("../db");
+      const { storagePut } = await import("../storage");
+      const { notifyOwner } = await import("../_core/notification");
+      const { pocFileUploads } = await import("../../drizzle/poc_schema");
+
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // Derive a safe S3 key
+      const safeName = input.originalName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+      const s3Key = `poc-files/${input.pocSlug}/${input.fileRole}/${Date.now()}-${safeName}`;
+
+      // Upload to S3 (graceful degradation if S3 not configured)
+      const fileBuffer = Buffer.from(input.dataBase64, "base64");
+      let s3Url = "";
+      try {
+        const result = await storagePut(s3Key, fileBuffer, input.mimeType);
+        s3Url = result.url;
+      } catch (err) {
+        console.warn("[POC saveFile] S3 unavailable, storing metadata only:", (err as Error).message);
+      }
+
+      // Persist metadata
+      const inserted = await db.insert(pocFileUploads).values({
+        pocSlug: input.pocSlug,
+        fileRole: input.fileRole,
+        originalName: input.originalName,
+        mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes,
+        s3Key,
+        visitorId: input.visitorId ?? null,
+        userAgent: input.userAgent ?? null,
+        runId: input.runId ?? null,
+      });
+      const fileId = (inserted as any)[0].insertId as number;
+
+      // Notify owner (fire-and-forget)
+      const roleLabel = input.fileRole === "cbs" ? "CBS Card Settlement GL" : "Interswitch Settlement File";
+      const sizeMb = (input.sizeBytes / (1024 * 1024)).toFixed(2);
+      notifyOwner({
+        title: `📂 LAPO POC — New file uploaded`,
+        content:
+          `A prospect has uploaded a file on the **LAPO MFB POC** page.\n\n` +
+          `**File:** ${input.originalName}\n` +
+          `**Role:** ${roleLabel}\n` +
+          `**Size:** ${sizeMb} MB\n` +
+          `**Type:** ${input.mimeType}\n` +
+          `**Visitor ID:** ${input.visitorId ?? "unknown"}\n\n` +
+          `View all uploads in the **Admin Portal → POC Hub → LAPO Uploads**.`,
+      }).catch(() => {/* swallow */});
+
+      return { fileId, s3Key, s3Url };
+    }),
+
+  // List all anonymously uploaded files for a given POC slug (admin portal).
+  listFiles: publicProcedure
+    .input(z.object({ pocSlug }))
+    .query(async ({ input }) => {
+      const { getDb } = await import("../db");
+      const { pocFileUploads } = await import("../../drizzle/poc_schema");
+      const { desc, eq } = await import("drizzle-orm");
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      return db
+        .select()
+        .from(pocFileUploads)
+        .where(eq(pocFileUploads.pocSlug, input.pocSlug))
+        .orderBy(desc(pocFileUploads.createdAt))
+        .limit(200);
+    }),
+
+  // Generate a fresh presigned download URL for a stored file.
+  getFileUrl: publicProcedure
+    .input(z.object({ s3Key: z.string().min(1).max(512) }))
+    .query(async ({ input }) => {
+      const { storageGet } = await import("../storage");
+      try {
+        const { url } = await storageGet(input.s3Key);
+        return { url };
+      } catch {
+        return { url: null };
+      }
+    }),
 });

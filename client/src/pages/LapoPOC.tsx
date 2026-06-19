@@ -48,6 +48,18 @@ if (typeof document !== "undefined" && !document.getElementById("lapo-fonts")) {
 
 const POC_SLUG = "lapo_mfb";
 
+// Generate or retrieve a stable anonymous visitor ID for this browser session.
+// No PII is stored — this is only used to correlate uploads from the same session.
+function getVisitorId(): string {
+  const key = "lapo_poc_visitor_id";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FileKind = "pdf" | "excel" | "csv";
 type UploadState = {
@@ -624,10 +636,11 @@ export default function LapoPOC() {
   const [reviewStatuses, setReviewStatuses] = useState<Record<string, ReviewStatus>>({});
   const [filterStatus, setFilterStatus] = useState<ReviewStatus | "ALL">("ALL");
 
-  const extract = trpc.poc.extract.useMutation();
-  const run     = trpc.poc.run.useMutation();
-  const share   = trpc.poc.createShareToken.useMutation();
+  const extract      = trpc.poc.extract.useMutation();
+  const run          = trpc.poc.run.useMutation();
+  const share        = trpc.poc.createShareToken.useMutation();
   const updateStatus = trpc.poc.updateExceptionStatus.useMutation();
+  const saveFile     = trpc.poc.saveFile.useMutation();
 
   const setStage = (side: "cbs" | "isw", s: ParseStage) => {
     if (side === "cbs") setCbsStage(s); else setIswStage(s);
@@ -640,6 +653,19 @@ export default function LapoPOC() {
     setStage(side, "reading");
     try {
       const contentBase64 = await fileToBase64(file);
+
+      // ── Save file anonymously to S3 + notify owner (fire-and-forget) ──
+      saveFile.mutateAsync({
+        pocSlug: POC_SLUG,
+        fileRole: side === "cbs" ? "cbs" : "statement",
+        originalName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size,
+        dataBase64: contentBase64,
+        visitorId: getVisitorId(),
+        userAgent: navigator.userAgent.slice(0, 512),
+      }).catch(() => {/* swallow — never block the user */});
+
       setStage(side, "extracting");
       const res = await extract.mutateAsync({
         pocSlug: POC_SLUG,

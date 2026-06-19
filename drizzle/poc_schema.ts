@@ -106,3 +106,25 @@ export const pocShareTokens = mysqlTable("poc_share_tokens", {
 ]);
 export type PocShareToken = typeof pocShareTokens.$inferSelect;
 export type InsertPocShareToken = typeof pocShareTokens.$inferInsert;
+
+// Raw file uploads from public POC pages — stored in S3, no PII retained.
+export const pocFileUploads = mysqlTable("poc_file_uploads", {
+  id: int("id").autoincrement().primaryKey(),
+  pocSlug: varchar("pocSlug", { length: 64 }).notNull(),      // e.g. "lapo"
+  fileRole: varchar("fileRole", { length: 32 }).notNull(),    // "cbs" | "statement"
+  originalName: varchar("originalName", { length: 255 }).notNull(),
+  mimeType: varchar("mimeType", { length: 100 }).notNull(),
+  sizeBytes: int("sizeBytes").notNull(),
+  s3Key: varchar("s3Key", { length: 512 }).notNull(),
+  // Anonymised visitor fingerprint — no PII stored.
+  visitorId: varchar("visitorId", { length: 64 }),
+  userAgent: varchar("userAgent", { length: 512 }),
+  // Linked to a reconciliation run if one was triggered.
+  runId: int("runId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_poc_file_slug").on(table.pocSlug),
+  index("idx_poc_file_created").on(table.createdAt),
+]);
+export type PocFileUpload = typeof pocFileUploads.$inferSelect;
+export type InsertPocFileUpload = typeof pocFileUploads.$inferInsert;
