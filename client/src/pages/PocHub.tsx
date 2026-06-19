@@ -5,7 +5,7 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Database, Sparkles, ExternalLink, FlaskConical } from "lucide-react";
+import { Database, Sparkles, ExternalLink, FlaskConical, CreditCard } from "lucide-react";
 
 type Poc = {
   name: string;
@@ -31,6 +31,14 @@ const POCS: Poc[] = [
     path: "/salad-africa-poc",
     icon: Sparkles,
     accent: "from-emerald-700 to-lime-600",
+    status: "Active",
+  },
+  {
+    name: "LAPO MFB — Interswitch Card Settlement",
+    blurb: "CBS vs Interswitch card settlement reconciliation. Pre-loaded demo dataset with chargebacks, settlement shortfalls, late presentments, duplicate RRNs, and amount mismatches. Supports Mastercard, Visa, and Verve.",
+    path: "/lapo-poc",
+    icon: CreditCard,
+    accent: "from-[#003087] to-[#1677ff]",
     status: "Active",
   },
 ];
