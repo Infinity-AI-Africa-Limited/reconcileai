@@ -48,7 +48,16 @@ import {
   ChevronLeft,
   ChevronRight,
   LogIn,
+  TrendingUp,
+  Activity,
+  CheckCircle2,
+  Percent,
+  AlertTriangle,
 } from "lucide-react";
+import {
+  XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, AreaChart, Area,
+} from "recharts";
 import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
 
 type Segment = "financial_services" | "corporate_b2b" | "super_admin";
@@ -528,10 +537,26 @@ function AllUsersTable() {
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
+type SuperAdminTab = "overview" | "orgs" | "users" | "analytics";
+
+const TAB_ROUTES: { key: SuperAdminTab; label: string; icon: React.ElementType; path: string }[] = [
+  { key: "overview", label: "Overview", icon: Globe, path: "/admin/super-admin" },
+  { key: "orgs", label: "Organisations", icon: Building2, path: "/admin/super-admin/orgs" },
+  { key: "users", label: "Users", icon: Users, path: "/admin/super-admin/users" },
+  { key: "analytics", label: "Analytics", icon: BarChart3, path: "/admin/super-admin/analytics" },
+];
+
+function tabFromPath(path: string): SuperAdminTab {
+  if (path.startsWith("/admin/super-admin/orgs")) return "orgs";
+  if (path.startsWith("/admin/super-admin/users")) return "users";
+  if (path.startsWith("/admin/super-admin/analytics")) return "analytics";
+  return "overview";
+}
+
 export default function SuperAdminDashboard() {
   const { user } = useAuth();
-  const [, setLocation] = useLocation();
-  const [activeTab, setActiveTab] = useState<"overview" | "orgs" | "users" | "audit">("overview");
+  const [location, setLocation] = useLocation();
+  const activeTab = tabFromPath(location);
 
   if (user?.role !== "super_admin") {
     return (
@@ -570,17 +595,12 @@ export default function SuperAdminDashboard() {
       {/* Platform Stats */}
       <PlatformStatsCards />
 
-      {/* Tab Navigation */}
+      {/* Tab Navigation — synced to the URL so the sidebar and tabs stay in agreement */}
       <div className="flex gap-1 border-b border-border">
-        {[
-          { key: "overview", label: "Overview", icon: Globe },
-          { key: "orgs", label: "Organisations", icon: Building2 },
-          { key: "users", label: "Users", icon: Users },
-          { key: "audit", label: "Audit Log", icon: ClipboardList },
-        ].map((tab) => (
+        {TAB_ROUTES.map((tab) => (
           <button
             key={tab.key}
-            onClick={() => setActiveTab(tab.key as typeof activeTab)}
+            onClick={() => setLocation(tab.path)}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
                 ? "border-violet-500 text-violet-600 dark:text-violet-400"
@@ -653,7 +673,7 @@ export default function SuperAdminDashboard() {
               <Button
                 variant="outline"
                 className="w-full justify-start text-sm h-9"
-                onClick={() => setActiveTab("orgs")}
+                onClick={() => setLocation("/admin/super-admin/orgs")}
               >
                 <Building2 className="h-4 w-4 mr-2 text-blue-500" />
                 Manage Organisations
@@ -661,10 +681,18 @@ export default function SuperAdminDashboard() {
               <Button
                 variant="outline"
                 className="w-full justify-start text-sm h-9"
-                onClick={() => setActiveTab("users")}
+                onClick={() => setLocation("/admin/super-admin/users")}
               >
                 <Users className="h-4 w-4 mr-2 text-emerald-500" />
                 Manage Users &amp; Roles
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full justify-start text-sm h-9"
+                onClick={() => setLocation("/admin/super-admin/analytics")}
+              >
+                <BarChart3 className="h-4 w-4 mr-2 text-violet-500" />
+                Platform Analytics
               </Button>
               <Button
                 variant="outline"
@@ -674,14 +702,6 @@ export default function SuperAdminDashboard() {
                 <Shield className="h-4 w-4 mr-2 text-amber-500" />
                 Org-Level Admin Panel
               </Button>
-              <Button
-                variant="outline"
-                className="w-full justify-start text-sm h-9"
-                onClick={() => setLocation("/audit")}
-              >
-                <BarChart3 className="h-4 w-4 mr-2 text-violet-500" />
-                View Audit Trail
-              </Button>
             </CardContent>
           </Card>
         </div>
@@ -689,7 +709,7 @@ export default function SuperAdminDashboard() {
 
       {activeTab === "orgs" && <OrganisationsTable />}
       {activeTab === "users" && <AllUsersTable />}
-      {activeTab === "audit" && <AuditLogTable />}
+      {activeTab === "analytics" && <PlatformAnalytics />}
     </div>
   );
 }
@@ -832,6 +852,304 @@ function AuditLogTable() {
             </Button>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Platform Analytics ────────────────────────────────────────────────────────
+const ROLE_LABELS: Record<string, string> = {
+  super_admin: "Super Admin",
+  admin: "Admin",
+  cfo: "CFO",
+  operations: "Operations",
+  compliance: "Compliance",
+  user: "User",
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  pending: "Pending",
+  running: "Running",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+const MODULE_LABELS: Record<string, string> = {
+  settlement: "Settlement",
+  account_level: "Account-Level",
+  transaction_integrity: "Transaction Integrity (legacy)",
+};
+
+const SEGMENT_BAR_COLORS: Record<string, string> = {
+  financial_services: "#3b82f6",
+  corporate_b2b: "#10b981",
+  super_admin: "#8b5cf6",
+};
+
+const STATUS_BAR_COLORS: Record<string, string> = {
+  pending: "#9ca3af",
+  running: "#3b82f6",
+  completed: "#10b981",
+  failed: "#ef4444",
+  cancelled: "#6b7280",
+};
+
+const PALETTE = ["#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#06b6d4"];
+
+function fmtMonth(m: string): string {
+  const [y, mo] = m.split("-");
+  if (!y || !mo) return m;
+  const d = new Date(Number(y), Number(mo) - 1, 1);
+  return d.toLocaleString("en-US", { month: "short", year: "2-digit" });
+}
+
+function DistributionCard({
+  title,
+  icon: Icon,
+  rows,
+  labels,
+  colorFor,
+}: {
+  title: string;
+  icon: React.ElementType;
+  rows: { key: string; value: number }[];
+  labels: Record<string, string>;
+  colorFor: (key: string, index: number) => string;
+}) {
+  const sorted = [...rows].sort((a, b) => b.value - a.value);
+  const total = sorted.reduce((s, r) => s + r.value, 0);
+  return (
+    <Card className="border-border/60">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Icon className="h-4 w-4 text-muted-foreground" />
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {sorted.length === 0 ? (
+          <p className="text-xs text-muted-foreground py-2">No data yet.</p>
+        ) : (
+          sorted.map((r, i) => {
+            const pct = total > 0 ? (r.value / total) * 100 : 0;
+            return (
+              <div key={r.key}>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="font-medium text-foreground">{labels[r.key] ?? r.key}</span>
+                  <span className="text-muted-foreground tabular-nums">
+                    {r.value.toLocaleString()} · {pct.toFixed(0)}%
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{ width: `${pct}%`, backgroundColor: colorFor(r.key, i) }}
+                  />
+                </div>
+              </div>
+            );
+          })
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TrendCard({
+  title,
+  icon: Icon,
+  data,
+  color,
+  dataLabel,
+}: {
+  title: string;
+  icon: React.ElementType;
+  data: { month: string; value: number }[];
+  color: string;
+  dataLabel: string;
+}) {
+  const chartData = data.slice(-12).map((d) => ({ name: fmtMonth(d.month), value: d.value }));
+  const gradientId = `grad-${dataLabel.replace(/\s+/g, "-")}`;
+  return (
+    <Card className="border-border/60">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Icon className="h-4 w-4 text-muted-foreground" />
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {chartData.length === 0 ? (
+          <p className="text-xs text-muted-foreground py-8 text-center">No data yet.</p>
+        ) : (
+          <div className="h-[200px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                <defs>
+                  <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={color} stopOpacity={0.35} />
+                    <stop offset="95%" stopColor={color} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" allowDecimals={false} tickLine={false} axisLine={false} width={32} />
+                <Tooltip
+                  contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))" }}
+                  formatter={(v: number) => [v.toLocaleString(), dataLabel]}
+                />
+                <Area type="monotone" dataKey="value" stroke={color} strokeWidth={2} fill={`url(#${gradientId})`} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PlatformAnalytics() {
+  const { data, isLoading, refetch, isFetching } = trpc.superAdmin.platformAnalytics.useQuery();
+
+  const headline = data
+    ? [
+        { icon: Building2, label: "Active Orgs", value: data.totals.activeOrgs.toLocaleString(), sub: `of ${data.totals.orgs.toLocaleString()} total`, color: "text-blue-500" },
+        { icon: Users, label: "Active Users", value: data.totals.activeUsers.toLocaleString(), sub: `of ${data.totals.users.toLocaleString()} total`, color: "text-emerald-500" },
+        { icon: CheckCircle2, label: "Completed Jobs", value: data.totals.completedJobs.toLocaleString(), sub: `of ${data.totals.jobs.toLocaleString()} runs`, color: "text-violet-500" },
+        { icon: Percent, label: "Avg Match Rate", value: `${data.volume.avgMatchRate.toFixed(1)}%`, sub: "completed jobs", color: "text-amber-500" },
+        { icon: Activity, label: "Txns Matched", value: data.volume.matched.toLocaleString(), sub: `${data.volume.unmatched.toLocaleString()} unmatched`, color: "text-cyan-500" },
+        { icon: AlertTriangle, label: "Open Exceptions", value: data.totals.openExceptions.toLocaleString(), sub: `of ${data.totals.exceptions.toLocaleString()} total`, color: "text-rose-500" },
+      ]
+    : [];
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <BarChart3 className="h-4 w-4 text-violet-500" />
+          <span className="text-sm font-semibold">Platform Analytics</span>
+          <span className="text-xs text-muted-foreground">Cross-tenant metrics across every deployed instance</span>
+        </div>
+        <Button variant="outline" size="sm" className="h-8 gap-1" onClick={() => refetch()} disabled={isFetching}>
+          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
+      </div>
+
+      {/* Headline metric cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        {isLoading
+          ? Array.from({ length: 6 }).map((_, i) => (
+              <Card key={i} className="border-border/60">
+                <CardContent className="pt-4 pb-3 px-4">
+                  <div className="h-4 w-20 bg-muted animate-pulse rounded mb-2" />
+                  <div className="h-7 w-14 bg-muted animate-pulse rounded" />
+                </CardContent>
+              </Card>
+            ))
+          : headline.map((stat) => (
+              <Card key={stat.label} className="border-border/60">
+                <CardContent className="pt-4 pb-3 px-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <stat.icon className={`h-4 w-4 ${stat.color}`} />
+                    <span className="text-xs text-muted-foreground truncate">{stat.label}</span>
+                  </div>
+                  <p className="text-2xl font-bold text-foreground tabular-nums">{stat.value}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">{stat.sub}</p>
+                </CardContent>
+              </Card>
+            ))}
+      </div>
+
+      {data && (
+        <>
+          {/* Growth trends */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <TrendCard title="Organisation Growth" icon={TrendingUp} data={data.orgGrowth} color="#3b82f6" dataLabel="New orgs" />
+            <TrendCard title="Reconciliation Activity" icon={Activity} data={data.jobTrend} color="#8b5cf6" dataLabel="Jobs" />
+          </div>
+
+          {/* Categorical breakdowns */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <DistributionCard
+              title="Organisations by Segment"
+              icon={Layers}
+              rows={data.segmentBreakdown}
+              labels={SEGMENT_LABELS}
+              colorFor={(key) => SEGMENT_BAR_COLORS[key] ?? "#8b5cf6"}
+            />
+            <DistributionCard
+              title="Reconciliation Modules"
+              icon={Network}
+              rows={data.moduleBreakdown}
+              labels={MODULE_LABELS}
+              colorFor={(_key, i) => PALETTE[i % PALETTE.length]}
+            />
+            <DistributionCard
+              title="Job Outcomes"
+              icon={CheckCircle2}
+              rows={data.jobStatusBreakdown}
+              labels={STATUS_LABELS}
+              colorFor={(key) => STATUS_BAR_COLORS[key] ?? "#8b5cf6"}
+            />
+            <DistributionCard
+              title="Users by Role"
+              icon={UserCog}
+              rows={data.roleBreakdown}
+              labels={ROLE_LABELS}
+              colorFor={(_key, i) => PALETTE[i % PALETTE.length]}
+            />
+          </div>
+
+          {/* Top organisations by activity */}
+          <Card className="border-border/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Building2 className="h-4 w-4 text-muted-foreground" />
+                Top Organisations by Activity
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="pl-4">Organisation</TableHead>
+                      <TableHead>Segment</TableHead>
+                      <TableHead className="text-right">Jobs</TableHead>
+                      <TableHead className="text-right">Matched</TableHead>
+                      <TableHead className="text-right pr-4">Exceptions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.topOrgs.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">
+                          No reconciliation activity recorded yet.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      data.topOrgs.map((org) => (
+                        <TableRow key={org.organizationId ?? "unassigned"}>
+                          <TableCell className="pl-4 font-medium">{org.name}</TableCell>
+                          <TableCell>{org.segment ? <SegmentBadge segment={org.segment} /> : <span className="text-xs text-muted-foreground">—</span>}</TableCell>
+                          <TableCell className="text-right tabular-nums">{org.jobs.toLocaleString()}</TableCell>
+                          <TableCell className="text-right tabular-nums text-emerald-600 dark:text-emerald-400">{org.matched.toLocaleString()}</TableCell>
+                          <TableCell className="text-right pr-4 tabular-nums text-rose-600 dark:text-rose-400">{org.exceptions.toLocaleString()}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Recent platform activity */}
+          <AuditLogTable />
+        </>
       )}
     </div>
   );

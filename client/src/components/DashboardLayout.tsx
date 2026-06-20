@@ -326,7 +326,17 @@ function DashboardLayoutContent({
   const visibleAdvancedItems = portalAdvancedItems ?? (portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role)));
   const visibleSuperAdminItems = portalMenuItems ? [] : superAdminItems.filter(item => canAccessNav(item, user?.role));
   const allItems = [...visibleMenuItems, ...visibleAdminItems, ...visibleSuperAdminItems];
-  const activeMenuItem = allItems.find((item) => location.startsWith(item.path));
+  // Match the current path segment-aware and prefer the most specific (longest) match,
+  // so nested routes like /admin/super-admin/orgs resolve to "All Organisations" rather
+  // than the parent "Platform Overview" (/admin/super-admin).
+  const matchesPath = (path: string) => location === path || location.startsWith(path + "/");
+  const activeMenuItem = allItems
+    .filter((item) => matchesPath(item.path))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  // The single active super-admin route (most specific match wins).
+  const activeSuperAdminPath = visibleSuperAdminItems
+    .filter((item) => matchesPath(item.path))
+    .sort((a, b) => b.path.length - a.path.length)[0]?.path;
   const isMobile = useIsMobile();
 
   // Demo Mode
@@ -605,7 +615,7 @@ function DashboardLayoutContent({
                     </SidebarMenuItem>
                   )}
                   {showInfinityAI && visibleSuperAdminItems.map((item) => {
-                    const isActive = location.startsWith(item.path);
+                    const isActive = item.path === activeSuperAdminPath;
                     return (
                       <SidebarMenuItem key={item.path}>
                         <SidebarMenuButton

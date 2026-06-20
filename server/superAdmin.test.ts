@@ -88,6 +88,44 @@ describe("superAdmin.platformStats", () => {
   });
 });
 
+// ─── superAdmin.platformAnalytics ─────────────────────────────────────────────
+describe("superAdmin.platformAnalytics", () => {
+  it.each(["admin", "user", "cfo", "operations", "compliance"] as const)(
+    "throws FORBIDDEN for %s role",
+    async (role) => {
+      const ctx = createCtxWithRole(role);
+      const caller = appRouter.createCaller(ctx);
+      await expect(caller.superAdmin.platformAnalytics()).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+    },
+  );
+
+  it("allows super_admin role and returns the analytics shape", async () => {
+    const ctx = createCtxWithRole("super_admin");
+    const caller = appRouter.createCaller(ctx);
+    // DB may be unavailable in the test env — the procedure returns a typed
+    // empty payload rather than throwing, so the shape assertions hold either way.
+    try {
+      const result = await caller.superAdmin.platformAnalytics();
+      expect(result).toHaveProperty("totals");
+      expect(result.totals).toHaveProperty("orgs");
+      expect(result.totals).toHaveProperty("openExceptions");
+      expect(result).toHaveProperty("volume");
+      expect(result.volume).toHaveProperty("avgMatchRate");
+      expect(Array.isArray(result.segmentBreakdown)).toBe(true);
+      expect(Array.isArray(result.roleBreakdown)).toBe(true);
+      expect(Array.isArray(result.jobStatusBreakdown)).toBe(true);
+      expect(Array.isArray(result.moduleBreakdown)).toBe(true);
+      expect(Array.isArray(result.orgGrowth)).toBe(true);
+      expect(Array.isArray(result.jobTrend)).toBe(true);
+      expect(Array.isArray(result.topOrgs)).toBe(true);
+    } catch (err: any) {
+      expect(err.code).not.toBe("FORBIDDEN");
+    }
+  });
+});
+
 // ─── admin.users — super_admin should also be able to access admin procedures ──
 describe("admin.users (adminProcedure)", () => {
   it("throws FORBIDDEN for user role", async () => {

@@ -3816,6 +3816,114 @@ export const appRouter = router({
         },
       };
     }),
+
+    // Rich cross-tenant analytics for the Platform Analytics page.
+    // All aggregation runs in the DB; small grouped result sets are sorted in JS.
+    platformAnalytics: superAdminProcedure.query(async () => {
+      const drizzle = await getDb();
+      const empty = {
+        totals: { orgs: 0, activeOrgs: 0, users: 0, activeUsers: 0, jobs: 0, completedJobs: 0, exceptions: 0, openExceptions: 0 },
+        segmentBreakdown: [] as { key: string; value: number }[],
+        roleBreakdown: [] as { key: string; value: number }[],
+        jobStatusBreakdown: [] as { key: string; value: number }[],
+        moduleBreakdown: [] as { key: string; value: number }[],
+        volume: { matched: 0, exceptions: 0, unmatched: 0, avgMatchRate: 0 },
+        orgGrowth: [] as { month: string; value: number }[],
+        jobTrend: [] as { month: string; value: number }[],
+        topOrgs: [] as { organizationId: number | null; name: string; segment: string | null; jobs: number; matched: number; exceptions: number }[],
+      };
+      if (!drizzle) return empty;
+
+      const { organizations, users, reconciliationJobs, exceptions } = await import("../drizzle/schema");
+      const { count, eq, sql } = await import("drizzle-orm");
+
+      // ── Headline totals ──
+      const [orgsTotal] = await drizzle.select({ c: count() }).from(organizations);
+      const [orgsActive] = await drizzle.select({ c: count() }).from(organizations).where(eq(organizations.isActive, true));
+      const [usersTotal] = await drizzle.select({ c: count() }).from(users);
+      const [usersActive] = await drizzle.select({ c: count() }).from(users).where(eq(users.isActive, true));
+      const [jobsTotal] = await drizzle.select({ c: count() }).from(reconciliationJobs);
+      const [jobsCompleted] = await drizzle.select({ c: count() }).from(reconciliationJobs).where(eq(reconciliationJobs.status, "completed"));
+      const [exTotal] = await drizzle.select({ c: count() }).from(exceptions);
+      const [exOpen] = await drizzle.select({ c: count() }).from(exceptions).where(eq(exceptions.status, "open"));
+
+      // ── Categorical breakdowns ──
+      const segmentRows = await drizzle.select({ key: organizations.segment, value: count() }).from(organizations).groupBy(organizations.segment);
+      const roleRows = await drizzle.select({ key: users.role, value: count() }).from(users).groupBy(users.role);
+      const jobStatusRows = await drizzle.select({ key: reconciliationJobs.status, value: count() }).from(reconciliationJobs).groupBy(reconciliationJobs.status);
+      const moduleRows = await drizzle.select({ key: reconciliationJobs.moduleType, value: count() }).from(reconciliationJobs).groupBy(reconciliationJobs.moduleType);
+
+      // ── Reconciliation volume ──
+      const [vol] = await drizzle.select({
+        matched: sql<number>`COALESCE(SUM(${reconciliationJobs.matchedCount}), 0)`,
+        exceptions: sql<number>`COALESCE(SUM(${reconciliationJobs.exceptionCount}), 0)`,
+        unmatched: sql<number>`COALESCE(SUM(${reconciliationJobs.unmatchedCount}), 0)`,
+      }).from(reconciliationJobs);
+      const [avgMr] = await drizzle.select({
+        avg: sql<number>`COALESCE(AVG(${reconciliationJobs.matchRate}), 0)`,
+      }).from(reconciliationJobs).where(eq(reconciliationJobs.status, "completed"));
+
+      // ── Monthly growth trends ──
+      const orgGrowthRows = await drizzle
+        .select({ month: sql<string>`DATE_FORMAT(${organizations.createdAt}, '%Y-%m')`, value: count() })
+        .from(organizations)
+        .groupBy(sql`DATE_FORMAT(${organizations.createdAt}, '%Y-%m')`)
+        .orderBy(sql`DATE_FORMAT(${organizations.createdAt}, '%Y-%m')`);
+      const jobTrendRows = await drizzle
+        .select({ month: sql<string>`DATE_FORMAT(${reconciliationJobs.createdAt}, '%Y-%m')`, value: count() })
+        .from(reconciliationJobs)
+        .groupBy(sql`DATE_FORMAT(${reconciliationJobs.createdAt}, '%Y-%m')`)
+        .orderBy(sql`DATE_FORMAT(${reconciliationJobs.createdAt}, '%Y-%m')`);
+
+      // ── Top organisations by reconciliation activity (sorted in JS — small set) ──
+      const orgJobRows = await drizzle
+        .select({
+          organizationId: reconciliationJobs.organizationId,
+          jobs: count(),
+          matched: sql<number>`COALESCE(SUM(${reconciliationJobs.matchedCount}), 0)`,
+          exceptions: sql<number>`COALESCE(SUM(${reconciliationJobs.exceptionCount}), 0)`,
+        })
+        .from(reconciliationJobs)
+        .groupBy(reconciliationJobs.organizationId);
+      const orgsAll = await drizzle.select({ id: organizations.id, name: organizations.name, segment: organizations.segment }).from(organizations);
+      const orgMap = new Map(orgsAll.map((o) => [o.id, o]));
+      const topOrgs = orgJobRows
+        .map((r) => {
+          const meta = r.organizationId != null ? orgMap.get(r.organizationId) : undefined;
+          return {
+            organizationId: r.organizationId,
+            name: r.organizationId == null ? "Unassigned" : (meta?.name ?? `Org ${r.organizationId}`),
+            segment: meta?.segment ?? null,
+            jobs: Number(r.jobs),
+            matched: Number(r.matched),
+            exceptions: Number(r.exceptions),
+          };
+        })
+        .sort((a, b) => b.jobs - a.jobs)
+        .slice(0, 8);
+
+      return {
+        totals: {
+          orgs: orgsTotal.c, activeOrgs: orgsActive.c,
+          users: usersTotal.c, activeUsers: usersActive.c,
+          jobs: jobsTotal.c, completedJobs: jobsCompleted.c,
+          exceptions: exTotal.c, openExceptions: exOpen.c,
+        },
+        segmentBreakdown: segmentRows.map((r) => ({ key: String(r.key), value: Number(r.value) })),
+        roleBreakdown: roleRows.map((r) => ({ key: String(r.key), value: Number(r.value) })),
+        jobStatusBreakdown: jobStatusRows.map((r) => ({ key: String(r.key), value: Number(r.value) })),
+        moduleBreakdown: moduleRows.map((r) => ({ key: String(r.key), value: Number(r.value) })),
+        volume: {
+          matched: Number(vol?.matched ?? 0),
+          exceptions: Number(vol?.exceptions ?? 0),
+          unmatched: Number(vol?.unmatched ?? 0),
+          avgMatchRate: Number(avgMr?.avg ?? 0),
+        },
+        orgGrowth: orgGrowthRows.map((r) => ({ month: r.month, value: Number(r.value) })),
+        jobTrend: jobTrendRows.map((r) => ({ month: r.month, value: Number(r.value) })),
+        topOrgs,
+      };
+    }),
   }),
 
   // ─── Super Agent ─────────────────────────────────────────────────────

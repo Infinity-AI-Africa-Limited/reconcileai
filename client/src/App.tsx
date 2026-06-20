@@ -126,6 +126,9 @@ function Router() {
           <Route path="/admin/roadmap-access" component={AdminRoadmapAccess} />
           <Route path="/admin/users" component={AdminUsers} />
           <Route path="/admin/super-admin">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
+          <Route path="/admin/super-admin/orgs">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
+          <Route path="/admin/super-admin/users">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
+          <Route path="/admin/super-admin/analytics">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/login" component={Login} />
