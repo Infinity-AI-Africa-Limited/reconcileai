@@ -8,12 +8,22 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, publicProcedure } from "../_core/trpc";
+import { router, publicProcedure, protectedProcedure } from "../_core/trpc";
 import * as poc from "../poc-engine";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
 const pocSlug = z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/);
+
+// Prospects upload anonymously (saveFile is public), but listing/downloading those
+// raw files is sensitive financial data and lives in the super-admin POC Hub —
+// so it is gated to Infinity AI staff only.
+const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.user.role !== "super_admin") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin access required." });
+  }
+  return next({ ctx });
+});
 
 export const pocRouter = router({
   // Extract canonical transactions from one uploaded file (AI-powered).
@@ -216,8 +226,9 @@ export const pocRouter = router({
       return { fileId, s3Key, s3Url };
     }),
 
-  // List all anonymously uploaded files for a given POC slug (admin portal).
-  listFiles: publicProcedure
+  // List all anonymously uploaded files for a given POC slug (super-admin only —
+  // these are prospects' raw financial files).
+  listFiles: superAdminProcedure
     .input(z.object({ pocSlug }))
     .query(async ({ input }) => {
       const { getDb } = await import("../db");
@@ -233,10 +244,14 @@ export const pocRouter = router({
         .limit(200);
     }),
 
-  // Generate a fresh presigned download URL for a stored file.
-  getFileUrl: publicProcedure
+  // Generate a fresh presigned download URL for a stored POC file (super-admin only).
+  getFileUrl: superAdminProcedure
     .input(z.object({ s3Key: z.string().min(1).max(512) }))
     .query(async ({ input }) => {
+      // Defense in depth: only ever sign keys under the POC files prefix.
+      if (!input.s3Key.startsWith("poc-files/")) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid file key" });
+      }
       const { storageGet } = await import("../storage");
       try {
         const { url } = await storageGet(input.s3Key);
