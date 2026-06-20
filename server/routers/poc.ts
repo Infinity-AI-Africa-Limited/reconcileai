@@ -10,6 +10,9 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { router, publicProcedure, protectedProcedure } from "../_core/trpc";
 import * as poc from "../poc-engine";
+import {
+  assertPocAccess, checkPocAccess, getOrCreateAccess, regenerateAccess, setAccessEnabled, tokenFromCtx,
+} from "../pocAccess";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
@@ -25,9 +28,17 @@ const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
   return next({ ctx });
 });
 
+// Public-but-gated: requires a valid per-POC access token (sent as the
+// x-poc-access-token header). The pocSlug is read from the call's input.
+const pocProcedure = publicProcedure.use(async (opts) => {
+  const raw = (await opts.getRawInput()) as { pocSlug?: string } | undefined;
+  await assertPocAccess(raw?.pocSlug ?? "", tokenFromCtx(opts.ctx));
+  return opts.next();
+});
+
 export const pocRouter = router({
   // Extract canonical transactions from one uploaded file (AI-powered).
-  extract: publicProcedure
+  extract: pocProcedure
     .input(
       z.object({
         pocSlug,
@@ -75,7 +86,7 @@ export const pocRouter = router({
     }),
 
   // Run the 3-layer reconciliation on two previously-extracted uploads.
-  run: publicProcedure
+  run: pocProcedure
     .input(
       z.object({
         pocSlug,
@@ -98,7 +109,7 @@ export const pocRouter = router({
       }
     }),
 
-  getRun: publicProcedure
+  getRun: pocProcedure
     .input(z.object({ pocSlug, runId: z.number().int().positive() }))
     .query(async ({ input }) => {
       const run = await poc.getRun(input.runId, input.pocSlug);
@@ -107,17 +118,18 @@ export const pocRouter = router({
       return { run, exceptions };
     }),
 
-  getExceptions: publicProcedure
-    .input(z.object({ runId: z.number().int().positive() }))
+  getExceptions: pocProcedure
+    .input(z.object({ pocSlug, runId: z.number().int().positive() }))
     .query(async ({ input }) => poc.getRunExceptions(input.runId)),
 
-  listRuns: publicProcedure
+  listRuns: pocProcedure
     .input(z.object({ pocSlug }))
     .query(async ({ input }) => poc.listRuns(input.pocSlug)),
 
-  updateExceptionStatus: publicProcedure
+  updateExceptionStatus: pocProcedure
     .input(
       z.object({
+        pocSlug,
         exceptionId: z.number().int().positive(),
         reviewStatus: z.enum(["OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED"]),
         reviewedBy: z.string().max(100).optional(),
@@ -142,7 +154,7 @@ export const pocRouter = router({
       return { success: true, exceptionId: input.exceptionId, reviewStatus: input.reviewStatus };
     }),
 
-  createShareToken: publicProcedure
+  createShareToken: pocProcedure
     .input(z.object({ pocSlug, runId: z.number().int().positive(), createdBy: z.string().max(100).optional() }))
     .mutation(async ({ input }) => poc.createShareToken(input.runId, input.pocSlug, input.createdBy)),
 
@@ -157,7 +169,7 @@ export const pocRouter = router({
   // ─── Anonymous file storage ───────────────────────────────────────────────
   // Called immediately when a file is picked on a public POC page.
   // Saves the raw file to S3, persists metadata, and notifies the owner.
-  saveFile: publicProcedure
+  saveFile: pocProcedure
     .input(
       z.object({
         pocSlug,
@@ -259,5 +271,34 @@ export const pocRouter = router({
       } catch {
         return { url: null };
       }
+    }),
+
+  // ─── Access control ───────────────────────────────────────────────────────
+  // Public: the frontend gate checks whether a presented token unlocks this POC.
+  checkAccess: publicProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64), accessToken: z.string().max(64).optional() }))
+    .query(async ({ input }) => ({ valid: await checkPocAccess(input.pocKey, input.accessToken) })),
+
+  // Super-admin: get/regenerate/toggle a POC's access token (POC Hub). Lazily
+  // creates the token so every POC — current or future — is covered.
+  getAccessConfig: superAdminProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64) }))
+    .query(async ({ input }) => {
+      const row = await getOrCreateAccess(input.pocKey);
+      return { pocKey: row.pocKey, token: row.token, enabled: row.enabled };
+    }),
+
+  regenerateAccessToken: superAdminProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64) }))
+    .mutation(async ({ input }) => {
+      const row = await regenerateAccess(input.pocKey);
+      return { pocKey: input.pocKey, token: row?.token, enabled: row?.enabled };
+    }),
+
+  setAccessEnabled: superAdminProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64), enabled: z.boolean() }))
+    .mutation(async ({ input }) => {
+      const row = await setAccessEnabled(input.pocKey, input.enabled);
+      return { pocKey: input.pocKey, token: row?.token, enabled: row?.enabled };
     }),
 });

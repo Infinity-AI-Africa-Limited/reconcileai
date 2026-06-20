@@ -762,6 +762,7 @@ export default function LapoPOC() {
     }
     try {
       await updateStatus.mutateAsync({
+        pocSlug: POC_SLUG,
         exceptionId: exception.id,
         reviewStatus: newStatus,
         reviewedBy: reviewer || undefined,

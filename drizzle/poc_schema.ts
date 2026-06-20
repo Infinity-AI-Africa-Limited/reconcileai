@@ -16,8 +16,25 @@ import {
   decimal,
   json,
   timestamp,
+  boolean,
   index,
 } from "drizzle-orm/mysql-core";
+
+// Lightweight per-POC access token. Public POC pages require a matching token
+// (passed as `?key=` in the link) so they are invite-only rather than fully open.
+// Secure-by-default: a POC with no row here denies public access until configured.
+export const pocAccessTokens = mysqlTable("poc_access_tokens", {
+  id: int("id").autoincrement().primaryKey(),
+  pocKey: varchar("pocKey", { length: 64 }).notNull().unique(), // pocSlug or "woodcore"
+  token: varchar("token", { length: 64 }).notNull(),
+  enabled: boolean("enabled").default(true).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_poc_access_key").on(table.pocKey),
+]);
+export type PocAccessToken = typeof pocAccessTokens.$inferSelect;
+export type InsertPocAccessToken = typeof pocAccessTokens.$inferInsert;
 
 // An uploaded + extracted file (one side of a reconciliation: ledger or statement).
 export const pocUploads = mysqlTable("poc_uploads", {

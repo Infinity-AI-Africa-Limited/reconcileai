@@ -13,13 +13,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Database, Sparkles, ExternalLink, FlaskConical, CreditCard,
   FileSpreadsheet, FileText, File as FileIcon, Download, RefreshCw,
-  Clock, User, HardDrive, AlertCircle,
+  Clock, User, HardDrive, AlertCircle, Copy, Check,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 
 // ─── POC index ────────────────────────────────────────────────────────────────
 type Poc = {
   name: string;
+  pocKey: string;
   blurb: string;
   path: string;
   icon: typeof Database;
@@ -29,6 +30,7 @@ type Poc = {
 const POCS: Poc[] = [
   {
     name: "Woodcore CBS",
+    pocKey: "woodcore",
     blurb: "GL-to-CBS reconciliation against the live Woodcore/Fineract test tenant (savings + loan portfolios).",
     path: "/woodcore-poc",
     icon: Database,
@@ -37,6 +39,7 @@ const POCS: Poc[] = [
   },
   {
     name: "Salad Africa",
+    pocKey: "salad_africa",
     blurb: "Self-service ledger ↔ bank statement reconciliation. Upload Excel/CSV/PDF (incl. scans) and run the 3-layer engine.",
     path: "/salad-africa-poc",
     icon: Sparkles,
@@ -45,6 +48,7 @@ const POCS: Poc[] = [
   },
   {
     name: "LAPO MFB — Interswitch Card Settlement",
+    pocKey: "lapo_mfb",
     blurb: "CBS vs Interswitch card settlement reconciliation. Pre-loaded demo dataset with chargebacks, settlement shortfalls, late presentments, duplicate RRNs, and amount mismatches. Supports Mastercard, Visa, and Verve.",
     path: "/lapo-poc",
     icon: CreditCard,
@@ -52,6 +56,43 @@ const POCS: Poc[] = [
     status: "Active",
   },
 ];
+
+// Per-POC access link: shows the invite link (with token), copy, and regenerate.
+function PocAccessLink({ pocKey, path }: { pocKey: string; path: string }) {
+  const utils = trpc.useUtils();
+  const cfg = trpc.poc.getAccessConfig.useQuery({ pocKey });
+  const regen = trpc.poc.regenerateAccessToken.useMutation({
+    onSuccess: () => utils.poc.getAccessConfig.invalidate({ pocKey }),
+  });
+  const [copied, setCopied] = useState(false);
+  const link = cfg.data?.token ? `${window.location.origin}${path}?key=${cfg.data.token}` : "";
+
+  const copy = async () => {
+    if (!link) return;
+    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border bg-muted/30 p-2.5">
+      <p className="text-[11px] font-medium text-muted-foreground mb-1">Invite link (access-protected)</p>
+      <div className="flex items-center gap-2">
+        <code className="flex-1 truncate text-[11px] text-gray-700">{cfg.isLoading ? "Loading…" : link}</code>
+        <Button size="sm" variant="outline" className="h-7 gap-1 text-xs" onClick={copy} disabled={!link}>
+          {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
+          {copied ? "Copied" : "Copy"}
+        </Button>
+        <Button
+          size="sm" variant="outline" className="h-7 gap-1 text-xs"
+          onClick={() => { if (confirm("Regenerate the access link? The current link will stop working.")) regen.mutate({ pocKey }); }}
+          disabled={regen.isPending}
+          title="Invalidate the current link and create a new one"
+        >
+          <RefreshCw className={`h-3 w-3 ${regen.isPending ? "animate-spin" : ""}`} /> Regenerate
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatBytes(bytes: number): string {
@@ -302,6 +343,7 @@ export default function PocHub() {
                       </a>
                       <code className="text-xs text-muted-foreground">{poc.path}</code>
                     </div>
+                    <PocAccessLink pocKey={poc.pocKey} path={poc.path} />
                   </CardContent>
                 </Card>
               );
