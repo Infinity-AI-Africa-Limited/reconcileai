@@ -515,7 +515,66 @@ These features are in the PRD but were not built in the prototype. They are firs
 
 ---
 
-## 15. Coding Conventions
+## 15. Manus → Claude Collaboration Workflow
+
+### How New Features Arrive from Manus
+
+Manus (the AI prototyping agent) builds new features, improvements, and fixes on **feature branches** and submits them as **Pull Requests** against `main`. Claude's job is to:
+
+1. Pull the PR branch
+2. Review and harden the code for production
+3. Merge to `main` once satisfied
+
+**Manus never merges its own PRs.** Merging is always Claude's responsibility.
+
+### Branch Naming Convention
+
+All Manus-authored branches follow the pattern:
+```
+manus/<short-description>
+```
+Examples: `manus/lapo-poc-upload-tracking`, `manus/exception-age-tracker-ui`
+
+### What to Expect in Every Manus PR
+
+Each PR body will contain:
+- **Summary** — what was built and why
+- **Changes** — file-by-file list of what changed
+- **Testing** — TypeScript error count (always 0), test pass count, manual verification notes
+- **Notes for Claude** — specific items to harden, env vars needed, demo-only code to remove, known edge cases
+
+### Claude's Review Checklist for Manus PRs
+
+Before merging any `manus/*` branch, verify:
+
+| Check | What to look for |
+|---|---|
+| **TypeScript** | Run `npx tsc --noEmit` — must be 0 errors |
+| **Tests** | Run `pnpm test` — all must pass |
+| **No Manus-specific code** | Remove any `BUILT_IN_FORGE_*` references, Manus OAuth calls, or sandbox-only hacks |
+| **Demo/POC code isolation** | POC pages (`/salad-africa-poc`, `/lapo-poc`, `/woodcore-poc`) are intentionally public and demo-only — do not add auth gates unless instructed |
+| **LLM calls** | Confirm all `invokeLLM()` calls will work with `DIRECT_LLM_API_KEY` (Anthropic) in production |
+| **Database migrations** | If new tables/columns were added, confirm migration files exist in `drizzle/` and run `pnpm db:push` |
+| **S3 file keys** | Any new file uploads must use `storagePut()` — never store bytes in DB columns |
+| **Secrets** | No hardcoded API keys, tokens, or credentials in any file |
+| **Router size** | If `server/routers.ts` grew, check if it should be split into `server/routers/<feature>.ts` |
+
+### GitHub Remotes
+
+| Remote | Repository | Notes |
+|---|---|---|
+| Primary | `MistaRichMan/reconcileai` | Claude reads and merges PRs here |
+| Mirror | `Infinity-AI-Africa-Limited/reconcileai` | Manus also pushes branches here |
+
+### What Manus Does NOT Build via PR (commits directly to `main`)
+
+- GitHub sync merges (`git merge -X theirs mistarichman/main`) — these are already Claude's production code coming in
+- Manus checkpoint commits — internal sandbox state
+- Hotfixes to Manus-only demo/POC pages that do not touch production server code
+
+---
+
+## 16. Coding Conventions
 
 - **TypeScript strict mode** — no `any` types, no `ts-ignore`
 - **tRPC for all API calls** — never introduce Axios or raw fetch wrappers in the frontend
