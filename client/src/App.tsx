@@ -26,6 +26,7 @@ import SaladAfricaPOC from "./pages/SaladAfricaPOC";
 import AgeTracker from "./pages/AgeTracker";
 import PocHub from "./pages/PocHub";
 import PocSharedReport from "./pages/PocSharedReport";
+import PocAccessGate from "./components/PocAccessGate";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
@@ -110,9 +111,9 @@ function Router() {
       <Route path="/age-tracker">{() => <DashboardPage component={AgeTracker} />}</Route>
       <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
       <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
-      <Route path="/woodcore-poc" component={WoodcorePOC} />
-      <Route path="/salad-africa-poc" component={SaladAfricaPOC} />
-      <Route path="/lapo-poc" component={LapoPOC} />
+      <Route path="/woodcore-poc">{() => <PocAccessGate pocKey="woodcore"><WoodcorePOC /></PocAccessGate>}</Route>
+      <Route path="/salad-africa-poc">{() => <PocAccessGate pocKey="salad_africa"><SaladAfricaPOC /></PocAccessGate>}</Route>
+      <Route path="/lapo-poc">{() => <PocAccessGate pocKey="lapo_mfb"><LapoPOC /></PocAccessGate>}</Route>
       <Route path="/poc-report/:token" component={PocSharedReport} />
       <Route path="/admin/poc">{() => <DashboardPage component={PocHub} />}</Route>
       <Route path="/shared-report/:token" component={SharedReport} />

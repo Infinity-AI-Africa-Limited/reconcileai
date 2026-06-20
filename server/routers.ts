@@ -245,6 +245,15 @@ const operationsProcedure = protectedProcedure.use(({ ctx, next }) => {
   return next({ ctx });
 });
 
+// Public-but-gated Woodcore POC procedures: require a valid access token (the
+// x-poc-access-token header) for the fixed "woodcore" POC key. Keeps the live
+// Woodcore/Fineract data behind the per-POC invite link.
+const woodcoreProcedure = publicProcedure.use(async (opts) => {
+  const { assertPocAccess, tokenFromCtx } = await import("./pocAccess");
+  await assertPocAccess("woodcore", tokenFromCtx(opts.ctx));
+  return opts.next();
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 async function logAudit(
@@ -4459,13 +4468,13 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // ─── Woodcore POC Procedures ─────────────────────────────────────────
   woodcore: router({
     // Get dataset stats
-    stats: publicProcedure.query(async () => {
+    stats: woodcoreProcedure.query(async () => {
       return getWoodcoreStats();
     }),
 
     // List reconcilable products (have a GL mapping + transactions) for the run picker.
     // Used by the live POC so the engine targets a real product instead of a hardcoded id.
-    listProducts: publicProcedure
+    listProducts: woodcoreProcedure
       .input(z.object({ type: z.enum(["SAVINGS", "LOAN"]) }))
       .query(async ({ input }) => {
         const { getDb } = await import("./db");
@@ -4499,26 +4508,26 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Get all reconciliation runs
-    getRuns: publicProcedure.query(async () => {
+    getRuns: woodcoreProcedure.query(async () => {
       return getLatestRuns(20);
     }),
 
     // Get a specific run
-    getRun: publicProcedure
+    getRun: woodcoreProcedure
       .input(z.object({ runId: z.number() }))
       .query(async ({ input }) => {
         return getRunById(input.runId);
       }),
 
     // Get exceptions for a run
-    getExceptions: publicProcedure
+    getExceptions: woodcoreProcedure
       .input(z.object({ runId: z.number() }))
       .query(async ({ input }) => {
         return getRunExceptions(input.runId);
       }),
 
     // Run the full POC (all 3 layers)
-    runPOC: publicProcedure
+    runPOC: woodcoreProcedure
       .input(z.object({
         productId: z.number().default(2),
         productType: z.enum(["SAVINGS", "LOAN"]).default("SAVINGS"),
@@ -4540,7 +4549,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Update exception review status
-    updateExceptionStatus: publicProcedure
+    updateExceptionStatus: woodcoreProcedure
       .input(z.object({
         exceptionId: z.number(),
         reviewStatus: z.enum(["OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED"]),
@@ -4564,7 +4573,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Compare two runs side by side
-    compareRuns: publicProcedure
+    compareRuns: woodcoreProcedure
       .input(z.object({
         runIdA: z.number(),
         runIdB: z.number(),
@@ -4578,7 +4587,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Bulk acknowledge all OPEN exceptions for a run
-    bulkAcknowledge: publicProcedure
+    bulkAcknowledge: woodcoreProcedure
       .input(z.object({
         runId: z.number(),
         reviewedBy: z.string().default("Reviewer"),
@@ -4606,7 +4615,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Create a shareable read-only token for a run's Layer 3 report
-    createShareToken: publicProcedure
+    createShareToken: woodcoreProcedure
       .input(z.object({
         runId: z.number(),
         createdBy: z.string().optional(),
@@ -4680,7 +4689,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ─── LIVE DATA: Direct queries against Woodcore test tenant ──────────────
-    liveStats: publicProcedure.query(async () => {
+    liveStats: woodcoreProcedure.query(async () => {
       // Run all count queries in parallel for speed
       const [glRow, savingsRow, archiveRow, loanRow, acctRow, loanAcctRow] = await Promise.all([
         woodcoreQuery<{ cnt: string }>("SELECT COUNT(*) AS cnt FROM acc_gl_journal_entry WHERE reversed = 0"),
@@ -4702,7 +4711,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       };
     }),
 
-    liveGlReconciliation: publicProcedure
+    liveGlReconciliation: woodcoreProcedure
       .input(z.object({
         days: z.number().min(1).max(90).default(7),
         currency: z.string().default("NGN"),
@@ -4742,7 +4751,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         }));
       }),
 
-    liveSavingsReconciliation: publicProcedure
+    liveSavingsReconciliation: woodcoreProcedure
       .input(z.object({ days: z.number().min(1).max(90).default(30) }))
       .query(async ({ input }) => {
         // UNION active + archive tables for full savings transaction history
@@ -4789,7 +4798,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         }));
       }),
 
-    liveLoanReconciliation: publicProcedure
+    liveLoanReconciliation: woodcoreProcedure
       .input(z.object({ days: z.number().min(1).max(90).default(30) }))
       .query(async ({ input }) => {
         const rows = await woodcoreQuery<{
@@ -4828,7 +4837,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Full savings transactions: UNION of active + archive tables
-    liveSavingsTxns: publicProcedure
+    liveSavingsTxns: woodcoreProcedure
       .input(z.object({ limit: z.number().min(1).max(100).default(20), offset: z.number().default(0) }))
       .query(async ({ input }) => {
         const rows = await woodcoreQuery<{
@@ -4864,7 +4873,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         }));
       }),
 
-    liveLoanTxns: publicProcedure
+    liveLoanTxns: woodcoreProcedure
       .input(z.object({ limit: z.number().min(1).max(100).default(20), offset: z.number().default(0) }))
       .query(async ({ input }) => {
         const rows = await woodcoreQuery<{

@@ -43,6 +43,16 @@ const trpcClient = trpc.createClient({
     httpBatchLink({
       url: "/api/trpc",
       transformer: superjson,
+      // Attach the per-POC access token (set by the POC access gate) so gated
+      // POC procedures accept the request. Harmless on non-POC calls.
+      headers() {
+        try {
+          const t = sessionStorage.getItem("poc_access_token");
+          return t ? { "x-poc-access-token": t } : {};
+        } catch {
+          return {};
+        }
+      },
       fetch(input, init) {
         return globalThis.fetch(input, {
           ...(init ?? {}),
