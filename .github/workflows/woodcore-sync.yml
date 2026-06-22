@@ -24,12 +24,22 @@ jobs:
       SYNC_URL: "https://www.reconcileaiafrica.com/api/woodcore/sync"
     steps:
       - name: Trigger mirror sync
+        env:
+          SYNC_SECRET: ${{ secrets.WOODCORE_SYNC_SECRET }}
         run: |
+          # Skip cleanly when the secret isn't configured on this repo (e.g. the
+          # MistaRichMan mirror). This prevents spurious "all jobs failed" emails;
+          # the sync only runs where WOODCORE_SYNC_SECRET is set to match the
+          # server's CRON_SECRET (or JWT_SECRET fallback).
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "WOODCORE_SYNC_SECRET is not configured on this repository — skipping sync (expected on the mirror)."
+            exit 0
+          fi
           code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
-            -H "x-sync-secret: ${{ secrets.WOODCORE_SYNC_SECRET }}" \
+            -H "x-sync-secret: $SYNC_SECRET" \
             "$SYNC_URL")
           echo "HTTP $code"; cat /tmp/resp; echo
           # 202 = started, 409 = a sync is already running — both are fine.
           if [ "$code" != "202" ] && [ "$code" != "409" ]; then
-            echo "Unexpected status $code"; exit 1
+            echo "Unexpected status $code (check that WOODCORE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"; exit 1
           fi
