@@ -30,7 +30,7 @@ import {
   wc_reconciliation_runs,
   wc_exceptions,
 } from "../drizzle/woodcore_schema";
-import { eq, and, between, sql, isNull, isNotNull, ne } from "drizzle-orm";
+import { eq, and, between, sql, isNull, isNotNull, ne, inArray } from "drizzle-orm";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -248,42 +248,71 @@ export async function runLayer1(config: ReconciliationConfig): Promise<Layer1Res
     savingsCharges = totalWriteOff; // reuse field: write-offs
     savingsInterest = 0;
   } else {
-    // ── SAVINGS: original logic ───────────────────────────────────────────────
+    // ── SAVINGS: balance + activity from v_all_savings_account_transaction ─────
+    // The mirror wc_m_savings_account_transaction is now sourced from Woodcore's
+    // v_all_savings_account_transaction view (the COMPLETE transaction history),
+    // not the sparse base m_savings_account_transaction table. See woodcoreSync.ts.
     const savingsAccounts = await db.select({
       id: wc_m_savings_account.id,
-      accountBalanceDerived: wc_m_savings_account.accountBalanceDerived,
     }).from(wc_m_savings_account)
       .where(and(
         eq(wc_m_savings_account.productId, productId),
         eq(wc_m_savings_account.currencyCode, currencyCode),
       ));
+    const productAccountIds = savingsAccounts.map((a: typeof savingsAccounts[0]) => a.id);
 
-    const savingsTxns = await db.select({
+    // Period activity breakdown (deposits / withdrawals / interest / charges),
+    // scoped in SQL to this product's accounts now that the mirror is complete.
+    const productTxns = productAccountIds.length === 0 ? [] : await db.select({
       id: wc_m_savings_account_transaction.id,
       savingsAccountId: wc_m_savings_account_transaction.savingsAccountId,
       transactionTypeEnum: wc_m_savings_account_transaction.transactionTypeEnum,
       isReversed: wc_m_savings_account_transaction.isReversed,
       transactionDate: wc_m_savings_account_transaction.transactionDate,
       amount: wc_m_savings_account_transaction.amount,
-      runningBalanceDerived: wc_m_savings_account_transaction.runningBalanceDerived,
     }).from(wc_m_savings_account_transaction)
-      .where(between(wc_m_savings_account_transaction.transactionDate, periodStart, periodEnd));
-
-    const productAccountIds = new Set(savingsAccounts.map((a: typeof savingsAccounts[0]) => a.id));
-    const productTxns = savingsTxns.filter((t: typeof savingsTxns[0]) => productAccountIds.has(t.savingsAccountId));
+      .where(and(
+        inArray(wc_m_savings_account_transaction.savingsAccountId, productAccountIds),
+        between(wc_m_savings_account_transaction.transactionDate, periodStart, periodEnd),
+      ));
 
     for (const t of productTxns) {
       if (t.isReversed) continue;
       const amt = parseFloat(t.amount?.toString() ?? "0");
-      if (t.transactionTypeEnum === 1) savingsDeposits += amt;
-      else if (t.transactionTypeEnum === 2) savingsWithdrawals += amt;
-      else if (t.transactionTypeEnum === 3) savingsInterest += amt;
-      else if (t.transactionTypeEnum === 7) savingsCharges += amt;
+      if (t.transactionTypeEnum === 1) savingsDeposits += amt;        // Deposit
+      else if (t.transactionTypeEnum === 2) savingsWithdrawals += amt; // Withdrawal
+      else if (t.transactionTypeEnum === 3) savingsInterest += amt;    // Interest posting
+      else if (t.transactionTypeEnum === 4 || t.transactionTypeEnum === 5 || t.transactionTypeEnum === 7)
+        savingsCharges += amt;                                         // Withdrawal/annual/pay charge
     }
 
-    expectedBalance = savingsAccounts.reduce((sum: number, a: typeof savingsAccounts[0]) => {
-      return sum + parseFloat(a.accountBalanceDerived?.toString() ?? "0");
-    }, 0);
+    // Expected balance = sum across the product's accounts of each account's latest
+    // non-reversed running balance as of periodEnd, from the complete view-backed
+    // mirror. running_balance_derived is Fineract's authoritative per-transaction
+    // balance; the dedup tie-break keeps it deterministic for the view's few
+    // duplicate ids. Accounts with no qualifying transaction contribute 0.
+    if (productAccountIds.length > 0) {
+      const balResult = await db.execute(sql`
+        SELECT COALESCE(SUM(lt.running_balance_derived), 0) AS expected
+        FROM (
+          SELECT t.running_balance_derived,
+            ROW_NUMBER() OVER (
+              PARTITION BY t.savings_account_id
+              ORDER BY t.transaction_date DESC, t.id DESC, t.running_balance_derived DESC
+            ) AS rn
+          FROM wc_m_savings_account_transaction t
+          JOIN wc_m_savings_account a ON a.id = t.savings_account_id
+          WHERE a.product_id = ${productId}
+            AND a.currency_code = ${currencyCode}
+            AND t.is_reversed = 0
+            AND t.running_balance_derived IS NOT NULL
+            AND t.transaction_date <= ${periodEnd}
+        ) lt
+        WHERE lt.rn = 1
+      `);
+      const balRows = (balResult as unknown as any[][])[0] as any[];
+      expectedBalance = parseFloat(balRows?.[0]?.expected?.toString() ?? "0");
+    }
     totalLoanTxns = productTxns.length;
   }
 

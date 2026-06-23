@@ -29,7 +29,12 @@ const SPECS: TableSpec[] = [
   { live: "m_savings_product", mirror: "wc_m_savings_product", batch: 2000, cols: ["id", "name", "short_name", "description", "deposit_amount", "currency_code", "nominal_annual_interest_rate"] },
   { live: "m_product_loan", mirror: "wc_m_product_loan", batch: 2000, cols: ["id", "name", "short_name", "currency_code", "nominal_interest_rate_per_period"] },
   { live: "m_savings_account", mirror: "wc_m_savings_account", batch: 2000, cols: ["id", "account_no", "client_id", "product_id", "status_enum", "currency_code", "account_balance_derived", "activated_on_date"] },
-  { live: "m_savings_account_transaction", mirror: "wc_m_savings_account_transaction", batch: 2000, cols: ["id", "savings_account_id", "transaction_type_enum", "is_reversed", "transaction_date", "amount", "running_balance_derived", "is_manual", "created_date"] },
+  // Sourced from Woodcore's v_all_savings_account_transaction view (the COMPLETE
+  // transaction history, ~121k rows) rather than the sparse base table
+  // m_savings_account_transaction (~2.5k rows). The view exposes the same columns
+  // the engine relies on. NOTE: the view has a handful of duplicate ids (union
+  // artifacts); the dup-safe INSERT in syncOne keeps one row per id (PK).
+  { live: "v_all_savings_account_transaction", mirror: "wc_m_savings_account_transaction", batch: 5000, cols: ["id", "savings_account_id", "transaction_type_enum", "is_reversed", "transaction_date", "amount", "running_balance_derived", "is_manual", "created_date"] },
   { live: "m_loan", mirror: "wc_m_loan", batch: 2000, cols: ["id", "account_no", "client_id", "product_id", "loan_status_id", "principal_amount", "approved_principal", "currency_code"] },
   { live: "m_loan_transaction", mirror: "wc_m_loan_transaction", batch: 5000, cols: ["id", "loan_id", "transaction_type_enum", "is_reversed", "transaction_date", "amount", "principal_portion_derived", "interest_portion_derived", "created_date"] },
   // Bridge tables — currently SELECT-denied for `reconcileai`; skipped + preserved until granted.
@@ -131,7 +136,10 @@ async function syncOne(spec: TableSpec): Promise<TableResult> {
         return v ?? null;
       });
     });
-    await tidb.query(`INSERT INTO \`${spec.mirror}\` (${colSql}) VALUES ?`, [values]);
+    // Dup-safe: a couple of source views (e.g. v_all_savings_account_transaction)
+    // expose duplicate ids. Keep one row per id (PK); a no-op on conflict. Tables
+    // with unique ids never trigger this branch.
+    await tidb.query(`INSERT INTO \`${spec.mirror}\` (${colSql}) VALUES ? ON DUPLICATE KEY UPDATE \`id\` = \`id\``, [values]);
     copied += rows.length;
     lastId = Number((rows[rows.length - 1] as Record<string, unknown>).id);
 
