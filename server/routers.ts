@@ -1190,6 +1190,57 @@ export const appRouter = router({
           notes: input.resolutionNotes,
         }, ip, ua);
 
+        // Fire-and-forget: capture the resolved exception as a per-institution learning pattern.
+        const _resolveOrgId = ctx.user.organizationId;
+        const _resolveUserId = ctx.user.id;
+        const _resolveInput = input;
+        void (async () => {
+          try {
+            if (!_resolveOrgId) return;
+            const drizzle = await getDb();
+            if (!drizzle) return;
+            const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
+            const rows = await drizzle
+              .select({
+                category: exTbl.category,
+                description: exTbl.description,
+                amount: txTbl.amount,
+                counterparty: txTbl.counterparty,
+                transactionRef: txTbl.transactionRef,
+              })
+              .from(exTbl)
+              .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
+              .where(eq(exTbl.id, _resolveInput.id))
+              .limit(1);
+            if (!rows.length) return;
+            const row = rows[0];
+            const amt = parseFloat(String(row.amount)) || 0;
+            const amtRange: "0-100k" | "100k-1m" | "1m+" = amt < 100_000 ? "0-100k" : amt < 1_000_000 ? "100k-1m" : "1m+";
+            const ei = await import("./exceptionIntelligence");
+            const cpType = ei.counterpartyTypeOf(row.counterparty);
+            const resolution = _resolveInput.resolutionNotes || "Exception resolved";
+            const actionClass = ei.classifyResolutionAction(resolution);
+            const outcome: "resolved" | "rejected" = _resolveInput.status === "resolved" ? "resolved" : "rejected";
+            await drizzle.insert(agentMemory).values({
+              organizationId: _resolveOrgId,
+              exceptionId: _resolveInput.id,
+              exceptionCategory: row.category,
+              transactionRef: row.transactionRef ?? null,
+              amountRange: amtRange,
+              counterpartyType: cpType,
+              deductionType: null,
+              resolution,
+              outcome,
+              reasoning: row.description || "Exception resolved by operations team",
+              embeddingText: `category:${row.category} amount:${amtRange} counterparty:${cpType} resolution:${actionClass} outcome:${outcome}`,
+              resolvedBy: _resolveUserId,
+            });
+            // Also feed the anonymized cross-institution pool.
+            const sig = ei.deriveSignature({ exceptionCategory: row.category, amount: amt, counterparty: row.counterparty, resolution, outcome });
+            await ei.recordLocalSignature(_resolveOrgId, sig);
+          } catch { /* pattern capture is best-effort; never fail the primary response */ }
+        })();
+
         dispatchWebhook("exception.resolved", { exceptionId: input.id, status: input.status });
         return { success: true };
       }),
@@ -4078,6 +4129,28 @@ export const appRouter = router({
           createdAt: j.createdAt,
         }));
 
+        // Inject per-institution learned patterns as few-shot examples.
+        const saQueryDrizzle = await getDb();
+        const recentPatterns = saQueryDrizzle && orgId
+          ? await saQueryDrizzle.select({
+              category: agentMemory.exceptionCategory,
+              amountRange: agentMemory.amountRange,
+              resolution: agentMemory.resolution,
+              outcome: agentMemory.outcome,
+              reasoning: agentMemory.reasoning,
+            })
+            .from(agentMemory)
+            .where(eq(agentMemory.organizationId, orgId))
+            .orderBy(desc(agentMemory.createdAt))
+            .limit(8)
+          : [];
+        const fewShotBlock = recentPatterns.length > 0
+          ? `\n\nLearned patterns from your institution's resolved exceptions (${recentPatterns.length} examples):\n` +
+            recentPatterns.map(m =>
+              `• [${m.category}/${m.amountRange}] Resolution: "${m.resolution}" → ${m.outcome}. Context: ${(m.reasoning ?? "").substring(0, 100)}`
+            ).join("\n")
+          : "";
+
         const systemPrompt = `You are the ReconcileAI Super Agent — an autonomous financial reconciliation intelligence for African FMCG and corporate B2B payment environments.
 
 Your role is to:
@@ -4089,7 +4162,7 @@ Your role is to:
 Current system context:
 - Open exceptions: ${recentExceptions.total} total, showing top ${exceptionSummary.length}
 - Recent jobs: ${JSON.stringify(jobStats, null, 2)}
-- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}
+- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}${fewShotBlock}
 
 When proposing an action draft, structure your response as JSON with this exact format:
 {
@@ -6106,6 +6179,45 @@ Always be specific, reference actual exception IDs and amounts where available, 
       const pushed = await ei.syncToPool(orgId);
       await logAudit(ctx.user.id, "exception_intelligence_sync", "exception_intelligence", orgId, { aggregated, pushed });
       return { aggregatedPatterns: aggregated.patterns, pushed };
+    }),
+
+    // Per-institution learning flywheel stats: patterns captured by this org over time.
+    // Powers the "value grows with every job" narrative in the UI.
+    flywheelStats: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const drizzle = await getDb();
+      if (!drizzle) return { totalPatterns: 0, categoryCoverage: [] as { category: string; count: number }[], monthlyGrowth: [] as { month: string; count: number }[] };
+
+      const [totalRow] = await drizzle
+        .select({ count: sql<number>`count(*)` })
+        .from(agentMemory)
+        .where(eq(agentMemory.organizationId, orgId));
+
+      const categoryRows = await drizzle
+        .select({ category: agentMemory.exceptionCategory, count: sql<number>`count(*)` })
+        .from(agentMemory)
+        .where(eq(agentMemory.organizationId, orgId))
+        .groupBy(agentMemory.exceptionCategory)
+        .orderBy(desc(sql<number>`count(*)`));
+
+      const monthlyRows = await drizzle
+        .select({
+          month: sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`,
+          count: sql<number>`count(*)`,
+        })
+        .from(agentMemory)
+        .where(and(
+          eq(agentMemory.organizationId, orgId),
+          sql`${agentMemory.createdAt} >= DATE_SUB(NOW(), INTERVAL 6 MONTH)`,
+        ))
+        .groupBy(sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`)
+        .orderBy(sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`);
+
+      return {
+        totalPatterns: Number(totalRow?.count || 0),
+        categoryCoverage: categoryRows.map(r => ({ category: r.category, count: Number(r.count) })),
+        monthlyGrowth: monthlyRows.map(r => ({ month: r.month as string, count: Number(r.count) })),
+      };
     }),
   }),
 
