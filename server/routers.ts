@@ -1194,6 +1194,32 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    // Reverts a RESOLVED/DISMISSED exception back to OPEN.
+    // Used when the CBS staleness check shows the anomaly was never fixed.
+    reopen: operationsProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        notes: z.string().max(2000).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
+        await drizzle.update(exceptionsTable)
+          .set({
+            status: "open",
+            resolvedBy: null,
+            resolvedAt: null,
+            resolutionNotes: input.notes ?? null,
+            cbsStillAnomalous: false,
+            userKeptResolved: false,
+          })
+          .where(eq(exceptionsTable.id, input.id));
+        await logAudit(ctx.user.id, "reopen_exception", "exception", input.id, { notes: input.notes }, ip, ua);
+        return { success: true };
+      }),
+
     assign: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
@@ -1421,6 +1447,95 @@ export const appRouter = router({
           filters: input, count: exceptions.data?.length ?? 0,
         }, ip, ua);
         return { url, fileName };
+      }),
+
+    // Cross-run CBS staleness check for the main reconciliation system.
+    //
+    // ReconcileAI connects to multiple CBS systems via uploads, SFTP, or API —
+    // there is no direct live CBS query. Staleness is detected cross-run:
+    // "Was this RESOLVED exception's transactionRef seen again as a new open exception
+    // in a more recent job on the same channel?" If yes → the CBS was never fixed.
+    checkStaleness: protectedProcedure
+      .input(z.object({
+        exceptionIds: z.array(z.number().int().positive()).max(200),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const orgId = ctx.user.organizationId;
+
+        const { exceptions: exceptionsTable, transactions: transactionsTable } = await import("../drizzle/schema");
+
+        // Pull the resolved exceptions + their linked transaction refs
+        const resolvedRows = await drizzle
+          .select({
+            exceptionId: exceptionsTable.id,
+            resolvedAt: exceptionsTable.resolvedAt,
+            transactionId: exceptionsTable.transactionId,
+            transactionRef: transactionsTable.transactionRef,
+            channelId: transactionsTable.channelId,
+          })
+          .from(exceptionsTable)
+          .innerJoin(transactionsTable, eq(transactionsTable.id, exceptionsTable.transactionId))
+          .where(
+            and(
+              inArray(exceptionsTable.id, input.exceptionIds),
+              inArray(exceptionsTable.status, ["resolved", "dismissed"] as any[]),
+            )
+          );
+
+        if (resolvedRows.length === 0) return { checked: 0, staleCount: 0, results: [] };
+
+        const results: { exceptionId: number; cbsStillAnomalous: boolean; verificationNote: string }[] = [];
+
+        for (const row of resolvedRows) {
+          if (!row.transactionRef || !row.resolvedAt) {
+            results.push({ exceptionId: row.exceptionId, cbsStillAnomalous: false, verificationNote: "No transaction reference available for cross-run check" });
+            continue;
+          }
+
+          // Raw SQL avoids drizzle self-join complexity. Finds any open exception
+          // for a transaction with the same ref + channel created after resolution.
+          const orgFilter = orgId != null ? sql` AND t_new.organizationId = ${orgId}` : sql``;
+          const rawResult = await drizzle.execute(sql`
+            SELECT e_new.id AS new_exception_id, e_new.jobId AS new_job_id, e_new.createdAt AS new_created_at
+            FROM transactions t_new
+            JOIN exceptions e_new ON e_new.transactionId = t_new.id
+            WHERE t_new.transactionRef = ${row.transactionRef}
+              AND t_new.channelId = ${row.channelId}
+              AND e_new.status IN ('open', 'in_review', 'escalated')
+              AND e_new.createdAt > ${row.resolvedAt}
+              ${orgFilter}
+            LIMIT 1
+          `);
+
+          const reappeared = ((rawResult as unknown as any[][])[0]) as any[];
+          const stillAnomalous = reappeared.length > 0;
+          const note = stillAnomalous
+            ? `Transaction ref "${row.transactionRef}" re-appeared as an open exception in job #${reappeared[0].new_job_id} (${new Date(reappeared[0].new_created_at).toLocaleDateString()}) — corrective action was not applied in the CBS`
+            : `No re-occurrence of "${row.transactionRef}" found in subsequent reconciliation runs — CBS appears resolved`;
+
+          await drizzle.update(exceptionsTable)
+            .set({ cbsStillAnomalous: stillAnomalous, cbsVerificationNote: note })
+            .where(eq(exceptionsTable.id, row.exceptionId));
+
+          results.push({ exceptionId: row.exceptionId, cbsStillAnomalous: stillAnomalous, verificationNote: note });
+        }
+
+        return { checked: results.length, staleCount: results.filter((r) => r.cbsStillAnomalous).length, results };
+      }),
+
+    // User explicitly keeps the exception RESOLVED despite the CBS re-occurrence.
+    keepResolvedDespiteStaleness: protectedProcedure
+      .input(z.object({ exceptionId: z.number().int().positive() }))
+      .mutation(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
+        await drizzle.update(exceptionsTable)
+          .set({ userKeptResolved: true })
+          .where(eq(exceptionsTable.id, input.exceptionId));
+        return { success: true, exceptionId: input.exceptionId };
       }),
   }),
 
@@ -5006,6 +5121,75 @@ Always be specific, reference actual exception IDs and amounts where available, 
           date: r.transaction_date,
           amount: parseFloat(r.amount ?? "0"),
         }));
+      }),
+
+    // Check CBS staleness for all RESOLVED/ACKNOWLEDGED exceptions in a run.
+    // For each exception, re-queries the Fineract data to see if the underlying
+    // anomaly still exists — i.e., the user marked it RESOLVED but never fixed the CBS.
+    verifyResolvedExceptions: woodcoreProcedure
+      .input(z.object({ runId: z.number() }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_exceptions } = await import("../drizzle/woodcore_schema");
+        const { checkExceptionStaleness } = await import("./woodcore-engine");
+        const { and: _and, inArray } = await import("drizzle-orm");
+
+        const resolved = await db2.select().from(wc_exceptions)
+          .where(
+            _and(
+              eq(wc_exceptions.reconciliationRunId, input.runId),
+              inArray(wc_exceptions.reviewStatus, ["RESOLVED", "ACKNOWLEDGED"]),
+            )
+          );
+
+        if (resolved.length === 0) return { checked: 0, staleCount: 0, results: [] };
+
+        const results: { exceptionId: number; cbsStillAnomalous: boolean; verificationNote: string }[] = [];
+        const now = new Date();
+
+        for (const exc of resolved) {
+          try {
+            const check = await checkExceptionStaleness({
+              glEntryId: exc.glEntryId,
+              exceptionCategory: exc.exceptionCategory,
+              linkedSavingsTxnId: exc.linkedSavingsTxnId ?? null,
+              productMatch: exc.productMatch ?? null,
+            });
+            await db2.update(wc_exceptions)
+              .set({
+                cbsVerifiedAt: now,
+                cbsStillAnomalous: check.cbsStillAnomalous ? 1 : 0,
+                cbsVerificationNote: check.verificationNote.slice(0, 300),
+              })
+              .where(eq(wc_exceptions.id, exc.id));
+            results.push({ exceptionId: exc.id, ...check });
+          } catch {
+            // Non-fatal: if CBS is unreachable, skip this exception
+          }
+        }
+
+        return {
+          checked: results.length,
+          staleCount: results.filter((r) => r.cbsStillAnomalous).length,
+          results,
+        };
+      }),
+
+    // User chose to keep the exception RESOLVED despite the CBS still showing the anomaly.
+    // Sets userKeptResolved = 1 so the mismatch banner is suppressed.
+    keepResolvedDespiteStaleness: woodcoreProcedure
+      .input(z.object({ exceptionId: z.number() }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_exceptions } = await import("../drizzle/woodcore_schema");
+        await db2.update(wc_exceptions)
+          .set({ userKeptResolved: 1 })
+          .where(eq(wc_exceptions.id, input.exceptionId));
+        return { success: true, exceptionId: input.exceptionId };
       }),
   }),
   // ─── Compliance (NDPA/NDPR — NDA Clause 11, 7, 12) ───────────────────

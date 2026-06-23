@@ -246,6 +246,11 @@ export const wc_exceptions = mysqlTable("wc_exceptions", {
   reviewedBy: varchar("reviewed_by", { length: 100 }),
   reviewedAt: datetime("reviewed_at"),
   reviewNote: text("review_note"),
+  // CBS staleness detection: when a user marks RESOLVED but hasn't fixed it in the CBS
+  cbsVerifiedAt: datetime("cbs_verified_at"),
+  cbsStillAnomalous: tinyint("cbs_still_anomalous"), // null=unchecked, 0=CBS fixed, 1=CBS still anomalous
+  cbsVerificationNote: varchar("cbs_verification_note", { length: 300 }),
+  userKeptResolved: tinyint("user_kept_resolved").default(0), // 1=user dismissed the mismatch alert
   createdAt: datetime("created_at").notNull(),
 }, (t) => [
   index("idx_wc_exc_run").on(t.reconciliationRunId),

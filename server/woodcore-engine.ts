@@ -960,6 +960,107 @@ export async function runFullPOC(config: ReconciliationConfig) {
   };
 }
 
+// ─── CBS Staleness Check ──────────────────────────────────────────────────────
+// Re-examines the CBS (Fineract) data for a RESOLVED exception to determine
+// whether the underlying anomaly was actually fixed in the core banking system.
+
+export type StalenessCheckResult = {
+  cbsStillAnomalous: boolean;
+  verificationNote: string;
+};
+
+export async function checkExceptionStaleness(exception: {
+  glEntryId: number;
+  exceptionCategory: string;
+  linkedSavingsTxnId: number | null;
+  productMatch: number | null;
+}): Promise<StalenessCheckResult> {
+  const db = await getDatabase();
+
+  // Synthetic GL IDs (negative) are used for loan categories where no GL entry exists.
+  // REPAYMENT_NOT_POSTED: glEntryId = -(loanTxnId)
+  // DISBURSEMENT_NOT_POSTED/MISPOSTING: glEntryId = -(loanTxnId + 10000)
+  if (exception.glEntryId < 0) {
+    const loanTxnId = exception.exceptionCategory === "REPAYMENT_NOT_POSTED"
+      ? -exception.glEntryId
+      : -exception.glEntryId - 10000;
+
+    // Check if a GL entry now exists linking to this loan transaction
+    const glRows = await db.select({ id: wc_acc_gl_journal_entry.id })
+      .from(wc_acc_gl_journal_entry)
+      .where(and(
+        eq(wc_acc_gl_journal_entry.loanTransactionId, loanTxnId),
+        eq(wc_acc_gl_journal_entry.reversed, 0),
+      ));
+    if (glRows.length > 0) {
+      return { cbsStillAnomalous: false, verificationNote: "GL entry for this loan transaction now exists in CBS — anomaly resolved" };
+    }
+    return { cbsStillAnomalous: true, verificationNote: `Loan transaction still has no corresponding GL entry in CBS (${exception.exceptionCategory})` };
+  }
+
+  // Real GL entry — look it up
+  const [glEntry] = await db.select({
+    reversed: wc_acc_gl_journal_entry.reversed,
+    manualEntry: wc_acc_gl_journal_entry.manualEntry,
+    savingsTransactionId: wc_acc_gl_journal_entry.savingsTransactionId,
+    loanTransactionId: wc_acc_gl_journal_entry.loanTransactionId,
+    reversalId: wc_acc_gl_journal_entry.reversalId,
+  }).from(wc_acc_gl_journal_entry)
+    .where(eq(wc_acc_gl_journal_entry.id, exception.glEntryId));
+
+  if (!glEntry) {
+    return { cbsStillAnomalous: false, verificationNote: "GL entry no longer exists in CBS — anomaly resolved" };
+  }
+  if (glEntry.reversed) {
+    return { cbsStillAnomalous: false, verificationNote: "GL entry has been reversed in CBS — anomaly resolved" };
+  }
+
+  switch (exception.exceptionCategory) {
+    case "MANUAL_POSTING":
+    case "MANUAL_POSTING_ANOMALY":
+    case "PRINCIPAL_ADJUSTMENT_ANOMALY":
+      if (!glEntry.manualEntry) {
+        return { cbsStillAnomalous: false, verificationNote: "Manual entry flag removed in CBS — anomaly resolved" };
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry is still flagged as a manual posting in CBS — corrective action not yet taken" };
+
+    case "ORPHANED_ENTRY":
+    case "ORPHANED_LOAN_ENTRY":
+      if (glEntry.savingsTransactionId != null || glEntry.loanTransactionId != null) {
+        return { cbsStillAnomalous: false, verificationNote: "GL entry now has a linked CBS transaction — anomaly resolved" };
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry still has no linked savings or loan transaction in CBS" };
+
+    case "REVERSAL_ANOMALY": {
+      if (!glEntry.reversalId) {
+        return { cbsStillAnomalous: false, verificationNote: "Reversal reference removed in CBS — anomaly resolved" };
+      }
+      // Check if the linked savings transaction is still reversed
+      if (exception.linkedSavingsTxnId) {
+        const [savingsTxn] = await db.select({ isReversed: wc_m_savings_account_transaction.isReversed })
+          .from(wc_m_savings_account_transaction)
+          .where(eq(wc_m_savings_account_transaction.id, exception.linkedSavingsTxnId));
+        if (savingsTxn && !savingsTxn.isReversed) {
+          return { cbsStillAnomalous: false, verificationNote: "CBS transaction reversal has been corrected" };
+        }
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry still shows reversal anomaly in CBS" };
+    }
+
+    case "CROSS_PRODUCT_MISPOSTING":
+      if (exception.productMatch === 1) {
+        return { cbsStillAnomalous: false, verificationNote: "Product mapping now matches — anomaly resolved" };
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry is still linked to a transaction belonging to a different product in CBS" };
+
+    case "DISBURSEMENT_MISPOSTING":
+      return { cbsStillAnomalous: true, verificationNote: "GL entry for disbursement still present and unreversed in CBS — check if it was reposted correctly" };
+
+    default:
+      return { cbsStillAnomalous: true, verificationNote: `GL entry for ${exception.exceptionCategory} still exists and is unreversed in CBS — corrective action not confirmed` };
+  }
+}
+
 // ─── Query helpers ────────────────────────────────────────────────────────────
 
 export async function getLatestRuns(limit = 10) {

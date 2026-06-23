@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, AlertTriangle, CheckCircle2, Eye, ClipboardList,
-  FilterX, Filter, CalendarDays, X, Download, Lock
+  FilterX, Filter, CalendarDays, X, Download, Lock, RefreshCw
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
@@ -73,9 +73,57 @@ export default function Exceptions() {
     offset: 0,
   });
 
+  // Staleness state: exceptionId → { cbsStillAnomalous, verificationNote, userKeptResolved }
+  const [stalenessMap, setStalenessMap] = useState<Map<number, { cbsStillAnomalous: boolean; verificationNote: string; userKeptResolved: boolean }>>(new Map());
+
   const resolveMutation = trpc.exceptions.resolve.useMutation();
   const moveToReviewMutation = trpc.exceptions.moveToReview.useMutation();
   const exportXlsxMutation = trpc.exceptions.exportXlsx.useMutation();
+
+  const reopenMutation = trpc.exceptions.reopen.useMutation({
+    onSuccess: () => {
+      toast.success("Exception reverted to Open — CBS fix still required");
+      setSelectedEx(null);
+      refetch();
+    },
+    onError: (err) => toast.error(err.message || "Failed to reopen"),
+  });
+
+  const checkStalenessMutation = trpc.exceptions.checkStaleness.useMutation({
+    onSuccess: (result) => {
+      if (!result.results.length) return;
+      setStalenessMap((prev) => {
+        const next = new Map(prev);
+        for (const r of result.results) {
+          next.set(r.exceptionId, { cbsStillAnomalous: r.cbsStillAnomalous, verificationNote: r.verificationNote, userKeptResolved: false });
+        }
+        return next;
+      });
+    },
+  });
+
+  const keepResolvedMutation = trpc.exceptions.keepResolvedDespiteStaleness.useMutation({
+    onSuccess: (result) => {
+      setStalenessMap((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(result.exceptionId);
+        if (existing) next.set(result.exceptionId, { ...existing, userKeptResolved: true });
+        return next;
+      });
+    },
+  });
+
+  // Auto-check staleness whenever the resolved exceptions list changes
+  const triggerStalenessCheck = useCallback((exceptions: any[]) => {
+    const resolvedIds = exceptions
+      .filter((ex) => (ex.status === "resolved" || ex.status === "dismissed") && !stalenessMap.has(ex.id))
+      .map((ex) => ex.id);
+    if (resolvedIds.length > 0) checkStalenessMutation.mutate({ exceptionIds: resolvedIds });
+  }, [stalenessMap]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (data?.data && data.data.length > 0) triggerStalenessCheck(data.data);
+  }, [data?.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleResolve = async (id: number, status: "resolved" | "dismissed") => {
     try {
@@ -275,27 +323,38 @@ export default function Exceptions() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((ex) => (
-                    <tr key={ex.id} className="border-b last:border-0 hover:bg-muted/30">
-                      <td className="py-3 px-2 font-mono text-xs">{ex.id}</td>
-                      <td className="py-3 px-2">
-                        <span className="text-xs font-medium">{ex.category?.replace(/_/g, " ")}</span>
-                      </td>
-                      <td className="py-3 px-2">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${severityColor(ex.severity || "low")}`}>{ex.severity}</span>
-                      </td>
-                      <td className="py-3 px-2 max-w-[250px] truncate text-muted-foreground">{ex.description}</td>
-                      <td className="py-3 px-2">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${statusColor(ex.status || "open")}`}>{ex.status}</span>
-                      </td>
-                      <td className="py-3 px-2 max-w-[200px] truncate text-xs text-muted-foreground">{ex.suggestedResolution || "-"}</td>
-                      <td className="py-3 px-2 text-right">
-                        <Button variant="ghost" size="sm" onClick={() => setSelectedEx(ex)}>
-                          <Eye className="h-3 w-3 mr-1" /> View
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
+                  {filtered.map((ex) => {
+                    const staleness = stalenessMap.get(ex.id);
+                    const isStale = staleness?.cbsStillAnomalous && !staleness?.userKeptResolved;
+                    return (
+                      <tr key={ex.id} className={`border-b last:border-0 hover:bg-muted/30 ${isStale ? "bg-amber-50/40" : ""}`}>
+                        <td className="py-3 px-2 font-mono text-xs">{ex.id}</td>
+                        <td className="py-3 px-2">
+                          <span className="text-xs font-medium">{ex.category?.replace(/_/g, " ")}</span>
+                        </td>
+                        <td className="py-3 px-2">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${severityColor(ex.severity || "low")}`}>{ex.severity}</span>
+                        </td>
+                        <td className="py-3 px-2 max-w-[250px] truncate text-muted-foreground">{ex.description}</td>
+                        <td className="py-3 px-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${statusColor(ex.status || "open")}`}>{ex.status}</span>
+                            {isStale && (
+                              <span className="flex items-center gap-0.5 text-[10px] font-medium text-amber-700 bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded-full" title={staleness.verificationNote}>
+                                <AlertTriangle className="h-2.5 w-2.5" /> CBS mismatch
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-2 max-w-[200px] truncate text-xs text-muted-foreground">{ex.suggestedResolution || "-"}</td>
+                        <td className="py-3 px-2 text-right">
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedEx(ex)}>
+                            <Eye className="h-3 w-3 mr-1" /> View
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -393,6 +452,43 @@ export default function Exceptions() {
                   </div>
                 </div>
               )}
+              {/* CBS staleness alert */}
+              {(() => {
+                const staleness = stalenessMap.get(selectedEx.id);
+                const isStale = staleness?.cbsStillAnomalous && !staleness?.userKeptResolved;
+                if (!isStale) return null;
+                return (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-sm font-semibold text-amber-800">CBS still shows this anomaly</p>
+                        <p className="text-xs text-amber-700 mt-0.5 leading-relaxed">{staleness.verificationNote}</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1 border-amber-300 text-amber-800 hover:bg-amber-100"
+                        onClick={() => reopenMutation.mutate({ id: selectedEx.id, notes: "Reverted — CBS still shows the anomaly" })}
+                        disabled={reopenMutation.isPending}
+                      >
+                        <RefreshCw className="h-3.5 w-3.5 mr-1" /> Revert to Open
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="flex-1 bg-amber-600 hover:bg-amber-700 text-white"
+                        onClick={() => keepResolvedMutation.mutate({ exceptionId: selectedEx.id })}
+                        disabled={keepResolvedMutation.isPending}
+                      >
+                        Keep as Resolved
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {isReadOnly ? (
                 <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                   <Lock className="h-4 w-4 shrink-0 text-amber-600" />
