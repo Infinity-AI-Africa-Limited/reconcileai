@@ -50,6 +50,7 @@ import {
   type ReconciliationConfig,
 } from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
+import { loadExcelJS } from "./exceljsLoader";
 import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "./_core/egress";
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
@@ -1431,7 +1432,7 @@ export const appRouter = router({
           offset: 0,
         });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -1965,7 +1966,7 @@ export const appRouter = router({
           return true;
         });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -2272,7 +2273,7 @@ export const appRouter = router({
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -2458,7 +2459,7 @@ export const appRouter = router({
 
         if (filtered.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "No completed reconciliation runs found for the selected period" });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -6277,7 +6278,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const { buildChannelMetrics } = await import("./cfoReportService");
         const rows = await buildChannelMetrics(input.period, input.channelCodes);
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();

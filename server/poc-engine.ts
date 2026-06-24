@@ -17,6 +17,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { Transaction } from "../drizzle/schema";
 import { invokeLLM } from "./_core/llm";
 import { runMatchingEngine, type ReconciliationConfig } from "./reconciliationEngine";
+import { loadExcelJS } from "./exceljsLoader";
 import { getDb } from "./db";
 import {
   pocUploads,
@@ -76,7 +77,7 @@ const EXTRACTION_SCHEMA = {
 
 /** Serialize an Excel workbook buffer to a tab-separated text the LLM can read. */
 async function excelToText(buffer: Buffer): Promise<string> {
-  const ExcelJS = await import("exceljs");
+  const ExcelJS = await loadExcelJS();
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as any);
   const lines: string[] = [];
@@ -123,14 +124,25 @@ export async function extractTransactions(params: {
     userContent = `Extract all transactions from this ${params.fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
   }
 
-  const res = await invokeLLM({
-    messages: [
-      { role: "system", content: EXTRACTION_SYSTEM },
-      { role: "user", content: userContent },
-    ],
-    response_format: { type: "json_schema", json_schema: { name: "extracted_transactions", schema: EXTRACTION_SCHEMA } },
-    maxTokens: 8192,
-  });
+  let res;
+  try {
+    res = await invokeLLM({
+      messages: [
+        { role: "system", content: EXTRACTION_SYSTEM },
+        { role: "user", content: userContent },
+      ],
+      response_format: { type: "json_schema", json_schema: { name: "extracted_transactions", schema: EXTRACTION_SCHEMA } },
+      maxTokens: 8192,
+    });
+  } catch (err: any) {
+    // The retry layer already absorbed transient blips; if we still failed on a
+    // gateway/upstream error, don't surface raw provider HTML to the prospect.
+    const msg = String(err?.message ?? "");
+    if (/\b50\d\b|bad gateway|gateway time-?out|overloaded|temporarily|ECONN|fetch failed/i.test(msg)) {
+      throw new Error("The extraction service is busy right now. Please try again in a moment.");
+    }
+    throw err;
+  }
 
   const rawContent = res.choices?.[0]?.message?.content;
   const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? {});
