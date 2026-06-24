@@ -40,6 +40,24 @@ export interface CanonicalRow {
 
 export const MAX_POC_ROWS = 5000;
 
+// Anthropic per-request PDF limits. We reject clearly BEFORE the LLM call so an
+// oversized scan fails instantly with a useful message instead of burning the
+// retry budget on a request the provider will refuse.
+export const MAX_PDF_BYTES = 32 * 1024 * 1024; // 32 MB
+export const MAX_PDF_PAGES = 100;
+
+/**
+ * Best-effort PDF page count from the raw bytes — counts `/Type /Page` page
+ * objects (excluding the `/Pages` tree node). PDFs that tuck page objects inside
+ * compressed object streams will undercount (often to 0), so this is used only to
+ * reject documents it is CONFIDENT exceed the limit; it never false-rejects.
+ */
+function estimatePdfPageCount(buffer: Buffer): number {
+  const text = buffer.toString("latin1");
+  const matches = text.match(/\/Type\s*\/Page(?![\w])/g);
+  return matches ? matches.length : 0;
+}
+
 // ─── Extraction (AI-powered, any format) ─────────────────────────────
 
 const EXTRACTION_SYSTEM =
@@ -114,6 +132,21 @@ export async function extractTransactions(params: {
   let userContent: any;
 
   if (params.fileType === "pdf") {
+    // Fast pre-checks: reject too-large / too-long PDFs before the LLM call.
+    if (buffer.length > MAX_PDF_BYTES) {
+      const mb = (buffer.length / (1024 * 1024)).toFixed(1);
+      throw new Error(
+        `This PDF is ${mb} MB, over the ${MAX_PDF_BYTES / (1024 * 1024)} MB limit. ` +
+        `Please split it into smaller files or export the transactions to Excel/CSV.`,
+      );
+    }
+    const pageCount = estimatePdfPageCount(buffer);
+    if (pageCount > MAX_PDF_PAGES) {
+      throw new Error(
+        `This PDF has ${pageCount} pages, over the ${MAX_PDF_PAGES}-page limit per upload. ` +
+        `Please upload a shorter date range or export the transactions to Excel/CSV.`,
+      );
+    }
     userContent = [
       { type: "text", text: "Extract all transactions from this statement/ledger PDF." },
       { type: "file_url", file_url: { url: `data:application/pdf;base64,${params.base64}`, mime_type: "application/pdf" } },
