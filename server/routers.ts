@@ -50,6 +50,7 @@ import {
   type ReconciliationConfig,
 } from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
+import { loadExcelJS } from "./exceljsLoader";
 import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "./_core/egress";
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
@@ -1190,7 +1191,84 @@ export const appRouter = router({
           notes: input.resolutionNotes,
         }, ip, ua);
 
+        // Fire-and-forget: capture the resolved exception as a per-institution learning pattern.
+        const _resolveOrgId = ctx.user.organizationId;
+        const _resolveUserId = ctx.user.id;
+        const _resolveInput = input;
+        void (async () => {
+          try {
+            if (!_resolveOrgId) return;
+            const drizzle = await getDb();
+            if (!drizzle) return;
+            const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
+            const rows = await drizzle
+              .select({
+                category: exTbl.category,
+                description: exTbl.description,
+                amount: txTbl.amount,
+                counterparty: txTbl.counterparty,
+                transactionRef: txTbl.transactionRef,
+              })
+              .from(exTbl)
+              .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
+              .where(eq(exTbl.id, _resolveInput.id))
+              .limit(1);
+            if (!rows.length) return;
+            const row = rows[0];
+            const amt = parseFloat(String(row.amount)) || 0;
+            const amtRange: "0-100k" | "100k-1m" | "1m+" = amt < 100_000 ? "0-100k" : amt < 1_000_000 ? "100k-1m" : "1m+";
+            const ei = await import("./exceptionIntelligence");
+            const cpType = ei.counterpartyTypeOf(row.counterparty);
+            const resolution = _resolveInput.resolutionNotes || "Exception resolved";
+            const actionClass = ei.classifyResolutionAction(resolution);
+            const outcome: "resolved" | "rejected" = _resolveInput.status === "resolved" ? "resolved" : "rejected";
+            await drizzle.insert(agentMemory).values({
+              organizationId: _resolveOrgId,
+              exceptionId: _resolveInput.id,
+              exceptionCategory: row.category,
+              transactionRef: row.transactionRef ?? null,
+              amountRange: amtRange,
+              counterpartyType: cpType,
+              deductionType: null,
+              resolution,
+              outcome,
+              reasoning: row.description || "Exception resolved by operations team",
+              embeddingText: `category:${row.category} amount:${amtRange} counterparty:${cpType} resolution:${actionClass} outcome:${outcome}`,
+              resolvedBy: _resolveUserId,
+            });
+            // Also feed the anonymized cross-institution pool.
+            const sig = ei.deriveSignature({ exceptionCategory: row.category, amount: amt, counterparty: row.counterparty, resolution, outcome });
+            await ei.recordLocalSignature(_resolveOrgId, sig);
+          } catch { /* pattern capture is best-effort; never fail the primary response */ }
+        })();
+
         dispatchWebhook("exception.resolved", { exceptionId: input.id, status: input.status });
+        return { success: true };
+      }),
+
+    // Reverts a RESOLVED/DISMISSED exception back to OPEN.
+    // Used when the CBS staleness check shows the anomaly was never fixed.
+    reopen: operationsProcedure
+      .input(z.object({
+        id: z.number().int().positive(),
+        notes: z.string().max(2000).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { ip, ua } = getClientInfo(ctx);
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
+        await drizzle.update(exceptionsTable)
+          .set({
+            status: "open",
+            resolvedBy: null,
+            resolvedAt: null,
+            resolutionNotes: input.notes ?? null,
+            cbsStillAnomalous: false,
+            userKeptResolved: false,
+          })
+          .where(eq(exceptionsTable.id, input.id));
+        await logAudit(ctx.user.id, "reopen_exception", "exception", input.id, { notes: input.notes }, ip, ua);
         return { success: true };
       }),
 
@@ -1354,7 +1432,7 @@ export const appRouter = router({
           offset: 0,
         });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -1421,6 +1499,95 @@ export const appRouter = router({
           filters: input, count: exceptions.data?.length ?? 0,
         }, ip, ua);
         return { url, fileName };
+      }),
+
+    // Cross-run CBS staleness check for the main reconciliation system.
+    //
+    // ReconcileAI connects to multiple CBS systems via uploads, SFTP, or API —
+    // there is no direct live CBS query. Staleness is detected cross-run:
+    // "Was this RESOLVED exception's transactionRef seen again as a new open exception
+    // in a more recent job on the same channel?" If yes → the CBS was never fixed.
+    checkStaleness: protectedProcedure
+      .input(z.object({
+        exceptionIds: z.array(z.number().int().positive()).max(200),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const orgId = ctx.user.organizationId;
+
+        const { exceptions: exceptionsTable, transactions: transactionsTable } = await import("../drizzle/schema");
+
+        // Pull the resolved exceptions + their linked transaction refs
+        const resolvedRows = await drizzle
+          .select({
+            exceptionId: exceptionsTable.id,
+            resolvedAt: exceptionsTable.resolvedAt,
+            transactionId: exceptionsTable.transactionId,
+            transactionRef: transactionsTable.transactionRef,
+            channelId: transactionsTable.channelId,
+          })
+          .from(exceptionsTable)
+          .innerJoin(transactionsTable, eq(transactionsTable.id, exceptionsTable.transactionId))
+          .where(
+            and(
+              inArray(exceptionsTable.id, input.exceptionIds),
+              inArray(exceptionsTable.status, ["resolved", "dismissed"] as any[]),
+            )
+          );
+
+        if (resolvedRows.length === 0) return { checked: 0, staleCount: 0, results: [] };
+
+        const results: { exceptionId: number; cbsStillAnomalous: boolean; verificationNote: string }[] = [];
+
+        for (const row of resolvedRows) {
+          if (!row.transactionRef || !row.resolvedAt) {
+            results.push({ exceptionId: row.exceptionId, cbsStillAnomalous: false, verificationNote: "No transaction reference available for cross-run check" });
+            continue;
+          }
+
+          // Raw SQL avoids drizzle self-join complexity. Finds any open exception
+          // for a transaction with the same ref + channel created after resolution.
+          const orgFilter = orgId != null ? sql` AND t_new.organizationId = ${orgId}` : sql``;
+          const rawResult = await drizzle.execute(sql`
+            SELECT e_new.id AS new_exception_id, e_new.jobId AS new_job_id, e_new.createdAt AS new_created_at
+            FROM transactions t_new
+            JOIN exceptions e_new ON e_new.transactionId = t_new.id
+            WHERE t_new.transactionRef = ${row.transactionRef}
+              AND t_new.channelId = ${row.channelId}
+              AND e_new.status IN ('open', 'in_review', 'escalated')
+              AND e_new.createdAt > ${row.resolvedAt}
+              ${orgFilter}
+            LIMIT 1
+          `);
+
+          const reappeared = ((rawResult as unknown as any[][])[0]) as any[];
+          const stillAnomalous = reappeared.length > 0;
+          const note = stillAnomalous
+            ? `Transaction ref "${row.transactionRef}" re-appeared as an open exception in job #${reappeared[0].new_job_id} (${new Date(reappeared[0].new_created_at).toLocaleDateString()}) — corrective action was not applied in the CBS`
+            : `No re-occurrence of "${row.transactionRef}" found in subsequent reconciliation runs — CBS appears resolved`;
+
+          await drizzle.update(exceptionsTable)
+            .set({ cbsStillAnomalous: stillAnomalous, cbsVerificationNote: note })
+            .where(eq(exceptionsTable.id, row.exceptionId));
+
+          results.push({ exceptionId: row.exceptionId, cbsStillAnomalous: stillAnomalous, verificationNote: note });
+        }
+
+        return { checked: results.length, staleCount: results.filter((r) => r.cbsStillAnomalous).length, results };
+      }),
+
+    // User explicitly keeps the exception RESOLVED despite the CBS re-occurrence.
+    keepResolvedDespiteStaleness: protectedProcedure
+      .input(z.object({ exceptionId: z.number().int().positive() }))
+      .mutation(async ({ input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
+        await drizzle.update(exceptionsTable)
+          .set({ userKeptResolved: true })
+          .where(eq(exceptionsTable.id, input.exceptionId));
+        return { success: true, exceptionId: input.exceptionId };
       }),
   }),
 
@@ -1799,7 +1966,7 @@ export const appRouter = router({
           return true;
         });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -2106,7 +2273,7 @@ export const appRouter = router({
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -2292,7 +2459,7 @@ export const appRouter = router({
 
         if (filtered.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "No completed reconciliation runs found for the selected period" });
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();
@@ -3963,6 +4130,28 @@ export const appRouter = router({
           createdAt: j.createdAt,
         }));
 
+        // Inject per-institution learned patterns as few-shot examples.
+        const saQueryDrizzle = await getDb();
+        const recentPatterns = saQueryDrizzle && orgId
+          ? await saQueryDrizzle.select({
+              category: agentMemory.exceptionCategory,
+              amountRange: agentMemory.amountRange,
+              resolution: agentMemory.resolution,
+              outcome: agentMemory.outcome,
+              reasoning: agentMemory.reasoning,
+            })
+            .from(agentMemory)
+            .where(eq(agentMemory.organizationId, orgId))
+            .orderBy(desc(agentMemory.createdAt))
+            .limit(8)
+          : [];
+        const fewShotBlock = recentPatterns.length > 0
+          ? `\n\nLearned patterns from your institution's resolved exceptions (${recentPatterns.length} examples):\n` +
+            recentPatterns.map(m =>
+              `• [${m.category}/${m.amountRange}] Resolution: "${m.resolution}" → ${m.outcome}. Context: ${(m.reasoning ?? "").substring(0, 100)}`
+            ).join("\n")
+          : "";
+
         const systemPrompt = `You are the ReconcileAI Super Agent — an autonomous financial reconciliation intelligence for African FMCG and corporate B2B payment environments.
 
 Your role is to:
@@ -3974,7 +4163,7 @@ Your role is to:
 Current system context:
 - Open exceptions: ${recentExceptions.total} total, showing top ${exceptionSummary.length}
 - Recent jobs: ${JSON.stringify(jobStats, null, 2)}
-- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}
+- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}${fewShotBlock}
 
 When proposing an action draft, structure your response as JSON with this exact format:
 {
@@ -5007,6 +5196,75 @@ Always be specific, reference actual exception IDs and amounts where available, 
           amount: parseFloat(r.amount ?? "0"),
         }));
       }),
+
+    // Check CBS staleness for all RESOLVED/ACKNOWLEDGED exceptions in a run.
+    // For each exception, re-queries the Fineract data to see if the underlying
+    // anomaly still exists — i.e., the user marked it RESOLVED but never fixed the CBS.
+    verifyResolvedExceptions: woodcoreProcedure
+      .input(z.object({ runId: z.number() }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_exceptions } = await import("../drizzle/woodcore_schema");
+        const { checkExceptionStaleness } = await import("./woodcore-engine");
+        const { and: _and, inArray } = await import("drizzle-orm");
+
+        const resolved = await db2.select().from(wc_exceptions)
+          .where(
+            _and(
+              eq(wc_exceptions.reconciliationRunId, input.runId),
+              inArray(wc_exceptions.reviewStatus, ["RESOLVED", "ACKNOWLEDGED"]),
+            )
+          );
+
+        if (resolved.length === 0) return { checked: 0, staleCount: 0, results: [] };
+
+        const results: { exceptionId: number; cbsStillAnomalous: boolean; verificationNote: string }[] = [];
+        const now = new Date();
+
+        for (const exc of resolved) {
+          try {
+            const check = await checkExceptionStaleness({
+              glEntryId: exc.glEntryId,
+              exceptionCategory: exc.exceptionCategory,
+              linkedSavingsTxnId: exc.linkedSavingsTxnId ?? null,
+              productMatch: exc.productMatch ?? null,
+            });
+            await db2.update(wc_exceptions)
+              .set({
+                cbsVerifiedAt: now,
+                cbsStillAnomalous: check.cbsStillAnomalous ? 1 : 0,
+                cbsVerificationNote: check.verificationNote.slice(0, 300),
+              })
+              .where(eq(wc_exceptions.id, exc.id));
+            results.push({ exceptionId: exc.id, ...check });
+          } catch {
+            // Non-fatal: if CBS is unreachable, skip this exception
+          }
+        }
+
+        return {
+          checked: results.length,
+          staleCount: results.filter((r) => r.cbsStillAnomalous).length,
+          results,
+        };
+      }),
+
+    // User chose to keep the exception RESOLVED despite the CBS still showing the anomaly.
+    // Sets userKeptResolved = 1 so the mismatch banner is suppressed.
+    keepResolvedDespiteStaleness: woodcoreProcedure
+      .input(z.object({ exceptionId: z.number() }))
+      .mutation(async ({ input }) => {
+        const { getDb } = await import("./db");
+        const db2 = await getDb();
+        if (!db2) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { wc_exceptions } = await import("../drizzle/woodcore_schema");
+        await db2.update(wc_exceptions)
+          .set({ userKeptResolved: 1 })
+          .where(eq(wc_exceptions.id, input.exceptionId));
+        return { success: true, exceptionId: input.exceptionId };
+      }),
   }),
   // ─── Compliance (NDPA/NDPR — NDA Clause 11, 7, 12) ───────────────────
   compliance: router({
@@ -5923,6 +6181,45 @@ Always be specific, reference actual exception IDs and amounts where available, 
       await logAudit(ctx.user.id, "exception_intelligence_sync", "exception_intelligence", orgId, { aggregated, pushed });
       return { aggregatedPatterns: aggregated.patterns, pushed };
     }),
+
+    // Per-institution learning flywheel stats: patterns captured by this org over time.
+    // Powers the "value grows with every job" narrative in the UI.
+    flywheelStats: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const drizzle = await getDb();
+      if (!drizzle) return { totalPatterns: 0, categoryCoverage: [] as { category: string; count: number }[], monthlyGrowth: [] as { month: string; count: number }[] };
+
+      const [totalRow] = await drizzle
+        .select({ count: sql<number>`count(*)` })
+        .from(agentMemory)
+        .where(eq(agentMemory.organizationId, orgId));
+
+      const categoryRows = await drizzle
+        .select({ category: agentMemory.exceptionCategory, count: sql<number>`count(*)` })
+        .from(agentMemory)
+        .where(eq(agentMemory.organizationId, orgId))
+        .groupBy(agentMemory.exceptionCategory)
+        .orderBy(desc(sql<number>`count(*)`));
+
+      const monthlyRows = await drizzle
+        .select({
+          month: sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`,
+          count: sql<number>`count(*)`,
+        })
+        .from(agentMemory)
+        .where(and(
+          eq(agentMemory.organizationId, orgId),
+          sql`${agentMemory.createdAt} >= DATE_SUB(NOW(), INTERVAL 6 MONTH)`,
+        ))
+        .groupBy(sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`)
+        .orderBy(sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`);
+
+      return {
+        totalPatterns: Number(totalRow?.count || 0),
+        categoryCoverage: categoryRows.map(r => ({ category: r.category, count: Number(r.count) })),
+        monthlyGrowth: monthlyRows.map(r => ({ month: r.month as string, count: Number(r.count) })),
+      };
+    }),
   }),
 
   // ─── CFO Report Schedule + Alerts ──────────────────────────────────
@@ -5981,7 +6278,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const { buildChannelMetrics } = await import("./cfoReportService");
         const rows = await buildChannelMetrics(input.period, input.channelCodes);
 
-        const ExcelJS = await import("exceljs");
+        const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
         workbook.creator = "ReconcileAI";
         workbook.created = new Date();

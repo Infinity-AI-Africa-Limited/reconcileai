@@ -116,6 +116,10 @@ type Layer3Result = {
   reviewedBy?: string | null;
   reviewedAt?: string | null;
   reviewNote?: string | null;
+  // CBS staleness detection
+  cbsStillAnomalous?: number | null; // 0=CBS fixed, 1=CBS still shows anomaly, null=not checked
+  cbsVerificationNote?: string | null;
+  userKeptResolved?: number | null; // 1=user dismissed the mismatch alert
 };
 
 type POCResult = {
@@ -532,17 +536,52 @@ function ExceptionRow({
   exc,
   layer3,
   onStatusUpdate,
+  onKeepResolved,
 }: {
   exc: Layer2Exception;
   layer3?: Layer3Result;
   onStatusUpdate: (id: number, status: ReviewStatus, note: string, reviewedAt: string) => void;
+  onKeepResolved?: (id: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const reviewStatus: ReviewStatus = (layer3?.reviewStatus as ReviewStatus) ?? "OPEN";
+  const showStalenessAlert =
+    reviewStatus === "RESOLVED" &&
+    layer3?.cbsStillAnomalous === 1 &&
+    !layer3?.userKeptResolved;
 
   return (
-    <div className="border rounded-xl overflow-hidden">
+    <div className={`border rounded-xl overflow-hidden ${showStalenessAlert ? "border-amber-400 ring-1 ring-amber-300" : ""}`}>
+      {showStalenessAlert && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-start gap-2.5">
+          <AlertTriangle className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-amber-800">CBS still shows this anomaly — corrective action not confirmed</p>
+            <p className="text-xs text-amber-700 mt-0.5 leading-relaxed">{layer3?.cbsVerificationNote}</p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              className="text-xs px-2.5 py-1 rounded-full bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 font-medium transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (layer3) onStatusUpdate(layer3.exceptionId, "OPEN", "Reverted — CBS still shows the anomaly", new Date().toISOString());
+              }}
+            >
+              Revert to Open
+            </button>
+            <button
+              className="text-xs px-2.5 py-1 rounded-full bg-amber-600 text-white hover:bg-amber-700 font-medium transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (layer3?.exceptionId != null) onKeepResolved?.(layer3.exceptionId);
+              }}
+            >
+              Keep as Resolved
+            </button>
+          </div>
+        </div>
+      )}
       <button
         className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors"
         onClick={() => setExpanded(!expanded)}
@@ -1109,6 +1148,28 @@ function POCModePanel({
     onSuccess: (data) => { setShareToken(data.token); },
   });
 
+  const verifyResolved = trpc.woodcore.verifyResolvedExceptions.useMutation({
+    onSuccess: (data) => {
+      if (!data.results.length) return;
+      const stalenessById = new Map(data.results.map((r) => [r.exceptionId, r]));
+      setLayer3Local((prev) =>
+        prev.map((r) => {
+          const s = stalenessById.get(r.exceptionId);
+          if (!s) return r;
+          return { ...r, cbsStillAnomalous: s.cbsStillAnomalous ? 1 : 0, cbsVerificationNote: s.verificationNote };
+        })
+      );
+    },
+  });
+
+  const keepResolved = trpc.woodcore.keepResolvedDespiteStaleness.useMutation({
+    onSuccess: (data) => {
+      setLayer3Local((prev) =>
+        prev.map((r) => r.exceptionId === data.exceptionId ? { ...r, userKeptResolved: 1 } : r)
+      );
+    },
+  });
+
   const runPOC = trpc.woodcore.runPOC.useMutation({
     onSuccess: (data) => {
       const result = data as POCResult;
@@ -1116,6 +1177,11 @@ function POCModePanel({
       setLayer3Local(result.layer3Results ?? []);
       setActiveTab("layer1");
       runsQuery.refetch();
+      // Auto-verify if the new run already has RESOLVED/ACKNOWLEDGED exceptions
+      const hasResolved = (result.layer3Results ?? []).some(
+        (r) => r.reviewStatus === "RESOLVED" || r.reviewStatus === "ACKNOWLEDGED"
+      );
+      if (hasResolved) verifyResolved.mutate({ runId: result.layer1.runId });
     },
   });
 
@@ -1138,11 +1204,17 @@ function POCModePanel({
     setLayer3Local((prev) =>
       prev.map((r) =>
         r.exceptionId === id
-          ? { ...r, reviewStatus: status, reviewNote: note, reviewedAt, reviewedBy: "Reviewer" }
+          ? { ...r, reviewStatus: status, reviewNote: note, reviewedAt, reviewedBy: "Reviewer",
+              // Clear staleness override when reverting to OPEN
+              ...(status === "OPEN" ? { cbsStillAnomalous: null, userKeptResolved: 0 } : {}) }
           : r
       )
     );
-  }, []);
+    // Re-run CBS verification after a status change to RESOLVED or ACKNOWLEDGED
+    if ((status === "RESOLVED" || status === "ACKNOWLEDGED") && pocResult) {
+      verifyResolved.mutate({ runId: pocResult.layer1.runId });
+    }
+  }, [pocResult, verifyResolved]);
 
   const handleRunPOC = () => {
     if (!selectedProductId) return;
@@ -1448,6 +1520,7 @@ function POCModePanel({
                           exc={exc}
                           layer3={layer3}
                           onStatusUpdate={handleStatusUpdate}
+                          onKeepResolved={(exceptionId) => keepResolved.mutate({ exceptionId })}
                         />
                       ))
                     }

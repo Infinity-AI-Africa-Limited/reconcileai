@@ -341,6 +341,42 @@ const normalizeResponseFormat = ({
   };
 };
 
+// ─── Transient-failure retry ───────────────────────────────────────────────────
+
+// Statuses worth retrying: rate-limit (429), Anthropic "overloaded" (529), and
+// gateway/upstream blips (500/502/503/504). A scanned-PDF extraction must not die
+// because api.anthropic.com's Cloudflare front returned a one-off 502.
+const TRANSIENT_STATUS = new Set([429, 500, 502, 503, 504, 529]);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * fetch() with bounded exponential backoff (+jitter) on transient upstream
+ * failures and network errors. Non-transient responses (2xx, 4xx) return
+ * immediately. After exhausting retries on a transient status, returns the last
+ * response unconsumed so the caller surfaces the upstream error as usual.
+ */
+async function fetchLLM(url: string, init: RequestInit, retries = 3): Promise<Response> {
+  let lastResponse: Response | undefined;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (TRANSIENT_STATUS.has(res.status) && attempt < retries) {
+        // Discard the failed body so the socket can be reused; keep the latest
+        // around only to return if every attempt fails.
+        if (lastResponse) lastResponse.body?.cancel().catch(() => {});
+        lastResponse = res;
+        await sleep(500 * 2 ** attempt + Math.floor(Math.random() * 250));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (attempt >= retries) throw err;
+      await sleep(500 * 2 ** attempt + Math.floor(Math.random() * 250));
+    }
+  }
+  return lastResponse as Response;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -404,7 +440,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   // Data residency: in on-premise mode this throws unless apiUrl is local/allowlisted.
   assertEgressAllowed(provider.apiUrl, "LLM call");
 
-  const response = await fetch(provider.apiUrl, {
+  const response = await fetchLLM(provider.apiUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -671,7 +707,7 @@ async function invokeAnthropic(
   // (a local Anthropic-Messages-compatible gateway is allowed; api.anthropic.com is not).
   assertEgressAllowed(provider.apiUrl, "LLM call");
 
-  const response = await fetch(provider.apiUrl, {
+  const response = await fetchLLM(provider.apiUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",

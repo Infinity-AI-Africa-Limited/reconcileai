@@ -266,6 +266,10 @@ export const exceptions = mysqlTable("exceptions", {
   resolvedBy: int("resolvedBy"),
   resolvedAt: timestamp("resolvedAt"),
   resolutionNotes: text("resolutionNotes"),
+  // CBS staleness detection: set when a re-run finds the same anomaly after RESOLVED status
+  cbsStillAnomalous: boolean("cbsStillAnomalous").default(false),
+  cbsVerificationNote: text("cbsVerificationNote"),
+  userKeptResolved: boolean("userKeptResolved").default(false),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_exceptions_job").on(table.jobId),

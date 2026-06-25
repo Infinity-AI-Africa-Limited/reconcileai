@@ -30,7 +30,7 @@ import {
   wc_reconciliation_runs,
   wc_exceptions,
 } from "../drizzle/woodcore_schema";
-import { eq, and, between, sql, isNull, isNotNull, ne } from "drizzle-orm";
+import { eq, and, between, sql, isNull, isNotNull, ne, inArray } from "drizzle-orm";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -248,42 +248,71 @@ export async function runLayer1(config: ReconciliationConfig): Promise<Layer1Res
     savingsCharges = totalWriteOff; // reuse field: write-offs
     savingsInterest = 0;
   } else {
-    // ── SAVINGS: original logic ───────────────────────────────────────────────
+    // ── SAVINGS: balance + activity from v_all_savings_account_transaction ─────
+    // The mirror wc_m_savings_account_transaction is now sourced from Woodcore's
+    // v_all_savings_account_transaction view (the COMPLETE transaction history),
+    // not the sparse base m_savings_account_transaction table. See woodcoreSync.ts.
     const savingsAccounts = await db.select({
       id: wc_m_savings_account.id,
-      accountBalanceDerived: wc_m_savings_account.accountBalanceDerived,
     }).from(wc_m_savings_account)
       .where(and(
         eq(wc_m_savings_account.productId, productId),
         eq(wc_m_savings_account.currencyCode, currencyCode),
       ));
+    const productAccountIds = savingsAccounts.map((a: typeof savingsAccounts[0]) => a.id);
 
-    const savingsTxns = await db.select({
+    // Period activity breakdown (deposits / withdrawals / interest / charges),
+    // scoped in SQL to this product's accounts now that the mirror is complete.
+    const productTxns = productAccountIds.length === 0 ? [] : await db.select({
       id: wc_m_savings_account_transaction.id,
       savingsAccountId: wc_m_savings_account_transaction.savingsAccountId,
       transactionTypeEnum: wc_m_savings_account_transaction.transactionTypeEnum,
       isReversed: wc_m_savings_account_transaction.isReversed,
       transactionDate: wc_m_savings_account_transaction.transactionDate,
       amount: wc_m_savings_account_transaction.amount,
-      runningBalanceDerived: wc_m_savings_account_transaction.runningBalanceDerived,
     }).from(wc_m_savings_account_transaction)
-      .where(between(wc_m_savings_account_transaction.transactionDate, periodStart, periodEnd));
-
-    const productAccountIds = new Set(savingsAccounts.map((a: typeof savingsAccounts[0]) => a.id));
-    const productTxns = savingsTxns.filter((t: typeof savingsTxns[0]) => productAccountIds.has(t.savingsAccountId));
+      .where(and(
+        inArray(wc_m_savings_account_transaction.savingsAccountId, productAccountIds),
+        between(wc_m_savings_account_transaction.transactionDate, periodStart, periodEnd),
+      ));
 
     for (const t of productTxns) {
       if (t.isReversed) continue;
       const amt = parseFloat(t.amount?.toString() ?? "0");
-      if (t.transactionTypeEnum === 1) savingsDeposits += amt;
-      else if (t.transactionTypeEnum === 2) savingsWithdrawals += amt;
-      else if (t.transactionTypeEnum === 3) savingsInterest += amt;
-      else if (t.transactionTypeEnum === 7) savingsCharges += amt;
+      if (t.transactionTypeEnum === 1) savingsDeposits += amt;        // Deposit
+      else if (t.transactionTypeEnum === 2) savingsWithdrawals += amt; // Withdrawal
+      else if (t.transactionTypeEnum === 3) savingsInterest += amt;    // Interest posting
+      else if (t.transactionTypeEnum === 4 || t.transactionTypeEnum === 5 || t.transactionTypeEnum === 7)
+        savingsCharges += amt;                                         // Withdrawal/annual/pay charge
     }
 
-    expectedBalance = savingsAccounts.reduce((sum: number, a: typeof savingsAccounts[0]) => {
-      return sum + parseFloat(a.accountBalanceDerived?.toString() ?? "0");
-    }, 0);
+    // Expected balance = sum across the product's accounts of each account's latest
+    // non-reversed running balance as of periodEnd, from the complete view-backed
+    // mirror. running_balance_derived is Fineract's authoritative per-transaction
+    // balance; the dedup tie-break keeps it deterministic for the view's few
+    // duplicate ids. Accounts with no qualifying transaction contribute 0.
+    if (productAccountIds.length > 0) {
+      const balResult = await db.execute(sql`
+        SELECT COALESCE(SUM(lt.running_balance_derived), 0) AS expected
+        FROM (
+          SELECT t.running_balance_derived,
+            ROW_NUMBER() OVER (
+              PARTITION BY t.savings_account_id
+              ORDER BY t.transaction_date DESC, t.id DESC, t.running_balance_derived DESC
+            ) AS rn
+          FROM wc_m_savings_account_transaction t
+          JOIN wc_m_savings_account a ON a.id = t.savings_account_id
+          WHERE a.product_id = ${productId}
+            AND a.currency_code = ${currencyCode}
+            AND t.is_reversed = 0
+            AND t.running_balance_derived IS NOT NULL
+            AND t.transaction_date <= ${periodEnd}
+        ) lt
+        WHERE lt.rn = 1
+      `);
+      const balRows = (balResult as unknown as any[][])[0] as any[];
+      expectedBalance = parseFloat(balRows?.[0]?.expected?.toString() ?? "0");
+    }
     totalLoanTxns = productTxns.length;
   }
 
@@ -958,6 +987,107 @@ export async function runFullPOC(config: ReconciliationConfig) {
     layer2Exceptions,
     layer3Results,
   };
+}
+
+// ─── CBS Staleness Check ──────────────────────────────────────────────────────
+// Re-examines the CBS (Fineract) data for a RESOLVED exception to determine
+// whether the underlying anomaly was actually fixed in the core banking system.
+
+export type StalenessCheckResult = {
+  cbsStillAnomalous: boolean;
+  verificationNote: string;
+};
+
+export async function checkExceptionStaleness(exception: {
+  glEntryId: number;
+  exceptionCategory: string;
+  linkedSavingsTxnId: number | null;
+  productMatch: number | null;
+}): Promise<StalenessCheckResult> {
+  const db = await getDatabase();
+
+  // Synthetic GL IDs (negative) are used for loan categories where no GL entry exists.
+  // REPAYMENT_NOT_POSTED: glEntryId = -(loanTxnId)
+  // DISBURSEMENT_NOT_POSTED/MISPOSTING: glEntryId = -(loanTxnId + 10000)
+  if (exception.glEntryId < 0) {
+    const loanTxnId = exception.exceptionCategory === "REPAYMENT_NOT_POSTED"
+      ? -exception.glEntryId
+      : -exception.glEntryId - 10000;
+
+    // Check if a GL entry now exists linking to this loan transaction
+    const glRows = await db.select({ id: wc_acc_gl_journal_entry.id })
+      .from(wc_acc_gl_journal_entry)
+      .where(and(
+        eq(wc_acc_gl_journal_entry.loanTransactionId, loanTxnId),
+        eq(wc_acc_gl_journal_entry.reversed, 0),
+      ));
+    if (glRows.length > 0) {
+      return { cbsStillAnomalous: false, verificationNote: "GL entry for this loan transaction now exists in CBS — anomaly resolved" };
+    }
+    return { cbsStillAnomalous: true, verificationNote: `Loan transaction still has no corresponding GL entry in CBS (${exception.exceptionCategory})` };
+  }
+
+  // Real GL entry — look it up
+  const [glEntry] = await db.select({
+    reversed: wc_acc_gl_journal_entry.reversed,
+    manualEntry: wc_acc_gl_journal_entry.manualEntry,
+    savingsTransactionId: wc_acc_gl_journal_entry.savingsTransactionId,
+    loanTransactionId: wc_acc_gl_journal_entry.loanTransactionId,
+    reversalId: wc_acc_gl_journal_entry.reversalId,
+  }).from(wc_acc_gl_journal_entry)
+    .where(eq(wc_acc_gl_journal_entry.id, exception.glEntryId));
+
+  if (!glEntry) {
+    return { cbsStillAnomalous: false, verificationNote: "GL entry no longer exists in CBS — anomaly resolved" };
+  }
+  if (glEntry.reversed) {
+    return { cbsStillAnomalous: false, verificationNote: "GL entry has been reversed in CBS — anomaly resolved" };
+  }
+
+  switch (exception.exceptionCategory) {
+    case "MANUAL_POSTING":
+    case "MANUAL_POSTING_ANOMALY":
+    case "PRINCIPAL_ADJUSTMENT_ANOMALY":
+      if (!glEntry.manualEntry) {
+        return { cbsStillAnomalous: false, verificationNote: "Manual entry flag removed in CBS — anomaly resolved" };
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry is still flagged as a manual posting in CBS — corrective action not yet taken" };
+
+    case "ORPHANED_ENTRY":
+    case "ORPHANED_LOAN_ENTRY":
+      if (glEntry.savingsTransactionId != null || glEntry.loanTransactionId != null) {
+        return { cbsStillAnomalous: false, verificationNote: "GL entry now has a linked CBS transaction — anomaly resolved" };
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry still has no linked savings or loan transaction in CBS" };
+
+    case "REVERSAL_ANOMALY": {
+      if (!glEntry.reversalId) {
+        return { cbsStillAnomalous: false, verificationNote: "Reversal reference removed in CBS — anomaly resolved" };
+      }
+      // Check if the linked savings transaction is still reversed
+      if (exception.linkedSavingsTxnId) {
+        const [savingsTxn] = await db.select({ isReversed: wc_m_savings_account_transaction.isReversed })
+          .from(wc_m_savings_account_transaction)
+          .where(eq(wc_m_savings_account_transaction.id, exception.linkedSavingsTxnId));
+        if (savingsTxn && !savingsTxn.isReversed) {
+          return { cbsStillAnomalous: false, verificationNote: "CBS transaction reversal has been corrected" };
+        }
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry still shows reversal anomaly in CBS" };
+    }
+
+    case "CROSS_PRODUCT_MISPOSTING":
+      if (exception.productMatch === 1) {
+        return { cbsStillAnomalous: false, verificationNote: "Product mapping now matches — anomaly resolved" };
+      }
+      return { cbsStillAnomalous: true, verificationNote: "GL entry is still linked to a transaction belonging to a different product in CBS" };
+
+    case "DISBURSEMENT_MISPOSTING":
+      return { cbsStillAnomalous: true, verificationNote: "GL entry for disbursement still present and unreversed in CBS — check if it was reposted correctly" };
+
+    default:
+      return { cbsStillAnomalous: true, verificationNote: `GL entry for ${exception.exceptionCategory} still exists and is unreversed in CBS — corrective action not confirmed` };
+  }
 }
 
 // ─── Query helpers ────────────────────────────────────────────────────────────

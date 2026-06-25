@@ -8,6 +8,7 @@ import * as db from "./db";
 import { notifyOwner } from "./_core/notification";
 import { sendEmail, renderBrandedHtml, markdownToBasicHtml } from "./_core/email";
 import { storagePut } from "./storage";
+import { loadExcelJS } from "./exceljsLoader";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -242,7 +243,7 @@ export async function sendWeeklyChannelReport(
     let xlsxBuffer: Buffer | undefined;
     let xlsxFileName: string | undefined;
     try {
-      const ExcelJS = await import("exceljs");
+      const ExcelJS = await loadExcelJS();
       const workbook = new ExcelJS.Workbook();
       workbook.creator = "ReconcileAI";
       workbook.created = now;

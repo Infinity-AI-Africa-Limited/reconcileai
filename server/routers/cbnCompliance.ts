@@ -17,6 +17,7 @@ import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { invokeLLM } from "../_core/llm";
+import { loadExcelJS } from "../exceljsLoader";
 import { signReport, verifyReport, publicKeyFingerprint, publicKeyPem } from "../signing";
 import {
   cbnReportFrameworks,
@@ -904,7 +905,7 @@ Be specific, reference the relevant CBN regulation, and write in a professional 
         .where(eq(cbnReportFindings.submissionId, input.submissionId))
         .orderBy(asc(cbnReportFindings.severity));
 
-      const ExcelJS = await import("exceljs");
+      const ExcelJS = await loadExcelJS();
       const workbook = new ExcelJS.Workbook();
       workbook.creator = "ReconcileAI";
       workbook.created = new Date();
