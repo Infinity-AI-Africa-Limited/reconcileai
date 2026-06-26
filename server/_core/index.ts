@@ -11,6 +11,7 @@ import { serveStatic, setupVite } from "./vite";
 import { assertResidencyStartupConfig, describeResidencyPosture } from "./egress";
 import { getLlmProviderInfo } from "./llm";
 import { getDb } from "../db";
+import { seedDefaultResolutionTemplates } from "../seedResolutionTemplates";
 import { sql } from "drizzle-orm";
 import { storagePut, storageGet, storageDelete } from "../storage";
 import { sdk } from "./sdk";
@@ -404,6 +405,12 @@ async function startServer() {
   } else {
     serveStatic(app);
   }
+
+  // Seed global default resolution templates (idempotent; fire-and-forget so a
+  // DB hiccup never blocks startup or the healthcheck).
+  seedDefaultResolutionTemplates()
+    .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} default resolution template(s)`); })
+    .catch((e) => console.error("[seed] resolution templates failed:", e instanceof Error ? e.message : e));
 
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);

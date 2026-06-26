@@ -719,9 +719,13 @@ async function invokeAnthropic(
 
   if (!response.ok) {
     const errorText = await response.text();
+    const hint =
+      response.status === 401 || response.status === 403
+        ? " — authentication failed; verify DIRECT_LLM_API_KEY is a valid Anthropic key (sk-ant-…) for DIRECT_LLM_API_URL"
+        : "";
     throw new Error(
       `LLM invoke failed [anthropic/${provider.model}]: ` +
-        `${response.status} ${response.statusText} – ${errorText}`
+        `${response.status} ${response.statusText} – ${errorText}${hint}`
     );
   }
 

@@ -337,6 +337,13 @@
       "when": 1782228887910,
       "tag": "0047_violet_grim_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "5",
+      "when": 1782489122244,
+      "tag": "0048_youthful_smiling_tiger",
+      "breakpoints": true
     }
   ]
 }

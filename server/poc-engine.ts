@@ -168,9 +168,16 @@ export async function extractTransactions(params: {
       maxTokens: 8192,
     });
   } catch (err: any) {
-    // The retry layer already absorbed transient blips; if we still failed on a
-    // gateway/upstream error, don't surface raw provider HTML to the prospect.
+    // Keep the real provider error in the server logs for operators…
     const msg = String(err?.message ?? "");
+    console.error("[poc extract] LLM call failed:", msg);
+    // …but never surface raw provider HTML/JSON (or API-key errors) to the prospect.
+    if (/\b401\b|\b403\b|unauthorized|authentication_error|invalid x-api-key|api[- ]?key|not configured/i.test(msg)) {
+      throw new Error(
+        "The extraction service is temporarily unavailable due to a configuration issue on our side. " +
+        "Your file is fine — please try again later or contact support.",
+      );
+    }
     if (/\b50\d\b|bad gateway|gateway time-?out|overloaded|temporarily|ECONN|fetch failed/i.test(msg)) {
       throw new Error("The extraction service is busy right now. Please try again in a moment.");
     }

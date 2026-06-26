@@ -437,16 +437,15 @@ export default function Exceptions() {
                     </TooltipProvider>
                   </div>
                   <div className="space-y-1.5 max-h-32 overflow-y-auto">
-                    {templates.map((t: any) => (
+                    {templates.map((t) => (
                       <button
                         key={t.id}
                         className="w-full text-left text-xs bg-muted/50 hover:bg-muted p-2 rounded border border-transparent hover:border-border"
                         onClick={() => setResolveNotes(t.templateText)}
+                        title={t.templateText}
                       >
-                        <span className="font-medium">{t.title}</span>
-                        {t.successRate != null && (
-                          <span className="ml-2 text-green-600">{Math.round(t.successRate * 100)}% success</span>
-                        )}
+                        <span className="font-medium">{t.name}</span>
+                        <span className="block text-muted-foreground truncate">{t.templateText}</span>
                       </button>
                     ))}
                   </div>
