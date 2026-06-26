@@ -8,7 +8,7 @@
  * are (re)added on the next start. createdBy = 0 is a system sentinel; the column
  * has no FK and template edit/delete key off id, so this is safe.
  */
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { resolutionTemplates } from "../drizzle/schema";
 
@@ -150,32 +150,66 @@ const DEFAULT_TEMPLATES: Array<{ category: ExceptionCategory; name: string; temp
   },
 ];
 
+/** Stable dedupe key for a global default (matches the unique index column). */
+const dedupeKeyFor = (category: ExceptionCategory, name: string) => `default:${category}:${name}`;
+
 /**
- * Insert any missing global default templates. Returns how many were added.
- * Never throws to the caller's critical path — callers should still guard.
+ * Reconcile the global default templates: insert any that are missing and
+ * backfill the dedupe_key on any already-seeded rows that predate the column.
+ * Returns how many were inserted. Never throws to the caller's critical path —
+ * callers should still guard.
+ *
+ * Race-proof: inserts carry a unique dedupe_key, so two instances seeding at once
+ * (e.g. overlapping rolling deploy) can't create duplicates — the second insert
+ * is absorbed by ON DUPLICATE KEY as a no-op rather than throwing.
  */
 export async function seedDefaultResolutionTemplates(): Promise<{ inserted: number }> {
   const db = await getDb();
   if (!db) return { inserted: 0 };
 
   const existing = await db
-    .select({ category: resolutionTemplates.category, name: resolutionTemplates.name })
+    .select({
+      id: resolutionTemplates.id,
+      category: resolutionTemplates.category,
+      name: resolutionTemplates.name,
+      dedupeKey: resolutionTemplates.dedupeKey,
+    })
     .from(resolutionTemplates)
     .where(and(isNull(resolutionTemplates.organizationId), eq(resolutionTemplates.isDefault, true)));
 
-  const have = new Set(existing.map((r) => `${r.category}::${r.name}`));
-  const toInsert = DEFAULT_TEMPLATES.filter((t) => !have.has(`${t.category}::${t.name}`));
+  // Last-wins map: if a pre-existing race left duplicate rows for the same key,
+  // only one is referenced here, so backfill assigns each unique key to one row.
+  const byKey = new Map(existing.map((r) => [`${r.category}::${r.name}`, r]));
+
+  const toInsert: typeof DEFAULT_TEMPLATES = [];
+  const toBackfill: Array<{ id: number; dedupeKey: string }> = [];
+  for (const t of DEFAULT_TEMPLATES) {
+    const row = byKey.get(`${t.category}::${t.name}`);
+    if (!row) toInsert.push(t);
+    else if (row.dedupeKey == null) toBackfill.push({ id: row.id, dedupeKey: dedupeKeyFor(t.category, t.name) });
+  }
+
+  // Backfill rows seeded before the dedupe_key column existed (each key distinct →
+  // no unique-index conflict). Runs once; later boots find the key already set.
+  for (const b of toBackfill) {
+    await db.update(resolutionTemplates).set({ dedupeKey: b.dedupeKey }).where(eq(resolutionTemplates.id, b.id));
+  }
+
   if (toInsert.length === 0) return { inserted: 0 };
 
-  await db.insert(resolutionTemplates).values(
-    toInsert.map((t) => ({
-      name: t.name,
-      category: t.category,
-      templateText: t.templateText,
-      isDefault: true,
-      createdBy: SYSTEM_CREATED_BY,
-      organizationId: null,
-    })),
-  );
+  await db
+    .insert(resolutionTemplates)
+    .values(
+      toInsert.map((t) => ({
+        name: t.name,
+        category: t.category,
+        templateText: t.templateText,
+        isDefault: true,
+        createdBy: SYSTEM_CREATED_BY,
+        organizationId: null,
+        dedupeKey: dedupeKeyFor(t.category, t.name),
+      })),
+    )
+    .onDuplicateKeyUpdate({ set: { dedupeKey: sql`dedupe_key` } });
   return { inserted: toInsert.length };
 }

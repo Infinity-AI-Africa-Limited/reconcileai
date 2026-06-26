@@ -799,11 +799,19 @@ export const resolutionTemplates = mysqlTable("resolution_templates", {
   isDefault: boolean("isDefault").default(false).notNull(),
   createdBy: int("createdBy").notNull(), // References users table
   organizationId: int("organizationId"), // References organizations table
+  // Dedupe guard for the seeded GLOBAL defaults only. Set to
+  // `default:<category>:<name>` for org-less default rows, NULL for everything
+  // else. A unique index on it makes seeding race-proof. A plain unique index on
+  // organizationId+category+name would NOT work here: MySQL treats the NULL
+  // organizationId of global defaults as always-distinct, so it would permit
+  // duplicates. Multiple NULLs are allowed, so user/org templates stay unconstrained.
+  dedupeKey: varchar("dedupe_key", { length: 191 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
   index("idx_resolution_templates_category").on(table.category),
   index("idx_resolution_templates_org").on(table.organizationId),
+  uniqueIndex("uniq_resolution_template_dedupe").on(table.dedupeKey),
 ]);
 
 export type ResolutionTemplate = typeof resolutionTemplates.$inferSelect;
