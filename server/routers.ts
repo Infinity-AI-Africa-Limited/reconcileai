@@ -4131,23 +4131,50 @@ export const appRouter = router({
         }));
 
         // Inject per-institution learned patterns as few-shot examples.
+        // Selection strategy: pull a candidate pool of the 60 most recent patterns,
+        // then rank by relevance to the user's query using token-overlap (Jaccard).
+        // Within the same relevance tier, more recent patterns rank higher.
+        // This ensures the AI sees the most applicable institutional memory, not
+        // just the most recently resolved exceptions.
         const saQueryDrizzle = await getDb();
-        const recentPatterns = saQueryDrizzle && orgId
+        const candidatePatterns = saQueryDrizzle && orgId
           ? await saQueryDrizzle.select({
               category: agentMemory.exceptionCategory,
               amountRange: agentMemory.amountRange,
               resolution: agentMemory.resolution,
               outcome: agentMemory.outcome,
               reasoning: agentMemory.reasoning,
+              embeddingText: agentMemory.embeddingText,
             })
             .from(agentMemory)
             .where(eq(agentMemory.organizationId, orgId))
             .orderBy(desc(agentMemory.createdAt))
-            .limit(8)
+            .limit(60)
           : [];
-        const fewShotBlock = recentPatterns.length > 0
-          ? `\n\nLearned patterns from your institution's resolved exceptions (${recentPatterns.length} examples):\n` +
-            recentPatterns.map(m =>
+
+        // Rank candidates by Jaccard token-overlap against the user's query.
+        const queryTokens = new Set(
+          input.query.toLowerCase().split(/[\s|:,.()?!]+/).filter((t) => t.length > 2)
+        );
+        const queryTokensArr = Array.from(queryTokens);
+        const rankedPatterns = candidatePatterns
+          .map((m, idx) => {
+            const memText = `${m.category} ${m.amountRange} ${m.resolution} ${m.reasoning ?? ''}`.toLowerCase();
+            const memTokens = new Set(memText.split(/[\s|:,.()?!]+/).filter((t) => t.length > 2));
+            const memTokensArr = Array.from(memTokens);
+            const intersectionCount = queryTokensArr.filter((t) => memTokens.has(t)).length;
+            const unionCount = new Set([...queryTokensArr, ...memTokensArr]).size;
+            const similarity = unionCount > 0 ? intersectionCount / unionCount : 0;
+            return { m, similarity, idx };
+          })
+          // Sort by similarity desc, then by original index (recency) asc as tiebreaker.
+          .sort((a, b) => b.similarity - a.similarity || a.idx - b.idx)
+          .slice(0, 8)
+          .map((r) => r.m);
+
+        const fewShotBlock = rankedPatterns.length > 0
+          ? `\n\nLearned patterns from your institution's resolved exceptions (${rankedPatterns.length} most relevant examples):\n` +
+            rankedPatterns.map(m =>
               `• [${m.category}/${m.amountRange}] Resolution: "${m.resolution}" → ${m.outcome}. Context: ${(m.reasoning ?? "").substring(0, 100)}`
             ).join("\n")
           : "";
@@ -4435,6 +4462,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
         exceptionCategory: z.string(),
         transactionRef: z.string().optional(),
         amountRange: z.enum(['0-100k', '100k-1m', '1m+']),
+        // counterpartyType is optional; when omitted the server derives it from the
+        // linked exception's transaction record so the flywheel is always accurate.
+        counterpartyType: z.string().optional(),
         deductionType: z.string().optional(),
         resolution: z.string(),
         outcome: z.enum(['resolved', 'escalated', 'rejected']),
@@ -4447,13 +4477,33 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
 
+        // Derive the counterparty type from the linked exception's transaction when
+        // the caller does not supply it, so we never fall back to a hardcoded value.
+        let resolvedCounterpartyType = input.counterpartyType ?? null;
+        if (!resolvedCounterpartyType && input.exceptionId) {
+          try {
+            const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
+            const cpRows = await drizzle
+              .select({ counterparty: txTbl.counterparty })
+              .from(exTbl)
+              .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
+              .where(eq(exTbl.id, input.exceptionId))
+              .limit(1);
+            if (cpRows.length) {
+              const ei = await import("./exceptionIntelligence");
+              resolvedCounterpartyType = ei.counterpartyTypeOf(cpRows[0].counterparty);
+            }
+          } catch { /* non-fatal: fall through to 'unknown' */ }
+        }
+        if (!resolvedCounterpartyType) resolvedCounterpartyType = 'unknown';
+
         await drizzle.insert(agentMemory).values({
           organizationId: orgId,
           exceptionId: input.exceptionId,
           exceptionCategory: input.exceptionCategory,
           transactionRef: input.transactionRef,
           amountRange: input.amountRange,
-          counterpartyType: 'distributor',
+          counterpartyType: resolvedCounterpartyType,
           deductionType: input.deductionType,
           resolution: input.resolution,
           outcome: input.outcome,
@@ -4470,7 +4520,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           const sig = ei.deriveSignature({
             exceptionCategory: input.exceptionCategory,
             amount: input.amountRange === "1m+" ? 1_000_000 : input.amountRange === "100k-1m" ? 100_000 : 0,
-            counterpartyType: "distributor",
+            counterpartyType: resolvedCounterpartyType,
             deductionType: input.deductionType ?? null,
             resolution: input.resolution,
             outcome: input.outcome,
@@ -4496,6 +4546,10 @@ Always be specific, reference actual exception IDs and amounts where available, 
       .input(z.object({
         embeddingText: z.string(),
         topK: z.number().int().min(1).max(10).default(3),
+        // Explicit category avoids fragile regex parsing of the embedding text.
+        // Callers should pass the exception's category directly; falls back to
+        // parsing the embedding text only when omitted for backwards compatibility.
+        exceptionCategory: z.string().optional(),
       }))
       .query(async ({ input, ctx }) => {
         const orgId = ctx.user.organizationId ?? 0;
@@ -4546,14 +4600,19 @@ Always be specific, reference actual exception IDs and amounts where available, 
           .slice(0, input.topK);
 
         // Exception Intelligence: augment with cross-institution recommendations
-        // from the shared pool (k-anonymized, non-personal). The category is
-        // parsed from the embedding text's `category:<x>` token.
+        // from the shared pool (k-anonymized, non-personal).
+        // Prefer the explicit exceptionCategory input; fall back to parsing the
+        // embedding text's `category:<x>` token for backwards compatibility.
         let sharedRecommendations: Array<{ resolutionActionClass: string; outcome: string; contributorCount: number; observationCount: number }> = [];
         try {
-          const catMatch = input.embeddingText.match(/category:([a-z0-9_]+)/i);
-          if (catMatch) {
+          let resolvedCategory: string | null = input.exceptionCategory ?? null;
+          if (!resolvedCategory) {
+            const catMatch = input.embeddingText.match(/category:([a-z0-9_]+)/i);
+            resolvedCategory = catMatch ? catMatch[1] : null;
+          }
+          if (resolvedCategory) {
             const ei = await import("./exceptionIntelligence");
-            sharedRecommendations = await ei.getSharedRecommendations(orgId, catMatch[1]);
+            sharedRecommendations = await ei.getSharedRecommendations(orgId, resolvedCategory);
           }
         } catch (err) {
           console.error("[ExceptionIntelligence] shared recommendation lookup failed (non-fatal):", err);

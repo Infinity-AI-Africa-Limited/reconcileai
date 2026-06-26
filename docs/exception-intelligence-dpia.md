@@ -49,8 +49,7 @@ keep it that way:
 Because no personal data is shared, no individual lawful basis is engaged for the shared payload. For
 the *local* signatures derived from an institution's own resolved exceptions, processing is under the
 institution's legitimate interest in reconciliation quality, within its existing controller role.
-Rights are preserved: an institution can disable contribution and/or consumption at any time
-(`exceptionIntelligence.updateSettings`), and disabling contribution stops any future sharing.
+Rights are preserved: cross-institution sharing is **off by default** — both `shareEnabled` and `consumeEnabled` initialise to `false` in `getSettings`. An institution must explicitly opt in. Once opted in, contribution and consumption are coupled (reciprocity rule: you cannot consume without contributing). Either flag can be disabled at any time via `exceptionIntelligence.updateSettings`, and disabling contribution immediately stops any future sharing.
 
 ## 5. Data flows & residency
 
@@ -68,7 +67,7 @@ Rights are preserved: an institution can disable contribution and/or consumption
 | Singling out a contributor | k-anonymity (≥3 orgs) before a pattern is served; pseudonymized contributor |
 | PII leakage via free text | Free-text resolution mapped to a fixed action class; `assertNoPII` blocks any free-text/identifier value |
 | Unwanted egress (on-prem) | Residency egress guard + single allowlisted endpoint |
-| Lack of choice | Per-org opt-out for both contribution and consumption; default-on, documented |
+| Lack of choice | Per-org opt-in for both contribution and consumption; **default-off** (both `shareEnabled` and `consumeEnabled` initialise to `false`); institution must explicitly enable; documented in settings UI |
 | Lack of transparency | Settings page lists exactly which fields are shared and the current posture |
 
 ## 7. Residual risk
