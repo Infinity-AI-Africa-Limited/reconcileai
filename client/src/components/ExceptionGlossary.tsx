@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { trpc } from "@/lib/trpc";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -11,7 +13,9 @@ import { BookOpen, ChevronDown } from "lucide-react";
  * recur in African bank / MFB / FMCG reconciliation.
  */
 type GlossaryEntry = { term: string; description: string };
-type GlossaryGroup = { title: string; note?: string; entries: GlossaryEntry[] };
+// hideForCorporateB2b: card-settlement terms are finserv-specific, so they're
+// hidden in the Corporate B2B segment (and when a super admin views as one).
+type GlossaryGroup = { title: string; note?: string; hideForCorporateB2b?: boolean; entries: GlossaryEntry[] };
 
 const GLOSSARY: GlossaryGroup[] = [
   {
@@ -30,6 +34,7 @@ const GLOSSARY: GlossaryGroup[] = [
   },
   {
     title: "Card & settlement exceptions",
+    hideForCorporateB2b: true,
     note: "Common when reconciling a core banking ledger against a card processor / scheme settlement file (e.g. Interswitch, Visa, Mastercard, Verve).",
     entries: [
       { term: "Chargeback", description: "The customer or issuer has disputed a transaction. The ledger shows a debit reversal the settlement file has not yet reflected." },
@@ -65,6 +70,17 @@ const GLOSSARY: GlossaryGroup[] = [
 export default function ExceptionGlossary({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
 
+  // Effective segment: a super admin viewing-as an org uses that org's segment;
+  // otherwise the caller's own org segment. Card-settlement terms are hidden for
+  // Corporate B2B; any other / unknown segment shows the full glossary.
+  const { viewAsOrg, isViewingAs } = usePortalContext();
+  const { data: mine } = trpc.auth.mySegment.useQuery(undefined, {
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+  });
+  const segment = isViewingAs ? viewAsOrg?.segment : mine?.segment;
+  const groups = GLOSSARY.filter((g) => !(g.hideForCorporateB2b && segment === "corporate_b2b"));
+
   return (
     <Card>
       <Collapsible open={open} onOpenChange={setOpen}>
@@ -78,7 +94,7 @@ export default function ExceptionGlossary({ defaultOpen = false }: { defaultOpen
         </CollapsibleTrigger>
         <CollapsibleContent>
           <CardContent className="pt-0 space-y-6">
-            {GLOSSARY.map((group) => (
+            {groups.map((group) => (
               <div key={group.title}>
                 <p className="text-xs font-semibold text-foreground">{group.title}</p>
                 {group.note && <p className="text-[11px] text-muted-foreground mt-0.5 mb-2">{group.note}</p>}

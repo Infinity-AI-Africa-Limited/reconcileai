@@ -446,6 +446,20 @@ export const appRouter = router({
 
   auth: router({
     me: publicProcedure.query((opts) => opts.ctx.user),
+    // The caller's organization segment (financial_services | corporate_b2b |
+    // super_admin), or null. Drives segment-aware UI (e.g. hiding card-settlement
+    // content for corporate B2B). Cheap, indexed lookup — used sparingly.
+    mySegment: protectedProcedure.query(async ({ ctx }) => {
+      if (!ctx.user.organizationId) return { segment: null as string | null };
+      const drizzle = await getDb();
+      if (!drizzle) return { segment: null as string | null };
+      const [org] = await drizzle
+        .select({ segment: organizations.segment })
+        .from(organizations)
+        .where(eq(organizations.id, ctx.user.organizationId))
+        .limit(1);
+      return { segment: org?.segment ?? null };
+    }),
     // Self-service passwordless sign-in: emails a single-use magic link to an
     // existing active user. Always returns a generic success so the endpoint
     // never reveals whether an email is registered (no account enumeration).
