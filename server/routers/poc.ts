@@ -55,7 +55,7 @@ export const pocRouter = router({
         pocSlug,
         side: z.enum(["ledger", "statement"]),
         fileName: z.string().max(500).optional(),
-        fileType: z.enum(["pdf", "excel", "csv"]),
+        fileType: z.enum(["excel", "csv"]),
         contentBase64: z.string().min(1).max(MAX_BASE64_LEN),
       }),
     )

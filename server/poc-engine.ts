@@ -9,8 +9,9 @@
  *   Layer 3 — AI Agent:   plain-English explanation + recommended action +
  *                         priority for each exception.
  *
- * Extraction is AI-powered and format-agnostic: Excel (exceljs), CSV (text), and
- * PDF/scans (Claude reads the document natively) are normalized to canonical rows.
+ * Extraction handles structured CSV/Excel uploads: a deterministic table reader
+ * parses the rows directly (instant, any row count), and an LLM fallback covers
+ * unusual layouts the reader can't confidently interpret. (PDF is not supported.)
  */
 import crypto from "node:crypto";
 import Papa from "papaparse";
@@ -27,7 +28,7 @@ import {
   pocShareTokens,
 } from "../drizzle/poc_schema";
 
-export type FileType = "pdf" | "excel" | "csv";
+export type FileType = "excel" | "csv";
 export type Side = "ledger" | "statement";
 
 export interface CanonicalRow {
@@ -41,25 +42,7 @@ export interface CanonicalRow {
 
 export const MAX_POC_ROWS = 5000;
 
-// Anthropic per-request PDF limits. We reject clearly BEFORE the LLM call so an
-// oversized scan fails instantly with a useful message instead of burning the
-// retry budget on a request the provider will refuse.
-export const MAX_PDF_BYTES = 32 * 1024 * 1024; // 32 MB
-export const MAX_PDF_PAGES = 100;
-
-/**
- * Best-effort PDF page count from the raw bytes — counts `/Type /Page` page
- * objects (excluding the `/Pages` tree node). PDFs that tuck page objects inside
- * compressed object streams will undercount (often to 0), so this is used only to
- * reject documents it is CONFIDENT exceed the limit; it never false-rejects.
- */
-function estimatePdfPageCount(buffer: Buffer): number {
-  const text = buffer.toString("latin1");
-  const matches = text.match(/\/Type\s*\/Page(?![\w])/g);
-  return matches ? matches.length : 0;
-}
-
-// ─── Extraction (AI-powered, any format) ─────────────────────────────
+// ─── Extraction (structured CSV/Excel; LLM fallback for unusual layouts) ───
 
 const EXTRACTION_SYSTEM =
   "You are a precise financial data extraction engine. Extract EVERY individual transaction row " +
@@ -108,16 +91,18 @@ export function sniffFileType(buffer: Buffer, declared: FileType): FileType {
         (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07)) {
       return "excel";
     }
-    // "%PDF" → PDF, even if uploaded with the wrong extension.
-    if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
-      return "pdf";
-    }
-    // Every real .xlsx is a ZIP. If a file declared "excel" is NOT a ZIP (and not a
-    // PDF), it cannot be a workbook — it's almost always a CSV/text export misnamed
-    // .xlsx. Read it as text rather than letting exceljs throw on non-zip bytes.
+    // Every real .xlsx is a ZIP. If a file declared "excel" is NOT a ZIP, it cannot be
+    // a workbook — it's almost always a CSV/text export misnamed .xlsx. Read it as text
+    // rather than letting exceljs throw on non-zip bytes.
     if (declared === "excel") return "csv";
   }
   return declared;
+}
+
+/** True when the bytes are a PDF (`%PDF`), regardless of the file's extension. */
+export function isPdfBytes(buffer: Buffer): boolean {
+  return buffer.length >= 4 &&
+    buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46;
 }
 
 /**
@@ -163,8 +148,8 @@ async function excelToText(buffer: Buffer): Promise<string> {
 // cannot emit that many JSON objects within the output-token budget, so it returns
 // nothing. But CSV/Excel statements ARE already structured: a header row names the
 // columns, and every row below is a transaction. We parse them directly — instant,
-// free, and unbounded by row count. The LLM is reserved for genuinely unstructured
-// input (scanned PDFs) and as a fallback when we can't confidently find the table.
+// free, and unbounded by row count. The LLM is only a fallback for CSV/Excel layouts
+// we can't confidently map (e.g. a trade ledger with no debit/credit columns).
 
 /** Stringify an exceljs cell value (handles richtext, hyperlinks, formulas, dates). */
 function cellToString(v: unknown): string {
@@ -343,8 +328,8 @@ export interface ExtractionResult {
 }
 
 /**
- * Extract canonical transaction rows from an uploaded file (base64). PDFs are
- * read by Claude directly (handles scans); Excel/CSV are serialized to text first.
+ * Extract canonical transaction rows from an uploaded CSV/Excel file (base64).
+ * Structured tables are parsed deterministically; unusual layouts fall back to the LLM.
  */
 export async function extractTransactions(params: {
   fileType: FileType;
@@ -352,6 +337,15 @@ export async function extractTransactions(params: {
   fileName?: string;
 }): Promise<ExtractionResult> {
   const buffer = Buffer.from(params.base64, "base64");
+
+  // PDF is not supported — both POCs ingest structured CSV/Excel only. Detect by magic
+  // bytes so a PDF mislabeled .csv/.xlsx is rejected clearly instead of parsed as junk.
+  if (isPdfBytes(buffer)) {
+    throw new Error(
+      "PDF files aren't supported. Please upload an Excel (.xlsx/.xls) or CSV export of your statement.",
+    );
+  }
+
   // Trust the bytes over the extension: a mislabeled file (e.g. xlsx saved as .csv)
   // would otherwise be read as text and extract nothing.
   const fileType = sniffFileType(buffer, params.fileType);
@@ -383,33 +377,11 @@ export async function extractTransactions(params: {
     }
   }
 
-  let userContent: any;
-
-  if (fileType === "pdf") {
-    // Fast pre-checks: reject too-large / too-long PDFs before the LLM call.
-    if (buffer.length > MAX_PDF_BYTES) {
-      const mb = (buffer.length / (1024 * 1024)).toFixed(1);
-      throw new Error(
-        `This PDF is ${mb} MB, over the ${MAX_PDF_BYTES / (1024 * 1024)} MB limit. ` +
-        `Please split it into smaller files or export the transactions to Excel/CSV.`,
-      );
-    }
-    const pageCount = estimatePdfPageCount(buffer);
-    if (pageCount > MAX_PDF_PAGES) {
-      throw new Error(
-        `This PDF has ${pageCount} pages, over the ${MAX_PDF_PAGES}-page limit per upload. ` +
-        `Please upload a shorter date range or export the transactions to Excel/CSV.`,
-      );
-    }
-    userContent = [
-      { type: "text", text: "Extract all transactions from this statement/ledger PDF." },
-      { type: "file_url", file_url: { url: `data:application/pdf;base64,${params.base64}`, mime_type: "application/pdf" } },
-    ];
-  } else {
-    const text =
-      fileType === "excel" ? await excelToText(buffer) : buffer.toString("utf8");
-    userContent = `Extract all transactions from this ${fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
-  }
+  // Unusual CSV/Excel layouts the deterministic reader couldn't interpret fall back to
+  // the LLM (e.g. a trade ledger with no debit/credit columns, like the Salad cashbook).
+  const text =
+    fileType === "excel" ? await excelToText(buffer) : buffer.toString("utf8");
+  const userContent: any = `Extract all transactions from this ${fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
 
   let res;
   try {
@@ -446,7 +418,7 @@ export async function extractTransactions(params: {
   try {
     parsed = JSON.parse(content);
   } catch {
-    throw new Error("Could not read this file. If it is a scanned image, try a clearer copy or an Excel/CSV export.");
+    throw new Error("Could not read this file. Please upload a clean Excel (.xlsx/.xls) or CSV export.");
   }
   const rawRows = Array.isArray(parsed.rows) ? parsed.rows : [];
   const rows: CanonicalRow[] = rawRows
@@ -475,11 +447,9 @@ export async function extractTransactions(params: {
   const notes =
     rows.length > 0
       ? `Extracted ${rows.length} transaction(s).`
-      : fileType === "pdf"
-        ? "No transactions could be extracted. If this is a scanned image, try a clearer scan or an Excel/CSV export."
-        : "No transaction rows were found in this file. Make sure it contains dated transactions with amounts " +
-          "(not just an opening/closing balance or a summary). A plain CSV or Excel export with Date, Description, " +
-          "and Amount columns works best.";
+      : "No transaction rows were found in this file. Make sure it contains dated transactions with amounts " +
+        "(not just an opening/closing balance or a summary). A plain CSV or Excel export with Date, Description, " +
+        "and Amount columns works best.";
   return { rows, currency: (parsed.currency || "NGN").toUpperCase().slice(0, 3), notes };
 }
 

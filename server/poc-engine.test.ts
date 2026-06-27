@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  runLayer1, runLayer2, runLayer3, parseAmount, sniffFileType,
+  runLayer1, runLayer2, runLayer3, parseAmount, sniffFileType, isPdfBytes, extractTransactions,
   csvToMatrix, parseStructuredStatement, type CanonicalRow,
 } from "./poc-engine";
 
@@ -38,16 +38,12 @@ describe("POC extraction — parseAmount", () => {
 });
 
 describe("POC extraction — sniffFileType", () => {
-  const declare = (bytes: number[], declared: "csv" | "excel" | "pdf") =>
+  const declare = (bytes: number[], declared: "csv" | "excel") =>
     sniffFileType(Buffer.from(bytes), declared);
 
   it("overrides a lying extension when bytes are an xlsx (ZIP) — the statement.xlsx(14).csv case", () => {
     // "PK\x03\x04" — an Excel workbook mislabeled as .csv would otherwise read as gibberish.
     expect(declare([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00], "csv")).toBe("excel");
-  });
-
-  it("detects a PDF by magic bytes regardless of declared type", () => {
-    expect(declare([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31], "csv")).toBe("pdf"); // "%PDF-1"
   });
 
   it("keeps the declared type for genuine text/CSV content", () => {
@@ -62,6 +58,22 @@ describe("POC extraction — sniffFileType", () => {
 
   it("still treats a real xlsx workbook as excel", () => {
     expect(sniffFileType(Buffer.from([0x50, 0x4b, 0x03, 0x04]), "excel")).toBe("excel");
+  });
+});
+
+describe("POC extraction — PDF is rejected (CSV/Excel only)", () => {
+  const pdfBase64 = Buffer.from("%PDF-1.7\n%âãÏÓ\n1 0 obj", "latin1").toString("base64");
+
+  it("isPdfBytes detects %PDF magic", () => {
+    expect(isPdfBytes(Buffer.from("%PDF-1.7", "latin1"))).toBe(true);
+    expect(isPdfBytes(Buffer.from("Date,Amount\n", "utf8"))).toBe(false);
+  });
+
+  it("extractTransactions rejects a PDF even when uploaded as .csv", async () => {
+    // A PDF mislabeled .csv must fail clearly (never reach the LLM) — no API key needed.
+    await expect(
+      extractTransactions({ fileType: "csv", base64: pdfBase64, fileName: "statement.csv" }),
+    ).rejects.toThrow(/PDF files aren't supported/);
   });
 });
 

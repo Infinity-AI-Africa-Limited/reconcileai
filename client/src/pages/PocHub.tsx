@@ -40,7 +40,7 @@ const POCS: Poc[] = [
   {
     name: "Salad Africa",
     pocKey: "salad_africa",
-    blurb: "Self-service ledger ↔ bank statement reconciliation. Upload Excel/CSV/PDF (incl. scans) and run the 3-layer engine.",
+    blurb: "Self-service ledger ↔ bank statement reconciliation. Upload Excel/CSV and run the 3-layer engine.",
     path: "/salad-africa-poc",
     icon: Sparkles,
     accent: "from-emerald-700 to-lime-600",

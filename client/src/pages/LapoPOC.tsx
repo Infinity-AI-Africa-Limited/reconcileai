@@ -4,7 +4,7 @@
  * Demonstrates CBS vs Interswitch card settlement reconciliation for LAPO MFB.
  * Supports:
  *   • Pre-loaded demo dataset (LAPO CBS ledger + Interswitch settlement file)
- *   • Self-service upload (drag-and-drop, Excel/CSV/PDF, AI extraction)
+ *   • Self-service upload (drag-and-drop, Excel/CSV)
  *   • 3-layer reconciliation engine (Balance → Exception → AI Agent)
  *   • Card-specific exception categories (chargeback, settlement shortfall, etc.)
  *   • Exception review & resolution workflow (OPEN → IN_REVIEW → RESOLVED | ESCALATED)
@@ -22,7 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, Upload as UploadIcon, FileSpreadsheet, FileText, CheckCircle2,
   Play, Scale, AlertTriangle, Bot, Copy, Check, CreditCard,
-  FileImage, File as FileIcon, X, Download, Info, ChevronDown, ChevronUp,
+  File as FileIcon, X, Download, Info, ChevronDown, ChevronUp,
   ClipboardCheck, MessageSquare, ChevronRight, CircleCheck, CircleAlert,
   ArrowUpRight, RotateCcw, Filter,
 } from "lucide-react";
@@ -61,7 +61,7 @@ function getVisitorId(): string {
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type FileKind = "pdf" | "excel" | "csv";
+type FileKind = "excel" | "csv";
 type UploadState = {
   uploadId: number;
   rowCount: number;
@@ -153,7 +153,6 @@ const CBS_COLUMNS = [
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function detectKind(name: string): FileKind | null {
   const n = name.toLowerCase();
-  if (n.endsWith(".pdf")) return "pdf";
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return "excel";
   if (n.endsWith(".csv") || n.endsWith(".txt")) return "csv";
   return null;
@@ -168,9 +167,7 @@ function fileToBase64(file: File): Promise<string> {
 }
 function getFileIcon(name: string) {
   const n = name.toLowerCase();
-  if (n.endsWith(".pdf")) return FileText;
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return FileSpreadsheet;
-  if (n.endsWith(".png") || n.endsWith(".jpg")) return FileImage;
   return FileIcon;
 }
 const ngn = (n: number | string) =>
@@ -648,7 +645,7 @@ export default function LapoPOC() {
 
   const handlePick = async (side: "cbs" | "isw", file: File) => {
     const kind = detectKind(file.name);
-    if (!kind) { toast.error("Unsupported file. Use PDF, Excel (.xlsx/.xls) or CSV."); return; }
+    if (!kind) { toast.error("Unsupported file. Please upload Excel (.xlsx/.xls) or CSV."); return; }
     if (side === "cbs") setCbsPendingName(file.name); else setIswPendingName(file.name);
     setStage(side, "reading");
     try {
@@ -851,7 +848,7 @@ export default function LapoPOC() {
           <UploadSlot
             label="Interswitch Settlement File"
             hint="CSV or Excel from Interswitch portal (ISW format)"
-            accept=".xlsx,.xls,.csv,.txt,.pdf"
+            accept=".xlsx,.xls,.csv,.txt"
             state={isw} stage={iswStage} pendingFileName={iswPendingName}
             onPick={(f) => handlePick("isw", f)} onClear={() => handleClear("isw")}
             demoFileName="lapo_interswitch_settlement_sample.csv"
