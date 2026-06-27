@@ -86,6 +86,15 @@ const MAX_SEARCH_LENGTH = 100;
 const MAX_NAME_LENGTH = 255;
 const MAX_QUERY_LIMIT = 500;
 
+// Canonical public origin for links embedded in outbound emails and exports sent to
+// external recipients (compliance-assessment results, unsubscribe links, CSV report URLs).
+// Prefer the configured APP_URL; fall back to the live production domain. The historical
+// hardcoded "reconcileai.vip" is NOT the live site, so links built from it are broken for
+// recipients. Trailing slash is stripped so callers can append paths safely.
+const PUBLIC_APP_ORIGIN = (ENV.appUrl || "https://www.reconcileaiafrica.com").replace(/\/$/, "");
+// Host-only form (no scheme) for plain-text references in email footers and notifications.
+const PUBLIC_APP_HOST = PUBLIC_APP_ORIGIN.replace(/^https?:\/\//, "");
+
 // Shared shape + validation for uploaded transaction rows, reused by the single-shot
 // createBatch path and the chunked appendBatch path.
 const uploadTxnSchema = z.object({
@@ -455,7 +464,7 @@ export const appRouter = router({
           const host = ctx.req.get("host");
           const origin =
             input.origin ||
-            (host ? `${ctx.req.protocol}://${host}` : "https://reconcileai.vip");
+            (host ? `${ctx.req.protocol}://${host}` : PUBLIC_APP_ORIGIN);
           try {
             const { sendLoginLinkEmail } = await import("./magicLinkService");
             await sendLoginLinkEmail({ email, origin });
@@ -5520,7 +5529,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
         // Send follow-up email to respondent when they have consented to contact
         if (input.consentToContact && input.respondentEmail) {
-          const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${token}`;
+          const resultUrl = `${PUBLIC_APP_ORIGIN}/compliance-assessment/result/${token}`;
           const riskLevelLabel = riskLevel === "critical" ? "Critical Risk" : riskLevel === "high" ? "High Risk" : riskLevel === "medium" ? "Medium Risk" : "Low Risk";
           const firstName = input.respondentName?.split(" ")[0] ?? "there";
           const emailHtml = `
@@ -5562,7 +5571,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
           <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
           <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you consented to be contacted when you submitted the assessment.</p>
-          <p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p>
+          <p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="${PUBLIC_APP_ORIGIN}/compliance-assessment/unsubscribe/${token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -5631,7 +5640,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const assessment = rows[0];
         if (!assessment.respondentEmail) throw new TRPCError({ code: 'BAD_REQUEST', message: 'No email address on record for this respondent' });
 
-        const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${assessment.token}`;
+        const resultUrl = `${PUBLIC_APP_ORIGIN}/compliance-assessment/result/${assessment.token}`;
         const firstName = assessment.respondentName?.split(" ")[0] ?? "there";
         const riskLevelLabel = assessment.riskLevel === "critical" ? "Critical Risk" : assessment.riskLevel === "high" ? "High Risk" : assessment.riskLevel === "medium" ? "Medium Risk" : "Low Risk";
         const overallScore = assessment.overallScore;
@@ -5678,9 +5687,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
         </td></tr>
         <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;">
           <p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p>
-          <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you completed a compliance assessment at reconcileai.vip.</p>
+          <p style="margin:4px 0 0;font-size:12px;color:#8c757d;">You're receiving this because you completed a compliance assessment at ${PUBLIC_APP_HOST}.</p>
           <p style="margin:8px 0 0;font-size:12px;color:#8c757d;">Ready to book? Pick a time directly: <a href="https://calendly.com/richard-infinityaiafrica/30min" style="color:#F47458;text-decoration:underline;font-weight:600;">calendly.com/richard-infinityaiafrica/30min</a></p>
-          <p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p>
+          <p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="${PUBLIC_APP_ORIGIN}/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -5847,7 +5856,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           escape(r.demoInviteSent ? "Yes" : "No"),
           escape(r.emailOptedOut ? "Yes" : "No"),
           escape(r.createdAt ? new Date(r.createdAt).toISOString().split("T")[0] : ""),
-          escape(r.token ? `https://reconcileai.vip/compliance-assessment/result/${r.token}` : ""),
+          escape(r.token ? `${PUBLIC_APP_ORIGIN}/compliance-assessment/result/${r.token}` : ""),
         ].join(","));
         const csv = [headers.join(","), ...csvRows].join("\n");
         return { csv, count: rows.length };
@@ -5880,12 +5889,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
         let sent = 0;
         let failed = 0;
         for (const assessment of eligible) {
-          const resultUrl = `https://reconcileai.vip/compliance-assessment/result/${assessment.token}`;
+          const resultUrl = `${PUBLIC_APP_ORIGIN}/compliance-assessment/result/${assessment.token}`;
           const firstName = assessment.respondentName?.split(" ")[0] ?? "there";
           const riskLevelLabel = assessment.riskLevel === "critical" ? "Critical Risk" : assessment.riskLevel === "high" ? "High Risk" : assessment.riskLevel === "medium" ? "Medium Risk" : "Low Risk";
           const overallScore = assessment.overallScore;
           const institutionName = assessment.institutionName ?? "your institution";
-          const emailHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;"><tr><td style="background:#1B365D;padding:28px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">ReconcileAI</p><p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">AI-Powered Financial Reconciliation for African Banks &amp; Fintechs</p></td></tr><tr><td style="padding:32px;"><p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p><p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your score of <strong>${overallScore}/100 (${riskLevelLabel})</strong> tells us a lot about where ${institutionName} stands today.</p><p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">We'd love to show you exactly how ReconcileAI closes those gaps in a focused 30-minute demo.</p><table cellpadding="0" cellspacing="0" style="margin:0 0 16px;"><tr><td style="background:#1B365D;border-radius:8px;"><a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a></td></tr></table><table cellpadding="0" cellspacing="0" style="margin:0 0 24px;"><tr><td style="background:#F47458;border-radius:8px;"><a href="https://calendly.com/richard-infinityaiafrica/30min" style="display:inline-block;padding:12px 24px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">📅 Book a Free 30-Minute Demo →</a></td></tr></table></td></tr><tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;"><p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p><p style="margin:8px 0 0;font-size:12px;color:#8c757d;">Ready to book? Pick a time directly: <a href="https://calendly.com/richard-infinityaiafrica/30min" style="color:#F47458;text-decoration:underline;font-weight:600;">calendly.com/richard-infinityaiafrica/30min</a></p><p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="https://reconcileai.vip/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p></td></tr></table></td></tr></table></body></html>`;
+          const emailHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#f4f4f5;font-family:Inter,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;"><tr><td style="background:#1B365D;padding:28px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">ReconcileAI</p><p style="margin:4px 0 0;color:#a0aec0;font-size:13px;">AI-Powered Financial Reconciliation for African Banks &amp; Fintechs</p></td></tr><tr><td style="padding:32px;"><p style="margin:0 0 16px;font-size:16px;color:#1B365D;font-weight:600;">Hi ${firstName},</p><p style="margin:0 0 16px;font-size:14px;color:#4a5568;line-height:1.6;">Thank you for completing the ReconcileAI CBN Compliance Readiness Assessment. Your score of <strong>${overallScore}/100 (${riskLevelLabel})</strong> tells us a lot about where ${institutionName} stands today.</p><p style="margin:0 0 24px;font-size:14px;color:#4a5568;line-height:1.6;">We'd love to show you exactly how ReconcileAI closes those gaps in a focused 30-minute demo.</p><table cellpadding="0" cellspacing="0" style="margin:0 0 16px;"><tr><td style="background:#1B365D;border-radius:8px;"><a href="${resultUrl}" style="display:inline-block;padding:14px 28px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">View Your Full Report →</a></td></tr></table><table cellpadding="0" cellspacing="0" style="margin:0 0 24px;"><tr><td style="background:#F47458;border-radius:8px;"><a href="https://calendly.com/richard-infinityaiafrica/30min" style="display:inline-block;padding:12px 24px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;">📅 Book a Free 30-Minute Demo →</a></td></tr></table></td></tr><tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;"><p style="margin:0;font-size:12px;color:#8c757d;">ReconcileAI by Infinity AI Africa Limited · Lagos, Nigeria</p><p style="margin:8px 0 0;font-size:12px;color:#8c757d;">Ready to book? Pick a time directly: <a href="https://calendly.com/richard-infinityaiafrica/30min" style="color:#F47458;text-decoration:underline;font-weight:600;">calendly.com/richard-infinityaiafrica/30min</a></p><p style="margin:8px 0 0;font-size:11px;color:#b0b0b0;">To opt out of future emails, <a href="${PUBLIC_APP_ORIGIN}/compliance-assessment/unsubscribe/${assessment.token}" style="color:#b0b0b0;text-decoration:underline;">click here to unsubscribe</a>. This is required under Nigeria's NDPR.</p></td></tr></table></td></tr></table></body></html>`;
           try {
             // Data residency: legacy Forge email relay is external egress; blocked on-premise.
             assertEgressAllowed(`${process.env.BUILT_IN_FORGE_API_URL}/email/send`, "outbound email");
@@ -6043,7 +6052,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const { notifyOwner } = await import('./_core/notification');
         await notifyOwner({
           title: `New Roadmap Access Request — ${input.name}`,
-          content: `**${input.name}** (${input.email}) from **${input.company || 'unknown company'}** has requested access to the ReconcileAI GTM Roadmap.\n\nReason: ${input.reason || 'Not provided'}\n\nApprove or reject at reconcileai.vip/admin/roadmap-access`,
+          content: `**${input.name}** (${input.email}) from **${input.company || 'unknown company'}** has requested access to the ReconcileAI GTM Roadmap.\n\nReason: ${input.reason || 'Not provided'}\n\nApprove or reject at ${PUBLIC_APP_HOST}/admin/roadmap-access`,
         }).catch(() => undefined);
         return { status: 'pending' };
       }),
