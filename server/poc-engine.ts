@@ -13,6 +13,7 @@
  * PDF/scans (Claude reads the document natively) are normalized to canonical rows.
  */
 import crypto from "node:crypto";
+import Papa from "papaparse";
 import { and, desc, eq } from "drizzle-orm";
 import { Transaction } from "../drizzle/schema";
 import { invokeLLM } from "./_core/llm";
@@ -156,6 +157,185 @@ async function excelToText(buffer: Buffer): Promise<string> {
   return lines.join("\n");
 }
 
+// ─── Deterministic structured-table extraction (CSV / Excel) ─────────
+//
+// Real bank statements run to hundreds or thousands of rows — a single LLM call
+// cannot emit that many JSON objects within the output-token budget, so it returns
+// nothing. But CSV/Excel statements ARE already structured: a header row names the
+// columns, and every row below is a transaction. We parse them directly — instant,
+// free, and unbounded by row count. The LLM is reserved for genuinely unstructured
+// input (scanned PDFs) and as a fallback when we can't confidently find the table.
+
+/** Stringify an exceljs cell value (handles richtext, hyperlinks, formulas, dates). */
+function cellToString(v: unknown): string {
+  if (v == null) return "";
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "object") {
+    const o = v as any;
+    if (Array.isArray(o.richText)) return o.richText.map((t: any) => t?.text ?? "").join("");
+    if (typeof o.text === "string") return o.text;
+    if (o.result != null) return String(o.result);
+    if (o.hyperlink && o.text == null) return String(o.hyperlink);
+    return "";
+  }
+  return String(v);
+}
+
+/** CSV text → matrix of string cells (RFC4180: quoted fields, embedded commas/newlines). */
+export function csvToMatrix(text: string): string[][] {
+  const parsed = Papa.parse<string[]>(text, { skipEmptyLines: false });
+  return (parsed.data as unknown as string[][]).map((row) =>
+    Array.isArray(row) ? row.map((c) => (c == null ? "" : String(c))) : [],
+  );
+}
+
+/** Excel workbook → matrix of string cells, taken from the worksheet with most rows. */
+export async function excelToMatrix(buffer: Buffer): Promise<string[][]> {
+  const ExcelJS = await loadExcelJS();
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer as any);
+  let best: string[][] = [];
+  wb.worksheets.forEach((ws) => {
+    const matrix: string[][] = [];
+    ws.eachRow({ includeEmpty: true }, (row) => {
+      const cells: string[] = [];
+      // row.values is 1-based (index 0 is empty); normalise to 0-based dense cells.
+      const vals = row.values as unknown[];
+      for (let i = 1; i < vals.length; i++) cells.push(cellToString(vals[i]));
+      matrix.push(cells);
+    });
+    if (matrix.length > best.length) best = matrix;
+  });
+  return best;
+}
+
+/** Normalise a date string to ISO YYYY-MM-DD so both sides match in the date window.
+ *  Assumes day-first (DD-MM-YYYY) — the standard across African bank statements. */
+function normalizeDate(raw: string): string {
+  const s = (raw ?? "").trim();
+  if (!s) return s;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10); // already ISO
+  const m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2}|\d{4})$/);
+  if (m) {
+    let [, d, mo, y] = m;
+    if (y.length === 2) y = `20${y}`;
+    const dd = d.padStart(2, "0");
+    const mm = mo.padStart(2, "0");
+    // Guard obviously-wrong day-first reads (e.g. a real MM-DD source): if the first
+    // field can't be a day (>31) but could be a month, fall through unchanged.
+    if (Number(dd) >= 1 && Number(dd) <= 31 && Number(mm) >= 1 && Number(mm) <= 12) {
+      return `${y}-${mm}-${dd}`;
+    }
+  }
+  return s; // leave anything we can't confidently parse exactly as printed
+}
+
+const COL = {
+  date: /\bdate\b|txn\s*date|trans(action)?\s*date|posting\s*date|value\s*date/i,
+  valueDate: /\bval(ue)?\s*date\b/i,
+  debit: /debit|withdraw|money\s*out|paid\s*out|\bdr\b|outflow/i,
+  credit: /credit|deposit|money\s*in|paid\s*in|\bcr\b|inflow/i,
+  amount: /amount|value|principal/i,
+  balance: /balance|bal\b|running\s*bal/i,
+  desc: /remark|narration|description|details|particular|memo|reference\s*detail/i,
+  dir: /^(dir|direction|type|dr\/?cr|cr\/?dr|debit\/credit)$/i,
+};
+
+/**
+ * Parse a structured statement/ledger matrix into canonical rows. Detects the header
+ * row by its column names, maps debit/credit (or a single signed/typed amount) column,
+ * and reads every transaction below it. Returns null when no confident header is found
+ * so the caller can fall back to the LLM.
+ */
+export function parseStructuredStatement(
+  matrix: string[][],
+): { rows: CanonicalRow[]; currency?: string } | null {
+  if (!matrix.length) return null;
+
+  // Find the header row within the first 40 rows (skips any account/preamble block).
+  let headerIdx = -1;
+  let map: { date: number; desc: number; debit: number; credit: number; amount: number; balance: number; dir: number } | null = null;
+  const scan = Math.min(matrix.length, 40);
+  for (let r = 0; r < scan; r++) {
+    const cells = matrix[r].map((c) => c.trim());
+    const find = (re: RegExp) => cells.findIndex((c) => c && re.test(c));
+    // Prefer a transaction date over a value date when both exist.
+    const dateIdxs = cells.map((c, i) => ({ c, i })).filter((x) => x.c && COL.date.test(x.c));
+    const txnDate = dateIdxs.find((x) => !COL.valueDate.test(x.c));
+    const date = txnDate ? txnDate.i : (dateIdxs[0]?.i ?? -1);
+    const debit = find(COL.debit);
+    const credit = find(COL.credit);
+    const amount = find(COL.amount);
+    const dir = find(COL.dir);
+    // Confident only when direction is unambiguous: either separate debit & credit
+    // columns (the classic bank-statement layout), or an amount column paired with an
+    // explicit direction/type column. A bare "amount" column with no direction signal
+    // (e.g. a trade ledger: Date, Product, Supplier, Amount, …) is left to the LLM,
+    // which can infer intent and a description from context. This avoids hijacking and
+    // mis-parsing files the deterministic reader can't interpret correctly.
+    const qualifies = date >= 0 && ((debit >= 0 && credit >= 0) || (amount >= 0 && dir >= 0));
+    if (qualifies) {
+      headerIdx = r;
+      map = { date, desc: find(COL.desc), debit, credit, amount, balance: find(COL.balance), dir };
+      break;
+    }
+  }
+  if (headerIdx < 0 || !map) return null;
+
+  // Optional currency from a preamble cell like "CURRENCY | NGN".
+  let currency: string | undefined;
+  for (let r = 0; r < headerIdx; r++) {
+    const cells = matrix[r];
+    const ci = cells.findIndex((c) => /^currency$/i.test(c.trim()));
+    if (ci >= 0) {
+      const val = cells.slice(ci + 1).find((c) => c.trim());
+      if (val) currency = val.trim().toUpperCase().slice(0, 3);
+      break;
+    }
+  }
+
+  const at = (row: string[], idx: number) => (idx >= 0 && idx < row.length ? row[idx] : "");
+  const rows: CanonicalRow[] = [];
+  for (let r = headerIdx + 1; r < matrix.length && rows.length < MAX_POC_ROWS; r++) {
+    const row = matrix[r];
+    if (!row.some((c) => c && c.trim())) continue; // blank line
+
+    let amount = 0;
+    let direction: "debit" | "credit" = "debit";
+    if (map.debit >= 0 && map.credit >= 0) {
+      const debit = parseAmount(at(row, map.debit));
+      const credit = parseAmount(at(row, map.credit));
+      if (debit > 0) { amount = debit; direction = "debit"; }
+      else if (credit > 0) { amount = credit; direction = "credit"; }
+      else continue; // totals/footer/section rows carry no debit or credit
+    } else {
+      const rawAmt = at(row, map.amount);
+      amount = parseAmount(rawAmt);
+      if (amount <= 0) continue;
+      const dirCell = at(row, map.dir).trim().toLowerCase();
+      if (map.dir >= 0 && dirCell) {
+        direction = /cr|credit|deposit|inflow|in\b/.test(dirCell) ? "credit" : "debit";
+      } else {
+        // No explicit direction column: treat parenthesised/negative as debit (money out).
+        direction = /^\(|-/.test(rawAmt.trim()) ? "debit" : "credit";
+      }
+    }
+
+    const dateStr = normalizeDate(at(row, map.date));
+    if (!dateStr) continue; // a transaction must have a date
+    const balRaw = at(row, map.balance);
+    rows.push({
+      date: dateStr,
+      description: at(row, map.desc).trim(),
+      amount,
+      direction,
+      balance: map.balance >= 0 && balRaw.trim() ? parseAmount(balRaw) : null,
+    });
+  }
+
+  return rows.length > 0 ? { rows, currency } : null;
+}
+
 export interface ExtractionResult {
   rows: CanonicalRow[];
   currency: string;
@@ -175,6 +355,34 @@ export async function extractTransactions(params: {
   // Trust the bytes over the extension: a mislabeled file (e.g. xlsx saved as .csv)
   // would otherwise be read as text and extract nothing.
   const fileType = sniffFileType(buffer, params.fileType);
+
+  // Structured formats (CSV/Excel) are parsed deterministically first. This scales to
+  // the thousands of rows a real bank statement contains — which a single LLM call
+  // cannot emit within the output-token budget — and is instant and free. We only fall
+  // through to the LLM when no confident table header is found (unusual layouts).
+  if (fileType === "excel" || fileType === "csv") {
+    try {
+      const matrix = fileType === "excel"
+        ? await excelToMatrix(buffer)
+        : csvToMatrix(buffer.toString("utf8"));
+      const structured = parseStructuredStatement(matrix);
+      const rows = (structured?.rows ?? []).slice(0, MAX_POC_ROWS).filter((r) => r.amount > 0);
+      if (rows.length > 0) {
+        return {
+          rows,
+          currency: (structured?.currency || "NGN").toUpperCase().slice(0, 3),
+          notes: `Extracted ${rows.length} transaction(s).`,
+        };
+      }
+      console.warn(
+        `[poc extract] structured parse found no rows for "${params.fileName ?? "?"}" ` +
+        `(${fileType}, ${matrix.length} lines) — falling back to LLM.`,
+      );
+    } catch (err) {
+      console.warn("[poc extract] structured parse threw, falling back to LLM:", (err as Error).message);
+    }
+  }
+
   let userContent: any;
 
   if (fileType === "pdf") {
