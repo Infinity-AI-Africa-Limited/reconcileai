@@ -40,7 +40,7 @@ export default function AdminRoadmapAccess() {
 
   const { data: requests, isLoading } = trpc.roadmap.listRequests.useQuery(
     { status: statusFilter },
-    { enabled: user?.role === "admin" }
+    { enabled: user?.role === "super_admin" }
   );
 
   const updateStatus = trpc.roadmap.updateStatus.useMutation({
@@ -57,11 +57,11 @@ export default function AdminRoadmapAccess() {
     },
   });
 
-  if (user?.role !== "admin") {
+  if (user?.role !== "super_admin") {
     return (
       <DashboardLayout>
         <div className="flex items-center justify-center h-64">
-          <p className="text-gray-400">Admin access required.</p>
+          <p className="text-gray-400">Super Admin access required. This area is restricted to Infinity AI staff.</p>
         </div>
       </DashboardLayout>
     );
@@ -184,9 +184,9 @@ export default function AdminRoadmapAccess() {
                       {req.status === "approved" && req.accessToken && (
                         <div className="flex items-center gap-1 mt-1">
                           <span className="text-xs text-gray-500 font-mono truncate max-w-xs">
-                            https://reconcileai.vip/roadmap?token={req.accessToken.slice(0, 16)}...
+                            {window.location.origin}/roadmap?token={req.accessToken.slice(0, 16)}...
                           </span>
-                          <CopyButton text={`https://reconcileai.vip/roadmap?token=${req.accessToken}`} />
+                          <CopyButton text={`${window.location.origin}/roadmap?token=${req.accessToken}`} />
                         </div>
                       )}
                     </div>

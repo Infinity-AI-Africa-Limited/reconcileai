@@ -50,6 +50,7 @@ import {
   type ReconciliationConfig,
 } from "./woodcore-engine";
 import { invokeLLM } from "./_core/llm";
+import { ENV } from "./_core/env";
 import { loadExcelJS } from "./exceljsLoader";
 import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "./_core/egress";
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
@@ -6067,11 +6068,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { valid: true, name: req.name, roadmapKey: 'roadmap_92b329c1.html' };
       }),
 
-    // Admin: list all access requests
-    listRequests: protectedProcedure
+    // Super Admin (Infinity AI staff): list all GTM roadmap access requests.
+    // This is a global, platform-internal table — org admins must not see it.
+    listRequests: superAdminProcedure
       .input(z.object({ status: z.enum(['pending','approved','rejected','all']).default('all') }))
-      .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== 'admin') throw new TRPCError({ code: 'FORBIDDEN' });
+      .query(async ({ input }) => {
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
         const { roadmapAccessRequests } = await import('../drizzle/schema');
@@ -6083,15 +6084,14 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return query;
       }),
 
-    // Admin: approve or reject a request
-    updateStatus: protectedProcedure
+    // Super Admin (Infinity AI staff): approve or reject a request.
+    updateStatus: superAdminProcedure
       .input(z.object({
         id: z.number(),
         action: z.enum(['approve','reject']),
         expiryDays: z.number().int().positive().default(30),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== 'admin') throw new TRPCError({ code: 'FORBIDDEN' });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
         const { roadmapAccessRequests } = await import('../drizzle/schema');
@@ -6107,10 +6107,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
             .set({ status: 'approved', accessToken: token, tokenExpiresAt: expiresAt, approvedAt: new Date(), approvedByUserId: ctx.user.id })
             .where(eq(roadmapAccessRequests.id, input.id));
           // Notify the requester via owner notification (owner can then email them)
+          const origin = (ENV.appUrl || "https://www.reconcileaiafrica.com").replace(/\/$/, "");
           const { notifyOwner } = await import('./_core/notification');
           await notifyOwner({
             title: `Roadmap Access Approved — ${req.name}`,
-            content: `Send this link to **${req.name}** (${req.email}):\n\nhttps://reconcileai.vip/roadmap?token=${token}\n\nExpires: ${expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+            content: `Send this link to **${req.name}** (${req.email}):\n\n${origin}/roadmap?token=${token}\n\nExpires: ${expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`,
           }).catch(() => undefined);
           return { status: 'approved', token, expiresAt };
         } else {
