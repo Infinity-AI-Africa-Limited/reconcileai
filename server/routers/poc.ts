@@ -18,6 +18,17 @@ import {
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
 const pocSlug = z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/);
 
+// Friendly labels per POC, used in the owner upload notification + the file-role
+// display. Each POC reuses the shared cbs/statement file roles but names them in
+// its own terms. Unknown slugs fall back to generic labels.
+const POC_META: Record<string, { name: string; roles: { cbs: string; statement: string } }> = {
+  lapo_mfb: { name: "LAPO MFB", roles: { cbs: "CBS Card Settlement GL", statement: "Interswitch Settlement File" } },
+  salad_africa: { name: "Salad Africa", roles: { cbs: "Ledger / Cashbook", statement: "Bank Statement" } },
+};
+function pocMeta(slug: string) {
+  return POC_META[slug] ?? { name: slug, roles: { cbs: "Ledger / CBS file", statement: "Bank Statement" } };
+}
+
 // Prospects upload anonymously (saveFile is public), but listing/downloading those
 // raw files is sensitive financial data and lives in the super-admin POC Hub —
 // so it is gated to Infinity AI staff only.
@@ -44,7 +55,7 @@ export const pocRouter = router({
         pocSlug,
         side: z.enum(["ledger", "statement"]),
         fileName: z.string().max(500).optional(),
-        fileType: z.enum(["pdf", "excel", "csv"]),
+        fileType: z.enum(["excel", "csv"]),
         contentBase64: z.string().min(1).max(MAX_BASE64_LEN),
       }),
     )
@@ -221,18 +232,19 @@ export const pocRouter = router({
       const fileId = (inserted as any)[0].insertId as number;
 
       // Notify owner (fire-and-forget)
-      const roleLabel = input.fileRole === "cbs" ? "CBS Card Settlement GL" : "Interswitch Settlement File";
+      const meta = pocMeta(input.pocSlug);
+      const roleLabel = meta.roles[input.fileRole];
       const sizeMb = (input.sizeBytes / (1024 * 1024)).toFixed(2);
       notifyOwner({
-        title: `📂 LAPO POC — New file uploaded`,
+        title: `📂 ${meta.name} POC — New file uploaded`,
         content:
-          `A prospect has uploaded a file on the **LAPO MFB POC** page.\n\n` +
+          `A prospect has uploaded a file on the **${meta.name} POC** page.\n\n` +
           `**File:** ${input.originalName}\n` +
           `**Role:** ${roleLabel}\n` +
           `**Size:** ${sizeMb} MB\n` +
           `**Type:** ${input.mimeType}\n` +
           `**Visitor ID:** ${input.visitorId ?? "unknown"}\n\n` +
-          `View all uploads in the **Admin Portal → POC Hub → LAPO Uploads**.`,
+          `View all uploads in the **Admin Portal → POC Hub**.`,
       }).catch(() => {/* swallow */});
 
       return { fileId, s3Key, s3Url };

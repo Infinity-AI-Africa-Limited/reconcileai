@@ -59,7 +59,7 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock, Map } from "lucide-react";
 import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } from "@/contexts/PortalContext";
 
 type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: string[] };
@@ -165,6 +165,7 @@ const superAdminItems: NavItem[] = [
   { icon: Users, label: "All Users", path: "/admin/super-admin/users", roles: ["super_admin"] },
   { icon: BarChart3, label: "Platform Analytics", path: "/admin/super-admin/analytics", roles: ["super_admin"] },
   { icon: FlaskConical, label: "POC Hub", path: "/admin/poc", roles: ["super_admin"] },
+  { icon: Map, label: "Roadmap Access", path: "/admin/roadmap-access", roles: ["super_admin"] },
 ];
 
 function canAccessNav(item: NavItem, userRole: string | undefined): boolean {

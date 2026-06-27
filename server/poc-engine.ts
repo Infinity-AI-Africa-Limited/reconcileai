@@ -9,10 +9,12 @@
  *   Layer 3 — AI Agent:   plain-English explanation + recommended action +
  *                         priority for each exception.
  *
- * Extraction is AI-powered and format-agnostic: Excel (exceljs), CSV (text), and
- * PDF/scans (Claude reads the document natively) are normalized to canonical rows.
+ * Extraction handles structured CSV/Excel uploads: a deterministic table reader
+ * parses the rows directly (instant, any row count), and an LLM fallback covers
+ * unusual layouts the reader can't confidently interpret. (PDF is not supported.)
  */
 import crypto from "node:crypto";
+import Papa from "papaparse";
 import { and, desc, eq } from "drizzle-orm";
 import { Transaction } from "../drizzle/schema";
 import { invokeLLM } from "./_core/llm";
@@ -26,7 +28,7 @@ import {
   pocShareTokens,
 } from "../drizzle/poc_schema";
 
-export type FileType = "pdf" | "excel" | "csv";
+export type FileType = "excel" | "csv";
 export type Side = "ledger" | "statement";
 
 export interface CanonicalRow {
@@ -40,25 +42,7 @@ export interface CanonicalRow {
 
 export const MAX_POC_ROWS = 5000;
 
-// Anthropic per-request PDF limits. We reject clearly BEFORE the LLM call so an
-// oversized scan fails instantly with a useful message instead of burning the
-// retry budget on a request the provider will refuse.
-export const MAX_PDF_BYTES = 32 * 1024 * 1024; // 32 MB
-export const MAX_PDF_PAGES = 100;
-
-/**
- * Best-effort PDF page count from the raw bytes — counts `/Type /Page` page
- * objects (excluding the `/Pages` tree node). PDFs that tuck page objects inside
- * compressed object streams will undercount (often to 0), so this is used only to
- * reject documents it is CONFIDENT exceed the limit; it never false-rejects.
- */
-function estimatePdfPageCount(buffer: Buffer): number {
-  const text = buffer.toString("latin1");
-  const matches = text.match(/\/Type\s*\/Page(?![\w])/g);
-  return matches ? matches.length : 0;
-}
-
-// ─── Extraction (AI-powered, any format) ─────────────────────────────
+// ─── Extraction (structured CSV/Excel; LLM fallback for unusual layouts) ───
 
 const EXTRACTION_SYSTEM =
   "You are a precise financial data extraction engine. Extract EVERY individual transaction row " +
@@ -93,6 +77,51 @@ const EXTRACTION_SCHEMA = {
   additionalProperties: false,
 };
 
+/**
+ * Some users upload a file whose extension lies about its real format — e.g. an
+ * Excel workbook exported/renamed as "statement.xlsx (14).csv", or an xlsx saved
+ * with a .csv suffix. Reading xlsx ZIP bytes as UTF-8 text yields binary gibberish
+ * and the model extracts nothing. Sniff the leading magic bytes and override the
+ * declared type when they disagree, so the file is parsed by its real format.
+ */
+export function sniffFileType(buffer: Buffer, declared: FileType): FileType {
+  if (buffer.length >= 4) {
+    // ZIP local-file-header "PK\x03\x04" (also empty/spanned variants) → OOXML (.xlsx).
+    if (buffer[0] === 0x50 && buffer[1] === 0x4b &&
+        (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07)) {
+      return "excel";
+    }
+    // Every real .xlsx is a ZIP. If a file declared "excel" is NOT a ZIP, it cannot be
+    // a workbook — it's almost always a CSV/text export misnamed .xlsx. Read it as text
+    // rather than letting exceljs throw on non-zip bytes.
+    if (declared === "excel") return "csv";
+  }
+  return declared;
+}
+
+/** True when the bytes are a PDF (`%PDF`), regardless of the file's extension. */
+export function isPdfBytes(buffer: Buffer): boolean {
+  return buffer.length >= 4 &&
+    buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46;
+}
+
+/**
+ * Parse a money value into a positive number, tolerating the formats real bank
+ * statements use: currency symbols (₦, $), thousands separators ("16,576,000.00"),
+ * surrounding spaces, and parenthesised negatives ("(1,234.56)"). Direction is
+ * tracked separately, so the sign is irrelevant here — we always return |amount|.
+ * Without this, a model that returns amounts as formatted strings would yield NaN,
+ * collapse to 0, and get silently filtered out, producing a "0 transactions" result.
+ */
+export function parseAmount(raw: unknown): number {
+  if (typeof raw === "number") return Number.isFinite(raw) ? Math.abs(raw) : 0;
+  // Keep only digits and the decimal point; commas/symbols/parens are stripped.
+  const cleaned = String(raw ?? "").replace(/[^0-9.]/g, "");
+  if (!cleaned) return 0;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? Math.abs(n) : 0;
+}
+
 /** Serialize an Excel workbook buffer to a tab-separated text the LLM can read. */
 async function excelToText(buffer: Buffer): Promise<string> {
   const ExcelJS = await loadExcelJS();
@@ -113,6 +142,185 @@ async function excelToText(buffer: Buffer): Promise<string> {
   return lines.join("\n");
 }
 
+// ─── Deterministic structured-table extraction (CSV / Excel) ─────────
+//
+// Real bank statements run to hundreds or thousands of rows — a single LLM call
+// cannot emit that many JSON objects within the output-token budget, so it returns
+// nothing. But CSV/Excel statements ARE already structured: a header row names the
+// columns, and every row below is a transaction. We parse them directly — instant,
+// free, and unbounded by row count. The LLM is only a fallback for CSV/Excel layouts
+// we can't confidently map (e.g. a trade ledger with no debit/credit columns).
+
+/** Stringify an exceljs cell value (handles richtext, hyperlinks, formulas, dates). */
+function cellToString(v: unknown): string {
+  if (v == null) return "";
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "object") {
+    const o = v as any;
+    if (Array.isArray(o.richText)) return o.richText.map((t: any) => t?.text ?? "").join("");
+    if (typeof o.text === "string") return o.text;
+    if (o.result != null) return String(o.result);
+    if (o.hyperlink && o.text == null) return String(o.hyperlink);
+    return "";
+  }
+  return String(v);
+}
+
+/** CSV text → matrix of string cells (RFC4180: quoted fields, embedded commas/newlines). */
+export function csvToMatrix(text: string): string[][] {
+  const parsed = Papa.parse<string[]>(text, { skipEmptyLines: false });
+  return (parsed.data as unknown as string[][]).map((row) =>
+    Array.isArray(row) ? row.map((c) => (c == null ? "" : String(c))) : [],
+  );
+}
+
+/** Excel workbook → matrix of string cells, taken from the worksheet with most rows. */
+export async function excelToMatrix(buffer: Buffer): Promise<string[][]> {
+  const ExcelJS = await loadExcelJS();
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer as any);
+  let best: string[][] = [];
+  wb.worksheets.forEach((ws) => {
+    const matrix: string[][] = [];
+    ws.eachRow({ includeEmpty: true }, (row) => {
+      const cells: string[] = [];
+      // row.values is 1-based (index 0 is empty); normalise to 0-based dense cells.
+      const vals = row.values as unknown[];
+      for (let i = 1; i < vals.length; i++) cells.push(cellToString(vals[i]));
+      matrix.push(cells);
+    });
+    if (matrix.length > best.length) best = matrix;
+  });
+  return best;
+}
+
+/** Normalise a date string to ISO YYYY-MM-DD so both sides match in the date window.
+ *  Assumes day-first (DD-MM-YYYY) — the standard across African bank statements. */
+function normalizeDate(raw: string): string {
+  const s = (raw ?? "").trim();
+  if (!s) return s;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10); // already ISO
+  const m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2}|\d{4})$/);
+  if (m) {
+    let [, d, mo, y] = m;
+    if (y.length === 2) y = `20${y}`;
+    const dd = d.padStart(2, "0");
+    const mm = mo.padStart(2, "0");
+    // Guard obviously-wrong day-first reads (e.g. a real MM-DD source): if the first
+    // field can't be a day (>31) but could be a month, fall through unchanged.
+    if (Number(dd) >= 1 && Number(dd) <= 31 && Number(mm) >= 1 && Number(mm) <= 12) {
+      return `${y}-${mm}-${dd}`;
+    }
+  }
+  return s; // leave anything we can't confidently parse exactly as printed
+}
+
+const COL = {
+  date: /\bdate\b|txn\s*date|trans(action)?\s*date|posting\s*date|value\s*date/i,
+  valueDate: /\bval(ue)?\s*date\b/i,
+  debit: /debit|withdraw|money\s*out|paid\s*out|\bdr\b|outflow/i,
+  credit: /credit|deposit|money\s*in|paid\s*in|\bcr\b|inflow/i,
+  amount: /amount|value|principal/i,
+  balance: /balance|bal\b|running\s*bal/i,
+  desc: /remark|narration|description|details|particular|memo|reference\s*detail/i,
+  dir: /^(dir|direction|type|dr\/?cr|cr\/?dr|debit\/credit)$/i,
+};
+
+/**
+ * Parse a structured statement/ledger matrix into canonical rows. Detects the header
+ * row by its column names, maps debit/credit (or a single signed/typed amount) column,
+ * and reads every transaction below it. Returns null when no confident header is found
+ * so the caller can fall back to the LLM.
+ */
+export function parseStructuredStatement(
+  matrix: string[][],
+): { rows: CanonicalRow[]; currency?: string } | null {
+  if (!matrix.length) return null;
+
+  // Find the header row within the first 40 rows (skips any account/preamble block).
+  let headerIdx = -1;
+  let map: { date: number; desc: number; debit: number; credit: number; amount: number; balance: number; dir: number } | null = null;
+  const scan = Math.min(matrix.length, 40);
+  for (let r = 0; r < scan; r++) {
+    const cells = matrix[r].map((c) => c.trim());
+    const find = (re: RegExp) => cells.findIndex((c) => c && re.test(c));
+    // Prefer a transaction date over a value date when both exist.
+    const dateIdxs = cells.map((c, i) => ({ c, i })).filter((x) => x.c && COL.date.test(x.c));
+    const txnDate = dateIdxs.find((x) => !COL.valueDate.test(x.c));
+    const date = txnDate ? txnDate.i : (dateIdxs[0]?.i ?? -1);
+    const debit = find(COL.debit);
+    const credit = find(COL.credit);
+    const amount = find(COL.amount);
+    const dir = find(COL.dir);
+    // Confident only when direction is unambiguous: either separate debit & credit
+    // columns (the classic bank-statement layout), or an amount column paired with an
+    // explicit direction/type column. A bare "amount" column with no direction signal
+    // (e.g. a trade ledger: Date, Product, Supplier, Amount, …) is left to the LLM,
+    // which can infer intent and a description from context. This avoids hijacking and
+    // mis-parsing files the deterministic reader can't interpret correctly.
+    const qualifies = date >= 0 && ((debit >= 0 && credit >= 0) || (amount >= 0 && dir >= 0));
+    if (qualifies) {
+      headerIdx = r;
+      map = { date, desc: find(COL.desc), debit, credit, amount, balance: find(COL.balance), dir };
+      break;
+    }
+  }
+  if (headerIdx < 0 || !map) return null;
+
+  // Optional currency from a preamble cell like "CURRENCY | NGN".
+  let currency: string | undefined;
+  for (let r = 0; r < headerIdx; r++) {
+    const cells = matrix[r];
+    const ci = cells.findIndex((c) => /^currency$/i.test(c.trim()));
+    if (ci >= 0) {
+      const val = cells.slice(ci + 1).find((c) => c.trim());
+      if (val) currency = val.trim().toUpperCase().slice(0, 3);
+      break;
+    }
+  }
+
+  const at = (row: string[], idx: number) => (idx >= 0 && idx < row.length ? row[idx] : "");
+  const rows: CanonicalRow[] = [];
+  for (let r = headerIdx + 1; r < matrix.length && rows.length < MAX_POC_ROWS; r++) {
+    const row = matrix[r];
+    if (!row.some((c) => c && c.trim())) continue; // blank line
+
+    let amount = 0;
+    let direction: "debit" | "credit" = "debit";
+    if (map.debit >= 0 && map.credit >= 0) {
+      const debit = parseAmount(at(row, map.debit));
+      const credit = parseAmount(at(row, map.credit));
+      if (debit > 0) { amount = debit; direction = "debit"; }
+      else if (credit > 0) { amount = credit; direction = "credit"; }
+      else continue; // totals/footer/section rows carry no debit or credit
+    } else {
+      const rawAmt = at(row, map.amount);
+      amount = parseAmount(rawAmt);
+      if (amount <= 0) continue;
+      const dirCell = at(row, map.dir).trim().toLowerCase();
+      if (map.dir >= 0 && dirCell) {
+        direction = /cr|credit|deposit|inflow|in\b/.test(dirCell) ? "credit" : "debit";
+      } else {
+        // No explicit direction column: treat parenthesised/negative as debit (money out).
+        direction = /^\(|-/.test(rawAmt.trim()) ? "debit" : "credit";
+      }
+    }
+
+    const dateStr = normalizeDate(at(row, map.date));
+    if (!dateStr) continue; // a transaction must have a date
+    const balRaw = at(row, map.balance);
+    rows.push({
+      date: dateStr,
+      description: at(row, map.desc).trim(),
+      amount,
+      direction,
+      balance: map.balance >= 0 && balRaw.trim() ? parseAmount(balRaw) : null,
+    });
+  }
+
+  return rows.length > 0 ? { rows, currency } : null;
+}
+
 export interface ExtractionResult {
   rows: CanonicalRow[];
   currency: string;
@@ -120,8 +328,8 @@ export interface ExtractionResult {
 }
 
 /**
- * Extract canonical transaction rows from an uploaded file (base64). PDFs are
- * read by Claude directly (handles scans); Excel/CSV are serialized to text first.
+ * Extract canonical transaction rows from an uploaded CSV/Excel file (base64).
+ * Structured tables are parsed deterministically; unusual layouts fall back to the LLM.
  */
 export async function extractTransactions(params: {
   fileType: FileType;
@@ -129,33 +337,51 @@ export async function extractTransactions(params: {
   fileName?: string;
 }): Promise<ExtractionResult> {
   const buffer = Buffer.from(params.base64, "base64");
-  let userContent: any;
 
-  if (params.fileType === "pdf") {
-    // Fast pre-checks: reject too-large / too-long PDFs before the LLM call.
-    if (buffer.length > MAX_PDF_BYTES) {
-      const mb = (buffer.length / (1024 * 1024)).toFixed(1);
-      throw new Error(
-        `This PDF is ${mb} MB, over the ${MAX_PDF_BYTES / (1024 * 1024)} MB limit. ` +
-        `Please split it into smaller files or export the transactions to Excel/CSV.`,
-      );
-    }
-    const pageCount = estimatePdfPageCount(buffer);
-    if (pageCount > MAX_PDF_PAGES) {
-      throw new Error(
-        `This PDF has ${pageCount} pages, over the ${MAX_PDF_PAGES}-page limit per upload. ` +
-        `Please upload a shorter date range or export the transactions to Excel/CSV.`,
-      );
-    }
-    userContent = [
-      { type: "text", text: "Extract all transactions from this statement/ledger PDF." },
-      { type: "file_url", file_url: { url: `data:application/pdf;base64,${params.base64}`, mime_type: "application/pdf" } },
-    ];
-  } else {
-    const text =
-      params.fileType === "excel" ? await excelToText(buffer) : buffer.toString("utf8");
-    userContent = `Extract all transactions from this ${params.fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
+  // PDF is not supported — both POCs ingest structured CSV/Excel only. Detect by magic
+  // bytes so a PDF mislabeled .csv/.xlsx is rejected clearly instead of parsed as junk.
+  if (isPdfBytes(buffer)) {
+    throw new Error(
+      "PDF files aren't supported. Please upload an Excel (.xlsx/.xls) or CSV export of your statement.",
+    );
   }
+
+  // Trust the bytes over the extension: a mislabeled file (e.g. xlsx saved as .csv)
+  // would otherwise be read as text and extract nothing.
+  const fileType = sniffFileType(buffer, params.fileType);
+
+  // Structured formats (CSV/Excel) are parsed deterministically first. This scales to
+  // the thousands of rows a real bank statement contains — which a single LLM call
+  // cannot emit within the output-token budget — and is instant and free. We only fall
+  // through to the LLM when no confident table header is found (unusual layouts).
+  if (fileType === "excel" || fileType === "csv") {
+    try {
+      const matrix = fileType === "excel"
+        ? await excelToMatrix(buffer)
+        : csvToMatrix(buffer.toString("utf8"));
+      const structured = parseStructuredStatement(matrix);
+      const rows = (structured?.rows ?? []).slice(0, MAX_POC_ROWS).filter((r) => r.amount > 0);
+      if (rows.length > 0) {
+        return {
+          rows,
+          currency: (structured?.currency || "NGN").toUpperCase().slice(0, 3),
+          notes: `Extracted ${rows.length} transaction(s).`,
+        };
+      }
+      console.warn(
+        `[poc extract] structured parse found no rows for "${params.fileName ?? "?"}" ` +
+        `(${fileType}, ${matrix.length} lines) — falling back to LLM.`,
+      );
+    } catch (err) {
+      console.warn("[poc extract] structured parse threw, falling back to LLM:", (err as Error).message);
+    }
+  }
+
+  // Unusual CSV/Excel layouts the deterministic reader couldn't interpret fall back to
+  // the LLM (e.g. a trade ledger with no debit/credit columns, like the Salad cashbook).
+  const text =
+    fileType === "excel" ? await excelToText(buffer) : buffer.toString("utf8");
+  const userContent: any = `Extract all transactions from this ${fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
 
   let res;
   try {
@@ -165,7 +391,9 @@ export async function extractTransactions(params: {
         { role: "user", content: userContent },
       ],
       response_format: { type: "json_schema", json_schema: { name: "extracted_transactions", schema: EXTRACTION_SCHEMA } },
-      maxTokens: 8192,
+      // Statements can run to hundreds of rows; a tight output cap truncates the
+      // JSON mid-array, which then fails to parse. Give the model ample room.
+      maxTokens: 16384,
     });
   } catch (err: any) {
     // Keep the real provider error in the server logs for operators…
@@ -190,7 +418,7 @@ export async function extractTransactions(params: {
   try {
     parsed = JSON.parse(content);
   } catch {
-    throw new Error("Could not read this file. If it is a scanned image, try a clearer copy or an Excel/CSV export.");
+    throw new Error("Could not read this file. Please upload a clean Excel (.xlsx/.xls) or CSV export.");
   }
   const rawRows = Array.isArray(parsed.rows) ? parsed.rows : [];
   const rows: CanonicalRow[] = rawRows
@@ -198,17 +426,30 @@ export async function extractTransactions(params: {
     .map((r): CanonicalRow => ({
       date: String(r.date ?? ""),
       description: String(r.description ?? ""),
-      amount: Math.abs(Number(r.amount) || 0),
+      amount: parseAmount(r.amount),
       direction: r.direction === "credit" ? "credit" : "debit",
       reference: r.reference ? String(r.reference) : undefined,
-      balance: r.balance == null ? null : Number(r.balance),
+      balance: r.balance == null ? null : (Number.isFinite(Number(r.balance)) ? Number(r.balance) : null),
     }))
     .filter((r) => r.amount > 0);
 
+  if (rows.length === 0) {
+    // Diagnostic for operators: distinguishes "model returned nothing" (rawRows=0 —
+    // unreadable/gibberish input) from "rows parsed away" (rawRows>0 but amounts
+    // filtered to 0 — an amount-format problem). Helps RCA a prospect's file fast.
+    console.warn(
+      `[poc extract] 0 usable rows — file="${params.fileName ?? "?"}" declared=${params.fileType} ` +
+      `resolved=${fileType} bytes=${buffer.length} llmContentLen=${content.length} rawRows=${rawRows.length}. ` +
+      `Preview: ${content.slice(0, 300).replace(/\s+/g, " ")}`,
+    );
+  }
+
   const notes =
-    rows.length === 0
-      ? "No transactions could be extracted. If this is a scanned image, try a clearer scan or an Excel/CSV export."
-      : `Extracted ${rows.length} transaction(s).`;
+    rows.length > 0
+      ? `Extracted ${rows.length} transaction(s).`
+      : "No transaction rows were found in this file. Make sure it contains dated transactions with amounts " +
+        "(not just an opening/closing balance or a summary). A plain CSV or Excel export with Date, Description, " +
+        "and Amount columns works best.";
   return { rows, currency: (parsed.currency || "NGN").toUpperCase().slice(0, 3), notes };
 }
 

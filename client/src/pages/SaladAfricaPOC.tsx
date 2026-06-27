@@ -1,8 +1,8 @@
 /**
  * ReconcileAI — Salad Africa POC (public, no login).
  *
- * Self-service: upload a ledger (Excel/CSV) + a bank statement (PDF/Excel/CSV),
- * the AI extracts transactions from any format (incl. scanned PDFs), then the
+ * Self-service: upload a ledger (Excel/CSV) + a bank statement (Excel/CSV),
+ * transactions are extracted directly from the structured file, then the
  * 3-layer engine reconciles them. Results are stored and shareable.
  *
  * Enhanced UX:
@@ -19,13 +19,25 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Loader2, Upload as UploadIcon, FileSpreadsheet, FileText, CheckCircle2,
   Play, Scale, AlertTriangle, Bot, Copy, Check, Sparkles, X,
-  FileImage, File as FileIcon,
+  File as FileIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 const POC_SLUG = "salad_africa";
 
-type FileKind = "pdf" | "excel" | "csv";
+// Stable anonymous visitor ID for this browser session — no PII, only used to
+// correlate uploads from the same session in the owner notification / POC Hub.
+function getVisitorId(): string {
+  const key = "salad_africa_poc_visitor_id";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
+
+type FileKind = "excel" | "csv";
 type UploadState = {
   uploadId: number;
   rowCount: number;
@@ -39,7 +51,7 @@ type ParseStage = "idle" | "reading" | "extracting" | "verifying" | "done" | "er
 const STAGE_LABELS: Record<ParseStage, string> = {
   idle: "",
   reading: "Reading file…",
-  extracting: "AI extracting transactions…",
+  extracting: "Extracting transactions…",
   verifying: "Verifying data…",
   done: "Done",
   error: "Failed",
@@ -55,7 +67,6 @@ const STAGE_PROGRESS: Record<ParseStage, number> = {
 
 function detectKind(name: string): FileKind | null {
   const n = name.toLowerCase();
-  if (n.endsWith(".pdf")) return "pdf";
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return "excel";
   if (n.endsWith(".csv") || n.endsWith(".txt")) return "csv";
   return null;
@@ -72,9 +83,7 @@ function fileToBase64(file: File): Promise<string> {
 
 function getFileIcon(name: string) {
   const n = name.toLowerCase();
-  if (n.endsWith(".pdf")) return FileText;
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return FileSpreadsheet;
-  if (n.endsWith(".png") || n.endsWith(".jpg")) return FileImage;
   return FileIcon;
 }
 
@@ -211,13 +220,23 @@ function UploadSlot({
       </CardHeader>
       <CardContent>
         {state ? (
-          /* ── Done state ── */
+          /* ── Done state (success when rows were found, warning when none) ── */
           <div className="space-y-3">
-            <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
-              <CheckCircle2 className="h-5 w-5 text-emerald-600 mt-0.5 shrink-0" />
+            <div className={[
+              "flex items-start gap-3 rounded-lg border p-3",
+              state.rowCount > 0 ? "border-emerald-200 bg-emerald-50" : "border-amber-300 bg-amber-50",
+            ].join(" ")}>
+              {state.rowCount > 0 ? (
+                <CheckCircle2 className="h-5 w-5 text-emerald-600 mt-0.5 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-5 w-5 text-amber-600 mt-0.5 shrink-0" />
+              )}
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium truncate">{state.fileName}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">{state.notes}</p>
+                <p className={[
+                  "text-xs mt-0.5",
+                  state.rowCount > 0 ? "text-muted-foreground" : "text-amber-700",
+                ].join(" ")}>{state.notes}</p>
               </div>
               <button
                 onClick={onClear}
@@ -352,6 +371,7 @@ export default function SaladAfricaPOC() {
   const extract = trpc.poc.extract.useMutation();
   const run = trpc.poc.run.useMutation();
   const share = trpc.poc.createShareToken.useMutation();
+  const saveFile = trpc.poc.saveFile.useMutation();
 
   const setStage = (side: "ledger" | "statement", s: ParseStage) => {
     if (side === "ledger") setLedgerStage(s);
@@ -361,7 +381,7 @@ export default function SaladAfricaPOC() {
   const handlePick = async (side: "ledger" | "statement", file: File) => {
     const kind = detectKind(file.name);
     if (!kind) {
-      toast.error("Unsupported file. Use PDF, Excel (.xlsx/.xls) or CSV.");
+      toast.error("Unsupported file. Please upload Excel (.xlsx/.xls) or CSV.");
       return;
     }
 
@@ -374,6 +394,19 @@ export default function SaladAfricaPOC() {
     try {
       // Stage 1: Read file locally
       const contentBase64 = await fileToBase64(file);
+
+      // Save the raw file anonymously to S3 + notify the owner (fire-and-forget;
+      // never block or fail the user's extraction over archival/notification).
+      saveFile.mutateAsync({
+        pocSlug: POC_SLUG,
+        fileRole: side === "ledger" ? "cbs" : "statement",
+        originalName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size,
+        dataBase64: contentBase64,
+        visitorId: getVisitorId(),
+        userAgent: navigator.userAgent.slice(0, 512),
+      }).catch(() => {/* swallow — archival/notification must never block the user */});
 
       // Stage 2: AI extraction (server call)
       setStage(side, "extracting");
@@ -473,8 +506,8 @@ export default function SaladAfricaPOC() {
         <div>
           <h1 className="text-xl font-bold text-gray-900">Reconcile your ledger against your bank statement</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Upload your two files in any format — Excel, CSV, or PDF (even a scan). Our AI extracts the
-            transactions, then reconciles them and explains every difference.
+            Upload your two files as Excel (.xlsx/.xls) or CSV. We read the transactions directly,
+            reconcile them, and explain every difference.
           </p>
         </div>
 
@@ -492,8 +525,8 @@ export default function SaladAfricaPOC() {
           />
           <UploadSlot
             label="Bank Statement"
-            hint="PDF, Excel, CSV — scans are fine"
-            accept=".pdf,.xlsx,.xls,.csv,.txt"
+            hint="Excel, CSV (export from your bank)"
+            accept=".xlsx,.xls,.csv,.txt"
             state={statement}
             stage={statementStage}
             pendingFileName={statementPendingName}
@@ -506,7 +539,7 @@ export default function SaladAfricaPOC() {
         <div className="flex items-center gap-3">
           <Button
             onClick={handleRun}
-            disabled={!ledger || !statement || run.isPending}
+            disabled={!ledger || !statement || !ledger.rowCount || !statement.rowCount || run.isPending}
             className="gap-2 bg-emerald-700 hover:bg-emerald-800"
           >
             {run.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
@@ -514,6 +547,11 @@ export default function SaladAfricaPOC() {
           </Button>
           {(!ledger || !statement) && (
             <span className="text-xs text-muted-foreground">Upload both files to run.</span>
+          )}
+          {ledger && statement && (!ledger.rowCount || !statement.rowCount) && (
+            <span className="text-xs text-amber-700">
+              No transactions were read from the {!ledger.rowCount && !statement.rowCount ? "uploaded files" : !statement.rowCount ? "bank statement" : "ledger"}. Re-upload before running.
+            </span>
           )}
           {run.isPending && (
             <span className="text-xs text-emerald-700 flex items-center gap-1.5">
