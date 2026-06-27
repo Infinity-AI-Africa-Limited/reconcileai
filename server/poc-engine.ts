@@ -93,6 +93,49 @@ const EXTRACTION_SCHEMA = {
   additionalProperties: false,
 };
 
+/**
+ * Some users upload a file whose extension lies about its real format — e.g. an
+ * Excel workbook exported/renamed as "statement.xlsx (14).csv", or an xlsx saved
+ * with a .csv suffix. Reading xlsx ZIP bytes as UTF-8 text yields binary gibberish
+ * and the model extracts nothing. Sniff the leading magic bytes and override the
+ * declared type when they disagree, so the file is parsed by its real format.
+ */
+export function sniffFileType(buffer: Buffer, declared: FileType): FileType {
+  if (buffer.length >= 4) {
+    // ZIP local-file-header "PK\x03\x04" (also empty/spanned variants) → OOXML (.xlsx).
+    if (buffer[0] === 0x50 && buffer[1] === 0x4b &&
+        (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07)) {
+      return "excel";
+    }
+    // "%PDF" → PDF, even if uploaded with the wrong extension.
+    if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
+      return "pdf";
+    }
+    // Every real .xlsx is a ZIP. If a file declared "excel" is NOT a ZIP (and not a
+    // PDF), it cannot be a workbook — it's almost always a CSV/text export misnamed
+    // .xlsx. Read it as text rather than letting exceljs throw on non-zip bytes.
+    if (declared === "excel") return "csv";
+  }
+  return declared;
+}
+
+/**
+ * Parse a money value into a positive number, tolerating the formats real bank
+ * statements use: currency symbols (₦, $), thousands separators ("16,576,000.00"),
+ * surrounding spaces, and parenthesised negatives ("(1,234.56)"). Direction is
+ * tracked separately, so the sign is irrelevant here — we always return |amount|.
+ * Without this, a model that returns amounts as formatted strings would yield NaN,
+ * collapse to 0, and get silently filtered out, producing a "0 transactions" result.
+ */
+export function parseAmount(raw: unknown): number {
+  if (typeof raw === "number") return Number.isFinite(raw) ? Math.abs(raw) : 0;
+  // Keep only digits and the decimal point; commas/symbols/parens are stripped.
+  const cleaned = String(raw ?? "").replace(/[^0-9.]/g, "");
+  if (!cleaned) return 0;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? Math.abs(n) : 0;
+}
+
 /** Serialize an Excel workbook buffer to a tab-separated text the LLM can read. */
 async function excelToText(buffer: Buffer): Promise<string> {
   const ExcelJS = await loadExcelJS();
@@ -129,9 +172,12 @@ export async function extractTransactions(params: {
   fileName?: string;
 }): Promise<ExtractionResult> {
   const buffer = Buffer.from(params.base64, "base64");
+  // Trust the bytes over the extension: a mislabeled file (e.g. xlsx saved as .csv)
+  // would otherwise be read as text and extract nothing.
+  const fileType = sniffFileType(buffer, params.fileType);
   let userContent: any;
 
-  if (params.fileType === "pdf") {
+  if (fileType === "pdf") {
     // Fast pre-checks: reject too-large / too-long PDFs before the LLM call.
     if (buffer.length > MAX_PDF_BYTES) {
       const mb = (buffer.length / (1024 * 1024)).toFixed(1);
@@ -153,8 +199,8 @@ export async function extractTransactions(params: {
     ];
   } else {
     const text =
-      params.fileType === "excel" ? await excelToText(buffer) : buffer.toString("utf8");
-    userContent = `Extract all transactions from this ${params.fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
+      fileType === "excel" ? await excelToText(buffer) : buffer.toString("utf8");
+    userContent = `Extract all transactions from this ${fileType.toUpperCase()} data:\n\n${text.slice(0, 200_000)}`;
   }
 
   let res;
@@ -165,7 +211,9 @@ export async function extractTransactions(params: {
         { role: "user", content: userContent },
       ],
       response_format: { type: "json_schema", json_schema: { name: "extracted_transactions", schema: EXTRACTION_SCHEMA } },
-      maxTokens: 8192,
+      // Statements can run to hundreds of rows; a tight output cap truncates the
+      // JSON mid-array, which then fails to parse. Give the model ample room.
+      maxTokens: 16384,
     });
   } catch (err: any) {
     // Keep the real provider error in the server logs for operators…
@@ -198,17 +246,32 @@ export async function extractTransactions(params: {
     .map((r): CanonicalRow => ({
       date: String(r.date ?? ""),
       description: String(r.description ?? ""),
-      amount: Math.abs(Number(r.amount) || 0),
+      amount: parseAmount(r.amount),
       direction: r.direction === "credit" ? "credit" : "debit",
       reference: r.reference ? String(r.reference) : undefined,
-      balance: r.balance == null ? null : Number(r.balance),
+      balance: r.balance == null ? null : (Number.isFinite(Number(r.balance)) ? Number(r.balance) : null),
     }))
     .filter((r) => r.amount > 0);
 
+  if (rows.length === 0) {
+    // Diagnostic for operators: distinguishes "model returned nothing" (rawRows=0 —
+    // unreadable/gibberish input) from "rows parsed away" (rawRows>0 but amounts
+    // filtered to 0 — an amount-format problem). Helps RCA a prospect's file fast.
+    console.warn(
+      `[poc extract] 0 usable rows — file="${params.fileName ?? "?"}" declared=${params.fileType} ` +
+      `resolved=${fileType} bytes=${buffer.length} llmContentLen=${content.length} rawRows=${rawRows.length}. ` +
+      `Preview: ${content.slice(0, 300).replace(/\s+/g, " ")}`,
+    );
+  }
+
   const notes =
-    rows.length === 0
-      ? "No transactions could be extracted. If this is a scanned image, try a clearer scan or an Excel/CSV export."
-      : `Extracted ${rows.length} transaction(s).`;
+    rows.length > 0
+      ? `Extracted ${rows.length} transaction(s).`
+      : fileType === "pdf"
+        ? "No transactions could be extracted. If this is a scanned image, try a clearer scan or an Excel/CSV export."
+        : "No transaction rows were found in this file. Make sure it contains dated transactions with amounts " +
+          "(not just an opening/closing balance or a summary). A plain CSV or Excel export with Date, Description, " +
+          "and Amount columns works best.";
   return { rows, currency: (parsed.currency || "NGN").toUpperCase().slice(0, 3), notes };
 }
 

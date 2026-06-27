@@ -223,13 +223,23 @@ function UploadSlot({
       </CardHeader>
       <CardContent>
         {state ? (
-          /* ── Done state ── */
+          /* ── Done state (success when rows were found, warning when none) ── */
           <div className="space-y-3">
-            <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
-              <CheckCircle2 className="h-5 w-5 text-emerald-600 mt-0.5 shrink-0" />
+            <div className={[
+              "flex items-start gap-3 rounded-lg border p-3",
+              state.rowCount > 0 ? "border-emerald-200 bg-emerald-50" : "border-amber-300 bg-amber-50",
+            ].join(" ")}>
+              {state.rowCount > 0 ? (
+                <CheckCircle2 className="h-5 w-5 text-emerald-600 mt-0.5 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-5 w-5 text-amber-600 mt-0.5 shrink-0" />
+              )}
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium truncate">{state.fileName}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">{state.notes}</p>
+                <p className={[
+                  "text-xs mt-0.5",
+                  state.rowCount > 0 ? "text-muted-foreground" : "text-amber-700",
+                ].join(" ")}>{state.notes}</p>
               </div>
               <button
                 onClick={onClear}
@@ -532,7 +542,7 @@ export default function SaladAfricaPOC() {
         <div className="flex items-center gap-3">
           <Button
             onClick={handleRun}
-            disabled={!ledger || !statement || run.isPending}
+            disabled={!ledger || !statement || !ledger.rowCount || !statement.rowCount || run.isPending}
             className="gap-2 bg-emerald-700 hover:bg-emerald-800"
           >
             {run.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
@@ -540,6 +550,11 @@ export default function SaladAfricaPOC() {
           </Button>
           {(!ledger || !statement) && (
             <span className="text-xs text-muted-foreground">Upload both files to run.</span>
+          )}
+          {ledger && statement && (!ledger.rowCount || !statement.rowCount) && (
+            <span className="text-xs text-amber-700">
+              No transactions were read from the {!ledger.rowCount && !statement.rowCount ? "uploaded files" : !statement.rowCount ? "bank statement" : "ledger"}. Re-upload before running.
+            </span>
           )}
           {run.isPending && (
             <span className="text-xs text-emerald-700 flex items-center gap-1.5">
