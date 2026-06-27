@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { toast } from "sonner";
 import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
 import { useAuth } from "@/_core/hooks/useAuth";
+import ExceptionGlossary from "@/components/ExceptionGlossary";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -377,6 +378,9 @@ export default function Exceptions() {
           </CardContent>
         </Card>
       )}
+
+      {/* Plain-English reference for every exception type */}
+      <ExceptionGlossary />
 
       {/* Exception Detail Dialog */}
       <Dialog open={!!selectedEx} onOpenChange={(o) => { if (!o) setSelectedEx(null); }}>
