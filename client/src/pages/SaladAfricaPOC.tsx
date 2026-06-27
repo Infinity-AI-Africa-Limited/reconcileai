@@ -25,6 +25,18 @@ import { toast } from "sonner";
 
 const POC_SLUG = "salad_africa";
 
+// Stable anonymous visitor ID for this browser session — no PII, only used to
+// correlate uploads from the same session in the owner notification / POC Hub.
+function getVisitorId(): string {
+  const key = "salad_africa_poc_visitor_id";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
+
 type FileKind = "pdf" | "excel" | "csv";
 type UploadState = {
   uploadId: number;
@@ -352,6 +364,7 @@ export default function SaladAfricaPOC() {
   const extract = trpc.poc.extract.useMutation();
   const run = trpc.poc.run.useMutation();
   const share = trpc.poc.createShareToken.useMutation();
+  const saveFile = trpc.poc.saveFile.useMutation();
 
   const setStage = (side: "ledger" | "statement", s: ParseStage) => {
     if (side === "ledger") setLedgerStage(s);
@@ -374,6 +387,19 @@ export default function SaladAfricaPOC() {
     try {
       // Stage 1: Read file locally
       const contentBase64 = await fileToBase64(file);
+
+      // Save the raw file anonymously to S3 + notify the owner (fire-and-forget;
+      // never block or fail the user's extraction over archival/notification).
+      saveFile.mutateAsync({
+        pocSlug: POC_SLUG,
+        fileRole: side === "ledger" ? "cbs" : "statement",
+        originalName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size,
+        dataBase64: contentBase64,
+        visitorId: getVisitorId(),
+        userAgent: navigator.userAgent.slice(0, 512),
+      }).catch(() => {/* swallow — archival/notification must never block the user */});
 
       // Stage 2: AI extraction (server call)
       setStage(side, "extracting");

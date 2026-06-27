@@ -113,10 +113,18 @@ function FileTypeIcon({ mime, name }: { mime: string; name: string }) {
   return <FileIcon className="h-4 w-4 text-muted-foreground shrink-0" />;
 }
 
-// ─── LAPO Uploads panel ───────────────────────────────────────────────────────
-function LapoUploads() {
+// ─── Prospect Uploads panel (per POC) ─────────────────────────────────────────
+function PocUploads({
+  pocSlug,
+  name,
+  roleLabels,
+}: {
+  pocSlug: string;
+  name: string;
+  roleLabels: { cbs: string; statement: string };
+}) {
   const { data, isLoading, error, refetch, isFetching } =
-    trpc.poc.listFiles.useQuery({ pocSlug: "lapo_mfb" });
+    trpc.poc.listFiles.useQuery({ pocSlug });
 
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const utils = trpc.useUtils();
@@ -166,9 +174,9 @@ function LapoUploads() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="font-semibold text-base">LAPO MFB — Prospect Uploads</h2>
+          <h2 className="font-semibold text-base">{name} — Prospect Uploads</h2>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Every file anonymously uploaded by a prospect on the LAPO POC page. No PII is stored.
+            Every file anonymously uploaded by a prospect on the {name} POC page. No PII is stored.
           </p>
         </div>
         <Button
@@ -187,8 +195,8 @@ function LapoUploads() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
           { label: "Total files", value: files.length },
-          { label: "CBS ledger files", value: files.filter((f) => f.fileRole === "cbs").length },
-          { label: "Settlement files", value: files.filter((f) => f.fileRole === "statement").length },
+          { label: roleLabels.cbs, value: files.filter((f) => f.fileRole === "cbs").length },
+          { label: roleLabels.statement, value: files.filter((f) => f.fileRole === "statement").length },
           { label: "Unique sessions", value: new Set(files.map((f) => f.visitorId).filter(Boolean)).size },
         ].map((s) => (
           <div key={s.label} className="rounded-lg border bg-white p-3">
@@ -201,7 +209,7 @@ function LapoUploads() {
       {/* Table */}
       {files.length === 0 ? (
         <div className="rounded-lg border bg-white p-10 text-center text-muted-foreground text-sm">
-          No files uploaded yet. When a prospect uploads a file on the LAPO POC page, it will appear here.
+          No files uploaded yet. When a prospect uploads a file on the {name} POC page, it will appear here.
         </div>
       ) : (
         <div className="rounded-lg border bg-white overflow-hidden">
@@ -241,7 +249,7 @@ function LapoUploads() {
                             : "border-sky-300 text-sky-700 text-[11px]"
                         }
                       >
-                        {f.fileRole === "cbs" ? "CBS Ledger" : "Settlement File"}
+                        {f.fileRole === "cbs" ? roleLabels.cbs : roleLabels.statement}
                       </Badge>
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs text-muted-foreground">
@@ -311,6 +319,9 @@ export default function PocHub() {
           <TabsTrigger value="pocs" className="gap-1.5">
             <FlaskConical className="h-4 w-4" /> POC Environments
           </TabsTrigger>
+          <TabsTrigger value="salad-uploads" className="gap-1.5">
+            <Download className="h-4 w-4" /> Salad Uploads
+          </TabsTrigger>
           <TabsTrigger value="lapo-uploads" className="gap-1.5">
             <Download className="h-4 w-4" /> LAPO Uploads
           </TabsTrigger>
@@ -354,9 +365,22 @@ export default function PocHub() {
           </p>
         </TabsContent>
 
+        {/* Salad uploads tab */}
+        <TabsContent value="salad-uploads" className="mt-4">
+          <PocUploads
+            pocSlug="salad_africa"
+            name="Salad Africa"
+            roleLabels={{ cbs: "Ledger / Cashbook", statement: "Bank Statement" }}
+          />
+        </TabsContent>
+
         {/* LAPO uploads tab */}
         <TabsContent value="lapo-uploads" className="mt-4">
-          <LapoUploads />
+          <PocUploads
+            pocSlug="lapo_mfb"
+            name="LAPO MFB"
+            roleLabels={{ cbs: "CBS Ledger", statement: "Settlement File" }}
+          />
         </TabsContent>
       </Tabs>
     </div>
