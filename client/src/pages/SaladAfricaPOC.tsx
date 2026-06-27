@@ -1,8 +1,8 @@
 /**
  * ReconcileAI — Salad Africa POC (public, no login).
  *
- * Self-service: upload a ledger (Excel/CSV) + a bank statement (PDF/Excel/CSV),
- * the AI extracts transactions from any format (incl. scanned PDFs), then the
+ * Self-service: upload a ledger (Excel/CSV) + a bank statement (Excel/CSV),
+ * transactions are extracted directly from the structured file, then the
  * 3-layer engine reconciles them. Results are stored and shareable.
  *
  * Enhanced UX:
@@ -19,7 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Loader2, Upload as UploadIcon, FileSpreadsheet, FileText, CheckCircle2,
   Play, Scale, AlertTriangle, Bot, Copy, Check, Sparkles, X,
-  FileImage, File as FileIcon,
+  File as FileIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -37,7 +37,7 @@ function getVisitorId(): string {
   return id;
 }
 
-type FileKind = "pdf" | "excel" | "csv";
+type FileKind = "excel" | "csv";
 type UploadState = {
   uploadId: number;
   rowCount: number;
@@ -51,7 +51,7 @@ type ParseStage = "idle" | "reading" | "extracting" | "verifying" | "done" | "er
 const STAGE_LABELS: Record<ParseStage, string> = {
   idle: "",
   reading: "Reading file…",
-  extracting: "AI extracting transactions…",
+  extracting: "Extracting transactions…",
   verifying: "Verifying data…",
   done: "Done",
   error: "Failed",
@@ -67,7 +67,6 @@ const STAGE_PROGRESS: Record<ParseStage, number> = {
 
 function detectKind(name: string): FileKind | null {
   const n = name.toLowerCase();
-  if (n.endsWith(".pdf")) return "pdf";
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return "excel";
   if (n.endsWith(".csv") || n.endsWith(".txt")) return "csv";
   return null;
@@ -84,9 +83,7 @@ function fileToBase64(file: File): Promise<string> {
 
 function getFileIcon(name: string) {
   const n = name.toLowerCase();
-  if (n.endsWith(".pdf")) return FileText;
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return FileSpreadsheet;
-  if (n.endsWith(".png") || n.endsWith(".jpg")) return FileImage;
   return FileIcon;
 }
 
@@ -384,7 +381,7 @@ export default function SaladAfricaPOC() {
   const handlePick = async (side: "ledger" | "statement", file: File) => {
     const kind = detectKind(file.name);
     if (!kind) {
-      toast.error("Unsupported file. Use PDF, Excel (.xlsx/.xls) or CSV.");
+      toast.error("Unsupported file. Please upload Excel (.xlsx/.xls) or CSV.");
       return;
     }
 
@@ -509,8 +506,8 @@ export default function SaladAfricaPOC() {
         <div>
           <h1 className="text-xl font-bold text-gray-900">Reconcile your ledger against your bank statement</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Upload your two files in any format — Excel, CSV, or PDF (even a scan). Our AI extracts the
-            transactions, then reconciles them and explains every difference.
+            Upload your two files as Excel (.xlsx/.xls) or CSV. We read the transactions directly,
+            reconcile them, and explain every difference.
           </p>
         </div>
 
@@ -528,8 +525,8 @@ export default function SaladAfricaPOC() {
           />
           <UploadSlot
             label="Bank Statement"
-            hint="PDF, Excel, CSV — scans are fine"
-            accept=".pdf,.xlsx,.xls,.csv,.txt"
+            hint="Excel, CSV (export from your bank)"
+            accept=".xlsx,.xls,.csv,.txt"
             state={statement}
             stage={statementStage}
             pendingFileName={statementPendingName}
