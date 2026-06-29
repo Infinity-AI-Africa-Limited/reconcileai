@@ -1674,6 +1674,7 @@ function POCModePanel({
               <PocKpiDashboard
                 report={kpiQuery.data}
                 isLoading={kpiQuery.isLoading}
+                isError={kpiQuery.isError}
                 title="Woodcore POC — KPI Dashboard"
                 subtitle="Tracks reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
                 accentColor={isSavings ? "#4f46e5" : "#d97706"}

@@ -1001,6 +1001,7 @@ export default function LapoPOC() {
                 <PocKpiDashboard
                   report={kpiQuery.data}
                   isLoading={kpiQuery.isLoading}
+                  isError={kpiQuery.isError}
                   title="LAPO MFB POC — KPI Dashboard"
                   subtitle="Tracks card settlement reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
                   accentColor={LAPO_GREEN}

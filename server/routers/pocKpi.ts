@@ -55,7 +55,7 @@ export interface KpiReport {
   metrics: KpiMetric[];
 }
 
-function statusFor(value: number | null, target: number, floor: number, higherIsBetter: boolean): KpiMetric["status"] {
+export function statusFor(value: number | null, target: number, floor: number, higherIsBetter: boolean): KpiMetric["status"] {
   if (value === null) return "no_data";
   if (higherIsBetter) {
     if (value >= target) return "above_target";
@@ -94,35 +94,34 @@ function metric(
 async function computeGenericKpis(pocSlug: string): Promise<KpiReport> {
   const { getDb } = await import("../db");
   const { pocRuns, pocExceptions } = await import("../../drizzle/poc_schema");
-  const { eq, desc } = await import("drizzle-orm");
+  const { eq, desc, inArray } = await import("drizzle-orm");
 
+  const empty = (): KpiReport => ({ pocSlug, computedAt: new Date().toISOString(), runCount: 0, metrics: [] });
   const db = await getDb();
-  if (!db) {
-    return { pocSlug, computedAt: new Date().toISOString(), runCount: 0, metrics: [] };
-  }
+  if (!db) return empty();
 
-  // Fetch last 20 runs for this POC
+  // Most recent 20 runs for this POC.
   const runs = await db
     .select()
     .from(pocRuns)
     .where(eq(pocRuns.pocSlug, pocSlug))
     .orderBy(desc(pocRuns.createdAt))
     .limit(20);
+  if (runs.length === 0) return empty();
 
-  if (runs.length === 0) {
-    return { pocSlug, computedAt: new Date().toISOString(), runCount: 0, metrics: [] };
-  }
-
-  // Fetch all exceptions for these runs
+  // All exceptions for those runs, grouped by run once. Re-scanning the full set per
+  // run is wasteful — a single Salad statement can produce ~1,300 exceptions per run.
   const runIds = runs.map((r) => r.id);
-  const allExceptions = runIds.length === 0 ? [] : await db
+  const allExceptions = await db
     .select()
     .from(pocExceptions)
-    .where(
-      runIds.length === 1
-        ? eq(pocExceptions.runId, runIds[0])
-        : (await import("drizzle-orm")).inArray(pocExceptions.runId, runIds)
-    );
+    .where(inArray(pocExceptions.runId, runIds));
+  const byRun = new Map<number, typeof allExceptions>();
+  for (const e of allExceptions) {
+    const arr = byRun.get(e.runId);
+    if (arr) arr.push(e); else byRun.set(e.runId, [e]);
+  }
+  const exceptionsFor = (runId: number) => byRun.get(runId) ?? [];
 
   // ── Per-run metrics (for trend sparklines) ──────────────────────────────────
   const matchRateTrend: number[] = [];
@@ -131,10 +130,10 @@ async function computeGenericKpis(pocSlug: string): Promise<KpiReport> {
   const aiConfidenceTrend: number[] = [];
 
   for (const run of [...runs].reverse()) { // oldest first for sparkline
-    const matchRate = run.matchRate ? parseFloat(String(run.matchRate)) : null;
-    if (matchRate !== null) matchRateTrend.push(matchRate);
+    const matchRate = run.matchRate != null ? parseFloat(String(run.matchRate)) : null;
+    if (matchRate !== null && Number.isFinite(matchRate)) matchRateTrend.push(matchRate);
 
-    const runExceptions = allExceptions.filter((e) => e.runId === run.id);
+    const runExceptions = exceptionsFor(run.id);
     const total = runExceptions.length;
     if (total > 0) {
       const resolved = runExceptions.filter((e) => e.reviewStatus === "RESOLVED").length;
@@ -225,44 +224,42 @@ async function computeGenericKpis(pocSlug: string): Promise<KpiReport> {
 async function computeWoodcoreKpis(): Promise<KpiReport> {
   const { getDb } = await import("../db");
   const { wc_reconciliation_runs, wc_exceptions } = await import("../../drizzle/woodcore_schema");
-  const { desc } = await import("drizzle-orm");
+  const { desc, inArray } = await import("drizzle-orm");
 
+  const empty = (): KpiReport => ({ pocSlug: "woodcore", computedAt: new Date().toISOString(), runCount: 0, metrics: [] });
   const db = await getDb();
-  if (!db) {
-    return { pocSlug: "woodcore", computedAt: new Date().toISOString(), runCount: 0, metrics: [] };
-  }
+  if (!db) return empty();
 
   const runs = await db
     .select()
     .from(wc_reconciliation_runs)
     .orderBy(desc(wc_reconciliation_runs.createdAt))
     .limit(20);
+  if (runs.length === 0) return empty();
 
-  if (runs.length === 0) {
-    return { pocSlug: "woodcore", computedAt: new Date().toISOString(), runCount: 0, metrics: [] };
-  }
-
+  // Fetch all exceptions for those runs, grouped by run once (avoids re-scanning).
   const runIds = runs.map((r) => r.id);
-  const { inArray } = await import("drizzle-orm");
-  const allExceptions = runIds.length === 0 ? [] : await db
+  const allExceptions = await db
     .select()
     .from(wc_exceptions)
     .where(inArray(wc_exceptions.reconciliationRunId, runIds));
+  const byRun = new Map<number, typeof allExceptions>();
+  for (const e of allExceptions) {
+    const arr = byRun.get(e.reconciliationRunId);
+    if (arr) arr.push(e); else byRun.set(e.reconciliationRunId, [e]);
+  }
+  const exceptionsFor = (runId: number) => byRun.get(runId) ?? [];
 
   // ── Per-run metrics for sparklines ─────────────────────────────────────────
   const matchRateTrend: number[] = [];
-  const varianceTrend: number[] = [];
   const resolutionRateTrend: number[] = [];
   const layer2TriggerTrend: number[] = [];
 
   for (const run of [...runs].reverse()) {
-    const variance = Math.abs(parseFloat(String(run.varianceAmount ?? "0")));
-    varianceTrend.push(variance);
-
-    // Layer 2 trigger: 1 if variance_detected, 0 if balanced
+    // Layer 2 trigger: 100 if variance triggered the exception layer, else 0.
     layer2TriggerTrend.push(run.layer2Triggered ? 100 : 0);
 
-    const runExceptions = allExceptions.filter((e) => e.reconciliationRunId === run.id);
+    const runExceptions = exceptionsFor(run.id);
     const total = runExceptions.length;
     const totalTxns = (run.totalGlEntries ?? 0) + (run.totalSavingsTxns ?? 0);
     const exceptionCount = total;
@@ -305,9 +302,7 @@ async function computeWoodcoreKpis(): Promise<KpiReport> {
 
   // Layer 2 auto-trigger rate: % of VARIANCE_DETECTED runs that have exceptions
   const varianceRuns = runs.filter((r) => r.status === "VARIANCE_DETECTED");
-  const triggeredRuns = varianceRuns.filter((r) =>
-    allExceptions.some((e) => e.reconciliationRunId === r.id)
-  );
+  const triggeredRuns = varianceRuns.filter((r) => exceptionsFor(r.id).length > 0);
   const layer2TriggerRate = varianceRuns.length > 0
     ? Math.round((triggeredRuns.length / varianceRuns.length) * 100)
     : 100; // if no variance runs, the system is working perfectly

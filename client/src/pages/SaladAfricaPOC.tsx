@@ -626,6 +626,7 @@ export default function SaladAfricaPOC() {
               <PocKpiDashboard
                 report={kpiQuery.data}
                 isLoading={kpiQuery.isLoading}
+                isError={kpiQuery.isError}
                 title="Salad Africa POC — KPI Dashboard"
                 subtitle="Tracks ledger-vs-bank reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
                 accentColor="#16a34a"

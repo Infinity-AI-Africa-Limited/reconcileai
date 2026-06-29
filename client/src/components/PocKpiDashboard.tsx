@@ -11,7 +11,6 @@
  */
 import { useMemo } from "react";
 import { TrendingUp, TrendingDown, Minus, AlertTriangle, CheckCircle2, Info } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -215,11 +214,13 @@ interface PocKpiDashboardProps {
   title?: string;
   subtitle?: string;
   accentColor?: string; // CSS hex for the section header accent
+  isError?: boolean;    // the KPI query failed (distinct from "no data yet")
 }
 
 export function PocKpiDashboard({
   report,
   isLoading,
+  isError,
   title = "POC KPI Dashboard",
   subtitle,
   accentColor = "#0f172a",
@@ -245,6 +246,16 @@ export function PocKpiDashboard({
             ))}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (isError && !report) {
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-8 text-center">
+        <AlertTriangle size={32} className="mx-auto text-amber-400 mb-3" />
+        <p className="text-sm font-medium text-amber-700">Couldn't load KPIs</p>
+        <p className="text-xs text-amber-600 mt-1">Something went wrong fetching the metrics. Please try again in a moment.</p>
       </div>
     );
   }
