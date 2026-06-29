@@ -8,6 +8,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { LineChart, Line, Tooltip, ResponsiveContainer } from "recharts";
 import { trpc } from "@/lib/trpc";
+import { PocKpiDashboard } from "@/components/PocKpiDashboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1124,6 +1125,7 @@ function POCModePanel({
   const statsQuery = trpc.woodcore.stats.useQuery();
   const runsQuery = trpc.woodcore.getRuns.useQuery();
   const productsQuery = trpc.woodcore.listProducts.useQuery({ type: mode });
+  const kpiQuery = trpc.pocKpi.getWoodcoreKpis.useQuery(undefined, { staleTime: 30_000 });
   // Default to the most active product once the list loads.
   useEffect(() => {
     if (selectedProductId == null && productsQuery.data && productsQuery.data.length > 0) {
@@ -1410,6 +1412,9 @@ function POCModePanel({
               <TabsTrigger value="compare" className="gap-1.5">
                 <GitCompare className="h-3.5 w-3.5" /> Compare Runs
               </TabsTrigger>
+              <TabsTrigger value="kpi" className="gap-1.5">
+                <TrendingUp className="h-3.5 w-3.5" /> KPI Dashboard
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="layer1" className="mt-4">
@@ -1663,6 +1668,16 @@ function POCModePanel({
 
             <TabsContent value="compare" className="mt-4">
               <ComparisonPanel runs={runs} />
+            </TabsContent>
+
+            <TabsContent value="kpi" className="mt-4">
+              <PocKpiDashboard
+                report={kpiQuery.data}
+                isLoading={kpiQuery.isLoading}
+                title="Woodcore POC — KPI Dashboard"
+                subtitle="Tracks reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
+                accentColor={isSavings ? "#4f46e5" : "#d97706"}
+              />
             </TabsContent>
           </Tabs>
         )}

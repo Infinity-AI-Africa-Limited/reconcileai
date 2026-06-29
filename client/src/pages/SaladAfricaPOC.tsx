@@ -12,6 +12,7 @@
  */
 import { useState, useRef, useCallback, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
+import { PocKpiDashboard } from "@/components/PocKpiDashboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -372,6 +373,7 @@ export default function SaladAfricaPOC() {
   const run = trpc.poc.run.useMutation();
   const share = trpc.poc.createShareToken.useMutation();
   const saveFile = trpc.poc.saveFile.useMutation();
+  const kpiQuery = trpc.pocKpi.getKpis.useQuery({ pocSlug: POC_SLUG }, { staleTime: 30_000 });
 
   const setStage = (side: "ledger" | "statement", s: ParseStage) => {
     if (side === "ledger") setLedgerStage(s);
@@ -573,6 +575,9 @@ export default function SaladAfricaPOC() {
               <TabsTrigger value="agent" className="gap-1.5">
                 <Bot className="h-4 w-4" /> AI Agent
               </TabsTrigger>
+              <TabsTrigger value="kpi" className="gap-1.5">
+                <Sparkles className="h-4 w-4" /> KPI Dashboard
+              </TabsTrigger>
             </TabsList>
 
             {/* Layer 1 */}
@@ -614,6 +619,17 @@ export default function SaladAfricaPOC() {
             {/* Layer 3 */}
             <TabsContent value="agent" className="space-y-3">
               {exceptions.map((e, i) => <ExceptionCard key={i} e={e} showAgent />)}
+            </TabsContent>
+
+            {/* KPI Dashboard */}
+            <TabsContent value="kpi" className="mt-2">
+              <PocKpiDashboard
+                report={kpiQuery.data}
+                isLoading={kpiQuery.isLoading}
+                title="Salad Africa POC — KPI Dashboard"
+                subtitle="Tracks ledger-vs-bank reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
+                accentColor="#16a34a"
+              />
             </TabsContent>
           </Tabs>
         )}
