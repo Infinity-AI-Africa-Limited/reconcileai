@@ -190,6 +190,10 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   unmatchedCount: int("unmatchedCount").default(0).notNull(),
   matchRate: decimal("matchRate", { precision: 5, scale: 2 }),
   processingTimeMs: int("processingTimeMs"), // Track engine performance
+  // Bank fee/charge "noise" set aside from the reconciliation (not counted as
+  // exceptions). excludedItems holds the flagged rows + reason for the user.
+  excludedCount: int("excludedCount").default(0).notNull(),
+  excludedItems: json("excludedItems"),
   startedAt: timestamp("startedAt"),
   completedAt: timestamp("completedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

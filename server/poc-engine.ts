@@ -735,6 +735,11 @@ const NOISE_PATTERNS: { reason: string; re: RegExp }[] = [
   { reason: "Account maintenance fee", re: /\b(account maintenance|maintenance (fee|charge)|a\.?m\.?f\b|ledger fee|c\.?o\.?t\b|commission on turnover)\b/i },
   { reason: "Card / channel fee", re: /\b(sms( alert| charge| fee)?|e-?alert|alert (fee|charge)|atm (fee|charge)|card (fee|maintenance)|hardware token|token fee|ussd (fee|charge))\b/i },
   { reason: "Bank charge / commission", re: /\b(bank charge|service (charge|fee)|processing fee|handling fee|transaction (fee|charge)|transfer (fee|charge)|nip (fee|charge)|neft (fee|charge)|rtgs (fee|charge)|management fee|commission)\b/i },
+  // Some banks prefix system-generated charges with "MISC." (e.g. real Salad
+  // statement: "MISC. SMS ALERT CHARGE", "MISC. ELECTRONIC MONEY TRANSFER LEVY").
+  // Catch any such line that also carries a charge/fee/levy term — the specific
+  // buckets above still win for the known forms, so this only hardens new variants.
+  { reason: "Bank-generated charge", re: /\bmisc\.?\s+.*\b(charge|fee|levy|duty|tax|commission)\b/i },
   { reason: "Possible fee / charge (review)", re: /\b(fees?|charges?)\b/i },
 ];
 

@@ -344,6 +344,13 @@
       "when": 1782489122244,
       "tag": "0048_youthful_smiling_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "5",
+      "when": 1782850280077,
+      "tag": "0049_spooky_tiger_shark",
+      "breakpoints": true
     }
   ]
 }

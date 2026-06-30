@@ -374,6 +374,60 @@ export default function ReconciliationPage() {
                   </div>
                 </div>
 
+                {/* Fee/charge noise set aside from the reconciliation */}
+                {(() => {
+                  const excluded = ((jobDetail.job.excludedItems as Array<{ side: string; amount: number; reference: string | null; description: string | null; reason: string }> | null) ?? []);
+                  if (excluded.length === 0) return null;
+                  const ngn = (n: number) => `₦${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                  const total = excluded.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+                  const byReason: Record<string, { count: number; total: number }> = {};
+                  for (const e of excluded) { const b = (byReason[e.reason] ??= { count: 0, total: 0 }); b.count++; b.total += Number(e.amount) || 0; }
+                  return (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4">
+                      <div className="flex items-start gap-2 mb-3">
+                        <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                        <div>
+                          <h4 className="font-semibold text-sm text-amber-900">{excluded.length} item{excluded.length !== 1 ? "s" : ""} set aside ({ngn(total)})</h4>
+                          <p className="text-xs text-amber-800/80 mt-0.5">
+                            Bank fees, charges, taxes and levies — not transactions to reconcile one-to-one. They were excluded
+                            from matching so they don't skew the result, and are listed here for awareness. Card-settlement fees
+                            (interchange / scheme) are intentionally <strong>not</strong> excluded.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {Object.entries(byReason).map(([reason, agg]) => (
+                          <span key={reason} className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-medium text-amber-800">
+                            {reason}<span className="text-amber-600">{agg.count} · {ngn(agg.total)}</span>
+                          </span>
+                        ))}
+                      </div>
+                      <div className="overflow-x-auto border rounded-lg bg-white/60 max-h-64 overflow-y-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-amber-50 border-b text-amber-800">
+                              <th className="text-left py-2 px-3">Reason</th>
+                              <th className="text-left py-2 px-3">Description</th>
+                              <th className="text-left py-2 px-3">Side</th>
+                              <th className="text-right py-2 px-3">Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {excluded.slice(0, 100).map((e, i) => (
+                              <tr key={i} className="border-b last:border-0">
+                                <td className="py-2 px-3"><span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-700">{e.reason}</span></td>
+                                <td className="py-2 px-3 max-w-[280px] truncate" title={e.description ?? ""}>{e.description || e.reference || "—"}</td>
+                                <td className="py-2 px-3 uppercase text-[10px] text-muted-foreground">{e.side}</td>
+                                <td className="py-2 px-3 text-right font-mono">{ngn(Number(e.amount) || 0)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {jobDetail.matches.length > 0 && (
                   <div>
                     <h4 className="font-semibold mb-2">Matches ({jobDetail.matches.length})</h4>

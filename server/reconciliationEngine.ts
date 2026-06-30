@@ -16,6 +16,19 @@ export interface MatchCandidate {
 export interface ReconciliationConfig {
   amountTolerance: number; // e.g. 0.005 for ±0.5%
   dateWindowDays: number;  // e.g. 3 for ±3 days
+  // When true, bank fee/charge/levy "noise" is set aside BEFORE matching so it
+  // can't skew the result, and returned in `excluded` flagged with context.
+  // Card-settlement fees (interchange/scheme/MDR…) are never treated as noise.
+  excludeFeeNoise?: boolean;
+}
+
+export interface ExcludedFee {
+  transactionId: number;
+  side: "source" | "target";
+  amount: number;
+  reference: string | null;
+  description: string | null;
+  reason: string;
 }
 
 export interface ReconciliationResult {
@@ -25,6 +38,9 @@ export interface ReconciliationResult {
   duplicates: DuplicateGroup[];
   reversals: ReversalPair[];
   stats: EngineStats;
+  // Fee/charge lines set aside from the reconciliation (empty unless
+  // config.excludeFeeNoise). Flagged for the user, not counted as exceptions.
+  excluded: ExcludedFee[];
 }
 
 interface DuplicateGroup {
@@ -260,12 +276,80 @@ function detectReversals(txns: Transaction[]): ReversalPair[] {
 
 // ─── Core Matching Engine (Optimized) ───────────────────────────────
 
+// ─── Fee/charge "noise" detection (general bank fees only) ───────────
+//
+// Mirrors the POC engine: in a bank-statement reconciliation, fee/charge/levy
+// lines are informational and skew the result. We set them aside and flag them.
+//
+// CRITICAL: card-settlement fees (interchange, scheme fee, MDR, merchant
+// discount, acquirer/issuer fees, settlement fees) are RELEVANT to card
+// reconciliation & settlement — the guard below keeps them in the reconciliation
+// even though they contain the words "fee"/"charge".
+const CARD_FEE_GUARD =
+  /\b(interchange|scheme fee|m\.?d\.?r\b|merchant discount|merchant service charge|card scheme|settlement fee|acquirer fee|issuer fee|chargeback fee|cashback)\b/i;
+
+const RECON_NOISE_PATTERNS: { reason: string; re: RegExp }[] = [
+  { reason: "Tax, levy or duty", re: /\b(v\.?a\.?t|w\.?h\.?t|withholding tax|stamp duty|e\.?m\.?t\.?l|electronic money transfer levy|cbn levy|levy|excise duty)\b/i },
+  { reason: "Account maintenance fee", re: /\b(account maintenance|maintenance (fee|charge)|a\.?m\.?f\b|ledger fee|c\.?o\.?t\b|commission on turnover)\b/i },
+  { reason: "Card / channel fee", re: /\b(sms( alert| charge| fee)?|e-?alert|alert (fee|charge)|atm (fee|charge)|hardware token|token fee|ussd (fee|charge))\b/i },
+  { reason: "Bank charge / commission", re: /\b(bank charge|service (charge|fee)|processing fee|handling fee|transaction (fee|charge)|transfer (fee|charge)|nip (fee|charge)|neft (fee|charge)|rtgs (fee|charge)|management fee|commission)\b/i },
+  { reason: "Bank-generated charge", re: /\bmisc\.?\s+.*\b(charge|fee|levy|duty|tax|commission)\b/i },
+  { reason: "Possible fee / charge (review)", re: /\b(fees?|charges?)\b/i },
+];
+
+/** Classify a transaction as reconcilable or general-bank-fee noise (with reason). */
+export function detectReconciliationNoise(
+  txn: { description?: string | null; transactionRef?: string | null },
+): { noise: boolean; reason: string } {
+  const text = `${txn.description ?? ""} ${txn.transactionRef ?? ""}`.toLowerCase();
+  if (!text.trim()) return { noise: false, reason: "" };
+  // Card-settlement fees are part of card reconciliation — never set them aside.
+  if (CARD_FEE_GUARD.test(text)) return { noise: false, reason: "" };
+  for (const p of RECON_NOISE_PATTERNS) {
+    if (p.re.test(text)) return { noise: true, reason: p.reason };
+  }
+  return { noise: false, reason: "" };
+}
+
+function partitionReconNoise(txns: Transaction[], side: "source" | "target"): { kept: Transaction[]; excluded: ExcludedFee[] } {
+  const kept: Transaction[] = [];
+  const excluded: ExcludedFee[] = [];
+  for (const t of txns) {
+    const { noise, reason } = detectReconciliationNoise(t);
+    if (noise) {
+      excluded.push({
+        transactionId: t.id,
+        side,
+        amount: parseFloat(String(t.amount)) || 0,
+        reference: t.transactionRef ?? null,
+        description: t.description ?? null,
+        reason,
+      });
+    } else {
+      kept.push(t);
+    }
+  }
+  return { kept, excluded };
+}
+
 export function runMatchingEngine(
   sourceTxns: Transaction[],
   targetTxns: Transaction[],
   config: ReconciliationConfig
 ): ReconciliationResult {
   const startTime = Date.now();
+
+  // Set aside fee/charge noise BEFORE matching so it can't skew totals/matching.
+  // Opt-in (default off) — the POC engine does its own partitioning and must not
+  // double-exclude; the main reconciliation flow passes excludeFeeNoise: true.
+  let excluded: ExcludedFee[] = [];
+  if (config.excludeFeeNoise) {
+    const sp = partitionReconNoise(sourceTxns, "source");
+    const tp = partitionReconNoise(targetTxns, "target");
+    sourceTxns = sp.kept;
+    targetTxns = tp.kept;
+    excluded = [...sp.excluded, ...tp.excluded];
+  }
   const matchedSourceIds = new Set<number>();
   const matchedTargetIds = new Set<number>();
   const allMatches: MatchCandidate[] = [];
@@ -503,6 +587,7 @@ export function runMatchingEngine(
       reversalsDetected: reversals.length,
       processingTimeMs,
     },
+    excluded,
   };
 }
 
