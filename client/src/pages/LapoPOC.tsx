@@ -14,6 +14,7 @@
  */
 import { useState, useRef, useCallback, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { PocKpiDashboard } from "@/components/PocKpiDashboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -639,7 +640,14 @@ export default function LapoPOC() {
   const share        = trpc.poc.createShareToken.useMutation();
   const updateStatus = trpc.poc.updateExceptionStatus.useMutation();
   const saveFile     = trpc.poc.saveFile.useMutation();
-  const kpiQuery     = trpc.pocKpi.getKpis.useQuery({ pocSlug: POC_SLUG }, { staleTime: 30_000 });
+  // KPI Dashboard is an internal Infinity AI view — only super admins see the tab,
+  // and the query only runs for them (the server enforces this too).
+  const { user }     = useAuth();
+  const isSuperAdmin = user?.role === "super_admin";
+  const kpiQuery     = trpc.pocKpi.getKpis.useQuery(
+    { pocSlug: POC_SLUG },
+    { staleTime: 30_000, enabled: isSuperAdmin },
+  );
 
   const setStage = (side: "cbs" | "isw", s: ParseStage) => {
     if (side === "cbs") setCbsStage(s); else setIswStage(s);
@@ -889,7 +897,7 @@ export default function LapoPOC() {
                   <ClipboardCheck className="h-4 w-4" /> Review & Resolve ({exceptions.length})
                 </TabsTrigger>
                 <TabsTrigger value="agent" className="gap-1.5"><Bot className="h-4 w-4" /> AI Agent</TabsTrigger>
-                <TabsTrigger value="kpi" className="gap-1.5"><ArrowUpRight className="h-4 w-4" /> KPI Dashboard</TabsTrigger>
+                {isSuperAdmin && <TabsTrigger value="kpi" className="gap-1.5"><ArrowUpRight className="h-4 w-4" /> KPI Dashboard</TabsTrigger>}
               </TabsList>
 
               {/* Layer 1 — Balance */}
@@ -996,17 +1004,19 @@ export default function LapoPOC() {
                 ))}
               </TabsContent>
 
-              {/* KPI Dashboard tab */}
-              <TabsContent value="kpi" className="mt-2">
-                <PocKpiDashboard
-                  report={kpiQuery.data}
-                  isLoading={kpiQuery.isLoading}
-                  isError={kpiQuery.isError}
-                  title="LAPO MFB POC — KPI Dashboard"
-                  subtitle="Tracks card settlement reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
-                  accentColor={LAPO_GREEN}
-                />
-              </TabsContent>
+              {/* KPI Dashboard tab — super admin only */}
+              {isSuperAdmin && (
+                <TabsContent value="kpi" className="mt-2">
+                  <PocKpiDashboard
+                    report={kpiQuery.data}
+                    isLoading={kpiQuery.isLoading}
+                    isError={kpiQuery.isError}
+                    title="LAPO MFB POC — KPI Dashboard"
+                    subtitle="Tracks card settlement reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
+                    accentColor={LAPO_GREEN}
+                  />
+                </TabsContent>
+              )}
             </Tabs>
           </>
         )}

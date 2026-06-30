@@ -9,8 +9,8 @@
  * component renders as gauges, benchmark bands, and trend sparklines.
  */
 import { z } from "zod";
-import { router, publicProcedure } from "../_core/trpc";
-import { assertPocAccess, tokenFromCtx } from "../pocAccess";
+import { TRPCError } from "@trpc/server";
+import { router, protectedProcedure } from "../_core/trpc";
 
 // ─── Benchmark constants (from the KPI framework document) ───────────────────
 
@@ -341,25 +341,24 @@ async function computeWoodcoreKpis(): Promise<KpiReport> {
 
 const pocSlugSchema = z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/);
 
-// Reuse the same access-gating pattern as the main poc router
-const pocProcedure = publicProcedure.use(async (opts) => {
-  const raw = (await opts.getRawInput()) as { pocSlug?: string } | undefined;
-  await assertPocAccess(raw?.pocSlug ?? "", tokenFromCtx(opts.ctx));
-  return opts.next();
-});
-
-const woodcoreProcedure = publicProcedure.use(async (opts) => {
-  await assertPocAccess("woodcore", tokenFromCtx(opts.ctx));
-  return opts.next();
+// The KPI dashboards are an INTERNAL Infinity AI view — never shown to POC
+// customers. Gate them to authenticated super admins. This is the server-side
+// half of the restriction; the POC pages also hide the tab for non-super-admins.
+// A POC access token (the customer's `?key=`) is intentionally NOT sufficient here.
+const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.user.role !== "super_admin") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin access required." });
+  }
+  return next({ ctx });
 });
 
 export const pocKpiRouter = router({
-  // Generic POC KPIs (LAPO MFB, Salad Africa)
-  getKpis: pocProcedure
+  // Generic POC KPIs (LAPO MFB, Salad Africa) — super admin only
+  getKpis: superAdminProcedure
     .input(z.object({ pocSlug: pocSlugSchema }))
     .query(async ({ input }) => computeGenericKpis(input.pocSlug)),
 
-  // Woodcore KPIs
-  getWoodcoreKpis: woodcoreProcedure
+  // Woodcore KPIs — super admin only
+  getWoodcoreKpis: superAdminProcedure
     .query(async () => computeWoodcoreKpis()),
 });
