@@ -14,6 +14,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { PocKpiDashboard } from "@/components/PocKpiDashboard";
+import PocRunHistory from "@/components/PocRunHistory";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -659,6 +660,9 @@ export default function SaladAfricaPOC() {
             )}
           </div>
         )}
+
+        {/* Saved reconciliation history — every run is persisted for future reference */}
+        <PocRunHistory pocSlug={POC_SLUG} refreshKey={result?.runId ?? 0} />
       </div>
     </div>
   );

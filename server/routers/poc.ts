@@ -137,6 +137,22 @@ export const pocRouter = router({
     .input(z.object({ pocSlug }))
     .query(async ({ input }) => poc.listRuns(input.pocSlug)),
 
+  // ─── Admin run history (Infinity AI super-admin, no per-POC token) ──────────
+  // Lets the POC Hub show reconciliation runs for any POC without holding the
+  // per-POC access token. Same data the client sees on its own POC page.
+  adminListRuns: superAdminProcedure
+    .input(z.object({ pocSlug }))
+    .query(async ({ input }) => poc.listRuns(input.pocSlug, 100)),
+
+  adminGetRun: superAdminProcedure
+    .input(z.object({ pocSlug, runId: z.number().int().positive() }))
+    .query(async ({ input }) => {
+      const run = await poc.getRun(input.runId, input.pocSlug);
+      if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Run not found" });
+      const exceptions = await poc.getRunExceptions(input.runId);
+      return { run, exceptions };
+    }),
+
   updateExceptionStatus: pocProcedure
     .input(
       z.object({

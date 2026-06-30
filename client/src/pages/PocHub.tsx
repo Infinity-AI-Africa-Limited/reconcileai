@@ -10,12 +10,14 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Database, Sparkles, ExternalLink, FlaskConical, CreditCard,
   FileSpreadsheet, FileText, File as FileIcon, Download, RefreshCw,
-  Clock, User, HardDrive, AlertCircle, Copy, Check,
+  Clock, User, HardDrive, AlertCircle, Copy, Check, History,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
+import PocRunHistory from "@/components/PocRunHistory";
 
 // ─── POC index ────────────────────────────────────────────────────────────────
 type Poc = {
@@ -300,6 +302,37 @@ function PocUploads({
   );
 }
 
+// ─── Reconciliation runs panel (per POC, admin) ───────────────────────────────
+// Generic across every self-service POC. Woodcore is excluded — it keeps its own
+// run store (wc_reconciliation_runs) surfaced on its own page.
+function PocRunsAdmin() {
+  const runnablePocs = POCS.filter((p) => p.pocKey !== "woodcore");
+  const [slug, setSlug] = useState(runnablePocs[0]?.pocKey ?? "salad_africa");
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="font-semibold text-base">Reconciliation Runs</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Every reconciliation a prospect runs is saved. Pick a POC to review and refer back to its run history.
+          </p>
+        </div>
+        <Select value={slug} onValueChange={setSlug}>
+          <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {runnablePocs.map((p) => (
+              <SelectItem key={p.pocKey} value={p.pocKey}>{p.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {/* key remounts the history (fresh state) when switching POC */}
+      <PocRunHistory key={slug} pocSlug={slug} admin />
+    </div>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function PocHub() {
   return (
@@ -318,6 +351,9 @@ export default function PocHub() {
         <TabsList>
           <TabsTrigger value="pocs" className="gap-1.5">
             <FlaskConical className="h-4 w-4" /> POC Environments
+          </TabsTrigger>
+          <TabsTrigger value="runs" className="gap-1.5">
+            <History className="h-4 w-4" /> Reconciliation Runs
           </TabsTrigger>
           <TabsTrigger value="salad-uploads" className="gap-1.5">
             <Download className="h-4 w-4" /> Salad Uploads
@@ -363,6 +399,11 @@ export default function PocHub() {
           <p className="text-xs text-muted-foreground mt-4">
             POC pages are public (no login) so prospects can use them directly. POC data is isolated from real tenant data.
           </p>
+        </TabsContent>
+
+        {/* Reconciliation runs tab */}
+        <TabsContent value="runs" className="mt-4">
+          <PocRunsAdmin />
         </TabsContent>
 
         {/* Salad uploads tab */}
