@@ -162,6 +162,29 @@ export default function PocRunHistory({
                 ))}
               </div>
 
+              {/* Flagged & excluded fee/charge noise (set aside from the reconciliation) */}
+              {Array.isArray(detail.run.summary?.excludedItems) && detail.run.summary.excludedItems.length > 0 && (
+                <div className="rounded-md border border-amber-200 bg-amber-50/50 p-2.5">
+                  <p className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                    {detail.run.summary.excludedItems.length} item(s) set aside
+                    {detail.run.summary.excludedTotal != null && ` · ${ngn(detail.run.summary.excludedTotal, detail.run.currencyCode)}`}
+                  </p>
+                  <p className="text-[11px] text-amber-800/80 mt-0.5 mb-1.5">
+                    Bank fees / charges / levies excluded from the balance and matching, listed for awareness.
+                  </p>
+                  <div className="space-y-1 max-h-40 overflow-y-auto">
+                    {detail.run.summary.excludedItems.map((e: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-[11px] bg-white/70 rounded px-2 py-1">
+                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800 shrink-0">{e.reason}</span>
+                        <span className="truncate flex-1">{e.description || e.reference || "—"}</span>
+                        <span className="font-mono shrink-0">{ngn(e.amount, detail.run.currencyCode)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Exceptions */}
               <div>
                 <p className="text-xs font-semibold text-gray-700 mb-2">

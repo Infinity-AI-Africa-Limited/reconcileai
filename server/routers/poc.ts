@@ -105,6 +105,9 @@ export const pocRouter = router({
         statementUploadId: z.number().int().positive(),
         amountTolerance: z.number().min(0).max(0.1).default(0.005),
         dateWindowDays: z.number().int().min(0).max(30).default(3),
+        // Set aside bank fee/charge/levy noise and flag it (default ON). Card
+        // settlement POCs (e.g. LAPO) pass false — fees are part of the recon.
+        excludeFeeNoise: z.boolean().optional(),
       }),
     )
     .mutation(async ({ input }) => {
@@ -114,6 +117,7 @@ export const pocRouter = router({
           ledgerUploadId: input.ledgerUploadId,
           statementUploadId: input.statementUploadId,
           config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+          excludeFeeNoise: input.excludeFeeNoise,
         });
       } catch (err: any) {
         throw new TRPCError({ code: "BAD_REQUEST", message: err?.message || "Reconciliation failed." });

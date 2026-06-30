@@ -498,6 +498,8 @@ export default function SaladAfricaPOC() {
 
   const l1 = result?.layer1;
   const exceptions = (result?.layer3 ?? []) as any[];
+  const excluded = (result?.excluded ?? []) as Array<{ side: string; amount: number; date: string; reference: string | null; description: string | null; reason: string }>;
+  const excludedByReason = (result?.excludedByReason ?? {}) as Record<string, { count: number; total: number }>;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -611,6 +613,49 @@ export default function SaladAfricaPOC() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* Flagged & excluded — fee/charge noise set aside from the reconciliation */}
+              {excluded.length > 0 && (
+                <Card className="border-amber-200 bg-amber-50/40">
+                  <CardContent className="pt-6">
+                    <div className="flex items-start gap-2 mb-3">
+                      <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                      <div>
+                        <h3 className="font-semibold text-sm text-amber-900">
+                          {excluded.length} item{excluded.length !== 1 ? "s" : ""} set aside ({ngn(result.excludedTotal ?? 0)})
+                        </h3>
+                        <p className="text-xs text-amber-800/80 mt-0.5">
+                          These look like bank fees, charges, taxes or levies — not transactions to match one-to-one.
+                          They were excluded from the balance and matching above so they don't skew the result, and are
+                          listed here for your awareness. Review them and account for them separately if needed.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Breakdown by reason */}
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {Object.entries(excludedByReason).map(([reason, agg]) => (
+                        <span key={reason} className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-medium text-amber-800">
+                          {reason}
+                          <span className="text-amber-600">{agg.count} · {ngn(agg.total)}</span>
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Item list */}
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                      {excluded.map((e, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs bg-white/70 rounded border border-amber-100 px-2.5 py-1.5">
+                          <Badge variant="outline" className="shrink-0 text-[10px] border-amber-300 text-amber-700">{e.reason}</Badge>
+                          <span className="truncate flex-1" title={e.description ?? ""}>{e.description || e.reference || "—"}</span>
+                          <span className="text-[10px] text-muted-foreground shrink-0 uppercase">{e.side}</span>
+                          <span className="font-mono shrink-0">{ngn(e.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
 
             {/* Layer 2 */}

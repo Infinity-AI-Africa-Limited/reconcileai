@@ -733,6 +733,9 @@ export default function LapoPOC() {
         statementUploadId: isw.uploadId,
         amountTolerance: 0.02,
         dateWindowDays: 5,
+        // Card settlement: interchange/scheme fees ARE part of the reconciliation,
+        // so don't set fee lines aside (unlike ledger↔bank reconciliation).
+        excludeFeeNoise: false,
       });
       setResult(res);
       // Initialise all exceptions as OPEN
