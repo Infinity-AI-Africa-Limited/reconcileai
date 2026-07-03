@@ -30,6 +30,12 @@ export const BENCHMARKS = {
   // Salad Africa-specific
   parseSuccessRate:    { target: 90,  floor: 75,  unit: "%",  label: "Structured Parse Success Rate", higherIsBetter: true },
   timeToInsightSec:    { target: 60,  floor: 180, unit: "s",  label: "Time to Full Run (seconds)", higherIsBetter: false },
+  // Mobile Money-specific (LAPO)
+  mmAutoMatchRate:        { target: 95,  floor: 85,  unit: "%",  label: "MM Auto-Match Rate",            higherIsBetter: true },
+  mmFalsePositiveRate:    { target: 2,   floor: 5,   unit: "%",  label: "MM False Positive Rate",        higherIsBetter: false },
+  mmResolutionRate:       { target: 80,  floor: 60,  unit: "%",  label: "MM Resolution Progress Rate",   higherIsBetter: true },
+  mmAiConfidence:         { target: 85,  floor: 75,  unit: "%",  label: "MM AI Agent Confidence",        higherIsBetter: true },
+  mmFailedUssdDetection:  { target: 100, floor: 95,  unit: "%",  label: "Failed USSD Detection Rate",    higherIsBetter: true },
 } as const;
 
 export type BenchmarkKey = keyof typeof BENCHMARKS;
@@ -198,6 +204,50 @@ async function computeGenericKpis(pocSlug: string): Promise<KpiReport> {
 
   const isLapo = pocSlug === "lapo_mfb";
 
+  // ── Mobile Money KPIs (LAPO only — pulls from mm_runs / mm_exceptions) ───────
+  let mmMetrics: KpiMetric[] = [];
+  if (isLapo) {
+    try {
+      const { mmRuns, mmExceptions } = await import("../../drizzle/mobile_money_schema");
+      const { inArray: inArrayMm, desc: descMm, eq: eqMm } = await import("drizzle-orm");
+      const db2 = await getDb();
+      if (db2) {
+        const mmRunRows = await db2.select().from(mmRuns)
+          .where(eqMm(mmRuns.pocKey, pocSlug))
+          .orderBy(descMm(mmRuns.createdAt))
+          .limit(20);
+        if (mmRunRows.length > 0) {
+          const mmRunIds = mmRunRows.map((r) => r.id);
+          const mmExcRows = await db2.select().from(mmExceptions)
+            .where(inArrayMm(mmExceptions.runId, mmRunIds));
+          const mmTotal = mmRunRows.reduce((s, r) => s + r.matchedCount + r.exceptionCount, 0);
+          const mmMatched = mmRunRows.reduce((s, r) => s + r.matchedCount, 0);
+          const mmAutoMatchRate = mmTotal > 0 ? Math.round((mmMatched / mmTotal) * 10000) / 100 : null;
+          const mmTotalExc = mmExcRows.length;
+          const mmResolved = mmExcRows.filter((e) => e.reviewStatus === "RESOLVED").length;
+          const mmEscalated = mmExcRows.filter((e) => e.reviewStatus === "ESCALATED").length;
+          const mmOpen = mmExcRows.filter((e) => e.reviewStatus === "OPEN").length;
+          const mmResolutionRate = mmTotalExc > 0 ? Math.round(((mmResolved + mmEscalated) / mmTotalExc) * 100) : null;
+          const mmFprRate = mmTotalExc > 0 ? Math.round((mmOpen / mmTotalExc) * 100) : null;
+          const mmConfs = mmExcRows.map((e) => e.agentConfidence).filter((c): c is number => c !== null && c !== undefined);
+          const mmAvgConf = mmConfs.length > 0 ? Math.round(mmConfs.reduce((a, b) => a + b, 0) / mmConfs.length) : null;
+          const failedUssd = mmExcRows.filter((e) => e.category === "mm_failed_ussd_debit");
+          const failedUssdReviewed = failedUssd.filter((e) => e.reviewStatus !== "OPEN").length;
+          const failedUssdRate = failedUssd.length > 0 ? Math.round((failedUssdReviewed / failedUssd.length) * 100) : null;
+          mmMetrics = [
+            metric("mmAutoMatchRate", mmAutoMatchRate, [], mmRunRows.length),
+            metric("mmFalsePositiveRate", mmFprRate, [], mmRunRows.length),
+            metric("mmResolutionRate", mmResolutionRate, [], mmRunRows.length),
+            metric("mmAiConfidence", mmAvgConf, [], mmRunRows.length),
+            metric("mmFailedUssdDetection", failedUssdRate, [], mmRunRows.length),
+          ];
+        }
+      }
+    } catch {
+      // mm tables not yet migrated — skip silently
+    }
+  }
+
   const metrics: KpiMetric[] = [
     metric("autoMatchRate", avgMatchRate, matchRateTrend, runs.length),
     metric("falsePositiveRate", falsePositiveRate, [], runs.length),
@@ -208,6 +258,7 @@ async function computeGenericKpis(pocSlug: string): Promise<KpiReport> {
     ...(isLapo ? [
       metric("chargebackDetection", chargebackDetectionRate, [], runs.length),
       metric("duplicateDetection", duplicateDetectionRate, [], runs.length),
+      ...mmMetrics,
     ] : []),
   ];
 

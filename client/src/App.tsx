@@ -46,6 +46,7 @@ import Documentation from "./pages/Documentation";
 import DocViewer from "./pages/DocViewer";
 import WoodcorePOC from "./pages/WoodcorePOC";
 import LapoPOC from "./pages/LapoPOC";
+import MobileMoneyPOC from "./pages/MobileMoneyPOC";
 import SharedReport from "./pages/SharedReport";
 import SharedReportPublic from "./pages/SharedReportPublic";
 import ComplianceAssessmentLanding from "./pages/ComplianceAssessmentLanding";
@@ -114,6 +115,7 @@ function Router() {
       <Route path="/woodcore-poc">{() => <PocAccessGate pocKey="woodcore"><WoodcorePOC /></PocAccessGate>}</Route>
       <Route path="/salad-africa-poc">{() => <PocAccessGate pocKey="salad_africa"><SaladAfricaPOC /></PocAccessGate>}</Route>
       <Route path="/lapo-poc">{() => <PocAccessGate pocKey="lapo_mfb"><LapoPOC /></PocAccessGate>}</Route>
+      <Route path="/mobile-money-poc">{() => <PocAccessGate pocKey="lapo_mfb"><MobileMoneyPOC pocSlug="lapo_mfb" /></PocAccessGate>}</Route>
       <Route path="/poc-report/:token" component={PocSharedReport} />
       <Route path="/admin/poc">{() => <DashboardPage component={PocHub} />}</Route>
       <Route path="/shared-report/:token" component={SharedReport} />

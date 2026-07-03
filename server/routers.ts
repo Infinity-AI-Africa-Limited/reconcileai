@@ -5,6 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
+import { mobileMoneyRouter } from "./routers/mobileMoney";
 import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -6093,6 +6094,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   cbnCompliance: cbnComplianceRouter,
   poc: pocRouter,
   pocKpi: pocKpiRouter,
+  mobileMoney: mobileMoneyRouter,
   roadmap: router({
     // Public: submit an access request
     requestAccess: publicProcedure

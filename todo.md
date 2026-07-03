@@ -1142,3 +1142,19 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Update portal nav logic: portalAdvancedItems resolves to financialServicesAdvancedItems when in Financial Services portal
 - [x] Refactor Admin section rendering to support portal-only advanced items (no admin section header needed)
 - [x] Advanced Tools dropdown visible in Financial Services portal with collapse/expand toggle
+
+## Feature: Mobile Money Reconciliation (Gap 2 — Competitive Intelligence Roadmap)
+- [x] Schema: mm_runs table (operator, channel, session tracking fields)
+- [x] Schema: mm_exceptions table (8 mobile money exception categories)
+- [x] DB migration pushed (mm_runs + mm_exceptions live in production DB)
+- [x] Server: mobileMoney-engine.ts — NIP/OPay/Palmpay settlement file parsers
+- [x] Server: Mobile money exception taxonomy (8 categories) — open string in EI layer, no changes needed
+- [x] Server: Mobile money AI diagnosis prompts with CBN regulatory context (in mobileMoney-engine.ts)
+- [x] Server: Flywheel integration — mm exception categories wired into captureResolutionPattern
+- [x] Server: tRPC procedures — run, getRuns, getExceptions, updateStatus (server/routers/mobileMoney.ts)
+- [x] Frontend: MobileMoneyPOC.tsx — standalone page at /mobile-money-poc
+- [x] Frontend: Operator selector (NIP / OPay / Palmpay)
+- [x] Frontend: File upload + Layer 1/2/3 results display
+- [x] Frontend: Exception list with AI diagnosis panel and resolution workflow
+- [x] Frontend: 5 mobile money KPI benchmark keys + computation wired into LAPO KPI dashboard
+- [x] Tests: mobileMoney.test.ts — taxonomy, operator metadata, KPI benchmarks, amount mismatch, duplicate detection (26 tests)
