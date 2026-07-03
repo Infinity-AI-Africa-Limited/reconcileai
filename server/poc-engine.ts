@@ -708,6 +708,62 @@ export function runLayer3(exceptions: ExceptionDraft[]): Layer3Item[] {
   });
 }
 
+// ─── Non-reconcilable "noise" detection (bank fees, charges, taxes, levies) ──
+//
+// In a ledger ↔ bank-statement reconciliation, bank-generated fee/charge/levy
+// lines are informational — they are NOT transactions the two sides should match
+// one-to-one, and in bulk (as seen in the Salad dataset) they skew the variance
+// and flood the exception list. We detect them, set them aside from Layer 1 + 2,
+// and flag every one with context so the user still sees them and can account
+// for them. NOTE: this is intentionally OFF for card-settlement reconciliations
+// (e.g. LAPO) where interchange/scheme fees ARE part of what is reconciled.
+
+export interface ExcludedItem {
+  side: Side;
+  amount: number;
+  date: string;
+  reference: string | null;
+  description: string | null;
+  reason: string;
+}
+
+// Ordered most-specific → most-generic. The generic "possible fee" bucket is a
+// heuristic catch — items land there flagged (never silently dropped) so the user
+// can judge them. Tune these patterns per client as real descriptions are seen.
+const NOISE_PATTERNS: { reason: string; re: RegExp }[] = [
+  { reason: "Tax, levy or duty", re: /\b(v\.?a\.?t|w\.?h\.?t|withholding tax|stamp duty|e\.?m\.?t\.?l|electronic money transfer levy|cbn levy|levy|excise duty)\b/i },
+  { reason: "Account maintenance fee", re: /\b(account maintenance|maintenance (fee|charge)|a\.?m\.?f\b|ledger fee|c\.?o\.?t\b|commission on turnover)\b/i },
+  { reason: "Card / channel fee", re: /\b(sms( alert| charge| fee)?|e-?alert|alert (fee|charge)|atm (fee|charge)|card (fee|maintenance)|hardware token|token fee|ussd (fee|charge))\b/i },
+  { reason: "Bank charge / commission", re: /\b(bank charge|service (charge|fee)|processing fee|handling fee|transaction (fee|charge)|transfer (fee|charge)|nip (fee|charge)|neft (fee|charge)|rtgs (fee|charge)|management fee|commission)\b/i },
+  // Some banks prefix system-generated charges with "MISC." (e.g. real Salad
+  // statement: "MISC. SMS ALERT CHARGE", "MISC. ELECTRONIC MONEY TRANSFER LEVY").
+  // Catch any such line that also carries a charge/fee/levy term — the specific
+  // buckets above still win for the known forms, so this only hardens new variants.
+  { reason: "Bank-generated charge", re: /\bmisc\.?\s+.*\b(charge|fee|levy|duty|tax|commission)\b/i },
+  { reason: "Possible fee / charge (review)", re: /\b(fees?|charges?)\b/i },
+];
+
+/** Classify a single row as reconcilable or fee/charge noise (with a reason). */
+export function detectNoise(row: CanonicalRow): { noise: boolean; reason: string } {
+  const text = `${row.description ?? ""} ${row.reference ?? ""}`.toLowerCase();
+  if (!text.trim()) return { noise: false, reason: "" };
+  for (const p of NOISE_PATTERNS) {
+    if (p.re.test(text)) return { noise: true, reason: p.reason };
+  }
+  return { noise: false, reason: "" };
+}
+
+function partitionNoise(rows: CanonicalRow[], side: Side): { keep: CanonicalRow[]; excluded: ExcludedItem[] } {
+  const keep: CanonicalRow[] = [];
+  const excluded: ExcludedItem[] = [];
+  for (const r of rows) {
+    const { noise, reason } = detectNoise(r);
+    if (noise) excluded.push({ side, amount: r.amount, date: r.date, reference: r.reference ?? null, description: r.description ?? null, reason });
+    else keep.push(r);
+  }
+  return { keep, excluded };
+}
+
 // ─── Orchestration + persistence ─────────────────────────────────────
 
 export interface PocRunResult {
@@ -715,6 +771,9 @@ export interface PocRunResult {
   layer1: Layer1Result;
   matchedCount: number;
   layer3: Layer3Item[];
+  excluded: ExcludedItem[];
+  excludedTotal: number;
+  excludedByReason: Record<string, { count: number; total: number }>;
 }
 
 export async function runFullPoc(params: {
@@ -722,6 +781,9 @@ export async function runFullPoc(params: {
   ledgerUploadId: number;
   statementUploadId: number;
   config?: ReconciliationConfig;
+  // Set aside bank fee/charge/levy "noise" from the reconciliation and flag it.
+  // Default ON for ledger↔bank reconciliation; pass false for card settlement.
+  excludeFeeNoise?: boolean;
 }): Promise<PocRunResult> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -730,13 +792,34 @@ export async function runFullPoc(params: {
   const [stmtUp] = await db.select().from(pocUploads).where(eq(pocUploads.id, params.statementUploadId)).limit(1);
   if (!ledgerUp || !stmtUp) throw new Error("Upload(s) not found — please re-upload the files");
 
-  const ledger = (ledgerUp.rows as CanonicalRow[]) ?? [];
-  const statement = (stmtUp.rows as CanonicalRow[]) ?? [];
+  const ledgerAll = (ledgerUp.rows as CanonicalRow[]) ?? [];
+  const statementAll = (stmtUp.rows as CanonicalRow[]) ?? [];
   const currency = "NGN";
+
+  // Set aside fee/charge noise BEFORE reconciling so it can't skew totals/matching.
+  const excludeFeeNoise = params.excludeFeeNoise ?? true;
+  let ledger = ledgerAll;
+  let statement = statementAll;
+  let excluded: ExcludedItem[] = [];
+  if (excludeFeeNoise) {
+    const lp = partitionNoise(ledgerAll, "ledger");
+    const sp = partitionNoise(statementAll, "statement");
+    ledger = lp.keep;
+    statement = sp.keep;
+    excluded = [...lp.excluded, ...sp.excluded];
+  }
 
   const layer1 = runLayer1(ledger, statement, currency);
   const layer2 = runLayer2(ledger, statement, params.config);
   const layer3 = runLayer3(layer2.exceptions);
+
+  const excludedTotal = Math.round(excluded.reduce((s, e) => s + e.amount, 0) * 100) / 100;
+  const excludedByReason: Record<string, { count: number; total: number }> = {};
+  for (const e of excluded) {
+    const b = (excludedByReason[e.reason] ??= { count: 0, total: 0 });
+    b.count += 1;
+    b.total = Math.round((b.total + e.amount) * 100) / 100;
+  }
 
   const denom = layer2.matchedCount + layer2.exceptions.length;
   const matchRate = denom > 0 ? Math.round((layer2.matchedCount / denom) * 10000) / 100 : 0;
@@ -755,7 +838,9 @@ export async function runFullPoc(params: {
     matchedCount: layer2.matchedCount,
     exceptionCount: layer2.exceptions.length,
     matchRate: String(matchRate),
-    summary: layer1,
+    // Persist excluded items + tallies alongside the Layer-1 detail so the run
+    // history can show what was set aside and why.
+    summary: { ...layer1, excludedItems: excluded, excludedTotal, excludedByReason },
   });
   const runId = (insertRun as any)[0].insertId as number;
 
@@ -778,7 +863,7 @@ export async function runFullPoc(params: {
     );
   }
 
-  return { runId, layer1, matchedCount: layer2.matchedCount, layer3 };
+  return { runId, layer1, matchedCount: layer2.matchedCount, layer3, excluded, excludedTotal, excludedByReason };
 }
 
 // ─── Queries + share tokens ──────────────────────────────────────────

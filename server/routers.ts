@@ -6549,7 +6549,16 @@ async function runReconciliation(
       message: `Processing ${sourceTxns.length} source and ${targetTxns.length} target transactions`,
       totalCount: sourceTxns.length + targetTxns.length,
     });
-    const result = runMatchingEngine(sourceTxns, targetTxns, config);
+    // excludeFeeNoise: set aside general bank fees/charges/levies so they don't
+    // skew matching or inflate exceptions. Card-settlement fees (interchange,
+    // scheme, MDR…) are guarded in the engine and stay in the reconciliation.
+    const result = runMatchingEngine(sourceTxns, targetTxns, { ...config, excludeFeeNoise: true });
+    if (result.excluded.length > 0) {
+      await db.updateReconciliationJob(jobId, {
+        excludedCount: result.excluded.length,
+        excludedItems: result.excluded,
+      });
+    }
     await trackProgress(jobId, "pass3_tolerance_match", {
       message: `Matching complete: ${result.matches.length} matches found`,
       processedCount: result.matches.length,

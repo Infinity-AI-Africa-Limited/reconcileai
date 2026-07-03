@@ -12,7 +12,9 @@
  */
 import { useState, useRef, useCallback, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { PocKpiDashboard } from "@/components/PocKpiDashboard";
+import PocRunHistory from "@/components/PocRunHistory";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -373,7 +375,14 @@ export default function SaladAfricaPOC() {
   const run = trpc.poc.run.useMutation();
   const share = trpc.poc.createShareToken.useMutation();
   const saveFile = trpc.poc.saveFile.useMutation();
-  const kpiQuery = trpc.pocKpi.getKpis.useQuery({ pocSlug: POC_SLUG }, { staleTime: 30_000 });
+  // KPI Dashboard is an internal Infinity AI view — only super admins see the tab,
+  // and the query only runs for them (the server enforces this too).
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === "super_admin";
+  const kpiQuery = trpc.pocKpi.getKpis.useQuery(
+    { pocSlug: POC_SLUG },
+    { staleTime: 30_000, enabled: isSuperAdmin },
+  );
 
   const setStage = (side: "ledger" | "statement", s: ParseStage) => {
     if (side === "ledger") setLedgerStage(s);
@@ -489,6 +498,8 @@ export default function SaladAfricaPOC() {
 
   const l1 = result?.layer1;
   const exceptions = (result?.layer3 ?? []) as any[];
+  const excluded = (result?.excluded ?? []) as Array<{ side: string; amount: number; date: string; reference: string | null; description: string | null; reason: string }>;
+  const excludedByReason = (result?.excludedByReason ?? {}) as Record<string, { count: number; total: number }>;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -575,9 +586,11 @@ export default function SaladAfricaPOC() {
               <TabsTrigger value="agent" className="gap-1.5">
                 <Bot className="h-4 w-4" /> AI Agent
               </TabsTrigger>
-              <TabsTrigger value="kpi" className="gap-1.5">
-                <Sparkles className="h-4 w-4" /> KPI Dashboard
-              </TabsTrigger>
+              {isSuperAdmin && (
+                <TabsTrigger value="kpi" className="gap-1.5">
+                  <Sparkles className="h-4 w-4" /> KPI Dashboard
+                </TabsTrigger>
+              )}
             </TabsList>
 
             {/* Layer 1 */}
@@ -600,6 +613,49 @@ export default function SaladAfricaPOC() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* Flagged & excluded — fee/charge noise set aside from the reconciliation */}
+              {excluded.length > 0 && (
+                <Card className="border-amber-200 bg-amber-50/40">
+                  <CardContent className="pt-6">
+                    <div className="flex items-start gap-2 mb-3">
+                      <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                      <div>
+                        <h3 className="font-semibold text-sm text-amber-900">
+                          {excluded.length} item{excluded.length !== 1 ? "s" : ""} set aside ({ngn(result.excludedTotal ?? 0)})
+                        </h3>
+                        <p className="text-xs text-amber-800/80 mt-0.5">
+                          These look like bank fees, charges, taxes or levies — not transactions to match one-to-one.
+                          They were excluded from the balance and matching above so they don't skew the result, and are
+                          listed here for your awareness. Review them and account for them separately if needed.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Breakdown by reason */}
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {Object.entries(excludedByReason).map(([reason, agg]) => (
+                        <span key={reason} className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-medium text-amber-800">
+                          {reason}
+                          <span className="text-amber-600">{agg.count} · {ngn(agg.total)}</span>
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Item list */}
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                      {excluded.map((e, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs bg-white/70 rounded border border-amber-100 px-2.5 py-1.5">
+                          <Badge variant="outline" className="shrink-0 text-[10px] border-amber-300 text-amber-700">{e.reason}</Badge>
+                          <span className="truncate flex-1" title={e.description ?? ""}>{e.description || e.reference || "—"}</span>
+                          <span className="text-[10px] text-muted-foreground shrink-0 uppercase">{e.side}</span>
+                          <span className="font-mono shrink-0">{ngn(e.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
 
             {/* Layer 2 */}
@@ -621,17 +677,19 @@ export default function SaladAfricaPOC() {
               {exceptions.map((e, i) => <ExceptionCard key={i} e={e} showAgent />)}
             </TabsContent>
 
-            {/* KPI Dashboard */}
-            <TabsContent value="kpi" className="mt-2">
-              <PocKpiDashboard
-                report={kpiQuery.data}
-                isLoading={kpiQuery.isLoading}
-                isError={kpiQuery.isError}
-                title="Salad Africa POC — KPI Dashboard"
-                subtitle="Tracks ledger-vs-bank reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
-                accentColor="#16a34a"
-              />
-            </TabsContent>
+            {/* KPI Dashboard — super admin only */}
+            {isSuperAdmin && (
+              <TabsContent value="kpi" className="mt-2">
+                <PocKpiDashboard
+                  report={kpiQuery.data}
+                  isLoading={kpiQuery.isLoading}
+                  isError={kpiQuery.isError}
+                  title="Salad Africa POC — KPI Dashboard"
+                  subtitle="Tracks ledger-vs-bank reconciliation quality against ReconcileAI target and floor benchmarks across all runs."
+                  accentColor="#16a34a"
+                />
+              </TabsContent>
+            )}
           </Tabs>
         )}
 
@@ -647,6 +705,9 @@ export default function SaladAfricaPOC() {
             )}
           </div>
         )}
+
+        {/* Saved reconciliation history — every run is persisted for future reference */}
+        <PocRunHistory pocSlug={POC_SLUG} refreshKey={result?.runId ?? 0} />
       </div>
     </div>
   );
