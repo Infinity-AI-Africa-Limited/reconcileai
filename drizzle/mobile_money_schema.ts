@@ -1,15 +1,17 @@
 /**
  * Mobile Money Reconciliation Schema
  *
- * Supports reconciliation of mobile money settlement files from Nigerian
- * operators: NIBSS NIP, OPay, and Palmpay. Structured to mirror the
- * poc_runs / poc_exceptions pattern so the existing reconciliation engine,
- * exception intelligence flywheel, and KPI dashboard all work without
- * modification.
+ * Supports reconciliation of mobile money settlement files across two
+ * jurisdictions:
+ *   Nigeria — NIBSS NIP, OPay, Palmpay (NGN, CBN/NIBSS rules)
+ *   Uganda  — MTN MoMo, Airtel Money  (UGX, Bank of Uganda NPS framework)
  *
- * Exception categories (8 total) are mobile-money-specific and are also
- * registered in exceptionIntelligence.ts so every resolution feeds the
- * Per-Institution Learning Flywheel.
+ * Structured to mirror the poc_runs / poc_exceptions pattern so the existing
+ * reconciliation engine and KPI dashboard work without modification.
+ *
+ * Exception categories (12 total: 8 Nigeria + 4 Uganda) are mobile-money-
+ * specific. Per-institution learning is powered by the resolution history in
+ * mm_exceptions itself (see applyInstitutionalLearning in mobileMoney-engine.ts).
  */
 import {
   int,
@@ -25,19 +27,26 @@ import {
 } from "drizzle-orm/mysql-core";
 
 // ─── Operator enum ────────────────────────────────────────────────────────────
-export const MM_OPERATORS = ["nip", "opay", "palmpay"] as const;
+// Nigeria: nip, opay, palmpay — Uganda: mtn_momo_ug, airtel_money_ug
+export const MM_OPERATORS = ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"] as const;
 export type MmOperator = (typeof MM_OPERATORS)[number];
 
 // ─── Exception category enum ─────────────────────────────────────────────────
 export const MM_EXCEPTION_CATEGORIES = [
+  // Nigeria (CBN / NIBSS)
   "mm_failed_ussd_debit",       // Customer debited, institution not credited
   "mm_reversal_not_credited",   // Reversal processed, credit not received
-  "mm_nip_settlement_shortfall",// Net settlement differs from gross transaction sum
+  "mm_nip_settlement_shortfall",// Net NIP settlement differs from gross transaction sum
   "mm_duplicate_credit",        // Same session credited twice
   "mm_expired_session_debit",   // USSD session timeout, debit not reversed
   "mm_amount_mismatch",         // Settled amount differs from transaction amount
   "mm_unmatched_nip_inflow",    // NIP credit in settlement, not in internal ledger
   "mm_operator_fee_variance",   // Operator fee deducted differs from contracted rate
+  // Uganda (Bank of Uganda NPS framework)
+  "mm_wallet_to_bank_failed",   // Wallet debited (operator settled), bank ledger never credited
+  "mm_bank_to_wallet_failed",   // Bank ledger debited, wallet never credited (no operator record)
+  "mm_withdrawal_tax_variance", // Variance matching Uganda's 0.5% MM withdrawal excise duty
+  "mm_momo_settlement_shortfall",// Net MoMo settlement below gross statement sum (trust account)
 ] as const;
 export type MmExceptionCategory = (typeof MM_EXCEPTION_CATEGORIES)[number];
 
@@ -50,7 +59,7 @@ export const mmRuns = mysqlTable("mm_runs", {
   pocKey: varchar("pocKey", { length: 64 }).notNull(), // e.g. "lapo"
 
   // Operator that produced the settlement file
-  operator: mysqlEnum("operator", ["nip", "opay", "palmpay"]).notNull(),
+  operator: mysqlEnum("operator", ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"]).notNull(),
 
   // Settlement period
   settlementDate: varchar("settlementDate", { length: 32 }),
@@ -93,7 +102,7 @@ export const mmExceptions = mysqlTable("mm_exceptions", {
   id: int("id").autoincrement().primaryKey(),
   runId: int("runId").notNull(),
   pocKey: varchar("pocKey", { length: 64 }).notNull(),
-  operator: mysqlEnum("operator", ["nip", "opay", "palmpay"]).notNull(),
+  operator: mysqlEnum("operator", ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"]).notNull(),
 
   // Exception classification
   category: varchar("category", { length: 64 }).notNull(), // one of MM_EXCEPTION_CATEGORIES
@@ -111,12 +120,14 @@ export const mmExceptions = mysqlTable("mm_exceptions", {
   // Layer 3 — AI agent diagnosis
   agentExplanation: text("agentExplanation"),
   recommendedAction: text("recommendedAction"),
-  cbnRuleReference: varchar("cbnRuleReference", { length: 255 }), // e.g. "CBN Mobile Money Policy 2021, Section 4.3"
+  // Regulatory rule reference — CBN/NIBSS (Nigeria) or BoU NPS framework (Uganda).
+  // Column name predates Uganda support; kept for compatibility.
+  cbnRuleReference: varchar("cbnRuleReference", { length: 255 }),
   priorityLevel: varchar("priorityLevel", { length: 10 }), // CRITICAL | HIGH | MEDIUM | LOW
   agentConfidence: int("agentConfidence"), // 0-100
 
   // Review / resolution workflow
-  reviewStatus: varchar("reviewStatus", { length: 16 }).default("OPEN").notNull(), // OPEN | ACKNOWLEDGED | RESOLVED | ESCALATED
+  reviewStatus: varchar("reviewStatus", { length: 16 }).default("OPEN").notNull(), // OPEN | ACKNOWLEDGED | RESOLVED | ESCALATED | REJECTED
   reviewedBy: varchar("reviewedBy", { length: 100 }),
   reviewNote: text("reviewNote"),
   reviewedAt: timestamp("reviewedAt"),

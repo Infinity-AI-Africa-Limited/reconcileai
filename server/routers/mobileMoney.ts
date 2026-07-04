@@ -4,7 +4,9 @@
  * Public-but-gated: uses the same per-POC access token system as poc.ts.
  * All procedures are scoped by `pocSlug` so each institution's data is isolated.
  *
- * Operators supported: NIBSS NIP, OPay, Palmpay
+ * Operators supported:
+ *   Nigeria — NIBSS NIP, OPay, Palmpay
+ *   Uganda  — MTN MoMo, Airtel Money
  */
 import { z } from "zod";
 import { router, publicProcedure } from "../_core/trpc";
@@ -19,7 +21,7 @@ import type { MmOperator } from "../../drizzle/mobile_money_schema";
 
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
 const pocSlug = z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/);
-const mmOperator = z.enum(["nip", "opay", "palmpay"]);
+const mmOperator = z.enum(["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"]);
 
 // Public-but-gated: requires a valid per-POC access token
 const mmProcedure = publicProcedure.use(async (opts) => {
@@ -60,11 +62,13 @@ export const mobileMoneyRouter = router({
       return {
         runId: result.runId,
         operator: result.operator,
+        currency: result.currency,
         layer1: result.layer1,
         matchedCount: result.matchedCount,
         exceptionCount: result.exceptionCount,
         exceptions: result.layer3,
         aiSummary: result.aiSummary,
+        learningApplied: result.learningApplied,
       };
     }),
 
@@ -98,14 +102,16 @@ export const mobileMoneyRouter = router({
 
   /**
    * Update the review status of a mobile money exception.
-   * Wires into the Per-Institution Learning Flywheel via captureResolutionPattern.
+   * Non-OPEN statuses become the institution's resolution history, which
+   * applyInstitutionalLearning feeds back into future run diagnoses — this
+   * is the per-institution learning write-path for POC-scoped runs.
    */
   updateExceptionStatus: mmProcedure
     .input(
       z.object({
         pocSlug,
         exceptionId: z.number().int().positive(),
-        reviewStatus: z.enum(["OPEN", "RESOLVED", "ESCALATED", "REJECTED"]),
+        reviewStatus: z.enum(["OPEN", "ACKNOWLEDGED", "RESOLVED", "ESCALATED", "REJECTED"]),
         reviewedBy: z.string().max(200).default("POC User"),
         reviewNote: z.string().max(2000).default(""),
       })

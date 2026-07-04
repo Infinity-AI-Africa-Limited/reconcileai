@@ -291,6 +291,18 @@ Module state is stored in `moduleConfigurations` (per-org toggle) and `moduleOve
 
 ---
 
+## 9A. Feature Evaluation Rubric — The Intelligence Moat Test
+
+**Every feature — whether proposed by the founder, Manus, or Claude — is evaluated against this rubric before it is built, and every Manus PR is reviewed against it before merging:**
+
+> "Does this deepen the intelligence moat for ReconcileAI?" Features that add breadth without adding intelligence depth should be deprioritised in favour of features that make the AI recommendations more accurate, more personalised, and more difficult to replicate.
+
+**How to apply it in practice:**
+- A new reconciliation vertical, data source, channel, or geography (breadth) must ship with its own **exception taxonomy, resolution templates, regulatory context, and AI diagnosis prompts** — never matching-only.
+- Features that feed or consume the learning flywheel (per-institution resolution history, `agentMemory`, the anonymised cross-institution pattern pool in `exceptionIntelligence.ts`) rank above features that don't.
+- If a feature claims flywheel/learning integration, verify the write-path and read-path actually exist in code — a comment is not an integration.
+- When two features compete for capacity, pick the one that makes recommendations **more accurate, more personalised, or harder to replicate** — in that order.
+
 ## 10. Known Technical Debt — Address in Production Build
 
 These are the most critical items to resolve before the Woodcore pilot goes live:

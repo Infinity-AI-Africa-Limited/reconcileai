@@ -2,20 +2,23 @@
  * MobileMoneyPOC.tsx
  *
  * Mobile Money Reconciliation POC page.
- * Supports NIBSS NIP, OPay, and Palmpay settlement files.
+ * Supports settlement files from:
+ *   Nigeria — NIBSS NIP, OPay, Palmpay (NGN)
+ *   Uganda  — MTN MoMo, Airtel Money  (UGX)
  *
  * Features:
- *   • Operator selector (NIP / OPay / Palmpay)
+ *   • Operator selector grouped by country
  *   • Dual file upload: settlement file + internal ledger
  *   • Layer 1: Balance check (total credits vs total debits)
  *   • Layer 2: Transaction-level matching with exception detection
- *   • Layer 3: AI diagnosis with CBN regulatory context
+ *   • Layer 3: AI diagnosis with CBN (Nigeria) / BoU (Uganda) regulatory context,
+ *     enriched with the institution's own resolution history
  *   • Exception resolution workflow (OPEN → RESOLVED | ESCALATED)
- *   • Per-Institution Learning Flywheel integration
- *   • KPI Dashboard tab
+ *   • KPI Dashboard tab (Infinity AI super admins only)
  */
 import { useState, useRef, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { PocKpiDashboard } from "@/components/PocKpiDashboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,45 +51,92 @@ if (typeof document !== "undefined" && !document.getElementById("mm-fonts")) {
 }
 
 // ─── Operator config ──────────────────────────────────────────────────────────
-type MmOperator = "nip" | "opay" | "palmpay";
+type MmOperator = "nip" | "opay" | "palmpay" | "mtn_momo_ug" | "airtel_money_ug";
+type MmCountry = "NG" | "UG";
+
+const COUNTRY_LABELS: Record<MmCountry, string> = {
+  NG: "🇳🇬 Nigeria",
+  UG: "🇺🇬 Uganda",
+};
 
 const OPERATOR_META: Record<MmOperator, {
   label: string;
+  country: MmCountry;
+  currency: "NGN" | "UGX";
   color: string;
   bg: string;
   settlementLabel: string;
   ledgerLabel: string;
   description: string;
+  hint: string;
   icon: React.ReactNode;
 }> = {
   nip: {
     label: "NIBSS NIP",
+    country: "NG",
+    currency: "NGN",
     color: "#1A56DB",
     bg: "#EFF6FF",
     settlementLabel: "NIP Settlement Report (CSV/Excel)",
     ledgerLabel: "Internal Ledger / CBS Extract (CSV/Excel)",
     description: "NIBSS Instant Payment inter-bank transfers. Reconcile NIP settlement credits against your internal ledger.",
+    hint: "The NIP settlement report from NIBSS",
     icon: <Banknote className="w-5 h-5" />,
   },
   opay: {
     label: "OPay",
+    country: "NG",
+    currency: "NGN",
     color: "#00A859",
     bg: "#F0FDF4",
     settlementLabel: "OPay Settlement File (CSV/Excel)",
     ledgerLabel: "Internal Ledger / CBS Extract (CSV/Excel)",
     description: "OPay mobile money transfers and agent banking. Reconcile OPay settlement credits against your internal ledger.",
+    hint: "The settlement report from OPay",
     icon: <Smartphone className="w-5 h-5" />,
   },
   palmpay: {
     label: "Palmpay",
+    country: "NG",
+    currency: "NGN",
     color: "#6D28D9",
     bg: "#F5F3FF",
     settlementLabel: "Palmpay Settlement File (CSV/Excel)",
     ledgerLabel: "Internal Ledger / CBS Extract (CSV/Excel)",
     description: "Palmpay mobile money and wallet transfers. Reconcile Palmpay settlement credits against your internal ledger.",
+    hint: "The settlement report from Palmpay",
+    icon: <Wifi className="w-5 h-5" />,
+  },
+  mtn_momo_ug: {
+    label: "MTN MoMo",
+    country: "UG",
+    currency: "UGX",
+    color: "#F7C600",
+    bg: "#FFFBEB",
+    settlementLabel: "MTN MoMo Settlement Statement (CSV/Excel)",
+    ledgerLabel: "Internal Ledger / CBS Extract (CSV/Excel)",
+    description: "MTN Mobile Money Uganda wallet-to-bank and bank-to-wallet flows. Reconciled under the BoU NPS framework (UGX).",
+    hint: "The settlement statement from MTN MoMo Uganda",
+    icon: <Smartphone className="w-5 h-5" />,
+  },
+  airtel_money_ug: {
+    label: "Airtel Money",
+    country: "UG",
+    currency: "UGX",
+    color: "#E40000",
+    bg: "#FEF2F2",
+    settlementLabel: "Airtel Money Settlement Statement (CSV/Excel)",
+    ledgerLabel: "Internal Ledger / CBS Extract (CSV/Excel)",
+    description: "Airtel Money Uganda wallet-to-bank and bank-to-wallet flows. Reconciled under the BoU NPS framework (UGX).",
+    hint: "The settlement statement from Airtel Money Uganda",
     icon: <Wifi className="w-5 h-5" />,
   },
 };
+
+const OPERATORS_BY_COUNTRY: Array<{ country: MmCountry; operators: MmOperator[] }> = [
+  { country: "NG", operators: ["nip", "opay", "palmpay"] },
+  { country: "UG", operators: ["mtn_momo_ug", "airtel_money_ug"] },
+];
 
 // ─── Exception category labels ────────────────────────────────────────────────
 const MM_CATEGORY_LABELS: Record<string, string> = {
@@ -98,6 +148,10 @@ const MM_CATEGORY_LABELS: Record<string, string> = {
   mm_amount_mismatch:        "Amount Mismatch",
   mm_unmatched_nip_inflow:   "Unmatched NIP Inflow",
   mm_operator_fee_variance:  "Operator Fee Variance",
+  mm_wallet_to_bank_failed:  "Wallet-to-Bank Failed",
+  mm_bank_to_wallet_failed:  "Bank-to-Wallet Failed",
+  mm_withdrawal_tax_variance: "Withdrawal Tax Variance (0.5%)",
+  mm_momo_settlement_shortfall: "MoMo Settlement Shortfall",
   IN_SETTLEMENT_NOT_IN_LEDGER: "In Settlement, Not in Ledger",
   IN_LEDGER_NOT_IN_SETTLEMENT: "In Ledger, Not in Settlement",
   AMOUNT_MISMATCH:           "Amount Mismatch",
@@ -113,6 +167,10 @@ const MM_CATEGORY_DESCRIPTIONS: Record<string, string> = {
   mm_amount_mismatch:        "Settlement amount differs from the transaction amount in the internal ledger.",
   mm_unmatched_nip_inflow:   "NIP credit appears in the settlement report but has no matching entry in the internal ledger.",
   mm_operator_fee_variance:  "Operator fee deducted differs from the contracted rate. Raise a dispute with the operator.",
+  mm_wallet_to_bank_failed:  "Customer's mobile money wallet was debited but the bank account was never credited. BoU error-resolution obligations apply.",
+  mm_bank_to_wallet_failed:  "Bank account was debited for a push-to-wallet but the wallet was never credited. Reverse or escalate to the operator.",
+  mm_withdrawal_tax_variance: "Variance matches Uganda's 0.5% excise duty on mobile money withdrawals — a statutory deduction, not an operator error.",
+  mm_momo_settlement_shortfall: "Net settlement received is below the gross statement sum. Itemise fees, levies, and netted reversals against the trust account.",
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -131,6 +189,8 @@ interface FileState {
 interface RunResult {
   runId: number;
   operator: string;
+  currency?: string;
+  learningApplied?: number;
   layer1: {
     statementNet: number;
     ledgerNet: number;
@@ -192,9 +252,12 @@ function detectFileKind(file: File): FileKind {
   return "csv";
 }
 
-function fmtNGN(amount: number | null | undefined): string {
+function fmtMoney(amount: number | null | undefined, currency: string = "NGN"): string {
   if (amount == null) return "—";
-  return new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 2 }).format(amount);
+  const locale = currency === "UGX" ? "en-UG" : "en-NG";
+  // UGX is not subdivided in practice — whole shillings only.
+  const digits = currency === "UGX" ? 0 : 2;
+  return new Intl.NumberFormat(locale, { style: "currency", currency, maximumFractionDigits: digits }).format(amount);
 }
 
 function severityColor(severity: string): string {
@@ -286,11 +349,13 @@ function ExceptionCard({
   pocSlug,
   onResolved,
   accentColor,
+  currency,
 }: {
   exc: RunResult["exceptions"][number];
   pocSlug: string;
   onResolved: () => void;
   accentColor: string;
+  currency: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [note, setNote] = useState("");
@@ -353,7 +418,7 @@ function ExceptionCard({
         </div>
         <div className="text-right flex-shrink-0">
           <div className="text-sm font-bold" style={{ color: exc.amount !== 0 ? MM_RED : MM_GREEN }}>
-            {fmtNGN(Math.abs(exc.amount))}
+            {fmtMoney(Math.abs(exc.amount), currency)}
           </div>
           {expanded ? <ChevronUp className="w-4 h-4 text-gray-400 mt-1" /> : <ChevronDown className="w-4 h-4 text-gray-400 mt-1" />}
         </div>
@@ -366,7 +431,7 @@ function ExceptionCard({
           <div className="grid grid-cols-3 gap-3">
             <div className="rounded-lg bg-gray-50 p-3">
               <div className="text-xs text-gray-500 mb-1">{exc.side === "settlement" ? "Settlement Amount" : "Side"}</div>
-              <div className="text-sm font-semibold text-gray-800">{exc.side === "settlement" ? fmtNGN(exc.amount) : exc.side}</div>
+              <div className="text-sm font-semibold text-gray-800">{exc.side === "settlement" ? fmtMoney(exc.amount, currency) : exc.side}</div>
             </div>
             <div className="rounded-lg bg-gray-50 p-3">
               <div className="text-xs text-gray-500 mb-1">Transaction Date</div>
@@ -375,7 +440,7 @@ function ExceptionCard({
             <div className="rounded-lg p-3" style={{ backgroundColor: "#FEF2F2" }}>
               <div className="text-xs text-gray-500 mb-1">Exception Amount</div>
               <div className="text-sm font-semibold" style={{ color: MM_RED }}>
-                {fmtNGN(exc.amount)}
+                {fmtMoney(exc.amount, currency)}
               </div>
             </div>
           </div>
@@ -478,10 +543,16 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
   const [refreshKey, setRefreshKey] = useState(0);
 
   const meta = OPERATOR_META[operator];
+  const currency = result?.currency ?? meta.currency;
+
+  // KPI dashboards are an internal Infinity AI view — hidden from POC customers
+  // (matches LapoPOC/WoodcorePOC; the server enforces this with a super-admin guard).
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === "super_admin";
 
   const kpiQuery = trpc.pocKpi.getKpis.useQuery(
     { pocSlug },
-    { enabled: true }
+    { staleTime: 30_000, enabled: isSuperAdmin }
   );
 
   const runMutation = trpc.mobileMoney.run.useMutation({
@@ -548,7 +619,7 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
             </div>
             <div>
               <h1 className="text-2xl font-bold text-white">Mobile Money Reconciliation</h1>
-              <p className="text-sm text-blue-200">NIBSS NIP · OPay · Palmpay — AI-powered exception detection</p>
+              <p className="text-sm text-blue-200">Nigeria: NIBSS NIP · OPay · Palmpay &nbsp;|&nbsp; Uganda: MTN MoMo · Airtel Money — AI-powered exception detection</p>
             </div>
           </div>
         </div>
@@ -567,7 +638,7 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                 </Badge>
               )}
             </TabsTrigger>
-            <TabsTrigger value="kpi" className="rounded-lg text-sm">KPI Dashboard</TabsTrigger>
+            {isSuperAdmin && <TabsTrigger value="kpi" className="rounded-lg text-sm">KPI Dashboard</TabsTrigger>}
           </TabsList>
 
           {/* ── Upload Tab ── */}
@@ -578,32 +649,40 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base font-semibold text-gray-800">Select Mobile Money Operator</CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-3 gap-3">
-                    {(["nip", "opay", "palmpay"] as MmOperator[]).map((op) => {
-                      const m = OPERATOR_META[op];
-                      const selected = operator === op;
-                      return (
-                        <button
-                          key={op}
-                          onClick={() => setOperator(op)}
-                          className="rounded-xl border-2 p-4 text-left transition-all"
-                          style={{
-                            borderColor: selected ? m.color : "#E5E7EB",
-                            backgroundColor: selected ? m.bg : "white",
-                          }}
-                        >
-                          <div className="flex items-center gap-2 mb-2">
-                            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: m.color, color: "white" }}>
-                              {m.icon}
-                            </div>
-                            <span className="font-semibold text-sm" style={{ color: selected ? m.color : MM_DARK }}>{m.label}</span>
-                          </div>
-                          <p className="text-xs text-gray-500 leading-relaxed">{m.description}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
+                <CardContent className="space-y-4">
+                  {OPERATORS_BY_COUNTRY.map(({ country, operators }) => (
+                    <div key={country}>
+                      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                        {COUNTRY_LABELS[country]}
+                      </div>
+                      <div className={country === "NG" ? "grid grid-cols-3 gap-3" : "grid grid-cols-2 gap-3"}>
+                        {operators.map((op) => {
+                          const m = OPERATOR_META[op];
+                          const selected = operator === op;
+                          return (
+                            <button
+                              key={op}
+                              onClick={() => setOperator(op)}
+                              className="rounded-xl border-2 p-4 text-left transition-all"
+                              style={{
+                                borderColor: selected ? m.color : "#E5E7EB",
+                                backgroundColor: selected ? m.bg : "white",
+                              }}
+                            >
+                              <div className="flex items-center gap-2 mb-2">
+                                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: m.color, color: "white" }}>
+                                  {m.icon}
+                                </div>
+                                <span className="font-semibold text-sm" style={{ color: selected ? m.color : MM_DARK }}>{m.label}</span>
+                                <Badge variant="outline" className="ml-auto text-[10px]">{m.currency}</Badge>
+                              </div>
+                              <p className="text-xs text-gray-500 leading-relaxed">{m.description}</p>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </CardContent>
               </Card>
 
@@ -616,7 +695,7 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                   <div className="grid grid-cols-2 gap-6">
                     <FileUploadCard
                       label={meta.settlementLabel}
-                      hint="The settlement report from the operator (NIBSS, OPay, or Palmpay)"
+                      hint={meta.hint}
                       fileState={settlementFile}
                       onFile={(f) => handleFile(f, setSettlementFile)}
                       onClear={() => setSettlementFile({ file: null, kind: "csv", base64: "", stage: "idle", error: null })}
@@ -678,18 +757,18 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                     <div className="grid grid-cols-4 gap-4">
                       <div className="rounded-lg bg-gray-50 p-4">
                         <div className="text-xs text-gray-500 mb-1">Settlement Total</div>
-                        <div className="text-lg font-bold text-gray-800">{fmtNGN(result.layer1.statementNet)}</div>
+                        <div className="text-lg font-bold text-gray-800">{fmtMoney(result.layer1.statementNet, currency)}</div>
                         <div className="text-xs text-gray-400">{result.layer1.statementCount.toLocaleString()} txns</div>
                       </div>
                       <div className="rounded-lg bg-gray-50 p-4">
                         <div className="text-xs text-gray-500 mb-1">Ledger Total</div>
-                        <div className="text-lg font-bold text-gray-800">{fmtNGN(result.layer1.ledgerNet)}</div>
+                        <div className="text-lg font-bold text-gray-800">{fmtMoney(result.layer1.ledgerNet, currency)}</div>
                         <div className="text-xs text-gray-400">{result.layer1.ledgerCount.toLocaleString()} txns</div>
                       </div>
                       <div       className="rounded-lg p-4" style={{ backgroundColor: result.layer1.varianceAmount !== 0 ? "#FEF2F2" : "#F0FDF4" }}>
                         <div className="text-xs text-gray-500 mb-1">Variance</div>
                         <div className="text-lg font-bold" style={{ color: result.layer1.varianceAmount !== 0 ? MM_RED : MM_GREEN }}>
-                          {fmtNGN(Math.abs(result.layer1.varianceAmount))}
+                          {fmtMoney(Math.abs(result.layer1.varianceAmount), currency)}
                         </div>
                         <div className="text-xs text-gray-400">{result.layer1.varianceAmount > 0 ? "Ledger > Settlement" : result.layer1.varianceAmount < 0 ? "Settlement > Ledger" : "Balanced"}</div>
                       </div>
@@ -817,6 +896,7 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                         pocSlug={pocSlug}
                         onResolved={() => setRefreshKey((k) => k + 1)}
                         accentColor={meta.color}
+                        currency={currency}
                       />
                     ))
                   )}
@@ -825,17 +905,19 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
             )}
           </TabsContent>
 
-          {/* ── KPI Dashboard Tab ── */}
-          <TabsContent value="kpi">
-            <PocKpiDashboard
-              report={kpiQuery.data ?? null}
-              isLoading={kpiQuery.isLoading}
-              isError={kpiQuery.isError}
-              accentColor={MM_BLUE}
-              title="Mobile Money KPI Dashboard"
-              subtitle="NIBSS NIP · OPay · Palmpay"
-            />
-          </TabsContent>
+          {/* ── KPI Dashboard Tab (Infinity AI super admins only) ── */}
+          {isSuperAdmin && (
+            <TabsContent value="kpi">
+              <PocKpiDashboard
+                report={kpiQuery.data ?? null}
+                isLoading={kpiQuery.isLoading}
+                isError={kpiQuery.isError}
+                accentColor={MM_BLUE}
+                title="Mobile Money KPI Dashboard"
+                subtitle="Nigeria: NIBSS NIP · OPay · Palmpay | Uganda: MTN MoMo · Airtel Money"
+              />
+            </TabsContent>
+          )}
         </Tabs>
       </div>
     </div>
