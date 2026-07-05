@@ -170,7 +170,14 @@ export class WoodcoreClient {
       const res = await this.request<WcPagedResponse<T> | T[]>(path, {
         query: { ...query, offset, limit },
       });
-      const items: T[] = Array.isArray(res) ? res : (res.pageItems ?? []);
+      // Envelope tolerance across CBS dialects: Fineract `pageItems`, Temenos
+      // IRIS `body`, generic `content`/`items`, or a bare array.
+      const items: T[] = Array.isArray(res)
+        ? res
+        : ((res.pageItems ??
+            (Array.isArray(res.body) ? (res.body as T[]) : undefined) ??
+            (Array.isArray(res.content) ? (res.content as T[]) : undefined) ??
+            (Array.isArray(res.items) ? (res.items as T[]) : undefined)) ?? []);
       if (items.length > 0) {
         await onPage(items, offset);
         total += items.length;

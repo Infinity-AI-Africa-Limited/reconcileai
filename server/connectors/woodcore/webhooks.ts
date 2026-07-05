@@ -24,10 +24,11 @@ import {
   wcConnectorWebhookEvents,
 } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { getCbsProfile } from "../cbs/registry";
 import { getConfigRow } from "./config";
 import { enqueueDeadLetter } from "./dlq";
 import {
-  ensureWoodcoreChannel,
+  ensureCbsChannel,
   createIngestBatch,
   finalizeIngestBatch,
   ingestCanonicalTransactions,
@@ -63,14 +64,14 @@ export function verifySignature(
 /** Infer which entity a webhook event refers to, from event type or payload shape. */
 export function inferEntity(eventType: string | null, payload: unknown): WcEntity | null {
   const t = (eventType ?? "").toLowerCase();
-  if (t.includes("savings")) return "savings_transaction";
-  if (t.includes("loan")) return "loan_transaction";
+  if (t.includes("savings") || t.includes("deposit")) return "savings_transaction";
+  if (t.includes("loan") || t.includes("arrangement")) return "loan_transaction";
   if (t.includes("journal") || t.includes("gl")) return "journal_entry";
   const p = payload as Record<string, unknown> | null;
   if (p && typeof p === "object") {
     if ("savingsAccountId" in p || "runningBalance" in p) return "savings_transaction";
-    if ("loanId" in p || "principalPortion" in p) return "loan_transaction";
-    if ("entryType" in p || "glAccountId" in p || "glAccountCode" in p) return "journal_entry";
+    if ("loanId" in p || "principalPortion" in p || "arrangementId" in p) return "loan_transaction";
+    if ("entryType" in p || "glAccountId" in p || "glAccountCode" in p || "glAccount" in p) return "journal_entry";
   }
   return null;
 }
@@ -161,11 +162,12 @@ export async function handleWoodcoreWebhook(input: {
 
   try {
     const overrides = await getActiveOverrideRules(cfg.id, entity);
-    const mapped = applyMapping(entity, data, overrides);
+    const profile = getCbsProfile(cfg.cbsType);
+    const mapped = applyMapping(entity, data, overrides, profile.apiMappings[entity]);
     if (!mapped.ok || !mapped.value) {
       throw new Error(`mapping failed: ${mapped.errors.join("; ")}`);
     }
-    const channelId = await ensureWoodcoreChannel(cfg.organizationId);
+    const channelId = await ensureCbsChannel(cfg.organizationId, cfg.cbsType);
     const batchId = await createIngestBatch({
       organizationId: cfg.organizationId,
       channelId,
@@ -244,12 +246,14 @@ export async function retryWebhookDeadLetter(letter: {
   if (!["savings_transaction", "loan_transaction", "journal_entry"].includes(entity)) {
     throw new Error(`unknown entity "${letter.refType}" on dead letter`);
   }
+  const cfg = await getConfigRow(letter.configId);
+  const profile = getCbsProfile(cfg?.cbsType);
   const overrides = await getActiveOverrideRules(letter.configId, entity);
-  const mapped = applyMapping(entity, letter.payload, overrides);
+  const mapped = applyMapping(entity, letter.payload, overrides, profile.apiMappings[entity]);
   if (!mapped.ok || !mapped.value) {
     throw new Error(`mapping failed: ${mapped.errors.join("; ")}`);
   }
-  const channelId = await ensureWoodcoreChannel(letter.organizationId);
+  const channelId = await ensureCbsChannel(letter.organizationId, profile.type);
   const batchId = await createIngestBatch({
     organizationId: letter.organizationId,
     channelId,

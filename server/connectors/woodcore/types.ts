@@ -46,6 +46,8 @@ export type WcAuthMode = "oauth2" | "api_key" | "basic";
 export interface WcConnection {
   configId: number;
   organizationId: number;
+  /** CBS profile key: woodcore | t24 | mambu | flexcube (see cbs/registry.ts). */
+  cbsType: string;
   baseUrl: string;
   tenantId: string;
   authMode: WcAuthMode;

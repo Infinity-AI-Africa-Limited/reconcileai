@@ -60,22 +60,35 @@ WOODCORE_DB_PASSWORD=<set in environment>
 
 ### Connector-as-Onboarding-Channel Model (applies to ALL CBS connectors)
 
-The WoodCore production connector (`server/connectors/woodcore/`) is not just a data
-integration — it is the **onboarding bridge for WoodCore's client banks**:
+The CBS connector engine (`server/connectors/woodcore/` = the engine,
+`server/connectors/cbs/registry.ts` = per-platform profiles) is not just a data
+integration — it is the **onboarding bridge for CBS-partner client banks**:
 
-- Each WoodCore client is onboarded as its **own organization** (multi-tenant), with its
+- **Four platforms ship today**: WoodCore (live/tested), Temenos T24, Mambu, and Oracle
+  FLEXCUBE. One engine (auth, webhooks, batch sync, DLQ, health, canonical ingest);
+  per-CBS differences (default endpoints, auth mode, API + CSV field mappings) are
+  **data in the registry**, selected by `wc_connector_configs.cbsType`.
+- Each CBS client is onboarded as its **own organization** (multi-tenant), with its
   own org-scoped ReconcileAI interface, provisioned **through the connector** in one step:
   organization + admin invite + connector config + data channel
-  (`server/connectors/woodcore/onboarding.ts`, super-admin UI at `/admin/onboarding`).
-- `organizations.onboardingChannel` records the acquisition path: `"woodcore"` for
-  connector-onboarded institutions, `"direct"` for clients onboarded directly with their
-  own data connection (uploads/API/SFTP). Future CBS connectors (Mambu, T24, …) add their
-  own channel code — the column is varchar on purpose, and each new connector must ship
-  the same 4-step onboarding contract as `onboardWoodcoreClient()`.
-- Direct clients never pass through a CBS connector; connector-onboarded clients get their
-  transactions exclusively via their connector (webhooks + daily batch sync).
+  (`onboardCbsClient()` in `server/connectors/woodcore/onboarding.ts`).
+- **The onboarding hub is the New Organisation dialog** (All Organisations → New
+  Organisation, super admin): channel choice "Direct" vs "Via Core Banking Connector"
+  (with CBS platform picker) side by side. There is no separate onboarding page.
+- `organizations.onboardingChannel` records the acquisition path: `"direct"`, or the
+  CBS code (`"woodcore" | "t24" | "mambu" | "flexcube"`). The column is varchar on
+  purpose — a new CBS = a new registry profile, not a migration.
+- **CSV fallback import**: every CBS connector accepts transaction CSV exports through
+  the same mapping + dedupe pipeline (`server/connectors/cbs/csvImport.ts`), so clients
+  are productive before API credentials exist, and switching to the API later never
+  double-ingests.
+- Direct clients never pass through a CBS connector; connector-onboarded clients get
+  their transactions exclusively via their connector (webhooks + daily batch sync + CSV).
 - Super admins manage any client's connector from inside that client's portal (the
   connector tRPC procedures accept an `organizationId` override for `super_admin` only).
+  The router is mounted as both `woodcoreConnector` (legacy) and `cbsConnector`
+  (preferred); the inbound webhook path is `/api/webhooks/cbs/:configId` (the
+  `/api/webhooks/woodcore/:configId` alias is kept).
 
 ---
 

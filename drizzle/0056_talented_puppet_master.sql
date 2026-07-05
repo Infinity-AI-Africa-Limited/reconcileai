@@ -1,0 +1,1 @@
+ALTER TABLE `wc_connector_configs` ADD `cbsType` varchar(20) DEFAULT 'woodcore' NOT NULL;

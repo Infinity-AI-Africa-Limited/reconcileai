@@ -5,13 +5,14 @@
 import { eq } from "drizzle-orm";
 import { wcConnectorConfigs, type WcConnectorConfig } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { getCbsProfile } from "../cbs/registry";
 import { decryptSecret } from "./secrets";
 import { DEFAULT_ENDPOINTS, type WcConnection, type WcEndpoints } from "./types";
 
-export function mergeEndpoints(overrides: unknown): WcEndpoints {
+export function mergeEndpoints(overrides: unknown, defaults: WcEndpoints = DEFAULT_ENDPOINTS): WcEndpoints {
   const o = (overrides ?? {}) as Partial<Record<keyof WcEndpoints, unknown>>;
-  const merged: WcEndpoints = { ...DEFAULT_ENDPOINTS };
-  for (const key of Object.keys(DEFAULT_ENDPOINTS) as (keyof WcEndpoints)[]) {
+  const merged: WcEndpoints = { ...defaults };
+  for (const key of Object.keys(defaults) as (keyof WcEndpoints)[]) {
     const v = o[key];
     if (typeof v === "string" && v.trim()) merged[key] = v.trim();
   }
@@ -19,9 +20,11 @@ export function mergeEndpoints(overrides: unknown): WcEndpoints {
 }
 
 export function toConnection(row: WcConnectorConfig): WcConnection {
+  const profile = getCbsProfile(row.cbsType);
   return {
     configId: row.id,
     organizationId: row.organizationId,
+    cbsType: profile.type,
     baseUrl: row.baseUrl,
     tenantId: row.tenantId,
     authMode: row.authMode,
@@ -36,7 +39,7 @@ export function toConnection(row: WcConnectorConfig): WcConnection {
     pageSize: row.pageSize,
     maxRetries: row.maxRetries,
     requestTimeoutMs: row.requestTimeoutMs,
-    endpoints: mergeEndpoints(row.endpointsJson),
+    endpoints: mergeEndpoints(row.endpointsJson, profile.defaultEndpoints),
   };
 }
 

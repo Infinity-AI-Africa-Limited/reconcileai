@@ -28,7 +28,8 @@ export interface MappingRule {
     | "description"
     | "counterparty"
     | "isReversal"
-    | "typeEnum";
+    | "typeEnum" // numeric type id (WoodCore/Fineract)
+    | "typeLabel"; // string type label (T24/Mambu/Flexcube — used as sourceType)
   /** Dot-path into the source payload, e.g. "transaction.amount". */
   source: string;
   /** Optional named transform applied after extraction. */
@@ -42,10 +43,13 @@ export type TransformName =
   | "number"
   | "absAmount"
   | "boolean"
-  | "wcDate" // Fineract date: [y,m,d] array | "yyyy-MM-dd" | epoch ms
-  | "savingsTxnType" // enum id → label
+  | "presentAsBool" // any non-empty value → true (e.g. Mambu adjustmentTransactionKey)
+  | "wcDate" // Fineract date: [y,m,d] array | "yyyy-MM-dd" | epoch ms | ISO string
+  | "savingsTxnType" // enum id → label (WoodCore)
   | "loanTxnType"
-  | "glEntryType"; // 1 → DEBIT, 2 → CREDIT
+  | "glEntryType" // 1 → DEBIT, 2 → CREDIT (WoodCore)
+  | "directionWord" // CREDIT/CR/C → credit, DEBIT/DR/D → debit (T24/Flexcube/GL)
+  | "typeWordDirection"; // transaction-type word → direction (Mambu DEPOSIT/WITHDRAWAL/…)
 
 export interface MappingResult {
   ok: boolean;
@@ -139,6 +143,11 @@ export const DEFAULT_MAPPINGS: Record<WcEntity, MappingRule[]> = {
 
 // ─── Extraction + transforms ─────────────────────────────────────────────────
 export function getByPath(obj: unknown, path: string): unknown {
+  // Literal flat key wins over dot-traversal: CSV exports (e.g. T24's
+  // "TRANS.ID", "DR.CR.MARKER") produce flat keys that contain dots.
+  if (obj != null && typeof obj === "object" && path in (obj as Record<string, unknown>)) {
+    return (obj as Record<string, unknown>)[path];
+  }
   let cur: unknown = obj;
   for (const seg of path.split(".")) {
     if (cur == null || typeof cur !== "object") return undefined;
@@ -168,6 +177,24 @@ export function parseWcDate(v: unknown): Date | null {
   return null;
 }
 
+/** Word → direction, for CBSs that state debit/credit explicitly. */
+const DIRECTION_WORDS: Record<string, "debit" | "credit"> = {
+  CREDIT: "credit", CR: "credit", C: "credit",
+  DEBIT: "debit", DR: "debit", D: "debit",
+};
+
+/** Transaction-type word → direction (account-holder ledger perspective). */
+const TYPE_WORD_DIRECTION: Record<string, "debit" | "credit"> = {
+  // money in
+  DEPOSIT: "credit", INTEREST_APPLIED: "credit", DIVIDEND: "credit",
+  REPAYMENT: "credit", LOAN_REPAYMENT: "credit", RECOVERY_REPAYMENT: "credit",
+  TRANSFER_IN: "credit", PAYMENT_RECEIVED: "credit", REFUND: "credit",
+  // money out
+  WITHDRAWAL: "debit", FEE: "debit", FEE_APPLIED: "debit", FEE_CHARGED: "debit",
+  DISBURSEMENT: "debit", LOAN_DISBURSEMENT: "debit", TRANSFER_OUT: "debit",
+  WITHHOLDING_TAX: "debit", PENALTY: "debit", PENALTY_APPLIED: "debit", CHARGE: "debit",
+};
+
 function applyTransform(value: unknown, transform: TransformName | undefined): unknown {
   if (transform === undefined) return value;
   switch (transform) {
@@ -187,8 +214,14 @@ function applyTransform(value: unknown, transform: TransformName | undefined): u
       if (typeof value === "boolean") return value;
       if (value == null) return null;
       return ["true", "1", "yes"].includes(String(value).toLowerCase());
+    case "presentAsBool":
+      return value !== null && value !== undefined && value !== "" && value !== false && value !== 0;
     case "wcDate":
       return parseWcDate(value);
+    case "directionWord":
+      return DIRECTION_WORDS[String(value ?? "").trim().toUpperCase()] ?? null;
+    case "typeWordDirection":
+      return TYPE_WORD_DIRECTION[String(value ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_")] ?? null;
     case "savingsTxnType":
       return SAVINGS_TXN_TYPE[Number(value)] ?? `Unknown(${String(value)})`;
     case "loanTxnType":
@@ -232,12 +265,17 @@ export function externalRefFor(entity: WcEntity, externalId: string): string {
 }
 
 // ─── The mapper ──────────────────────────────────────────────────────────────
+/**
+ * `defaultRules` selects the CBS profile's defaults (from the registry);
+ * omitted → WoodCore defaults, so all pre-registry call sites keep working.
+ */
 export function applyMapping(
   entity: WcEntity,
   payload: unknown,
   overrideRules?: MappingRule[] | null,
+  defaultRules?: MappingRule[],
 ): MappingResult {
-  const rules = mergeRules(DEFAULT_MAPPINGS[entity], overrideRules);
+  const rules = mergeRules(defaultRules ?? DEFAULT_MAPPINGS[entity], overrideRules);
   const errors: string[] = [];
   const acc: Record<string, unknown> = {};
 
@@ -259,8 +297,11 @@ export function applyMapping(
   if (!transactionDate) errors.push("transactionDate is missing or unparseable");
 
   const typeEnum = typeof acc.typeEnum === "number" ? acc.typeEnum : null;
+  const typeLabelValue = acc.typeLabel == null ? null : String(acc.typeLabel);
 
-  // debitCredit: explicit rule wins; otherwise derived from the type enum.
+  // debitCredit: explicit rule wins (directionWord/typeWordDirection transforms
+  // yield 'debit'/'credit' directly); otherwise derived from the numeric type
+  // enum via the WoodCore direction tables.
   let debitCredit: "debit" | "credit" | null = null;
   if (acc.debitCredit === "debit" || acc.debitCredit === "credit") {
     debitCredit = acc.debitCredit;
@@ -289,7 +330,7 @@ export function applyMapping(
     counterparty: acc.counterparty == null ? null : String(acc.counterparty),
     isReversal: acc.isReversal === true,
     sourceEntity: entity,
-    sourceType: typeLabel(entity, typeEnum),
+    sourceType: typeLabelValue ?? typeLabel(entity, typeEnum),
     raw: payload,
   };
 
@@ -302,11 +343,12 @@ export function validateRules(rules: unknown): { ok: boolean; errors: string[] }
   if (!Array.isArray(rules)) return { ok: false, errors: ["rules must be an array"] };
   const validTargets = new Set([
     "externalId", "transactionRef", "amount", "currency", "debitCredit",
-    "transactionDate", "valueDate", "description", "counterparty", "isReversal", "typeEnum",
+    "transactionDate", "valueDate", "description", "counterparty", "isReversal",
+    "typeEnum", "typeLabel",
   ]);
   const validTransforms = new Set([
-    "string", "number", "absAmount", "boolean", "wcDate",
-    "savingsTxnType", "loanTxnType", "glEntryType",
+    "string", "number", "absAmount", "boolean", "presentAsBool", "wcDate",
+    "savingsTxnType", "loanTxnType", "glEntryType", "directionWord", "typeWordDirection",
   ]);
   rules.forEach((r, i) => {
     if (typeof r !== "object" || r === null) {

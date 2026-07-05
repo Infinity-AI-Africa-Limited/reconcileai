@@ -393,6 +393,13 @@
       "when": 1783269230681,
       "tag": "0055_late_stryfe",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "5",
+      "when": 1783275808240,
+      "tag": "0056_talented_puppet_master",
+      "breakpoints": true
     }
   ]
 }

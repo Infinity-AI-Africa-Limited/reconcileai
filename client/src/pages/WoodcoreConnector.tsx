@@ -1,5 +1,10 @@
 /**
- * WoodCore Connector — health dashboard + configuration.
+ * Core Banking Connector — health dashboard + configuration.
+ *
+ * One page for every CBS the connector engine supports (WoodCore, Temenos T24,
+ * Mambu, Oracle FLEXCUBE) — the org's configured cbsType selects labels,
+ * default endpoints and field mappings. Includes the CSV fallback import for
+ * institutions whose API access isn't live yet.
  *
  * Written for two audiences:
  *  - The institution's IT admin: Overview tab (status, sync runs, webhooks, DLQ).
@@ -141,6 +146,32 @@ export default function WoodcoreConnector() {
   const f = (k: string) => form[k];
   const setF = (k: string, v: string | number | boolean) => setForm((p) => ({ ...p, [k]: v }));
 
+  const importCsv = trpc.woodcoreConnector.importCsv.useMutation();
+  const [csvEntity, setCsvEntity] = useState<Entity>("savings_transaction");
+  const [csvResult, setCsvResult] = useState<{
+    total: number; inserted: number; duplicates: number; failed: number;
+    sampleFailures: Array<{ rowIndex: number; errors: string[] }>;
+  } | null>(null);
+
+  const handleCsvFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const r = await importCsv.mutateAsync({
+        entity: csvEntity,
+        csvContent: text,
+        fileName: file.name,
+        ...orgOverride,
+      });
+      setCsvResult(r);
+      toast.success(`Imported ${r.inserted.toLocaleString()} new transactions from ${file.name}`);
+      utils.woodcoreConnector.listSyncRuns.invalidate();
+      utils.woodcoreConnector.getHealth.invalidate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "CSV import failed");
+    }
+  };
+
   const [previewEntity, setPreviewEntity] = useState<Entity>("savings_transaction");
   const [previewSample, setPreviewSample] = useState("");
   const [previewResult, setPreviewResult] = useState<
@@ -214,10 +245,11 @@ export default function WoodcoreConnector() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
-            <Plug className="h-7 w-7" /> WoodCore Connector
+            <Plug className="h-7 w-7" /> Core Banking Connector
+            {config?.cbsLabel && <Badge variant="outline" className="text-base">{config.cbsLabel}</Badge>}
           </h1>
           <p className="text-muted-foreground mt-1">
-            Live link between your WoodCore core banking system and ReconcileAI.
+            Live link between your {config?.cbsVendor ?? "core banking"} system and ReconcileAI.
           </p>
         </div>
         {health && <StatusBadge status={health.status} />}
@@ -334,6 +366,57 @@ export default function WoodcoreConnector() {
                   <PlayCircle className="h-4 w-4 mr-2" /> Run sync now
                 </Button>
               </div>
+
+              {/* CSV fallback — works before API credentials are live, and for
+                  historical backfills. Same mapping + dedupe as the API path. */}
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Fallback: import a CSV export</CardTitle>
+                  <CardDescription>
+                    No API access yet? Upload a transaction export from {config.cbsLabel}. Rows are
+                    mapped and de-duplicated exactly like live data — switching to the API later
+                    will never create duplicates.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Select value={csvEntity} onValueChange={(v) => setCsvEntity(v as Entity)}>
+                      <SelectTrigger className="w-64">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(Object.keys(ENTITY_LABELS) as Entity[]).map((e) => (
+                          <SelectItem key={e} value={e}>{ENTITY_LABELS[e]}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      className="text-sm file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-accent"
+                      disabled={importCsv.isPending}
+                      onChange={(e) => { handleCsvFile(e.target.files?.[0]); e.target.value = ""; }}
+                    />
+                    {importCsv.isPending && <span className="text-sm text-muted-foreground">Importing…</span>}
+                  </div>
+                  {csvResult && (
+                    <div className="text-sm text-muted-foreground">
+                      {csvResult.total.toLocaleString()} rows · {csvResult.inserted.toLocaleString()} new ·{" "}
+                      {csvResult.duplicates.toLocaleString()} already known
+                      {csvResult.failed > 0 && (
+                        <span className="text-red-600"> · {csvResult.failed} failed (see Failed Items tab)</span>
+                      )}
+                      {csvResult.sampleFailures.length > 0 && (
+                        <ul className="list-disc pl-5 mt-1 text-xs text-red-700">
+                          {csvResult.sampleFailures.map((f, i) => (
+                            <li key={i}>row {f.rowIndex}: {f.errors.join("; ")}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </>
           )}
         </TabsContent>

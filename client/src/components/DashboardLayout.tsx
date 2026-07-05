@@ -103,7 +103,7 @@ const adminMenuItems: NavItem[] = [
 const adminAdvancedItems: NavItem[] = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data", roles: ["admin"] },
   { icon: Plug, label: "Integrations", path: "/integrations", roles: ["admin"] },
-  { icon: Plug, label: "WoodCore Connector", path: "/woodcore-connector", roles: ["admin"] },
+  { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector", roles: ["admin"] },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
   { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
@@ -136,7 +136,7 @@ const financialServicesMenuItems: NavItem[] = [
 const financialServicesAdvancedItems: NavItem[] = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data" },
   { icon: Plug, label: "Integrations", path: "/integrations" },
-  { icon: Plug, label: "WoodCore Connector", path: "/woodcore-connector" },
+  { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector" },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
   { icon: Server, label: "SFTP Config", path: "/sftp-config" },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
@@ -164,7 +164,6 @@ const corporateB2BMenuItems: NavItem[] = [
 const superAdminItems: NavItem[] = [
   { icon: Globe, label: "Platform Overview", path: "/admin/super-admin", roles: ["super_admin"] },
   { icon: Network, label: "All Organisations", path: "/admin/super-admin/orgs", roles: ["super_admin"] },
-  { icon: Plug, label: "Client Onboarding", path: "/admin/onboarding", roles: ["super_admin"] },
   { icon: Users, label: "All Users", path: "/admin/super-admin/users", roles: ["super_admin"] },
   { icon: BarChart3, label: "Platform Analytics", path: "/admin/super-admin/analytics", roles: ["super_admin"] },
   { icon: FlaskConical, label: "POC Hub", path: "/admin/poc", roles: ["super_admin"] },

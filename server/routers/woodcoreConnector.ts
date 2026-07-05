@@ -8,7 +8,7 @@
  * All queries are scoped to the caller's organizationId — no cross-tenant reads.
  */
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { z } from "zod";
 import {
   wcConnectorConfigs,
@@ -21,12 +21,13 @@ import { ENV } from "../_core/env";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { dlqHandlers } from "../connectors/woodcore";
+import { getCbsProfile, listCbsProfiles } from "../connectors/cbs/registry";
+import { importCbsCsv } from "../connectors/cbs/csvImport";
 import { getConfigRowByOrg } from "../connectors/woodcore/config";
 import { discardDeadLetter, processDueDeadLetters, replayDeadLetter } from "../connectors/woodcore/dlq";
 import { getConnectorHealth, testConnection } from "../connectors/woodcore/health";
 import {
   applyMapping,
-  DEFAULT_MAPPINGS,
   validateRules,
   type MappingRule,
 } from "../connectors/woodcore/mapping";
@@ -94,8 +95,13 @@ async function requireOrgConfig(organizationId: number) {
 
 /** Never send secrets to the client — masked previews only. */
 function toClientConfig(cfg: NonNullable<Awaited<ReturnType<typeof getConfigRowByOrg>>>) {
+  const profile = getCbsProfile(cfg.cbsType);
   return {
     id: cfg.id,
+    cbsType: profile.type,
+    cbsLabel: profile.label,
+    cbsVendor: profile.vendor,
+    cbsNotes: profile.notes,
     name: cfg.name,
     baseUrl: cfg.baseUrl,
     tenantId: cfg.tenantId,
@@ -110,7 +116,7 @@ function toClientConfig(cfg: NonNullable<Awaited<ReturnType<typeof getConfigRowB
     basicPasswordSet: Boolean(cfg.basicPasswordEnc),
     webhookSecretSet: Boolean(cfg.webhookSecretEnc),
     webhookEnabled: cfg.webhookEnabled,
-    webhookUrl: `${ENV.appUrl || ""}/api/webhooks/woodcore/${cfg.id}`,
+    webhookUrl: `${ENV.appUrl || ""}/api/webhooks/cbs/${cfg.id}`,
     batchSyncEnabled: cfg.batchSyncEnabled,
     batchSyncHourUtc: cfg.batchSyncHourUtc,
     writeBackEnabled: cfg.writeBackEnabled,
@@ -134,6 +140,9 @@ function secretUpdate(input: string | undefined): { set: boolean; value: string 
 }
 
 export const woodcoreConnectorRouter = router({
+  /** Supported core-banking platforms (for the onboarding hub + connector UI). */
+  listCbsProfiles: protectedProcedure.query(() => listCbsProfiles()),
+
   // ─── Configuration ─────────────────────────────────────────────────────────
   getConfig: protectedProcedure.input(orgOverrideInput.optional()).query(async ({ ctx, input }) => {
     const orgId = resolveOrgId(ctx.user, input?.organizationId);
@@ -144,6 +153,7 @@ export const woodcoreConnectorRouter = router({
   saveConfig: connectorAdminProcedure
     .input(
       z.object({
+        cbsType: z.enum(["woodcore", "t24", "mambu", "flexcube"]).optional(), // set on create; changing later is deliberate
         name: z.string().min(1).max(255).optional(),
         baseUrl: z.string().url().max(500),
         tenantId: z.string().min(1).max(100).default("default"),
@@ -180,8 +190,10 @@ export const woodcoreConnectorRouter = router({
       const basicPassword = secretUpdate(input.basicPassword);
       const webhookSecret = secretUpdate(input.webhookSecret);
 
+      const effectiveCbsType = input.cbsType ?? existing?.cbsType ?? "woodcore";
       const common = {
-        name: input.name ?? "WoodCore Core Banking",
+        cbsType: effectiveCbsType,
+        name: input.name ?? `${getCbsProfile(effectiveCbsType).label} Core Banking`,
         baseUrl: input.baseUrl.replace(/\/+$/, ""),
         tenantId: input.tenantId,
         authMode: input.authMode,
@@ -382,6 +394,7 @@ export const woodcoreConnectorRouter = router({
   getFieldMappings: protectedProcedure.input(orgOverrideInput.optional()).query(async ({ ctx, input }) => {
     const orgId = resolveOrgId(ctx.user, input?.organizationId);
     const cfg = await getConfigRowByOrg(orgId);
+    const profile = getCbsProfile(cfg?.cbsType);
     const db = await getDb();
     const overrides: Record<string, { version: number; rules: MappingRule[]; notes: string | null } | null> = {
       savings_transaction: null,
@@ -407,7 +420,13 @@ export const woodcoreConnectorRouter = router({
         };
       }
     }
-    return { defaults: DEFAULT_MAPPINGS, overrides };
+    return {
+      cbsType: profile.type,
+      cbsLabel: profile.label,
+      defaults: profile.apiMappings,
+      csvDefaults: profile.csvMappings,
+      overrides,
+    };
   }),
 
   saveFieldMapping: connectorAdminProcedure
@@ -473,12 +492,14 @@ export const woodcoreConnectorRouter = router({
       return { ok: true, version: nextVersion };
     }),
 
-  /** Paste a sample WoodCore payload, see exactly what ReconcileAI will store. */
+  /** Paste a sample CBS payload, see exactly what ReconcileAI will store. */
   previewMapping: protectedProcedure
     .input(
       z.object({
         entity: entitySchema,
         samplePayload: z.string().min(2).max(100_000),
+        cbsType: z.enum(["woodcore", "t24", "mambu", "flexcube"]).optional(), // default: the org's connector
+        organizationId: z.number().int().positive().optional(),
         rules: z
           .array(
             z.object({
@@ -491,14 +512,26 @@ export const woodcoreConnectorRouter = router({
           .optional(),
       }),
     )
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       let payload: unknown;
       try {
         payload = JSON.parse(input.samplePayload);
       } catch {
         return { ok: false as const, errors: ["Sample is not valid JSON"], preview: null };
       }
-      const result = applyMapping(input.entity, payload, (input.rules as MappingRule[] | undefined) ?? null);
+      let cbsType = input.cbsType;
+      if (!cbsType) {
+        const orgId = resolveOrgId(ctx.user, input.organizationId);
+        const cfg = await getConfigRowByOrg(orgId);
+        cbsType = (cfg?.cbsType as typeof cbsType) ?? "woodcore";
+      }
+      const profile = getCbsProfile(cbsType);
+      const result = applyMapping(
+        input.entity,
+        payload,
+        (input.rules as MappingRule[] | undefined) ?? null,
+        profile.apiMappings[input.entity],
+      );
       if (!result.ok || !result.value) {
         return { ok: false as const, errors: result.errors, preview: null };
       }
@@ -545,13 +578,14 @@ export const woodcoreConnectorRouter = router({
     }),
 
   // ─── Partner-channel onboarding (Infinity AI super admins) ────────────────
-  // The connector is the onboarding bridge for WoodCore client banks: one call
-  // provisions org + admin + connector config + channel, and the institution
-  // gets its own org-scoped ReconcileAI interface. Direct clients do not use
-  // this path (superAdmin.createOrganization, onboardingChannel "direct").
+  // The connector is the onboarding bridge for CBS-partner client banks: one
+  // call provisions org + admin + connector config + channel, and the
+  // institution gets its own org-scoped ReconcileAI interface. Direct clients
+  // do not use this path (superAdmin.createOrganization, channel "direct").
   onboardClient: superAdminProcedure
     .input(
       z.object({
+        cbsType: z.enum(["woodcore", "t24", "mambu", "flexcube"]).default("woodcore"),
         orgName: z.string().min(2).max(255),
         orgCode: z.string().min(2).max(50).regex(/^[A-Za-z0-9_-]+$/).optional(),
         country: z.string().length(3).default("NGA"),
@@ -573,9 +607,9 @@ export const woodcoreConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { onboardWoodcoreClient, OnboardingError } = await import("../connectors/woodcore/onboarding");
+      const { onboardCbsClient, OnboardingError } = await import("../connectors/woodcore/onboarding");
       try {
-        const result = await onboardWoodcoreClient(input);
+        const result = await onboardCbsClient(input);
         // Platform audit trail (same event stream as direct org creation).
         try {
           const dbHelpers = await import("../db");
@@ -586,7 +620,7 @@ export const woodcoreConnectorRouter = router({
             targetType: "organization",
             targetId: result.organizationId,
             targetName: input.orgName,
-            newValue: JSON.stringify({ onboardingChannel: "woodcore", configId: result.configId }),
+            newValue: JSON.stringify({ onboardingChannel: input.cbsType, configId: result.configId }),
           });
         } catch (e) {
           console.error("[wc-onboarding] platform event failed:", e);
@@ -602,7 +636,7 @@ export const woodcoreConnectorRouter = router({
       }
     }),
 
-  /** All organizations onboarded through the WoodCore channel, with connector state. */
+  /** All organizations onboarded through any CBS channel, with connector state. */
   listOnboardedClients: superAdminProcedure.query(async () => {
     const db = await getDb();
     if (!db) return [];
@@ -610,7 +644,7 @@ export const woodcoreConnectorRouter = router({
     const orgs = await db
       .select()
       .from(organizations)
-      .where(eq(organizations.onboardingChannel, "woodcore"))
+      .where(ne(organizations.onboardingChannel, "direct"))
       .orderBy(desc(organizations.createdAt));
     const configs = await db.select().from(wcConnectorConfigs);
     const byOrg = new Map(configs.map((c) => [c.organizationId, c]));
@@ -620,11 +654,14 @@ export const woodcoreConnectorRouter = router({
         organizationId: o.id,
         name: o.name,
         code: o.code,
+        onboardingChannel: o.onboardingChannel,
+        cbsLabel: getCbsProfile(o.onboardingChannel).label,
         isActive: o.isActive,
         createdAt: o.createdAt,
         connector: cfg
           ? {
               configId: cfg.id,
+              cbsType: cfg.cbsType,
               isEnabled: cfg.isEnabled,
               baseUrlSet: Boolean(cfg.baseUrl),
               lastHealthStatus: cfg.lastHealthStatus,
@@ -634,4 +671,20 @@ export const woodcoreConnectorRouter = router({
       };
     });
   }),
+
+  // ─── CSV fallback import (no API access yet, or historical backfill) ──────
+  importCsv: connectorAdminProcedure
+    .input(
+      z.object({
+        entity: entitySchema,
+        csvContent: z.string().min(10).max(30 * 1024 * 1024), // 30MB text cap
+        fileName: z.string().max(300).optional(),
+        organizationId: z.number().int().positive().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+      const cfg = await requireOrgConfig(orgId);
+      return importCbsCsv(cfg, input.entity, input.csvContent, { fileName: input.fileName });
+    }),
 });

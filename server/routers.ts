@@ -6079,6 +6079,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
   pocKpi: pocKpiRouter,
   mobileMoney: mobileMoneyRouter,
   woodcoreConnector: woodcoreConnectorRouter,
+  // Same router, CBS-neutral name — the connector engine now serves WoodCore,
+  // T24, Mambu and FLEXCUBE. Prefer `cbsConnector` in new client code.
+  cbsConnector: woodcoreConnectorRouter,
   roadmap: router({
     // Public: submit an access request
     requestAccess: publicProcedure

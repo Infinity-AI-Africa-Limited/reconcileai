@@ -16,6 +16,7 @@ function makeConn(over: Partial<WcConnection> = {}): WcConnection {
   return {
     configId: nextConfigId++,
     organizationId: 1,
+    cbsType: "woodcore",
     baseUrl: "http://localhost:9999/api/v1",
     tenantId: "default",
     authMode: "oauth2",

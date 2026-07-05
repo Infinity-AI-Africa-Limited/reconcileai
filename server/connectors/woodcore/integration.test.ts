@@ -123,6 +123,7 @@ function makeConn(): WcConnection {
   return {
     configId: 999_999,
     organizationId: 1,
+    cbsType: "woodcore",
     baseUrl,
     tenantId: "default",
     authMode: "oauth2",

@@ -147,7 +147,11 @@ function PlatformStatsCards() {
   );
 }
 
-// ─── Create Organisation Dialog ───────────────────────────────────────────────
+// ─── Create Organisation Dialog — the unified onboarding hub ─────────────────
+// One front door for both acquisition channels:
+//   Direct                — org with its own data connection (uploads/API/SFTP)
+//   Core Banking Connector — CBS-partner client (WoodCore/T24/Mambu/FLEXCUBE):
+//                            org + admin invite + connector config + channel
 function CreateOrgDialog({
   open,
   onClose,
@@ -157,73 +161,226 @@ function CreateOrgDialog({
   onClose: () => void;
   onSuccess: () => void;
 }) {
+  const [channel, setChannel] = useState<"direct" | "cbs">("direct");
+  const [cbsType, setCbsType] = useState<"woodcore" | "t24" | "mambu" | "flexcube">("woodcore");
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [segment, setSegment] = useState<Segment>("financial_services");
   const [country, setCountry] = useState("NGA");
   const [currency, setCurrency] = useState("NGN");
+  const [adminName, setAdminName] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [cbsResult, setCbsResult] = useState<{
+    orgCode: string;
+    webhookPath: string;
+    emailSent: boolean;
+    magicLink: string | null;
+  } | null>(null);
+
+  const { data: cbsProfiles } = trpc.cbsConnector.listCbsProfiles.useQuery(undefined, { enabled: open });
+
+  const resetForm = () => {
+    setName(""); setCode(""); setSegment("financial_services");
+    setAdminName(""); setAdminEmail(""); setApiBaseUrl("");
+    setCbsResult(null);
+  };
 
   const createOrg = trpc.superAdmin.createOrganization.useMutation({
     onSuccess: () => {
       toast.success("Organisation created successfully");
-      setName(""); setCode(""); setSegment("financial_services");
+      resetForm();
       onSuccess();
       onClose();
     },
     onError: (err) => toast.error("Failed to create organisation", { description: err.message }),
   });
 
+  const onboardCbs = trpc.cbsConnector.onboardClient.useMutation({
+    onSuccess: (r) => {
+      toast.success("Client onboarded via core banking connector");
+      setCbsResult({
+        orgCode: r.organizationCode,
+        webhookPath: r.webhookPath,
+        emailSent: r.emailSent,
+        magicLink: r.magicLink,
+      });
+      onSuccess();
+    },
+    onError: (err) => toast.error("Onboarding failed", { description: err.message }),
+  });
+
+  const submit = () => {
+    if (channel === "direct") {
+      createOrg.mutate({ name, code, segment, country, baseCurrency: currency });
+    } else {
+      onboardCbs.mutate({
+        cbsType,
+        orgName: name,
+        orgCode: code.trim() || undefined,
+        country,
+        baseCurrency: currency,
+        adminName,
+        adminEmail,
+        origin: window.location.origin,
+        connector: apiBaseUrl.trim() ? { baseUrl: apiBaseUrl.trim() } : undefined,
+      });
+    }
+  };
+
+  const pending = createOrg.isPending || onboardCbs.isPending;
+  const cbsFieldsMissing = channel === "cbs" && (!adminName.trim() || !adminEmail.trim());
+
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="sm:max-w-md">
+    <Dialog open={open} onOpenChange={(v) => { if (!v) { resetForm(); onClose(); } }}>
+      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Plus className="h-4 w-4" />
             New Organisation
           </DialogTitle>
         </DialogHeader>
-        <div className="space-y-3 py-2">
-          <div>
-            <label className="text-xs font-medium text-muted-foreground mb-1 block">Organisation Name *</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. LapoMFB" />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-muted-foreground mb-1 block">Code (short identifier) *</label>
-            <Input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="e.g. LAPOMFB" maxLength={50} />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-muted-foreground mb-1 block">Segment *</label>
-            <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="financial_services">Financial Services</SelectItem>
-                <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-medium text-muted-foreground mb-1 block">Country Code</label>
-              <Input value={country} onChange={(e) => setCountry(e.target.value.toUpperCase())} maxLength={3} placeholder="NGA" />
+
+        {cbsResult ? (
+          // CBS onboarding succeeded — hand the operator what they need next.
+          <div className="space-y-3 py-2 text-sm">
+            <p className="font-medium">
+              Onboarded as <code className="bg-muted px-1.5 py-0.5 rounded">{cbsResult.orgCode}</code>
+            </p>
+            <p className="text-muted-foreground">
+              Webhook address for the {cbsProfiles?.find((p) => p.type === cbsType)?.label ?? "CBS"} team:
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-muted px-2 py-1 rounded break-all">{cbsResult.webhookPath}</code>
+              <Button
+                variant="ghost" size="sm"
+                onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${cbsResult.webhookPath}`); toast.success("Webhook URL copied"); }}
+              >Copy</Button>
             </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground mb-1 block">Base Currency</label>
-              <Input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} maxLength={3} placeholder="NGN" />
-            </div>
+            {cbsResult.emailSent ? (
+              <p>The admin's welcome email with a sign-in link has been sent.</p>
+            ) : cbsResult.magicLink ? (
+              <div className="text-amber-700">
+                Email not sent (email service unconfigured) — share the sign-in link directly:{" "}
+                <Button
+                  variant="outline" size="sm"
+                  onClick={() => { navigator.clipboard.writeText(cbsResult.magicLink!); toast.success("Sign-in link copied"); }}
+                >Copy invite link</Button>
+              </div>
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              Next: Enter Portal on the org row → Core Banking Connector page → add credentials →
+              test connection → enable. Until the API is live, the CSV fallback import works immediately.
+            </p>
+            <DialogFooter>
+              <Button onClick={() => { resetForm(); onClose(); }}>Done</Button>
+            </DialogFooter>
           </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={createOrg.isPending}>Cancel</Button>
-          <Button
-            onClick={() => createOrg.mutate({ name, code, segment, country, baseCurrency: currency })}
-            disabled={createOrg.isPending || !name.trim() || !code.trim()}
-          >
-            {createOrg.isPending ? "Creating…" : "Create Organisation"}
-          </Button>
-        </DialogFooter>
+        ) : (
+          <>
+            <div className="space-y-3 py-2">
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Onboarding Channel *</label>
+                <Select value={channel} onValueChange={(v) => setChannel(v as "direct" | "cbs")}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="direct">Direct — own data connection (uploads / API / SFTP)</SelectItem>
+                    <SelectItem value="cbs">Via Core Banking Connector — CBS-partner client</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {channel === "cbs" && (
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Core Banking System *</label>
+                  <Select value={cbsType} onValueChange={(v) => setCbsType(v as typeof cbsType)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(cbsProfiles ?? []).map((p) => (
+                        <SelectItem key={p.type} value={p.type}>{p.label} — {p.vendor}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {cbsProfiles?.find((p) => p.type === cbsType)?.notes && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {cbsProfiles.find((p) => p.type === cbsType)!.notes}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Organisation Name *</label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. LapoMFB" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                  Code (short identifier) {channel === "direct" ? "*" : "(optional — auto-derived)"}
+                </label>
+                <Input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="e.g. LAPOMFB" maxLength={50} />
+              </div>
+
+              {channel === "direct" ? (
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Segment *</label>
+                  <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="financial_services">Financial Services</SelectItem>
+                      <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
+                      <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground mb-1 block">Institution Admin Name *</label>
+                      <Input value={adminName} onChange={(e) => setAdminName(e.target.value)} placeholder="Adaeze Okafor" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground mb-1 block">Institution Admin Email *</label>
+                      <Input type="email" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} placeholder="ops@bank.ng" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                      CBS API address (optional — can be added later; CSV import works meanwhile)
+                    </label>
+                    <Input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} placeholder="https://api.bank.example/api/v1" />
+                  </div>
+                </>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Country Code</label>
+                  <Input value={country} onChange={(e) => setCountry(e.target.value.toUpperCase())} maxLength={3} placeholder="NGA" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Base Currency</label>
+                  <Input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} maxLength={3} placeholder="NGN" />
+                </div>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => { resetForm(); onClose(); }} disabled={pending}>Cancel</Button>
+              <Button
+                onClick={submit}
+                disabled={pending || !name.trim() || (channel === "direct" && !code.trim()) || cbsFieldsMissing}
+              >
+                {pending ? "Creating…" : channel === "direct" ? "Create Organisation" : "Onboard Client"}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

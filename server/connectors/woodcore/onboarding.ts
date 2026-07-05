@@ -22,8 +22,9 @@ import { eq } from "drizzle-orm";
 import { organizations, users } from "../../../drizzle/schema";
 import { wcConnectorConfigs } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { getCbsProfile, type CbsType } from "../cbs/registry";
 import { encryptSecret } from "./secrets";
-import { ensureWoodcoreChannel } from "./ingest";
+import { ensureCbsChannel } from "./ingest";
 
 /** Channel code this connector stamps on organizations it onboards. */
 export const WOODCORE_ONBOARDING_CHANNEL = "woodcore";
@@ -46,6 +47,8 @@ export function deriveOrgCode(name: string): string {
 }
 
 export interface OnboardWoodcoreClientInput {
+  /** Which core banking system this client runs (default "woodcore"). */
+  cbsType?: CbsType;
   /** Institution */
   orgName: string;
   orgCode?: string; // derived from name when omitted
@@ -90,12 +93,18 @@ export class OnboardingError extends Error {
   }
 }
 
-export async function onboardWoodcoreClient(
+/**
+ * Onboard a CBS-partner client bank: organization + admin invite + connector
+ * config + data channel, in one step. The 4-step contract every CBS connector
+ * shares — `cbsType` selects the profile (WoodCore, T24, Mambu, FLEXCUBE).
+ */
+export async function onboardCbsClient(
   input: OnboardWoodcoreClientInput,
 ): Promise<OnboardWoodcoreClientResult> {
   const db = await getDb();
   if (!db) throw new OnboardingError("Database unavailable", "DB_UNAVAILABLE");
 
+  const profile = getCbsProfile(input.cbsType);
   const email = input.adminEmail.trim().toLowerCase();
 
   // Pre-flight: email must be free (mirrors admin.addUser behaviour).
@@ -120,7 +129,7 @@ export async function onboardWoodcoreClient(
     name: input.orgName.trim(),
     code,
     segment: "financial_services",
-    onboardingChannel: WOODCORE_ONBOARDING_CHANNEL,
+    onboardingChannel: profile.onboardingChannel,
     country: input.country ?? "NGA",
     baseCurrency: input.baseCurrency ?? "NGN",
     isActive: true,
@@ -145,10 +154,12 @@ export async function onboardWoodcoreClient(
   const conn = input.connector ?? {};
   const cfgRes = await db.insert(wcConnectorConfigs).values({
     organizationId,
-    name: `WoodCore — ${input.orgName.trim()}`.slice(0, 255),
+    cbsType: profile.type,
+    name: `${profile.label} — ${input.orgName.trim()}`.slice(0, 255),
     baseUrl: conn.baseUrl?.trim().replace(/\/+$/, "") ?? "",
-    tenantId: conn.tenantId?.trim() || "default",
-    authMode: conn.authMode ?? "oauth2",
+    tenantId: conn.tenantId?.trim() || profile.defaultTenantId,
+    authMode: conn.authMode ?? profile.defaultAuthMode,
+    apiKeyHeader: profile.defaultApiKeyHeader,
     oauthClientId: conn.oauthClientId ?? null,
     oauthClientSecretEnc: conn.oauthClientSecret ? encryptSecret(conn.oauthClientSecret) : null,
     apiKeyEnc: conn.apiKey ? encryptSecret(conn.apiKey) : null,
@@ -157,8 +168,8 @@ export async function onboardWoodcoreClient(
   });
   const configId = Number((cfgRes as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
 
-  // 4) Their WoodCore channel in the canonical reconciliation tables.
-  const channelId = await ensureWoodcoreChannel(organizationId);
+  // 4) Their CBS channel in the canonical reconciliation tables.
+  const channelId = await ensureCbsChannel(organizationId, profile.type);
 
   // Welcome email — best effort; the magic link is returned either way so the
   // operator can hand it over out-of-band when email isn't configured.
@@ -190,8 +201,17 @@ export async function onboardWoodcoreClient(
     adminUserId,
     configId,
     channelId,
-    webhookPath: `/api/webhooks/woodcore/${configId}`,
+    // /api/webhooks/cbs/:configId serves every CBS; the /woodcore/ path is a
+    // kept alias from before multi-CBS support.
+    webhookPath: `/api/webhooks/cbs/${configId}`,
     emailSent,
     magicLink,
   };
+}
+
+/** Back-compat wrapper: the original WoodCore-only entry point. */
+export async function onboardWoodcoreClient(
+  input: OnboardWoodcoreClientInput,
+): Promise<OnboardWoodcoreClientResult> {
+  return onboardCbsClient({ ...input, cbsType: input.cbsType ?? "woodcore" });
 }

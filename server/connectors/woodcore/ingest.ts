@@ -7,6 +7,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { channels, transactions, uploadBatches } from "../../../drizzle/schema";
 import { getDb } from "../../db";
+import { getCbsProfile } from "../cbs/registry";
 import type { CanonicalTransaction } from "./types";
 
 export const WOODCORE_CHANNEL_CODE_PREFIX = "WOODCORE_CBS";
@@ -14,28 +15,34 @@ export const WOODCORE_CHANNEL_CODE_PREFIX = "WOODCORE_CBS";
 /** System user id used for connector-originated rows (matches API ingestion). */
 const SYSTEM_USER_ID = 0;
 
-/** Find or create the per-org WoodCore CBS channel. */
-export async function ensureWoodcoreChannel(organizationId: number): Promise<number> {
+/** Find or create the per-org channel for a CBS connector (any CBS type). */
+export async function ensureCbsChannel(organizationId: number, cbsType: string): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  const profile = getCbsProfile(cbsType);
 
-  const code = `${WOODCORE_CHANNEL_CODE_PREFIX}_${organizationId}`;
+  const code = `${profile.channelCodePrefix}_${organizationId}`;
   const existing = await db.select().from(channels).where(eq(channels.code, code)).limit(1);
   if (existing[0]) return existing[0].id;
 
   await db.insert(channels).values({
     organizationId,
-    name: "WoodCore Core Banking",
+    name: profile.channelName,
     code,
-    description: "Live WoodCore CBS connector (API sync + webhooks)",
+    description: `Live ${profile.label} CBS connector (API sync + webhooks + CSV fallback)`,
     channelType: "bank_core",
     country: "NGA",
     defaultCurrency: "NGN",
     isActive: true,
   });
   const created = await db.select().from(channels).where(eq(channels.code, code)).limit(1);
-  if (!created[0]) throw new Error("Failed to create WoodCore channel");
+  if (!created[0]) throw new Error(`Failed to create ${profile.label} channel`);
   return created[0].id;
+}
+
+/** Back-compat wrapper (pre-registry call sites and tests). */
+export async function ensureWoodcoreChannel(organizationId: number): Promise<number> {
+  return ensureCbsChannel(organizationId, "woodcore");
 }
 
 /** One upload_batches row per sync run / webhook burst, for lineage + reporting. */

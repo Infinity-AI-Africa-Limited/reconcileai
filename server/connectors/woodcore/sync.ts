@@ -15,12 +15,13 @@ import {
   type WcConnectorConfig,
 } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { getCbsProfile } from "../cbs/registry";
 import { WoodcoreClient } from "./client";
 import { getConfigRow, toConnection } from "./config";
 import { enqueueDeadLetter } from "./dlq";
 import {
   createIngestBatch,
-  ensureWoodcoreChannel,
+  ensureCbsChannel,
   finalizeIngestBatch,
   ingestCanonicalTransactions,
 } from "./ingest";
@@ -131,8 +132,9 @@ export async function runBatchSync(
 
   try {
     const conn = toConnection(cfg);
+    const profile = getCbsProfile(cfg.cbsType);
     const client = new WoodcoreClient(conn, opts.clientDeps);
-    const channelId = await ensureWoodcoreChannel(cfg.organizationId);
+    const channelId = await ensureCbsChannel(cfg.organizationId, cfg.cbsType);
 
     const entities: WcEntity[] =
       scope === "all"
@@ -155,7 +157,7 @@ export async function runBatchSync(
         fetched += items.length;
         const mappedOk: CanonicalTransaction[] = [];
         for (const item of items) {
-          const mapped = applyMapping(entity, item, overrides);
+          const mapped = applyMapping(entity, item, overrides, profile.apiMappings[entity]);
           if (mapped.ok && mapped.value) {
             mappedOk.push(mapped.value);
           } else {

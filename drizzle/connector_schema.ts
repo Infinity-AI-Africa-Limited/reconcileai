@@ -27,8 +27,12 @@ export const wcConnectorConfigs = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     organizationId: int("organizationId").notNull(),
+    // Which core banking system this connector talks to. Profiles (default
+    // endpoints, auth, field mappings) live in server/connectors/cbs/registry.ts.
+    // Values: woodcore | t24 | mambu | flexcube (varchar so new CBSs are data).
+    cbsType: varchar("cbsType", { length: 20 }).default("woodcore").notNull(),
     name: varchar("name", { length: 255 }).default("WoodCore Core Banking").notNull(),
-    // Base URL of the WoodCore/Fineract API, e.g. https://<host>/fineract-provider/api/v1
+    // Base URL of the CBS API, e.g. https://<host>/fineract-provider/api/v1
     baseUrl: varchar("baseUrl", { length: 500 }).notNull(),
     // Fineract-Platform-TenantId header value (Fineract multi-tenancy)
     tenantId: varchar("tenantId", { length: 100 }).default("default").notNull(),

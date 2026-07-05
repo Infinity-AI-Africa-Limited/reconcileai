@@ -364,12 +364,13 @@ async function startServer() {
     res.json(syncState);
   });
 
-  // ── WoodCore connector: inbound webhooks ───────────────────────────────────
-  // POST /api/webhooks/woodcore/:configId
-  // Real-time transaction ingestion from WoodCore. HMAC-verified against the
-  // raw body; idempotent on event id; failures are dead-lettered (we own the
-  // retry, so WoodCore always gets a fast 2xx once the signature checks out).
-  app.post("/api/webhooks/woodcore/:configId", async (req, res) => {
+  // ── CBS connector: inbound webhooks (all core-banking platforms) ──────────
+  // POST /api/webhooks/cbs/:configId       — canonical path (any CBS type)
+  // POST /api/webhooks/woodcore/:configId  — kept alias (pre-multi-CBS)
+  // Real-time transaction ingestion. HMAC-verified against the raw body;
+  // idempotent on event id; failures are dead-lettered (we own the retry, so
+  // the CBS always gets a fast 2xx once the signature checks out).
+  const cbsWebhookHandler = async (req: express.Request, res: express.Response) => {
     try {
       const configId = parseInt(req.params.configId, 10);
       if (!Number.isFinite(configId) || configId <= 0) {
@@ -386,10 +387,12 @@ async function startServer() {
       });
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
-      console.error("[woodcore-webhook] error:", err);
+      console.error("[cbs-webhook] error:", err);
       res.status(500).json({ ok: false, status: "internal_error" });
     }
-  });
+  };
+  app.post("/api/webhooks/cbs/:configId", cbsWebhookHandler);
+  app.post("/api/webhooks/woodcore/:configId", cbsWebhookHandler);
 
   // ── WoodCore connector: scheduled tick (daily batch sync + DLQ retries) ───
   // POST /api/scheduled/woodcoreConnectorSync — guarded by x-sync-secret, same
