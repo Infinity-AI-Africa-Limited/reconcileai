@@ -31,6 +31,7 @@ import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
 import WoodcoreConnector from "./pages/WoodcoreConnector";
+import ClientOnboarding from "./pages/ClientOnboarding";
 import AnomalyDetection from "./pages/AnomalyDetection";
 import CfoDashboard from "./pages/CfoDashboard";
 import OperationsDashboard from "./pages/OperationsDashboard";
@@ -106,6 +107,7 @@ function Router() {
       <Route path="/api-ingestion">{() => <DashboardPage component={ApiIngestion} />}</Route>
       <Route path="/sftp-config">{() => <DashboardPage component={SftpConfig} />}</Route>
       <Route path="/woodcore-connector">{() => <DashboardPage component={WoodcoreConnector} />}</Route>
+      <Route path="/admin/onboarding">{() => <DashboardPage component={ClientOnboarding} />}</Route>
       <Route path="/anomalies">{() => <DashboardPage component={AnomalyDetection} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
       <Route path="/modules">{() => <DashboardPage component={ModuleConfiguration} />}</Route>

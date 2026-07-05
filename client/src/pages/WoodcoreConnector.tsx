@@ -9,6 +9,7 @@
  */
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -80,24 +81,29 @@ function runStatusBadge(status: string) {
 
 export default function WoodcoreConnector() {
   const utils = trpc.useUtils();
-  const { data: config, isLoading: configLoading } = trpc.woodcoreConnector.getConfig.useQuery();
+  // Portal context: a super admin who has "entered" a WoodCore client's portal
+  // operates that client's connector; everyone else is scoped to their own org.
+  const { viewAsOrg } = usePortalContext();
+  const orgOverride = viewAsOrg ? { organizationId: viewAsOrg.id } : {};
+
+  const { data: config, isLoading: configLoading } = trpc.woodcoreConnector.getConfig.useQuery(orgOverride);
   const { data: health } = trpc.woodcoreConnector.getHealth.useQuery(
-    { probe: false },
+    { probe: false, ...orgOverride },
     { enabled: Boolean(config), refetchInterval: 30_000 },
   );
   const { data: syncRuns } = trpc.woodcoreConnector.listSyncRuns.useQuery(
-    { limit: 30 },
+    { limit: 30, ...orgOverride },
     { enabled: Boolean(config), refetchInterval: 15_000 },
   );
   const { data: webhookEvents } = trpc.woodcoreConnector.listWebhookEvents.useQuery(
-    { limit: 50 },
+    { limit: 50, ...orgOverride },
     { enabled: Boolean(config), refetchInterval: 30_000 },
   );
   const { data: deadLetters } = trpc.woodcoreConnector.listDeadLetters.useQuery(
-    { limit: 50 },
+    { limit: 50, ...orgOverride },
     { enabled: Boolean(config), refetchInterval: 30_000 },
   );
-  const { data: mappings } = trpc.woodcoreConnector.getFieldMappings.useQuery(undefined, {
+  const { data: mappings } = trpc.woodcoreConnector.getFieldMappings.useQuery(orgOverride, {
     enabled: Boolean(config),
   });
 
@@ -168,6 +174,7 @@ export default function WoodcoreConnector() {
         maxRetries: 3,
         requestTimeoutMs: 30000,
         isEnabled: Boolean(form.isEnabled),
+        ...orgOverride,
       });
       toast.success("Connector settings saved");
       utils.woodcoreConnector.getConfig.invalidate();
@@ -179,7 +186,7 @@ export default function WoodcoreConnector() {
 
   const handleTest = async () => {
     try {
-      const r = await testConn.mutateAsync();
+      const r = await testConn.mutateAsync(orgOverride);
       if (r.ok) {
         toast.success(
           `Connected in ${r.latencyMs}ms using ${r.authModeUsed}${r.authDegraded ? " (fallback mode — check OAuth settings)" : ""}`,
@@ -315,7 +322,7 @@ export default function WoodcoreConnector() {
                 <Button
                   onClick={async () => {
                     try {
-                      await triggerSync.mutateAsync({ scope: "all" });
+                      await triggerSync.mutateAsync({ scope: "all", ...orgOverride });
                       toast.success("Sync started — watch the Sync Runs tab");
                       utils.woodcoreConnector.listSyncRuns.invalidate();
                     } catch (e) {
@@ -670,7 +677,7 @@ export default function WoodcoreConnector() {
                 variant="outline"
                 onClick={async () => {
                   try {
-                    const r = await retryAllDlq.mutateAsync();
+                    const r = await retryAllDlq.mutateAsync(orgOverride);
                     toast.success(`Retried ${r.processed}: ${r.resolved} fixed, ${r.failedAgain + r.exhausted} still failing`);
                     utils.woodcoreConnector.listDeadLetters.invalidate();
                   } catch (e) {
@@ -715,7 +722,7 @@ export default function WoodcoreConnector() {
                             title="Retry now"
                             onClick={async () => {
                               try {
-                                await replayDlq.mutateAsync({ id: dl.id });
+                                await replayDlq.mutateAsync({ id: dl.id, ...orgOverride });
                                 toast.success("Queued for immediate retry");
                                 utils.woodcoreConnector.listDeadLetters.invalidate();
                               } catch (e) {
@@ -733,7 +740,7 @@ export default function WoodcoreConnector() {
                               const note = prompt("Why is this item safe to dismiss? (kept for audit)");
                               if (!note) return;
                               try {
-                                await discardDlq.mutateAsync({ id: dl.id, note });
+                                await discardDlq.mutateAsync({ id: dl.id, note, ...orgOverride });
                                 toast.success("Dismissed (kept in the audit trail)");
                                 utils.woodcoreConnector.listDeadLetters.invalidate();
                               } catch (e) {

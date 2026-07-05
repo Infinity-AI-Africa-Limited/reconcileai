@@ -58,6 +58,25 @@ WOODCORE_DB_PASSWORD=<set in environment>
 - `client/src/pages/WoodcorePOC.tsx` — Frontend POC dashboard
 - `server/routers.ts` — `woodcore.*` tRPC procedures (lines ~3926–4316)
 
+### Connector-as-Onboarding-Channel Model (applies to ALL CBS connectors)
+
+The WoodCore production connector (`server/connectors/woodcore/`) is not just a data
+integration — it is the **onboarding bridge for WoodCore's client banks**:
+
+- Each WoodCore client is onboarded as its **own organization** (multi-tenant), with its
+  own org-scoped ReconcileAI interface, provisioned **through the connector** in one step:
+  organization + admin invite + connector config + data channel
+  (`server/connectors/woodcore/onboarding.ts`, super-admin UI at `/admin/onboarding`).
+- `organizations.onboardingChannel` records the acquisition path: `"woodcore"` for
+  connector-onboarded institutions, `"direct"` for clients onboarded directly with their
+  own data connection (uploads/API/SFTP). Future CBS connectors (Mambu, T24, …) add their
+  own channel code — the column is varchar on purpose, and each new connector must ship
+  the same 4-step onboarding contract as `onboardWoodcoreClient()`.
+- Direct clients never pass through a CBS connector; connector-onboarded clients get their
+  transactions exclusively via their connector (webhooks + daily batch sync).
+- Super admins manage any client's connector from inside that client's portal (the
+  connector tRPC procedures accept an `organizationId` override for `super_admin` only).
+
 ---
 
 ## 3. Technology Stack

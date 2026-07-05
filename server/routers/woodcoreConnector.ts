@@ -45,6 +45,14 @@ const connectorAdminProcedure = protectedProcedure.use(async (opts) => {
   return opts.next();
 });
 
+/** Super-admin-only gate (Infinity AI platform operations, e.g. client onboarding). */
+const superAdminProcedure = protectedProcedure.use(async (opts) => {
+  if ((opts.ctx.user.role ?? "") !== "super_admin") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Super admin access required" });
+  }
+  return opts.next();
+});
+
 function requireOrgId(user: { organizationId?: number | null }): number {
   if (!user.organizationId) {
     throw new TRPCError({
@@ -54,6 +62,27 @@ function requireOrgId(user: { organizationId?: number | null }): number {
   }
   return user.organizationId;
 }
+
+/**
+ * Resolve which organization a call operates on. Super admins may pass an
+ * explicit organizationId (portal context / onboarded-client management);
+ * everyone else is locked to their own organization.
+ */
+function resolveOrgId(
+  user: { role?: string | null; organizationId?: number | null },
+  override?: number,
+): number {
+  if (override !== undefined) {
+    if (user.role !== "super_admin") {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Only super admins can act on another organization" });
+    }
+    return override;
+  }
+  return requireOrgId(user);
+}
+
+/** Optional org override accepted by org-scoped procedures (super admins only). */
+const orgOverrideInput = z.object({ organizationId: z.number().int().positive().optional() });
 
 async function requireOrgConfig(organizationId: number) {
   const cfg = await getConfigRowByOrg(organizationId);
@@ -106,8 +135,8 @@ function secretUpdate(input: string | undefined): { set: boolean; value: string 
 
 export const woodcoreConnectorRouter = router({
   // ─── Configuration ─────────────────────────────────────────────────────────
-  getConfig: protectedProcedure.query(async ({ ctx }) => {
-    const orgId = requireOrgId(ctx.user);
+  getConfig: protectedProcedure.input(orgOverrideInput.optional()).query(async ({ ctx, input }) => {
+    const orgId = resolveOrgId(ctx.user, input?.organizationId);
     const cfg = await getConfigRowByOrg(orgId);
     return cfg ? toClientConfig(cfg) : null;
   }),
@@ -137,10 +166,11 @@ export const woodcoreConnectorRouter = router({
         requestTimeoutMs: z.number().int().min(5000).max(120000).default(30000),
         endpointsJson: z.record(z.string(), z.string()).optional(),
         isEnabled: z.boolean().default(false),
+        organizationId: z.number().int().positive().optional(), // super admins only
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -196,26 +226,28 @@ export const woodcoreConnectorRouter = router({
       return saved ? toClientConfig(saved) : null;
     }),
 
-  testConnection: connectorAdminProcedure.mutation(async ({ ctx }) => {
-    const orgId = requireOrgId(ctx.user);
-    const cfg = await requireOrgConfig(orgId);
-    return testConnection(cfg);
-  }),
+  testConnection: connectorAdminProcedure
+    .input(orgOverrideInput.optional())
+    .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
+      const cfg = await requireOrgConfig(orgId);
+      return testConnection(cfg);
+    }),
 
   // ─── Health dashboard ──────────────────────────────────────────────────────
   getHealth: protectedProcedure
-    .input(z.object({ probe: z.boolean().default(false) }).optional())
+    .input(z.object({ probe: z.boolean().default(false), organizationId: z.number().int().positive().optional() }).optional())
     .query(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
       const cfg = await getConfigRowByOrg(orgId);
       if (!cfg) return null;
       return getConnectorHealth(cfg, { runConnectivityProbe: input?.probe ?? false });
     }),
 
   listSyncRuns: protectedProcedure
-    .input(z.object({ limit: z.number().int().min(1).max(200).default(30) }).optional())
+    .input(z.object({ limit: z.number().int().min(1).max(200).default(30), organizationId: z.number().int().positive().optional() }).optional())
     .query(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
       const db = await getDb();
       if (!db) return [];
       return db
@@ -232,11 +264,12 @@ export const woodcoreConnectorRouter = router({
         .object({
           limit: z.number().int().min(1).max(200).default(50),
           status: z.enum(["received", "processed", "failed", "duplicate", "quarantined"]).optional(),
+          organizationId: z.number().int().positive().optional(),
         })
         .optional(),
     )
     .query(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
       const db = await getDb();
       if (!db) return [];
       const where = input?.status
@@ -270,11 +303,12 @@ export const woodcoreConnectorRouter = router({
           scope: z.enum(["savings", "loans", "gl", "all"]).default("all"),
           windowFrom: z.date().optional(),
           windowTo: z.date().optional(),
+          organizationId: z.number().int().positive().optional(),
         })
         .optional(),
     )
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
       const cfg = await requireOrgConfig(orgId);
       if (!cfg.isEnabled) {
         throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Enable the connector before running a sync" });
@@ -296,11 +330,12 @@ export const woodcoreConnectorRouter = router({
         .object({
           limit: z.number().int().min(1).max(200).default(50),
           status: z.enum(["pending", "retrying", "resolved", "exhausted", "discarded"]).optional(),
+          organizationId: z.number().int().positive().optional(),
         })
         .optional(),
     )
     .query(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
       const db = await getDb();
       if (!db) return [];
       const where = input?.status
@@ -318,32 +353,34 @@ export const woodcoreConnectorRouter = router({
     }),
 
   replayDeadLetter: connectorAdminProcedure
-    .input(z.object({ id: z.number().int().positive() }))
+    .input(z.object({ id: z.number().int().positive(), organizationId: z.number().int().positive().optional() }))
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const ok = await replayDeadLetter(input.id, orgId);
       if (!ok) throw new TRPCError({ code: "NOT_FOUND", message: "Dead letter not found or already resolved" });
       return { ok: true };
     }),
 
   discardDeadLetter: connectorAdminProcedure
-    .input(z.object({ id: z.number().int().positive(), note: z.string().min(1).max(1000) }))
+    .input(z.object({ id: z.number().int().positive(), note: z.string().min(1).max(1000), organizationId: z.number().int().positive().optional() }))
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const ok = await discardDeadLetter(input.id, orgId, input.note);
       if (!ok) throw new TRPCError({ code: "NOT_FOUND", message: "Dead letter not found" });
       return { ok: true };
     }),
 
-  retryDeadLettersNow: connectorAdminProcedure.mutation(async ({ ctx }) => {
-    const orgId = requireOrgId(ctx.user);
-    const cfg = await requireOrgConfig(orgId);
-    return processDueDeadLetters(dlqHandlers, { configId: cfg.id, limit: 100 });
-  }),
+  retryDeadLettersNow: connectorAdminProcedure
+    .input(orgOverrideInput.optional())
+    .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input?.organizationId);
+      const cfg = await requireOrgConfig(orgId);
+      return processDueDeadLetters(dlqHandlers, { configId: cfg.id, limit: 100 });
+    }),
 
   // ─── Field mappings ────────────────────────────────────────────────────────
-  getFieldMappings: protectedProcedure.query(async ({ ctx }) => {
-    const orgId = requireOrgId(ctx.user);
+  getFieldMappings: protectedProcedure.input(orgOverrideInput.optional()).query(async ({ ctx, input }) => {
+    const orgId = resolveOrgId(ctx.user, input?.organizationId);
     const cfg = await getConfigRowByOrg(orgId);
     const db = await getDb();
     const overrides: Record<string, { version: number; rules: MappingRule[]; notes: string | null } | null> = {
@@ -386,10 +423,11 @@ export const woodcoreConnectorRouter = router({
           }),
         ),
         notes: z.string().max(1000).optional(),
+        organizationId: z.number().int().positive().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const cfg = await requireOrgConfig(orgId);
       const check = validateRules(input.rules);
       if (!check.ok) {
@@ -492,11 +530,108 @@ export const woodcoreConnectorRouter = router({
         accountId: z.string().min(1).max(100),
         reconcileRef: z.string().min(1).max(100),
         note: z.string().min(1).max(1000),
+        organizationId: z.number().int().positive().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const cfg = await requireOrgConfig(orgId);
-      return pushWriteBackNote(cfg.id, input);
+      return pushWriteBackNote(cfg.id, {
+        accountType: input.accountType,
+        accountId: input.accountId,
+        reconcileRef: input.reconcileRef,
+        note: input.note,
+      });
     }),
+
+  // ─── Partner-channel onboarding (Infinity AI super admins) ────────────────
+  // The connector is the onboarding bridge for WoodCore client banks: one call
+  // provisions org + admin + connector config + channel, and the institution
+  // gets its own org-scoped ReconcileAI interface. Direct clients do not use
+  // this path (superAdmin.createOrganization, onboardingChannel "direct").
+  onboardClient: superAdminProcedure
+    .input(
+      z.object({
+        orgName: z.string().min(2).max(255),
+        orgCode: z.string().min(2).max(50).regex(/^[A-Za-z0-9_-]+$/).optional(),
+        country: z.string().length(3).default("NGA"),
+        baseCurrency: z.string().length(3).default("NGN"),
+        adminName: z.string().min(1).max(255),
+        adminEmail: z.string().email().max(320),
+        origin: z.string().url().max(500).optional(),
+        connector: z
+          .object({
+            baseUrl: z.string().url().max(500).optional(),
+            tenantId: z.string().max(100).optional(),
+            authMode: z.enum(["oauth2", "api_key", "basic"]).optional(),
+            oauthClientId: z.string().max(255).optional(),
+            oauthClientSecret: z.string().max(1000).optional(),
+            apiKey: z.string().max(1000).optional(),
+            webhookSecret: z.string().max(1000).optional(),
+          })
+          .optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { onboardWoodcoreClient, OnboardingError } = await import("../connectors/woodcore/onboarding");
+      try {
+        const result = await onboardWoodcoreClient(input);
+        // Platform audit trail (same event stream as direct org creation).
+        try {
+          const dbHelpers = await import("../db");
+          await dbHelpers.logPlatformEvent({
+            actorId: ctx.user.id,
+            actorName: ctx.user.name ?? undefined,
+            eventType: "org_created",
+            targetType: "organization",
+            targetId: result.organizationId,
+            targetName: input.orgName,
+            newValue: JSON.stringify({ onboardingChannel: "woodcore", configId: result.configId }),
+          });
+        } catch (e) {
+          console.error("[wc-onboarding] platform event failed:", e);
+        }
+        return result;
+      } catch (err) {
+        if (err instanceof OnboardingError) {
+          const code =
+            err.code === "DUPLICATE_EMAIL" || err.code === "DUPLICATE_ORG" ? "CONFLICT" : "INTERNAL_SERVER_ERROR";
+          throw new TRPCError({ code, message: err.message });
+        }
+        throw err;
+      }
+    }),
+
+  /** All organizations onboarded through the WoodCore channel, with connector state. */
+  listOnboardedClients: superAdminProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return [];
+    const { organizations } = await import("../../drizzle/schema");
+    const orgs = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.onboardingChannel, "woodcore"))
+      .orderBy(desc(organizations.createdAt));
+    const configs = await db.select().from(wcConnectorConfigs);
+    const byOrg = new Map(configs.map((c) => [c.organizationId, c]));
+    return orgs.map((o) => {
+      const cfg = byOrg.get(o.id);
+      return {
+        organizationId: o.id,
+        name: o.name,
+        code: o.code,
+        isActive: o.isActive,
+        createdAt: o.createdAt,
+        connector: cfg
+          ? {
+              configId: cfg.id,
+              isEnabled: cfg.isEnabled,
+              baseUrlSet: Boolean(cfg.baseUrl),
+              lastHealthStatus: cfg.lastHealthStatus,
+              lastHealthCheckAt: cfg.lastHealthCheckAt,
+            }
+          : null,
+      };
+    });
+  }),
 });

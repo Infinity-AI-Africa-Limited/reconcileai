@@ -164,6 +164,7 @@ const corporateB2BMenuItems: NavItem[] = [
 const superAdminItems: NavItem[] = [
   { icon: Globe, label: "Platform Overview", path: "/admin/super-admin", roles: ["super_admin"] },
   { icon: Network, label: "All Organisations", path: "/admin/super-admin/orgs", roles: ["super_admin"] },
+  { icon: Plug, label: "Client Onboarding", path: "/admin/onboarding", roles: ["super_admin"] },
   { icon: Users, label: "All Users", path: "/admin/super-admin/users", roles: ["super_admin"] },
   { icon: BarChart3, label: "Platform Analytics", path: "/admin/super-admin/analytics", roles: ["super_admin"] },
   { icon: FlaskConical, label: "POC Hub", path: "/admin/poc", roles: ["super_admin"] },

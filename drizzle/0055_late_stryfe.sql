@@ -1,0 +1,1 @@
+ALTER TABLE `organizations` ADD `onboardingChannel` varchar(50) DEFAULT 'direct' NOT NULL;

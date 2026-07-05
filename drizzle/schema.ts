@@ -26,6 +26,11 @@ export const organizations = mysqlTable("organizations", {
   // - corporate_b2b: FMCG distributors, corporate treasury, B2B payments
   // - super_admin: Infinity AI internal (cross-tenant visibility)
   segment: mysqlEnum("segment", ["financial_services", "corporate_b2b", "super_admin"]).default("financial_services").notNull(),
+  // How this organization arrived on the platform:
+  // - "direct":   onboarded directly by ReconcileAI (own data connection/uploads)
+  // - "woodcore": onboarded through the WoodCore CBS connector (WoodCore client bank)
+  // - future CBS connectors add their own channel code here (varchar, not enum, on purpose)
+  onboardingChannel: varchar("onboardingChannel", { length: 50 }).default("direct").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
