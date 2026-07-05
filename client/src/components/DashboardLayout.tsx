@@ -103,6 +103,7 @@ const adminMenuItems: NavItem[] = [
 const adminAdvancedItems: NavItem[] = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data", roles: ["admin"] },
   { icon: Plug, label: "Integrations", path: "/integrations", roles: ["admin"] },
+  { icon: Plug, label: "WoodCore Connector", path: "/woodcore-connector", roles: ["admin"] },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
   { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
@@ -135,6 +136,7 @@ const financialServicesMenuItems: NavItem[] = [
 const financialServicesAdvancedItems: NavItem[] = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data" },
   { icon: Plug, label: "Integrations", path: "/integrations" },
+  { icon: Plug, label: "WoodCore Connector", path: "/woodcore-connector" },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
   { icon: Server, label: "SFTP Config", path: "/sftp-config" },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },

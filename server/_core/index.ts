@@ -50,8 +50,18 @@ async function startServer() {
 
   const app = express();
   const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
+  // Configure body parser with larger size limit for file uploads.
+  // `verify` captures the raw body bytes so webhook HMAC signatures can be
+  // checked against exactly what was sent (JSON re-serialization is not
+  // byte-stable and would break signature verification).
+  app.use(
+    express.json({
+      limit: "50mb",
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    })
+  );
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   // ── Liveness probe ─────────────────────────────────────────────────────────
   // GET /api/healthz — returns 200 whenever the process is alive. Used as the
@@ -352,6 +362,49 @@ async function startServer() {
     if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
     const { syncState } = await import("../woodcoreSync");
     res.json(syncState);
+  });
+
+  // ── WoodCore connector: inbound webhooks ───────────────────────────────────
+  // POST /api/webhooks/woodcore/:configId
+  // Real-time transaction ingestion from WoodCore. HMAC-verified against the
+  // raw body; idempotent on event id; failures are dead-lettered (we own the
+  // retry, so WoodCore always gets a fast 2xx once the signature checks out).
+  app.post("/api/webhooks/woodcore/:configId", async (req, res) => {
+    try {
+      const configId = parseInt(req.params.configId, 10);
+      if (!Number.isFinite(configId) || configId <= 0) {
+        return res.status(400).json({ ok: false, status: "bad_config_id" });
+      }
+      const rawBody =
+        (req as express.Request & { rawBody?: Buffer }).rawBody ??
+        Buffer.from(JSON.stringify(req.body ?? {}));
+      const { handleWoodcoreWebhook } = await import("../connectors/woodcore/webhooks");
+      const result = await handleWoodcoreWebhook({
+        configId,
+        rawBody,
+        headers: req.headers,
+      });
+      res.status(result.httpStatus).json(result.body);
+    } catch (err) {
+      console.error("[woodcore-webhook] error:", err);
+      res.status(500).json({ ok: false, status: "internal_error" });
+    }
+  });
+
+  // ── WoodCore connector: scheduled tick (daily batch sync + DLQ retries) ───
+  // POST /api/scheduled/woodcoreConnectorSync — guarded by x-sync-secret, same
+  // scheme as /api/woodcore/sync. Point a Railway/host cron at this hourly;
+  // each connector's own batchSyncHourUtc decides when it actually pulls.
+  app.post("/api/scheduled/woodcoreConnectorSync", async (req, res) => {
+    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    try {
+      const { runConnectorTick } = await import("../connectors/woodcore");
+      const result = await runConnectorTick();
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error("[woodcoreConnectorSync] error:", err);
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   // ── Live monitoring stream (SSE) ───────────────────────────────────────────

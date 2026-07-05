@@ -6,6 +6,7 @@ import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
 import { mobileMoneyRouter } from "./routers/mobileMoney";
+import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -6077,6 +6078,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   poc: pocRouter,
   pocKpi: pocKpiRouter,
   mobileMoney: mobileMoneyRouter,
+  woodcoreConnector: woodcoreConnectorRouter,
   roadmap: router({
     // Public: submit an access request
     requestAccess: publicProcedure
