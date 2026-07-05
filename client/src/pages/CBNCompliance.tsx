@@ -61,6 +61,10 @@ const CBN_THRESHOLDS = {
 };
 
 // ─── Upcoming CBN Submission Deadlines ───────────────────────────────────────
+// Scope: ONLY the returns that reconciliation output directly feeds. Institution-
+// wide returns (CAR, LCR, IFRS 9, cybersecurity, consumer protection) belong to
+// the bank's GRC/finance calendar, not a reconciliation platform — deliberately
+// out of scope for ReconcileAI.
 const REGULATORY_DEADLINES = [
   {
     framework: "AML/CFT Monthly Returns",
@@ -81,24 +85,6 @@ const REGULATORY_DEADLINES = [
     relevance: "Settlement reconciliation figures feed directly into the FinA balance sheet returns",
   },
   {
-    framework: "Capital Adequacy Ratio",
-    code: "CAPITAL_ADEQUACY",
-    basis: "CBN Guidance Notes / Basel III",
-    frequency: "Quarterly",
-    daysAfterPeriod: 15,
-    channel: "CBN FinA Portal",
-    relevance: "Unreconciled exposures affect risk-weighted assets and CAR computation",
-  },
-  {
-    framework: "Liquidity Coverage Ratio",
-    code: "LIQUIDITY",
-    basis: "CBN LCR Guidelines 2021",
-    frequency: "Monthly",
-    daysAfterPeriod: 5,
-    channel: "CBN FinA Portal",
-    relevance: "Unsettled interbank positions affect HQLA and net cash outflow calculations",
-  },
-  {
     framework: "KYC/CDD Returns",
     code: "KYC_CDD",
     basis: "CBN KYC Regulations 2023",
@@ -106,33 +92,6 @@ const REGULATORY_DEADLINES = [
     daysAfterPeriod: 10,
     channel: "CBN Portal",
     relevance: "Transactions with unverified counterparties flagged in reconciliation require CDD escalation",
-  },
-  {
-    framework: "IFRS 9 / Credit Risk Returns",
-    code: "IFRS9",
-    basis: "CBN Prudential Guidelines / IFRS 9",
-    frequency: "Quarterly",
-    daysAfterPeriod: 15,
-    channel: "CBN FinA Portal",
-    relevance: "Unmatched credit transactions may affect ECL staging and NPL ratio computation",
-  },
-  {
-    framework: "Cybersecurity Incident Report",
-    code: "CYBERSECURITY",
-    basis: "CBN Cybersecurity Framework 2022",
-    frequency: "Semi-Annual",
-    daysAfterPeriod: 30,
-    channel: "CBN Portal",
-    relevance: "Reconciliation anomalies that indicate system tampering must be reported as cyber incidents",
-  },
-  {
-    framework: "Consumer Protection Returns",
-    code: "CONSUMER_PROTECTION",
-    basis: "CBN Consumer Protection Framework 2022",
-    frequency: "Annual",
-    daysAfterPeriod: 30,
-    channel: "CBN Portal",
-    relevance: "Unresolved exception complaints must be captured in the consumer protection returns",
   },
 ];
 
@@ -259,17 +218,6 @@ export default function CBNCompliance() {
   const { data: jobs, isLoading: jobsLoading } = trpc.reconciliation.list.useQuery();
   const { data: anomalies, isLoading: anomaliesLoading } = trpc.anomalies.getFlagged.useQuery({ reviewStatus: "pending", limit: 200 });
   const { data: submissionLog, refetch: refetchLog } = trpc.cbnCompliance.listDeadlineSubmissions.useQuery();
-  const exportXlsxMutation = trpc.cbnCompliance.exportSubmissionXlsx.useMutation({
-    onSuccess: (data) => {
-      const a = document.createElement("a");
-      a.href = data.url;
-      a.download = data.filename;
-      a.target = "_blank";
-      a.click();
-      toast.success("Excel workbook downloaded", { description: data.filename });
-    },
-    onError: (e) => toast.error("Export failed", { description: e.message }),
-  });
 
   const [isExportingXlsx, setIsExportingXlsx] = useState(false);
 
