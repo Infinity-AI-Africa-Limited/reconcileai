@@ -1,3 +1,4 @@
+import BeforeAfterROI from "@/components/BeforeAfterROI";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -291,6 +292,9 @@ export default function BanksLanding() {
           </div>
         </div>
       </section>
+
+      {/* Before / After — the decision-maker's financial comparison */}
+      <BeforeAfterROI />
 
       {/* CTA Section */}
       <section className="py-20 bg-gradient-to-r from-[#1B365D] to-[#2A4A7C]">

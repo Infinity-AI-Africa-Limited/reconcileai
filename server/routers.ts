@@ -6265,6 +6265,77 @@ Always be specific, reference actual exception IDs and amounts where available, 
       return ei.getNetworkStats();
     }),
 
+    // ── Regulator engagement asset (CBN strategy) ────────────────────────────
+    // Packages the k-anonymous industry exception-pattern pool into a signed,
+    // regulator-consumable dataset — the concrete artifact behind the CBN
+    // engagement play: contributing anonymised, consented industry data the CBN
+    // can use to improve its reconciliation compliance guidance. Contains ONLY
+    // the categorical pattern tuples already cleared for sharing (k ≥ threshold,
+    // PII-scrubbed by construction); the Ed25519 signature gives the recipient
+    // provenance + integrity. Infinity AI staff only.
+    regulatorReport: superAdminProcedure.mutation(async ({ ctx }) => {
+      const drizzle = await getDb();
+      if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const { sharedExceptionPatterns: sep, exceptionIntelligenceSettings: eis } = await import("../drizzle/schema");
+      const ei = await import("./exceptionIntelligence");
+      const { signReport } = await import("./signing");
+
+      const patterns = await drizzle
+        .select({
+          exceptionCategory: sep.exceptionCategory,
+          amountBucket: sep.amountBucket,
+          counterpartyType: sep.counterpartyType,
+          deductionType: sep.deductionType,
+          resolutionActionClass: sep.resolutionActionClass,
+          outcome: sep.outcome,
+          contributorCount: sep.contributorCount,
+          observationCount: sep.observationCount,
+        })
+        .from(sep)
+        .where(sql`${sep.contributorCount} >= ${ei.K_ANON_THRESHOLD}`)
+        .orderBy(desc(sep.observationCount));
+
+      const [participation] = await drizzle
+        .select({ n: sql<number>`count(*)` })
+        .from(eis)
+        .where(eq(eis.shareEnabled, true));
+
+      const methodology = {
+        title: "ReconcileAI Industry Exception Pattern Report",
+        preparedFor: "Central Bank of Nigeria — Payments Policy Department",
+        generatedAt: new Date().toISOString(),
+        contributingInstitutions: Number(participation?.n || 0),
+        kAnonymityThreshold: ei.K_ANON_THRESHOLD,
+        patternCount: patterns.length,
+        fieldsShared: ei.ALLOWED_SIGNATURE_KEYS,
+        privacyStatement:
+          "Each row is a coarse categorical pattern (exception category, amount bucket, counterparty type, " +
+          "deduction type, resolution action class, outcome) independently observed by at least " +
+          `${ei.K_ANON_THRESHOLD} consenting institutions (k-anonymity). No transaction data, amounts, ` +
+          "references, account numbers, names, or free text are included; every value passes a runtime " +
+          "PII-scrub allowlist before leaving a contributing deployment. Institutions opt in explicitly " +
+          "and are identified only by stable pseudonyms that never leave the pool.",
+      };
+
+      const sig = signReport({ methodology, patterns });
+      await logAudit(ctx.user.id, "regulator_report_generated", "exception_intelligence", undefined, {
+        patternCount: patterns.length,
+        contributingInstitutions: methodology.contributingInstitutions,
+      });
+
+      return {
+        methodology,
+        patterns,
+        signature: {
+          contentHash: sig.contentHash,
+          signature: sig.signature,
+          signingKeyFingerprint: sig.signingKeyFingerprint,
+          signedAt: sig.signedAt.toISOString(),
+          algorithm: "Ed25519",
+        },
+      };
+    }),
+
     // Per-institution learning flywheel stats: patterns captured by this org over time.
     // Powers the "value grows with every job" narrative in the UI.
     flywheelStats: protectedProcedure.query(async ({ ctx }) => {

@@ -47,6 +47,45 @@ export default function ExceptionIntelligencePage() {
     onError: (e) => toast.error(e.message || "Sync failed"),
   });
 
+  // Regulator engagement asset: signed, k-anonymous industry pattern report
+  // (CBN Payments Policy Department deliverable). Downloads as CSV with the
+  // methodology header and Ed25519 signature block embedded.
+  const regulatorReport = trpc.exceptionIntelligence.regulatorReport.useMutation({
+    onSuccess: (r) => {
+      const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const lines: string[] = [
+        `# ${r.methodology.title}`,
+        `# Prepared for: ${r.methodology.preparedFor}`,
+        `# Generated: ${r.methodology.generatedAt}`,
+        `# Contributing institutions (consented): ${r.methodology.contributingInstitutions}`,
+        `# k-anonymity threshold: ${r.methodology.kAnonymityThreshold} (every row corroborated by at least this many institutions)`,
+        `# Patterns: ${r.methodology.patternCount}`,
+        `# Privacy: ${r.methodology.privacyStatement}`,
+        "#",
+        ["exceptionCategory", "amountBucket", "counterpartyType", "deductionType", "resolutionActionClass", "outcome", "contributorCount", "observationCount"].join(","),
+        ...r.patterns.map((p) =>
+          [p.exceptionCategory, p.amountBucket, p.counterpartyType, p.deductionType ?? "", p.resolutionActionClass, p.outcome, p.contributorCount, p.observationCount].map(esc).join(","),
+        ),
+        "#",
+        `# Signature (Ed25519): ${r.signature.signature}`,
+        `# Content hash: ${r.signature.contentHash}`,
+        `# Signing key fingerprint: ${r.signature.signingKeyFingerprint}`,
+        `# Signed at: ${r.signature.signedAt}`,
+      ];
+      const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ReconcileAI_Industry_Exception_Patterns_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Regulator report generated — ${r.methodology.patternCount} patterns`, {
+        description: "Signed CSV downloaded. Share with the CBN Payments Policy Department.",
+      });
+    },
+    onError: (e) => toast.error(e.message || "Report generation failed"),
+  });
+
   const participating = !!(settings?.shareEnabled || settings?.consumeEnabled);
 
   const { user } = useAuth();
@@ -228,15 +267,24 @@ export default function ExceptionIntelligencePage() {
             </CardContent></Card>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate()}>
               {sync.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               Refresh shared pool
+            </Button>
+            <Button className="gap-2" disabled={regulatorReport.isPending} onClick={() => regulatorReport.mutate()}>
+              {regulatorReport.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              Generate CBN regulator report
             </Button>
             <span className="text-xs text-muted-foreground">
               {settings?.endpointConfigured ? "On-premise sync endpoint configured." : "Cloud mode — patterns aggregated in-place."}
             </span>
           </div>
+          <p className="text-xs text-muted-foreground -mt-1">
+            The regulator report packages the k-anonymous industry pattern pool into a signed CSV (methodology +
+            Ed25519 provenance) for the CBN Payments Policy Department — the concrete contribution behind the
+            "reference implementation" engagement strategy.
+          </p>
         </>
       )}
     </div>

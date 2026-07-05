@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import BeforeAfterROI from "@/components/BeforeAfterROI";
 import { Button } from "@/components/ui/button";
 import { getLoginUrl } from "@/const";
 import { useLocation } from "wouter";
@@ -92,7 +93,9 @@ export default function Home() {
             to <span className="text-[#F47458]">Reconciliation Gaps</span>
           </h1>
           <p className="text-lg text-[#8C757D] mt-6 max-w-2xl mx-auto leading-relaxed">
-            Reduce false positives by 95%, eliminate multi-system logins, and protect your financial license with intelligent Agentic AI-assisted reconciliation built for Nigerian banks and FinTechs.
+            This is a regulatory survival problem, not a productivity problem. The CBN revoked licenses in 2025 —
+            the question is whether you close your reconciliation gaps before or after your next examination.
+            ReconcileAI resolves exposure within 24 hours and keeps a signed, CBN-ready audit trail on demand.
           </p>
           <div className="flex items-center justify-center gap-4 mt-10">
             <Button
@@ -204,10 +207,10 @@ export default function Home() {
       <section className="py-12 bg-white border-y border-gray-200">
         <div className="max-w-5xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8">
           {[
-            { value: "95%", label: "False Positive Reduction" },
-            { value: "< 3min", label: "Avg Resolution Time" },
-            { value: "5+ Systems", label: "Unified in One View" },
-            { value: "60%", label: "Time Saved on Matching" },
+            { value: "₦50M+", label: "Typical Unresolved Exposure Carried Monthly" },
+            { value: "24 hrs", label: "Exposure Identified & Assigned" },
+            { value: "Signed", label: "Tamper-Evident, CBN-Ready Audit Trail" },
+            { value: "60%", label: "Staff Time Saved — the Secondary Benefit" },
           ].map((s) => (
             <div key={s.label} className="text-center">
               <p className="text-3xl font-bold text-[#1B365D]">{s.value}</p>
@@ -229,6 +232,12 @@ export default function Home() {
           <div className="grid md:grid-cols-3 gap-6">
             {[
               {
+                icon: FileCheck,
+                title: "License Revocation Risk",
+                desc: "Unresolved exceptions can cost you your CBN license. Audit confidence sits at only 6.5/10 for most institutions — and the examiner finds the gaps before you do.",
+                severity: "critical",
+              },
+              {
                 icon: AlertTriangle,
                 title: "35-65% False Positives",
                 desc: "Only 2-5% of flagged exceptions are real issues. Your team wastes 30+ minutes investigating each false alarm.",
@@ -239,12 +248,6 @@ export default function Home() {
                 title: "5+ System Logins Daily",
                 desc: "Logging into NIBSS, POS portals, bank statements, core banking, and ERP systems. 60% of your day spent on manual downloads.",
                 severity: "high",
-              },
-              {
-                icon: FileCheck,
-                title: "License Revocation Risk",
-                desc: "Unresolved exceptions can cost you your CBN license. Audit confidence sits at only 6.5/10 for most institutions.",
-                severity: "critical",
               },
             ].map((p) => (
               <div key={p.title} className={`p-6 rounded-xl bg-white border-2 ${p.severity === 'critical' ? 'border-red-200 bg-red-50/30' : 'border-orange-200 bg-orange-50/30'}`}>
@@ -258,6 +261,9 @@ export default function Home() {
           </div>
         </div>
       </section>
+
+      {/* Before / After — the decision-maker's financial comparison */}
+      <BeforeAfterROI />
 
       {/* Features */}
       <section className="py-20 px-6 bg-white">
