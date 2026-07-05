@@ -18,7 +18,7 @@ import {
   getAIAnalysis,
 } from "./reconciliationEngine";
 import { generateSampleData, type SampleDataConfig } from "./sampleDataGenerator";
-import { SUPPORTED_CURRENCIES } from "../drizzle/schema";
+import { SUPPORTED_CURRENCIES, RESOLUTION_TEMPLATE_CATEGORIES } from "../drizzle/schema";
 import * as crypto from "crypto";
 import { trackProgress } from "./jobProgressService";
 import { getJobProgress, getAllActiveJobsProgress } from "./jobProgressService";
@@ -1622,16 +1622,7 @@ export const appRouter = router({
   resolutionTemplates: router({
     list: protectedProcedure
       .input(z.object({
-        category: z.enum([
-          "unmatched",
-          "missing_counterparty",
-          "amount_mismatch",
-          "timing_difference",
-          "duplicate_transaction",
-          "reversal_unmatched",
-          "currency_mismatch",
-          "format_error",
-        ]).optional(),
+        category: z.enum(RESOLUTION_TEMPLATE_CATEGORIES).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
         const dbConn = await db.getDb();
@@ -1657,16 +1648,7 @@ export const appRouter = router({
     create: guestProtectedProcedure
       .input(z.object({
         name: z.string().min(1).max(255),
-        category: z.enum([
-          "unmatched",
-          "missing_counterparty",
-          "amount_mismatch",
-          "timing_difference",
-          "duplicate_transaction",
-          "reversal_unmatched",
-          "currency_mismatch",
-          "format_error",
-        ]),
+        category: z.enum(RESOLUTION_TEMPLATE_CATEGORIES),
         templateText: z.string().min(1).max(2000),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -6267,6 +6249,15 @@ Always be specific, reference actual exception IDs and amounts where available, 
       const pushed = await ei.syncToPool(orgId);
       await logAudit(ctx.user.id, "exception_intelligence_sync", "exception_intelligence", orgId, { aggregated, pushed });
       return { aggregatedPatterns: aggregated.patterns, pushed };
+    }),
+
+    // Internal KPI (gap-closure plan WS-5): cross-tenant view of the
+    // intelligence network — contributing orgs, pool depth, k-anonymity
+    // coverage, and the "% of recommendations informed by cross-institution
+    // patterns" rate. Aggregates only; restricted to Infinity AI staff.
+    networkStats: superAdminProcedure.query(async () => {
+      const ei = await import("./exceptionIntelligence");
+      return ei.getNetworkStats();
     }),
 
     // Per-institution learning flywheel stats: patterns captured by this org over time.

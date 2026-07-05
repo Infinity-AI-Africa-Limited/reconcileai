@@ -1,0 +1,439 @@
+# ReconcileAI Developer API — design specification (gap-closure plan WS-4, Phase 1).
+# Design-first artifact: published BEFORE the REST gateway is built. Every path is a
+# thin translation onto an existing tRPC procedure (business logic unchanged); shapes
+# below mirror the live Drizzle schema (reconciliationJobs/exceptions/resolutionTemplates/
+# shared patterns/KPI reports) so implementation cannot drift from this contract.
+openapi: 3.0.3
+info:
+  title: ReconcileAI Developer API
+  version: 1.0.0-design
+  description: |
+    Programmatic access to ReconcileAI's reconciliation engine, exception
+    intelligence, and KPI reporting for banks, MFBs, fintechs, and platform
+    partners (ERPs, core banking systems, payment processors).
+
+    **Status: design specification.** The surface is frozen before implementation
+    (gap-closure plan WS-4 Phase 1); the gateway ships in Phase 2.
+
+    ## Authentication
+    Every request carries an API key in the `X-API-Key` header. Keys are issued
+    per organization in the ReconcileAI dashboard (Admin → API Keys) and scoped
+    to that organization's data.
+
+    ## Rate limits
+    60 requests/minute per API key. `429` responses carry a `Retry-After` header.
+
+    ## Webhooks (outbound)
+    Configure webhook endpoints in the dashboard to receive:
+    - `exception.created` — a new exception was detected
+    - `exception.resolved` — an exception reached a terminal status
+    - `reconciliation.completed` — a run finished (payload: run summary)
+    - `kpi.threshold.breached` — a KPI crossed its floor
+    Deliveries are signed (`X-ReconcileAI-Signature`, HMAC-SHA256 of the body)
+    and retried with exponential backoff for 24h.
+  contact:
+    name: ReconcileAI (Infinity AI Africa Limited)
+    url: https://www.reconcileaiafrica.com
+servers:
+  - url: https://www.reconcileaiafrica.com/api/v1
+    description: Production
+  - url: https://sandbox.reconcileaiafrica.com/api/v1
+    description: Sandbox (synthetic data, self-service keys)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Reconciliation
+    description: Trigger reconciliation runs and retrieve results
+  - name: Exceptions
+    description: List, inspect, and resolve exceptions
+  - name: Templates
+    description: Resolution templates (global defaults + organization custom)
+  - name: Intelligence
+    description: AI diagnosis and learning-flywheel recommendations
+  - name: KPI
+    description: Benchmark metrics with target/floor bands
+  - name: System
+
+paths:
+  /reconciliation/runs:
+    post:
+      tags: [Reconciliation]
+      summary: Trigger a reconciliation run
+      description: |
+        Starts an asynchronous reconciliation of two uploaded files (or two
+        connected channels). Poll `GET /reconciliation/runs/{runId}` or
+        subscribe to the `reconciliation.completed` webhook.
+      operationId: createReconciliationRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
+      responses:
+        '202':
+          description: Run accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunSummary'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Reconciliation]
+      summary: List reconciliation runs
+      operationId: listReconciliationRuns
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, running, completed, failed] } }
+        - { name: channel, in: query, schema: { type: string }, description: Channel code filter }
+        - { name: limit, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: Runs, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/RunSummary' } }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /reconciliation/runs/{runId}:
+    get:
+      tags: [Reconciliation]
+      summary: Get run status and results
+      operationId: getReconciliationRun
+      parameters:
+        - { name: runId, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Full run detail — Layer-1 balance, match tallies, exception counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunDetail'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /exceptions:
+    get:
+      tags: [Exceptions]
+      summary: List exceptions
+      operationId: listExceptions
+      parameters:
+        - { name: runId, in: query, schema: { type: integer } }
+        - { name: status, in: query, schema: { type: string, enum: [open, acknowledged, resolved, escalated, rejected] } }
+        - { name: category, in: query, schema: { type: string }, description: e.g. amount_mismatch, mm_failed_ussd_debit }
+        - { name: priority, in: query, schema: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: Exceptions with AI diagnosis attached
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Exception' } }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /exceptions/{exceptionId}:
+    get:
+      tags: [Exceptions]
+      summary: Get one exception
+      operationId: getException
+      parameters:
+        - { name: exceptionId, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: The exception
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Exception' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Exceptions]
+      summary: Update review status (resolve / escalate / reject)
+      description: |
+        Terminal statuses feed the per-institution learning flywheel: the
+        resolution note is classified and cited in future AI diagnoses.
+      operationId: updateException
+      parameters:
+        - { name: exceptionId, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [acknowledged, resolved, escalated, rejected] }
+                resolutionNote: { type: string, maxLength: 2000 }
+                resolvedBy: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: Updated exception
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Exception' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /templates:
+    get:
+      tags: [Templates]
+      summary: List resolution templates
+      operationId: listTemplates
+      parameters:
+        - { name: category, in: query, schema: { type: string }, description: Exception category filter (core or mm_* mobile money) }
+      responses:
+        '200':
+          description: Global defaults + this organization's custom templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ResolutionTemplate' }
+
+  /intelligence/diagnose:
+    post:
+      tags: [Intelligence]
+      summary: AI diagnosis for an exception payload
+      description: |
+        Returns a plain-English root-cause explanation, a recommended action,
+        the regulatory rule reference, and a confidence score — enriched with
+        the institution's own resolution history (institutional memory).
+      operationId: diagnoseException
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, amount]
+              properties:
+                category: { type: string, example: mm_failed_ussd_debit }
+                amount: { type: number }
+                currency: { type: string, default: NGN, example: UGX }
+                reference: { type: string }
+                description: { type: string }
+      responses:
+        '200':
+          description: Diagnosis
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Diagnosis' }
+
+  /intelligence/recommendations:
+    get:
+      tags: [Intelligence]
+      summary: Resolution recommendations for a category
+      description: |
+        Blends (a) the institution's own resolution history and (b) anonymised
+        cross-institution patterns (k-anonymity gated; requires reciprocal
+        sharing opt-in).
+      operationId: getRecommendations
+      parameters:
+        - { name: category, in: query, required: true, schema: { type: string } }
+        - { name: amountBucket, in: query, schema: { type: string, enum: [0-100k, 100k-1m, 1m+] } }
+      responses:
+        '200':
+          description: Ranked recommendations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  institutional: { type: array, items: { $ref: '#/components/schemas/Recommendation' } }
+                  network: { type: array, items: { $ref: '#/components/schemas/Recommendation' } }
+
+  /kpi:
+    get:
+      tags: [KPI]
+      summary: KPI report with benchmark bands
+      operationId: getKpiReport
+      responses:
+        '200':
+          description: Metrics vs target/floor with trend series
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  computedAt: { type: string, format: date-time }
+                  runCount: { type: integer }
+                  metrics: { type: array, items: { $ref: '#/components/schemas/KpiMetric' } }
+
+  /health:
+    get:
+      tags: [System]
+      summary: Health check (unauthenticated, unlimited)
+      security: []
+      operationId: health
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  timestamp: { type: string, format: date-time }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found (or not in this organization's scope)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Rate limit exceeded (60 req/min per key)
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds until the window resets
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        code: { type: string, example: RATE_LIMITED }
+        message: { type: string }
+
+    CreateRunRequest:
+      type: object
+      required: [module]
+      properties:
+        module: { type: string, enum: [settlement, account_level, mobile_money] }
+        channelCode: { type: string, description: Source channel code }
+        operator:
+          type: string
+          enum: [nip, opay, palmpay, mtn_momo_ug, airtel_money_ug]
+          description: Mobile money module only
+        files:
+          type: object
+          description: Base64 file payloads (≤20MB each) or prior upload IDs
+          properties:
+            settlement: { type: string }
+            ledger: { type: string }
+        webhookUrl: { type: string, format: uri, description: One-off completion callback }
+
+    RunSummary:
+      type: object
+      properties:
+        runId: { type: integer }
+        module: { type: string }
+        status: { type: string, enum: [pending, running, completed, failed] }
+        createdAt: { type: string, format: date-time }
+
+    RunDetail:
+      allOf:
+        - $ref: '#/components/schemas/RunSummary'
+        - type: object
+          properties:
+            currency: { type: string, example: NGN }
+            settlementTotal: { type: number }
+            ledgerTotal: { type: number }
+            varianceAmount: { type: number }
+            balanceStatus: { type: string, enum: [BALANCED, VARIANCE_DETECTED] }
+            matchedCount: { type: integer }
+            exceptionCount: { type: integer }
+            matchRate: { type: number, example: 97.4 }
+            aiSummary: { type: string }
+
+    Exception:
+      type: object
+      properties:
+        id: { type: integer }
+        runId: { type: integer }
+        category: { type: string, example: mm_withdrawal_tax_variance }
+        side: { type: string, enum: [settlement, ledger] }
+        amount: { type: number }
+        currency: { type: string }
+        txnDate: { type: string }
+        reference: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        priorityLevel: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] }
+        agentExplanation: { type: string, description: AI root-cause diagnosis incl. institutional memory }
+        recommendedAction: { type: string }
+        regulatoryReference: { type: string, example: "Uganda Excise Duty Act (2018 Amendment) — 0.5% Levy on Mobile Money Withdrawals" }
+        agentConfidence: { type: integer, minimum: 0, maximum: 100 }
+        status: { type: string, enum: [open, acknowledged, resolved, escalated, rejected] }
+        resolutionNote: { type: string, nullable: true }
+
+    ResolutionTemplate:
+      type: object
+      properties:
+        id: { type: integer }
+        category: { type: string }
+        name: { type: string }
+        templateText: { type: string }
+        isDefault: { type: boolean, description: true = ReconcileAI global default }
+
+    Diagnosis:
+      type: object
+      properties:
+        explanation: { type: string }
+        recommendedAction: { type: string }
+        regulatoryReference: { type: string }
+        priorityLevel: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] }
+        confidence: { type: integer }
+        institutionalMemory:
+          type: object
+          nullable: true
+          properties:
+            similarActioned: { type: integer }
+            resolved: { type: integer }
+            escalated: { type: integer }
+            topActionClass: { type: string, nullable: true }
+
+    Recommendation:
+      type: object
+      properties:
+        resolutionActionClass: { type: string, example: fee_posting }
+        outcome: { type: string, enum: [resolved, escalated, rejected] }
+        observationCount: { type: integer }
+        contributorCount: { type: integer, description: Distinct institutions (network recommendations only, k ≥ 3) }
+
+    KpiMetric:
+      type: object
+      properties:
+        key: { type: string, example: mmAutoMatchRate }
+        label: { type: string }
+        value: { type: number, nullable: true }
+        unit: { type: string, example: '%' }
+        target: { type: number }
+        floor: { type: number }
+        higherIsBetter: { type: boolean }
+        status: { type: string, enum: [above_target, between, below_floor, no_data] }
+        trend: { type: array, items: { type: number } }

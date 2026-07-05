@@ -10,17 +10,9 @@
  */
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { getDb } from "./db";
-import { resolutionTemplates } from "../drizzle/schema";
+import { resolutionTemplates, type ResolutionTemplateCategory } from "../drizzle/schema";
 
-type ExceptionCategory =
-  | "unmatched"
-  | "missing_counterparty"
-  | "amount_mismatch"
-  | "timing_difference"
-  | "duplicate_transaction"
-  | "reversal_unmatched"
-  | "currency_mismatch"
-  | "format_error";
+type ExceptionCategory = ResolutionTemplateCategory;
 
 const SYSTEM_CREATED_BY = 0;
 
@@ -147,6 +139,94 @@ const DEFAULT_TEMPLATES: Array<{ category: ExceptionCategory; name: string; temp
     name: "Re-export in expected format",
     templateText:
       "Upload had truncated or shifted columns. Re-exported from the source in the expected format and re-ran the reconciliation.",
+  },
+
+  // ═══ Mobile Money — Nigeria (CBN / NIBSS) ═══════════════════════════════════
+  {
+    category: "mm_failed_ussd_debit",
+    name: "Reverse failed USSD debit (T+1)",
+    templateText:
+      "Confirmed the USSD debit in the session log with no corresponding institution credit. Initiated reversal to the customer's account within T+1 business day per CBN Mobile Money Framework 2021 §4.3, logged in CBS, and notified the customer.",
+  },
+  {
+    category: "mm_failed_ussd_debit",
+    name: "Reversal already processed — timing",
+    templateText:
+      "Operator had already auto-reversed the failed debit; the credit posted after the reconciliation cut-off. Matched the reversal to the original debit and closed with a timing note — no customer impact.",
+  },
+  {
+    category: "mm_reversal_not_credited",
+    name: "Post reversal credit from suspense",
+    templateText:
+      "Confirmed the reversal reference in the operator's portal. Posted the reversal credit to the customer's account against the operator settlement suspense GL and recorded the operator reference.",
+  },
+  {
+    category: "mm_nip_settlement_shortfall",
+    name: "Attribute shortfall to NIBSS fees",
+    templateText:
+      "Reconciled the shortfall line-by-line against the NIBSS settlement advice: entire variance attributable to NIP fees and failed-transaction netting. Posted fees to the NIP charges GL; no residual variance.",
+  },
+  {
+    category: "mm_duplicate_credit",
+    name: "Freeze and reverse duplicate credit",
+    templateText:
+      "Verified in the operator portal that only one settlement was made for the session ID. Froze the second credit, reversed it, notified the customer, and logged the root cause (duplicate file upload / CBS repost) for control review.",
+  },
+  {
+    category: "mm_expired_session_debit",
+    name: "Provisional credit pending auto-reversal",
+    templateText:
+      "Confirmed session timeout in the USSD log. Posted a provisional credit to the customer while awaiting the operator's auto-reversal; escalated to the operator when the reversal exceeded T+1 per CBN Mobile Money Framework 2021 §4.3.1.",
+  },
+  {
+    category: "mm_amount_mismatch",
+    name: "Difference is operator fee deduction",
+    templateText:
+      "Compared the settlement amount to the CBS posting: the difference equals the operator's contracted fee. Posted the fee to the operator charges GL and matched on the gross amount.",
+  },
+  {
+    category: "mm_unmatched_nip_inflow",
+    name: "Post to NIP suspense, then beneficiary",
+    templateText:
+      "No CBS posting found for the NIP session ID. Posted the credit to the NIP suspense account, identified the beneficiary from the NIBSS transaction detail, and posted to the customer within T+2 per NIP Operating Rules §9.",
+  },
+  {
+    category: "mm_operator_fee_variance",
+    name: "Dispute fee above contracted rate",
+    templateText:
+      "Deducted fee exceeds the contracted schedule. Raised a formal dispute with the operator, posted the variance to the fee dispute suspense GL, and diarised follow-up pending the operator's response.",
+  },
+
+  // ═══ Mobile Money — Uganda (Bank of Uganda NPS framework) ═══════════════════
+  {
+    category: "mm_wallet_to_bank_failed",
+    name: "Credit customer from settlement suspense",
+    templateText:
+      "Verified the transaction ID in the operator's merchant portal: wallet debited, no bank credit posted. Credited the customer's account from the operator settlement suspense GL and logged the resolution for the BoU consumer-protection audit trail.",
+  },
+  {
+    category: "mm_wallet_to_bank_failed",
+    name: "Operator auto-refunded wallet — close",
+    templateText:
+      "Operator marked the transfer failed and auto-refunded the customer's wallet. Confirmed the refund in the operator statement; closed with no ledger action required.",
+  },
+  {
+    category: "mm_bank_to_wallet_failed",
+    name: "Reverse ledger debit (failed push)",
+    templateText:
+      "Operator has no record of the bank-to-wallet push. Reversed the ledger debit to the customer's account within T+1 and recorded the outcome per the Uganda NPS Act 2020 error-resolution requirements.",
+  },
+  {
+    category: "mm_withdrawal_tax_variance",
+    name: "Post 0.5% levy to tax GL",
+    templateText:
+      "Confirmed the variance equals 0.5% of the gross withdrawal amount — Uganda's mobile money excise duty, remitted by the operator. Posted to the mobile money tax GL and verified against the operator's tax remittance statement. Statutory deduction; no dispute.",
+  },
+  {
+    category: "mm_momo_settlement_shortfall",
+    name: "Itemise fees, levy, and netted reversals",
+    templateText:
+      "Itemised the shortfall against the operator's settlement advice: operator fees, 0.5% withdrawal levy, and netted failed transactions fully attribute the variance. Posted each to its GL and updated the daily trust-account reconciliation record per BoU E-Money Regulations 2021.",
   },
 ];
 

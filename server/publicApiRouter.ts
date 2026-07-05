@@ -15,12 +15,30 @@ import {
   getApiIngestionLogs,
   type ApiUploadRequest,
 } from "./apiIngestionService";
+import { publicApiLimiter, publicApiRateKey } from "./rateLimiter";
+
+// ─── Rate limiting (per API key, IP fallback) ───────────────────────
+// 60 req/min per key. Applied before API-key validation so brute-force
+// key guessing is also throttled. Health stays unlimited for uptime probes.
+
+const rateLimitedProcedure = publicProcedure.use(async (opts) => {
+  const raw = (await opts.getRawInput()) as { apiKey?: string } | undefined;
+  const ip = (opts.ctx as any).req?.ip || (opts.ctx as any).req?.connection?.remoteAddress;
+  const result = publicApiLimiter.check(publicApiRateKey(raw?.apiKey, ip));
+  if (!result.allowed) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: `Rate limit exceeded (60 requests/minute). Retry in ${result.retryAfterSec}s.`,
+    });
+  }
+  return opts.next();
+});
 
 // ─── Public API Router ──────────────────────────────────────────────
 
 export const publicApiRouter = router({
   // POST /api/v1/transactions/upload
-  uploadTransactions: publicProcedure
+  uploadTransactions: rateLimitedProcedure
     .input(
       z.object({
         apiKey: z.string().min(32, "API key must be at least 32 characters"),
@@ -51,7 +69,7 @@ export const publicApiRouter = router({
     }),
 
   // GET /api/v1/ingestion/logs
-  getIngestionLogs: publicProcedure
+  getIngestionLogs: rateLimitedProcedure
     .input(
       z.object({
         apiKey: z.string().min(32),

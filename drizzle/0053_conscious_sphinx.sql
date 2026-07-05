@@ -1,0 +1,2 @@
+ALTER TABLE `exception_intelligence_settings` ADD `consumeRequests` int DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE `exception_intelligence_settings` ADD `consumeHits` int DEFAULT 0 NOT NULL;

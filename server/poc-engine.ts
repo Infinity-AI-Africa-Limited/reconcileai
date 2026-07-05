@@ -15,7 +15,7 @@
  */
 import crypto from "node:crypto";
 import Papa from "papaparse";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { Transaction } from "../drizzle/schema";
 import { invokeLLM } from "./_core/llm";
 import { runMatchingEngine, type ReconciliationConfig } from "./reconciliationEngine";
@@ -708,6 +708,45 @@ export function runLayer3(exceptions: ExceptionDraft[]): Layer3Item[] {
   });
 }
 
+/**
+ * Per-institution learning (POC-scoped flywheel): enrich Layer-3 diagnoses
+ * with this POC's own resolution history from poc_exceptions — cite how many
+ * similar exceptions were previously actioned, the dominant resolution
+ * approach, and raise confidence with corroborating history. Mirrors
+ * applyInstitutionalLearning in mobileMoney-engine.ts via the shared
+ * institutionalLearning module. Best-effort: never fails the run.
+ */
+export async function applyPocInstitutionalLearning(
+  pocSlug: string,
+  items: Layer3Item[],
+): Promise<{ items: Layer3Item[]; learningApplied: number }> {
+  if (items.length === 0) return { items, learningApplied: 0 };
+
+  let history: Array<{ category: string; reviewStatus: string; reviewNote: string | null }> = [];
+  try {
+    const db = await getDb();
+    if (!db) return { items, learningApplied: 0 };
+    history = await db
+      .select({
+        category: pocExceptions.category,
+        reviewStatus: pocExceptions.reviewStatus,
+        reviewNote: pocExceptions.reviewNote,
+      })
+      .from(pocExceptions)
+      .where(and(eq(pocExceptions.pocSlug, pocSlug), ne(pocExceptions.reviewStatus, "OPEN")))
+      .orderBy(desc(pocExceptions.createdAt))
+      .limit(500);
+  } catch {
+    return { items, learningApplied: 0 };
+  }
+  if (history.length === 0) return { items, learningApplied: 0 };
+
+  const ei = await import("./exceptionIntelligence");
+  const learning = await import("./institutionalLearning");
+  const stats = learning.summarizeResolutionHistory(history, ei.classifyResolutionAction);
+  return learning.enrichWithInstitutionalMemory(items, stats);
+}
+
 // ─── Non-reconcilable "noise" detection (bank fees, charges, taxes, levies) ──
 //
 // In a ledger ↔ bank-statement reconciliation, bank-generated fee/charge/levy
@@ -774,6 +813,8 @@ export interface PocRunResult {
   excluded: ExcludedItem[];
   excludedTotal: number;
   excludedByReason: Record<string, { count: number; total: number }>;
+  /** How many Layer-3 diagnoses were enriched with institutional memory. */
+  learningApplied: number;
 }
 
 export async function runFullPoc(params: {
@@ -811,7 +852,11 @@ export async function runFullPoc(params: {
 
   const layer1 = runLayer1(ledger, statement, currency);
   const layer2 = runLayer2(ledger, statement, params.config);
-  const layer3 = runLayer3(layer2.exceptions);
+  // Layer 3 + per-institution learning from this POC's resolution history
+  const { items: layer3, learningApplied } = await applyPocInstitutionalLearning(
+    params.pocSlug,
+    runLayer3(layer2.exceptions),
+  );
 
   const excludedTotal = Math.round(excluded.reduce((s, e) => s + e.amount, 0) * 100) / 100;
   const excludedByReason: Record<string, { count: number; total: number }> = {};
@@ -863,7 +908,7 @@ export async function runFullPoc(params: {
     );
   }
 
-  return { runId, layer1, matchedCount: layer2.matchedCount, layer3, excluded, excludedTotal, excludedByReason };
+  return { runId, layer1, matchedCount: layer2.matchedCount, layer3, excluded, excludedTotal, excludedByReason, learningApplied };
 }
 
 // ─── Queries + share tokens ──────────────────────────────────────────

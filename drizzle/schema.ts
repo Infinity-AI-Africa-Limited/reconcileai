@@ -786,19 +786,40 @@ export type GuestSession = typeof guestSessions.$inferSelect;
 export type InsertGuestSession = typeof guestSessions.$inferInsert;
 
 // ─── Resolution Templates ────────────────────────────────────────────
+// Single source of truth for template categories — the zod input enums in
+// routers.ts and the seeder in seedResolutionTemplates.ts derive from this.
+// Core reconciliation categories first, then the mobile money taxonomy
+// (Nigeria: CBN/NIBSS — Uganda: BoU NPS framework).
+export const RESOLUTION_TEMPLATE_CATEGORIES = [
+  "unmatched",
+  "missing_counterparty",
+  "amount_mismatch",
+  "timing_difference",
+  "duplicate_transaction",
+  "reversal_unmatched",
+  "currency_mismatch",
+  "format_error",
+  // Mobile money — Nigeria
+  "mm_failed_ussd_debit",
+  "mm_reversal_not_credited",
+  "mm_nip_settlement_shortfall",
+  "mm_duplicate_credit",
+  "mm_expired_session_debit",
+  "mm_amount_mismatch",
+  "mm_unmatched_nip_inflow",
+  "mm_operator_fee_variance",
+  // Mobile money — Uganda
+  "mm_wallet_to_bank_failed",
+  "mm_bank_to_wallet_failed",
+  "mm_withdrawal_tax_variance",
+  "mm_momo_settlement_shortfall",
+] as const;
+export type ResolutionTemplateCategory = (typeof RESOLUTION_TEMPLATE_CATEGORIES)[number];
+
 export const resolutionTemplates = mysqlTable("resolution_templates", {
   id: int("id").autoincrement().primaryKey(),
   name: varchar("name", { length: 255 }).notNull(),
-  category: mysqlEnum("category", [
-    "unmatched",
-    "missing_counterparty",
-    "amount_mismatch",
-    "timing_difference",
-    "duplicate_transaction",
-    "reversal_unmatched",
-    "currency_mismatch",
-    "format_error",
-  ]).notNull(),
+  category: mysqlEnum("category", RESOLUTION_TEMPLATE_CATEGORIES).notNull(),
   templateText: text("templateText").notNull(),
   isDefault: boolean("isDefault").default(false).notNull(),
   createdBy: int("createdBy").notNull(), // References users table
@@ -1002,6 +1023,12 @@ export const exceptionIntelligenceSettings = mysqlTable("exception_intelligence_
   contributorPseudonym: varchar("contributorPseudonym", { length: 64 }),
   lastSharedAt: timestamp("lastSharedAt"),
   lastConsumedAt: timestamp("lastConsumedAt"),
+  // Consumption counters — power the internal "recommendations informed by
+  // cross-institution patterns" KPI (gap-closure plan WS-5). requests = pool
+  // lookups attempted while participating; hits = lookups that returned
+  // k-anonymous patterns.
+  consumeRequests: int("consumeRequests").default(0).notNull(),
+  consumeHits: int("consumeHits").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [

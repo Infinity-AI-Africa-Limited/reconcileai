@@ -423,7 +423,107 @@ export async function getSharedRecommendations(
     .where(and(...conds))
     .orderBy(desc(sharedExceptionPatterns.observationCount))
     .limit(5);
+
+  // Consumption tracking for the network KPI ("recommendations informed by
+  // cross-institution patterns %"). Best-effort — never fails the lookup.
+  try {
+    await db
+      .update(exceptionIntelligenceSettings)
+      .set({
+        consumeRequests: sql`${exceptionIntelligenceSettings.consumeRequests} + 1`,
+        ...(rows.length > 0
+          ? { consumeHits: sql`${exceptionIntelligenceSettings.consumeHits} + 1`, lastConsumedAt: new Date() }
+          : {}),
+      })
+      .where(eq(exceptionIntelligenceSettings.organizationId, organizationId));
+  } catch { /* metric is best-effort */ }
+
   return rows;
+}
+
+// ─── Network-level stats (internal KPI — super admin) ────────────────
+
+export interface NetworkStats {
+  /** Orgs with at least one locally-recorded pattern signature. */
+  contributingOrgs: number;
+  /** Orgs that opted in to reciprocal sharing/consumption. */
+  participatingOrgs: number;
+  /** Distinct signatures and total observations recorded across all orgs. */
+  totalLocalSignatures: number;
+  totalLocalObservations: number;
+  /** Shared pool size and how much of it clears the k-anonymity gate. */
+  poolPatterns: number;
+  kAnonymousPatterns: number;
+  kAnonThreshold: number;
+  /** Pool lookups attempted / lookups that returned k-anonymous patterns. */
+  consumeRequests: number;
+  consumeHits: number;
+  /** % of recommendation lookups informed by cross-institution patterns (null = no lookups yet). */
+  informedRate: number | null;
+  /** Gap-closure plan WS-5: the network effect needs 5–7 active institutions. */
+  networkEffectThreshold: number;
+}
+
+/**
+ * Cross-tenant view of the intelligence network for the internal KPI dashboard
+ * (gap-closure plan WS-5): proves flywheel compounding in sales conversations.
+ * Aggregates only — no per-org data leaves this summary.
+ */
+export async function getNetworkStats(): Promise<NetworkStats> {
+  const empty: NetworkStats = {
+    contributingOrgs: 0,
+    participatingOrgs: 0,
+    totalLocalSignatures: 0,
+    totalLocalObservations: 0,
+    poolPatterns: 0,
+    kAnonymousPatterns: 0,
+    kAnonThreshold: K_ANON_THRESHOLD,
+    consumeRequests: 0,
+    consumeHits: 0,
+    informedRate: null,
+    networkEffectThreshold: 5,
+  };
+  const db = await getDb();
+  if (!db) return empty;
+
+  const [local] = await db
+    .select({
+      orgs: sql<number>`count(distinct ${exceptionPatternSignatures.organizationId})`,
+      sigs: sql<number>`count(*)`,
+      obs: sql<number>`coalesce(sum(${exceptionPatternSignatures.observationCount}), 0)`,
+    })
+    .from(exceptionPatternSignatures);
+
+  const [participation] = await db
+    .select({
+      participating: sql<number>`coalesce(sum(case when ${exceptionIntelligenceSettings.shareEnabled} then 1 else 0 end), 0)`,
+      requests: sql<number>`coalesce(sum(${exceptionIntelligenceSettings.consumeRequests}), 0)`,
+      hits: sql<number>`coalesce(sum(${exceptionIntelligenceSettings.consumeHits}), 0)`,
+    })
+    .from(exceptionIntelligenceSettings);
+
+  const [pool] = await db
+    .select({
+      total: sql<number>`count(*)`,
+      kAnon: sql<number>`coalesce(sum(case when ${sharedExceptionPatterns.contributorCount} >= ${K_ANON_THRESHOLD} then 1 else 0 end), 0)`,
+    })
+    .from(sharedExceptionPatterns);
+
+  const requests = Number(participation?.requests || 0);
+  const hits = Number(participation?.hits || 0);
+  return {
+    contributingOrgs: Number(local?.orgs || 0),
+    participatingOrgs: Number(participation?.participating || 0),
+    totalLocalSignatures: Number(local?.sigs || 0),
+    totalLocalObservations: Number(local?.obs || 0),
+    poolPatterns: Number(pool?.total || 0),
+    kAnonymousPatterns: Number(pool?.kAnon || 0),
+    kAnonThreshold: K_ANON_THRESHOLD,
+    consumeRequests: requests,
+    consumeHits: hits,
+    informedRate: requests > 0 ? Math.round((hits / requests) * 10000) / 100 : null,
+    networkEffectThreshold: 5,
+  };
 }
 
 // ─── On-prem sync (endpoint-gated, egress-guarded) ──────────────────

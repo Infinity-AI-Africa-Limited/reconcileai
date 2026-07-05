@@ -651,59 +651,13 @@ export function runMmLayer3(exceptions: MmExceptionDraft[], operator: MmOperator
 }
 
 // ─── Per-Institution Learning (POC-scoped flywheel) ──────────────────────────
+// Shared logic lives in institutionalLearning.ts (also used by poc-engine.ts).
+// Re-exported here so existing consumers/tests keep working.
 
-export interface CategoryResolutionStats {
-  category: string;
-  actioned: number;                       // resolutions with any terminal status
-  resolved: number;
-  escalated: number;
-  topActionClass: string | null;          // most common resolution action class
-}
-
-/**
- * Pure aggregation of an institution's past exception reviews, grouped by
- * category. Exported separately so the learning logic is unit-testable
- * without a database.
- */
-export function summarizeResolutionHistory(
-  rows: Array<{ category: string; reviewStatus: string; reviewNote: string | null }>,
-  classifyAction: (note: string | null | undefined) => string,
-): Map<string, CategoryResolutionStats> {
-  const stats = new Map<string, CategoryResolutionStats>();
-  const actionCounts = new Map<string, Map<string, number>>();
-
-  for (const row of rows) {
-    if (row.reviewStatus === "OPEN") continue;
-    let s = stats.get(row.category);
-    if (!s) {
-      s = { category: row.category, actioned: 0, resolved: 0, escalated: 0, topActionClass: null };
-      stats.set(row.category, s);
-    }
-    s.actioned += 1;
-    if (row.reviewStatus === "RESOLVED") s.resolved += 1;
-    if (row.reviewStatus === "ESCALATED") s.escalated += 1;
-
-    const cls = classifyAction(row.reviewNote);
-    let counts = actionCounts.get(row.category);
-    if (!counts) {
-      counts = new Map();
-      actionCounts.set(row.category, counts);
-    }
-    counts.set(cls, (counts.get(cls) ?? 0) + 1);
-  }
-
-  for (const [category, counts] of Array.from(actionCounts.entries())) {
-    let top: string | null = null;
-    let topCount = 0;
-    for (const [cls, count] of Array.from(counts.entries())) {
-      if (count > topCount) { top = cls; topCount = count; }
-    }
-    const s = stats.get(category);
-    if (s) s.topActionClass = top;
-  }
-
-  return stats;
-}
+export {
+  summarizeResolutionHistory,
+  type CategoryResolutionStats,
+} from "./institutionalLearning";
 
 /**
  * Enrich Layer-3 diagnoses with the institution's own resolution history:
@@ -736,27 +690,9 @@ export async function applyInstitutionalLearning(
   if (history.length === 0) return { items, learningApplied: 0 };
 
   const ei = await import("./exceptionIntelligence");
-  const stats = summarizeResolutionHistory(history, ei.classifyResolutionAction);
-
-  let learningApplied = 0;
-  const enriched = items.map((item) => {
-    const s = stats.get(item.category);
-    if (!s || s.actioned === 0) return item;
-    learningApplied += 1;
-    const approach = s.topActionClass && s.topActionClass !== "other"
-      ? ` Most common resolution approach: ${s.topActionClass.replace(/_/g, " ")}.`
-      : "";
-    return {
-      ...item,
-      agentExplanation:
-        item.agentExplanation +
-        `\n\nInstitutional memory: this institution has previously actioned ${s.actioned} similar ` +
-        `exception${s.actioned === 1 ? "" : "s"} in this category (${s.resolved} resolved, ${s.escalated} escalated).${approach}`,
-      agentConfidence: Math.min(98, item.agentConfidence + Math.min(6, s.actioned)),
-    };
-  });
-
-  return { items: enriched, learningApplied };
+  const learning = await import("./institutionalLearning");
+  const stats = learning.summarizeResolutionHistory(history, ei.classifyResolutionAction);
+  return learning.enrichWithInstitutionalMemory(items, stats);
 }
 
 // ─── AI Summary (async — calls LLM) ──────────────────────────────────────────
