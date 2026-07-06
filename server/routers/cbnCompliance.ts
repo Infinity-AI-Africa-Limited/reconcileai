@@ -26,7 +26,44 @@ import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { signReport, publicKeyFingerprint, publicKeyPem } from "../signing";
-import { cbnAuditLog, cbnDeadlineSubmissions } from "../../drizzle/schema";
+import { cbnAuditLog, cbnDeadlineSubmissions, cbnReportSettings, cbnReportRuns } from "../../drizzle/schema";
+import * as cbnReports from "../cbnReports";
+
+// ─── CBN report builders: dispatch + shared input ─────────────────────────────
+const reportTypeEnum = z.enum([
+  "daily_recon_summary", "exception_log", "counterparty_exposure", "interbank_settlement",
+]);
+const reportParams = z.object({
+  reportType: reportTypeEnum,
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),     // daily_recon_summary
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),     // range reports
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
+async function runReport(orgId: number, input: z.infer<typeof reportParams>) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (input.reportType === "daily_recon_summary") {
+    return cbnReports.buildDailyReconSummary(orgId, input.date ?? today);
+  }
+  const from = new Date(`${input.from ?? today}T00:00:00.000Z`);
+  const to = new Date(`${input.to ?? today}T23:59:59.999Z`);
+  if (input.reportType === "exception_log") return cbnReports.buildExceptionLog(orgId, from, to);
+  if (input.reportType === "counterparty_exposure") return cbnReports.buildCounterpartyExposure(orgId, from, to);
+  return cbnReports.buildInterbankSettlement(orgId, from, to);
+}
+
+function reportPeriod(input: z.infer<typeof reportParams>): { label: string; start: Date; end: Date } {
+  const today = new Date().toISOString().slice(0, 10);
+  if (input.reportType === "daily_recon_summary") {
+    const d = input.date ?? today;
+    return { label: d, start: new Date(`${d}T00:00:00.000Z`), end: new Date(`${d}T23:59:59.999Z`) };
+  }
+  return {
+    label: `${input.from ?? today} to ${input.to ?? today}`,
+    start: new Date(`${input.from ?? today}T00:00:00.000Z`),
+    end: new Date(`${input.to ?? today}T23:59:59.999Z`),
+  };
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -150,4 +187,131 @@ export const cbnComplianceRouter = router({
     return db.select().from(cbnDeadlineSubmissions)
       .orderBy(desc(cbnDeadlineSubmissions.submittedAt));
   }),
+
+  // ═══ CBN Report Module (standalone, configurable, all customers) ═══════════
+
+  // ── Institution profile (report header identity) ──────────────────────────
+  getReportSettings: protectedProcedure.query(async ({ ctx }) => {
+    const orgId = ctx.user.organizationId ?? 0;
+    return cbnReports.getReportSettings(orgId);
+  }),
+
+  saveReportSettings: protectedProcedure
+    .input(z.object({
+      institutionName: z.string().max(255).optional(),
+      institutionType: z.enum([
+        "microfinance_bank", "commercial_bank", "payment_service_bank",
+        "merchant_bank", "other_financial_institution", "fintech", "other",
+      ]).optional(),
+      rcNumber: z.string().max(50).optional(),
+      cbnLicenseNumber: z.string().max(100).optional(),
+      cbnInstitutionCode: z.string().max(50).optional(),
+      address: z.string().max(500).optional(),
+      preparedByName: z.string().max(255).optional(),
+      preparedByTitle: z.string().max(150).optional(),
+      attestingOfficerName: z.string().max(255).optional(),
+      attestingOfficerTitle: z.string().max(150).optional(),
+      complianceContactEmail: z.string().max(320).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      await cbnReports.getReportSettings(orgId); // ensure row exists
+      await db.update(cbnReportSettings).set({ ...input }).where(eq(cbnReportSettings.organizationId, orgId));
+      await writeAuditLog(ctx.user.id, ctx.user.name, "cbn_report_settings.updated", "cbn_report_settings", orgId, input.institutionName ?? "profile", input, orgId);
+      return cbnReports.getReportSettings(orgId);
+    }),
+
+  // ── Generate a report (preview data) ──────────────────────────────────────
+  generateReport: protectedProcedure
+    .input(reportParams)
+    .query(async ({ ctx, input }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      return runReport(orgId, input);
+    }),
+
+  // ── One-click CBN-format CSV export (logs the run) ────────────────────────
+  exportReportCsv: protectedProcedure
+    .input(reportParams)
+    .mutation(async ({ ctx, input }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const result = await runReport(orgId, input);
+      const csv = cbnReports.toCsv(result);
+      const period = reportPeriod(input);
+      const db = await getDb();
+      if (db) {
+        await db.insert(cbnReportRuns).values({
+          organizationId: orgId,
+          reportType: input.reportType,
+          periodLabel: period.label,
+          periodStart: period.start,
+          periodEnd: period.end,
+          rowCount: result.rows.length,
+          summary: result.summary,
+          generatedByUserId: ctx.user.id,
+          generatedByName: ctx.user.name ?? "Unknown",
+        });
+      }
+      await writeAuditLog(ctx.user.id, ctx.user.name, "cbn_report.exported", "cbn_report", orgId, `${input.reportType} — ${period.label}`, { rowCount: result.rows.length }, orgId);
+      const filename = `CBN_${input.reportType}_${period.label.replace(/[^0-9A-Za-z]+/g, "_")}.csv`;
+      return { filename, csv, rowCount: result.rows.length };
+    }),
+
+  // ── Monthly compliance attestation (build → Ed25519 sign → persist) ───────
+  generateMonthlyAttestation: protectedProcedure
+    .input(z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }))
+    .mutation(async ({ ctx, input }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const doc = await cbnReports.buildMonthlyAttestation(orgId, input.month);
+      const payload = {
+        ...doc,
+        organizationId: orgId,
+        signedByUserId: ctx.user.id,
+        signedByName: ctx.user.name ?? "Unknown",
+      };
+      const sig = signReport(payload);
+      await db.insert(cbnReportRuns).values({
+        organizationId: orgId,
+        reportType: "monthly_attestation",
+        periodLabel: doc.monthLabel,
+        periodStart: doc.periodStart,
+        periodEnd: doc.periodEnd,
+        rowCount: 1,
+        summary: { overallStatus: doc.overallStatus, ...doc.metrics },
+        contentHash: sig.contentHash,
+        signature: sig.signature,
+        signingKeyFingerprint: sig.signingKeyFingerprint,
+        signedAt: sig.signedAt,
+        attestingOfficerName: doc.attestingOfficer.name || null,
+        attestingOfficerTitle: doc.attestingOfficer.title || null,
+        generatedByUserId: ctx.user.id,
+        generatedByName: ctx.user.name ?? "Unknown",
+      });
+      await writeAuditLog(ctx.user.id, ctx.user.name, "cbn_attestation.signed", "cbn_report", orgId, `Monthly attestation — ${doc.monthLabel}`, { overallStatus: doc.overallStatus }, orgId);
+      return {
+        document: doc,
+        signature: {
+          contentHash: sig.contentHash,
+          signature: sig.signature,
+          signingKeyFingerprint: sig.signingKeyFingerprint,
+          signedAt: sig.signedAt.toISOString(),
+          algorithm: "Ed25519",
+        },
+      };
+    }),
+
+  // ── Report / attestation generation history ───────────────────────────────
+  listReportRuns: protectedProcedure
+    .input(z.object({ reportType: z.string().max(48).optional() }).optional())
+    .query(async ({ ctx, input }) => {
+      const orgId = ctx.user.organizationId ?? 0;
+      const db = await getDb();
+      if (!db) return [];
+      const conds = [eq(cbnReportRuns.organizationId, orgId)];
+      if (input?.reportType) conds.push(eq(cbnReportRuns.reportType, input.reportType));
+      return db.select().from(cbnReportRuns).where(and(...conds)).orderBy(desc(cbnReportRuns.createdAt)).limit(100);
+    }),
 });

@@ -14,6 +14,7 @@
 import { useState, useMemo, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
+import CbnReportModule from "@/components/CbnReportModule";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ import {
   Minus,
   Info,
   FileText,
+  FileSpreadsheet,
   Zap,
   AlertCircle,
   CalendarClock,
@@ -580,8 +582,12 @@ export default function CBNCompliance() {
         </div>
 
         {/* Tabs */}
-        <Tabs defaultValue="scorecard" className="space-y-4">
-          <TabsList className="grid w-full grid-cols-4">
+        <Tabs defaultValue="reports" className="space-y-4">
+          <TabsList className="grid w-full grid-cols-5">
+            <TabsTrigger value="reports" className="gap-1.5">
+              <FileSpreadsheet className="h-3.5 w-3.5" />
+              Reports
+            </TabsTrigger>
             <TabsTrigger value="scorecard" className="gap-1.5">
               <ShieldCheck className="h-3.5 w-3.5" />
               Scorecard
@@ -605,6 +611,11 @@ export default function CBNCompliance() {
               )}
             </TabsTrigger>
           </TabsList>
+
+          {/* ── Tab: Regulatory Reports (standalone module) ── */}
+          <TabsContent value="reports" className="space-y-4">
+            <CbnReportModule />
+          </TabsContent>
 
           {/* ── Tab 1: Scorecard ── */}
           <TabsContent value="scorecard" className="space-y-4">
