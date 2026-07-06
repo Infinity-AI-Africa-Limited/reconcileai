@@ -34,7 +34,7 @@ import {
   ingestCanonicalTransactions,
 } from "./ingest";
 import { applyMapping, type MappingRule } from "./mapping";
-import { decryptSecret } from "./secrets";
+import { decryptSecretForOrg } from "./secrets";
 import type { WcEntity } from "./types";
 
 export const SIGNATURE_HEADER = "x-woodcore-signature";
@@ -96,7 +96,19 @@ export async function handleWoodcoreWebhook(input: {
     return { httpStatus: 404, body: { ok: false, status: "unknown_or_disabled" } };
   }
 
-  const secret = decryptSecret(cfg.webhookSecretEnc);
+  // Tenant rate limit: a runaway CBS webhook firehose for one tenant must not
+  // starve the others. 429 tells the sender to back off; the daily batch sync
+  // guarantees nothing is lost.
+  const { checkTenantRate } = await import("../../_core/rateLimit");
+  const rate = await checkTenantRate(cfg.organizationId, "webhook");
+  if (!rate.allowed) {
+    return {
+      httpStatus: 429,
+      body: { ok: false, status: "rate_limited", error: `retry after ${rate.retryAfterSec}s` },
+    };
+  }
+
+  const secret = await decryptSecretForOrg(cfg.webhookSecretEnc, cfg.organizationId);
   if (!secret) {
     // Misconfiguration on our side — record it, reject the event.
     return { httpStatus: 503, body: { ok: false, status: "webhook_secret_not_configured" } };

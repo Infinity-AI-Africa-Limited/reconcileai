@@ -51,7 +51,7 @@ export async function pushWriteBackNote(
   };
 
   try {
-    const client = new WoodcoreClient(toConnection(cfg), deps);
+    const client = new WoodcoreClient(await toConnection(cfg), deps);
     await client.postWriteBack(body);
     return { ok: true, deadLettered: false };
   } catch (err) {
@@ -79,6 +79,6 @@ export async function retryWriteBackDeadLetter(letter: {
   if (!cfg.isEnabled || !cfg.writeBackEnabled) {
     throw new Error("write-back no longer enabled; discard this item if intentional");
   }
-  const client = new WoodcoreClient(toConnection(cfg));
+  const client = new WoodcoreClient(await toConnection(cfg));
   await client.postWriteBack(letter.payload);
 }

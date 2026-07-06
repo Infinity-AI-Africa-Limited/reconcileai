@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { wcConnectorConfigs, type WcConnectorConfig } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
 import { getCbsProfile } from "../cbs/registry";
-import { decryptSecret } from "./secrets";
+import { decryptSecretForOrg } from "./secrets";
 import { DEFAULT_ENDPOINTS, type WcConnection, type WcEndpoints } from "./types";
 
 export function mergeEndpoints(overrides: unknown, defaults: WcEndpoints = DEFAULT_ENDPOINTS): WcEndpoints {
@@ -19,23 +19,24 @@ export function mergeEndpoints(overrides: unknown, defaults: WcEndpoints = DEFAU
   return merged;
 }
 
-export function toConnection(row: WcConnectorConfig): WcConnection {
+export async function toConnection(row: WcConnectorConfig): Promise<WcConnection> {
   const profile = getCbsProfile(row.cbsType);
+  const orgId = row.organizationId;
   return {
     configId: row.id,
-    organizationId: row.organizationId,
+    organizationId: orgId,
     cbsType: profile.type,
     baseUrl: row.baseUrl,
     tenantId: row.tenantId,
     authMode: row.authMode,
     oauthClientId: row.oauthClientId,
-    oauthClientSecret: decryptSecret(row.oauthClientSecretEnc),
+    oauthClientSecret: await decryptSecretForOrg(row.oauthClientSecretEnc, orgId),
     oauthTokenUrl: row.oauthTokenUrl,
     oauthScope: row.oauthScope,
-    apiKey: decryptSecret(row.apiKeyEnc),
+    apiKey: await decryptSecretForOrg(row.apiKeyEnc, orgId),
     apiKeyHeader: row.apiKeyHeader,
     basicUsername: row.basicUsername,
-    basicPassword: decryptSecret(row.basicPasswordEnc),
+    basicPassword: await decryptSecretForOrg(row.basicPasswordEnc, orgId),
     pageSize: row.pageSize,
     maxRetries: row.maxRetries,
     requestTimeoutMs: row.requestTimeoutMs,
@@ -67,7 +68,7 @@ export async function getConfigRowByOrg(organizationId: number): Promise<WcConne
 
 export async function getConnection(configId: number): Promise<WcConnection | null> {
   const row = await getConfigRow(configId);
-  return row ? toConnection(row) : null;
+  return row ? await toConnection(row) : null;
 }
 
 export async function listEnabledConfigs(): Promise<WcConnectorConfig[]> {

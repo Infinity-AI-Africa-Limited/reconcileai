@@ -63,3 +63,34 @@ export function maskSecret(stored: string | null | undefined): string | null {
   if (!plain) return null;
   return `••••••${plain.slice(-4)}`;
 }
+
+// ─── Tenant-scoped variants (multi-tenant hardening) ─────────────────────────
+// New secret WRITES are encrypted under the organization's own DEK (envelope
+// encryption via server/_core/tenantKeys.ts) so one tenant's credentials are
+// cryptographically isolated from every other tenant. READS handle both the
+// tenant format (tk1:...) and the legacy global-key format, so secrets stored
+// before this change keep working; they migrate to tenant keys on next save.
+
+export async function encryptSecretForOrg(plain: string, organizationId: number): Promise<string> {
+  const { encryptForTenant } = await import("../../_core/tenantKeys");
+  return encryptForTenant(organizationId, plain);
+}
+
+export async function decryptSecretForOrg(
+  stored: string | null | undefined,
+  organizationId: number,
+): Promise<string | null> {
+  if (!stored) return null;
+  const { isTenantCiphertext, decryptForTenant } = await import("../../_core/tenantKeys");
+  if (isTenantCiphertext(stored)) return decryptForTenant(organizationId, stored);
+  return decryptSecret(stored);
+}
+
+export async function maskSecretForOrg(
+  stored: string | null | undefined,
+  organizationId: number,
+): Promise<string | null> {
+  const plain = await decryptSecretForOrg(stored, organizationId);
+  if (!plain) return null;
+  return `••••••${plain.slice(-4)}`;
+}

@@ -46,7 +46,7 @@ export async function testConnection(
   cfg: WcConnectorConfig,
   deps: WcClientDeps = {},
 ): Promise<{ ok: boolean; latencyMs: number; authModeUsed: string; authDegraded: boolean; error?: string }> {
-  const conn = toConnection(cfg);
+  const conn = await toConnection(cfg);
   const client = new WoodcoreClient(conn, deps);
   const ping = await client.ping();
   return {

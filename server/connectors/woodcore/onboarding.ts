@@ -23,7 +23,7 @@ import { organizations, users } from "../../../drizzle/schema";
 import { wcConnectorConfigs } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
 import { getCbsProfile, type CbsType } from "../cbs/registry";
-import { encryptSecret } from "./secrets";
+import { encryptSecretForOrg } from "./secrets";
 import { ensureCbsChannel } from "./ingest";
 
 /** Channel code this connector stamps on organizations it onboards. */
@@ -161,15 +161,32 @@ export async function onboardCbsClient(
     authMode: conn.authMode ?? profile.defaultAuthMode,
     apiKeyHeader: profile.defaultApiKeyHeader,
     oauthClientId: conn.oauthClientId ?? null,
-    oauthClientSecretEnc: conn.oauthClientSecret ? encryptSecret(conn.oauthClientSecret) : null,
-    apiKeyEnc: conn.apiKey ? encryptSecret(conn.apiKey) : null,
-    webhookSecretEnc: conn.webhookSecret ? encryptSecret(conn.webhookSecret) : null,
+    oauthClientSecretEnc: conn.oauthClientSecret
+      ? await encryptSecretForOrg(conn.oauthClientSecret, organizationId)
+      : null,
+    apiKeyEnc: conn.apiKey ? await encryptSecretForOrg(conn.apiKey, organizationId) : null,
+    webhookSecretEnc: conn.webhookSecret
+      ? await encryptSecretForOrg(conn.webhookSecret, organizationId)
+      : null,
     isEnabled: false,
   });
   const configId = Number((cfgRes as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
 
   // 4) Their CBS channel in the canonical reconciliation tables.
   const channelId = await ensureCbsChannel(organizationId, profile.type);
+
+  // 5) Tenant baseline: encryption key + quotas + default modules. Failures
+  //    here never abort onboarding — the baseline is idempotent and re-run
+  //    by a super admin if a step reports failed.
+  try {
+    const { provisionTenantBaseline } = await import("../../provisioning");
+    const baseline = await provisionTenantBaseline(organizationId);
+    if (!baseline.ok) {
+      console.error("[wc-onboarding] tenant baseline partial failure:", JSON.stringify(baseline.steps));
+    }
+  } catch (err) {
+    console.error("[wc-onboarding] tenant baseline failed:", err);
+  }
 
   // Welcome email — best effort; the magic link is returned either way so the
   // operator can hand it over out-of-band when email isn't configured.

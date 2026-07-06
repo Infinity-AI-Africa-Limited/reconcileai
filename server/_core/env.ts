@@ -65,6 +65,16 @@ export const ENV = {
   awsRegion: process.env.AWS_REGION ?? "auto",
   awsS3Bucket: process.env.AWS_S3_BUCKET ?? process.env.AWS_BUCKET_NAME ?? "",
   awsS3Endpoint: process.env.AWS_S3_ENDPOINT ?? process.env.AWS_ENDPOINT_URL ?? "", // set for R2 / S3-compatible
+  // ── Per-tenant encryption key management ──────────────────────────────────
+  // Master-key provider that wraps each tenant's Data Encryption Key:
+  //   "local"   — AES-256-GCM wrap under TENANT_MASTER_KEY (on-prem/air-gap, default)
+  //   "aws_kms" — AWS KMS GenerateDataKey/Decrypt (requires @aws-sdk/client-kms
+  //               installed, TENANT_KMS_KEY_ID, and the AWS_* credentials)
+  tenantKeyProvider: (process.env.TENANT_KEY_PROVIDER ?? "local").toLowerCase(),
+  // 64 hex chars. When unset, derived from JWT_SECRET (deterministic across
+  // restarts) — set a dedicated key in production.
+  tenantMasterKey: cleanSecret(process.env.TENANT_MASTER_KEY),
+  tenantKmsKeyId: cleanSecret(process.env.TENANT_KMS_KEY_ID),
   // ── Enterprise SSO (both optional; buttons appear on /login when configured) ──
   // Google OAuth2 — fintechs/startups on Google Workspace.
   // Redirect URI to register: <APP_URL>/api/oauth/google/callback

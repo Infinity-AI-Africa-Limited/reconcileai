@@ -31,7 +31,7 @@ import {
   validateRules,
   type MappingRule,
 } from "../connectors/woodcore/mapping";
-import { encryptSecret, maskSecret } from "../connectors/woodcore/secrets";
+import { encryptSecretForOrg, maskSecretForOrg } from "../connectors/woodcore/secrets";
 import { runBatchSync } from "../connectors/woodcore/sync";
 import { pushWriteBackNote } from "../connectors/woodcore/writeback";
 
@@ -94,7 +94,7 @@ async function requireOrgConfig(organizationId: number) {
 }
 
 /** Never send secrets to the client — masked previews only. */
-function toClientConfig(cfg: NonNullable<Awaited<ReturnType<typeof getConfigRowByOrg>>>) {
+async function toClientConfig(cfg: NonNullable<Awaited<ReturnType<typeof getConfigRowByOrg>>>) {
   const profile = getCbsProfile(cfg.cbsType);
   return {
     id: cfg.id,
@@ -107,10 +107,10 @@ function toClientConfig(cfg: NonNullable<Awaited<ReturnType<typeof getConfigRowB
     tenantId: cfg.tenantId,
     authMode: cfg.authMode,
     oauthClientId: cfg.oauthClientId,
-    oauthClientSecretMasked: maskSecret(cfg.oauthClientSecretEnc),
+    oauthClientSecretMasked: await maskSecretForOrg(cfg.oauthClientSecretEnc, cfg.organizationId),
     oauthTokenUrl: cfg.oauthTokenUrl,
     oauthScope: cfg.oauthScope,
-    apiKeyMasked: maskSecret(cfg.apiKeyEnc),
+    apiKeyMasked: await maskSecretForOrg(cfg.apiKeyEnc, cfg.organizationId),
     apiKeyHeader: cfg.apiKeyHeader,
     basicUsername: cfg.basicUsername,
     basicPasswordSet: Boolean(cfg.basicPasswordEnc),
@@ -133,10 +133,13 @@ function toClientConfig(cfg: NonNullable<Awaited<ReturnType<typeof getConfigRowB
 }
 
 /** "" clears a secret, undefined keeps it, a value replaces it. */
-function secretUpdate(input: string | undefined): { set: boolean; value: string | null } {
+async function secretUpdate(
+  input: string | undefined,
+  organizationId: number,
+): Promise<{ set: boolean; value: string | null }> {
   if (input === undefined) return { set: false, value: null };
   if (input === "") return { set: true, value: null };
-  return { set: true, value: encryptSecret(input) };
+  return { set: true, value: await encryptSecretForOrg(input, organizationId) };
 }
 
 export const woodcoreConnectorRouter = router({
@@ -147,7 +150,7 @@ export const woodcoreConnectorRouter = router({
   getConfig: protectedProcedure.input(orgOverrideInput.optional()).query(async ({ ctx, input }) => {
     const orgId = resolveOrgId(ctx.user, input?.organizationId);
     const cfg = await getConfigRowByOrg(orgId);
-    return cfg ? toClientConfig(cfg) : null;
+    return cfg ? await toClientConfig(cfg) : null;
   }),
 
   saveConfig: connectorAdminProcedure
@@ -185,10 +188,10 @@ export const woodcoreConnectorRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const existing = await getConfigRowByOrg(orgId);
-      const oauthSecret = secretUpdate(input.oauthClientSecret);
-      const apiKey = secretUpdate(input.apiKey);
-      const basicPassword = secretUpdate(input.basicPassword);
-      const webhookSecret = secretUpdate(input.webhookSecret);
+      const oauthSecret = await secretUpdate(input.oauthClientSecret, orgId);
+      const apiKey = await secretUpdate(input.apiKey, orgId);
+      const basicPassword = await secretUpdate(input.basicPassword, orgId);
+      const webhookSecret = await secretUpdate(input.webhookSecret, orgId);
 
       const effectiveCbsType = input.cbsType ?? existing?.cbsType ?? "woodcore";
       const common = {
@@ -235,7 +238,7 @@ export const woodcoreConnectorRouter = router({
         });
       }
       const saved = await getConfigRowByOrg(orgId);
-      return saved ? toClientConfig(saved) : null;
+      return saved ? await toClientConfig(saved) : null;
     }),
 
   testConnection: connectorAdminProcedure
@@ -324,6 +327,14 @@ export const woodcoreConnectorRouter = router({
       const cfg = await requireOrgConfig(orgId);
       if (!cfg.isEnabled) {
         throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Enable the connector before running a sync" });
+      }
+      const { checkTenantRate } = await import("../_core/rateLimit");
+      const rate = await checkTenantRate(orgId, "sync_trigger");
+      if (!rate.allowed) {
+        throw new TRPCError({
+          code: "TOO_MANY_REQUESTS",
+          message: `Sync trigger rate limit reached — try again in ${rate.retryAfterSec}s`,
+        });
       }
       // Fire-and-forget: the dashboard polls listSyncRuns for progress.
       runBatchSync(cfg.id, {
@@ -685,6 +696,14 @@ export const woodcoreConnectorRouter = router({
     .mutation(async ({ ctx, input }) => {
       const orgId = resolveOrgId(ctx.user, input.organizationId);
       const cfg = await requireOrgConfig(orgId);
+      const { checkTenantRate } = await import("../_core/rateLimit");
+      const rate = await checkTenantRate(orgId, "csv_import");
+      if (!rate.allowed) {
+        throw new TRPCError({
+          code: "TOO_MANY_REQUESTS",
+          message: `CSV import rate limit reached — try again in ${rate.retryAfterSec}s`,
+        });
+      }
       return importCbsCsv(cfg, input.entity, input.csvContent, { fileName: input.fileName });
     }),
 });

@@ -101,27 +101,47 @@ export async function runBatchSync(
   if (runningConfigs.has(configId)) {
     throw new Error(`A sync is already running for connector ${configId}`);
   }
+
+  // Tenant concurrency quota: syncs count against the org's reconciliation
+  // slots so one tenant's backfill can't monopolise the process.
+  const { acquireReconciliationSlot } = await import("../../_core/rateLimit");
+  const releaseSlot = await acquireReconciliationSlot(cfg.organizationId);
+  if (!releaseSlot) {
+    throw new Error(
+      `Organization ${cfg.organizationId} is at its concurrent reconciliation quota — try again shortly`,
+    );
+  }
   runningConfigs.add(configId);
 
   const scope = opts.scope ?? "all";
-  const now = new Date();
-  const lastTo = await getLastSuccessfulWindowTo(configId);
-  const windowFrom =
-    opts.windowFrom ??
-    (lastTo ? new Date(lastTo.getTime() - OVERLAP_MS) : new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS));
-  const windowTo = opts.windowTo ?? now;
+  let runId: number;
+  let windowFrom: Date;
+  let windowTo: Date;
+  try {
+    const now = new Date();
+    const lastTo = await getLastSuccessfulWindowTo(configId);
+    windowFrom =
+      opts.windowFrom ??
+      (lastTo ? new Date(lastTo.getTime() - OVERLAP_MS) : new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS));
+    windowTo = opts.windowTo ?? now;
 
-  // Create the run row up front so the dashboard shows it as running.
-  const insertRes = await db.insert(wcConnectorSyncRuns).values({
-    configId,
-    organizationId: cfg.organizationId,
-    trigger: opts.trigger,
-    scope,
-    windowFrom,
-    windowTo,
-    status: "running",
-  });
-  const runId = Number((insertRes as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
+    // Create the run row up front so the dashboard shows it as running.
+    const insertRes = await db.insert(wcConnectorSyncRuns).values({
+      configId,
+      organizationId: cfg.organizationId,
+      trigger: opts.trigger,
+      scope,
+      windowFrom,
+      windowTo,
+      status: "running",
+    });
+    runId = Number((insertRes as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
+  } catch (err) {
+    // Failed before the run started — free the guards, or the tenant's slot leaks.
+    runningConfigs.delete(configId);
+    releaseSlot();
+    throw err;
+  }
 
   const startedMs = Date.now();
   let fetched = 0;
@@ -131,7 +151,7 @@ export async function runBatchSync(
   let fatalError: string | undefined;
 
   try {
-    const conn = toConnection(cfg);
+    const conn = await toConnection(cfg);
     const profile = getCbsProfile(cfg.cbsType);
     const client = new WoodcoreClient(conn, opts.clientDeps);
     const channelId = await ensureCbsChannel(cfg.organizationId, cfg.cbsType);
@@ -230,6 +250,7 @@ export async function runBatchSync(
     fatalError = err instanceof Error ? err.message : String(err);
   } finally {
     runningConfigs.delete(configId);
+    releaseSlot();
   }
 
   const status: "completed" | "partial" | "failed" = fatalError

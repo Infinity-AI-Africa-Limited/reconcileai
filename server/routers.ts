@@ -3921,6 +3921,17 @@ export const appRouter = router({
           isActive: true,
         });
         const newOrgId = (result as any).insertId;
+        // Tenant baseline: per-tenant encryption key + quotas + default
+        // modules — every org creation path provisions the same way.
+        try {
+          const { provisionTenantBaseline } = await import("./provisioning");
+          const baseline = await provisionTenantBaseline(newOrgId);
+          if (!baseline.ok) {
+            console.error("[createOrganization] tenant baseline partial failure:", JSON.stringify(baseline.steps));
+          }
+        } catch (err) {
+          console.error("[createOrganization] tenant baseline failed:", err);
+        }
         await logAudit(ctx.user.id, "create_organization", "organization", newOrgId, {
           name: input.name,
           segment: input.segment,
