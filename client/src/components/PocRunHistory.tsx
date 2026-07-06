@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 import { trpc } from "@/lib/trpc";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { History, Loader2, Eye, CheckCircle2, AlertTriangle } from "lucide-react";
+import { History, Loader2, Eye, CheckCircle2, AlertTriangle, ArrowLeft, X } from "lucide-react";
 
 /**
  * Reusable reconciliation-run history for any POC page.
@@ -76,6 +74,20 @@ export default function PocRunHistory({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
+  // While the full-page run detail is open: close on Escape and lock body scroll
+  // so the page behind doesn't scroll under the overlay.
+  useEffect(() => {
+    if (selectedId == null) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSelectedId(null); };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [selectedId]);
+
   return (
     <div className="rounded-lg border bg-white p-4">
       <div className="flex items-center gap-2 mb-3">
@@ -129,95 +141,113 @@ export default function PocRunHistory({
         </div>
       )}
 
-      {/* Run detail */}
-      <Dialog open={selectedId != null} onOpenChange={(o) => { if (!o) setSelectedId(null); }}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base">
-              <History className="h-4 w-4" /> Reconciliation run
-              {detail?.run && <span className="text-sm font-normal text-muted-foreground">· {fmtDate(detail.run.createdAt)}</span>}
-            </DialogTitle>
-          </DialogHeader>
-
-          {detailQuery.isLoading || !detail ? (
-            <div className="flex items-center gap-2 text-muted-foreground text-sm py-8 justify-center">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading run…
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {/* Layer-1 summary */}
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {[
-                  { label: "Status", node: <StatusBadge status={detail.run.status} /> },
-                  { label: "Match rate", node: <span className="font-semibold">{detail.run.matchRate != null ? `${Number(detail.run.matchRate)}%` : "—"}</span> },
-                  { label: "Variance", node: <span className="font-mono text-sm">{ngn(detail.run.varianceAmount, detail.run.currencyCode)}</span> },
-                  { label: "Ledger", node: <span>{detail.run.ledgerCount} · {ngn(detail.run.ledgerTotal, detail.run.currencyCode)}</span> },
-                  { label: "Statement", node: <span>{detail.run.statementCount} · {ngn(detail.run.statementTotal, detail.run.currencyCode)}</span> },
-                  { label: "Matched / Exceptions", node: <span>{detail.run.matchedCount} / {detail.run.exceptionCount}</span> },
-                ].map((s) => (
-                  <div key={s.label} className="rounded-md border bg-muted/20 p-2.5">
-                    <p className="text-[11px] text-muted-foreground">{s.label}</p>
-                    <div className="text-sm mt-0.5">{s.node}</div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Flagged & excluded fee/charge noise (set aside from the reconciliation) */}
-              {Array.isArray(detail.run.summary?.excludedItems) && detail.run.summary.excludedItems.length > 0 && (
-                <div className="rounded-md border border-amber-200 bg-amber-50/50 p-2.5">
-                  <p className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
-                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
-                    {detail.run.summary.excludedItems.length} item(s) set aside
-                    {detail.run.summary.excludedTotal != null && ` · ${ngn(detail.run.summary.excludedTotal, detail.run.currencyCode)}`}
-                  </p>
-                  <p className="text-[11px] text-amber-800/80 mt-0.5 mb-1.5">
-                    Bank fees / charges / levies excluded from the balance and matching, listed for awareness.
-                  </p>
-                  <div className="space-y-1 max-h-40 overflow-y-auto">
-                    {detail.run.summary.excludedItems.map((e: any, i: number) => (
-                      <div key={i} className="flex items-center gap-2 text-[11px] bg-white/70 rounded px-2 py-1">
-                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800 shrink-0">{e.reason}</span>
-                        <span className="truncate flex-1">{e.description || e.reference || "—"}</span>
-                        <span className="font-mono shrink-0">{ngn(e.amount, detail.run.currencyCode)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Exceptions */}
-              <div>
-                <p className="text-xs font-semibold text-gray-700 mb-2">
-                  Exceptions {detail.exceptions.length > 0 && `(${detail.exceptions.length})`}
-                </p>
-                {detail.exceptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">No exceptions — everything reconciled.</p>
-                ) : (
-                  <div className="space-y-2 max-h-72 overflow-y-auto">
-                    {detail.exceptions.map((e) => (
-                      <div key={e.id} className="rounded-md border p-2.5 text-xs">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-medium">{String(e.category).replace(/_/g, " ")}</span>
-                          {e.priorityLevel && (
-                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${PRIORITY_COLORS[e.priorityLevel] ?? "bg-gray-100 text-gray-600"}`}>
-                              {e.priorityLevel}
-                            </span>
-                          )}
-                          <span className="ml-auto font-mono">{ngn(e.amount, detail.run.currencyCode)}</span>
-                        </div>
-                        {e.description && <p className="text-muted-foreground mt-1">{e.description}</p>}
-                        {e.recommendedAction && (
-                          <p className="text-gray-700 mt-1"><span className="font-medium">Action:</span> {e.recommendedAction}</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+      {/* Run detail — full-page view (replaces the cramped modal) */}
+      {selectedId != null && (
+        <div className="fixed inset-0 z-50 bg-background overflow-y-auto">
+          {/* Sticky header with a Back action */}
+          <div className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+            <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3">
+              <Button variant="ghost" size="sm" className="gap-1.5 shrink-0" onClick={() => setSelectedId(null)}>
+                <ArrowLeft className="h-4 w-4" /> Back
+              </Button>
+              <div className="flex items-center gap-2 min-w-0">
+                <History className="h-4 w-4 text-primary shrink-0" />
+                <h2 className="text-base font-semibold truncate">Reconciliation run</h2>
+                {detail?.run && (
+                  <span className="text-sm font-normal text-muted-foreground whitespace-nowrap">· {fmtDate(detail.run.createdAt)}</span>
                 )}
               </div>
+              <button
+                onClick={() => setSelectedId(null)}
+                aria-label="Close"
+                className="ml-auto shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
-          )}
-        </DialogContent>
-      </Dialog>
+          </div>
+
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+            {detailQuery.isLoading || !detail ? (
+              <div className="flex items-center gap-2 text-muted-foreground text-sm py-16 justify-center">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading run…
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Layer-1 summary */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  {[
+                    { label: "Status", node: <StatusBadge status={detail.run.status} /> },
+                    { label: "Match rate", node: <span className="font-semibold">{detail.run.matchRate != null ? `${Number(detail.run.matchRate)}%` : "—"}</span> },
+                    { label: "Variance", node: <span className="font-mono text-sm break-all">{ngn(detail.run.varianceAmount, detail.run.currencyCode)}</span> },
+                    { label: "Ledger", node: <span className="break-all">{detail.run.ledgerCount} · {ngn(detail.run.ledgerTotal, detail.run.currencyCode)}</span> },
+                    { label: "Statement", node: <span className="break-all">{detail.run.statementCount} · {ngn(detail.run.statementTotal, detail.run.currencyCode)}</span> },
+                    { label: "Matched / Exceptions", node: <span>{detail.run.matchedCount} / {detail.run.exceptionCount}</span> },
+                  ].map((s) => (
+                    <div key={s.label} className="rounded-md border bg-muted/20 p-3">
+                      <p className="text-[11px] text-muted-foreground">{s.label}</p>
+                      <div className="text-sm mt-1">{s.node}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Flagged & excluded fee/charge noise (set aside from the reconciliation) */}
+                {Array.isArray(detail.run.summary?.excludedItems) && detail.run.summary.excludedItems.length > 0 && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50/50 p-4">
+                    <p className="text-sm font-semibold text-amber-900 flex items-center gap-1.5">
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                      {detail.run.summary.excludedItems.length} item(s) set aside
+                      {detail.run.summary.excludedTotal != null && ` · ${ngn(detail.run.summary.excludedTotal, detail.run.currencyCode)}`}
+                    </p>
+                    <p className="text-xs text-amber-800/80 mt-1 mb-3">
+                      Bank fees / charges / levies excluded from the balance and matching, listed for awareness.
+                    </p>
+                    <div className="space-y-1">
+                      {detail.run.summary.excludedItems.map((e: any, i: number) => (
+                        <div key={i} className="flex items-start gap-3 text-xs bg-white/70 rounded px-3 py-2">
+                          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800 shrink-0">{e.reason}</span>
+                          <span className="flex-1 break-words min-w-0">{e.description || e.reference || "—"}</span>
+                          <span className="font-mono shrink-0 whitespace-nowrap">{ngn(e.amount, detail.run.currencyCode)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Exceptions */}
+                <div>
+                  <p className="text-sm font-semibold text-gray-700 mb-2">
+                    Exceptions {detail.exceptions.length > 0 && `(${detail.exceptions.length})`}
+                  </p>
+                  {detail.exceptions.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No exceptions — everything reconciled.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {detail.exceptions.map((e) => (
+                        <div key={e.id} className="rounded-md border p-3 text-sm">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium">{String(e.category).replace(/_/g, " ")}</span>
+                            {e.priorityLevel && (
+                              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${PRIORITY_COLORS[e.priorityLevel] ?? "bg-gray-100 text-gray-600"}`}>
+                                {e.priorityLevel}
+                              </span>
+                            )}
+                            <span className="ml-auto font-mono whitespace-nowrap">{ngn(e.amount, detail.run.currencyCode)}</span>
+                          </div>
+                          {e.description && <p className="text-muted-foreground mt-1 break-words">{e.description}</p>}
+                          {e.recommendedAction && (
+                            <p className="text-gray-700 mt-1 break-words"><span className="font-medium">Action:</span> {e.recommendedAction}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
