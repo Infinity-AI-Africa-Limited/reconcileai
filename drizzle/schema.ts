@@ -1445,6 +1445,66 @@ export const cbnDeadlineSubmissions = mysqlTable("cbnDeadlineSubmissions", {
 export type CbnDeadlineSubmission = typeof cbnDeadlineSubmissions.$inferSelect;
 export type InsertCbnDeadlineSubmission = typeof cbnDeadlineSubmissions.$inferInsert;
 
+// ─── CBN Report Module: per-institution profile (configurable, all customers) ─
+// Header identity that appears on every CBN/NIBSS report + the monthly
+// attestation. One row per organisation; created lazily with sensible defaults.
+export const cbnReportSettings = mysqlTable("cbn_report_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull().unique(),
+  institutionName: varchar("institutionName", { length: 255 }),
+  institutionType: mysqlEnum("institutionType", [
+    "microfinance_bank", "commercial_bank", "payment_service_bank",
+    "merchant_bank", "other_financial_institution", "fintech", "other",
+  ]).default("microfinance_bank").notNull(),
+  rcNumber: varchar("rcNumber", { length: 50 }),                 // CAC RC number
+  cbnLicenseNumber: varchar("cbnLicenseNumber", { length: 100 }),
+  cbnInstitutionCode: varchar("cbnInstitutionCode", { length: 50 }), // CBN/NIBSS institution/sort code
+  address: varchar("address", { length: 500 }),
+  // Officers named on reports + attestation
+  preparedByName: varchar("preparedByName", { length: 255 }),
+  preparedByTitle: varchar("preparedByTitle", { length: 150 }),
+  attestingOfficerName: varchar("attestingOfficerName", { length: 255 }),   // CFO/CCO who signs the monthly attestation
+  attestingOfficerTitle: varchar("attestingOfficerTitle", { length: 150 }),
+  complianceContactEmail: varchar("complianceContactEmail", { length: 320 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_cbn_report_settings_org").on(table.organizationId),
+]);
+export type CbnReportSettings = typeof cbnReportSettings.$inferSelect;
+export type InsertCbnReportSettings = typeof cbnReportSettings.$inferInsert;
+
+// ─── CBN Report Module: generated report / attestation history ───────────────
+// One row per generated report (audit of what was produced) and per signed
+// monthly attestation (with its Ed25519 signature for later verification).
+export const cbnReportRuns = mysqlTable("cbn_report_runs", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId"),
+  reportType: varchar("reportType", { length: 48 }).notNull(),
+  // daily_recon_summary | exception_log | counterparty_exposure |
+  // interbank_settlement | monthly_attestation
+  periodLabel: varchar("periodLabel", { length: 64 }),
+  periodStart: timestamp("periodStart"),
+  periodEnd: timestamp("periodEnd"),
+  rowCount: int("rowCount").default(0).notNull(),
+  summary: json("summary"), // headline figures snapshot for the run
+  // Signature block — populated only for signed monthly attestations
+  contentHash: varchar("contentHash", { length: 64 }),
+  signature: text("signature"),
+  signingKeyFingerprint: varchar("signingKeyFingerprint", { length: 64 }),
+  signedAt: timestamp("signedAt"),
+  attestingOfficerName: varchar("attestingOfficerName", { length: 255 }),
+  attestingOfficerTitle: varchar("attestingOfficerTitle", { length: 150 }),
+  generatedByUserId: int("generatedByUserId"),
+  generatedByName: varchar("generatedByName", { length: 255 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_cbn_report_runs_org").on(table.organizationId),
+  index("idx_cbn_report_runs_type").on(table.reportType),
+]);
+export type CbnReportRun = typeof cbnReportRuns.$inferSelect;
+export type InsertCbnReportRun = typeof cbnReportRuns.$inferInsert;
+
 // ─── Roadmap Access Requests ──────────────────────────────────────────────────
 export const roadmapAccessRequests = mysqlTable("roadmapAccessRequests", {
   id: int("id").autoincrement().primaryKey(),

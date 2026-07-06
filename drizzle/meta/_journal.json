@@ -400,6 +400,13 @@
       "when": 1783275808240,
       "tag": "0056_talented_puppet_master",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "5",
+      "when": 1783340988571,
+      "tag": "0057_fine_the_captain",
+      "breakpoints": true
     }
   ]
 }
