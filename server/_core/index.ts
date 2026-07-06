@@ -303,6 +303,12 @@ async function startServer() {
         return res.redirect(302, "/?error=account_inactive");
       }
 
+      // Tenant gate: members of a deactivated organization cannot sign in.
+      const { isOrgLoginAllowed } = await import("./tenancy");
+      if (!(await isOrgLoginAllowed(user.organizationId))) {
+        return res.redirect(302, "/login?error=org_suspended");
+      }
+
       // Create a JWT session token using the user's openId (same as OAuth flow)
       const sessionToken = await sdk.createSessionToken(user.openId, {
         name: user.name || "",
@@ -445,8 +451,12 @@ async function startServer() {
 
   // Storage proxy — serves /manus-storage/* assets via signed S3 URLs
   registerStorageProxy(app);
-  // OAuth callback under /api/oauth/callback
+  // Legacy Manus OAuth callback under /api/oauth/callback (redirects to /login)
   registerOAuthRoutes(app);
+  // Enterprise SSO: Google OAuth2 + Microsoft Entra ID
+  // (/api/oauth/{google|microsoft}/{start|callback})
+  const { registerSsoRoutes } = await import("./sso");
+  registerSsoRoutes(app);
   // tRPC API
   app.use(
     "/api/trpc",

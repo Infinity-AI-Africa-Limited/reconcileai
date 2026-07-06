@@ -65,6 +65,17 @@ export const ENV = {
   awsRegion: process.env.AWS_REGION ?? "auto",
   awsS3Bucket: process.env.AWS_S3_BUCKET ?? process.env.AWS_BUCKET_NAME ?? "",
   awsS3Endpoint: process.env.AWS_S3_ENDPOINT ?? process.env.AWS_ENDPOINT_URL ?? "", // set for R2 / S3-compatible
+  // ── Enterprise SSO (both optional; buttons appear on /login when configured) ──
+  // Google OAuth2 — fintechs/startups on Google Workspace.
+  // Redirect URI to register: <APP_URL>/api/oauth/google/callback
+  googleClientId: cleanSecret(process.env.GOOGLE_CLIENT_ID),
+  googleClientSecret: cleanSecret(process.env.GOOGLE_CLIENT_SECRET),
+  // Microsoft Entra ID (Azure AD) OAuth2 — commercial banks on Microsoft 365.
+  // Redirect URI to register: <APP_URL>/api/oauth/microsoft/callback
+  microsoftClientId: cleanSecret(process.env.MICROSOFT_CLIENT_ID),
+  microsoftClientSecret: cleanSecret(process.env.MICROSOFT_CLIENT_SECRET),
+  // Entra tenant: "common" (any org), "organizations", or a specific tenant GUID.
+  microsoftTenantId: cleanSecret(process.env.MICROSOFT_TENANT_ID) || "common",
   // Woodcore (Fineract) test tenant
   woodcoreDbHost: process.env.WOODCORE_DB_HOST ?? "",
   woodcoreDbPort: parseInt(process.env.WOODCORE_DB_PORT ?? "3306", 10),

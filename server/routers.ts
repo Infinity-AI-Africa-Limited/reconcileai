@@ -449,6 +449,11 @@ export const appRouter = router({
 
   auth: router({
     me: publicProcedure.query((opts) => opts.ctx.user),
+    // Which enterprise SSO providers are configured (drives /login buttons).
+    oauthProviders: publicProcedure.query(async () => {
+      const { enabledSsoProviders } = await import("./_core/sso");
+      return enabledSsoProviders();
+    }),
     // The caller's organization segment (financial_services | corporate_b2b |
     // super_admin), or null. Drives segment-aware UI (e.g. hiding card-settlement
     // content for corporate B2B). Cheap, indexed lookup — used sparingly.
@@ -6574,13 +6579,40 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
   const txns = await db.getTransactionsByIds(txnIds);
   const txnById = new Map(txns.map((t) => [t.id, t]));
 
+  // Cross-institution intelligence read-path (gap-closure plan WS-5): fold
+  // anonymised, k-anonymous network patterns into each diagnosis. Gated by the
+  // org's reciprocal opt-in inside getSharedRecommendations, which also records
+  // the consume request/hit that powers the "recommendations informed by
+  // cross-institution patterns %" metric. Cached per category per job.
+  const job = await db.getReconciliationJob(jobId);
+  const orgId = job?.organizationId ?? null;
+  const ei = orgId != null ? await import("./exceptionIntelligence") : null;
+  const learning = orgId != null ? await import("./institutionalLearning") : null;
+  const networkGuidanceByCategory = new Map<string, string>();
+  async function networkGuidanceFor(category: string): Promise<string> {
+    if (orgId == null || !ei || !learning) return "";
+    const cached = networkGuidanceByCategory.get(category);
+    if (cached !== undefined) return cached;
+    let guidance = "";
+    try {
+      const recs = await ei.getSharedRecommendations(orgId, category);
+      guidance = learning.formatNetworkGuidance(recs);
+    } catch (err) {
+      console.error(`[AI pass] network lookup for "${category}" failed (non-fatal):`, err);
+    }
+    networkGuidanceByCategory.set(category, guidance);
+    return guidance;
+  }
+
   for (const exc of pending) {
     const txn = exc.transactionId != null ? txnById.get(exc.transactionId) : undefined;
     if (!txn) continue;
     try {
+      const networkGuidance = await networkGuidanceFor(exc.category);
       const analysis = await getAIAnalysis(
         { category: exc.category, description: exc.description ?? "" },
-        txn as any
+        txn as any,
+        networkGuidance ? { networkGuidance } : undefined
       );
       await db.updateException(exc.id, { aiAnalysis: analysis });
     } catch (err) {
