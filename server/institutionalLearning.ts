@@ -73,6 +73,41 @@ export function summarizeResolutionHistory(
   return stats;
 }
 
+/** The institutional-memory citation for one category (empty when no history). */
+export function institutionalMemoryNote(stats: CategoryResolutionStats | undefined): string {
+  if (!stats || stats.actioned === 0) return "";
+  const approach = stats.topActionClass && stats.topActionClass !== "other"
+    ? ` Most common resolution approach: ${stats.topActionClass.replace(/_/g, " ")}.`
+    : "";
+  return (
+    `Institutional memory: this institution has previously actioned ${stats.actioned} similar ` +
+    `exception${stats.actioned === 1 ? "" : "s"} in this category ` +
+    `(${stats.resolved} resolved, ${stats.escalated} escalated).${approach}`
+  );
+}
+
+/**
+ * Enrich a single AI-diagnosis item with the institution's own resolution
+ * history: append the memory citation and raise confidence by up to 6 points
+ * (capped at 98) with corroborating resolutions. Returns the item unchanged
+ * (and applied=false) when there is no matching history.
+ */
+export function enrichItemWithInstitutionalMemory<
+  T extends { category: string; agentExplanation: string; agentConfidence: number },
+>(item: T, stats: Map<string, CategoryResolutionStats>): { item: T; applied: boolean } {
+  const s = stats.get(item.category);
+  const note = institutionalMemoryNote(s);
+  if (!note) return { item, applied: false };
+  return {
+    item: {
+      ...item,
+      agentExplanation: `${item.agentExplanation}\n\n${note}`,
+      agentConfidence: Math.min(98, item.agentConfidence + Math.min(6, s!.actioned)),
+    },
+    applied: true,
+  };
+}
+
 /**
  * Enrich AI diagnoses with the institutional memory: append the history
  * citation to each item's explanation and raise confidence by up to 6 points
@@ -89,21 +124,39 @@ export function enrichWithInstitutionalMemory<
 
   let learningApplied = 0;
   const enriched = items.map((item) => {
-    const s = stats.get(item.category);
-    if (!s || s.actioned === 0) return item;
-    learningApplied += 1;
-    const approach = s.topActionClass && s.topActionClass !== "other"
-      ? ` Most common resolution approach: ${s.topActionClass.replace(/_/g, " ")}.`
-      : "";
-    return {
-      ...item,
-      agentExplanation:
-        item.agentExplanation +
-        `\n\nInstitutional memory: this institution has previously actioned ${s.actioned} similar ` +
-        `exception${s.actioned === 1 ? "" : "s"} in this category (${s.resolved} resolved, ${s.escalated} escalated).${approach}`,
-      agentConfidence: Math.min(98, item.agentConfidence + Math.min(6, s.actioned)),
-    };
+    const { item: next, applied } = enrichItemWithInstitutionalMemory(item, stats);
+    if (applied) learningApplied += 1;
+    return next;
   });
 
   return { items: enriched, learningApplied };
+}
+
+/** One anonymised cross-institution pattern from the shared pool. */
+export interface NetworkRecommendation {
+  resolutionActionClass: string;
+  outcome: string;
+  contributorCount: number;
+  observationCount: number;
+}
+
+/**
+ * Format k-anonymous cross-institution patterns as prompt-injectable guidance
+ * for the AI diagnosis. Purely categorical — the pool never carries an org id,
+ * name, or any transaction detail, so this string is safe to feed an LLM.
+ * Returns "" when there is nothing that clears the k-anonymity gate.
+ */
+export function formatNetworkGuidance(recs: NetworkRecommendation[]): string {
+  if (recs.length === 0) return "";
+  const lines = recs
+    .slice(0, 3)
+    .map((r) => {
+      const action = r.resolutionActionClass.replace(/_/g, " ");
+      return `- ${action} → ${r.outcome} (seen across ${r.contributorCount} institutions, ${r.observationCount} cases)`;
+    })
+    .join("\n");
+  return (
+    `Cross-institution intelligence (anonymised, k-anonymous ReconcileAI network): ` +
+    `peer institutions most often resolved similar exceptions as follows:\n${lines}`
+  );
 }

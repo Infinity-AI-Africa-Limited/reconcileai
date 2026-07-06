@@ -443,6 +443,17 @@ export async function getSharedRecommendations(
 
 // ─── Network-level stats (internal KPI — super admin) ────────────────
 
+/** Per-category depth of the shared pool — shows where the network is strong vs thin. */
+export interface NetworkCategoryCoverage {
+  category: string;
+  /** Patterns in this category that clear the k-anonymity gate (servable). */
+  kAnonymousPatterns: number;
+  /** Highest distinct-org count across this category's patterns. */
+  maxContributors: number;
+  /** Total observations across this category's k-anonymous patterns. */
+  observations: number;
+}
+
 export interface NetworkStats {
   /** Orgs with at least one locally-recorded pattern signature. */
   contributingOrgs: number;
@@ -462,6 +473,8 @@ export interface NetworkStats {
   informedRate: number | null;
   /** Gap-closure plan WS-5: the network effect needs 5–7 active institutions. */
   networkEffectThreshold: number;
+  /** Per-category coverage (k-anonymous only), strongest first. */
+  categoryCoverage: NetworkCategoryCoverage[];
 }
 
 /**
@@ -482,6 +495,7 @@ export async function getNetworkStats(): Promise<NetworkStats> {
     consumeHits: 0,
     informedRate: null,
     networkEffectThreshold: 5,
+    categoryCoverage: [],
   };
   const db = await getDb();
   if (!db) return empty;
@@ -509,6 +523,20 @@ export async function getNetworkStats(): Promise<NetworkStats> {
     })
     .from(sharedExceptionPatterns);
 
+  // Per-category coverage — k-anonymous patterns only, so this summary can be
+  // shown without leaking below-threshold (single-institution) patterns.
+  const coverageRows = await db
+    .select({
+      category: sharedExceptionPatterns.exceptionCategory,
+      kAnonymousPatterns: sql<number>`count(*)`,
+      maxContributors: sql<number>`max(${sharedExceptionPatterns.contributorCount})`,
+      observations: sql<number>`coalesce(sum(${sharedExceptionPatterns.observationCount}), 0)`,
+    })
+    .from(sharedExceptionPatterns)
+    .where(sql`${sharedExceptionPatterns.contributorCount} >= ${K_ANON_THRESHOLD}`)
+    .groupBy(sharedExceptionPatterns.exceptionCategory)
+    .orderBy(desc(sql`count(*)`));
+
   const requests = Number(participation?.requests || 0);
   const hits = Number(participation?.hits || 0);
   return {
@@ -523,6 +551,12 @@ export async function getNetworkStats(): Promise<NetworkStats> {
     consumeHits: hits,
     informedRate: requests > 0 ? Math.round((hits / requests) * 10000) / 100 : null,
     networkEffectThreshold: 5,
+    categoryCoverage: coverageRows.map((r) => ({
+      category: r.category,
+      kAnonymousPatterns: Number(r.kAnonymousPatterns || 0),
+      maxContributors: Number(r.maxContributors || 0),
+      observations: Number(r.observations || 0),
+    })),
   };
 }
 

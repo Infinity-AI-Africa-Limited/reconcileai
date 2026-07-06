@@ -1,6 +1,6 @@
 # Data Protection Impact Assessment — ReconcileAI Exception Intelligence Layer
 
-**Status:** Living document · **Owner:** Infinity AI Africa Limited · **Last updated:** June 2026
+**Status:** Living document · **Owner:** Infinity AI Africa Limited · **Last updated:** July 2026 (WS-5 network-deepening audit — §9)
 **Frameworks:** Nigeria Data Protection Act 2023 (NDPA) / NDPR, GDPR principles (data minimization, purpose limitation, privacy by design)
 
 ## 1. Purpose
@@ -80,3 +80,42 @@ must be explicitly allowlisted) and the pre-send scrub.
 ## 8. Review
 
 Re-assess on any change to the shared field set, the k threshold, or the sync transport.
+
+## 9. WS-5 network-deepening audit (July 2026)
+
+Recorded per the gap-closure plan (docs/GAP_CLOSURE_PLAN.md, WS-5 "anonymisation review").
+Scope: all write-paths and read-paths of the learning flywheel, plus the new network KPI.
+
+**Write-path audit (every channel verified):**
+
+| Channel | Institution-scoped tier | Anonymised shared tier |
+|---|---|---|
+| Main app exceptions (`exceptions.resolve`) | `agentMemory` insert | `deriveSignature` → `recordLocalSignature` |
+| Super Agent (`superAgent.addMemory`) | `agentMemory` insert | `deriveSignature` → `recordLocalSignature` |
+| Woodcore (`wc_exceptions` reviews) | resolution history consumed by Layer 3 (`enrichItemWithInstitutionalMemory`) — wired July 2026 | none (single fixed test tenant, no org id) |
+| Generic POC (`poc_exceptions` reviews) | resolution history consumed by Layer 3 (`applyPocInstitutionalLearning`) | none by design — POCs have no organization; pool participation begins at tenant conversion |
+| Mobile money (`mm_exceptions` reviews) | resolution history consumed by Layer 3 (`applyInstitutionalLearning`) | none by design (same POC scoping) |
+
+**Read-path audit:** consumers of the shared pool are `superAgent.getSimilarCases` and (new, July
+2026) the deferred AI-analysis pass on reconciliation jobs, which folds pool patterns into the LLM
+diagnosis prompt via `formatNetworkGuidance`. That guidance string is built exclusively from the
+categorical tuple + counts (action class, outcome, contributor count, observation count) and is
+covered by a unit test asserting it contains no identifiers, digit runs, currency amounts, or
+email-like tokens. Both consumers pass through `getSharedRecommendations`, which enforces the
+reciprocity opt-in and the k-anonymity gate server-side.
+
+**Aggregation audit:** `aggregateSharedPatterns` reads `organizationId` solely inside
+`count(distinct …)` to compute k; the shared pool table (`shared_exception_patterns`) has no
+organization column, so contributor identity is structurally impossible to store, not merely
+filtered out.
+
+**New telemetry (July 2026):** per-org `consumeRequests`/`consumeHits` counters on
+`exception_intelligence_settings` count pool lookups only — no category, amount, or content is
+recorded. They power the super-admin "recommendations informed by cross-institution patterns %"
+KPI (`exceptionIntelligence.networkStats`), which reports aggregates only; its per-category
+coverage list includes k-anonymous patterns exclusively, so below-threshold (attributable)
+patterns never appear even in the internal view.
+
+**Findings:** no anonymisation gaps. One correctness gap was found and fixed — the Woodcore channel
+previously recorded reviews without feeding any learning tier (a comment-only integration); it now
+consumes its own resolution history. Residual-risk assessment in §7 unchanged.

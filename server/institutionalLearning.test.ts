@@ -8,6 +8,10 @@ import { describe, it, expect } from "vitest";
 import {
   summarizeResolutionHistory,
   enrichWithInstitutionalMemory,
+  enrichItemWithInstitutionalMemory,
+  institutionalMemoryNote,
+  formatNetworkGuidance,
+  type CategoryResolutionStats,
 } from "./institutionalLearning";
 import { classifyResolutionAction } from "./exceptionIntelligence";
 
@@ -92,5 +96,67 @@ describe("enrichWithInstitutionalMemory", () => {
     ]);
     const { items } = enrichWithInstitutionalMemory([{ ...baseItem }], stats);
     expect(items[0].agentExplanation).toContain("fee posting");
+  });
+});
+
+describe("enrichItemWithInstitutionalMemory (single-item, used by Woodcore Layer 3)", () => {
+  const stats = new Map<string, CategoryResolutionStats>([
+    ["MANUAL_POSTING", { category: "MANUAL_POSTING", actioned: 4, resolved: 3, escalated: 1, topActionClass: "journal_entry" }],
+  ]);
+
+  it("enriches a matching item and reports applied=true", () => {
+    const { item, applied } = enrichItemWithInstitutionalMemory(
+      { category: "MANUAL_POSTING", agentExplanation: "Manual entry detected.", agentConfidence: 90 },
+      stats,
+    );
+    expect(applied).toBe(true);
+    expect(item.agentExplanation).toContain("Institutional memory");
+    expect(item.agentExplanation).toContain("4 similar exceptions");
+    expect(item.agentExplanation).toContain("journal entry");
+    expect(item.agentConfidence).toBe(94); // 90 + min(6, 4)
+  });
+
+  it("returns the item unchanged when no history matches", () => {
+    const original = { category: "ORPHANED_ENTRY", agentExplanation: "Orphaned.", agentConfidence: 88 };
+    const { item, applied } = enrichItemWithInstitutionalMemory(original, stats);
+    expect(applied).toBe(false);
+    expect(item).toBe(original);
+  });
+});
+
+describe("institutionalMemoryNote", () => {
+  it("is empty without history and populated with it", () => {
+    expect(institutionalMemoryNote(undefined)).toBe("");
+    expect(institutionalMemoryNote({ category: "X", actioned: 0, resolved: 0, escalated: 0, topActionClass: null })).toBe("");
+    const note = institutionalMemoryNote({ category: "X", actioned: 2, resolved: 2, escalated: 0, topActionClass: null });
+    expect(note).toContain("2 similar exceptions");
+  });
+});
+
+describe("formatNetworkGuidance (cross-institution read-path)", () => {
+  it("returns empty string for an empty pool", () => {
+    expect(formatNetworkGuidance([])).toBe("");
+  });
+
+  it("formats k-anonymous patterns as prompt guidance, capped at 3", () => {
+    const guidance = formatNetworkGuidance([
+      { resolutionActionClass: "journal_entry", outcome: "resolved", contributorCount: 4, observationCount: 31 },
+      { resolutionActionClass: "escalate", outcome: "escalated", contributorCount: 3, observationCount: 12 },
+      { resolutionActionClass: "write_off", outcome: "resolved", contributorCount: 3, observationCount: 7 },
+      { resolutionActionClass: "reversal", outcome: "resolved", contributorCount: 3, observationCount: 4 },
+    ]);
+    expect(guidance).toContain("Cross-institution intelligence");
+    expect(guidance).toContain("journal entry → resolved (seen across 4 institutions, 31 cases)");
+    expect(guidance).not.toContain("reversal"); // 4th entry dropped
+  });
+
+  it("contains only categorical tokens — no identifiers, amounts, or org names", () => {
+    const guidance = formatNetworkGuidance([
+      { resolutionActionClass: "fee_posting", outcome: "resolved", contributorCount: 5, observationCount: 20 },
+    ]);
+    // Nothing that looks like an account number, currency amount, or email.
+    expect(guidance).not.toMatch(/\d{6,}/);
+    expect(guidance).not.toMatch(/[₦$€£]\s*\d/);
+    expect(guidance).not.toMatch(/@/);
   });
 });

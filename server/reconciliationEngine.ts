@@ -691,14 +691,25 @@ export function categorizeException(
 
 export async function getAIAnalysis(
   exception: { category: string; description: string },
-  transaction: Transaction
+  transaction: Transaction,
+  // Optional flywheel context woven into the prompt so recommendations reflect
+  // the institution's own history and the anonymised cross-institution network.
+  // Both strings are purely categorical (no PII / no org identifiers) — see
+  // institutionalLearning.formatNetworkGuidance / institutionalMemoryNote.
+  context?: { institutionalGuidance?: string; networkGuidance?: string }
 ): Promise<string> {
   try {
+    const guidanceBlocks = [context?.institutionalGuidance, context?.networkGuidance]
+      .filter((g): g is string => !!g && g.length > 0);
+    const guidanceSection = guidanceBlocks.length > 0
+      ? `\n\nUse the following prior-resolution evidence to make the recommendation more specific and consistent with how this exception has been handled before:\n${guidanceBlocks.join("\n\n")}`
+      : "";
+
     const response = await invokeLLM({
       messages: [
         {
           role: "system",
-          content: `You are a financial reconciliation expert specializing in African banking systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT). Analyze the following exception and provide a brief, actionable recommendation (2-3 sentences max). Reference specific Nigerian/African banking regulations or processes where relevant. Focus on practical steps the reconciliation team should take.`,
+          content: `You are a financial reconciliation expert specializing in African banking systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT). Analyze the following exception and provide a brief, actionable recommendation (2-3 sentences max). Reference specific Nigerian/African banking regulations or processes where relevant. Focus on practical steps the reconciliation team should take.${guidanceBlocks.length > 0 ? " When prior-resolution evidence is provided, prefer the approach it shows and note that it reflects established practice." : ""}`,
         },
         {
           role: "user",
@@ -709,7 +720,7 @@ Amount: ${transaction.currency} ${transaction.amount}
 Date: ${transaction.transactionDate}
 Channel: Channel ID ${transaction.channelId}
 Counterparty: ${transaction.counterparty || "N/A"}
-Direction: ${transaction.debitCredit}
+Direction: ${transaction.debitCredit}${guidanceSection}
 
 Provide a brief analysis and recommended action.`,
         },

@@ -30,7 +30,7 @@ import {
   wc_reconciliation_runs,
   wc_exceptions,
 } from "../drizzle/woodcore_schema";
-import { eq, and, between, sql, isNull, isNotNull, ne, inArray } from "drizzle-orm";
+import { eq, and, between, sql, isNull, isNotNull, ne, inArray, desc } from "drizzle-orm";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -831,6 +831,36 @@ export async function runLayer3(
   const savingsAccountMap = new Map(savingsAccounts.map((a: typeof savingsAccounts[0]) => [a.id, a]));
   const savingsProductMap = new Map(savingsProducts.map((p: typeof savingsProducts[0]) => [p.id, p]));
 
+  // Per-institution learning flywheel: summarise Woodcore's own resolution
+  // history (past reviewed wc_exceptions) so each diagnosis can cite how this
+  // institution has previously actioned the same anomaly category. Woodcore is
+  // a single fixed tenant, so the whole wc_exceptions history is its memory.
+  // Best-effort — a history-lookup failure must never fail the reconciliation.
+  let learningStats: Awaited<ReturnType<typeof import("./institutionalLearning").summarizeResolutionHistory>> | null = null;
+  try {
+    const history = await db
+      .select({
+        category: wc_exceptions.exceptionCategory,
+        reviewStatus: wc_exceptions.reviewStatus,
+        reviewNote: wc_exceptions.reviewNote,
+      })
+      .from(wc_exceptions)
+      .where(ne(wc_exceptions.reviewStatus, "OPEN"))
+      .orderBy(desc(wc_exceptions.reviewedAt))
+      .limit(500);
+    if (history.length > 0) {
+      const ei = await import("./exceptionIntelligence");
+      const learning = await import("./institutionalLearning");
+      learningStats = learning.summarizeResolutionHistory(
+        history.map((h) => ({ category: h.category, reviewStatus: h.reviewStatus ?? "OPEN", reviewNote: h.reviewNote })),
+        ei.classifyResolutionAction,
+      );
+    }
+  } catch (e) {
+    console.error("[Woodcore Layer3] institutional learning lookup failed (non-fatal):", e);
+  }
+  const { enrichItemWithInstitutionalMemory } = await import("./institutionalLearning");
+
   for (const exc of exceptions) {
     const dbExc = dbExceptions.find((e: typeof dbExceptions[0]) => e.glEntryId === exc.glEntryId);
     if (!dbExc) continue;
@@ -918,6 +948,17 @@ Explain what likely caused this anomaly and what the finance team should do.`,
 
     const priorityLevel = getPriorityLevel(exc.exceptionContribution);
     const recommendedAction = EXCEPTION_ACTIONS[exc.exceptionCategory] ?? EXCEPTION_ACTIONS.UNKNOWN;
+
+    // Per-institution learning: cite this institution's own resolution history
+    // for the category and lift confidence when past cases corroborate.
+    if (learningStats) {
+      const enriched = enrichItemWithInstitutionalMemory(
+        { category: agentClassification, agentExplanation, agentConfidence: confidence },
+        learningStats,
+      );
+      agentExplanation = enriched.item.agentExplanation;
+      confidence = enriched.item.agentConfidence;
+    }
 
     // Update exception record in DB
     await db.update(wc_exceptions)
