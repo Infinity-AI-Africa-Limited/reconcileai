@@ -400,6 +400,24 @@ async function startServer() {
   app.post("/api/webhooks/cbs/:configId", cbsWebhookHandler);
   app.post("/api/webhooks/woodcore/:configId", cbsWebhookHandler);
 
+  // ── Developer REST API (gap-closure plan WS-4) ─────────────────────────────
+  // /api/v1/* — X-API-Key auth, rate-limited, request-logged; translates REST
+  // onto the existing tRPC procedures (server/api/gateway.ts). /developers
+  // serves the interactive API reference (Redoc over docs/openapi.yaml).
+  app.use("/api/v1", async (req, res, next) => {
+    try {
+      const { getApiGateway } = await import("../api/gateway");
+      getApiGateway()(req, res, next);
+    } catch (err) {
+      console.error("[api-gateway] mount error:", err);
+      res.status(500).json({ code: "INTERNAL", message: "API unavailable" });
+    }
+  });
+  app.get("/developers", async (_req, res) => {
+    const { developerDocsHtml } = await import("../api/developerDocs");
+    res.type("html").send(developerDocsHtml());
+  });
+
   // ── WoodCore connector: scheduled tick (daily batch sync + DLQ retries) ───
   // POST /api/scheduled/woodcoreConnectorSync — guarded by x-sync-secret, same
   // scheme as /api/woodcore/sync. Point a Railway/host cron at this hourly;

@@ -395,6 +395,34 @@ export const webhooks = mysqlTable("webhooks", {
 export type Webhook = typeof webhooks.$inferSelect;
 export type InsertWebhook = typeof webhooks.$inferInsert;
 
+// ─── Webhook Deliveries (WS-4) ───────────────────────────────────────
+// One row per delivery attempt chain: created pending, updated by the retry
+// queue until delivered or attempts exhaust. Powers the admin delivery
+// dashboard and the ≥99.5% reliability KPI. Org-scoped through webhookId
+// (RLS class: derived).
+export const webhookDeliveries = mysqlTable("webhook_deliveries", {
+  id: int("id").autoincrement().primaryKey(),
+  webhookId: int("webhookId").notNull(), // → webhooks.id (org scope derives from it)
+  event: varchar("event", { length: 64 }).notNull(), // e.g. exception.created
+  url: text("url").notNull(), // snapshot at dispatch time
+  status: mysqlEnum("status", ["pending", "delivered", "failed"]).default("pending").notNull(),
+  attempts: int("attempts").default(0).notNull(),
+  maxAttempts: int("maxAttempts").default(6).notNull(),
+  responseStatus: int("responseStatus"), // last HTTP status (null on network error)
+  lastError: varchar("lastError", { length: 500 }),
+  payloadSummary: varchar("payloadSummary", { length: 500 }), // event + ids only, never row data
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  lastAttemptAt: timestamp("lastAttemptAt"),
+  deliveredAt: timestamp("deliveredAt"),
+}, (table) => [
+  index("idx_whd_webhook").on(table.webhookId),
+  index("idx_whd_status").on(table.status),
+  index("idx_whd_created").on(table.createdAt),
+]);
+
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
+export type InsertWebhookDelivery = typeof webhookDeliveries.$inferInsert;
+
 // ─── API Keys (External Integration) ────────────────────────────────
 export const apiKeys = mysqlTable("api_keys", {
   id: int("id").autoincrement().primaryKey(),

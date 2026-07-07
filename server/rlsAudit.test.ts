@@ -61,6 +61,9 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   exception_aging_settings: "tenant_nullable",
   reconciliation_reports: "tenant_nullable",
   webhooks: "tenant_nullable",
+  // WS-4 delivery tracking: no own org column by design — org scope derives
+  // from webhookId → webhooks.organizationId (all queries join through it).
+  webhook_deliveries: "derived",
   api_keys: "tenant_nullable",
   scheduled_tasks: "tenant_nullable",
   schedule_run_history: "derived",

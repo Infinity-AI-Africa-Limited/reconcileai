@@ -1,44 +1,50 @@
-# ReconcileAI Developer API — design specification (gap-closure plan WS-4, Phase 1).
-# Design-first artifact: published BEFORE the REST gateway is built. Every path is a
-# thin translation onto an existing tRPC procedure (business logic unchanged); shapes
-# below mirror the live Drizzle schema (reconciliationJobs/exceptions/resolutionTemplates/
-# shared patterns/KPI reports) so implementation cannot drift from this contract.
+# ReconcileAI Developer API (gap-closure plan WS-4).
+# Served live at /api/v1/openapi.yaml; interactive reference at /developers.
+# Every path is a thin translation onto an existing tRPC procedure (business
+# logic unchanged); shapes mirror the live Drizzle schema.
 openapi: 3.0.3
 info:
   title: ReconcileAI Developer API
-  version: 1.0.0-design
+  version: 1.0.0
   description: |
     Programmatic access to ReconcileAI's reconciliation engine, exception
     intelligence, and KPI reporting for banks, MFBs, fintechs, and platform
-    partners (ERPs, core banking systems, payment processors).
-
-    **Status: design specification.** The surface is frozen before implementation
-    (gap-closure plan WS-4 Phase 1); the gateway ships in Phase 2.
+    partners (ERPs, core banking systems, payment processors). The same API
+    surface ships in on-premise deployments, so bank internal systems can
+    trigger runs and pull exceptions without dashboard logins.
 
     ## Authentication
     Every request carries an API key in the `X-API-Key` header. Keys are issued
     per organization in the ReconcileAI dashboard (Admin → API Keys) and scoped
-    to that organization's data.
+    to that organization's data. API requests act as the key's owner — the same
+    role permissions and audit trail as the dashboard.
+
+    ## Sandbox — first call in minutes, no key
+    `POST /sandbox/reconciliation/runs` runs the real matching engine on a
+    deterministic synthetic dataset and returns the full result synchronously.
+    No signup, no API key. See the Getting Started guide.
 
     ## Rate limits
-    60 requests/minute per API key. `429` responses carry a `Retry-After` header.
+    60 requests/minute per API key (30/minute per IP on the sandbox).
+    `429` responses carry a `Retry-After` header.
 
     ## Webhooks (outbound)
     Configure webhook endpoints in the dashboard to receive:
-    - `exception.created` — a new exception was detected
-    - `exception.resolved` — an exception reached a terminal status
+    - `exception.created` — new exceptions detected (one event per run with the
+      batch summary `{jobId, count, currency}` — not one call per exception)
+    - `exception.resolved` / `exception.escalated` / `exception.in_review`
     - `reconciliation.completed` — a run finished (payload: run summary)
-    - `kpi.threshold.breached` — a KPI crossed its floor
-    Deliveries are signed (`X-ReconcileAI-Signature`, HMAC-SHA256 of the body)
-    and retried with exponential backoff for 24h.
+    - `upload.completed` — a transaction upload finished
+    - `kpi.threshold.breached` — a KPI crossed its floor (first wired: autoMatchRate < 85%)
+    Deliveries are signed (`X-ReconcileAI-Signature`, HMAC-SHA256 of the raw
+    body), tracked per delivery, and retried with exponential backoff (6
+    attempts). Delivery history and reliability are visible in the dashboard.
   contact:
     name: ReconcileAI (Infinity AI Africa Limited)
     url: https://www.reconcileaiafrica.com
 servers:
   - url: https://www.reconcileaiafrica.com/api/v1
-    description: Production
-  - url: https://sandbox.reconcileaiafrica.com/api/v1
-    description: Sandbox (synthetic data, self-service keys)
+    description: Production (sandbox endpoints live under /sandbox on the same host)
 
 security:
   - ApiKeyAuth: []
@@ -273,6 +279,32 @@ paths:
                   runCount: { type: integer }
                   metrics: { type: array, items: { $ref: '#/components/schemas/KpiMetric' } }
 
+  /sandbox/reconciliation/runs:
+    post:
+      tags: [System]
+      summary: Run the engine on synthetic data (no API key)
+      description: |
+        Executes the real matching engine + exception categorizer on a
+        deterministic synthetic dataset (exact matches, a fee-deducted amount
+        mismatch, a timing difference, a duplicate, an unmatched leg, and a
+        cross-currency FX pair) and returns the complete result synchronously.
+        Identical output on every call — ideal for integration tests.
+      security: []
+      operationId: sandboxRun
+      responses:
+        '200':
+          description: Complete synthetic run — same shapes as the real endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sandbox: { type: boolean, example: true }
+                  stats: { type: object }
+                  matches: { type: array, items: { type: object } }
+                  exceptions: { type: array, items: { $ref: '#/components/schemas/Exception' } }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /health:
     get:
       tags: [System]
@@ -332,21 +364,16 @@ components:
 
     CreateRunRequest:
       type: object
-      required: [module]
+      required: [sourceChannelId, targetChannelId, dateFrom, dateTo]
       properties:
-        module: { type: string, enum: [settlement, account_level, mobile_money] }
-        channelCode: { type: string, description: Source channel code }
-        operator:
-          type: string
-          enum: [nip, opay, palmpay, mtn_momo_ug, airtel_money_ug]
-          description: Mobile money module only
-        files:
-          type: object
-          description: Base64 file payloads (≤20MB each) or prior upload IDs
-          properties:
-            settlement: { type: string }
-            ledger: { type: string }
-        webhookUrl: { type: string, format: uri, description: One-off completion callback }
+        name: { type: string, maxLength: 255, description: Defaults to a timestamped name }
+        module: { type: string, enum: [settlement, account_level], default: settlement }
+        sourceChannelId: { type: integer, description: Channel id (Admin → Channels) }
+        targetChannelId: { type: integer }
+        dateFrom: { type: string, format: date, example: "2026-06-01" }
+        dateTo: { type: string, format: date, example: "2026-06-30" }
+        amountTolerance: { type: number, minimum: 0, maximum: 0.1, default: 0.005 }
+        dateWindowDays: { type: integer, minimum: 0, maximum: 30, default: 3 }
 
     RunSummary:
       type: object

@@ -25,7 +25,7 @@ enforced at three layers:
 |---|---|---|---|
 | `tenant_required` | 12 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 39 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
-| `derived` | 5 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. |
+| `derived` | 6 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
 | `mirror_single_tenant` | 13 | `wc_*` Fineract mirror (Woodcore POC) | **Known caveat** — see finding F2. |
 | `global` | 7 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |

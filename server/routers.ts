@@ -185,168 +185,31 @@ function buildValidTransactions(
   return { validTxns, validRows, invalidRows, errors };
 }
 
-// ─── Super Admin Procedure ───────────────────────────────────────────
-// Only Infinity AI staff (super_admin role) can access these procedures.
-// Cross-tenant visibility: can see ALL organisations, instances, and users.
-
-const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
-  if (ctx.user.role !== "super_admin") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin access required. This action is restricted to Infinity AI staff." });
-  }
-  return next({ ctx });
-});
-
-// ─── Admin Procedure ─────────────────────────────────────────────────
-// Allows both super_admin (Infinity AI) and admin (org-level admin) roles.
-
-const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
-  if (ctx.user.role !== "admin" && ctx.user.role !== "super_admin") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
-  }
-  return next({ ctx });
-});
-
-// Tenancy guard for user-management mutations. Super admins (Infinity AI) may act
-// on anyone. Org admins may only act on non-super-admin users within their OWN
-// organisation — they can neither see nor touch Infinity AI staff or other orgs.
-async function assertCanManageUsers(
-  ctx: { user: { role: string; organizationId: number | null } },
-  userIds: number[]
-): Promise<void> {
-  if (ctx.user.role === "super_admin") return;
-  if (userIds.length === 0) return;
-  const drizzle = await getDb();
-  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-  const targets = await drizzle
-    .select({ id: users.id, role: users.role, organizationId: users.organizationId })
-    .from(users)
-    .where(inArray(users.id, userIds));
-  for (const t of targets) {
-    if (t.role === "super_admin" || t.organizationId !== ctx.user.organizationId) {
-      throw new TRPCError({
-        code: "FORBIDDEN",
-        message: "You can only manage users within your own organisation.",
-      });
-    }
-  }
-}
-
-// ─── Guest Protection Middleware ─────────────────────────────────────
-
-const guestProtectedProcedure = protectedProcedure.use(({ ctx, next }) => {
-  if (ctx.user.isGuest) {
-    throw new TRPCError({ 
-      code: "FORBIDDEN", 
-      message: "Guest users cannot perform write operations. Please sign up to save your work." 
-    });
-  }
-  return next({ ctx });
-});
-
-// ─── Operations-Only Middleware ───────────────────────────────────────
-// Blocks CFO and Compliance/Audit roles from performing reconciliation
-// and exception mutations. Admins and Operations users are allowed.
-const operationsProcedure = protectedProcedure.use(({ ctx, next }) => {
-  const restrictedRoles = ["cfo", "compliance"];
-  if (ctx.user.isGuest) {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Guest users cannot perform write operations." });
-  }
-  if (restrictedRoles.includes(ctx.user.role as string)) {
-    throw new TRPCError({
-      code: "FORBIDDEN",
-      message: `Your role (${ctx.user.role}) does not have permission to perform reconciliation or exception write operations. This is a read-only action for your role.`,
-    });
-  }
-  return next({ ctx });
-});
-
-// Public-but-gated Woodcore POC procedures: require a valid access token (the
-// x-poc-access-token header) for the fixed "woodcore" POC key. Keeps the live
-// Woodcore/Fineract data behind the per-POC invite link.
-const woodcoreProcedure = publicProcedure.use(async (opts) => {
-  const { assertPocAccess, tokenFromCtx } = await import("./pocAccess");
-  await assertPocAccess("woodcore", tokenFromCtx(opts.ctx));
-  return opts.next();
-});
-
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-async function logAudit(
-  userId: number | null,
-  action: string,
-  entityType: string,
-  entityId?: number,
-  details?: any,
-  ipAddress?: string,
-  userAgent?: string
-) {
-  try {
-    await db.createAuditLog({
-      userId,
-      action,
-      entityType,
-      entityId,
-      details: details ? JSON.stringify(details) : null,
-      ipAddress: ipAddress || null,
-      userAgent: userAgent ? userAgent.substring(0, 500) : null,
-    });
-  } catch (err) {
-    // Audit logging should never crash the main operation
-    console.error("[Audit] Failed to log:", err);
-  }
-}
-
-function getClientInfo(ctx: any): { ip: string; ua: string } {
-  const ip = ctx.req?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
-    || ctx.req?.socket?.remoteAddress
-    || "unknown";
-  const ua = ctx.req?.headers?.["user-agent"] || "unknown";
-  return { ip, ua };
-}
-
-function sanitizeInput(input: string, maxLength: number = 255): string {
-  return input
-    .replace(/<[^>]*>/g, "")
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
-    .trim()
-    .substring(0, maxLength);
-}
+// ─── Shared router building blocks ───────────────────────────────────
+// Extracted to server/routers/shared.ts (WS-4 pre-work — first step of the
+// routers.ts split; see docs/ROUTERS_SPLIT_PLAN.md). Imported back here so
+// the ~hundreds of call sites in this file are untouched; new domain routers
+// import from ./routers/shared directly.
+import {
+  superAdminProcedure,
+  adminProcedure,
+  assertCanManageUsers,
+  guestProtectedProcedure,
+  operationsProcedure,
+  woodcoreProcedure,
+  logAudit,
+  getClientInfo,
+  sanitizeInput,
+} from "./routers/shared";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
+// WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
+// abstraction: BullMQ when REDIS_URL is set, in-process otherwise). Kept as a
+// local wrapper so the ~15 call sites stay unchanged.
 
 async function dispatchWebhook(event: string, payload: any) {
-  try {
-    const webhookList = await db.getActiveWebhooksByEvent(event);
-    for (const webhook of webhookList) {
-      // Data residency: user-configured webhooks can carry reconciliation payloads.
-      // In on-premise mode, only deliver to in-VPC / allowlisted hosts.
-      if (!isEgressAllowed(webhook.url as string)) {
-        console.warn(
-          `[Webhook] on-premise mode: blocked delivery to external host ${webhook.url} (event ${event}). ` +
-            "Add the host to EGRESS_ALLOWLIST to permit it.",
-        );
-        continue;
-      }
-      const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
-      const signature = crypto.createHmac("sha256", webhook.secret).update(body).digest("hex");
-
-      fetch(webhook.url as string, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-ReconcileAI-Signature": signature,
-          "X-ReconcileAI-Event": event,
-        },
-        body,
-        signal: AbortSignal.timeout(10000), // 10s timeout
-      }).catch((err) => {
-        console.error(`[Webhook] Failed to deliver to ${webhook.url}:`, err);
-        db.updateWebhook(webhook.id, { failureCount: webhook.failureCount + 1 });
-      });
-    }
-  } catch (err) {
-    console.error("[Webhook] Dispatch error:", err);
-  }
+  const { dispatchWebhookEvent } = await import("./webhookDelivery");
+  await dispatchWebhookEvent(event, payload);
 }
 
 // ─── Distributor Identity Registry Router ───────────────────────────
@@ -2886,6 +2749,26 @@ export const appRouter = router({
         await db.deleteWebhook(input.id);
         await logAudit(ctx.user.id, "delete_webhook", "webhook", input.id, {}, ip, ua);
         return { success: true };
+      }),
+
+    // WS-4 delivery dashboard: recent tracked deliveries for this org's
+    // webhooks, and the reliability figure (≥99.5% success criterion).
+    deliveries: protectedProcedure
+      .input(z.object({ limit: z.number().int().min(1).max(200).default(50) }).optional())
+      .query(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId;
+        if (!orgId) return [];
+        const { listDeliveries } = await import("./webhookDelivery");
+        return listDeliveries(orgId, input?.limit ?? 50);
+      }),
+
+    deliveryStats: protectedProcedure
+      .input(z.object({ sinceDays: z.number().int().min(1).max(365).default(30) }).optional())
+      .query(async ({ ctx, input }) => {
+        const orgId = ctx.user.organizationId;
+        if (!orgId) return { total: 0, delivered: 0, failed: 0, pending: 0, reliability: null };
+        const { deliveryStats } = await import("./webhookDelivery");
+        return deliveryStats(orgId, input?.sinceDays ?? 30);
       }),
   }),
 
@@ -6860,7 +6743,7 @@ async function runReconciliation(
     // Invalidate dashboard stats cache so next load reflects fresh data
     db.invalidateDashboardStatsCache().catch(() => {});
 
-    // Dispatch webhook
+    // Dispatch webhooks (WS-4 event set)
     dispatchWebhook("reconciliation.completed", {
       jobId,
       matchedCount,
@@ -6869,6 +6752,25 @@ async function runReconciliation(
       matchRate: Math.round(matchRate * 100) / 100,
       processingTimeMs,
     });
+    // exception.created: one event per job with the batch summary — per-row
+    // events would fan a 5,000-exception run into 5,000 HTTP calls.
+    if (exceptionCount > 0) {
+      dispatchWebhook("exception.created", {
+        jobId,
+        count: exceptionCount,
+        currency: dominantCurrency,
+      });
+    }
+    // kpi.threshold.breached: the auto-match floor (85%) is the first wired
+    // threshold; others follow as their computations move server-side.
+    if (totalTxns > 0 && matchRate < 85) {
+      dispatchWebhook("kpi.threshold.breached", {
+        jobId,
+        metric: "autoMatchRate",
+        value: Math.round(matchRate * 100) / 100,
+        floor: 85,
+      });
+    }
 
     // Send email alerts based on user preferences
     checkAndSendAlerts(jobId, userId).catch((err) =>

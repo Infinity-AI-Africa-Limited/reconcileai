@@ -33,6 +33,8 @@ export async function validateApiKey(apiKey: string): Promise<{
   valid: boolean;
   organizationId?: number;
   apiKeyId?: number;
+  /** The key owner — REST gateway requests act as this user (WS-4). */
+  userId?: number;
   error?: string;
 }> {
   if (!apiKey || apiKey.length < 32) {
@@ -68,6 +70,7 @@ export async function validateApiKey(apiKey: string): Promise<{
     valid: true,
     organizationId: key.organizationId ?? undefined,
     apiKeyId: key.id,
+    userId: key.userId,
   };
 }
 
