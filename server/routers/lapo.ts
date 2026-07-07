@@ -16,12 +16,9 @@ import {
   checkDailyCompleteness,
   ingestLapoEvents,
   ingestLapoFile,
-  provisionLapoChannels,
+  provisionLapoForOrg,
 } from "../connectors/lapo/etl";
-import {
-  LAPO_EXCEPTION_CATEGORIES,
-  seedLapoResolutionTemplates,
-} from "../connectors/lapo/exceptions";
+import { LAPO_EXCEPTION_CATEGORIES } from "../connectors/lapo/exceptions";
 
 const sourceKeySchema = z.enum([
   "cbs_ledger", "mobile_banking", "ussd", "agent_banking",
@@ -113,16 +110,15 @@ export const lapoRouter = router({
     }),
 
   /**
-   * Provision (or repair) the LAPO channel pack for an org: eight source
-   * channels with timing-aware matching config + the exception taxonomy as
-   * resolution templates. Idempotent; also runs automatically when an org is
-   * onboarded through the "LAPO MFB (multi-source)" option in New Organisation.
+   * Provision (or repair) the LAPO channel pack for an org: LAPO connector
+   * config + eight source channels with timing-aware matching config + the
+   * exception taxonomy as resolution templates. Idempotent; also runs
+   * automatically when a super admin adds LAPO to a client's build during
+   * DIRECT onboarding (New Organisation → Direct → custom channel).
    */
   provision: superAdminProcedure
     .input(z.object({ organizationId: z.number().int().positive() }))
     .mutation(async ({ input }) => {
-      const channelIds = await provisionLapoChannels(input.organizationId);
-      const templates = await seedLapoResolutionTemplates(input.organizationId);
-      return { channelIds, templates };
+      return provisionLapoForOrg(input.organizationId);
     }),
 });

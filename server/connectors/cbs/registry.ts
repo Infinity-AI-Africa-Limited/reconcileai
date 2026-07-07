@@ -45,6 +45,14 @@ export interface CbsProfile {
   csvMappings: Record<WcEntity, MappingRule[]>;
   /** Shown in the UI under the connector name. */
   notes: string;
+  /**
+   * Hidden from the "Via Core Banking Connector" onboarding picker. LAPO is
+   * not a core-banking VENDOR — it's a direct client whose custom channel pack
+   * is added during DIRECT onboarding. The profile still exists in the registry
+   * (its connector config, webhook routing and DLQ rely on cbsType), it just
+   * doesn't appear as a CBS option.
+   */
+  pickerHidden?: boolean;
 }
 
 // ─── WoodCore (Apache Fineract) — the proven original ───────────────────────
@@ -356,6 +364,8 @@ const LAPO_PROFILE: CbsProfile = {
   csvMappings: lapoEntityMappings,
   notes:
     "Custom multi-source integration: 8 source systems (CBS ledger, mobile, USSD, agent, NIP, Interswitch/UPSL/eTranzact cards) via SFTP daily batches + realtime events. Provisions all source channels, timing tolerances and the LAPO exception taxonomy at onboarding. All shapes are config — updatable the day LAPO provides real specs.",
+  // Onboarded via the DIRECT channel (custom channel pack), not the CBS picker.
+  pickerHidden: true,
 };
 
 // ─── The registry ────────────────────────────────────────────────────────────
@@ -450,8 +460,7 @@ export function getCbsProfile(type: string | null | undefined): CbsProfile {
 
 /** Compact list for UI dropdowns (onboarding hub, connector page). */
 export function listCbsProfiles(): Array<Pick<CbsProfile, "type" | "label" | "vendor" | "notes" | "defaultAuthMode">> {
-  return CBS_TYPES.map((t) => {
-    const p = CBS_PROFILES[t];
-    return { type: p.type, label: p.label, vendor: p.vendor, notes: p.notes, defaultAuthMode: p.defaultAuthMode };
-  });
+  return CBS_TYPES.map((t) => CBS_PROFILES[t])
+    .filter((p) => !p.pickerHidden)
+    .map((p) => ({ type: p.type, label: p.label, vendor: p.vendor, notes: p.notes, defaultAuthMode: p.defaultAuthMode }));
 }

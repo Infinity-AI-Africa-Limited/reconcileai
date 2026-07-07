@@ -163,6 +163,9 @@ function CreateOrgDialog({
 }) {
   const [channel, setChannel] = useState<"direct" | "cbs">("direct");
   const [cbsType, setCbsType] = useState<"woodcore" | "t24" | "mambu" | "flexcube">("woodcore");
+  // Optional custom channel pack for a DIRECT client (e.g. LAPO's multi-source
+  // integration). Not a CBS vendor — added to a directly-onboarded org's build.
+  const [customChannel, setCustomChannel] = useState<"none" | "lapo">("none");
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [segment, setSegment] = useState<Segment>("financial_services");
@@ -182,13 +185,18 @@ function CreateOrgDialog({
 
   const resetForm = () => {
     setName(""); setCode(""); setSegment("financial_services");
-    setAdminName(""); setAdminEmail(""); setApiBaseUrl("");
+    setAdminName(""); setAdminEmail(""); setApiBaseUrl(""); setCustomChannel("none");
     setCbsResult(null);
   };
 
   const createOrg = trpc.superAdmin.createOrganization.useMutation({
-    onSuccess: () => {
-      toast.success("Organisation created successfully");
+    onSuccess: (r) => {
+      const cc = r.customChannel;
+      toast.success(
+        cc
+          ? `Organisation created — LAPO channel pack added (${cc.channels} channels, ${cc.templates} templates)`
+          : "Organisation created successfully",
+      );
       resetForm();
       onSuccess();
       onClose();
@@ -212,7 +220,7 @@ function CreateOrgDialog({
 
   const submit = () => {
     if (channel === "direct") {
-      createOrg.mutate({ name, code, segment, country, baseCurrency: currency });
+      createOrg.mutate({ name, code, segment, country, baseCurrency: currency, customChannel });
     } else {
       onboardCbs.mutate({
         cbsType,
@@ -325,19 +333,46 @@ function CreateOrgDialog({
               </div>
 
               {channel === "direct" ? (
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Segment *</label>
-                  <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="financial_services">Financial Services</SelectItem>
-                      <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                      <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+                <>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">Segment *</label>
+                    <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="financial_services">Financial Services</SelectItem>
+                        <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
+                        <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {/* Custom channel pack for a direct client with a proprietary
+                      channel estate (not a CBS vendor). LAPO adds its 8 source
+                      channels + exception taxonomy to this org's build. */}
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                      Custom channel integration (optional)
+                    </label>
+                    <Select value={customChannel} onValueChange={(v) => setCustomChannel(v as "none" | "lapo")}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None — standard uploads / API / SFTP</SelectItem>
+                        <SelectItem value="lapo">LAPO MFB (multi-source) — 8 source channels + taxonomy</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {customChannel === "lapo" && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Provisions the LAPO connector config, all 8 source channels (CBS ledger,
+                        mobile, USSD, agent, NIP, Interswitch/UPSL/eTranzact) with per-source timing
+                        tolerances, and the LAPO exception taxonomy. Point SFTP/webhook at LAPO
+                        after onboarding.
+                      </p>
+                    )}
+                  </div>
+                </>
               ) : (
                 <>
                   <div className="grid grid-cols-2 gap-3">

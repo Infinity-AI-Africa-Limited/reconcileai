@@ -3938,6 +3938,11 @@ export const appRouter = router({
         segment: z.enum(["financial_services", "corporate_b2b", "super_admin"]),
         country: z.string().length(3).default("NGA"),
         baseCurrency: z.string().length(3).default("NGN"),
+        // Optional custom channel pack added to a DIRECTLY-onboarded client's
+        // build. "lapo" provisions the LAPO multi-source integration (connector
+        // config + 8 source channels + exception taxonomy). Direct clients that
+        // run a proprietary channel estate get it here, NOT via the CBS picker.
+        customChannel: z.enum(["none", "lapo"]).default("none"),
       }))
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
@@ -3949,6 +3954,8 @@ export const appRouter = router({
           segment: input.segment,
           country: input.country,
           baseCurrency: input.baseCurrency,
+          // Acquisition path stays "direct" — the custom channel is an added
+          // capability, not the onboarding channel.
           isActive: true,
         });
         const newOrgId = (result as any).insertId;
@@ -3963,9 +3970,22 @@ export const appRouter = router({
         } catch (err) {
           console.error("[createOrganization] tenant baseline failed:", err);
         }
+        // Optional custom channel pack (LAPO). Idempotent; a failure here never
+        // aborts org creation — re-run via lapo.provision.
+        let customChannelResult: { channels: number; templates: number } | null = null;
+        if (input.customChannel === "lapo") {
+          try {
+            const { provisionLapoForOrg } = await import("./connectors/lapo/etl");
+            const r = await provisionLapoForOrg(newOrgId);
+            customChannelResult = { channels: r.channelIds.length, templates: r.templates.inserted };
+          } catch (err) {
+            console.error("[createOrganization] LAPO channel pack failed (re-run lapo.provision):", err);
+          }
+        }
         await logAudit(ctx.user.id, "create_organization", "organization", newOrgId, {
           name: input.name,
           segment: input.segment,
+          customChannel: input.customChannel,
         });
         await db.logPlatformEvent({
           actorId: ctx.user.id,
@@ -3974,9 +3994,9 @@ export const appRouter = router({
           targetType: "organization",
           targetId: newOrgId,
           targetName: input.name,
-          newValue: JSON.stringify({ segment: input.segment, country: input.country, currency: input.baseCurrency }),
+          newValue: JSON.stringify({ segment: input.segment, country: input.country, currency: input.baseCurrency, customChannel: input.customChannel }),
         });
-        return { success: true, organizationId: newOrgId };
+        return { success: true, organizationId: newOrgId, customChannel: customChannelResult };
       }),
 
     // Promote a user to super_admin (Infinity AI staff only)

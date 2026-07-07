@@ -32,10 +32,13 @@ describe("registry shape", () => {
     expect(getCbsProfile(null).type).toBe("woodcore");
   });
 
-  it("listCbsProfiles exposes all five platforms for the onboarding hub", () => {
-    expect(listCbsProfiles().map((p) => p.type)).toEqual([
-      "woodcore", "t24", "mambu", "flexcube", "lapo",
-    ]);
+  it("CBS picker shows the four vendor platforms; LAPO is hidden (direct-onboarded)", () => {
+    const shown = listCbsProfiles().map((p) => p.type);
+    expect(shown).toEqual(["woodcore", "t24", "mambu", "flexcube"]);
+    expect(shown).not.toContain("lapo");
+    // …but the LAPO profile still resolves from the registry (plumbing intact).
+    expect(getCbsProfile("lapo").type).toBe("lapo");
+    expect(CBS_PROFILES.lapo.pickerHidden).toBe(true);
   });
 });
 

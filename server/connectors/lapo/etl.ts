@@ -30,7 +30,10 @@ import {
   type LapoSourceProfile,
 } from "@shared/lapoSources";
 import { channels, uploadBatches } from "../../../drizzle/schema";
+import { wcConnectorConfigs } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { getCbsProfile } from "../cbs/registry";
+import { seedLapoResolutionTemplates } from "./exceptions";
 import { enqueueDeadLetter } from "../woodcore/dlq";
 import {
   createIngestBatch,
@@ -206,6 +209,61 @@ export async function provisionLapoChannels(organizationId: number): Promise<num
   const ids: number[] = [];
   for (const key of LAPO_SOURCE_KEYS) ids.push(await ensureLapoChannel(organizationId, key));
   return ids;
+}
+
+export interface LapoProvisionResult {
+  organizationId: number;
+  configId: number | null;
+  channelIds: number[];
+  templates: { inserted: number; existing: number };
+}
+
+/**
+ * Add the LAPO custom channel pack to an organization (idempotent).
+ *
+ * This is the operation behind "add LAPO to a client's build" during DIRECT
+ * onboarding — LAPO is a direct client, not a CBS vendor, so the pack is added
+ * to a directly-onboarded org rather than acquired through the CBS picker. It:
+ *   1. ensures a LAPO connector config (cbsType=lapo, disabled) — the backbone
+ *      for the realtime webhook endpoint and the dead-letter queue;
+ *   2. provisions the eight source channels with timing-aware matching config;
+ *   3. seeds the LAPO exception taxonomy as org resolution templates.
+ * Also invoked by lapo.provision (repair / re-run).
+ */
+export async function provisionLapoForOrg(organizationId: number): Promise<LapoProvisionResult> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+
+  // 1) LAPO connector config (one per org; unique on organizationId).
+  let configId: number | null = null;
+  const existing = await getConfigRowByOrg(organizationId);
+  if (existing) {
+    configId = existing.id;
+    if (existing.cbsType !== "lapo") {
+      console.warn(
+        `[lapo] org ${organizationId} already has a ${existing.cbsType} connector config; reusing it for LAPO DLQ/webhook.`,
+      );
+    }
+  } else {
+    const profile = getCbsProfile("lapo");
+    const res = await db.insert(wcConnectorConfigs).values({
+      organizationId,
+      cbsType: "lapo",
+      name: profile.channelName,
+      baseUrl: "",
+      tenantId: profile.defaultTenantId,
+      authMode: profile.defaultAuthMode,
+      apiKeyHeader: profile.defaultApiKeyHeader,
+      isEnabled: false,
+    });
+    configId = Number((res as unknown as [{ insertId: number }])[0]?.insertId ?? 0) || null;
+  }
+
+  // 2) Channels + 3) taxonomy templates.
+  const channelIds = await provisionLapoChannels(organizationId);
+  const templates = await seedLapoResolutionTemplates(organizationId);
+
+  return { organizationId, configId, channelIds, templates };
 }
 
 // ─── FILE path (SFTP daily batch / manual upload) ────────────────────────────
