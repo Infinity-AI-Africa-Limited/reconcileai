@@ -14,6 +14,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { PocKpiDashboard } from "@/components/PocKpiDashboard";
+import PocReportActions from "@/components/PocReportActions";
 import PocRunHistory from "@/components/PocRunHistory";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Loader2, Upload as UploadIcon, FileSpreadsheet, FileText, CheckCircle2,
-  Play, Scale, AlertTriangle, Bot, Copy, Check, Sparkles, X,
+  Play, Scale, AlertTriangle, Bot, Sparkles, X,
   File as FileIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -105,6 +106,17 @@ const CATEGORY_LABELS: Record<string, string> = {
   AMOUNT_MISMATCH: "Amount mismatch",
   DUPLICATE: "Duplicate",
   REVERSAL: "Reversal",
+};
+
+// Exception review workflow (parity with Woodcore / LAPO): each exception can be
+// acknowledged, resolved, escalated, or reopened; the status is persisted so the
+// resolution-rate KPI and the run history reflect it.
+type ReviewStatus = "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "ESCALATED";
+const REVIEW_STATUS_META: Record<ReviewStatus, { label: string; badge: string; bar: string }> = {
+  OPEN:         { label: "Open",        badge: "bg-red-100 text-red-700 border-red-200",       bar: "bg-red-400" },
+  ACKNOWLEDGED: { label: "In review",   badge: "bg-amber-100 text-amber-700 border-amber-200", bar: "bg-amber-400" },
+  RESOLVED:     { label: "Resolved",    badge: "bg-green-100 text-green-700 border-green-200", bar: "bg-green-500" },
+  ESCALATED:    { label: "Escalated",   badge: "bg-purple-100 text-purple-700 border-purple-200", bar: "bg-purple-500" },
 };
 
 // ─── Progress Bar ─────────────────────────────────────────────────────────────
@@ -368,12 +380,12 @@ export default function SaladAfricaPOC() {
   const [ledgerPendingName, setLedgerPendingName] = useState<string | undefined>();
   const [statementPendingName, setStatementPendingName] = useState<string | undefined>();
   const [result, setResult] = useState<any>(null);
-  const [shareUrl, setShareUrl] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  // Per-exception review status (index → status), persisted via poc.updateExceptionStatus.
+  const [reviewStatuses, setReviewStatuses] = useState<Record<string, ReviewStatus>>({});
 
   const extract = trpc.poc.extract.useMutation();
   const run = trpc.poc.run.useMutation();
-  const share = trpc.poc.createShareToken.useMutation();
+  const updateStatus = trpc.poc.updateExceptionStatus.useMutation();
   const saveFile = trpc.poc.saveFile.useMutation();
   // KPI Dashboard is an internal Infinity AI view — only super admins see the tab,
   // and the query only runs for them (the server enforces this too).
@@ -462,12 +474,12 @@ export default function SaladAfricaPOC() {
   const handleClear = (side: "ledger" | "statement") => {
     if (side === "ledger") { setLedger(null); setLedgerStage("idle"); }
     else { setStatement(null); setStatementStage("idle"); }
-    setResult(null); setShareUrl(null);
+    setResult(null); setReviewStatuses({});
   };
 
   const handleRun = async () => {
     if (!ledger || !statement) return;
-    setResult(null); setShareUrl(null);
+    setResult(null); setReviewStatuses({});
     try {
       const res = await run.mutateAsync({
         pocSlug: POC_SLUG,
@@ -475,24 +487,38 @@ export default function SaladAfricaPOC() {
         statementUploadId: statement.uploadId,
       });
       setResult(res);
+      // Every exception starts OPEN; the user can then resolve/escalate each one.
+      const initial: Record<string, ReviewStatus> = {};
+      (res.layer3 ?? []).forEach((_: any, i: number) => { initial[String(i)] = "OPEN"; });
+      setReviewStatuses(initial);
       toast.success("Reconciliation complete");
     } catch (e: any) {
       toast.error(e.message || "Reconciliation failed.");
     }
   };
 
-  const handleShare = async () => {
-    if (!result) return;
+  // Resolve a single exception: optimistic UI, then persist via the DB row id that
+  // runFullPoc now returns on each layer3 item.
+  const handleStatusChange = async (index: number, newStatus: ReviewStatus, note: string) => {
+    const key = String(index);
+    const prev = reviewStatuses[key] ?? "OPEN";
+    setReviewStatuses((s) => ({ ...s, [key]: newStatus }));
+    const exception = (result?.layer3 ?? [])[index];
+    if (!exception?.id) {
+      toast.success(`Exception ${index + 1} marked as ${REVIEW_STATUS_META[newStatus].label}`);
+      return;
+    }
     try {
-      const { token } = await share.mutateAsync({ pocSlug: POC_SLUG, runId: result.runId });
-      const url = `${window.location.origin}/poc-report/${token}`;
-      setShareUrl(url);
-      await navigator.clipboard.writeText(url).catch(() => {});
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-      toast.success("Share link copied to clipboard");
+      await updateStatus.mutateAsync({
+        pocSlug: POC_SLUG,
+        exceptionId: exception.id,
+        reviewStatus: newStatus,
+        reviewNote: note || undefined,
+      });
+      toast.success(`Exception marked as ${REVIEW_STATUS_META[newStatus].label}`);
     } catch (e: any) {
-      toast.error(e.message || "Could not create share link.");
+      setReviewStatuses((s) => ({ ...s, [key]: prev }));
+      toast.error("Could not save status: " + (e.message || "unknown error"));
     }
   };
 
@@ -668,13 +694,28 @@ export default function SaladAfricaPOC() {
                   </CardContent>
                 </Card>
               ) : (
-                exceptions.map((e, i) => <ExceptionCard key={i} e={e} />)
+                exceptions.map((e, i) => (
+                  <ExceptionCard
+                    key={i}
+                    e={e}
+                    status={reviewStatuses[String(i)] ?? "OPEN"}
+                    onResolve={(status, note) => handleStatusChange(i, status, note)}
+                  />
+                ))
               )}
             </TabsContent>
 
             {/* Layer 3 */}
             <TabsContent value="agent" className="space-y-3">
-              {exceptions.map((e, i) => <ExceptionCard key={i} e={e} showAgent />)}
+              {exceptions.map((e, i) => (
+                <ExceptionCard
+                  key={i}
+                  e={e}
+                  showAgent
+                  status={reviewStatuses[String(i)] ?? "OPEN"}
+                  onResolve={(status, note) => handleStatusChange(i, status, note)}
+                />
+              ))}
             </TabsContent>
 
             {/* KPI Dashboard — super admin only */}
@@ -693,16 +734,31 @@ export default function SaladAfricaPOC() {
           </Tabs>
         )}
 
-        {/* Share */}
+        {/* Report actions — download + share (shared across all POCs) */}
         {result && (
-          <div className="flex items-center gap-3 pt-2">
-            <Button variant="outline" className="gap-2" onClick={handleShare} disabled={share.isPending}>
-              {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-              {shareUrl ? "Copy share link again" : "Create shareable link"}
-            </Button>
-            {shareUrl && (
-              <span className="text-xs text-muted-foreground truncate max-w-[420px]">{shareUrl}</span>
-            )}
+          <div className="pt-2">
+            <PocReportActions
+              pocSlug={POC_SLUG}
+              runId={result.runId}
+              reportName="salad-africa-reconciliation"
+              run={{
+                status: l1?.status,
+                matchRate: result.matchedCount != null && (result.matchedCount + exceptions.length) > 0
+                  ? Math.round((result.matchedCount / (result.matchedCount + exceptions.length)) * 10000) / 100
+                  : null,
+                varianceAmount: l1?.varianceAmount,
+                ledgerCount: l1?.ledgerCount,
+                ledgerTotal: l1?.ledgerNet,
+                statementCount: l1?.statementCount,
+                statementTotal: l1?.statementNet,
+                matchedCount: result.matchedCount,
+                exceptionCount: exceptions.length,
+                currencyCode: l1?.currency,
+              }}
+              exceptions={exceptions}
+              statuses={reviewStatuses}
+              excluded={excluded}
+            />
           </div>
         )}
 
@@ -723,15 +779,27 @@ function Stat({ label, value, highlight }: { label: string; value: string | numb
   );
 }
 
-function ExceptionCard({ e, showAgent }: { e: any; showAgent?: boolean }) {
+function ExceptionCard({
+  e, showAgent, status = "OPEN", onResolve,
+}: {
+  e: any;
+  showAgent?: boolean;
+  status?: ReviewStatus;
+  onResolve?: (status: ReviewStatus, note: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  const [showNote, setShowNote] = useState(false);
+  const meta = REVIEW_STATUS_META[status];
   return (
-    <Card>
+    <Card className={`overflow-hidden ${status === "RESOLVED" ? "opacity-80" : ""}`}>
+      {onResolve && <div className={`h-1 ${meta.bar}`} />}
       <CardContent className="pt-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <Badge variant="outline">{CATEGORY_LABELS[e.category] ?? e.category}</Badge>
               <Badge className={PRIORITY_COLORS[e.priorityLevel] ?? ""}>{e.priorityLevel}</Badge>
+              {onResolve && <span className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${meta.badge}`}>{meta.label}</span>}
               <span className="text-xs text-muted-foreground">{e.side}</span>
             </div>
             <p className="text-sm mt-1 truncate">{e.description || e.reference || "—"}</p>
@@ -745,6 +813,41 @@ function ExceptionCard({ e, showAgent }: { e: any; showAgent?: boolean }) {
           </div>
           <span className="font-mono text-sm font-semibold shrink-0">{ngn(e.amount)}</span>
         </div>
+
+        {/* Resolution controls (parity with Woodcore / LAPO) */}
+        {onResolve && (
+          <div className="mt-3 pt-3 border-t space-y-2">
+            {showNote && (
+              <input
+                value={note}
+                onChange={(ev) => setNote(ev.target.value)}
+                placeholder="Add a resolution note (optional)…"
+                className="w-full text-xs rounded-md border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+              />
+            )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {status !== "ACKNOWLEDGED" && (
+                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => onResolve("ACKNOWLEDGED", note)}>Acknowledge</Button>
+              )}
+              {status !== "RESOLVED" && (
+                <Button size="sm" className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700" onClick={() => onResolve("RESOLVED", note)}>Resolve</Button>
+              )}
+              {status !== "ESCALATED" && (
+                <Button variant="outline" size="sm" className="h-7 text-xs text-purple-700 border-purple-200 hover:bg-purple-50" onClick={() => onResolve("ESCALATED", note)}>Escalate</Button>
+              )}
+              {status !== "OPEN" && (
+                <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => onResolve("OPEN", note)}>Reopen</Button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowNote((v) => !v)}
+                className="ml-auto text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                {showNote ? "Hide note" : "Add note"}
+              </button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

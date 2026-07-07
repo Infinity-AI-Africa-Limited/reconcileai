@@ -17,6 +17,7 @@ import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { PocKpiDashboard } from "@/components/PocKpiDashboard";
 import PocRunHistory from "@/components/PocRunHistory";
+import PocReportActions from "@/components/PocReportActions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1025,9 +1026,34 @@ export default function LapoPOC() {
           </>
         )}
 
-        {/* Share */}
+        {/* Report actions — download + share */}
         {result && (
-          <div className="flex items-center gap-3 pt-2">
+          <div className="flex flex-wrap items-center gap-3 pt-2">
+            {/* Download report (CSV) — shared across all POCs */}
+            <PocReportActions
+              pocSlug={POC_SLUG}
+              runId={result.runId}
+              reportName="lapo-mfb-reconciliation"
+              showShare={false}
+              run={{
+                status: l1?.status,
+                matchRate: result.matchedCount != null && (result.matchedCount + exceptions.length) > 0
+                  ? Math.round((result.matchedCount / (result.matchedCount + exceptions.length)) * 10000) / 100
+                  : null,
+                varianceAmount: l1?.varianceAmount,
+                ledgerCount: l1?.ledgerCount,
+                ledgerTotal: l1?.ledgerNet,
+                statementCount: l1?.statementCount,
+                statementTotal: l1?.statementNet,
+                matchedCount: result.matchedCount,
+                exceptionCount: exceptions.length,
+                currencyCode: l1?.currency,
+              }}
+              exceptions={exceptions}
+              statuses={reviewStatuses}
+              excluded={(result?.excluded ?? []) as any[]}
+            />
+            {/* Existing branded share button */}
             <Button variant="outline" className="gap-2" onClick={handleShare} disabled={share.isPending}>
               {copied ? <Check className="h-4 w-4" style={{ color: "#00954B" }} /> : <Copy className="h-4 w-4" />}
               {shareUrl ? "Copy share link again" : "Create shareable link"}

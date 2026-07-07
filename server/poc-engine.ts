@@ -689,6 +689,9 @@ export interface Layer3Item extends ExceptionDraft {
   recommendedAction: string;
   priorityLevel: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
   agentConfidence: number;
+  /** DB id of the persisted poc_exceptions row — set by runFullPoc after insert so
+   *  the client can resolve each exception (update its review status). */
+  id?: number;
 }
 
 export function runLayer3(exceptions: ExceptionDraft[], currency = "NGN"): Layer3Item[] {
@@ -908,6 +911,15 @@ export async function runFullPoc(params: {
         agentConfidence: e.agentConfidence,
       })),
     );
+    // Attach the persisted row ids back onto layer3 so the client can resolve each
+    // exception. Auto-increment ids are monotonic and this run's rows were inserted
+    // in layer3 order, so selecting them ordered by id restores that 1:1 mapping.
+    const insertedRows = await db
+      .select({ id: pocExceptions.id })
+      .from(pocExceptions)
+      .where(eq(pocExceptions.runId, runId))
+      .orderBy(pocExceptions.id);
+    insertedRows.forEach((row, i) => { if (layer3[i]) layer3[i].id = row.id; });
   }
 
   return { runId, layer1, matchedCount: layer2.matchedCount, layer3, excluded, excludedTotal, excludedByReason, learningApplied };
