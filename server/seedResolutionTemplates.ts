@@ -127,6 +127,20 @@ const DEFAULT_TEMPLATES: Array<{ category: ExceptionCategory; name: string; temp
       "Confirmed the correct booking currency (base vs transaction). Re-matched on the converted amount — no underlying variance.",
   },
 
+  // ── FX rate variance (WS-6) ──────────────────────────────────────────────────
+  {
+    category: "fx_rate_variance",
+    name: "Rate movement — post to FX revaluation GL",
+    templateText:
+      "Verified the implied rate against the settlement-date rate (CBN/NAFEM for NGN legs; deal-slip rate for correspondent settlements): the variance is legitimate rate movement between transaction date and settlement date. Posted the difference to the FX revaluation GL and matched on the converted amount. Recorded both dates' rates.",
+  },
+  {
+    category: "fx_rate_variance",
+    name: "Conversion error — dispute with counterparty",
+    templateText:
+      "The implied rate matches neither the transaction-date nor the settlement-date rate from the governing source. Raised a conversion dispute with the counterparty/processor citing both reference rates, and parked the variance in the FX suspense GL pending their response.",
+  },
+
   // ── Format error ─────────────────────────────────────────────────────────────
   {
     category: "format_error",

@@ -1,0 +1,5 @@
+ALTER TABLE `exceptions` MODIFY COLUMN `category` enum('missing_counterparty','amount_mismatch','timing_difference','duplicate_transaction','unmatched','reversal_unmatched','currency_mismatch','fx_rate_variance','format_error') NOT NULL;--> statement-breakpoint
+ALTER TABLE `resolution_templates` MODIFY COLUMN `category` enum('unmatched','missing_counterparty','amount_mismatch','timing_difference','duplicate_transaction','reversal_unmatched','currency_mismatch','fx_rate_variance','format_error','mm_failed_ussd_debit','mm_reversal_not_credited','mm_nip_settlement_shortfall','mm_duplicate_credit','mm_expired_session_debit','mm_amount_mismatch','mm_unmatched_nip_inflow','mm_operator_fee_variance','mm_wallet_to_bank_failed','mm_bank_to_wallet_failed','mm_withdrawal_tax_variance','mm_momo_settlement_shortfall') NOT NULL;--> statement-breakpoint
+ALTER TABLE `exceptions` ADD `currency` varchar(3) DEFAULT 'NGN' NOT NULL;--> statement-breakpoint
+ALTER TABLE `reconciliation_jobs` ADD `currency` varchar(3) DEFAULT 'NGN' NOT NULL;--> statement-breakpoint
+ALTER TABLE `poc_uploads` ADD `currency` varchar(3);

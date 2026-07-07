@@ -421,6 +421,13 @@
       "when": 1783386378321,
       "tag": "0059_narrow_vulture",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "5",
+      "when": 1783408506370,
+      "tag": "0060_aromatic_clea",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,7 @@ import {
   TrendingDown,
   FileCheck,
   Building2,
+  Globe,
 } from "lucide-react";
 
 function GuestLoginButton() {
@@ -310,6 +311,11 @@ export default function Home() {
                 icon: BarChart3,
                 title: "Role-Based Dashboards",
                 desc: "CFO, Operations, and Auditor views with KPIs, exception queues, and compliance metrics tailored to each role.",
+              },
+              {
+                icon: Globe,
+                title: "Multi-Currency & FX Reconciliation",
+                desc: "Reconcile NGN, UGX, USD, GBP, EUR and 10+ African currencies. FX rate variances are detected with the implied rate cited and verified against CBN/NAFEM settlement-date rates.",
               },
             ].map((f) => (
               <div key={f.title} className="p-6 rounded-xl bg-[#F8F9FA] border border-gray-100 hover:border-[#1B365D]/20 transition-colors">

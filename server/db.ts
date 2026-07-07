@@ -623,6 +623,7 @@ export async function getOpenExceptionsForAging(limit = 2000) {
       assignedTo: exceptions.assignedTo,
       createdAt: exceptions.createdAt,
       amount: transactions.amount,
+      currency: transactions.currency, // WS-6: amounts shown in the right currency
       transactionRef: transactions.transactionRef,
       transactionDate: transactions.transactionDate,
       jobName: reconciliationJobs.name,

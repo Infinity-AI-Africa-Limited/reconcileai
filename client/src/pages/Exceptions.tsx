@@ -36,7 +36,7 @@ function writeFilterPref(value: boolean) {
 
 const TEMPLATE_CATEGORIES = [
   "unmatched", "missing_counterparty", "amount_mismatch", "timing_difference",
-  "duplicate_transaction", "reversal_unmatched", "currency_mismatch", "format_error",
+  "duplicate_transaction", "reversal_unmatched", "currency_mismatch", "fx_rate_variance", "format_error",
 ] as const;
 type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
 
@@ -286,6 +286,8 @@ export default function Exceptions() {
             <SelectItem value="timing_difference">Timing Difference</SelectItem>
             <SelectItem value="duplicate_transaction">Duplicate</SelectItem>
             <SelectItem value="unmatched">Unmatched</SelectItem>
+            <SelectItem value="currency_mismatch">Currency Mismatch</SelectItem>
+            <SelectItem value="fx_rate_variance">FX Rate Variance</SelectItem>
           </SelectContent>
         </Select>
 

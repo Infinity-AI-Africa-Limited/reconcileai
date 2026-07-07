@@ -16,8 +16,13 @@ import {
 import { toast } from "sonner";
 import { useLocation } from "wouter";
 
-const ngn = (n: number | string) =>
-  `₦${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// WS-6: per-row amounts render in the exception's own currency. Aggregate
+// exposure figures (mixed currencies possible) stay ₦-labelled — the dominant
+// deployment currency — until exposure is bucketed per currency.
+const CCY_SYMBOL: Record<string, string> = { NGN: "₦", UGX: "USh ", KES: "KSh ", GHS: "GH₵", ZAR: "R", USD: "$", EUR: "€", GBP: "£" };
+const money = (n: number | string, ccy = "NGN") =>
+  `${CCY_SYMBOL[ccy] ?? `${ccy} `}${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const ngn = (n: number | string) => money(n, "NGN");
 
 const ESCALATION_STYLE: Record<string, { label: string; cls: string }> = {
   on_track: { label: "On track", cls: "bg-emerald-100 text-emerald-700" },
@@ -39,6 +44,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   unmatched: "Unmatched",
   reversal_unmatched: "Reversal unmatched",
   currency_mismatch: "Currency mismatch",
+  fx_rate_variance: "FX rate variance",
   format_error: "Format error",
 };
 
@@ -198,7 +204,7 @@ export default function AgeTracker() {
                     <td className="px-3 py-2 whitespace-nowrap"><span className={`font-bold ${ageColor(e.ageDays, sla)}`}>{e.ageDays}d</span></td>
                     <td className="px-3 py-2"><Badge className={esc.cls}>{esc.label}</Badge></td>
                     <td className="px-3 py-2">{CATEGORY_LABELS[e.category] ?? e.category}</td>
-                    <td className="px-3 py-2 text-right font-mono">{ngn(e.amount)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{money(e.amount, e.currency ?? "NGN")}</td>
                     <td className="px-3 py-2 font-mono text-xs max-w-[140px] truncate">{e.reference || "—"}</td>
                     <td className="px-3 py-2 max-w-[140px] truncate">{e.jobName || "—"}</td>
                     <td className="px-3 py-2">{e.assigneeName || <span className="text-muted-foreground">Unassigned</span>}</td>

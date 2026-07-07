@@ -140,29 +140,11 @@ export const OPERATOR_META: Record<MmOperator, {
 };
 
 // ─── Currency-aware formatting & priority ────────────────────────────────────
+// Shared with the POC engine via currency.ts (WS-6); re-exported so existing
+// consumers/tests keep importing from this module.
 
-const CURRENCY_SYMBOL: Record<string, string> = { NGN: "₦", UGX: "USh " };
-
-export function fmtMoney(n: number, currency = "NGN"): string {
-  const sym = CURRENCY_SYMBOL[currency] ?? `${currency} `;
-  // UGX is not subdivided in practice — whole shillings only.
-  const digits = currency === "UGX" ? 0 : 2;
-  return `${sym}${n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
-}
-
-// Priority thresholds hold roughly equivalent purchasing power per currency.
-const PRIORITY_THRESHOLDS: Record<string, { critical: number; high: number; medium: number }> = {
-  NGN: { critical: 500_000, high: 100_000, medium: 10_000 },
-  UGX: { critical: 2_000_000, high: 400_000, medium: 40_000 },
-};
-
-export function priorityFor(amount: number, currency = "NGN"): "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" {
-  const t = PRIORITY_THRESHOLDS[currency] ?? PRIORITY_THRESHOLDS.NGN;
-  if (amount >= t.critical) return "CRITICAL";
-  if (amount >= t.high) return "HIGH";
-  if (amount >= t.medium) return "MEDIUM";
-  return "LOW";
-}
+import { fmtMoney, priorityFor } from "./currency";
+export { fmtMoney, priorityFor };
 
 // ─── Mobile Money Exception Categories ───────────────────────────────────────
 

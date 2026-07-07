@@ -609,79 +609,79 @@ export function runLayer2(
 
 // ─── Layer 3 — AI Agent ──────────────────────────────────────────────
 
-const CATEGORY_INFO: Record<ExceptionCategory, { action: string; confidence: number; explain: (d: ExceptionDraft) => string }> = {
+const CATEGORY_INFO: Record<ExceptionCategory, { action: string; confidence: number; explain: (d: ExceptionDraft, ccy?: string) => string }> = {
   IN_LEDGER_NOT_IN_BANK: {
     action: "Confirm whether this item has cleared the bank. If it is an outstanding/uncleared entry, carry it forward; if it should have cleared, investigate with the bank.",
     confidence: 90,
-    explain: (d) => `This entry appears in the ledger but has no matching item on the bank statement (${fmt(d.amount)}). It is typically an uncleared/outstanding transaction or a recording timing difference.`,
+    explain: (d, ccy) => `This entry appears in the ledger but has no matching item on the bank statement (${fmt(d.amount, ccy)}). It is typically an uncleared/outstanding transaction or a recording timing difference.`,
   },
   IN_BANK_NOT_IN_LEDGER: {
     action: "Record this item in the ledger. Common causes: bank charges, interest, direct debits, or transfers not yet captured.",
     confidence: 90,
-    explain: (d) => `The bank statement shows this item (${fmt(d.amount)}) but it is missing from the ledger — often a bank charge, fee, interest credit, or an unrecorded receipt/payment.`,
+    explain: (d, ccy) => `The bank statement shows this item (${fmt(d.amount, ccy)}) but it is missing from the ledger — often a bank charge, fee, interest credit, or an unrecorded receipt/payment.`,
   },
   AMOUNT_MISMATCH: {
     action: "Reconcile the amount difference — check for fees deducted, FX, or a data-entry error on one side.",
     confidence: 85,
-    explain: (d) => `A matching transaction was found but the amounts differ${d.description ? ` ${d.description}` : ""}. This usually indicates a deducted fee, an FX difference, or a keying error.`,
+    explain: (d, ccy) => `A matching transaction was found but the amounts differ${d.description ? ` ${d.description}` : ""}. This usually indicates a deducted fee, an FX difference, or a keying error.`,
   },
   DUPLICATE: {
     action: "Remove or void the duplicate so the item is only counted once.",
     confidence: 88,
-    explain: (d) => `This transaction (${fmt(d.amount)}) appears more than once on the ${d.side} side and looks like a duplicate.`,
+    explain: (d, ccy) => `This transaction (${fmt(d.amount, ccy)}) appears more than once on the ${d.side} side and looks like a duplicate.`,
   },
   REVERSAL: {
     action: "Confirm the reversal nets off the original entry; ensure both legs are recorded.",
     confidence: 85,
-    explain: (d) => `This looks like a reversal/chargeback (${fmt(d.amount)}). Confirm the original entry and the reversal both appear and net to zero.`,
+    explain: (d, ccy) => `This looks like a reversal/chargeback (${fmt(d.amount, ccy)}). Confirm the original entry and the reversal both appear and net to zero.`,
   },
   // ── Card-specific categories ──────────────────────────────────────
   CHARGEBACK: {
     action: "Verify the chargeback is valid. Ensure the debit reversal is posted in CBS and the dispute is logged with Interswitch within the scheme deadline (typically 45 days).",
     confidence: 92,
-    explain: (d) => `A chargeback (${fmt(d.amount)}) has been raised — CBS shows a debit reversal but the Interswitch settlement file does not yet reflect it. This is a customer or issuer dispute in progress.`,
+    explain: (d, ccy) => `A chargeback (${fmt(d.amount, ccy)}) has been raised — CBS shows a debit reversal but the Interswitch settlement file does not yet reflect it. This is a customer or issuer dispute in progress.`,
   },
   SETTLEMENT_SHORTFALL: {
     action: "Reconcile the shortfall against the Interswitch interchange/scheme fee schedule. If the deduction exceeds the contracted rate, raise a dispute with Interswitch within 30 days.",
     confidence: 90,
-    explain: (d) => `Interswitch settled less than the CBS-posted amount (${fmt(d.amount)}). The difference is likely an interchange or scheme fee deduction. Verify against the contracted fee schedule.`,
+    explain: (d, ccy) => `Interswitch settled less than the CBS-posted amount (${fmt(d.amount, ccy)}). The difference is likely an interchange or scheme fee deduction. Verify against the contracted fee schedule.`,
   },
   LATE_PRESENTMENT: {
     action: "Check whether the late presentment incurs a penalty fee per the Interswitch agreement. Post any penalty to the appropriate GL and monitor for chargeback risk.",
     confidence: 88,
-    explain: (d) => `This transaction (${fmt(d.amount)}) was presented for settlement outside the standard window (>3 days). Late presentment increases chargeback risk and may attract penalty fees.`,
+    explain: (d, ccy) => `This transaction (${fmt(d.amount, ccy)}) was presented for settlement outside the standard window (>3 days). Late presentment increases chargeback risk and may attract penalty fees.`,
   },
   INTERCHANGE_DISPUTE: {
     action: "Compare the applied interchange rate against the Interswitch fee schedule for this card type and MCC. Raise a formal dispute via the Interswitch portal if the rate is incorrect.",
     confidence: 85,
-    explain: (d) => `The interchange fee applied by Interswitch for this transaction (${fmt(d.amount)}) does not match the expected rate for the card type or merchant category code.`,
+    explain: (d, ccy) => `The interchange fee applied by Interswitch for this transaction (${fmt(d.amount, ccy)}) does not match the expected rate for the card type or merchant category code.`,
   },
   SCHEME_FEE_VARIANCE: {
     action: "Verify the scheme fee against the Visa/Mastercard/Verve quarterly fee schedule. Escalate to Interswitch if the variance exceeds the tolerance threshold.",
     confidence: 83,
-    explain: (d) => `The Visa/Mastercard/Verve scheme fee deducted from this settlement (${fmt(d.amount)}) differs from the contracted rate. This may indicate a scheme fee revision or a billing error.`,
+    explain: (d, ccy) => `The Visa/Mastercard/Verve scheme fee deducted from this settlement (${fmt(d.amount, ccy)}) differs from the contracted rate. This may indicate a scheme fee revision or a billing error.`,
   },
   FORCE_POST: {
     action: "Validate that the force-post was authorised offline by a supervisor. Flag for fraud review if the merchant is not on the approved offline list. Monitor for chargeback.",
     confidence: 80,
-    explain: (d) => `This transaction (${fmt(d.amount)}) was force-posted (approved offline without authorisation). Force-posts carry elevated chargeback and fraud risk and require supervisory sign-off.`,
+    explain: (d, ccy) => `This transaction (${fmt(d.amount, ccy)}) was force-posted (approved offline without authorisation). Force-posts carry elevated chargeback and fraud risk and require supervisory sign-off.`,
   },
   PARTIAL_REVERSAL: {
     action: "Confirm the partial reversal amount is correctly reflected in CBS. Post the net (original minus reversal) to the card settlement GL and document the reason for the partial reversal.",
     confidence: 87,
-    explain: (d) => `Only part of the original transaction (${fmt(d.amount)}) was reversed. Ensure the net amount is correctly posted in CBS and that both the original and partial reversal legs are documented.`,
+    explain: (d, ccy) => `Only part of the original transaction (${fmt(d.amount, ccy)}) was reversed. Ensure the net amount is correctly posted in CBS and that both the original and partial reversal legs are documented.`,
   },
 };
 
-function fmt(n: number): string {
-  return `₦${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// Currency-aware formatting + priority (WS-6) — shared table in currency.ts.
+import { fmtMoney, priorityFor as priorityForCurrency } from "./currency";
+
+function fmt(n: number, ccy = "NGN"): string {
+  return fmtMoney(n, ccy);
 }
 
-function priorityFor(amount: number): "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" {
-  if (amount >= 500_000) return "CRITICAL";
-  if (amount >= 100_000) return "HIGH";
-  if (amount >= 10_000) return "MEDIUM";
-  return "LOW";
+function priorityFor(amount: number, ccy = "NGN"): "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" {
+  return priorityForCurrency(amount, ccy);
 }
 
 export interface Layer3Item extends ExceptionDraft {
@@ -691,18 +691,18 @@ export interface Layer3Item extends ExceptionDraft {
   agentConfidence: number;
 }
 
-export function runLayer3(exceptions: ExceptionDraft[]): Layer3Item[] {
+export function runLayer3(exceptions: ExceptionDraft[], currency = "NGN"): Layer3Item[] {
   return exceptions.map((d) => {
     const info = CATEGORY_INFO[d.category] ?? {
       action: "Review this exception manually and determine the appropriate corrective action.",
       confidence: 75,
-      explain: (ex: ExceptionDraft) => `An exception of type '${ex.category}' was detected for ${fmt(ex.amount)}. Manual review is required.`,
+      explain: (ex: ExceptionDraft, ccy?: string) => `An exception of type '${ex.category}' was detected for ${fmt(ex.amount, ccy)}. Manual review is required.`,
     };
     return {
       ...d,
-      agentExplanation: info.explain(d),
+      agentExplanation: info.explain(d, currency),
       recommendedAction: info.action,
-      priorityLevel: priorityFor(d.amount),
+      priorityLevel: priorityFor(d.amount, currency),
       agentConfidence: info.confidence,
     };
   });
@@ -835,7 +835,9 @@ export async function runFullPoc(params: {
 
   const ledgerAll = (ledgerUp.rows as CanonicalRow[]) ?? [];
   const statementAll = (stmtUp.rows as CanonicalRow[]) ?? [];
-  const currency = "NGN";
+  // WS-6: use the extractor-detected currency (statement side is authoritative —
+  // it's the bank's document), falling back to the ledger's, then NGN.
+  const currency = stmtUp.currency || ledgerUp.currency || "NGN";
 
   // Set aside fee/charge noise BEFORE reconciling so it can't skew totals/matching.
   const excludeFeeNoise = params.excludeFeeNoise ?? true;
@@ -855,7 +857,7 @@ export async function runFullPoc(params: {
   // Layer 3 + per-institution learning from this POC's resolution history
   const { items: layer3, learningApplied } = await applyPocInstitutionalLearning(
     params.pocSlug,
-    runLayer3(layer2.exceptions),
+    runLayer3(layer2.exceptions, currency),
   );
 
   const excludedTotal = Math.round(excluded.reduce((s, e) => s + e.amount, 0) * 100) / 100;

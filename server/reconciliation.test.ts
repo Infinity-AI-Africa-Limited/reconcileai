@@ -100,6 +100,65 @@ describe("runMatchingEngine - Pass 1: Exact Reference Matching", () => {
   });
 });
 
+// ─── WS-6: within-currency matching only ─────────────────────────────
+
+describe("runMatchingEngine - within-currency guard (WS-6)", () => {
+  const config = { amountTolerance: 0.005, dateWindowDays: 3 };
+
+  it("does NOT exact-match same ref + same numeric amount across currencies", () => {
+    const source = [makeTxn({ id: 1, transactionRef: "FX001", amount: "500.00", currency: "USD" })];
+    const target = [makeTxn({ id: 2, transactionRef: "FX001", amount: "500.00", currency: "NGN" })];
+    const result = runMatchingEngine(source, target, config);
+
+    expect(result.matches).toHaveLength(0);
+    expect(result.unmatchedSource).toContain(1);
+    expect(result.unmatchedTarget).toContain(2);
+  });
+
+  it("does NOT tolerance-match numerically-close amounts across currencies (pass 2)", () => {
+    const source = [makeTxn({ id: 1, transactionRef: null, amount: "500.00", currency: "USD", description: null, counterparty: null })];
+    const target = [makeTxn({ id: 2, transactionRef: null, amount: "501.00", currency: "NGN", description: null, counterparty: null })];
+    const result = runMatchingEngine(source, target, config);
+
+    expect(result.matches).toHaveLength(0);
+  });
+
+  it("does NOT fuzzy-match across currencies even with similar descriptions (pass 3)", () => {
+    const source = [makeTxn({ id: 1, transactionRef: null, amount: "500.00", currency: "USD", description: "Salary payment June" })];
+    const target = [makeTxn({ id: 2, transactionRef: null, amount: "500.00", currency: "KES", description: "Salary payment June" })];
+    const result = runMatchingEngine(source, target, config);
+
+    expect(result.matches).toHaveLength(0);
+  });
+
+  it("still matches normally within the same currency", () => {
+    const source = [makeTxn({ id: 1, transactionRef: "FX002", amount: "500.00", currency: "USD" })];
+    const target = [makeTxn({ id: 2, transactionRef: "FX002", amount: "500.00", currency: "USD" })];
+    const result = runMatchingEngine(source, target, config);
+
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].matchType).toBe("exact");
+  });
+
+  it("does NOT flag same ref/amount/date in different currencies as duplicates", () => {
+    const a = makeTxn({ id: 1, transactionRef: "DUP01", amount: "1000.00", currency: "NGN" });
+    const b = makeTxn({ id: 2, transactionRef: "DUP01", amount: "1000.00", currency: "USD" });
+    // Same side (both source), no targets — duplicates are computed across all txns.
+    const result = runMatchingEngine([a, b], [], config);
+
+    expect(result.duplicates).toHaveLength(0);
+  });
+
+  it("still flags same-currency duplicates", () => {
+    const a = makeTxn({ id: 1, transactionRef: "DUP02", amount: "1000.00", currency: "NGN" });
+    const b = makeTxn({ id: 2, transactionRef: "DUP02", amount: "1000.00", currency: "NGN" });
+    const result = runMatchingEngine([a, b], [], config);
+
+    expect(result.duplicates).toHaveLength(1);
+    expect(result.duplicates[0].transactionIds).toEqual(expect.arrayContaining([1, 2]));
+  });
+});
+
 // ─── Pass 2: Amount Tolerance + Date Window ─────────────────────────
 
 describe("runMatchingEngine - Pass 2: Tolerance Matching", () => {
@@ -365,12 +424,36 @@ describe("categorizeException", () => {
     expect(result.severity).toBe("high");
   });
 
-  it("categorizes as currency_mismatch for cross-currency ref matches", () => {
+  // WS-6: cross-currency same-ref pairs split into two categories —
+  // differing amounts = an FX conversion whose rate needs verification;
+  // identical amounts = a currency-code booking error.
+  it("categorizes cross-currency ref matches with differing amounts as fx_rate_variance", () => {
     const txn = makeTxn({ id: 1, amount: "5000.00", currency: "NGN", transactionRef: "CROSS001" });
     const targets = [makeTxn({ id: 2, amount: "12.50", currency: "USD", transactionRef: "CROSS001" })];
     const result = categorizeException(txn, targets, config);
 
+    expect(result.category).toBe("fx_rate_variance");
+    expect(result.description).toContain("implied rate");
+    expect(result.description).toContain("400.0000"); // 5000 / 12.50
+    expect(result.suggestedResolution).toContain("FX revaluation GL");
+  });
+
+  it("categorizes cross-currency ref matches with IDENTICAL amounts as currency_mismatch (booking error)", () => {
+    const txn = makeTxn({ id: 1, amount: "5000.00", currency: "NGN", transactionRef: "CROSS002" });
+    const targets = [makeTxn({ id: 2, amount: "5000.00", currency: "USD", transactionRef: "CROSS002" })];
+    const result = categorizeException(txn, targets, config);
+
     expect(result.category).toBe("currency_mismatch");
+    expect(result.severity).toBe("high");
+    expect(result.description).toContain("booking error");
+  });
+
+  it("fx_rate_variance is high severity for large amounts", () => {
+    const txn = makeTxn({ id: 1, amount: "5000000.00", currency: "NGN", transactionRef: "CROSS003" });
+    const targets = [makeTxn({ id: 2, amount: "3200.00", currency: "USD", transactionRef: "CROSS003" })];
+    const result = categorizeException(txn, targets, config);
+
+    expect(result.category).toBe("fx_rate_variance");
     expect(result.severity).toBe("high");
   });
 

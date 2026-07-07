@@ -1125,6 +1125,7 @@ export const appRouter = router({
             assigneeName: r.assigneeName ?? null,
             reference: r.transactionRef ?? null,
             amount: Math.abs(parseFloat(String(r.amount)) || 0),
+            currency: r.currency ?? "NGN", // WS-6
             createdAt: r.createdAt,
             ageDays: age,
             escalationLevel: ageTracker.escalationLevel(age, slaDays),
@@ -6759,6 +6760,7 @@ async function runReconciliation(
         transactionId: txn.id,
         category: info.category,
         severity: info.severity,
+        currency: txn.currency, // WS-6: exception carries its own currency
         description: info.description,
         suggestedResolution: info.suggestedResolution,
         aiAnalysis: null,
@@ -6770,12 +6772,17 @@ async function runReconciliation(
     exceptionCount += exceptionRows.length;
 
     // Exceptions for detected duplicates (batched).
+    const txnCurrencyById = new Map(unmatchedTxns.map((t) => [t.id, t.currency]));
+    for (const t of [...sourceTxns, ...targetTxns]) {
+      if (!txnCurrencyById.has(t.id)) txnCurrencyById.set(t.id, t.currency);
+    }
     const duplicateRows = result.duplicates.flatMap((dupGroup) =>
       dupGroup.transactionIds.map((txnId) => ({
         jobId,
         transactionId: txnId,
         category: "duplicate_transaction" as const,
         severity: "medium" as const,
+        currency: txnCurrencyById.get(txnId) ?? "NGN",
         description: dupGroup.reason,
         suggestedResolution: "Review and remove duplicate transactions. Verify with the source system whether these are genuine separate transactions or data entry errors.",
         status: "open" as const,
@@ -6789,6 +6796,18 @@ async function runReconciliation(
     const matchRate = totalTxns > 0 ? ((matchedCount * 2) / totalTxns * 100) : 0;
     const processingTimeMs = Date.now() - startTime;
 
+    // WS-6: record the job's dominant transaction currency (minority-currency
+    // legs surface as currency_mismatch / fx_rate_variance exceptions).
+    const currencyCounts = new Map<string, number>();
+    for (const t of [...sourceTxns, ...targetTxns]) {
+      currencyCounts.set(t.currency, (currencyCounts.get(t.currency) ?? 0) + 1);
+    }
+    let dominantCurrency = "NGN";
+    let dominantCount = -1;
+    for (const [ccy, count] of Array.from(currencyCounts.entries())) {
+      if (count > dominantCount) { dominantCurrency = ccy; dominantCount = count; }
+    }
+
     await db.updateReconciliationJob(jobId, {
       status: "completed",
       matchedCount,
@@ -6796,6 +6815,7 @@ async function runReconciliation(
       unmatchedCount: allUnmatched.length,
       matchRate: String(Math.round(matchRate * 100) / 100),
       processingTimeMs,
+      currency: dominantCurrency,
       completedAt: new Date(),
     });
 

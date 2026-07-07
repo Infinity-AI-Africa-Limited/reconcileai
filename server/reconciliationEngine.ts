@@ -182,11 +182,12 @@ function detectDuplicates(txns: Transaction[]): DuplicateGroup[] {
   const seen = new Map<string, Transaction[]>();
 
   for (const txn of txns) {
-    // Key: ref + amount + date
+    // Key: ref + amount + currency + date — the same numeric amount in two
+    // currencies is NOT a duplicate (WS-6).
     const ref = normalizeString(txn.transactionRef);
     const amt = parseFloat(String(txn.amount)).toFixed(2);
     const date = new Date(txn.transactionDate).toISOString().split("T")[0];
-    const key = `${ref}|${amt}|${date}|${txn.channelId}`;
+    const key = `${ref}|${amt}|${txn.currency}|${date}|${txn.channelId}`;
 
     if (ref) { // Only check duplicates for transactions with references
       const existing = seen.get(key) || [];
@@ -216,10 +217,11 @@ function detectReversals(txns: Transaction[]): ReversalPair[] {
     /return/i, /cancel/i, /void/i, /rvs/i, /rev\//i,
   ];
 
-  // Index by amount for quick lookup
+  // Index by amount + currency for quick lookup — a reversal must offset an
+  // original in the SAME currency (WS-6).
   const byAmount = new Map<string, Transaction[]>();
   for (const txn of txns) {
-    const amt = parseFloat(String(txn.amount)).toFixed(2);
+    const amt = `${parseFloat(String(txn.amount)).toFixed(2)}|${txn.currency}`;
     const existing = byAmount.get(amt) || [];
     existing.push(txn);
     byAmount.set(amt, existing);
@@ -232,8 +234,8 @@ function detectReversals(txns: Transaction[]): ReversalPair[] {
       reversalPatterns.some((p) => p.test(txn.transactionRef || ""));
 
     if (isReversal) {
-      // Look for the original transaction with same amount, opposite direction
-      const amt = parseFloat(String(txn.amount)).toFixed(2);
+      // Look for the original transaction with same amount + currency, opposite direction
+      const amt = `${parseFloat(String(txn.amount)).toFixed(2)}|${txn.currency}`;
       const candidates = byAmount.get(amt) || [];
 
       for (const candidate of candidates) {
@@ -404,6 +406,10 @@ export function runMatchingEngine(
 
     for (const tgt of candidates) {
       if (matchedTargetIds.has(tgt.id)) continue;
+      // Within-currency only (WS-6): a same-ref cross-currency pair is an FX
+      // leg, not a match — leaving both sides unmatched routes them to
+      // categorizeException's fx_rate_variance / currency_mismatch analysis.
+      if (src.currency !== tgt.currency) continue;
       const srcAmt = parseFloat(String(src.amount));
       const tgtAmt = parseFloat(String(tgt.amount));
       if (srcAmt === tgtAmt) {
@@ -465,6 +471,9 @@ export function runMatchingEngine(
       for (let ai = lowerBound(nums, lo); ai < nums.length && nums[ai] <= hi; ai++) {
         const tgt = txns[ai];
         if (matchedTargetIds.has(tgt.id)) continue;
+        // Within-currency only (WS-6): numeric closeness across currencies is
+        // meaningless — 500 USD must never tolerance-match 500 NGN.
+        if (src.currency !== tgt.currency) continue;
 
         const amtDiffPct = amountDifferencePercent(srcAmt, nums[ai]);
         if (amtDiffPct > config.amountTolerance) continue;
@@ -522,6 +531,8 @@ export function runMatchingEngine(
 
     for (const tgt of unmatchedTargets) {
       if (matchedTargetIds.has(tgt.id)) continue;
+      // Within-currency only (WS-6).
+      if (src.currency !== tgt.currency) continue;
 
       const srcAmt = parseFloat(String(src.amount));
       const tgtAmt = parseFloat(String(tgt.amount));
@@ -598,7 +609,7 @@ export function categorizeException(
   allTargetTxns: Transaction[],
   config: ReconciliationConfig
 ): {
-  category: "missing_counterparty" | "amount_mismatch" | "timing_difference" | "duplicate_transaction" | "unmatched" | "reversal_unmatched" | "currency_mismatch" | "format_error";
+  category: "missing_counterparty" | "amount_mismatch" | "timing_difference" | "duplicate_transaction" | "unmatched" | "reversal_unmatched" | "currency_mismatch" | "fx_rate_variance" | "format_error";
   severity: "low" | "medium" | "high" | "critical";
   description: string;
   suggestedResolution: string;
@@ -617,17 +628,41 @@ export function categorizeException(
     };
   }
 
-  // Check for currency mismatch (pan-African scenario)
+  // Cross-currency, same reference: two legs of one FX transaction (WS-6).
+  //   amounts equal   → currency_mismatch (a currency-code booking error — the
+  //                     same number cannot be both currencies)
+  //   amounts differ  → fx_rate_variance: cite the implied rate and the
+  //                     transaction-date gap (settlement-date vs
+  //                     transaction-date rate movement is the usual driver)
   for (const tgt of allTargetTxns) {
     if (txn.currency !== tgt.currency) {
       const tgtAmt = parseFloat(String(tgt.amount));
       if (txn.transactionRef && tgt.transactionRef &&
           normalizeString(txn.transactionRef) === normalizeString(tgt.transactionRef)) {
+        if (Math.abs(txnAmt - tgtAmt) < 0.01) {
+          return {
+            category: "currency_mismatch",
+            severity: "high",
+            description: `Transaction ${txn.transactionRef} is booked as ${txn.currency} ${txnAmt} on one side and ${tgt.currency} ${tgtAmt} on the other — identical amounts in different currencies indicate a currency-code booking error, not a conversion.`,
+            suggestedResolution: `Confirm the true transaction currency from the source document and correct the mis-booked leg. Identical numeric amounts across currencies are almost never a genuine FX conversion.`,
+          };
+        }
+        const bigger = Math.max(txnAmt, tgtAmt);
+        const smaller = Math.min(txnAmt, tgtAmt);
+        const impliedRate = smaller > 0 ? bigger / smaller : 0;
+        const dateGapDays = Math.round(daysDifference(txnDate, new Date(tgt.transactionDate)) * 10) / 10;
         return {
-          category: "currency_mismatch",
-          severity: "high",
-          description: `Transaction ${txn.transactionRef} has currency mismatch: source ${txn.currency} ${txnAmt}, target ${tgt.currency} ${tgtAmt}.`,
-          suggestedResolution: `Verify the exchange rate applied. For cross-border African transactions, check the applicable CBN/central bank rate for the transaction date.`,
+          category: "fx_rate_variance",
+          severity: bigger >= 1_000_000 ? "high" : "medium",
+          description:
+            `FX rate variance on ${txn.transactionRef}: ${txn.currency} ${txnAmt.toLocaleString()} vs ${tgt.currency} ${tgtAmt.toLocaleString()} ` +
+            `(implied rate ≈ ${impliedRate.toFixed(4)}), transaction dates ${dateGapDays} day(s) apart. ` +
+            `The variance profile matches an exchange-rate movement between the transaction date and the settlement date.`,
+          suggestedResolution:
+            `1. Retrieve the applicable rate for BOTH dates from the rate source governing this flow (CBN/NAFEM for NGN legs; the contract or deal-slip rate for correspondent-bank settlements). ` +
+            `2. If the implied rate ≈ the settlement-date rate, the difference is rate movement: post it to the FX revaluation GL and match on the converted amount. ` +
+            `3. If the implied rate matches neither date's rate, dispute the conversion with the counterparty/processor. ` +
+            `4. Record the confirmed rate and dates in the resolution note — it trains the recommendation for the next variance on this corridor.`,
         };
       }
     }
@@ -705,11 +740,18 @@ export async function getAIAnalysis(
       ? `\n\nUse the following prior-resolution evidence to make the recommendation more specific and consistent with how this exception has been handled before:\n${guidanceBlocks.join("\n\n")}`
       : "";
 
+    // FX-specific diagnosis context (WS-6): rate-source knowledge per currency
+    // corridor so the recommendation names WHERE to verify the rate, not just
+    // "check the rate".
+    const fxContext = exception.category === "fx_rate_variance"
+      ? " This is an FX rate variance: two legs of one transaction in different currencies whose implied rate needs verification against the transaction-date AND settlement-date rates. Rate sources: NGN legs settle against CBN/NAFEM (Nigerian Autonomous Foreign Exchange Market) rates; UGX legs against Bank of Uganda reference rates; USD/EUR/GBP correspondent settlements against the contract or deal-slip rate. If the implied rate matches the settlement-date rate, the variance is legitimate rate movement (post to the FX revaluation GL); if it matches neither date, it is a conversion error to dispute."
+      : "";
+
     const response = await invokeLLM({
       messages: [
         {
           role: "system",
-          content: `You are a financial reconciliation expert specializing in African banking systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT). Analyze the following exception and provide a brief, actionable recommendation (2-3 sentences max). Reference specific Nigerian/African banking regulations or processes where relevant. Focus on practical steps the reconciliation team should take.${guidanceBlocks.length > 0 ? " When prior-resolution evidence is provided, prefer the approach it shows and note that it reflects established practice." : ""}`,
+          content: `You are a financial reconciliation expert specializing in African banking systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT). Analyze the following exception and provide a brief, actionable recommendation (2-3 sentences max). Reference specific Nigerian/African banking regulations or processes where relevant. Focus on practical steps the reconciliation team should take.${fxContext}${guidanceBlocks.length > 0 ? " When prior-resolution evidence is provided, prefer the approach it shows and note that it reflects established practice." : ""}`,
         },
         {
           role: "user",

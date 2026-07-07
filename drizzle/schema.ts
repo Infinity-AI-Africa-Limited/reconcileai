@@ -184,6 +184,10 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   targetChannelId: int("targetChannelId").notNull(),
   dateFrom: timestamp("dateFrom").notNull(),
   dateTo: timestamp("dateTo").notNull(),
+  // The job's dominant transaction currency, set at completion (WS-6). A job
+  // may still contain minority-currency legs — those surface as
+  // currency_mismatch / fx_rate_variance exceptions, each carrying its own currency.
+  currency: varchar("currency", { length: 3 }).default("NGN").notNull(),
   amountTolerance: decimal("amountTolerance", { precision: 5, scale: 4 }).default("0.005").notNull(),
   dateWindowDays: int("dateWindowDays").default(3).notNull(),
   // Engine configuration snapshot
@@ -263,11 +267,17 @@ export const exceptions = mysqlTable("exceptions", {
     "unmatched",
     "reversal_unmatched",
     "currency_mismatch",
+    // Same reference, different currencies, amounts differing by an implied FX
+    // rate — settlement-vs-transaction-date rate variance (WS-6).
+    "fx_rate_variance",
     "format_error",
   ]).notNull(),
   severity: mysqlEnum("severity", ["low", "medium", "high", "critical"])
     .default("medium")
     .notNull(),
+  // Denormalized from the transaction at insert so exception lists/reports can
+  // state amounts in the right currency without a join (WS-6).
+  currency: varchar("currency", { length: 3 }).default("NGN").notNull(),
   description: text("description"),
   suggestedResolution: text("suggestedResolution"),
   aiAnalysis: text("aiAnalysis"),
@@ -808,6 +818,7 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "duplicate_transaction",
   "reversal_unmatched",
   "currency_mismatch",
+  "fx_rate_variance",
   "format_error",
   // Mobile money — Nigeria
   "mm_failed_ussd_debit",

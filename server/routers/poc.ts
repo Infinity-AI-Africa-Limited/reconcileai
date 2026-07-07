@@ -82,6 +82,9 @@ export const pocRouter = router({
         fileName: input.fileName ?? null,
         fileType: input.fileType,
         rowCount: extraction.rows.length,
+        // WS-6: persist the detected currency — runs consume it instead of
+        // hardcoding NGN (previously returned to the client and dropped).
+        currency: extraction.currency ?? null,
         rows: extraction.rows,
         notes: extraction.notes,
       });

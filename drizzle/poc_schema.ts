@@ -44,6 +44,9 @@ export const pocUploads = mysqlTable("poc_uploads", {
   fileName: varchar("fileName", { length: 500 }),
   fileType: varchar("fileType", { length: 16 }), // pdf | excel | csv
   rowCount: int("rowCount").default(0).notNull(),
+  // Currency detected by the extractor (WS-6) — previously returned to the
+  // client but dropped; runs now consume it instead of hardcoding NGN.
+  currency: varchar("currency", { length: 3 }),
   // Canonical extracted rows (date, description, amount, debitCredit, reference, balance?).
   rows: json("rows").notNull(),
   notes: text("notes"), // extraction notes / warnings shown to the user
