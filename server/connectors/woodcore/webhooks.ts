@@ -163,6 +163,47 @@ export async function handleWoodcoreWebhook(input: {
     return { httpStatus: 503, body: { ok: false, status: "event_store_failed", error: msg } };
   }
 
+  // ── LAPO multi-source realtime path ──
+  // LAPO configs receive channel events, not CBS entities. Envelope:
+  //   { source: "<lapoSourceKey>", events: [...] }  or a single event object
+  //   carrying a "source" field. Same HMAC/idempotency/rate-limit rules as
+  //   every other CBS webhook; ingestion routes through the LAPO ETL.
+  if (getCbsProfile(cfg.cbsType).type === "lapo") {
+    try {
+      const env = data as Record<string, unknown>;
+      const sourceKey = String(env.source ?? "");
+      const events = Array.isArray(env.events)
+        ? (env.events as Record<string, unknown>[])
+        : [env as Record<string, unknown>];
+      const { ingestLapoEvents } = await import("../lapo/etl");
+      const result = await ingestLapoEvents(cfg.organizationId, sourceKey, events);
+      await db
+        .update(wcConnectorWebhookEvents)
+        .set({ status: "processed", processedAt: new Date(), entity: `lapo:${sourceKey}`.slice(0, 50) })
+        .where(eq(wcConnectorWebhookEvents.id, eventDbId));
+      return {
+        httpStatus: 200,
+        body: { ok: true, status: result.failed > 0 ? "processed_with_failures" : "processed", eventDbId },
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await db
+        .update(wcConnectorWebhookEvents)
+        .set({ status: "failed", error: msg.slice(0, 4000) })
+        .where(eq(wcConnectorWebhookEvents.id, eventDbId));
+      await enqueueDeadLetter({
+        configId: cfg.id,
+        organizationId: cfg.organizationId,
+        source: "webhook",
+        refType: "lapo_event",
+        refId: String(eventId).slice(0, 191),
+        payload: data,
+        error: msg,
+      });
+      return { httpStatus: 202, body: { ok: true, status: "dead_lettered", eventDbId } };
+    }
+  }
+
   // Process inline (single event — fast path). Failures → DLQ, still 2xx.
   if (!entity) {
     await db

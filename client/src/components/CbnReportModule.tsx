@@ -19,13 +19,16 @@ import {
  * one-click CBN-format CSV export. Mounted as the "Regulatory Reports" tab.
  */
 
-type ReportType = "daily_recon_summary" | "exception_log" | "counterparty_exposure" | "interbank_settlement";
+type ReportType =
+  | "daily_recon_summary" | "exception_log" | "counterparty_exposure" | "interbank_settlement"
+  | "mfb_unreconciled_aging";
 
 const REPORTS: { type: ReportType; title: string; desc: string; period: "day" | "range" }[] = [
   { type: "daily_recon_summary", title: "Daily Reconciliation Summary", desc: "Per-channel reconciliation position for a single day — the CBN daily attestation that reconciliation was performed.", period: "day" },
   { type: "exception_log", title: "Exception Log & Resolution Register", desc: "Every exception with resolution status, days outstanding, CBS reflection, and audit-trail event count.", period: "range" },
   { type: "counterparty_exposure", title: "Counterparty Exposure Report", desc: "Open unreconciled exposure aggregated by counterparty, with concentration-risk rating.", period: "range" },
   { type: "interbank_settlement", title: "Interbank Settlement Reconciliation (NIBSS)", desc: "NIBSS / RTGS / SWIFT settlement reconciliation — volume, value, matched value and variance.", period: "range" },
+  { type: "mfb_unreconciled_aging", title: "Unreconciled Items Aging Schedule (MFB)", desc: "Unreconciled items aged 0–30 / 31–60 / 61–90 / 90+ days per channel, with provisioning flags — the MFB examination and OFISD monthly-return staple.", period: "day" },
 ];
 
 function downloadCsv(filename: string, csv: string) {

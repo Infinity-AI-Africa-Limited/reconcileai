@@ -188,6 +188,20 @@ export async function onboardCbsClient(
     console.error("[wc-onboarding] tenant baseline failed:", err);
   }
 
+  // 6) LAPO channel pack: the eight source channels (with per-source timing
+  //    tolerances) + the LAPO exception taxonomy as resolution templates.
+  //    Idempotent — re-run via lapo.provision if anything fails here.
+  if (profile.type === "lapo") {
+    try {
+      const { provisionLapoChannels } = await import("../lapo/etl");
+      const { seedLapoResolutionTemplates } = await import("../lapo/exceptions");
+      await provisionLapoChannels(organizationId);
+      await seedLapoResolutionTemplates(organizationId);
+    } catch (err) {
+      console.error("[wc-onboarding] LAPO channel pack failed (re-run lapo.provision):", err);
+    }
+  }
+
   // Welcome email — best effort; the magic link is returned either way so the
   // operator can hand it over out-of-band when email isn't configured.
   let emailSent = false;

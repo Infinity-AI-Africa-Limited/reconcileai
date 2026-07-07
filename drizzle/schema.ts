@@ -834,6 +834,17 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "mm_bank_to_wallet_failed",
   "mm_withdrawal_tax_variance",
   "mm_momo_settlement_shortfall",
+  // LAPO MFB multi-source integration (server/connectors/lapo/exceptions.ts)
+  "lapo_ussd_debit_no_value",
+  "lapo_nip_inward_not_credited",
+  "lapo_nip_outward_debit_unsettled",
+  "lapo_card_settlement_short",
+  "lapo_agent_float_mismatch",
+  "lapo_ledger_orphan",
+  "lapo_channel_orphan",
+  "lapo_cross_channel_duplicate",
+  "lapo_settlement_timing_lag",
+  "lapo_fee_commission_variance",
 ] as const;
 export type ResolutionTemplateCategory = (typeof RESOLUTION_TEMPLATE_CATEGORIES)[number];
 

@@ -113,10 +113,43 @@ export const INTERSWITCH_SETTLEMENT_FORMAT: ConnectorFormat = {
   },
 };
 
+// ─── LAPO multi-source formats (derived from the shared source registry) ─────
+// The LAPO integration declares its file shapes once in shared/lapoSources.ts;
+// registering them here means the Upload page auto-detects LAPO drops too.
+// Split debit/credit ledgers map both columns as `amount` aliases — exactly one
+// side is filled per row, so resolveField picks the right value; the LAPO
+// server ETL (the recommended path) derives direction from which side is set.
+import { LAPO_SOURCES } from "@shared/lapoSources";
+
+const LAPO_FORMATS: ConnectorFormat[] = Object.values(LAPO_SOURCES)
+  .filter((s) => !["nibss_nip", "interswitch_settlement"].includes(s.format.id)) // already registered
+  .map((s) => ({
+    id: s.format.id,
+    label: `LAPO — ${s.label}`,
+    description: s.systemDescription,
+    signature: s.format.signature,
+    aliases: {
+      transactionRef: s.format.aliases.transactionRef,
+      externalRef: s.format.aliases.externalRef,
+      description: s.format.aliases.description,
+      amount: [
+        ...(s.format.aliases.amount ?? []),
+        ...(s.format.aliases.amountCredit ?? []),
+        ...(s.format.aliases.amountDebit ?? []),
+      ],
+      currency: s.format.aliases.currency,
+      transactionDate: s.format.aliases.transactionDate,
+      valueDate: s.format.aliases.valueDate,
+      debitCredit: s.format.aliases.debitCredit,
+      counterparty: s.format.aliases.counterparty,
+    },
+  }));
+
 /** Ordered most-specific-first; generic is the implicit fallback (not listed). */
 export const CONNECTOR_FORMATS: ConnectorFormat[] = [
   NIBSS_NIP_FORMAT,
   INTERSWITCH_SETTLEMENT_FORMAT,
+  ...LAPO_FORMATS,
 ];
 
 /**

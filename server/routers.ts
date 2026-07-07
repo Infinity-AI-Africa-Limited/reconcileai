@@ -7,6 +7,7 @@ import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
 import { mobileMoneyRouter } from "./routers/mobileMoney";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
+import { lapoRouter } from "./routers/lapo";
 import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -6126,8 +6127,10 @@ Always be specific, reference actual exception IDs and amounts where available, 
   mobileMoney: mobileMoneyRouter,
   woodcoreConnector: woodcoreConnectorRouter,
   // Same router, CBS-neutral name — the connector engine now serves WoodCore,
-  // T24, Mambu and FLEXCUBE. Prefer `cbsConnector` in new client code.
+  // T24, Mambu, FLEXCUBE and LAPO. Prefer `cbsConnector` in new client code.
   cbsConnector: woodcoreConnectorRouter,
+  // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
+  lapo: lapoRouter,
   roadmap: router({
     // Public: submit an access request
     requestAccess: publicProcedure

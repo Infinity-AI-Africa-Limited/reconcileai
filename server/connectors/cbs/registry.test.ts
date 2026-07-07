@@ -32,8 +32,10 @@ describe("registry shape", () => {
     expect(getCbsProfile(null).type).toBe("woodcore");
   });
 
-  it("listCbsProfiles exposes all four platforms for the onboarding hub", () => {
-    expect(listCbsProfiles().map((p) => p.type)).toEqual(["woodcore", "t24", "mambu", "flexcube"]);
+  it("listCbsProfiles exposes all five platforms for the onboarding hub", () => {
+    expect(listCbsProfiles().map((p) => p.type)).toEqual([
+      "woodcore", "t24", "mambu", "flexcube", "lapo",
+    ]);
   });
 });
 

@@ -22,9 +22,9 @@ import type { WcEndpoints, WcEntity } from "../woodcore/types";
 import { DEFAULT_ENDPOINTS as WOODCORE_ENDPOINTS } from "../woodcore/types";
 import { DEFAULT_MAPPINGS as WOODCORE_API_MAPPINGS, type MappingRule } from "../woodcore/mapping";
 
-export type CbsType = "woodcore" | "t24" | "mambu" | "flexcube";
+export type CbsType = "woodcore" | "t24" | "mambu" | "flexcube" | "lapo";
 
-export const CBS_TYPES: CbsType[] = ["woodcore", "t24", "mambu", "flexcube"];
+export const CBS_TYPES: CbsType[] = ["woodcore", "t24", "mambu", "flexcube", "lapo"];
 
 export interface CbsProfile {
   type: CbsType;
@@ -309,8 +309,58 @@ const flexcubeCsv: Record<WcEntity, MappingRule[]> = {
   ],
 };
 
+// ─── LAPO MFB (custom multi-source integration) ─────────────────────────────
+// LAPO is NOT a vendor-API CBS: it is a proprietary core plus seven channel
+// systems (mobile, USSD, agent, NIP, three card processors) integrated through
+// the LAPO ETL (server/connectors/lapo/ + shared/lapoSources.ts). It lives in
+// this registry so the onboarding hub, connector config (webhook secret/DLQ/
+// health), and org provisioning all work unchanged. The entity mappings below
+// are the CBS-ledger file shape only — real ingestion routes through the LAPO
+// source profiles, per source system.
+const lapoLedgerRules: MappingRule[] = [
+  { target: "externalId", source: "reference", transform: "string" },
+  { target: "typeLabel", source: "channel", transform: "string" },
+  { target: "amount", source: "amount", transform: "absAmount" },
+  { target: "currency", source: "currency", default: "NGN" },
+  { target: "debitCredit", source: "dr_cr", transform: "directionWord" },
+  { target: "transactionDate", source: "transaction_date", transform: "wcDate" },
+  { target: "valueDate", source: "value_date", transform: "wcDate" },
+  { target: "description", source: "narration", transform: "string" },
+  { target: "counterparty", source: "account_name", transform: "string" },
+];
+const lapoEntityMappings: Record<WcEntity, MappingRule[]> = {
+  savings_transaction: lapoLedgerRules,
+  loan_transaction: lapoLedgerRules,
+  journal_entry: lapoLedgerRules,
+};
+
+const LAPO_PROFILE: CbsProfile = {
+  type: "lapo",
+  label: "LAPO MFB (multi-source)",
+  vendor: "LAPO proprietary core + channel systems (custom ETL)",
+  onboardingChannel: "lapo",
+  channelCodePrefix: "LAPO_CBS",
+  channelName: "LAPO Unified Ledger",
+  defaultAuthMode: "api_key",
+  defaultApiKeyHeader: "x-api-key",
+  defaultTenantId: "default",
+  defaultEndpoints: {
+    savingsTransactions: "/exports/ledger/transactions",
+    loanTransactions: "/exports/loans/transactions",
+    journalEntries: "/exports/gl/entries",
+    tokenUrl: "/oauth/token",
+    ping: "/health",
+    writeBack: "/notes",
+  },
+  apiMappings: lapoEntityMappings,
+  csvMappings: lapoEntityMappings,
+  notes:
+    "Custom multi-source integration: 8 source systems (CBS ledger, mobile, USSD, agent, NIP, Interswitch/UPSL/eTranzact cards) via SFTP daily batches + realtime events. Provisions all source channels, timing tolerances and the LAPO exception taxonomy at onboarding. All shapes are config — updatable the day LAPO provides real specs.",
+};
+
 // ─── The registry ────────────────────────────────────────────────────────────
 export const CBS_PROFILES: Record<CbsType, CbsProfile> = {
+  lapo: LAPO_PROFILE,
   woodcore: {
     type: "woodcore",
     label: "WoodCore",

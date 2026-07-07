@@ -186,6 +186,89 @@ async function channelMap(organizationId: number): Promise<Map<number, { name: s
   return m;
 }
 
+// ─── 0. Unreconciled Items Aging Schedule (MFB-specific) ─────────────────────
+// The MFB examination staple the original five reports lacked: unreconciled
+// items aged 0–30 / 31–60 / 61–90 / 90+ days per channel, as of a date.
+// Supports the OFISD monthly return pack and the Prudential Guidelines
+// provisioning conversation (long-aged unreconciled debits attract provisions).
+
+export async function buildUnreconciledAging(organizationId: number, asOf: string): Promise<ReportResult> {
+  const meta = await buildMeta(
+    organizationId,
+    "UNRECONCILED ITEMS AGING SCHEDULE",
+    `As of ${asOf}`,
+    "CBN Prudential Guidelines (provisioning for aged unreconciled items); OFISD MFB monthly return support; CBN bank-reconciliation circulars",
+  );
+  const db = await getDb();
+  const chans = await channelMap(organizationId);
+  const asOfDate = new Date(`${asOf}T23:59:59.999Z`);
+
+  type Bucket = { c0_30: number; v0_30: number; c31_60: number; v31_60: number; c61_90: number; v61_90: number; c90p: number; v90p: number; oldest: number };
+  const mk = (): Bucket => ({ c0_30: 0, v0_30: 0, c31_60: 0, v31_60: 0, c61_90: 0, v61_90: 0, c90p: 0, v90p: 0, oldest: 0 });
+  const byChannel = new Map<number, Bucket>();
+  let totalValue = 0;
+  let totalCount = 0;
+
+  if (db) {
+    const open = await db
+      .select({
+        channelId: transactions.channelId,
+        amount: transactions.amount,
+        transactionDate: transactions.transactionDate,
+      })
+      .from(transactions)
+      .where(and(
+        eq(transactions.organizationId, organizationId),
+        inArray(transactions.status, ["unmatched", "exception"]),
+        lte(transactions.transactionDate, asOfDate),
+      ));
+
+    for (const t of open) {
+      const age = Math.max(0, Math.floor((asOfDate.getTime() - new Date(t.transactionDate).getTime()) / 86_400_000));
+      const amt = num(t.amount);
+      const b = byChannel.get(t.channelId) ?? mk();
+      if (age <= 30) { b.c0_30++; b.v0_30 = round2(b.v0_30 + amt); }
+      else if (age <= 60) { b.c31_60++; b.v31_60 = round2(b.v31_60 + amt); }
+      else if (age <= 90) { b.c61_90++; b.v61_90 = round2(b.v61_90 + amt); }
+      else { b.c90p++; b.v90p = round2(b.v90p + amt); }
+      b.oldest = Math.max(b.oldest, age);
+      byChannel.set(t.channelId, b);
+      totalValue = round2(totalValue + amt);
+      totalCount++;
+    }
+  }
+
+  const fmt = (n: number) => n.toLocaleString("en-NG", { minimumFractionDigits: 2 });
+  const columns = [
+    "S/N", "Channel", "0–30 days (Count)", "0–30 days (NGN)", "31–60 days (Count)", "31–60 days (NGN)",
+    "61–90 days (Count)", "61–90 days (NGN)", "Over 90 days (Count)", "Over 90 days (NGN)",
+    "Oldest Item (days)", "Provisioning Flag",
+  ];
+  const sorted = Array.from(byChannel.entries()).sort(
+    (a, b) => (b[1].v0_30 + b[1].v31_60 + b[1].v61_90 + b[1].v90p) - (a[1].v0_30 + a[1].v31_60 + a[1].v61_90 + a[1].v90p),
+  );
+  const rows: (string | number)[][] = sorted.map(([channelId, b], i) => [
+    i + 1,
+    chans.get(channelId)?.name ?? `Channel ${channelId}`,
+    b.c0_30, fmt(b.v0_30), b.c31_60, fmt(b.v31_60), b.c61_90, fmt(b.v61_90), b.c90p, fmt(b.v90p),
+    b.oldest,
+    b.v90p > 0 ? "PROVISION (>90d)" : b.v61_90 > 0 ? "WATCH (61–90d)" : "NONE",
+  ]);
+  if (rows.length === 0) rows.push([1, "No unreconciled items as of this date", 0, "0.00", 0, "0.00", 0, "0.00", 0, "0.00", 0, "NONE"]);
+
+  const over90 = sorted.reduce((s, [, b]) => round2(s + b.v90p), 0);
+  return {
+    meta, columns, rows,
+    summary: {
+      "Total unreconciled items": totalCount,
+      "Total unreconciled value (NGN)": fmt(totalValue),
+      "Value aged over 90 days (NGN)": fmt(over90),
+      "Channels with provisioning-flag items": sorted.filter(([, b]) => b.v90p > 0).length,
+      "Attestation note": "Items aged >90 days are candidates for provisioning per the Prudential Guidelines; dispositions must be evidenced in the exception log.",
+    },
+  };
+}
+
 // ─── 1. Daily Reconciliation Summary (CBN format) ─────────────────────────────
 
 export async function buildDailyReconSummary(organizationId: number, date: string): Promise<ReportResult> {

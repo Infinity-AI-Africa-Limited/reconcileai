@@ -32,6 +32,7 @@ import * as cbnReports from "../cbnReports";
 // ─── CBN report builders: dispatch + shared input ─────────────────────────────
 const reportTypeEnum = z.enum([
   "daily_recon_summary", "exception_log", "counterparty_exposure", "interbank_settlement",
+  "mfb_unreconciled_aging",
 ]);
 const reportParams = z.object({
   reportType: reportTypeEnum,
@@ -45,6 +46,10 @@ async function runReport(orgId: number, input: z.infer<typeof reportParams>) {
   if (input.reportType === "daily_recon_summary") {
     return cbnReports.buildDailyReconSummary(orgId, input.date ?? today);
   }
+  if (input.reportType === "mfb_unreconciled_aging") {
+    // As-of snapshot (MFB monthly return support) — uses `date`, not a range.
+    return cbnReports.buildUnreconciledAging(orgId, input.date ?? today);
+  }
   const from = new Date(`${input.from ?? today}T00:00:00.000Z`);
   const to = new Date(`${input.to ?? today}T23:59:59.999Z`);
   if (input.reportType === "exception_log") return cbnReports.buildExceptionLog(orgId, from, to);
@@ -54,7 +59,7 @@ async function runReport(orgId: number, input: z.infer<typeof reportParams>) {
 
 function reportPeriod(input: z.infer<typeof reportParams>): { label: string; start: Date; end: Date } {
   const today = new Date().toISOString().slice(0, 10);
-  if (input.reportType === "daily_recon_summary") {
+  if (input.reportType === "daily_recon_summary" || input.reportType === "mfb_unreconciled_aging") {
     const d = input.date ?? today;
     return { label: d, start: new Date(`${d}T00:00:00.000Z`), end: new Date(`${d}T23:59:59.999Z`) };
   }
