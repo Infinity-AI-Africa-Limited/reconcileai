@@ -31,6 +31,11 @@ export const organizations = mysqlTable("organizations", {
   // - "woodcore": onboarded through the WoodCore CBS connector (WoodCore client bank)
   // - future CBS connectors add their own channel code here (varchar, not enum, on purpose)
   onboardingChannel: varchar("onboardingChannel", { length: 50 }).default("direct").notNull(),
+  // Enterprise SSO opt-in, per organization. Email/magic-link is the default
+  // for every org; a client's users can only use Google / Microsoft Entra ID
+  // sign-in once the org is switched on here ("when the client requests it").
+  // Values: "none" (default) | "google" | "microsoft" | "both".
+  ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -1657,6 +1662,7 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
   eventType: mysqlEnum("eventType", [
     "org_created",
     "org_segment_updated",
+    "org_sso_updated",
     "user_role_updated",
     "user_promoted_super_admin",
   ]).notNull(),

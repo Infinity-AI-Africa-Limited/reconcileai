@@ -405,6 +405,14 @@ function OrganisationsTable() {
     onError: (err) => toast.error("Failed to update segment", { description: err.message }),
   });
 
+  const updateSso = trpc.superAdmin.setOrganizationSso.useMutation({
+    onSuccess: () => {
+      toast.success("Sign-in method updated — takes effect on the client's next login");
+      utils.superAdmin.allOrganizations.invalidate();
+    },
+    onError: (err) => toast.error("Failed to update sign-in method", { description: err.message }),
+  });
+
   const filtered = (orgs ?? []).filter((org: any) => {
     const matchSearch = !search || org.name.toLowerCase().includes(search.toLowerCase()) || org.code?.toLowerCase().includes(search.toLowerCase());
     const matchSeg = segmentFilter === "all" || org.segment === segmentFilter;
@@ -536,6 +544,30 @@ function OrganisationsTable() {
                             <SelectItem value="super_admin">Infinity AI</SelectItem>
                           </SelectContent>
                         </Select>
+                        {/* Sign-in method: email link is every org's default; flip
+                            only when the client requests Google/Microsoft SSO. */}
+                        {org.segment !== "super_admin" && (
+                          <Select
+                            value={org.ssoProvider ?? "none"}
+                            onValueChange={(v) =>
+                              updateSso.mutate({
+                                organizationId: org.id,
+                                ssoProvider: v as "none" | "google" | "microsoft" | "both",
+                              })
+                            }
+                            disabled={updateSso.isPending}
+                          >
+                            <SelectTrigger className="h-7 text-xs w-40" title="Sign-in method">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">Email link (default)</SelectItem>
+                              <SelectItem value="google">+ Google SSO</SelectItem>
+                              <SelectItem value="microsoft">+ Microsoft SSO</SelectItem>
+                              <SelectItem value="both">+ Google & Microsoft</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

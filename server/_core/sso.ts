@@ -25,7 +25,7 @@ import { eq } from "drizzle-orm";
 import type { Express, Request, Response } from "express";
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "jose";
 import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
-import { users } from "../../drizzle/schema";
+import { organizations, users } from "../../drizzle/schema";
 import { getDb } from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { assertEgressAllowed } from "./egress";
@@ -91,12 +91,45 @@ export function getProviderDef(id: string): ProviderDef | null {
   return null;
 }
 
-/** Providers with credentials configured — drives the /login buttons. */
-export function enabledSsoProviders(): Array<{ id: SsoProviderId; label: string }> {
+/** Providers with platform credentials configured (env-level). */
+export function configuredSsoProviders(): Array<{ id: SsoProviderId; label: string }> {
   return (["google", "microsoft"] as const)
     .map((id) => getProviderDef(id))
     .filter((p): p is ProviderDef => p !== null)
     .map((p) => ({ id: p.id, label: p.label }));
+}
+
+/**
+ * Does an organization's SSO setting allow this provider?
+ * Email/magic-link is the default for every org ("none"); Google/Microsoft
+ * only work for orgs a super admin has switched on at the client's request.
+ */
+export function orgAllowsSso(ssoProvider: string | null | undefined, provider: SsoProviderId): boolean {
+  const setting = (ssoProvider ?? "none").toLowerCase();
+  return setting === "both" || setting === provider;
+}
+
+/**
+ * Providers shown on /login: platform credentials must be configured AND at
+ * least one client organization must have requested that provider. Until a
+ * client opts in, the login page shows only the default email sign-in.
+ */
+export async function enabledSsoProviders(): Promise<Array<{ id: SsoProviderId; label: string }>> {
+  const configured = configuredSsoProviders();
+  if (configured.length === 0) return [];
+  try {
+    const db = await getDb();
+    if (!db) return [];
+    const rows = await db
+      .select({ ssoProvider: organizations.ssoProvider })
+      .from(organizations)
+      .where(eq(organizations.isActive, true));
+    const enabled = new Set(rows.map((r) => (r.ssoProvider ?? "none").toLowerCase()));
+    return configured.filter((p) => enabled.has("both") || enabled.has(p.id));
+  } catch (err) {
+    console.error("[sso] provider listing failed:", err);
+    return [];
+  }
 }
 
 // ─── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -341,8 +374,28 @@ export function registerSsoRoutes(app: Express): void {
       if (!user || !user.isActive || user.isGuest) {
         return loginError(res, "no_account");
       }
+
+      // SSO is a CLIENT-ORGANIZATION feature only. Infinity AI super admins
+      // (cross-tenant access) must use the email magic link — their sessions
+      // are too powerful to hinge on a third-party IdP account. Users without
+      // an organization have nothing to scope SSO policy to; same rule.
+      if (user.role === "super_admin" || !user.organizationId) {
+        return loginError(res, "sso_not_allowed");
+      }
+
       if (!(await isOrgLoginAllowed(user.organizationId))) {
         return loginError(res, "org_suspended");
+      }
+
+      // Per-org opt-in: email/magic-link is the default for every client.
+      // Google/Microsoft only sign in users of orgs that requested it.
+      const [org] = await db
+        .select({ ssoProvider: organizations.ssoProvider })
+        .from(organizations)
+        .where(eq(organizations.id, user.organizationId))
+        .limit(1);
+      if (!org || !orgAllowsSso(org.ssoProvider, def.id)) {
+        return loginError(res, "sso_not_enabled");
       }
 
       // ── Mint the session (same shape as magic-link login) ──

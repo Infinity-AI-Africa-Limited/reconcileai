@@ -13,8 +13,34 @@ import {
   b64url,
   buildAuthorizeUrl,
   generatePkcePair,
+  orgAllowsSso,
   validateIdentityClaims,
 } from "./sso";
+
+describe("orgAllowsSso — email is the default, SSO is per-client opt-in", () => {
+  it("default ('none' / null / legacy empty) allows NO SSO provider", () => {
+    expect(orgAllowsSso("none", "google")).toBe(false);
+    expect(orgAllowsSso("none", "microsoft")).toBe(false);
+    expect(orgAllowsSso(null, "google")).toBe(false);
+    expect(orgAllowsSso(undefined, "microsoft")).toBe(false);
+  });
+
+  it("a client that requested Google gets Google only", () => {
+    expect(orgAllowsSso("google", "google")).toBe(true);
+    expect(orgAllowsSso("google", "microsoft")).toBe(false);
+  });
+
+  it("a client that requested Microsoft gets Microsoft only", () => {
+    expect(orgAllowsSso("microsoft", "microsoft")).toBe(true);
+    expect(orgAllowsSso("microsoft", "google")).toBe(false);
+  });
+
+  it("'both' enables the pair; casing is tolerated", () => {
+    expect(orgAllowsSso("both", "google")).toBe(true);
+    expect(orgAllowsSso("both", "microsoft")).toBe(true);
+    expect(orgAllowsSso("Google", "google")).toBe(true);
+  });
+});
 
 describe("PKCE", () => {
   it("verifier is base64url (no +/=), challenge is its S256 hash", () => {

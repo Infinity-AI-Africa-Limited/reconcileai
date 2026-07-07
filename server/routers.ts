@@ -3899,6 +3899,35 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    // Enterprise SSO opt-in per organization. Email/magic-link is the default
+    // for every client; flip this only when the client requests Google or
+    // Microsoft sign-in (their users then get the button on /login).
+    setOrganizationSso: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        ssoProvider: z.enum(["none", "google", "microsoft", "both"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await drizzle.update(organizations)
+          .set({ ssoProvider: input.ssoProvider })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_sso", "organization", input.organizationId, {
+          ssoProvider: input.ssoProvider,
+        });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_sso_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          newValue: input.ssoProvider,
+        });
+        return { success: true };
+      }),
+
     // Create a new organisation (for onboarding a new client instance)
     createOrganization: superAdminProcedure
       .input(z.object({

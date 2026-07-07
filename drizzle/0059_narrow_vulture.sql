@@ -1,0 +1,2 @@
+ALTER TABLE `platform_audit_logs` MODIFY COLUMN `eventType` enum('org_created','org_segment_updated','org_sso_updated','user_role_updated','user_promoted_super_admin') NOT NULL;--> statement-breakpoint
+ALTER TABLE `organizations` ADD `ssoProvider` varchar(20) DEFAULT 'none' NOT NULL;
