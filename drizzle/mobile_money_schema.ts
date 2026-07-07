@@ -2,16 +2,19 @@
  * Mobile Money Reconciliation Schema
  *
  * Supports reconciliation of mobile money settlement files across two
- * jurisdictions:
- *   Nigeria — NIBSS NIP, OPay, Palmpay (NGN, CBN/NIBSS rules)
- *   Uganda  — MTN MoMo, Airtel Money  (UGX, Bank of Uganda NPS framework)
+ * jurisdictions and two flow kinds:
+ *   Nigeria transfers/USSD — NIBSS NIP, OPay, Palmpay (NGN, CBN/NIBSS rules)
+ *   Nigeria wallets (WS-8) — OPay/Palmpay/Moniepoint wallet statements vs the
+ *                            institution's internal wallet ledger (NGN, CBN rules)
+ *   Uganda — MTN MoMo, Airtel Money (UGX, Bank of Uganda NPS framework)
  *
  * Structured to mirror the poc_runs / poc_exceptions pattern so the existing
  * reconciliation engine and KPI dashboard work without modification.
  *
- * Exception categories (12 total: 8 Nigeria + 4 Uganda) are mobile-money-
- * specific. Per-institution learning is powered by the resolution history in
- * mm_exceptions itself (see applyInstitutionalLearning in mobileMoney-engine.ts).
+ * Exception categories (15 total: 8 Nigeria + 4 Uganda + 3 wallet) are
+ * mobile-money-specific. Per-institution learning is powered by the resolution
+ * history in mm_exceptions itself (see applyInstitutionalLearning in
+ * mobileMoney-engine.ts).
  */
 import {
   int,
@@ -27,8 +30,15 @@ import {
 } from "drizzle-orm/mysql-core";
 
 // ─── Operator enum ────────────────────────────────────────────────────────────
-// Nigeria: nip, opay, palmpay — Uganda: mtn_momo_ug, airtel_money_ug
-export const MM_OPERATORS = ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"] as const;
+// Nigeria transfers/USSD: nip, opay, palmpay — Uganda: mtn_momo_ug, airtel_money_ug
+// Nigeria wallets (WS-8): opay_wallet, palmpay_wallet, moniepoint_wallet —
+// reconciling the provider's wallet settlement statement against the
+// institution's internal wallet ledger.
+export const MM_OPERATORS = [
+  "nip", "opay", "palmpay",
+  "mtn_momo_ug", "airtel_money_ug",
+  "opay_wallet", "palmpay_wallet", "moniepoint_wallet",
+] as const;
 export type MmOperator = (typeof MM_OPERATORS)[number];
 
 // ─── Exception category enum ─────────────────────────────────────────────────
@@ -47,6 +57,13 @@ export const MM_EXCEPTION_CATEGORIES = [
   "mm_bank_to_wallet_failed",   // Bank ledger debited, wallet never credited (no operator record)
   "mm_withdrawal_tax_variance", // Variance matching Uganda's 0.5% MM withdrawal excise duty
   "mm_momo_settlement_shortfall",// Net MoMo settlement below gross statement sum (trust account)
+  // Nigeria wallets — OPay/Palmpay/Moniepoint (WS-8)
+  "mm_wallet_credit_failed",    // Wallet credit missing on one side: funding collected but wallet
+                                // not credited (settlement side) or wallet credited with no
+                                // provider settlement backing it (ledger side)
+  "mm_wallet_debit_reversed",   // Provider reversed a wallet debit; the reversal credit has not
+                                // reached the institution's wallet ledger
+  "mm_wallet_settlement_shortfall", // Net wallet settlement below gross statement sum
 ] as const;
 export type MmExceptionCategory = (typeof MM_EXCEPTION_CATEGORIES)[number];
 
@@ -59,7 +76,7 @@ export const mmRuns = mysqlTable("mm_runs", {
   pocKey: varchar("pocKey", { length: 64 }).notNull(), // e.g. "lapo"
 
   // Operator that produced the settlement file
-  operator: mysqlEnum("operator", ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"]).notNull(),
+  operator: mysqlEnum("operator", MM_OPERATORS).notNull(),
 
   // Settlement period
   settlementDate: varchar("settlementDate", { length: 32 }),
@@ -102,7 +119,7 @@ export const mmExceptions = mysqlTable("mm_exceptions", {
   id: int("id").autoincrement().primaryKey(),
   runId: int("runId").notNull(),
   pocKey: varchar("pocKey", { length: 64 }).notNull(),
-  operator: mysqlEnum("operator", ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"]).notNull(),
+  operator: mysqlEnum("operator", MM_OPERATORS).notNull(),
 
   // Exception classification
   category: varchar("category", { length: 64 }).notNull(), // one of MM_EXCEPTION_CATEGORIES

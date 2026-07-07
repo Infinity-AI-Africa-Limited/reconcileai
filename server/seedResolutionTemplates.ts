@@ -242,6 +242,32 @@ const DEFAULT_TEMPLATES: Array<{ category: ExceptionCategory; name: string; temp
     templateText:
       "Itemised the shortfall against the operator's settlement advice: operator fees, 0.5% withdrawal levy, and netted failed transactions fully attribute the variance. Posted each to its GL and updated the daily trust-account reconciliation record per BoU E-Money Regulations 2021.",
   },
+
+  // ═══ Mobile Money — Nigeria wallets (WS-8: OPay/Palmpay/Moniepoint) ══════════
+  {
+    category: "mm_wallet_credit_failed",
+    name: "Post missing wallet credit from suspense",
+    templateText:
+      "Confirmed in the provider portal that the customer's funding was collected but the wallet credit never posted. Credited the customer's wallet from the provider settlement suspense GL, notified the customer, and logged the resolution for the CBN consumer-protection audit trail.",
+  },
+  {
+    category: "mm_wallet_credit_failed",
+    name: "Unbacked wallet credit — freeze and chase settlement",
+    templateText:
+      "Internal wallet ledger showed a credit with no provider settlement backing it. Froze spend against the unbacked balance, raised the missing settlement with the provider's reconciliation desk, and reversed the credit after the provider confirmed no settlement would follow.",
+  },
+  {
+    category: "mm_wallet_debit_reversed",
+    name: "Post provider reversal to wallet",
+    templateText:
+      "Verified the provider's reversal reference and posted the reversal credit to the customer's wallet against the provider settlement suspense GL. Escalated per CBN T+1 reversal timeline where the reversal was aged, and notified the customer once the balance was restored.",
+  },
+  {
+    category: "mm_wallet_settlement_shortfall",
+    name: "Attribute shortfall to provider fees",
+    templateText:
+      "Itemised the wallet settlement shortfall against the provider's settlement advice: fees, commissions, and netted failed transactions fully attribute the variance. Posted fees to the provider charges GL; flagged the provider for contract review after repeated unexplained shortfalls.",
+  },
 ];
 
 /** Stable dedupe key for a global default (matches the unique index column). */

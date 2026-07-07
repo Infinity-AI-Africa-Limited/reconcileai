@@ -51,8 +51,14 @@ function row(overrides: Partial<CanonicalRow> & { amount: number }): CanonicalRo
 // ─── 1. Taxonomy ──────────────────────────────────────────────────────────────
 
 describe("Mobile Money Exception Taxonomy", () => {
-  it("defines exactly 12 exception categories (8 Nigeria + 4 Uganda)", () => {
-    expect(MM_EXCEPTION_CATEGORIES).toHaveLength(12);
+  it("defines exactly 15 exception categories (8 Nigeria + 4 Uganda + 3 wallet)", () => {
+    expect(MM_EXCEPTION_CATEGORIES).toHaveLength(15);
+  });
+
+  it("includes the three wallet-specific categories (WS-8)", () => {
+    expect(MM_EXCEPTION_CATEGORIES).toContain("mm_wallet_credit_failed");
+    expect(MM_EXCEPTION_CATEGORIES).toContain("mm_wallet_debit_reversed");
+    expect(MM_EXCEPTION_CATEGORIES).toContain("mm_wallet_settlement_shortfall");
   });
 
   it("includes the four Uganda-specific categories", () => {
@@ -95,9 +101,9 @@ describe("Mobile Money Exception Taxonomy", () => {
 // ─── 2. Operator metadata ─────────────────────────────────────────────────────
 
 describe("Mobile Money Operator Metadata", () => {
-  it("defines exactly 5 operators (3 Nigeria + 2 Uganda)", () => {
-    expect(MM_OPERATORS).toHaveLength(5);
-    expect(Object.keys(OPERATOR_META)).toHaveLength(5);
+  it("defines exactly 8 operators (3 NG transfers + 2 Uganda + 3 NG wallets)", () => {
+    expect(MM_OPERATORS).toHaveLength(8);
+    expect(Object.keys(OPERATOR_META)).toHaveLength(8);
   });
 
   it("Nigerian operators use NGN; Ugandan operators use UGX", () => {
@@ -113,6 +119,18 @@ describe("Mobile Money Operator Metadata", () => {
     expect(OPERATOR_META.mtn_momo_ug.country).toBe("UG");
     expect(OPERATOR_META.mtn_momo_ug.regulator).toContain("Bank of Uganda");
     expect(OPERATOR_META.airtel_money_ug.regulator).toContain("Bank of Uganda");
+  });
+
+  it("wallet operators are NG/NGN with kind 'wallet'; transfer operators are kind 'momo' (WS-8)", () => {
+    for (const op of ["opay_wallet", "palmpay_wallet", "moniepoint_wallet"] as const) {
+      expect(OPERATOR_META[op].kind).toBe("wallet");
+      expect(OPERATOR_META[op].country).toBe("NG");
+      expect(OPERATOR_META[op].currency).toBe("NGN");
+      expect(OPERATOR_META[op].ledgerLabel).toContain("Wallet");
+    }
+    for (const op of ["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"] as const) {
+      expect(OPERATOR_META[op].kind).toBe("momo");
+    }
   });
 });
 
@@ -246,6 +264,46 @@ describe("runMmLayer2 — Uganda (MTN MoMo / Airtel Money)", () => {
   });
 });
 
+// ─── 5b. runMmLayer2 — Nigeria wallets (WS-8) ────────────────────────────────
+
+describe("runMmLayer2 — Nigeria wallets (OPay/Palmpay/Moniepoint)", () => {
+  it("unmatched provider-statement row classifies as mm_wallet_credit_failed (settlement side)", () => {
+    const settlement = [row({ amount: 25_000, reference: "WTX1001" })];
+    const exceptions = runMmLayer2([], settlement, "opay_wallet");
+    expect(exceptions).toHaveLength(1);
+    expect(exceptions[0].category).toBe("mm_wallet_credit_failed");
+    expect(exceptions[0].side).toBe("settlement");
+  });
+
+  it("unmatched internal-ledger row classifies as mm_wallet_credit_failed (ledger side — unbacked credit)", () => {
+    const ledger = [row({ amount: 25_000, reference: "WTX1002" })];
+    const exceptions = runMmLayer2(ledger, [], "moniepoint_wallet");
+    expect(exceptions).toHaveLength(1);
+    expect(exceptions[0].category).toBe("mm_wallet_credit_failed");
+    expect(exceptions[0].side).toBe("ledger");
+  });
+
+  it("reversal descriptions classify as mm_wallet_debit_reversed (either side)", () => {
+    const settlement = [row({ amount: 8_000, reference: "WTX2001", description: "Reversal of failed purchase" })];
+    const ledger = [row({ amount: 9_000, reference: "WTX2002", description: "Refund pending" })];
+    const exceptions = runMmLayer2(ledger, settlement, "palmpay_wallet");
+    expect(exceptions.filter((e) => e.category === "mm_wallet_debit_reversed")).toHaveLength(2);
+  });
+
+  it("fee descriptions still classify as mm_operator_fee_variance for wallets", () => {
+    const settlement = [row({ amount: 150, reference: "WTX3001", description: "Wallet commission charge" })];
+    const exceptions = runMmLayer2([], settlement, "opay_wallet");
+    expect(exceptions[0].category).toBe("mm_operator_fee_variance");
+  });
+
+  it("same-reference amount mismatches work unchanged for wallets", () => {
+    const ledger = [row({ amount: 10_000, reference: "WTX4001" })];
+    const settlement = [row({ amount: 9_900, reference: "WTX4001" })];
+    const exceptions = runMmLayer2(ledger, settlement, "moniepoint_wallet");
+    expect(exceptions[0].category).toBe("mm_amount_mismatch");
+  });
+});
+
 // ─── 6. Settlement shortfall detection (previously a dead category) ──────────
 
 describe("detectSettlementShortfall", () => {
@@ -257,6 +315,14 @@ describe("detectSettlementShortfall", () => {
     expect(shortfall).not.toBeNull();
     expect(shortfall!.category).toBe("mm_nip_settlement_shortfall");
     expect(shortfall!.amount).toBe(10_000);
+  });
+
+  it("emits mm_wallet_settlement_shortfall for wallet operators (WS-8)", () => {
+    const ledger = [row({ amount: 100_000 })];
+    const settlement = [row({ amount: 90_000 })];
+    const layer1 = runLayer1(ledger, settlement, "NGN");
+    expect(detectSettlementShortfall(layer1, "opay_wallet")!.category).toBe("mm_wallet_settlement_shortfall");
+    expect(detectSettlementShortfall(layer1, "moniepoint_wallet")!.category).toBe("mm_wallet_settlement_shortfall");
   });
 
   it("emits mm_momo_settlement_shortfall for non-NIP operators", () => {
@@ -308,6 +374,22 @@ describe("runMmLayer3 — AI diagnosis output", () => {
     expect(item.priorityLevel).toBe("HIGH");
     expect(item.agentExplanation).toContain("USh");
     expect(item.cbnRuleReference).toContain("Uganda");
+  });
+
+  it("wallet diagnoses are side-aware: settlement = missed funding, ledger = unbacked credit (WS-8)", () => {
+    const settlementDrafts = runMmLayer2([], [row({ amount: 25_000, reference: "WTX9001" })], "opay_wallet");
+    const ledgerDrafts = runMmLayer2([row({ amount: 25_000, reference: "WTX9002" })], [], "opay_wallet");
+    const [settlementItem] = runMmLayer3(settlementDrafts, "opay_wallet");
+    const [ledgerItem] = runMmLayer3(ledgerDrafts, "opay_wallet");
+
+    expect(settlementItem.category).toBe("mm_wallet_credit_failed");
+    expect(settlementItem.agentExplanation).toContain("funding collected");
+    expect(ledgerItem.category).toBe("mm_wallet_credit_failed");
+    expect(ledgerItem.agentExplanation).toContain("no backing entry");
+    expect(settlementItem.agentExplanation).not.toBe(ledgerItem.agentExplanation);
+    expect(settlementItem.cbnRuleReference).toContain("Consumer Protection");
+    // NGN thresholds: 25k is MEDIUM
+    expect(settlementItem.priorityLevel).toBe("MEDIUM");
   });
 });
 

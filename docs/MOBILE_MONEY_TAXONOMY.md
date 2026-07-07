@@ -1,14 +1,16 @@
 # Mobile Money Exception Taxonomy
 
-> **Gap-closure plan WS-3 deliverable.** The authoritative definition of the 12 mobile money
-> exception categories detected by `server/mobileMoney-engine.ts`, across two jurisdictions.
+> **Gap-closure plan WS-3 + WS-8 deliverable.** The authoritative definition of the 15 mobile
+> money exception categories detected by `server/mobileMoney-engine.ts`, across two
+> jurisdictions and two flow kinds (transfer/USSD settlement and provider wallets).
 > Code is the source of truth (`MM_EXCEPTION_CATEGORIES` in `drizzle/mobile_money_schema.ts`,
 > `REG_REFS`/`CATEGORY_INFO` in the engine); this document explains the domain reasoning
 > behind each category for operations teams, sales conversations, and future engineers.
 
-| Jurisdiction | Operators | Currency | Regulator / framework |
+| Segment | Operators | Currency | Regulator / framework |
 |---|---|---|---|
-| Nigeria | NIBSS NIP (`nip`), OPay (`opay`), Palmpay (`palmpay`) | NGN | CBN Mobile Money Framework 2021; NIBSS NIP Operating Rules |
+| Nigeria — transfers/USSD | NIBSS NIP (`nip`), OPay (`opay`), Palmpay (`palmpay`) | NGN | CBN Mobile Money Framework 2021; NIBSS NIP Operating Rules |
+| Nigeria — wallets (WS-8) | OPay Wallet (`opay_wallet`), Palmpay Wallet (`palmpay_wallet`), Moniepoint Wallet (`moniepoint_wallet`) | NGN | CBN Consumer Protection Regulations 2019; CBN Guidelines on Operations of Electronic Payment Channels 2020 |
 | Uganda | MTN MoMo (`mtn_momo_ug`), Airtel Money (`airtel_money_ug`) | UGX | Bank of Uganda — NPS Act 2020; NPS (E-Money) Regulations 2021; Excise Duty Act (2018 Amendment) |
 
 **Priority thresholds are currency-scaled** (roughly equal purchasing power):
@@ -105,6 +107,36 @@ persistent deduction in operator settlements.
 - **Detected when:** run-level Layer-1 variance on a non-NIP operator (`detectSettlementShortfall`); UG shortfalls matching the 0.5% profile classify as `mm_withdrawal_tax_variance` instead.
 - **Regulatory basis:** BoU NPS (E-Money) Regulations 2021 — trust account & daily reconciliation requirements.
 - **Resolution path:** itemise the operator's settlement advice (fees / levy / netted reversals) → post each to its GL → formal operator query within 2 business days for residual variance → update the daily trust-account reconciliation record.
+
+---
+
+## Nigeria wallets (3 categories — WS-8)
+
+Wallet reconciliation differs structurally from transfer settlement: the two sides are the
+**provider's wallet statement** (OPay/Palmpay/Moniepoint partner portal export) and the
+institution's **internal wallet ledger**. The core risks are consumer-protection exposure
+(customer paid, wallet not credited) and unbacked balances (wallet credited, no settled funds).
+Operators carry `kind: "wallet"` in `OPERATOR_META`, which switches the classification
+defaults below; `mm_duplicate_credit`, `mm_amount_mismatch`, and `mm_operator_fee_variance`
+apply to wallet flows unchanged.
+
+### 13. `mm_wallet_credit_failed` — Wallet Credit Failed
+- **What happened (side-aware):** *settlement side* — provider collected customer funding but the internal wallet ledger shows no credit: the customer paid and the wallet balance never moved (the most common wallet exception, direct consumer-protection exposure). *Ledger side* — the institution credited a wallet with no provider settlement backing it: an unbacked balance the institution is exposed for until settlement confirms.
+- **Detected when:** unmatched row on either side for a wallet operator (default classification; the Layer-3 explanation branches on `side`).
+- **Regulatory basis:** CBN Consumer Protection Regulations 2019 — error resolution & refund obligations.
+- **Resolution path:** establish the missing side in the provider portal → settlement-side: post wallet credit from settlement suspense, notify customer → ledger-side: freeze spend against the unbacked balance, chase or reverse.
+
+### 14. `mm_wallet_debit_reversed` — Wallet Debit Reversed
+- **What happened:** provider reversed a wallet debit (failed/disputed transaction) but the reversal credit has not reached the internal wallet ledger — the customer's balance is understated.
+- **Detected when:** reversal keywords (`reversal`/`reverse`/`refund`) on an unmatched row for a wallet operator (either side).
+- **Regulatory basis:** CBN Mobile Money Framework 2021 §4.3.2 — reversal credit timeline (T+1).
+- **Resolution path:** confirm reversal reference in provider portal → post reversal credit to the wallet → escalate past T+1 → notify customer on restoration.
+
+### 15. `mm_wallet_settlement_shortfall` — Wallet Settlement Shortfall
+- **What happened:** net wallet settlement received is below the gross statement sum — provider fees/commissions, netted failed transactions, negative-balance recoveries, or timing.
+- **Detected when:** run-level Layer-1 variance on a wallet operator (`detectSettlementShortfall`).
+- **Regulatory basis:** CBN Guidelines on Operations of Electronic Payment Channels 2020 — settlement obligations & fee transparency.
+- **Resolution path:** itemise the provider's settlement advice → post fees to the provider charges GL → formal query within 2 business days for residual variance → repeated unexplained shortfalls = contract-compliance signal.
 
 ---
 

@@ -41,11 +41,15 @@ async function getDatabase() {
 // ─── Operator metadata ────────────────────────────────────────────────────────
 
 export type MmCountry = "NG" | "UG";
+/** Flow kind: "momo" = transfer/USSD settlement; "wallet" = provider wallet
+ *  statement vs internal wallet ledger (WS-8). Drives classification defaults. */
+export type MmKind = "momo" | "wallet";
 
 export const OPERATOR_META: Record<MmOperator, {
   label: string;
   country: MmCountry;
   currency: "NGN" | "UGX";
+  kind: MmKind;
   regulator: string;
   settlementLabel: string;
   ledgerLabel: string;
@@ -60,6 +64,7 @@ export const OPERATOR_META: Record<MmOperator, {
   nip: {
     label: "NIBSS NIP",
     country: "NG",
+    kind: "momo",
     currency: "NGN",
     regulator: "CBN / NIBSS",
     settlementLabel: "NIP Settlement File",
@@ -76,6 +81,7 @@ export const OPERATOR_META: Record<MmOperator, {
   opay: {
     label: "OPay",
     country: "NG",
+    kind: "momo",
     currency: "NGN",
     regulator: "CBN",
     settlementLabel: "OPay Settlement Report",
@@ -92,6 +98,7 @@ export const OPERATOR_META: Record<MmOperator, {
   palmpay: {
     label: "Palmpay",
     country: "NG",
+    kind: "momo",
     currency: "NGN",
     regulator: "CBN",
     settlementLabel: "Palmpay Settlement Report",
@@ -108,6 +115,7 @@ export const OPERATOR_META: Record<MmOperator, {
   mtn_momo_ug: {
     label: "MTN MoMo (Uganda)",
     country: "UG",
+    kind: "momo",
     currency: "UGX",
     regulator: "Bank of Uganda",
     settlementLabel: "MTN MoMo Settlement Statement",
@@ -124,6 +132,7 @@ export const OPERATOR_META: Record<MmOperator, {
   airtel_money_ug: {
     label: "Airtel Money (Uganda)",
     country: "UG",
+    kind: "momo",
     currency: "UGX",
     regulator: "Bank of Uganda",
     settlementLabel: "Airtel Money Settlement Statement",
@@ -135,6 +144,58 @@ export const OPERATOR_META: Record<MmOperator, {
       amount: /amount|value|principal/i,
       direction: /^(dir|direction|type|dr\/?cr|cr\/?dr|debit\/credit)$/i,
       desc: /remark|narration|description|details|message|reason|service/i,
+    },
+  },
+  // ── Nigeria wallets (WS-8): provider wallet statement vs internal wallet ledger ──
+  opay_wallet: {
+    label: "OPay Wallet",
+    country: "NG",
+    kind: "wallet",
+    currency: "NGN",
+    regulator: "CBN",
+    settlementLabel: "OPay Wallet Statement",
+    ledgerLabel: "Internal Wallet Ledger",
+    settlementColumns: {
+      date: /\bdate\b|txn\s*date|trans(action)?\s*date|created\s*at/i,
+      ref: /ref(erence)?|order\s*id|txn\s*id|transaction\s*id|wallet\s*txn/i,
+      sessionId: /order\s*id|txn\s*id|transaction\s*id/i,
+      amount: /amount|value|credit|debit/i,
+      direction: /^(dir|direction|type|dr\/?cr|cr\/?dr|debit\/credit)$/i,
+      desc: /remark|narration|description|details|memo|category/i,
+    },
+  },
+  palmpay_wallet: {
+    label: "Palmpay Wallet",
+    country: "NG",
+    kind: "wallet",
+    currency: "NGN",
+    regulator: "CBN",
+    settlementLabel: "Palmpay Wallet Statement",
+    ledgerLabel: "Internal Wallet Ledger",
+    settlementColumns: {
+      date: /\bdate\b|txn\s*date|trans(action)?\s*date|created\s*time/i,
+      ref: /ref(erence)?|order\s*no|txn\s*no|transaction\s*no|wallet\s*txn/i,
+      sessionId: /order\s*no|txn\s*no|transaction\s*no/i,
+      amount: /amount|value|credit|debit/i,
+      direction: /^(dir|direction|type|dr\/?cr|cr\/?dr|debit\/credit)$/i,
+      desc: /remark|narration|description|details|memo|category/i,
+    },
+  },
+  moniepoint_wallet: {
+    label: "Moniepoint Wallet",
+    country: "NG",
+    kind: "wallet",
+    currency: "NGN",
+    regulator: "CBN",
+    settlementLabel: "Moniepoint Wallet Statement",
+    ledgerLabel: "Internal Wallet Ledger",
+    settlementColumns: {
+      date: /\bdate\b|txn\s*date|trans(action)?\s*date|created\s*at/i,
+      ref: /ref(erence)?|session\s*id|txn\s*ref|transaction\s*ref|rrn/i,
+      sessionId: /session\s*id|txn\s*ref|rrn/i,
+      amount: /amount|value|credit|debit/i,
+      direction: /^(dir|direction|type|dr\/?cr|cr\/?dr|debit\/credit)$/i,
+      desc: /remark|narration|description|details|memo|category/i,
     },
   },
 };
@@ -178,6 +239,10 @@ export const REG_REFS: Record<MmExceptionCategory, string> = {
   mm_bank_to_wallet_failed: "Uganda NPS Act 2020, Part VII — Failed Transfer Reversal Obligations",
   mm_withdrawal_tax_variance: "Uganda Excise Duty Act (2018 Amendment) — 0.5% Levy on Mobile Money Withdrawals",
   mm_momo_settlement_shortfall: "BoU NPS (E-Money) Regulations 2021 — Trust Account & Daily Reconciliation Requirements",
+  // Nigeria wallets (WS-8)
+  mm_wallet_credit_failed: "CBN Consumer Protection Regulations 2019 — Error Resolution & Refund Obligations for Wallet Credits",
+  mm_wallet_debit_reversed: "CBN Mobile Money Framework 2021, Section 4.3.2 — Reversal Credit Timeline (T+1 business day)",
+  mm_wallet_settlement_shortfall: "CBN Guidelines on Operations of Electronic Payment Channels 2020 — Settlement Obligations & Fee Transparency",
 };
 
 export const CATEGORY_INFO: Record<MmExceptionCategory, {
@@ -320,6 +385,43 @@ export const CATEGORY_INFO: Record<MmExceptionCategory, {
       "2. Attribute the shortfall line-by-line; post legitimate fees and levies to their GLs. " +
       "3. If a residual shortfall remains unattributed, raise a formal query with the operator's settlement team within 2 business days. " +
       "4. Update the daily trust-account reconciliation record to keep the BoU compliance position current.",
+  },
+  // ── Nigeria wallet categories (WS-8) ────────────────────────────────────────
+  mm_wallet_credit_failed: {
+    confidence: 91,
+    explain: (d, ccy) =>
+      d.side === "settlement"
+        ? `The provider's wallet statement shows a credit of ${fmtMoney(d.amount, ccy)} (customer funding collected) with no matching credit in the institution's wallet ledger. ` +
+          `The customer paid to fund the wallet but the wallet balance was never updated — the most common wallet exception and a direct consumer-protection exposure.`
+        : `The institution's wallet ledger shows a credit of ${fmtMoney(d.amount, ccy)} that has no backing entry in the provider's wallet statement. ` +
+          `A wallet balance has been increased without settled funds behind it — the institution is exposed for the full amount until the provider settlement is confirmed.`,
+    action:
+      "1. Look up the transaction reference in the provider's merchant/partner portal to establish which side is missing. " +
+      "2. Settlement-side (funding collected, wallet not credited): post the wallet credit from the provider settlement suspense GL and notify the customer. " +
+      "3. Ledger-side (wallet credited, no settlement): freeze further spend against the unbacked balance, and chase the provider for the settlement or reverse the credit. " +
+      "4. Log the resolution for the CBN consumer-protection audit trail.",
+  },
+  mm_wallet_debit_reversed: {
+    confidence: 90,
+    explain: (d, ccy) =>
+      `The provider reversed a wallet debit of ${fmtMoney(d.amount, ccy)} (failed or disputed transaction) but the reversal credit has not reached the institution's wallet ledger. ` +
+      `The customer's wallet balance is understated by the reversal amount until it is posted.`,
+    action:
+      "1. Confirm the reversal reference and status in the provider's portal. " +
+      "2. Post the reversal credit to the customer's wallet and the provider settlement suspense GL. " +
+      "3. If the reversal is older than T+1 business day, escalate to the provider's reconciliation desk per CBN Mobile Money Framework 2021, Section 4.3.2. " +
+      "4. Notify the customer once the wallet balance is restored.",
+  },
+  mm_wallet_settlement_shortfall: {
+    confidence: 89,
+    explain: (d, ccy) =>
+      `The net wallet settlement received is short by ${fmtMoney(d.amount, ccy)} against the gross sum of the provider's wallet statement. ` +
+      `Common causes are provider fees and commissions, netted failed transactions, negative-balance recoveries, or a settlement-cycle timing difference.`,
+    action:
+      "1. Obtain the provider's settlement advice for the cycle and itemise fees, commissions, and netted reversals. " +
+      "2. Attribute the shortfall line-by-line; post legitimate fees to the provider charges GL. " +
+      "3. If a residual shortfall remains unattributed, raise a formal query with the provider's settlement team within 2 business days per the CBN electronic-payment settlement guidelines. " +
+      "4. Record the outcome — repeated unexplained shortfalls on the same provider are a contract-compliance signal.",
   },
 };
 
@@ -528,13 +630,24 @@ export function runMmLayer2(
 }
 
 function classifyUnmatchedSettlement(desc: string, operator: MmOperator): MmExceptionCategory {
-  const isUg = OPERATOR_META[operator].country === "UG";
-  if (/reversal|reverse|refund/i.test(desc)) return "mm_reversal_not_credited";
+  const meta = OPERATOR_META[operator];
+  const isUg = meta.country === "UG";
+  if (/reversal|reverse|refund/i.test(desc)) {
+    // Wallet flows (WS-8): a reversal on the provider's statement means a
+    // wallet debit was reversed by the provider — the ledger is missing the
+    // reversal credit.
+    return meta.kind === "wallet" ? "mm_wallet_debit_reversed" : "mm_reversal_not_credited";
+  }
   if (/tax|levy|excise/i.test(desc)) {
     if (isUg) return "mm_withdrawal_tax_variance";
     return "mm_operator_fee_variance";
   }
   if (/fee|charge|commission/i.test(desc)) return "mm_operator_fee_variance";
+  if (meta.kind === "wallet") {
+    // Provider collected wallet funding the internal ledger never posted:
+    // the customer paid but the wallet balance was not updated.
+    return "mm_wallet_credit_failed";
+  }
   if (isUg) {
     // Operator settled a transfer the ledger never posted: the customer's
     // wallet moved but the bank side is missing.
@@ -547,8 +660,16 @@ function classifyUnmatchedSettlement(desc: string, operator: MmOperator): MmExce
 }
 
 function classifyUnmatchedLedger(desc: string, operator: MmOperator): MmExceptionCategory {
-  const isUg = OPERATOR_META[operator].country === "UG";
-  if (/reversal|reverse|refund/i.test(desc)) return "mm_reversal_not_credited";
+  const meta = OPERATOR_META[operator];
+  const isUg = meta.country === "UG";
+  if (/reversal|reverse|refund/i.test(desc)) {
+    return meta.kind === "wallet" ? "mm_wallet_debit_reversed" : "mm_reversal_not_credited";
+  }
+  if (meta.kind === "wallet") {
+    // Ledger credited a wallet with no provider settlement backing it — the
+    // institution carries the exposure (side-aware explanation in CATEGORY_INFO).
+    return "mm_wallet_credit_failed";
+  }
   if (isUg) {
     if (/tax|levy|excise/i.test(desc)) return "mm_withdrawal_tax_variance";
     // Ledger posted a push-to-wallet the operator never settled.
@@ -565,9 +686,10 @@ function classifyUnmatchedLedger(desc: string, operator: MmOperator): MmExceptio
 /**
  * Emit a run-level shortfall exception when the settlement net is materially
  * below the ledger net. This is the code path for mm_nip_settlement_shortfall
- * (Nigeria/NIP) and mm_momo_settlement_shortfall (all other operators);
- * for Ugandan operators a shortfall matching the 0.5% levy profile is
- * classified as mm_withdrawal_tax_variance instead.
+ * (Nigeria/NIP), mm_wallet_settlement_shortfall (wallet operators, WS-8), and
+ * mm_momo_settlement_shortfall (all other operators); for Ugandan operators a
+ * shortfall matching the 0.5% levy profile is classified as
+ * mm_withdrawal_tax_variance instead.
  */
 export function detectSettlementShortfall(
   layer1: Layer1Result,
@@ -584,6 +706,8 @@ export function detectSettlementShortfall(
     category = "mm_withdrawal_tax_variance";
   } else if (operator === "nip") {
     category = "mm_nip_settlement_shortfall";
+  } else if (meta.kind === "wallet") {
+    category = "mm_wallet_settlement_shortfall";
   } else {
     category = "mm_momo_settlement_shortfall";
   }
@@ -693,6 +817,10 @@ export async function generateMmAiSummary(params: {
     ? `You are a Ugandan banking reconciliation specialist reviewing a ${meta.label} mobile money settlement reconciliation. ` +
       `Reference the Bank of Uganda National Payment Systems Act 2020, the NPS (E-Money) Regulations 2021 trust-account reconciliation requirement, ` +
       `and the 0.5% excise duty on mobile money withdrawals where relevant.`
+    : meta.kind === "wallet"
+    ? `You are a Nigerian fintech reconciliation specialist reviewing a ${meta.label} reconciliation: the provider's wallet statement against the institution's internal wallet ledger. ` +
+      `Unbacked wallet credits are direct financial exposure and missed funding credits are consumer-protection issues — ` +
+      `reference the CBN Consumer Protection Regulations 2019 and the CBN electronic-payment settlement guidelines where relevant.`
     : `You are a Nigerian banking reconciliation specialist reviewing a ${meta.label} mobile money settlement reconciliation. ` +
       `Reference CBN Mobile Money Framework 2021 and NIBSS NIP Operating Rules where relevant.`;
 

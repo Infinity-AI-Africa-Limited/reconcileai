@@ -5,8 +5,9 @@
  * All procedures are scoped by `pocSlug` so each institution's data is isolated.
  *
  * Operators supported:
- *   Nigeria — NIBSS NIP, OPay, Palmpay
- *   Uganda  — MTN MoMo, Airtel Money
+ *   Nigeria transfers/USSD — NIBSS NIP, OPay, Palmpay
+ *   Nigeria wallets (WS-8) — OPay Wallet, Palmpay Wallet, Moniepoint Wallet
+ *   Uganda — MTN MoMo, Airtel Money
  */
 import { z } from "zod";
 import { router, publicProcedure } from "../_core/trpc";
@@ -17,11 +18,12 @@ import {
   getMmExceptions,
   updateMmExceptionStatus,
 } from "../mobileMoney-engine";
-import type { MmOperator } from "../../drizzle/mobile_money_schema";
+import { MM_OPERATORS, type MmOperator } from "../../drizzle/mobile_money_schema";
 
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
 const pocSlug = z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/);
-const mmOperator = z.enum(["nip", "opay", "palmpay", "mtn_momo_ug", "airtel_money_ug"]);
+// Derived from the schema constant so new operators (e.g. WS-8 wallets) can't drift.
+const mmOperator = z.enum(MM_OPERATORS);
 
 // Public-but-gated: requires a valid per-POC access token
 const mmProcedure = publicProcedure.use(async (opts) => {

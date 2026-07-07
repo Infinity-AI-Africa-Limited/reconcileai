@@ -30,7 +30,7 @@ import {
   Play, AlertTriangle, Bot, Copy, Check, Smartphone,
   File as FileIcon, X, ChevronDown, ChevronUp,
   ClipboardCheck, MessageSquare, ChevronRight, CircleAlert,
-  RotateCcw, Filter, Wifi, WifiOff, Banknote,
+  RotateCcw, Filter, Wifi, WifiOff, Banknote, Wallet as WalletIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -51,13 +51,11 @@ if (typeof document !== "undefined" && !document.getElementById("mm-fonts")) {
 }
 
 // ─── Operator config ──────────────────────────────────────────────────────────
-type MmOperator = "nip" | "opay" | "palmpay" | "mtn_momo_ug" | "airtel_money_ug";
+type MmOperator =
+  | "nip" | "opay" | "palmpay"
+  | "mtn_momo_ug" | "airtel_money_ug"
+  | "opay_wallet" | "palmpay_wallet" | "moniepoint_wallet";
 type MmCountry = "NG" | "UG";
-
-const COUNTRY_LABELS: Record<MmCountry, string> = {
-  NG: "🇳🇬 Nigeria",
-  UG: "🇺🇬 Uganda",
-};
 
 const OPERATOR_META: Record<MmOperator, {
   label: string;
@@ -131,11 +129,49 @@ const OPERATOR_META: Record<MmOperator, {
     hint: "The settlement statement from Airtel Money Uganda",
     icon: <Wifi className="w-5 h-5" />,
   },
+  // ── Nigeria wallets (WS-8): provider wallet statement vs internal wallet ledger ──
+  opay_wallet: {
+    label: "OPay Wallet",
+    country: "NG",
+    currency: "NGN",
+    color: "#047857",
+    bg: "#ECFDF5",
+    settlementLabel: "OPay Wallet Statement (CSV/Excel)",
+    ledgerLabel: "Internal Wallet Ledger (CSV/Excel)",
+    description: "OPay customer wallet balances. Reconcile the provider's wallet statement against your internal wallet ledger — funding credits, reversals, and settlement.",
+    hint: "The wallet statement from the OPay partner portal",
+    icon: <WalletIcon className="w-5 h-5" />,
+  },
+  palmpay_wallet: {
+    label: "Palmpay Wallet",
+    country: "NG",
+    currency: "NGN",
+    color: "#7C3AED",
+    bg: "#F5F3FF",
+    settlementLabel: "Palmpay Wallet Statement (CSV/Excel)",
+    ledgerLabel: "Internal Wallet Ledger (CSV/Excel)",
+    description: "Palmpay customer wallet balances. Reconcile the provider's wallet statement against your internal wallet ledger — funding credits, reversals, and settlement.",
+    hint: "The wallet statement from the Palmpay partner portal",
+    icon: <WalletIcon className="w-5 h-5" />,
+  },
+  moniepoint_wallet: {
+    label: "Moniepoint Wallet",
+    country: "NG",
+    currency: "NGN",
+    color: "#0369A1",
+    bg: "#F0F9FF",
+    settlementLabel: "Moniepoint Wallet Statement (CSV/Excel)",
+    ledgerLabel: "Internal Wallet Ledger (CSV/Excel)",
+    description: "Moniepoint customer wallet balances. Reconcile the provider's wallet statement against your internal wallet ledger — funding credits, reversals, and settlement.",
+    hint: "The wallet statement from the Moniepoint partner portal",
+    icon: <WalletIcon className="w-5 h-5" />,
+  },
 };
 
-const OPERATORS_BY_COUNTRY: Array<{ country: MmCountry; operators: MmOperator[] }> = [
-  { country: "NG", operators: ["nip", "opay", "palmpay"] },
-  { country: "UG", operators: ["mtn_momo_ug", "airtel_money_ug"] },
+const OPERATOR_GROUPS: Array<{ key: string; label: string; gridCls: string; operators: MmOperator[] }> = [
+  { key: "ng_transfers", label: "🇳🇬 Nigeria — Transfers & USSD", gridCls: "grid grid-cols-3 gap-3", operators: ["nip", "opay", "palmpay"] },
+  { key: "ng_wallets", label: "🇳🇬 Nigeria — Wallets", gridCls: "grid grid-cols-3 gap-3", operators: ["opay_wallet", "palmpay_wallet", "moniepoint_wallet"] },
+  { key: "ug", label: "🇺🇬 Uganda", gridCls: "grid grid-cols-2 gap-3", operators: ["mtn_momo_ug", "airtel_money_ug"] },
 ];
 
 // ─── Exception category labels ────────────────────────────────────────────────
@@ -152,6 +188,9 @@ const MM_CATEGORY_LABELS: Record<string, string> = {
   mm_bank_to_wallet_failed:  "Bank-to-Wallet Failed",
   mm_withdrawal_tax_variance: "Withdrawal Tax Variance (0.5%)",
   mm_momo_settlement_shortfall: "MoMo Settlement Shortfall",
+  mm_wallet_credit_failed:   "Wallet Credit Failed",
+  mm_wallet_debit_reversed:  "Wallet Debit Reversed",
+  mm_wallet_settlement_shortfall: "Wallet Settlement Shortfall",
   IN_SETTLEMENT_NOT_IN_LEDGER: "In Settlement, Not in Ledger",
   IN_LEDGER_NOT_IN_SETTLEMENT: "In Ledger, Not in Settlement",
   AMOUNT_MISMATCH:           "Amount Mismatch",
@@ -171,6 +210,9 @@ const MM_CATEGORY_DESCRIPTIONS: Record<string, string> = {
   mm_bank_to_wallet_failed:  "Bank account was debited for a push-to-wallet but the wallet was never credited. Reverse or escalate to the operator.",
   mm_withdrawal_tax_variance: "Variance matches Uganda's 0.5% excise duty on mobile money withdrawals — a statutory deduction, not an operator error.",
   mm_momo_settlement_shortfall: "Net settlement received is below the gross statement sum. Itemise fees, levies, and netted reversals against the trust account.",
+  mm_wallet_credit_failed:   "Wallet credit missing on one side: customer funding collected but wallet not credited, or wallet credited with no provider settlement backing it.",
+  mm_wallet_debit_reversed:  "Provider reversed a wallet debit but the reversal credit has not reached the internal wallet ledger. Customer balance is understated.",
+  mm_wallet_settlement_shortfall: "Net wallet settlement below the gross statement sum. Itemise provider fees, commissions, and netted failed transactions.",
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -619,7 +661,7 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
             </div>
             <div>
               <h1 className="text-2xl font-bold text-white">Mobile Money Reconciliation</h1>
-              <p className="text-sm text-blue-200">Nigeria: NIBSS NIP · OPay · Palmpay &nbsp;|&nbsp; Uganda: MTN MoMo · Airtel Money — AI-powered exception detection</p>
+              <p className="text-sm text-blue-200">Nigeria: NIBSS NIP · OPay · Palmpay · Wallets (OPay/Palmpay/Moniepoint) &nbsp;|&nbsp; Uganda: MTN MoMo · Airtel Money — AI-powered exception detection</p>
             </div>
           </div>
         </div>
@@ -650,12 +692,12 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                   <CardTitle className="text-base font-semibold text-gray-800">Select Mobile Money Operator</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {OPERATORS_BY_COUNTRY.map(({ country, operators }) => (
-                    <div key={country}>
+                  {OPERATOR_GROUPS.map(({ key, label, gridCls, operators }) => (
+                    <div key={key}>
                       <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                        {COUNTRY_LABELS[country]}
+                        {label}
                       </div>
-                      <div className={country === "NG" ? "grid grid-cols-3 gap-3" : "grid grid-cols-2 gap-3"}>
+                      <div className={gridCls}>
                         {operators.map((op) => {
                           const m = OPERATOR_META[op];
                           const selected = operator === op;
@@ -914,7 +956,7 @@ export default function MobileMoneyPOC({ pocSlug = "lapo_mfb" }: MobileMoneyPOCP
                 isError={kpiQuery.isError}
                 accentColor={MM_BLUE}
                 title="Mobile Money KPI Dashboard"
-                subtitle="Nigeria: NIBSS NIP · OPay · Palmpay | Uganda: MTN MoMo · Airtel Money"
+                subtitle="Nigeria: NIBSS NIP · OPay · Palmpay · Wallets | Uganda: MTN MoMo · Airtel Money"
               />
             </TabsContent>
           )}

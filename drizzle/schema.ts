@@ -834,6 +834,10 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "mm_bank_to_wallet_failed",
   "mm_withdrawal_tax_variance",
   "mm_momo_settlement_shortfall",
+  // Mobile money — Nigeria wallets (WS-8)
+  "mm_wallet_credit_failed",
+  "mm_wallet_debit_reversed",
+  "mm_wallet_settlement_shortfall",
   // LAPO MFB multi-source integration (server/connectors/lapo/exceptions.ts)
   "lapo_ussd_debit_no_value",
   "lapo_nip_inward_not_credited",
