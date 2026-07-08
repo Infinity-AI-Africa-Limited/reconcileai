@@ -11,6 +11,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { resolutionTemplates, type ResolutionTemplateCategory } from "../drizzle/schema";
+import { seedNigerianChannelExceptionGlobalDefaults } from "./exceptions/seed";
 
 type ExceptionCategory = ResolutionTemplateCategory;
 
@@ -332,4 +333,12 @@ export async function seedDefaultResolutionTemplates(): Promise<{ inserted: numb
     )
     .onDuplicateKeyUpdate({ set: { dedupeKey: sql`dedupe_key` } });
   return { inserted: toInsert.length };
+}
+
+/**
+ * Seed all Nigerian payment channel exception templates as global defaults.
+ * Called alongside seedDefaultResolutionTemplates on boot.
+ */
+export async function seedNigerianExceptionDefaults(): Promise<{ inserted: number }> {
+  return seedNigerianChannelExceptionGlobalDefaults();
 }
