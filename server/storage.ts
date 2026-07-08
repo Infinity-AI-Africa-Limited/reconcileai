@@ -30,6 +30,25 @@ function normalizeKey(relKey: string): string {
   return relKey.replace(/^\/+/, "");
 }
 
+// ─── Org-scoped key convention (PCI remediation, WS-2) ───────────────────────
+// New org-owned objects MUST be written under `org/<organizationId>/…` so the
+// storage proxy can enforce owner-based access. Legacy keys without the prefix
+// are served to any AUTHENTICATED user (never anonymously) — a documented
+// caveat until historical objects are migrated.
+
+/** Prefix a relative key with its owning organization: `org/42/reports/x.csv`. */
+export function orgScopedKey(organizationId: number, relKey: string): string {
+  return `org/${organizationId}/${normalizeKey(relKey)}`;
+}
+
+/** Extract the owning org from a key under the convention; null for legacy keys. */
+export function orgIdFromKey(key: string): number | null {
+  const m = /^org\/(\d+)\//.exec(normalizeKey(key));
+  if (!m) return null;
+  const id = parseInt(m[1], 10);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
 function getClient(): { s3: S3Client; bucket: string } {
   const bucket = ENV.awsS3Bucket;
   if (!ENV.awsAccessKeyId || !ENV.awsSecretAccessKey || !bucket) {

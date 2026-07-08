@@ -283,7 +283,15 @@ async function startServer() {
   // GET /api/magic-login?token=<hex>
   // Consumes a single-use welcome token, creates a session cookie, and
   // redirects the user to the dashboard. On error, redirects to /?error=...
+  // PCI remediation (WS-2): per-IP throttle — tokens are high-entropy and
+  // single-use, but auth endpoints must still be rate-limited.
+  const { createRateLimiter } = await import("../rateLimiter");
+  const magicLoginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
   app.get("/api/magic-login", async (req, res) => {
+    const reqIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+    if (!magicLoginLimiter.check(`ip:${reqIp}`).allowed) {
+      return res.status(429).send("Too many attempts. Please try again in a few minutes.");
+    }
     const token = typeof req.query.token === "string" ? req.query.token.trim() : "";
     if (!token) {
       return res.redirect(302, "/?error=invalid_magic_link");

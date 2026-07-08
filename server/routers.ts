@@ -305,6 +305,10 @@ const distributorRouter = router({
 // deployment; move to a shared store (Redis) when scaling horizontally.
 const magicLinkRequestCooldown = new Map<string, number>();
 const MAGIC_LINK_COOLDOWN_MS = 60_000;
+// PCI remediation (WS-2): per-IP companion throttle — 10 link requests per
+// 15 minutes per IP, regardless of how many emails are tried.
+import { createRateLimiter } from "./rateLimiter";
+const magicLinkIpLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10 });
 
 // ─── Router ──────────────────────────────────────────────────────────────
 
@@ -344,6 +348,14 @@ export const appRouter = router({
         const email = input.email.trim().toLowerCase();
         const now = Date.now();
         const last = magicLinkRequestCooldown.get(email);
+
+        // PCI remediation (WS-2): per-IP throttle on top of the per-email
+        // cooldown — an attacker rotating emails can't spam link sends.
+        // Response stays generic (no enumeration signal, no throttle signal).
+        const { ip: reqIp } = getClientInfo(ctx);
+        if (!magicLinkIpLimiter.check(`ip:${reqIp}`).allowed) {
+          return { success: true } as const;
+        }
 
         if (!last || now - last > MAGIC_LINK_COOLDOWN_MS) {
           magicLinkRequestCooldown.set(email, now);
