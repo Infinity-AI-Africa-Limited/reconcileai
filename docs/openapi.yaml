@@ -127,6 +127,40 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /reconciliation/runs/{runId}/erp-export:
+    get:
+      tags: [Reconciliation]
+      summary: ERP journal-entry export (WS-7)
+      description: |
+        Renders the run's RESOLVED exceptions as balanced journal entries in the
+        target ERP's native import format. File contents are returned inline
+        (journal CSVs are small). Account codes are remappable placeholders —
+        see docs/ERP_EXPORT_FORMATS.md before first import.
+      operationId: erpExport
+      parameters:
+        - { name: runId, in: path, required: true, schema: { type: integer } }
+        - { name: target, in: query, required: true, schema: { type: string, enum: [sap_b1, sage_300, quickbooks] } }
+      responses:
+        '200':
+          description: Export files (SAP B1 returns the OJDT/JDT1 pair; others one file)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId: { type: integer }
+                  target: { type: string }
+                  entryCount: { type: integer }
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        filename: { type: string }
+                        content: { type: string, description: CSV content }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /exceptions:
     get:
       tags: [Exceptions]

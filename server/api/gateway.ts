@@ -232,6 +232,30 @@ export function createApiGateway(): express.Router {
     } catch (err) { handleError(res, err); }
   });
 
+  // ERP journal-entry export (WS-7): natively-importable files, content inline.
+  api.get("/reconciliation/runs/:runId/erp-export", async (req: ApiRequest, res) => {
+    try {
+      const runId = Number(req.params.runId);
+      if (!Number.isInteger(runId) || runId <= 0) return sendError(res, 400, "BAD_REQUEST", "runId must be a positive integer");
+      const { ERP_TARGETS, loadJournalEntriesForJob, renderErpExport } = await import("../erpExport");
+      const target = String(req.query.target ?? "");
+      if (!(ERP_TARGETS as readonly string[]).includes(target)) {
+        return sendError(res, 400, "BAD_REQUEST", `target must be one of: ${ERP_TARGETS.join(", ")}`);
+      }
+      const loaded = await loadJournalEntriesForJob(runId, req.apiAuth!.organizationId);
+      if (!loaded) return sendError(res, 404, "NOT_FOUND", "Run not found");
+      const files = loaded.entries.length > 0
+        ? renderErpExport(target as any, loaded.entries, runId)
+        : [];
+      res.json({
+        runId,
+        target,
+        entryCount: loaded.entries.length,
+        files, // [{ filename, content }] — journal CSVs are small; content is inline
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
   // /exceptions
   api.get("/exceptions", async (req: ApiRequest, res) => {
     try {

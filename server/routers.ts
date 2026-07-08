@@ -6,6 +6,7 @@ import { cbnComplianceRouter } from "./routers/cbnCompliance";
 import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
 import { mobileMoneyRouter } from "./routers/mobileMoney";
+import { erpExportRouter } from "./routers/erpExport";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { lapoRouter } from "./routers/lapo";
 import * as ageTracker from "./ageTracker";
@@ -6040,6 +6041,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   poc: pocRouter,
   pocKpi: pocKpiRouter,
   mobileMoney: mobileMoneyRouter,
+  erpExport: erpExportRouter,
   woodcoreConnector: woodcoreConnectorRouter,
   // Same router, CBS-neutral name — the connector engine now serves WoodCore,
   // T24, Mambu, FLEXCUBE and LAPO. Prefer `cbsConnector` in new client code.
