@@ -4151,6 +4151,16 @@ export const appRouter = router({
             ).join("\n")
           : "";
 
+        // Inject the Nigerian channel exception taxonomy — only the channels the
+        // user's question actually touches, so channel-specific questions get the
+        // catalogued failure modes without bloating unrelated queries.
+        const { nigerianExceptionsTaxonomyPromptBlock, relevantNigerianChannelsForText } =
+          await import("./exceptions/seed");
+        const taxonomyChannels = relevantNigerianChannelsForText(input.query);
+        const taxonomyBlock = taxonomyChannels.length > 0
+          ? `\n\nCatalogued Nigerian channel exception patterns (relevant to this question):\n${nigerianExceptionsTaxonomyPromptBlock(taxonomyChannels)}`
+          : "";
+
         const systemPrompt = `You are the ReconcileAI Super Agent — an autonomous financial reconciliation intelligence for African FMCG and corporate B2B payment environments.
 
 Your role is to:
@@ -4162,7 +4172,7 @@ Your role is to:
 Current system context:
 - Open exceptions: ${recentExceptions.total} total, showing top ${exceptionSummary.length}
 - Recent jobs: ${JSON.stringify(jobStats, null, 2)}
-- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}${fewShotBlock}
+- Top exceptions: ${JSON.stringify(exceptionSummary, null, 2)}${fewShotBlock}${taxonomyBlock}
 
 When proposing an action draft, structure your response as JSON with this exact format:
 {

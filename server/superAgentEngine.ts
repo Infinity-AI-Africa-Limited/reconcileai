@@ -14,6 +14,10 @@
  */
 
 import { invokeLLM } from "./_core/llm";
+import {
+  nigerianExceptionsTaxonomyPromptBlock,
+  relevantNigerianChannelsForText,
+} from "./exceptions/seed";
 
 // ─── Shared Transaction type (mirrors drizzle schema) ────────────────
 
@@ -687,6 +691,15 @@ async function getLLMDiagnosis(
   parsedRef: ParsedReference,
   memoryContext: string
 ): Promise<{ headline: string; rootCause: string; recommendedAction: string }> {
+  // Inject only the taxonomy channels relevant to this transaction's text —
+  // an FMCG deduction gets no channel block; a card/NIP/POS exception gets the
+  // catalogued failure modes, regulatory context, and diagnosis guidance.
+  const channelText = [txn.description, txn.transactionRef, txn.counterparty]
+    .filter(Boolean)
+    .join(" ");
+  const channels = relevantNigerianChannelsForText(channelText);
+  const taxonomyBlock = channels.length > 0 ? nigerianExceptionsTaxonomyPromptBlock(channels) : "";
+
   try {
     const response = await invokeLLM({
       messages: [
@@ -700,7 +713,7 @@ Your job is to diagnose payment exceptions with the precision of a Big 4 forensi
 3. Recommend a single, specific next action
 4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable
 
-${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
+${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
         },
         {
           role: "user",

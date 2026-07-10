@@ -9,15 +9,61 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { resolutionTemplates, type ResolutionTemplateCategory } from "../../drizzle/schema";
 import { getDb } from "../db";
-import { ALL_NIGERIAN_EXCEPTIONS } from "./index";
+import { ALL_NIGERIAN_EXCEPTIONS, CHANNEL_EXCEPTION_GROUPS, type NigerianChannelKey } from "./index";
 import type { NigerianChannelException } from "./types";
+
+/**
+ * Keyword patterns that map free transaction text (description, reference,
+ * counterparty) to taxonomy channels. Used to inject only the RELEVANT slice
+ * of the taxonomy into the Super Agent prompt — an FMCG trade deduction should
+ * not pay tokens for the card-dispute catalogue, and vice versa.
+ */
+const CHANNEL_TEXT_PATTERNS: Array<{ channel: NigerianChannelKey; pattern: RegExp }> = [
+  { channel: "nip", pattern: /\bnip\b|instant payment|name enquiry|session[ _-]?id/i },
+  { channel: "neft", pattern: /\bneft\b/i },
+  { channel: "rtgs", pattern: /\brtgs\b|gross settlement/i },
+  { channel: "pos", pattern: /\bpos\b|terminal|merchant service charge|\bmsc\b/i },
+  { channel: "atm", pattern: /\batm\b|dispense|cash withdrawal/i },
+  { channel: "qr", pattern: /\bnqr\b|qr code|qr payment/i },
+  { channel: "direct_debit", pattern: /direct debit|standing order|mandate/i },
+  { channel: "swift", pattern: /\bswift\b|mt103|mt202|correspondent|nostro/i },
+  { channel: "remittance", pattern: /remittance|\bimto\b|western union|moneygram/i },
+  { channel: "fintech_gateway", pattern: /paystack|flutterwave|monnify|opay|palmpay|moniepoint|payment gateway/i },
+  { channel: "bills", pattern: /bill payment|ebills|biller|electricity token/i },
+  { channel: "bulk_payment", pattern: /bulk payment|salary|payroll/i },
+  { channel: "tsa", pattern: /\btsa\b|treasury single|etreasury|remita/i },
+  { channel: "mobile_channels", pattern: /ussd|\*\d{3}#|mobile app|agent banking|mobile banking/i },
+  { channel: "card_switching", pattern: /interswitch|etranzact|unified payments?|\brrn\b|\bstan\b|force.?post|\bcard\b/i },
+  { channel: "card_schemes", pattern: /verve|afrigo|\bvisa\b|mastercard|interchange|scheme fee|\bvss\b|\bcard\b/i },
+  { channel: "card_disputes", pattern: /charge.?back|representment|re.?presentment|arbitration|pre.?arb|\bdispute\b|\bcard\b/i },
+];
+
+/** Max channels injected per prompt — bounds token cost on keyword-dense text. */
+const MAX_PROMPT_CHANNELS = 4;
+
+/**
+ * Infer which taxonomy channels are relevant to a piece of transaction text.
+ * Returns [] when nothing matches (caller should then omit the block entirely).
+ */
+export function relevantNigerianChannelsForText(text: string): NigerianChannelKey[] {
+  if (!text || !text.trim()) return [];
+  const matched = CHANNEL_TEXT_PATTERNS.filter((p) => p.pattern.test(text)).map((p) => p.channel);
+  return Array.from(new Set(matched)).slice(0, MAX_PROMPT_CHANNELS);
+}
 
 /**
  * AI prompt block for the Super Agent when diagnosing Nigerian payment
  * channel exceptions — the taxonomy is the intelligence moat.
+ *
+ * Pass `channels` (from relevantNigerianChannelsForText) to inject only the
+ * relevant slice; with no argument the full 121-exception catalogue is returned.
  */
-export function nigerianExceptionsTaxonomyPromptBlock(): string {
-  return ALL_NIGERIAN_EXCEPTIONS.map(
+export function nigerianExceptionsTaxonomyPromptBlock(channels?: NigerianChannelKey[]): string {
+  const pool: NigerianChannelException[] =
+    channels && channels.length > 0
+      ? channels.flatMap((c) => CHANNEL_EXCEPTION_GROUPS[c] ?? [])
+      : ALL_NIGERIAN_EXCEPTIONS;
+  return pool.map(
     (c) =>
       `- ${c.key} (${c.severity}, SLA ${c.slaHours}h): ${c.label}. ${c.aiDiagnosisHint}`,
   ).join("\n");
