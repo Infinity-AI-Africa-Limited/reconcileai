@@ -225,14 +225,15 @@ The Manus `/api/oauth/callback` now simply redirects to `/login`. The session la
 
 ---
 
-## 6. Three-Portal Architecture
+## 6. Four-Portal Architecture
 
-ReconcileAI serves three distinct user segments from a single codebase, differentiated by the `organizations.segment` field:
+ReconcileAI serves **four** distinct user segments from a single codebase, differentiated by the `organizations.segment` field:
 
 | Segment | Value | Description |
 |---|---|---|
 | Financial Services | `financial_services` | Banks, MFBs, payment processors |
 | Corporate B2B | `corporate_b2b` | FMCG distributors, supply chain finance |
+| Retail Commerce | `retail_commerce` | E-commerce merchants (SHOPLINE vertical) |
 | Internal (Infinity AI) | `super_admin` | Platform operator — Infinity AI Africa Limited |
 
 ### Portal Context Switcher (Super Admin)
@@ -245,7 +246,8 @@ Super admins can "enter" any organisation's portal and see the app scoped to tha
 - `financialServicesMenuItems` — includes CBN Reports, Multi-Channel, Email Settings, Module Configuration
 - `financialServicesAdvancedItems` — full Advanced Tools dropdown (Sample Data, Integrations, API Ingestion, SFTP Config, Anomaly Detection)
 - `corporateB2bMenuItems` — includes Distributor Registry, FMCG-specific navigation
-- Both defined in `client/src/components/DashboardLayout.tsx`
+- `retailCommerceMenuItems` — (Phase 1, pending SHOPLINE API docs) merchant dashboard, chargeback tracker, settlement monitor
+- All defined in `client/src/components/DashboardLayout.tsx`
 
 ---
 
@@ -334,6 +336,122 @@ Module state is stored in `moduleConfigurations` (per-org toggle) and `moduleOve
 - Features that feed or consume the learning flywheel (per-institution resolution history, `agentMemory`, the anonymised cross-institution pattern pool in `exceptionIntelligence.ts`) rank above features that don't.
 - If a feature claims flywheel/learning integration, verify the write-path and read-path actually exist in code — a comment is not an integration.
 - When two features compete for capacity, pick the one that makes recommendations **more accurate, more personalised, or harder to replicate** — in that order.
+
+## 9B. SHOPLINE Retail Commerce Vertical (Phase 0 Complete)
+
+### Strategic Context
+
+ReconcileAI is extending into **retail/e-commerce reconciliation** through a partnership with **SHOPLINE** (Asia-Pacific’s largest e-commerce SaaS platform, 600K+ merchants, $30B+ GMV). The commercial model is a three-tier partnership:
+
+| Tier | Model | Description |
+|---|---|---|
+| **Tier 1** | App Store Integration | ReconcileAI listed on SHOPLINE App Store; merchants self-serve subscribe |
+| **Tier 2** | SHOPLINE Payments Embedded | White-label reconciliation embedded in SHOPLINE Payments dashboard |
+| **Tier 3** | Enterprise Bundle | On-premise/private-cloud deployment for regulated or high-volume merchants |
+
+### Architecture Decision: One Codebase, Three Configurations
+
+The SHOPLINE vertical is **not a fork**. It is a new tenant segment (`retail_commerce`) on the existing multi-tenant platform. The core 3-pass matching engine, exception intelligence layer, AI Super Agent, and multi-tenant infrastructure are shared. What differs is:
+- The **exception taxonomy** (retail-specific: chargebacks, gateway fees, FX, settlements)
+- The **data connector** (SHOPLINE API instead of CBS API — Phase 1, pending API docs)
+- The **UI configuration** (merchant self-serve dashboard instead of bank operations portal)
+
+### What Was Built (Phase 0 — July 2026)
+
+Phase 0 lays the foundation that all three tiers build upon. No external dependencies (SHOPLINE API docs not required).
+
+**Schema changes:**
+- `organizations.segment` enum: added `retail_commerce`
+- `channels.channelType` enum: added `shopline_payments`, `shopline_orders`, `stripe_connect`, `adyen_platform`, `paypal_commerce`
+- `RESOLUTION_TEMPLATE_CATEGORIES`: added 14 retail exception category keys
+
+**New files:**
+
+| File | Purpose |
+|---|---|
+| `shared/shoplineConstants.ts` | Onboarding channel codes (Tier 1/2/3), tier metadata, subscription pricing bands, OAuth scopes, revenue share percentage |
+| `server/exceptions/retail-commerce.ts` | 14-category retail exception taxonomy with severity, SLA, regulatory context, resolution templates, and AI diagnosis hints |
+| `server/retailReconciliationEngine.ts` | Retail reconciliation engine adapter — wraps core `runMatchingEngine` + retail-specific exception classifier |
+| `server/retailReconciliationEngine.test.ts` | 14 unit tests covering all retail exception categories + integration test |
+
+**Super Admin portal:**
+- `PortalContext.tsx`: `OrgSegment` type includes `retail_commerce` with amber accent
+- `SuperAdminDashboard.tsx`: Retail Commerce in segment filter, create-org dialog, stats cards, and segment update
+- `server/routers.ts`: `z.enum` validators for `createOrganization` and `updateOrganizationSegment` include `retail_commerce`
+
+### Retail Exception Taxonomy (14 Categories)
+
+The taxonomy in `server/exceptions/retail-commerce.ts` covers:
+
+| Category Key | Severity | SLA | Description |
+|---|---|---|---|
+| `retail_chargeback_not_posted` | critical | 24h | Chargeback not reflected in merchant ledger |
+| `retail_chargeback_duplicate` | high | 48h | Same ARN charged twice |
+| `retail_gateway_fee_variance` | high | 48h | Fee deviates from contracted rate schedule |
+| `retail_fx_rate_mismatch` | high | 48h | Auth-to-settlement FX rate exceeds tolerance |
+| `retail_settlement_shortfall` | critical | 24h | Payout amount less than expected |
+| `retail_settlement_delay` | medium | 72h | Settlement beyond SLA (T+n) |
+| `retail_refund_not_settled` | high | 48h | Refund issued but not deducted from settlement |
+| `retail_void_not_reversed` | medium | 72h | Voided transaction still in settlement |
+| `retail_duplicate_authorisation` | critical | 24h | Customer double-charged |
+| `retail_partial_capture_mismatch` | medium | 72h | Captured ≠ settled amount |
+| `retail_currency_conversion_error` | high | 48h | DCC/MCC conversion applied incorrectly |
+| `retail_payout_discrepancy` | high | 48h | Marketplace payout does not match order sum |
+| `retail_reserve_hold_unexplained` | medium | 72h | Reserve deduction not matching contract |
+| `retail_interchange_overcharge` | medium | 72h | Interchange fee exceeds scheme cap |
+
+Each category includes `regulatoryContext` (PCI DSS, card scheme rules, consumer protection law), `recommendedResolution` (step-by-step), and `aiDiagnosisHint` (prompt guidance for the AI Super Agent).
+
+### Retail Reconciliation Engine Adapter
+
+`server/retailReconciliationEngine.ts` does **not** duplicate the core matching engine. It:
+1. Delegates to `runMatchingEngine()` for the 3-pass match (exact → tolerance → fuzzy)
+2. Post-processes unmatched transactions through `classifyRetailException()` which examines `rawData` metadata injected by the SHOPLINE connector
+3. Returns `RetailReconciliationResult` (extends `ReconciliationResult` with `retailExceptions[]` and `retailStats`)
+
+The `rawData` contract expected from the Phase 1 SHOPLINE connector:
+```typescript
+{
+  gatewayEventType: "payment" | "refund" | "chargeback" | "payout" | "fee" | "reserve";
+  originalOrderRef: string;
+  gatewayRef: string;
+  cardScheme: "visa" | "mastercard" | "amex" | "unionpay";
+  cardType: "credit" | "debit" | "prepaid";
+  cardRegion: "domestic" | "international";
+  capturedAmount: number;
+  authorisedAmount: number;
+  feeAmount: number;
+  settlementBatchId: string;
+  chargebackArn?: string;
+  refundId?: string;
+  voidStatus?: "approved" | "voided";
+  expectedFxRate?: number;
+  appliedFxRate?: number;
+  expectedPayoutAmount?: number;
+  expectedReserveAmount?: number;
+  captureDate?: string; // ISO date
+}
+```
+
+### Phase 1 Gate (Blocked on External Dependency)
+
+Phase 1 requires the **SHOPLINE API documentation** to build:
+- OAuth2 App Store connector (install flow, token lifecycle)
+- Transaction/settlement webhook ingestion
+- Merchant self-serve dashboard UI
+- App Store billing integration (usage metering)
+
+**Do not begin Phase 1 until the API documentation is received AND a signed Pilot agreement is in place.** The Pilot pricing is $3,500/month for 90 days, credited against the annual contract.
+
+### SHOPLINE Constants Reference
+
+`shared/shoplineConstants.ts` defines the commercial and technical contract:
+- **Revenue share:** 15% to SHOPLINE (Tier 1 App Store)
+- **Tier 1 pricing bands:** Starter ($49/mo, ≤500 txns), Growth ($99/mo), Professional ($199/mo), Scale ($349/mo), Enterprise (custom)
+- **OAuth scopes required:** `read_orders`, `read_payments`, `read_settlements`, `read_shop`, `read_analytics`
+- **Onboarding channels:** `shopline_appstore` (Tier 1), `shopline_payments_api` (Tier 2), `shopline_enterprise` (Tier 3)
+
+---
 
 ## 10. Known Technical Debt — Address in Production Build
 
@@ -641,9 +759,9 @@ The following are stable foundations that should not be modified without explici
 - `client/src/lib/trpc.ts` — tRPC client binding
 - `client/src/contexts/AuthContext.tsx` — auth state management (update, do not replace)
 - `drizzle/woodcore_schema.ts` — Fineract table mirrors (read-only, do not modify)
-- The three-portal architecture (`organizations.segment` enum and portal context switcher)
+- The four-portal architecture (`organizations.segment` enum and portal context switcher)
 
 ---
 
-*Last updated: June 2026 | Built in Manus | Transferring to Claude Code for production engineering*
+*Last updated: July 2026 | Built in Manus | Transferring to Claude Code for production engineering*
 *Owner: Richard Anwanakak, Infinity AI Africa Limited*
