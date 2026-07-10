@@ -119,3 +119,39 @@ patterns never appear even in the internal view.
 **Findings:** no anonymisation gaps. One correctness gap was found and fixed — the Woodcore channel
 previously recorded reviews without feeding any learning tier (a comment-only integration); it now
 consumes its own resolution history. Residual-risk assessment in §7 unchanged.
+
+## 10. Re-audit (July 2026 — dedicated write-path/anonymisation ticket)
+
+Full re-sweep after the WS-4/6/7/8 builds and the parallel tracks (POC run-detail
+resolution, LAPO channel pack, CBN module, tenancy/SSO) added new surfaces.
+
+**Write-path map (verified):**
+
+| Surface | Learning tier | Status |
+|---|---|---|
+| `exceptions.resolve` (incl. dismissed → outcome `rejected`) | agentMemory + local signature | ✓ intact |
+| `superAgent.addMemory` | agentMemory + local signature | ✓ intact |
+| REST `PATCH /api/v1/exceptions/:id` | inherits `exceptions.resolve` via createCaller | ✓ by construction |
+| `exceptions.escalate` / ageTracker `escalate` / `bulkEscalateOverAged` | **was NOTHING** — outcome `escalated` had no write-path anywhere in the main app despite being one of the three pool outcomes | **FIXED** — `captureExceptionOutcome` (agentMemory + signature, fire-and-forget) on all three |
+| `exceptions.reopen` (CBS staleness proved a resolution wrong) | **was NOTHING** — the failed resolution's memory row and signature kept training recommendations | **FIXED** — `retractResolutionLearning` deletes the memory rows and decrements/deletes the recomputed signature; the cloud pool reflects it on next aggregation |
+| Woodcore / generic POC / mobile money reviews | own-history learning (no org → no pool by design) | ✓ intact |
+| LAPO connector | taxonomy only — no separate review surface | ✓ n/a |
+
+**Read-path map (verified):** `getSimilarCases` reads `agentMemory` strictly
+`WHERE organizationId = caller org` — free-text `reasoning`/`transactionRef` never
+crosses tenants; its cross-institution augmentation and the deferred-AI network
+guidance both pass through `getSharedRecommendations` (reciprocity + k-anonymity
+enforced server-side, consumption counted). Gateway `/intelligence/*` endpoints same.
+
+**Anonymisation layer (verified unchanged):** six-key allowlist + `assertNoPII`
+runtime scrub, k=3 gate, org-less pool table, pseudonymous contributors, egress
+guard on on-prem sync. Retraction correctness rests on a proven invariant —
+signatures rebuilt from stored coarse fields hash identically to capture-time
+derivations (unit-tested, incl. `counterpartyTypeOf` idempotency over its own
+token set). Demo seeders write `agentMemory` only into demo organizations.
+
+**Residual note:** signature retraction is exact for rows captured after the
+July 2026 fixes; historical rows predating `amountRange` bucketing conventions
+would retract via the same recomputation and match unless the bucketing
+constants change — treat `AMOUNT_BUCKETS` as frozen (changing them orphans
+retractability, flagged in WS-6 audit item 12 as well).

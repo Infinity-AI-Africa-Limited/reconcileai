@@ -115,3 +115,50 @@ describe("k-anonymity + pseudonym", () => {
     expect(contributorPseudonymFor(43, "salt")).not.toBe(p1);
   });
 });
+
+describe("retraction signature recomputation (write-path audit, July 2026)", () => {
+  it("a signature rebuilt from stored agentMemory fields matches the capture-time hash", () => {
+    // Capture time (exceptions.resolve / captureExceptionOutcome): derive from
+    // raw transaction values.
+    const captured = deriveSignature({
+      exceptionCategory: "amount_mismatch",
+      amount: 245_000,
+      counterparty: "First Bank of Nigeria",
+      resolution: "Fee variance posted to charges GL journal entry",
+      outcome: "resolved",
+    });
+
+    // What agentMemory stores: the already-normalized coarse fields.
+    const stored = {
+      exceptionCategory: "amount_mismatch",
+      amountRange: amountBucketOf(245_000),
+      counterpartyType: counterpartyTypeOf("First Bank of Nigeria"),
+      deductionType: null,
+      resolution: "Fee variance posted to charges GL journal entry",
+      outcome: "resolved" as const,
+    };
+
+    // Retraction time (retractResolutionLearning): rebuild from stored fields —
+    // relies on counterpartyTypeOf being idempotent over its own outputs and
+    // the amount bucket being overridden from the stored range.
+    const rebuilt = deriveSignature({
+      exceptionCategory: stored.exceptionCategory,
+      amount: 0,
+      counterpartyType: stored.counterpartyType,
+      deductionType: stored.deductionType,
+      resolution: stored.resolution,
+      outcome: stored.outcome,
+    });
+    rebuilt.amountBucket = stored.amountRange;
+    rebuilt.signatureHash = signatureHashOf(rebuilt);
+
+    expect(rebuilt.signatureHash).toBe(captured.signatureHash);
+  });
+
+  it("counterpartyTypeOf is idempotent over every type token it can emit", () => {
+    for (const raw of ["Access Bank", "Mega Distributor Ltd", "Flutterwave", "Shoprite Retail", "???"]) {
+      const once = counterpartyTypeOf(raw);
+      expect(counterpartyTypeOf(once)).toBe(once);
+    }
+  });
+});

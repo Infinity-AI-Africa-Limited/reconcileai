@@ -30,6 +30,9 @@ import {
   exceptionPatternSignatures,
   exceptionIntelligenceSettings,
   sharedExceptionPatterns,
+  agentMemory,
+  exceptions as exceptionsTable,
+  transactions as transactionsTable,
 } from "../drizzle/schema";
 
 /** Minimum distinct contributing organizations before a pattern can be served. */
@@ -298,6 +301,138 @@ export async function recordLocalSignature(
     outcome: sig.outcome,
     observationCount: 1,
   });
+}
+
+// ─── Outcome capture + retraction (write-path audit, July 2026) ──────
+
+/**
+ * Capture a terminal exception outcome into BOTH learning tiers: the
+ * org-scoped agentMemory record and the anonymised local signature. Added by
+ * the write-path audit for the ESCALATION surfaces, which previously fed
+ * nothing — even though "escalated" is one of the three outcomes the shared
+ * pool is designed to carry. Mirrors the inline capture in exceptions.resolve.
+ * Best-effort: never throws into the calling mutation.
+ */
+export async function captureExceptionOutcome(params: {
+  organizationId: number;
+  exceptionId: number;
+  actorUserId: number;
+  outcome: Outcome;
+  resolutionText: string;
+}): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const [row] = await db
+      .select({
+        category: exceptionsTable.category,
+        description: exceptionsTable.description,
+        amount: transactionsTable.amount,
+        counterparty: transactionsTable.counterparty,
+        transactionRef: transactionsTable.transactionRef,
+      })
+      .from(exceptionsTable)
+      .innerJoin(transactionsTable, eq(exceptionsTable.transactionId, transactionsTable.id))
+      .where(eq(exceptionsTable.id, params.exceptionId))
+      .limit(1);
+    if (!row) return;
+
+    const amt = parseFloat(String(row.amount)) || 0;
+    const cpType = counterpartyTypeOf(row.counterparty);
+    const actionClass = classifyResolutionAction(params.resolutionText);
+
+    await db.insert(agentMemory).values({
+      organizationId: params.organizationId,
+      exceptionId: params.exceptionId,
+      exceptionCategory: row.category,
+      transactionRef: row.transactionRef ?? null,
+      amountRange: amountBucketOf(amt),
+      counterpartyType: cpType,
+      deductionType: null,
+      resolution: params.resolutionText,
+      outcome: params.outcome,
+      reasoning: row.description || `Exception ${params.outcome} by operations team`,
+      embeddingText: `category:${row.category} amount:${amountBucketOf(amt)} counterparty:${cpType} resolution:${actionClass} outcome:${params.outcome}`,
+      resolvedBy: params.actorUserId,
+    });
+
+    const sig = deriveSignature({
+      exceptionCategory: row.category,
+      amount: amt,
+      counterparty: row.counterparty,
+      resolution: params.resolutionText,
+      outcome: params.outcome,
+    });
+    await recordLocalSignature(params.organizationId, sig);
+  } catch (err) {
+    console.error("[ExceptionIntelligence] outcome capture failed (non-fatal):", err);
+  }
+}
+
+/**
+ * Retract the learning captured for an exception — called when a resolution
+ * is REOPENED (e.g. the CBS staleness check proved the anomaly was never
+ * fixed). Without this, failed resolutions keep training the flywheel and
+ * inflating the shared pool's observation counts. Recomputes each memory
+ * row's signature from its stored coarse features (all functions involved
+ * are deterministic and idempotent over their outputs), decrements the local
+ * observation count (row deleted at zero), then deletes the memory rows.
+ * The cloud pool reflects the decrement on its next aggregation.
+ */
+export async function retractResolutionLearning(
+  organizationId: number,
+  exceptionId: number,
+): Promise<{ retracted: number }> {
+  const db = await getDb();
+  if (!db) return { retracted: 0 };
+
+  const rows = await db
+    .select()
+    .from(agentMemory)
+    .where(and(eq(agentMemory.organizationId, organizationId), eq(agentMemory.exceptionId, exceptionId)));
+  if (rows.length === 0) return { retracted: 0 };
+
+  for (const row of rows) {
+    try {
+      // Rebuild the exact signature this row produced at capture time.
+      const sig = deriveSignature({
+        exceptionCategory: row.exceptionCategory,
+        amount: 0, // placeholder — bucket is overridden from the stored range below
+        counterpartyType: row.counterpartyType,
+        deductionType: row.deductionType ?? null,
+        resolution: row.resolution,
+        outcome: (row.outcome as Outcome) ?? "resolved",
+      });
+      sig.amountBucket = row.amountRange as AmountBucket;
+      sig.signatureHash = signatureHashOf(sig);
+
+      const [existing] = await db
+        .select({ id: exceptionPatternSignatures.id, count: exceptionPatternSignatures.observationCount })
+        .from(exceptionPatternSignatures)
+        .where(and(
+          eq(exceptionPatternSignatures.organizationId, organizationId),
+          eq(exceptionPatternSignatures.signatureHash, sig.signatureHash),
+        ))
+        .limit(1);
+      if (existing) {
+        if (existing.count <= 1) {
+          await db.delete(exceptionPatternSignatures).where(eq(exceptionPatternSignatures.id, existing.id));
+        } else {
+          await db
+            .update(exceptionPatternSignatures)
+            .set({ observationCount: existing.count - 1 })
+            .where(eq(exceptionPatternSignatures.id, existing.id));
+        }
+      }
+    } catch (err) {
+      console.error("[ExceptionIntelligence] signature retraction failed (non-fatal):", err);
+    }
+  }
+
+  await db
+    .delete(agentMemory)
+    .where(and(eq(agentMemory.organizationId, organizationId), eq(agentMemory.exceptionId, exceptionId)));
+  return { retracted: rows.length };
 }
 
 // ─── Pool aggregation (multi-tenant cloud) ───────────────────────────

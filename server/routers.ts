@@ -1023,6 +1023,20 @@ export const appRouter = router({
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
         await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua);
+        // Flywheel write-path (audit fix): escalations are learnable outcomes.
+        if (ctx.user.organizationId) {
+          const _orgId = ctx.user.organizationId;
+          const _userId = ctx.user.id;
+          void import("./exceptionIntelligence").then((ei) =>
+            ei.captureExceptionOutcome({
+              organizationId: _orgId,
+              exceptionId: input.id,
+              actorUserId: _userId,
+              outcome: "escalated",
+              resolutionText: input.note || "Escalated per aging SLA",
+            }),
+          ).catch(() => {});
+        }
         dispatchWebhook("exception.escalated", { exceptionId: input.id });
         return { success: true };
       }),
@@ -1040,6 +1054,27 @@ export const appRouter = router({
       await Promise.all(overAged.map((r) => db.updateException(r.id, { status: "escalated" })));
       const { ip, ua } = getClientInfo(ctx);
       await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
+      // Flywheel write-path (audit fix): each bulk escalation is a learnable
+      // outcome. Fire-and-forget, sequential to avoid hammering the DB.
+      if (ctx.user.organizationId && overAged.length > 0) {
+        const _orgId = ctx.user.organizationId;
+        const _userId = ctx.user.id;
+        const _ids = overAged.map((r) => r.id);
+        void (async () => {
+          try {
+            const ei = await import("./exceptionIntelligence");
+            for (const id of _ids) {
+              await ei.captureExceptionOutcome({
+                organizationId: _orgId,
+                exceptionId: id,
+                actorUserId: _userId,
+                outcome: "escalated",
+                resolutionText: `Escalated per aging SLA (${slaDays} days)`,
+              });
+            }
+          } catch { /* best-effort */ }
+        })();
+      }
       return { success: true, count: overAged.length };
     }),
 
@@ -1179,6 +1214,18 @@ export const appRouter = router({
           })
           .where(eq(exceptionsTable.id, input.id));
         await logAudit(ctx.user.id, "reopen_exception", "exception", input.id, { notes: input.notes }, ip, ua);
+
+        // Flywheel retraction (audit fix): a reopened resolution was WRONG —
+        // remove its agentMemory record and decrement the local signature so
+        // failed resolutions stop training the recommendations and inflating
+        // the shared pool. Best-effort, never fails the reopen.
+        if (ctx.user.organizationId) {
+          const _orgId = ctx.user.organizationId;
+          void import("./exceptionIntelligence").then((ei) =>
+            ei.retractResolutionLearning(_orgId, input.id),
+          ).catch(() => {});
+        }
+
         return { success: true };
       }),
 
@@ -1297,6 +1344,21 @@ export const appRouter = router({
         await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, {
           notes: input.notes,
         }, ip, ua);
+
+        // Flywheel write-path (audit fix): escalations are learnable outcomes.
+        if (ctx.user.organizationId) {
+          const _orgId = ctx.user.organizationId;
+          const _userId = ctx.user.id;
+          void import("./exceptionIntelligence").then((ei) =>
+            ei.captureExceptionOutcome({
+              organizationId: _orgId,
+              exceptionId: input.id,
+              actorUserId: _userId,
+              outcome: "escalated",
+              resolutionText: input.notes || "Escalated to management",
+            }),
+          ).catch(() => {});
+        }
 
         dispatchWebhook("exception.escalated", { exceptionId: input.id });
         return { success: true };
