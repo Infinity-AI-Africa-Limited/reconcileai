@@ -61,19 +61,29 @@ export interface GatewayFeeSchedule {
 export interface RetailDupIndex {
   byArn: Map<string, number>;
   byOrderRef: Map<string, number>;
+  /** Refund id occurrences — duplicate refund detection. */
+  byRefundId: Map<string, number>;
+  /** Gateway reference occurrences — same txn settled in multiple batches. */
+  byGatewayRef: Map<string, number>;
 }
 
 export function buildRetailDupIndex(txns: Transaction[]): RetailDupIndex {
   const byArn = new Map<string, number>();
   const byOrderRef = new Map<string, number>();
+  const byRefundId = new Map<string, number>();
+  const byGatewayRef = new Map<string, number>();
   for (const t of txns) {
     const raw = (t.rawData as Record<string, unknown>) ?? {};
     const arn = raw.chargebackArn;
     if (typeof arn === "string" && arn) byArn.set(arn, (byArn.get(arn) ?? 0) + 1);
     const ref = raw.originalOrderRef;
     if (typeof ref === "string" && ref) byOrderRef.set(ref, (byOrderRef.get(ref) ?? 0) + 1);
+    const refund = raw.refundId;
+    if (typeof refund === "string" && refund) byRefundId.set(refund, (byRefundId.get(refund) ?? 0) + 1);
+    const gref = raw.gatewayRef;
+    if (typeof gref === "string" && gref) byGatewayRef.set(gref, (byGatewayRef.get(gref) ?? 0) + 1);
   }
-  return { byArn, byOrderRef };
+  return { byArn, byOrderRef, byRefundId, byGatewayRef };
 }
 
 // ─── Retail Exception Classification ────────────────────────────────────────
@@ -144,6 +154,19 @@ export function classifyRetailException(
     };
   }
 
+  /** Build a classification straight from the taxonomy entry for `key`. */
+  const fromTaxonomy = (key: string, description: string): RetailExceptionResult => {
+    const t = getRetailException(key)!;
+    return {
+      category: key,
+      severity: t.severity,
+      description,
+      suggestedResolution: t.recommendedResolution,
+      slaHours: t.slaHours,
+      hasRetailTaxonomy: true,
+    };
+  };
+
   // ─── Chargeback Detection ─────────────────────────────────────────────────
   if (gatewayEventType === "chargeback") {
     const chargebackArn = rawData.chargebackArn as string | undefined;
@@ -180,18 +203,76 @@ export function classifyRetailException(
     };
   }
 
-  // ─── Refund Not Settled ───────────────────────────────────────────────────
+  // ─── Refunds: duplicate first (same-feed refundId siblings), then unsettled ──
   if (gatewayEventType === "refund") {
     const refundId = rawData.refundId as string | undefined;
-    const taxonomy = getRetailException("retail_refund_not_settled")!;
-    return {
-      category: "retail_refund_not_settled",
-      severity: taxonomy.severity,
-      description: `Refund ${refundId ?? txn.transactionRef ?? "unknown"} for ${txn.currency} ${txnAmt.toLocaleString()} not reflected in settlement batch. Customer has been refunded but settlement deduction is missing.`,
-      suggestedResolution: taxonomy.recommendedResolution,
-      slaHours: taxonomy.slaHours,
-      hasRetailTaxonomy: true,
-    };
+    const duplicateRefund = refundId
+      ? sameSideDupIndex
+        ? (sameSideDupIndex.byRefundId.get(refundId) ?? 0) > 1
+        : relatedTxns.some((t) => ((t.rawData as Record<string, unknown>) ?? {}).refundId === refundId)
+      : false;
+    if (duplicateRefund) {
+      return fromTaxonomy(
+        "retail_refund_duplicate",
+        `Duplicate refund detected: refund ${refundId} for ${txn.currency} ${txnAmt.toLocaleString()} appears more than once. Customer may be double-credited or settlement double-deducted.`,
+      );
+    }
+    return fromTaxonomy(
+      "retail_refund_not_settled",
+      `Refund ${refundId ?? txn.transactionRef ?? "unknown"} for ${txn.currency} ${txnAmt.toLocaleString()} not reflected in settlement batch. Customer has been refunded but settlement deduction is missing.`,
+    );
+  }
+
+  // ─── Dispute lifecycle: won-but-not-credited + fee errors ───────────────────
+  if (gatewayEventType === "chargeback_reversal") {
+    // A reversal (merchant WON representment) that the matcher could not pair
+    // with a settlement credit — the classic silent leakage leg.
+    const caseId = (rawData.disputeCaseId as string | undefined) ?? (rawData.chargebackArn as string | undefined);
+    return fromTaxonomy(
+      "retail_dispute_won_not_credited",
+      `Dispute ${caseId ?? txn.transactionRef ?? "unknown"} was WON but the ${txn.currency} ${txnAmt.toLocaleString()} reversal credit has no matching settlement entry. Check same-batch netting before claiming with the acquirer.`,
+    );
+  }
+  if (gatewayEventType === "dispute_fee") {
+    const expectedFee = rawData.expectedDisputeFee as number | undefined;
+    if (expectedFee !== undefined && Math.abs(txnAmt - expectedFee) > 0.01) {
+      return fromTaxonomy(
+        "retail_dispute_fee_error",
+        `Dispute fee billed ${txn.currency} ${txnAmt.toLocaleString()} vs contracted ${txn.currency} ${expectedFee.toLocaleString()} (case ${(rawData.disputeCaseId as string | undefined) ?? "unknown"}).`,
+      );
+    }
+  }
+
+  // ─── COD courier remittance (SEA lifeline channel) ─────────────────────────
+  if (gatewayEventType === "cod_remittance") {
+    const expectedRemittance = rawData.expectedRemittanceAmount as number | undefined;
+    if (expectedRemittance !== undefined && expectedRemittance - txnAmt > 0.01) {
+      const gap = expectedRemittance - txnAmt;
+      return fromTaxonomy(
+        "retail_cod_remittance_variance",
+        `COD remittance shortfall of ${txn.currency} ${gap.toLocaleString()} from courier ${(rawData.courierId as string | undefined) ?? "unknown"}: expected ${txn.currency} ${expectedRemittance.toLocaleString()} for delivered orders, received ${txn.currency} ${txnAmt.toLocaleString()}.`,
+      );
+    }
+  }
+
+  // ─── Platform economics: tax withholding + commission ───────────────────────
+  if (gatewayEventType === "tax_deduction") {
+    const expectedTax = rawData.expectedTaxAmount as number | undefined;
+    if (expectedTax !== undefined && Math.abs(txnAmt - expectedTax) > 0.01) {
+      return fromTaxonomy(
+        "retail_tax_deduction_variance",
+        `Tax withheld ${txn.currency} ${txnAmt.toLocaleString()} vs expected ${txn.currency} ${expectedTax.toLocaleString()} (${(rawData.taxType as string | undefined) ?? "tax"}). Verify rate, base, and that a withholding certificate was issued.`,
+      );
+    }
+  }
+  if (gatewayEventType === "commission") {
+    const expectedCommission = rawData.expectedCommissionAmount as number | undefined;
+    if (expectedCommission !== undefined && Math.abs(txnAmt - expectedCommission) > 0.01) {
+      return fromTaxonomy(
+        "retail_platform_commission_variance",
+        `Platform commission ${txn.currency} ${txnAmt.toLocaleString()} vs rate-card expectation ${txn.currency} ${expectedCommission.toLocaleString()}. Cluster by category to find misclassified rates.`,
+      );
+    }
   }
 
   // ─── Void Not Reversed ────────────────────────────────────────────────────
@@ -252,8 +333,22 @@ export function classifyRetailException(
     }
   }
 
-  // ─── Duplicate Authorisation ──────────────────────────────────────────────
+  // ─── Payment integrity: settled-twice, duplicate auth, order↔amount ─────────
   if (gatewayEventType === "payment") {
+    // Same gateway reference appearing more than once on this feed = the
+    // transaction settled in multiple batches (provider re-delivery/regeneration).
+    const gatewayRef = rawData.gatewayRef as string | undefined;
+    const settledTwice = gatewayRef
+      ? sameSideDupIndex
+        ? (sameSideDupIndex.byGatewayRef.get(gatewayRef) ?? 0) > 1
+        : relatedTxns.some((t) => ((t.rawData as Record<string, unknown>) ?? {}).gatewayRef === gatewayRef)
+      : false;
+    if (settledTwice) {
+      return fromTaxonomy(
+        "retail_settlement_duplicate",
+        `Transaction ${gatewayRef} appears in more than one settlement batch for ${txn.currency} ${txnAmt.toLocaleString()}. Same-sign = duplicate credit (expect clawback); opposite-sign = correction pair.`,
+      );
+    }
     const orderRef = rawData.originalOrderRef as string | undefined;
     if (orderRef) {
       // Same-feed count of charges for this order. O(1) via the index; fall back
@@ -271,6 +366,20 @@ export function classifyRetailException(
           slaHours: taxonomy.slaHours,
           hasRetailTaxonomy: true,
         };
+      }
+    }
+    // Order total vs captured/settled amount (discounts/shipping/tax/gift-card
+    // legs drifting between storefront and payment request). Uses the job's
+    // amount tolerance so FX/rounding noise doesn't alert.
+    const orderTotal = rawData.orderTotal as number | undefined;
+    if (orderTotal !== undefined && orderTotal > 0) {
+      const variance = Math.abs(txnAmt - orderTotal) / orderTotal;
+      const tolerance = config.amountTolerance ?? 0.005;
+      if (variance > tolerance) {
+        return fromTaxonomy(
+          "retail_order_payment_amount_mismatch",
+          `Order ${orderRef ?? txn.transactionRef ?? "unknown"} total is ${txn.currency} ${orderTotal.toLocaleString()} but captured/settled amount is ${txn.currency} ${txnAmt.toLocaleString()} (${(variance * 100).toFixed(2)}% variance). Decompose: shipping, tax, discount, or gift-card leg.`,
+        );
       }
     }
   }
@@ -295,8 +404,17 @@ export function classifyRetailException(
     }
   }
 
-  // ─── Settlement Shortfall (payout-level) ──────────────────────────────────
+  // ─── Payout: bank leg first, then gateway-report shortfall ──────────────────
   if (gatewayEventType === "payout") {
+    // Third reconciliation leg: gateway payout report vs actual bank credit.
+    const bankCredited = rawData.bankCreditedAmount as number | undefined;
+    if (bankCredited !== undefined && Math.abs(txnAmt - bankCredited) > 0.01) {
+      const gap = txnAmt - bankCredited;
+      return fromTaxonomy(
+        "retail_payout_bank_variance",
+        `Payout report says ${txn.currency} ${txnAmt.toLocaleString()} but bank credit is ${txn.currency} ${bankCredited.toLocaleString()} (gap ${txn.currency} ${gap.toLocaleString()}). Constant small gaps = lifting fees (configure); unexplained gaps = same-day escalation + beneficiary-tampering check.`,
+      );
+    }
     const expectedPayout = rawData.expectedPayoutAmount as number | undefined;
     if (expectedPayout && Math.abs(txnAmt - expectedPayout) > 0.01) {
       const shortfall = expectedPayout - txnAmt;
@@ -436,6 +554,34 @@ export function runRetailReconciliation(
         : 1,
     },
   };
+}
+
+// ─── Settlement-batch completeness watchdog ──────────────────────────────────
+
+/**
+ * Is a provider's settlement batch overdue? Backs the
+ * `retail_settlement_batch_missing` category: a missing batch hides every
+ * other exception class for the period, so zero-data-loss reconciliation
+ * requires missing files to be loud. Pure — the Phase 1 SHOPLINE connector
+ * calls this per provider (gateway, wallet, BNPL, COD courier) on its
+ * completeness tick, with each provider's contracted cycle.
+ *
+ * @param lastBatchAt  when the provider's most recent batch was received
+ * @param cycleDays    contracted delivery cycle in days (1 = daily)
+ * @param graceDays    delay tolerated before alerting (default 1)
+ */
+export function isSettlementBatchOverdue(
+  lastBatchAt: Date | null,
+  cycleDays: number,
+  graceDays = 1,
+  now: Date = new Date(),
+): boolean {
+  if (cycleDays <= 0) return false;
+  if (!lastBatchAt) return true; // never received anything — loudest case
+  const lastMs = lastBatchAt.getTime();
+  if (!Number.isFinite(lastMs)) return true;
+  const dueMs = lastMs + (cycleDays + graceDays) * 24 * 60 * 60 * 1000;
+  return now.getTime() > dueMs;
 }
 
 // ─── Result Types ───────────────────────────────────────────────────────────

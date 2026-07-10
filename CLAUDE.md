@@ -123,13 +123,21 @@ config/placeholders, swappable when docs arrive):
 - **Schema (migration 0065):** `segment` += `retail_commerce`; `channelType` +=
   `ecommerce_gateway` / `marketplace_payout` / `buy_now_pay_later` /
   `digital_wallet`. `onboardingChannel` codes are varchar (no migration).
-- **Retail exception taxonomy** — `server/exceptions/retail-commerce.ts`, 14
-  categories (chargeback not-posted/duplicate, gateway-fee variance, FX mismatch,
-  settlement shortfall/delay, refund not-settled, duplicate auth, void-not-reversed,
-  partial-capture, currency-conversion, payout delay, reserve hold, interchange).
-  Regulatory context = card-scheme rules + gateway agreements (NOT CBN — retail).
-  Wired into the cross-vertical `EXCEPTION_REGISTRY` + `ALL_EXCEPTIONS`, boot +
-  per-org resolution-template seeding, and `retailExceptionsTaxonomyPromptBlock`.
+- **Retail exception taxonomy** — `server/exceptions/retail-commerce.ts`, **25
+  categories** (migration 0067): the 14 roadmap categories (chargebacks, gateway
+  fees, FX, settlement shortfall/delay, refunds, duplicate auth, voids, partial
+  capture, currency conversion, payout delay, reserves, interchange) plus 11
+  research-round-2 categories covering five surfaces the roadmap missed:
+  order↔payment integrity (order-total mismatch, gift-card split tender),
+  **COD courier remittance** (SEA lifeline channel; `cod_logistics` source),
+  dispute lifecycle (duplicate refunds, won-but-not-credited reversals, dispute
+  fee errors), the **payout↔bank third leg**, platform economics (tax
+  withholding, platform commission), and settlement-batch integrity (settled
+  twice, batch missing — `isSettlementBatchOverdue` watchdog).
+  Regulatory context = card-scheme rules + gateway/logistics/platform agreements
+  (NOT CBN — retail). Wired into the cross-vertical `EXCEPTION_REGISTRY` +
+  `ALL_EXCEPTIONS`, boot + per-org resolution-template seeding, and
+  `retailExceptionsTaxonomyPromptBlock`.
 - **Retail reconciliation adapter** — `server/retailReconciliationEngine.ts` wraps
   the core engine (does not fork it); `ShoplineSettlementRecord` placeholder;
   O(1) same-feed duplicate detection (`buildRetailDupIndex`).

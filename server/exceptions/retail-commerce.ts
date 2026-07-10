@@ -23,7 +23,9 @@ export type RetailChannelSource =
   | "buy_now_pay_later"
   | "digital_wallet"
   | "card_switch"
-  | "cbs_ledger";
+  | "cbs_ledger"
+  /** Cash-on-delivery courier/3PL remittance — dominant in SHOPLINE's SEA markets. */
+  | "cod_logistics";
 
 /**
  * Retail exception interface — extends the Nigerian channel exception pattern
@@ -115,7 +117,7 @@ export const RETAIL_COMMERCE_EXCEPTIONS: RetailCommerceException[] = [
     label: "Settlement Amount Shortfall",
     severity: "critical",
     slaHours: 24,
-    sources: ["ecommerce_gateway", "marketplace_payout"],
+    sources: ["ecommerce_gateway", "marketplace_payout", "buy_now_pay_later", "digital_wallet"],
     regulatoryContext:
       "Gateway agreements guarantee settlement of net transaction amounts (gross minus fees, chargebacks, and reserves) within the contracted settlement window. Shortfalls indicate either undisclosed deductions (hidden fees, reserve increases) or settlement calculation errors. Persistent shortfalls may indicate gateway financial distress.",
     recommendedResolution:
@@ -128,7 +130,7 @@ export const RETAIL_COMMERCE_EXCEPTIONS: RetailCommerceException[] = [
     label: "Settlement Delayed Beyond Contracted SLA",
     severity: "high",
     slaHours: 48,
-    sources: ["ecommerce_gateway", "marketplace_payout", "buy_now_pay_later"],
+    sources: ["ecommerce_gateway", "marketplace_payout", "buy_now_pay_later", "digital_wallet"],
     regulatoryContext:
       "Gateway agreements specify settlement cycles (T+1, T+2, T+3, or weekly). Delays beyond the contracted cycle constitute an SLA breach. For marketplace payouts, platform terms specify payout schedules. Persistent delays may indicate gateway liquidity issues or compliance holds.",
     recommendedResolution:
@@ -216,7 +218,7 @@ export const RETAIL_COMMERCE_EXCEPTIONS: RetailCommerceException[] = [
     label: "Merchant Payout Delayed Beyond Schedule",
     severity: "medium",
     slaHours: 72,
-    sources: ["marketplace_payout", "ecommerce_gateway"],
+    sources: ["marketplace_payout", "ecommerce_gateway", "buy_now_pay_later", "digital_wallet"],
     regulatoryContext:
       "Marketplace and gateway payout schedules are contractually defined (daily, weekly, bi-weekly, or monthly). Delays beyond the contracted schedule impact merchant cash flow and may indicate platform liquidity issues, compliance holds, or bank processing delays. Some jurisdictions require platforms to hold merchant funds in segregated accounts.",
     recommendedResolution:
@@ -251,6 +253,163 @@ export const RETAIL_COMMERCE_EXCEPTIONS: RetailCommerceException[] = [
       "1) Identify the interchange tier applied to the transaction (from the settlement detail report). 2) Determine the correct tier based on: merchant's MCC, card type (from BIN lookup), card region, and transaction channel. 3) If misclassified, calculate the overcharge amount. 4) For MCC errors, request reclassification from the acquirer (requires scheme approval, typically takes 30–60 days). 5) For systematic misclassification, negotiate a billing credit with the gateway while reclassification is pending.",
     aiDiagnosisHint:
       "Fee tier applied doesn't match expected tier for the transaction characteristics. Most common cause: MCC assigned at merchant onboarding is incorrect for the merchant's actual business category. Also check: is the gateway correctly passing the e-commerce indicator (ECI) for 3DS-authenticated transactions? Missing ECI causes downgrade to non-qualified rate. Cluster by card BIN to identify if specific card types are consistently misclassified.",
+  },
+
+  // ─── Order ↔ Payment Integrity ──────────────────────────────────────────────
+  {
+    key: "retail_order_payment_amount_mismatch",
+    label: "Order Total vs Captured/Settled Amount Mismatch",
+    severity: "high",
+    slaHours: 48,
+    sources: ["ecommerce_gateway", "digital_wallet", "cbs_ledger"],
+    regulatoryContext:
+      "The captured amount must equal the order total after discounts, shipping, taxes and store-credit legs — card scheme rules cap capture at the authorised amount, and consumer-protection law treats overcapture as an overcharge. Systematic mismatches indicate checkout/pricing engine drift between the storefront and the payment request.",
+    recommendedResolution:
+      "1) Rebuild the expected charge: items + shipping + tax − discounts − gift-card/store-credit legs, from the order record. 2) Compare with the captured and settled amounts. 3) If overcaptured, issue a partial refund for the difference immediately (consumer-protection exposure). 4) If undercaptured, post the uncollected revenue variance and determine whether to re-bill or write off per policy. 5) If mismatches cluster after a storefront release, escalate to the platform/checkout team as a pricing-engine defect.",
+    aiDiagnosisHint:
+      "Decompose the delta: exactly the shipping fee → shipping leg misbooked; exactly the tax amount → tax leg dropped from the payment request; equals a gift-card leg → split tender not applied at capture; small cents → FX/rounding. Cluster by order date against storefront release dates to spot checkout regressions.",
+  },
+
+  // ─── Cash on Delivery (COD) ─────────────────────────────────────────────────
+  {
+    key: "retail_cod_remittance_variance",
+    label: "COD Courier Remittance Shortfall / Missing",
+    severity: "critical",
+    slaHours: 24,
+    sources: ["cod_logistics", "cbs_ledger"],
+    regulatoryContext:
+      "Cash-on-delivery dominates Southeast Asian e-commerce (a large share of SHOPLINE merchant volume). The courier/3PL collects cash at the door and remits on a contracted cycle minus a COD fee — cash-in-transit that appears in NO gateway report. Unremitted deliveries are direct revenue leakage and the highest fraud-risk surface in the whole retail stack; logistics agreements set remittance SLAs and fee rate cards.",
+    recommendedResolution:
+      "1) Match the delivered-order manifest (proof-of-delivery records) against the courier's remittance report line by line. 2) Verify the COD fee deducted matches the contracted rate card. 3) Exclude failed/returned deliveries (no cash due) after verifying return status. 4) Chase every delivered-but-unremitted order past the remittance cycle with the courier, citing POD references. 5) Repeated shortfalls from the same courier/region → escalate to logistics management and consider COD suspension for that lane.",
+    aiDiagnosisHint:
+      "Split the gap three ways: undelivered/returned orders (no cash due — verify return status, not a courier debt), delivered-but-unremitted (chase the courier with POD evidence), and fee over-deduction (variance proportional to remittance = rate-card drift). Round-sum discrepancies suggest cash handling issues at the courier hub, not data errors.",
+  },
+
+  // ─── Refund & Dispute Lifecycle ─────────────────────────────────────────────
+  {
+    key: "retail_refund_duplicate",
+    label: "Duplicate Refund Processed",
+    severity: "high",
+    slaHours: 48,
+    sources: ["ecommerce_gateway", "digital_wallet"],
+    regulatoryContext:
+      "Card scheme rules permit refunds only up to the captured amount per transaction; a duplicate refund is a direct cash loss (the customer keeps both credits, or the settlement is deducted twice). Root causes are idempotency failures: double-clicked refund buttons, webhook retries triggering a second refund call, or a manual refund raised while the automatic one was pending.",
+    recommendedResolution:
+      "1) Locate both refund records against the same original transaction (refund IDs, timestamps, initiating user/system). 2) Confirm at the gateway whether one or two refunds actually executed. 3) If two executed, attempt gateway recovery/re-debit where supported; otherwise contact the customer for repayment per policy and record the loss if unrecoverable. 4) Fix the source: enforce idempotency keys on refund API calls and lock the refund button after first submission. 5) Add the order to the duplicate-refund watch report for the month.",
+    aiDiagnosisHint:
+      "Two refund deductions referencing one original transaction: same refundId twice = settlement double-count (provider-side, dispute the batch); distinct refundIds = two real refunds (check timestamps — seconds apart implies double-click/retry; days apart implies manual duplicate on top of automatic).",
+  },
+  {
+    key: "retail_dispute_won_not_credited",
+    label: "Dispute Won but Reversal Credit Missing",
+    severity: "high",
+    slaHours: 48,
+    sources: ["ecommerce_gateway", "card_switch"],
+    regulatoryContext:
+      "When a merchant wins representment, card scheme rules require the chargeback reversal to be credited back. In practice this is the least-monitored leg of the dispute lifecycle — gateways rarely alert on missing reversal credits, making it silent revenue leakage. Scheme timelines bound when the reversal must post after case closure.",
+    recommendedResolution:
+      "1) Extract all dispute cases with outcome WON in the period. 2) Match each case to a reversal credit in subsequent settlement batches (by case id / ARN). 3) Check for netting: reversals are often netted against new chargebacks within the same batch rather than shown as separate credits. 4) For any won case with no credit after the scheme posting window, raise a claim with the acquirer citing the case id and outcome notification. 5) Where the dispute fee is contractually refundable on a win, claim that too.",
+    aiDiagnosisHint:
+      "Join the dispute-outcome feed to settlement credits: WON cases with no matching reversal amount are the candidates. Before flagging, check same-batch netting (gross chargebacks minus reversals shown as one net line) — decompose the batch's dispute net line first. Track elapsed days since case closure vs the scheme posting window.",
+  },
+  {
+    key: "retail_dispute_fee_error",
+    label: "Dispute / Chargeback Fee Billed Incorrectly",
+    severity: "medium",
+    slaHours: 72,
+    sources: ["ecommerce_gateway", "card_switch"],
+    regulatoryContext:
+      "Gateways bill a per-dispute administration fee per their schedule; many contracts waive or refund the fee when the merchant wins. Wrong fee amounts, fees on won cases where a waiver is contracted, or duplicate fee lines are recurring billing errors that compound at chargeback-heavy merchants.",
+    recommendedResolution:
+      "1) Count disputes opened in the billing period and compute expected fees per the contracted schedule, applying win-waivers. 2) Compare with dispute-fee lines billed in settlements. 3) For each variance, tie fee lines to case ids — flag duplicates and fees on waived cases. 4) Raise a billing query with the case-level breakdown. 5) Track recovery and adjust the fee accrual.",
+    aiDiagnosisHint:
+      "Fee lines exceeding the dispute count = duplicate billing. Fees present on cases with outcome WON where waiver is contracted = waiver not applied. A step-change in per-case fee mid-period = schedule update not reflected in the contract — check the gateway's fee-change notice date.",
+  },
+
+  // ─── Payout ↔ Bank (the third reconciliation leg) ──────────────────────────
+  {
+    key: "retail_payout_bank_variance",
+    label: "Payout Report vs Bank Credit Mismatch",
+    severity: "critical",
+    slaHours: 24,
+    sources: ["ecommerce_gateway", "marketplace_payout"],
+    regulatoryContext:
+      "Three-way reconciliation's final leg: the gateway's payout report must equal the credit on the merchant's bank statement. Gaps arise from receiving-bank lifting fees, intermediary charges on cross-border payouts, failed/returned payouts, or — worst case — beneficiary-account tampering. An unexplained bank-leg gap is treated as a potential security incident until explained.",
+    recommendedResolution:
+      "1) Match each payout reference from the gateway report to a bank statement credit. 2) If the credit is absent, verify the payout wasn't returned/failed (wrong account, compliance hold) and confirm registered bank details are unchanged. 3) If the amount differs, identify receiving-bank/intermediary charges and FX conversion at the bank leg. 4) Escalate any unexplained gap the same day — verify beneficiary details against an out-of-band record (tampering check). 5) Configure known lifting fees as expected deductions so they stop alerting.",
+    aiDiagnosisHint:
+      "Constant small delta on every payout = receiving-bank lifting fee (configuration, not an exception). A single payout with zero bank credit = returned/failed payout or account issue. Amount right but late = bank processing. Changed beneficiary details preceding the gap = treat as a security incident immediately.",
+  },
+
+  // ─── Platform Economics (tax + commission) ──────────────────────────────────
+  {
+    key: "retail_tax_deduction_variance",
+    label: "Tax Withholding / VAT Deduction Variance",
+    severity: "high",
+    slaHours: 72,
+    sources: ["ecommerce_gateway", "marketplace_payout", "cod_logistics"],
+    regulatoryContext:
+      "Platforms and gateways withhold VAT/GST or cross-border withholding tax on fees or payouts under marketplace deemed-supplier and WHT rules (jurisdiction-specific — SEA VAT regimes, Nigerian VAT on fees). A wrong rate or wrong base (tax on gross instead of on the fee) either leaks cash through over-withholding or builds silent tax exposure through under-withholding; withheld amounts need certificates/tax invoices to be recoverable as input credit.",
+    recommendedResolution:
+      "1) Determine the applicable tax type, rate and base for the merchant's jurisdiction and the platform's tax status. 2) Recompute expected tax for the period and compare with amounts withheld in settlements/payouts. 3) Verify tax invoices/withholding certificates were issued for every withheld amount — chase missing ones (they block input-credit recovery). 4) Dispute rate/base errors with the platform's tax team with the recomputation attached. 5) Reconcile the withholding account to certificates quarterly.",
+    aiDiagnosisHint:
+      "Check the base first: tax computed on GROSS sales instead of on the platform fee is the most common error and produces large proportional variances. Rate variances that start on a specific date = statutory rate change or platform misconfiguration on that date. Correct amounts but missing certificates is still an exception — the cash is unrecoverable without them.",
+  },
+  {
+    key: "retail_platform_commission_variance",
+    label: "Platform / Marketplace Commission Variance",
+    severity: "medium",
+    slaHours: 72,
+    sources: ["marketplace_payout", "ecommerce_gateway"],
+    regulatoryContext:
+      "Platform commissions follow category-based rate cards with promotional rates and tier discounts. Misclassified product categories, expired promo rates applied (or not applied), and tier-change errors erode margin silently at volume — the merchant's platform agreement defines the rate card and adjustment process.",
+    recommendedResolution:
+      "1) Recompute expected commission per order from the category rate card effective for the period. 2) Compare with commission deducted in the payout statements. 3) Cluster variances by product category to find misclassifications; by date to find rate-card effective-date errors. 4) File an adjustment claim through the platform's billing process with the order-level recomputation. 5) Update the merchant's rate-card record whenever the platform notifies changes.",
+    aiDiagnosisHint:
+      "Single-category drift = product category misclassified on the platform. Uniform drift across all categories from a given date = tier change or promo-rate expiry on that date. Compare the commission rate implied per order (fee ÷ base) against the rate card rather than absolute amounts — it isolates rate errors from base errors.",
+  },
+
+  // ─── Settlement Batch Integrity ─────────────────────────────────────────────
+  {
+    key: "retail_settlement_duplicate",
+    label: "Transaction Settled in Multiple Batches",
+    severity: "high",
+    slaHours: 48,
+    sources: ["ecommerce_gateway", "marketplace_payout", "digital_wallet"],
+    regulatoryContext:
+      "A transaction must settle exactly once. Provider-side batch regeneration (corrections re-issuing the full file under a new batch id) or delivery retries can double-count revenue; providers claw back duplicate credits later, so unnoticed duplicates overstate revenue now and create surprise deductions later.",
+    recommendedResolution:
+      "1) Identify transaction references appearing in more than one settlement batch. 2) Distinguish a true duplicate credit (same amount, same sign) from a correction pair (opposite signs netting out). 3) For true duplicates, expect and track the provider clawback; adjust revenue recognition now, not when the clawback lands. 4) Confirm platform ingestion idempotency held (the ledger should already be single-counted — the exception is provider-side). 5) Ask the provider whether the batch was regenerated and which batch id is authoritative.",
+    aiDiagnosisHint:
+      "Same gateway reference in two batch ids: equal amounts with the same sign = duplicate credit (clawback coming); opposite signs = correction pair, net to zero and close as no-action. Regenerated files usually share a generation timestamp pattern — many refs duplicated across exactly two batches points to file regeneration, not transaction-level errors.",
+  },
+  {
+    key: "retail_settlement_batch_missing",
+    label: "Expected Settlement Batch Not Received",
+    severity: "high",
+    slaHours: 24,
+    sources: ["ecommerce_gateway", "marketplace_payout", "digital_wallet", "buy_now_pay_later", "cod_logistics"],
+    regulatoryContext:
+      "Every provider owes a settlement/payout/remittance report per contracted cycle. A missing batch hides every other exception class for that period — zero-data-loss reconciliation depends on missing files being loud, not silent. Contract SLAs define the delivery calendar per provider.",
+    recommendedResolution:
+      "1) Confirm the provider's delivery calendar (cycle, cut-off, holiday rules). 2) Check the delivery channel (portal/SFTP/API) for the file before declaring it missing. 3) If the provider had no activity for the period (legitimate no-file day), record a justified skip. 4) Otherwise chase the provider, obtain and backfill the batch BEFORE running reconciliation for the period. 5) Consecutive misses from one provider = integration break — escalate to engineering, not the provider.",
+    aiDiagnosisHint:
+      "Distinguish legitimate absence (no transactions in the period, provider holiday calendar) from delivery failure (activity exists in realtime feeds but no batch arrived). One miss = provider delay; consecutive misses = broken integration on our side or credential expiry. Check the provider's file-generation status page/API first.",
+  },
+
+  // ─── Split Tender / Gift Card ───────────────────────────────────────────────
+  {
+    key: "retail_gift_card_split_mismatch",
+    label: "Gift Card / Store Credit Split Tender Mismatch",
+    severity: "medium",
+    slaHours: 72,
+    sources: ["ecommerce_gateway", "cbs_ledger"],
+    regulatoryContext:
+      "Split tenders (gift card or store credit plus card) reach the gateway only for the card leg; the gift-card leg must be booked against the gift-card liability account. Misbooked splits misstate both revenue and the gift-card liability — an audit-sensitive balance in retail accounting, and in the worst case (gift card not applied at capture) the customer is double-charged.",
+    recommendedResolution:
+      "1) Rebuild the tender split from the order record (card leg vs gift-card/store-credit leg). 2) Verify the card leg equals the gateway settlement amount and the gift-card leg was posted against the liability account. 3) If the settlement equals the FULL order total, the gift card was not applied at capture — refund the gift-card leg to the customer immediately. 4) If the ledger booked the full amount as card revenue, repost to relieve the liability. 5) Reconcile the gift-card liability account movement for the period end-to-end.",
+    aiDiagnosisHint:
+      "Compare settlement amount against order total and against (order total − gift-card leg): matching the full total means the gift card never applied (customer double-charge — critical path); matching the net means the payment is right and the error is ledger-side (liability not relieved). Cluster by gift-card program to catch program-wide booking defects.",
   },
 ];
 

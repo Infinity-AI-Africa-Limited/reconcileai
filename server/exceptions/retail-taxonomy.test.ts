@@ -19,8 +19,29 @@ import { EXCEPTION_REGISTRY, ALL_EXCEPTIONS } from "./index";
 import { RESOLUTION_TEMPLATE_CATEGORIES } from "../../drizzle/schema";
 
 describe("retail taxonomy — internal integrity", () => {
-  it("defines the 14 roadmap exception categories", () => {
-    expect(RETAIL_COMMERCE_EXCEPTIONS).toHaveLength(14);
+  it("defines the full retail catalogue: 14 roadmap + 11 research-round-2 categories", () => {
+    expect(RETAIL_COMMERCE_EXCEPTIONS).toHaveLength(25);
+  });
+
+  it("research round 2 covers the five missing exception surfaces", () => {
+    const keys = new Set(RETAIL_COMMERCE_EXCEPTION_KEYS);
+    // order↔payment integrity
+    expect(keys.has("retail_order_payment_amount_mismatch")).toBe(true);
+    expect(keys.has("retail_gift_card_split_mismatch")).toBe(true);
+    // COD (SEA lifeline channel)
+    expect(keys.has("retail_cod_remittance_variance")).toBe(true);
+    // dispute lifecycle beyond the chargeback itself
+    expect(keys.has("retail_refund_duplicate")).toBe(true);
+    expect(keys.has("retail_dispute_won_not_credited")).toBe(true);
+    expect(keys.has("retail_dispute_fee_error")).toBe(true);
+    // payout↔bank third leg
+    expect(keys.has("retail_payout_bank_variance")).toBe(true);
+    // platform economics
+    expect(keys.has("retail_tax_deduction_variance")).toBe(true);
+    expect(keys.has("retail_platform_commission_variance")).toBe(true);
+    // settlement batch integrity
+    expect(keys.has("retail_settlement_duplicate")).toBe(true);
+    expect(keys.has("retail_settlement_batch_missing")).toBe(true);
   });
 
   it("has unique keys", () => {

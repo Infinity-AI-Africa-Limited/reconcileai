@@ -3,6 +3,7 @@ import {
   classifyRetailException,
   runRetailReconciliation,
   buildRetailDupIndex,
+  isSettlementBatchOverdue,
   type RetailReconciliationConfig,
 } from "./retailReconciliationEngine";
 import type { Transaction } from "../drizzle/schema";
@@ -320,6 +321,126 @@ describe("Retail Exception Classification", () => {
       const idx = buildRetailDupIndex([txn]);
       const result = classifyRetailException(txn, [], baseConfig, idx);
       expect(result.category).toBe("retail_chargeback_not_posted");
+    });
+  });
+
+  // ─── Research round 2: new exception surfaces ──────────────────────────────
+  describe("Refund duplicate (same refundId on one feed)", () => {
+    it("flags a duplicated refundId as retail_refund_duplicate", () => {
+      const txn = makeTxn({ id: 1, rawData: { gatewayEventType: "refund", refundId: "REF-DUP" } });
+      const idx = buildRetailDupIndex([txn, makeTxn({ id: 2, rawData: { gatewayEventType: "refund", refundId: "REF-DUP" } })]);
+      const result = classifyRetailException(txn, [], baseConfig, idx);
+      expect(result.category).toBe("retail_refund_duplicate");
+      expect(result.hasRetailTaxonomy).toBe(true);
+    });
+
+    it("a lone refund stays retail_refund_not_settled", () => {
+      const txn = makeTxn({ id: 1, rawData: { gatewayEventType: "refund", refundId: "REF-SOLO" } });
+      const idx = buildRetailDupIndex([txn]);
+      expect(classifyRetailException(txn, [], baseConfig, idx).category).toBe("retail_refund_not_settled");
+    });
+  });
+
+  describe("Dispute lifecycle", () => {
+    it("unmatched chargeback reversal → retail_dispute_won_not_credited", () => {
+      const txn = makeTxn({ rawData: { gatewayEventType: "chargeback_reversal", disputeCaseId: "CASE-42" } });
+      const result = classifyRetailException(txn, [], baseConfig);
+      expect(result.category).toBe("retail_dispute_won_not_credited");
+      expect(result.description).toContain("CASE-42");
+    });
+
+    it("dispute fee off-schedule → retail_dispute_fee_error", () => {
+      const txn = makeTxn({ amount: "25.00", rawData: { gatewayEventType: "dispute_fee", expectedDisputeFee: 15 } });
+      expect(classifyRetailException(txn, [], baseConfig).category).toBe("retail_dispute_fee_error");
+    });
+
+    it("dispute fee on-schedule does not alert", () => {
+      const txn = makeTxn({ amount: "15.00", rawData: { gatewayEventType: "dispute_fee", expectedDisputeFee: 15 } });
+      expect(classifyRetailException(txn, [], baseConfig).category).not.toBe("retail_dispute_fee_error");
+    });
+  });
+
+  describe("COD courier remittance", () => {
+    it("remittance shortfall → retail_cod_remittance_variance (critical)", () => {
+      const txn = makeTxn({
+        amount: "8500.00",
+        rawData: { gatewayEventType: "cod_remittance", expectedRemittanceAmount: 10000, courierId: "GHN-EXPRESS" },
+      });
+      const result = classifyRetailException(txn, [], baseConfig);
+      expect(result.category).toBe("retail_cod_remittance_variance");
+      expect(result.severity).toBe("critical");
+      expect(result.description).toContain("GHN-EXPRESS");
+    });
+
+    it("full remittance does not alert", () => {
+      const txn = makeTxn({ amount: "10000.00", rawData: { gatewayEventType: "cod_remittance", expectedRemittanceAmount: 10000 } });
+      expect(classifyRetailException(txn, [], baseConfig).category).not.toBe("retail_cod_remittance_variance");
+    });
+  });
+
+  describe("Payout ↔ bank third leg", () => {
+    it("bank credit differing from payout report → retail_payout_bank_variance", () => {
+      const txn = makeTxn({
+        amount: "10000.00",
+        rawData: { gatewayEventType: "payout", bankCreditedAmount: 9950, expectedPayoutAmount: 10000 },
+      });
+      const result = classifyRetailException(txn, [], baseConfig);
+      expect(result.category).toBe("retail_payout_bank_variance");
+      expect(result.severity).toBe("critical");
+    });
+
+    it("bank leg intact falls through to gateway-report shortfall check", () => {
+      const txn = makeTxn({
+        amount: "9500.00",
+        rawData: { gatewayEventType: "payout", bankCreditedAmount: 9500, expectedPayoutAmount: 10000 },
+      });
+      expect(classifyRetailException(txn, [], baseConfig).category).toBe("retail_settlement_shortfall");
+    });
+  });
+
+  describe("Platform economics", () => {
+    it("tax withheld off-expectation → retail_tax_deduction_variance", () => {
+      const txn = makeTxn({ amount: "750.00", rawData: { gatewayEventType: "tax_deduction", expectedTaxAmount: 500, taxType: "VAT" } });
+      expect(classifyRetailException(txn, [], baseConfig).category).toBe("retail_tax_deduction_variance");
+    });
+
+    it("commission off rate-card → retail_platform_commission_variance", () => {
+      const txn = makeTxn({ amount: "320.00", rawData: { gatewayEventType: "commission", expectedCommissionAmount: 250 } });
+      expect(classifyRetailException(txn, [], baseConfig).category).toBe("retail_platform_commission_variance");
+    });
+  });
+
+  describe("Settlement batch integrity", () => {
+    it("same gatewayRef twice on one feed → retail_settlement_duplicate", () => {
+      const txn = makeTxn({ id: 1, rawData: { gatewayEventType: "payment", gatewayRef: "GW-1" } });
+      const idx = buildRetailDupIndex([txn, makeTxn({ id: 2, rawData: { gatewayEventType: "payment", gatewayRef: "GW-1" } })]);
+      expect(classifyRetailException(txn, [], baseConfig, idx).category).toBe("retail_settlement_duplicate");
+    });
+
+    it("order total vs settled amount beyond tolerance → retail_order_payment_amount_mismatch", () => {
+      const txn = makeTxn({ amount: "90.00", rawData: { gatewayEventType: "payment", orderTotal: 100 } });
+      expect(classifyRetailException(txn, [], baseConfig).category).toBe("retail_order_payment_amount_mismatch");
+    });
+
+    it("order total within tolerance does not alert", () => {
+      const txn = makeTxn({ amount: "99.90", rawData: { gatewayEventType: "payment", orderTotal: 100 } }); // 0.1% < 0.5%
+      expect(classifyRetailException(txn, [], baseConfig).category).not.toBe("retail_order_payment_amount_mismatch");
+    });
+  });
+
+  describe("isSettlementBatchOverdue (batch-missing watchdog)", () => {
+    const now = new Date("2026-07-10T12:00:00Z");
+    it("never-received is always overdue", () => {
+      expect(isSettlementBatchOverdue(null, 1, 1, now)).toBe(true);
+    });
+    it("fresh batch is not overdue", () => {
+      expect(isSettlementBatchOverdue(new Date("2026-07-10T02:00:00Z"), 1, 1, now)).toBe(false);
+    });
+    it("batch older than cycle+grace is overdue", () => {
+      expect(isSettlementBatchOverdue(new Date("2026-07-07T02:00:00Z"), 1, 1, now)).toBe(true);
+    });
+    it("weekly cycle respects its window", () => {
+      expect(isSettlementBatchOverdue(new Date("2026-07-05T02:00:00Z"), 7, 1, now)).toBe(false);
     });
   });
 });

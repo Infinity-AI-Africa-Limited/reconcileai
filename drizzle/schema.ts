@@ -1003,6 +1003,19 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "retail_payout_delay",
   "retail_reserve_hold_unexplained",
   "retail_interchange_misclassification",
+  // Retail expansion (research round 2): order↔payment integrity, COD, dispute
+  // lifecycle, payout↔bank leg, platform economics, batch integrity, split tender
+  "retail_order_payment_amount_mismatch",
+  "retail_cod_remittance_variance",
+  "retail_refund_duplicate",
+  "retail_dispute_won_not_credited",
+  "retail_dispute_fee_error",
+  "retail_payout_bank_variance",
+  "retail_tax_deduction_variance",
+  "retail_platform_commission_variance",
+  "retail_settlement_duplicate",
+  "retail_settlement_batch_missing",
+  "retail_gift_card_split_mismatch",
   // Card Switching & Processors (Interswitch / UP / eTranzact)
   "card_switch_settlement_variance",
   "card_rrn_stan_mismatch",
