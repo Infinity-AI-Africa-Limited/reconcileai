@@ -99,3 +99,7 @@ export const EXCEPTION_CHANNELS = {
   tsa: { label: "CBN eTreasury / TSA", count: TSA_EXCEPTIONS.length },
   mobile_channels: { label: "Mobile / USSD / Agent Banking", count: MOBILE_CHANNEL_EXCEPTIONS.length },
 } as const;
+
+// Retail / E-Commerce (SHOPLINE vertical)
+export { RETAIL_COMMERCE_EXCEPTIONS, RETAIL_COMMERCE_EXCEPTION_KEYS } from "./retail-commerce";
+export type { RetailCommerceException, RetailChannelSource } from "./retail-commerce";

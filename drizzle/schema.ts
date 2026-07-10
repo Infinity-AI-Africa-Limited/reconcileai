@@ -25,7 +25,8 @@ export const organizations = mysqlTable("organizations", {
   // - financial_services: banks, MFBs, fintechs, payment processors
   // - corporate_b2b: FMCG distributors, corporate treasury, B2B payments
   // - super_admin: Infinity AI internal (cross-tenant visibility)
-  segment: mysqlEnum("segment", ["financial_services", "corporate_b2b", "super_admin"]).default("financial_services").notNull(),
+  // - retail_commerce: e-commerce merchants (SHOPLINE vertical)
+  segment: mysqlEnum("segment", ["financial_services", "corporate_b2b", "super_admin", "retail_commerce"]).default("financial_services").notNull(),
   // How this organization arrived on the platform:
   // - "direct":   onboarded directly by ReconcileAI (own data connection/uploads)
   // - "woodcore": onboarded through the WoodCore CBS connector (WoodCore client bank)
@@ -79,6 +80,8 @@ export const channels = mysqlTable("channels", {
     "bank_core", "nibss", "pos", "atm", "mobile_money", "bank_transfer",
     "agent_banking", "fintech_api", "card_payments", "rtgs", "swift",
     "mobile_banking", "ussd", "qr_payment",
+    // Retail / e-commerce channel types (SHOPLINE vertical)
+    "ecommerce_gateway", "marketplace_payout", "buy_now_pay_later", "digital_wallet",
   ]).default("bank_transfer").notNull(),
   country: varchar("country", { length: 3 }).default("NGA").notNull(),
   defaultCurrency: varchar("defaultCurrency", { length: 3 }).default("NGN").notNull(),
@@ -985,6 +988,21 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "agent_cash_in_not_credited",
   "agent_cash_out_reversal",
   "mobile_duplicate_transfer",
+  // ═══ Retail / E-Commerce Exceptions (SHOPLINE vertical) ═══════════════════
+  "retail_chargeback_not_posted",
+  "retail_chargeback_duplicate",
+  "retail_gateway_fee_variance",
+  "retail_fx_rate_mismatch",
+  "retail_settlement_shortfall",
+  "retail_settlement_delay",
+  "retail_refund_not_settled",
+  "retail_duplicate_authorisation",
+  "retail_void_not_reversed",
+  "retail_partial_capture_mismatch",
+  "retail_currency_conversion_error",
+  "retail_payout_delay",
+  "retail_reserve_hold_unexplained",
+  "retail_interchange_misclassification",
 ] as const;
 export type ResolutionTemplateCategory = (typeof RESOLUTION_TEMPLATE_CATEGORIES)[number];
 

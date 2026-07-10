@@ -3770,7 +3770,7 @@ export const appRouter = router({
     updateOrganizationSegment: superAdminProcedure
       .input(z.object({
         organizationId: z.number().int().positive(),
-        segment: z.enum(["financial_services", "corporate_b2b", "super_admin"]),
+        segment: z.enum(["financial_services", "corporate_b2b", "super_admin", "retail_commerce"]),
       }))
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
@@ -3831,7 +3831,7 @@ export const appRouter = router({
       .input(z.object({
         name: z.string().min(1).max(255),
         code: z.string().min(1).max(50),
-        segment: z.enum(["financial_services", "corporate_b2b", "super_admin"]),
+        segment: z.enum(["financial_services", "corporate_b2b", "super_admin", "retail_commerce"]),
         country: z.string().length(3).default("NGA"),
         baseCurrency: z.string().length(3).default("NGN"),
         // Optional custom channel pack added to a DIRECTLY-onboarded client's

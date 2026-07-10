@@ -449,6 +449,27 @@
       "when": 1783466499242,
       "tag": "0063_gray_radioactive_man",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "5",
+      "when": 1783603026848,
+      "tag": "0064_brainy_forge",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "5",
+      "when": 1783672261963,
+      "tag": "0065_fresh_hercules",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "5",
+      "when": 1783672330306,
+      "tag": "0066_cuddly_blonde_phantom",
+      "breakpoints": true
     }
   ]
 }

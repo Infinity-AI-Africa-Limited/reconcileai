@@ -60,18 +60,20 @@ import {
 } from "recharts";
 import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
 
-type Segment = "financial_services" | "corporate_b2b" | "super_admin";
+type Segment = "financial_services" | "corporate_b2b" | "super_admin" | "retail_commerce";
 
 const SEGMENT_LABELS: Record<Segment, string> = {
   financial_services: "Financial Services",
   corporate_b2b: "Corporate B2B",
   super_admin: "Infinity AI (Internal)",
+  retail_commerce: "Retail Commerce",
 };
 
 const SEGMENT_COLORS: Record<Segment, string> = {
   financial_services: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
   corporate_b2b: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
   super_admin: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
+  retail_commerce: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
 };
 
 function SegmentBadge({ segment }: { segment: string }) {
@@ -123,6 +125,12 @@ function PlatformStatsCards() {
       label: "Internal Orgs",
       value: (data?.segmentBreakdown as Record<string, number>)?.super_admin ?? 0,
       color: "text-violet-400",
+    },
+    {
+      icon: Globe,
+      label: "Retail Orgs",
+      value: (data?.segmentBreakdown as Record<string, number>)?.retail_commerce ?? 0,
+      color: "text-amber-400",
     },
   ];
 
@@ -344,6 +352,7 @@ function CreateOrgDialog({
                         <SelectItem value="financial_services">Financial Services</SelectItem>
                         <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
                         <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
+                        <SelectItem value="retail_commerce">Retail Commerce</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -489,6 +498,7 @@ function OrganisationsTable() {
               <SelectItem value="financial_services">Financial Services</SelectItem>
               <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
               <SelectItem value="super_admin">Infinity AI</SelectItem>
+              <SelectItem value="retail_commerce">Retail Commerce</SelectItem>
             </SelectContent>
           </Select>
         </div>

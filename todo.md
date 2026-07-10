@@ -1158,3 +1158,12 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Frontend: Exception list with AI diagnosis panel and resolution workflow
 - [x] Frontend: 5 mobile money KPI benchmark keys + computation wired into LAPO KPI dashboard
 - [x] Tests: mobileMoney.test.ts — taxonomy, operator metadata, KPI benchmarks, amount mismatch, duplicate detection (26 tests)
+
+## Phase 0 — SHOPLINE Retail Vertical Extension
+
+- [x] Task 0.1: Add `retail_commerce` segment to organizations schema
+- [x] Task 0.2: Add SHOPLINE onboarding channel constants (shared/shoplineConstants.ts)
+- [x] Task 0.3: Define retail exception taxonomy (server/exceptions/retail-commerce.ts)
+- [x] Task 0.4: Add retail channel types to channels table schema
+- [x] Task 0.5: Extend Super Admin portal with vertical selector
+- [x] Task 0.6: Write retail reconciliation engine adapter (server/retailReconciliationEngine.ts)

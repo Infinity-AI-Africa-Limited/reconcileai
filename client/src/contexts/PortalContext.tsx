@@ -10,7 +10,7 @@
 
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
 
-export type OrgSegment = "financial_services" | "corporate_b2b" | "super_admin";
+export type OrgSegment = "financial_services" | "corporate_b2b" | "super_admin" | "retail_commerce";
 
 export interface ViewAsOrg {
   id: number;
@@ -91,6 +91,7 @@ export const SEGMENT_LABELS: Record<OrgSegment, string> = {
   financial_services: "Financial Services",
   corporate_b2b: "Corporate B2B",
   super_admin: "Infinity AI (Internal)",
+  retail_commerce: "Retail Commerce",
 };
 
 /** Segment accent colours (Tailwind classes) */
@@ -112,5 +113,11 @@ export const SEGMENT_COLORS: Record<OrgSegment, { bg: string; text: string; bord
     text: "text-violet-700 dark:text-violet-300",
     border: "border-violet-200 dark:border-violet-800",
     badge: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
+  },
+  retail_commerce: {
+    bg: "bg-amber-50 dark:bg-amber-950/30",
+    text: "text-amber-700 dark:text-amber-300",
+    border: "border-amber-200 dark:border-amber-800",
+    badge: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   },
 };

@@ -1,0 +1,2 @@
+ALTER TABLE `channels` MODIFY COLUMN `channelType` enum('bank_core','nibss','pos','atm','mobile_money','bank_transfer','agent_banking','fintech_api','card_payments','rtgs','swift','mobile_banking','ussd','qr_payment','ecommerce_gateway','marketplace_payout','buy_now_pay_later','digital_wallet') NOT NULL DEFAULT 'bank_transfer';--> statement-breakpoint
+ALTER TABLE `organizations` MODIFY COLUMN `segment` enum('financial_services','corporate_b2b','super_admin','retail_commerce') NOT NULL DEFAULT 'financial_services';
