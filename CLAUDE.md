@@ -92,6 +92,66 @@ integration — it is the **onboarding bridge for CBS-partner client banks**:
 
 ---
 
+## 2A. SHOPLINE × ReconcileAI — Retail Commerce Partnership (GTM Roadmap)
+
+A GTM partnership that adds a **`retail_commerce`** vertical to the platform for
+SHOPLINE (e-commerce platform) merchants. Source roadmap:
+`Documents\Infinity AI\Reconcile AI\GTM\Partnerships\Shopline\ReconcileAI_×_SHOPLINE_Detailed_Implementation_Roadmap.docx`
+(codebase baseline commit `8e87109`; FY1 = Jul 2026–Jun 2027).
+
+### Three-tier partnership model
+| Tier | What | `organizations.onboardingChannel` |
+|---|---|---|
+| **Tier 1** | SHOPLINE App Store — self-serve merchants install via OAuth; Stripe subscription billing; 15% SHOPLINE rev share | `shopline_app_store` |
+| **Tier 2** | SHOPLINE Payments — white-label reconciliation embedded, as a single API-client tenant | `shopline_payments_api` |
+| **Tier 3** | Enterprise bundle — on-premise deployment for enterprise merchants | `shopline_enterprise` |
+
+Constants live in `shared/shoplineConstants.ts` (tiers, channels, subscription
+bands, required OAuth scopes, rev share).
+
+### THE SEQUENCING RULE (non-negotiable)
+Three phases mirror the commercial dependency chain: **Phase 0** (pre-commercial,
+no API docs needed) → **Phase 1** (post-API-docs, pre-pilot) → **Phase 2**
+(post-signed-agreement, production build).
+**Do NOT begin Phase 2 until a signed commercial agreement exists. Do NOT begin
+Phase 1 until SHOPLINE delivers API documentation.** Phase 0 is the only
+low-risk internal work that can proceed unconditionally.
+
+### Phase 0 — DONE + CTO-hardened (commit `c5976b4`)
+Retail-vertical foundation, built without SHOPLINE API docs (all shapes are
+config/placeholders, swappable when docs arrive):
+- **Schema (migration 0065):** `segment` += `retail_commerce`; `channelType` +=
+  `ecommerce_gateway` / `marketplace_payout` / `buy_now_pay_later` /
+  `digital_wallet`. `onboardingChannel` codes are varchar (no migration).
+- **Retail exception taxonomy** — `server/exceptions/retail-commerce.ts`, 14
+  categories (chargeback not-posted/duplicate, gateway-fee variance, FX mismatch,
+  settlement shortfall/delay, refund not-settled, duplicate auth, void-not-reversed,
+  partial-capture, currency-conversion, payout delay, reserve hold, interchange).
+  Regulatory context = card-scheme rules + gateway agreements (NOT CBN — retail).
+  Wired into the cross-vertical `EXCEPTION_REGISTRY` + `ALL_EXCEPTIONS`, boot +
+  per-org resolution-template seeding, and `retailExceptionsTaxonomyPromptBlock`.
+- **Retail reconciliation adapter** — `server/retailReconciliationEngine.ts` wraps
+  the core engine (does not fork it); `ShoplineSettlementRecord` placeholder;
+  O(1) same-feed duplicate detection (`buildRetailDupIndex`).
+- **Super Admin vertical selector** — All / Financial Services / Retail & Commerce
+  toggle + SHOPLINE Tier column, in `SuperAdminDashboard.tsx`.
+
+### Phase 1 — needs SHOPLINE API docs (do NOT start until received)
+SHOPLINE App Store OAuth connector (Tier 1), settlement batch ingestion endpoint
+(Tier 2), merchant self-serve onboarding UI, simplified retail-facing dashboard,
+App Store listing assets. Also: inject `retailExceptionsTaxonomyPromptBlock` into
+the Super Agent by segment.
+
+### Phase 2 — post-signed-agreement ONLY
+Tier 2 white-label API response format, on-premise Docker container packaging
+(Tier 3), Tier 1 Stripe subscription billing integration.
+
+> **CBN reports do NOT apply to SHOPLINE** — retail merchants are governed by
+> card-scheme/gateway terms, not CBN. The CBN report engine stays scoped to the
+> financial-services vertical.
+
+---
+
 ## 3. Technology Stack
 
 | Layer | Technology | Version |
