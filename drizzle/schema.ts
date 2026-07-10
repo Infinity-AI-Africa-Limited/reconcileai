@@ -1003,6 +1003,37 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "retail_payout_delay",
   "retail_reserve_hold_unexplained",
   "retail_interchange_misclassification",
+  // Card Switching & Processors (Interswitch / UP / eTranzact)
+  "card_switch_settlement_variance",
+  "card_rrn_stan_mismatch",
+  "card_stip_no_advice",
+  "card_switch_timeout_reversal_missing",
+  "card_partial_reversal_variance",
+  "card_force_post_no_auth",
+  "card_duplicate_presentment",
+  "card_late_presentment",
+  "card_ptsp_settlement_split_variance",
+  "card_switch_fee_variance",
+  // Card Schemes (Verve / AfriGO / Visa / Mastercard)
+  "scheme_net_settlement_variance",
+  "scheme_clearing_file_gap",
+  "scheme_interchange_downgrade",
+  "scheme_fee_assessment_variance",
+  "scheme_fx_settlement_variance",
+  "scheme_cutover_timing_break",
+  "verve_domestic_settlement_break",
+  "afrigo_settlement_break",
+  "scheme_compliance_penalty_charge",
+  // Card Disputes & Chargebacks
+  "chargeback_inbound_acquirer",
+  "chargeback_outbound_issuer_credit_pending",
+  "chargeback_representment_deadline",
+  "chargeback_pre_arbitration",
+  "chargeback_arbitration_case",
+  "chargeback_fraud_coded",
+  "chargeback_won_credit_not_posted",
+  "chargeback_right_expired",
+  "dispute_good_faith_recovery",
 ] as const;
 export type ResolutionTemplateCategory = (typeof RESOLUTION_TEMPLATE_CATEGORIES)[number];
 

@@ -25,6 +25,9 @@ export { BILL_PAYMENT_EXCEPTIONS, BILL_PAYMENT_EXCEPTION_KEYS } from "./bills";
 export { BULK_PAYMENT_EXCEPTIONS, BULK_PAYMENT_EXCEPTION_KEYS } from "./bulk-payment";
 export { TSA_EXCEPTIONS, TSA_EXCEPTION_KEYS } from "./tsa";
 export { MOBILE_CHANNEL_EXCEPTIONS, MOBILE_CHANNEL_EXCEPTION_KEYS } from "./mobile-channels";
+export { CARD_SWITCHING_EXCEPTIONS, CARD_SWITCHING_EXCEPTION_KEYS } from "./card-switching";
+export { CARD_SCHEME_EXCEPTIONS, CARD_SCHEME_EXCEPTION_KEYS } from "./card-schemes";
+export { CARD_DISPUTE_EXCEPTIONS, CARD_DISPUTE_EXCEPTION_KEYS } from "./card-disputes";
 
 // Shared types
 export type { NigerianChannelException, NigerianChannelSource } from "./types";
@@ -44,28 +47,44 @@ import { BILL_PAYMENT_EXCEPTIONS } from "./bills";
 import { BULK_PAYMENT_EXCEPTIONS } from "./bulk-payment";
 import { TSA_EXCEPTIONS } from "./tsa";
 import { MOBILE_CHANNEL_EXCEPTIONS } from "./mobile-channels";
+import { CARD_SWITCHING_EXCEPTIONS } from "./card-switching";
+import { CARD_SCHEME_EXCEPTIONS } from "./card-schemes";
+import { CARD_DISPUTE_EXCEPTIONS } from "./card-disputes";
 import type { NigerianChannelException } from "./types";
 
 /**
- * Complete registry of all Nigerian payment channel exceptions.
- * 93 exceptions across 14 channels — the intelligence moat.
+ * Channel groupings of the exception registry, keyed by channel id. Used by
+ * the taxonomy prompt block to inject only the channels relevant to a given
+ * transaction into the Super Agent's context (token-efficient read-path).
  */
-export const ALL_NIGERIAN_EXCEPTIONS: NigerianChannelException[] = [
-  ...NIP_EXCEPTIONS,
-  ...NEFT_EXCEPTIONS,
-  ...RTGS_EXCEPTIONS,
-  ...POS_EXCEPTIONS,
-  ...ATM_EXCEPTIONS,
-  ...QR_EXCEPTIONS,
-  ...DIRECT_DEBIT_EXCEPTIONS,
-  ...SWIFT_EXCEPTIONS,
-  ...REMITTANCE_EXCEPTIONS,
-  ...FINTECH_GATEWAY_EXCEPTIONS,
-  ...BILL_PAYMENT_EXCEPTIONS,
-  ...BULK_PAYMENT_EXCEPTIONS,
-  ...TSA_EXCEPTIONS,
-  ...MOBILE_CHANNEL_EXCEPTIONS,
-];
+export const CHANNEL_EXCEPTION_GROUPS = {
+  nip: NIP_EXCEPTIONS,
+  neft: NEFT_EXCEPTIONS,
+  rtgs: RTGS_EXCEPTIONS,
+  pos: POS_EXCEPTIONS,
+  atm: ATM_EXCEPTIONS,
+  qr: QR_EXCEPTIONS,
+  direct_debit: DIRECT_DEBIT_EXCEPTIONS,
+  swift: SWIFT_EXCEPTIONS,
+  remittance: REMITTANCE_EXCEPTIONS,
+  fintech_gateway: FINTECH_GATEWAY_EXCEPTIONS,
+  bills: BILL_PAYMENT_EXCEPTIONS,
+  bulk_payment: BULK_PAYMENT_EXCEPTIONS,
+  tsa: TSA_EXCEPTIONS,
+  mobile_channels: MOBILE_CHANNEL_EXCEPTIONS,
+  card_switching: CARD_SWITCHING_EXCEPTIONS,
+  card_schemes: CARD_SCHEME_EXCEPTIONS,
+  card_disputes: CARD_DISPUTE_EXCEPTIONS,
+} as const;
+
+export type NigerianChannelKey = keyof typeof CHANNEL_EXCEPTION_GROUPS;
+
+/**
+ * Complete registry of all Nigerian payment channel exceptions.
+ * 121 exceptions across 17 channels — the intelligence moat.
+ */
+export const ALL_NIGERIAN_EXCEPTIONS: NigerianChannelException[] =
+  Object.values(CHANNEL_EXCEPTION_GROUPS).flat();
 
 /**
  * All exception keys as a flat array — used for enum validation
@@ -98,6 +117,9 @@ export const EXCEPTION_CHANNELS = {
   bulk_payment: { label: "Bulk / Salary Payments", count: BULK_PAYMENT_EXCEPTIONS.length },
   tsa: { label: "CBN eTreasury / TSA", count: TSA_EXCEPTIONS.length },
   mobile_channels: { label: "Mobile / USSD / Agent Banking", count: MOBILE_CHANNEL_EXCEPTIONS.length },
+  card_switching: { label: "Card Switching & Processors (Interswitch / UP / eTranzact)", count: CARD_SWITCHING_EXCEPTIONS.length },
+  card_schemes: { label: "Card Schemes (Verve / AfriGO / Visa / Mastercard)", count: CARD_SCHEME_EXCEPTIONS.length },
+  card_disputes: { label: "Card Disputes & Chargebacks", count: CARD_DISPUTE_EXCEPTIONS.length },
 } as const;
 
 // Retail / E-Commerce (SHOPLINE vertical)

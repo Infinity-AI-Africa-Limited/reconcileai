@@ -26,7 +26,15 @@ export type NigerianChannelSource =
   | "card_switch"
   | "mobile_banking"
   | "ussd"
-  | "agent_banking";
+  | "agent_banking"
+  // Card processors & schemes (server/exceptions/card-*.ts)
+  | "interswitch_switch"
+  | "up_switch"
+  | "etranzact_switch"
+  | "verve_scheme"
+  | "afrigo_scheme"
+  | "visa_scheme"
+  | "mastercard_scheme";
 
 export interface NigerianChannelException {
   /** Unique key — also a resolution_templates.category enum value. */
