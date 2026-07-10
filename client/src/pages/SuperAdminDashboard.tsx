@@ -85,6 +85,19 @@ function SegmentBadge({ segment }: { segment: string }) {
   );
 }
 
+// SHOPLINE tier from the org's onboardingChannel (Retail / Commerce vertical).
+function shoplineTierLabel(onboardingChannel?: string | null): string | null {
+  switch (onboardingChannel) {
+    case "shopline_app_store": return "Tier 1 · App Store";
+    case "shopline_payments_api": return "Tier 2 · Payments";
+    case "shopline_enterprise": return "Tier 3 · Enterprise";
+    default: return null;
+  }
+}
+
+// The two top-level verticals the platform serves.
+const FINANCIAL_SEGMENTS = ["financial_services", "corporate_b2b", "super_admin"];
+
 // ─── Platform Stats Cards ─────────────────────────────────────────────────────
 function PlatformStatsCards() {
   const { data, isLoading } = trpc.superAdmin.platformStats.useQuery();
@@ -436,9 +449,14 @@ function OrganisationsTable() {
   const { data: orgs, isLoading, refetch } = trpc.superAdmin.allOrganizations.useQuery();
   const [search, setSearch] = useState("");
   const [segmentFilter, setSegmentFilter] = useState<string>("all");
+  // Top-level vertical selector (Task 0.5): groups the tenant list into
+  // Financial Services (financial_services + corporate_b2b + super_admin) and
+  // Retail / Commerce (retail_commerce). Retail view surfaces the SHOPLINE Tier.
+  const [vertical, setVertical] = useState<"all" | "financial" | "retail">("all");
   const [showCreate, setShowCreate] = useState(false);
   const { enterPortal } = usePortalContext();
   const [, setLocation] = useLocation();
+  const showTier = vertical === "retail";
 
   const updateSegment = trpc.superAdmin.updateOrganizationSegment.useMutation({
     onSuccess: () => {
@@ -460,7 +478,12 @@ function OrganisationsTable() {
   const filtered = (orgs ?? []).filter((org: any) => {
     const matchSearch = !search || org.name.toLowerCase().includes(search.toLowerCase()) || org.code?.toLowerCase().includes(search.toLowerCase());
     const matchSeg = segmentFilter === "all" || org.segment === segmentFilter;
-    return matchSearch && matchSeg;
+    const matchVertical =
+      vertical === "all" ||
+      (vertical === "retail"
+        ? org.segment === "retail_commerce"
+        : FINANCIAL_SEGMENTS.includes(org.segment ?? "financial_services"));
+    return matchSearch && matchSeg && matchVertical;
   });
 
   return (
@@ -481,6 +504,24 @@ function OrganisationsTable() {
               New Org
             </Button>
           </div>
+        </div>
+        {/* Vertical selector — top-level grouping of the tenant list. */}
+        <div className="flex items-center gap-1 mt-2">
+          {([
+            ["all", "All"],
+            ["financial", "Financial Services"],
+            ["retail", "Retail / Commerce"],
+          ] as const).map(([v, lbl]) => (
+            <Button
+              key={v}
+              size="sm"
+              variant={vertical === v ? "default" : "outline"}
+              className="h-7 text-xs"
+              onClick={() => setVertical(v)}
+            >
+              {lbl}
+            </Button>
+          ))}
         </div>
         <div className="flex gap-2 mt-2">
           <Input
@@ -512,6 +553,7 @@ function OrganisationsTable() {
                 <TableHead>Name</TableHead>
                 <TableHead>Code</TableHead>
                 <TableHead>Segment</TableHead>
+                {showTier && <TableHead>Tier</TableHead>}
                 <TableHead>Country</TableHead>
                 <TableHead>Currency</TableHead>
                 <TableHead>Status</TableHead>
@@ -522,7 +564,7 @@ function OrganisationsTable() {
               {isLoading ? (
                 Array.from({ length: 5 }).map((_, i) => (
                   <TableRow key={i}>
-                    {Array.from({ length: 8 }).map((_, j) => (
+                    {Array.from({ length: showTier ? 9 : 8 }).map((_, j) => (
                       <TableCell key={j}>
                         <div className="h-4 bg-muted animate-pulse rounded w-16" />
                       </TableCell>
@@ -531,7 +573,7 @@ function OrganisationsTable() {
                 ))
               ) : filtered.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground text-sm">
+                  <TableCell colSpan={showTier ? 9 : 8} className="text-center py-8 text-muted-foreground text-sm">
                     No organisations found
                   </TableCell>
                 </TableRow>
@@ -544,6 +586,17 @@ function OrganisationsTable() {
                     <TableCell>
                       <SegmentBadge segment={org.segment ?? "financial_services"} />
                     </TableCell>
+                    {showTier && (
+                      <TableCell className="text-xs">
+                        {shoplineTierLabel(org.onboardingChannel) ? (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 font-medium">
+                            {shoplineTierLabel(org.onboardingChannel)}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                    )}
                     <TableCell className="text-xs text-muted-foreground">{org.country ?? "NGA"}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{org.baseCurrency ?? "NGN"}</TableCell>
                     <TableCell>

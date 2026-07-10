@@ -277,3 +277,112 @@ export function getRetailExceptionsBySource(
     (e) => e.sources === "all" || e.sources.includes(source)
   );
 }
+
+// ─── Intelligence-moat wiring (parity with server/exceptions/seed.ts) ────────
+// The retail taxonomy is only a moat if it reaches the read-path: the Super
+// Agent's diagnosis prompt and the resolution-template store. These mirror the
+// Nigerian equivalents so retail_commerce orgs get identical treatment.
+
+/**
+ * AI prompt block for the Super Agent when diagnosing retail/e-commerce
+ * settlement exceptions. Inject for retail_commerce-segment organizations.
+ */
+export function retailExceptionsTaxonomyPromptBlock(): string {
+  return RETAIL_COMMERCE_EXCEPTIONS.map(
+    (e) => `- ${e.key} (${e.severity}, SLA ${e.slaHours}h): ${e.label}. ${e.aiDiagnosisHint}`,
+  ).join("\n");
+}
+
+/** Lookup a retail exception by key (null when not a retail key). */
+export function retailExceptionFor(key: string): RetailCommerceException | null {
+  return RETAIL_COMMERCE_EXCEPTIONS.find((e) => e.key === key) ?? null;
+}
+
+/**
+ * Seed the retail taxonomy as org-scoped resolution templates (idempotent).
+ * Called when a retail_commerce organization is created. Mirrors
+ * seedNigerianChannelExceptionTemplates. The `resolutionTemplates`/`getDb`
+ * imports are lazy so this pure taxonomy module carries no DB dependency for
+ * the client bundle or unit tests.
+ */
+export async function seedRetailResolutionTemplates(
+  organizationId: number,
+): Promise<{ inserted: number; existing: number }> {
+  const { and, eq } = await import("drizzle-orm");
+  const { resolutionTemplates } = await import("../../drizzle/schema");
+  const { getDb } = await import("../db");
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  let inserted = 0;
+  let existing = 0;
+  for (const cat of RETAIL_COMMERCE_EXCEPTIONS) {
+    const [already] = await db
+      .select({ id: resolutionTemplates.id })
+      .from(resolutionTemplates)
+      .where(and(
+        eq(resolutionTemplates.organizationId, organizationId),
+        eq(resolutionTemplates.category, cat.key as never),
+      ))
+      .limit(1);
+    if (already) {
+      existing++;
+      continue;
+    }
+    await db.insert(resolutionTemplates).values({
+      name: cat.label,
+      category: cat.key as never,
+      templateText:
+        `${cat.recommendedResolution}\n\nRegulatory context: ${cat.regulatoryContext}\n` +
+        `Severity: ${cat.severity.toUpperCase()} · SLA: ${cat.slaHours}h`,
+      isDefault: true,
+      createdBy: 0, // system
+      organizationId,
+      dedupeKey: null,
+    });
+    inserted++;
+  }
+  return { inserted, existing };
+}
+
+/**
+ * Seed the retail taxonomy as GLOBAL defaults (organizationId = null),
+ * idempotent + race-proof via the dedupeKey unique index. Called on boot,
+ * alongside the Nigerian defaults, so retail templates exist platform-wide.
+ */
+export async function seedRetailExceptionGlobalDefaults(): Promise<{ inserted: number }> {
+  const { and, eq, isNull, sql } = await import("drizzle-orm");
+  const { resolutionTemplates } = await import("../../drizzle/schema");
+  const { getDb } = await import("../db");
+  const db = await getDb();
+  if (!db) return { inserted: 0 };
+
+  const existing = await db
+    .select({ category: resolutionTemplates.category, name: resolutionTemplates.name })
+    .from(resolutionTemplates)
+    .where(and(isNull(resolutionTemplates.organizationId), eq(resolutionTemplates.isDefault, true)));
+  const existingKeys = new Set(existing.map((r) => `${r.category}::${r.name}`));
+
+  const toInsert = RETAIL_COMMERCE_EXCEPTIONS.filter(
+    (cat) => !existingKeys.has(`${cat.key}::${cat.label}`),
+  );
+  if (toInsert.length === 0) return { inserted: 0 };
+
+  await db
+    .insert(resolutionTemplates)
+    .values(
+      toInsert.map((cat) => ({
+        name: cat.label,
+        category: cat.key as never,
+        templateText:
+          `${cat.recommendedResolution}\n\nRegulatory context: ${cat.regulatoryContext}\n` +
+          `Severity: ${cat.severity.toUpperCase()} · SLA: ${cat.slaHours}h`,
+        isDefault: true,
+        createdBy: 0,
+        organizationId: null,
+        dedupeKey: `default:${cat.key}:${cat.label}`,
+      })),
+    )
+    .onDuplicateKeyUpdate({ set: { dedupeKey: sql`dedupe_key` } });
+
+  return { inserted: toInsert.length };
+}

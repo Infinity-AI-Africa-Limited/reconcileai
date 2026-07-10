@@ -3878,6 +3878,18 @@ export const appRouter = router({
             console.error("[createOrganization] LAPO channel pack failed (re-run lapo.provision):", err);
           }
         }
+        // Retail / e-commerce vertical (SHOPLINE): seed the retail exception
+        // taxonomy as org resolution templates so the merchant's Super Agent and
+        // resolution workflow carry the retail moat from day one. Idempotent;
+        // failure never aborts org creation (global defaults still apply).
+        if (input.segment === "retail_commerce") {
+          try {
+            const { seedRetailResolutionTemplates } = await import("./exceptions/retail-commerce");
+            await seedRetailResolutionTemplates(newOrgId);
+          } catch (err) {
+            console.error("[createOrganization] retail template seed failed:", err);
+          }
+        }
         await logAudit(ctx.user.id, "create_organization", "organization", newOrgId, {
           name: input.name,
           segment: input.segment,

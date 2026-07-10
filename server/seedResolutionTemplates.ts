@@ -342,3 +342,12 @@ export async function seedDefaultResolutionTemplates(): Promise<{ inserted: numb
 export async function seedNigerianExceptionDefaults(): Promise<{ inserted: number }> {
   return seedNigerianChannelExceptionGlobalDefaults();
 }
+
+/**
+ * Seed the retail/e-commerce (SHOPLINE vertical) exception taxonomy as global
+ * defaults. Called on boot so retail_commerce orgs inherit the templates.
+ */
+export async function seedRetailExceptionDefaults(): Promise<{ inserted: number }> {
+  const { seedRetailExceptionGlobalDefaults } = await import("./exceptions/retail-commerce");
+  return seedRetailExceptionGlobalDefaults();
+}

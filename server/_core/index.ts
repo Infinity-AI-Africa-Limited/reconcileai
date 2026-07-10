@@ -509,6 +509,12 @@ async function startServer() {
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} Nigerian channel exception template(s)`); })
     .catch((e) => console.error("[seed] Nigerian exception templates failed:", e instanceof Error ? e.message : e));
 
+  // Seed retail / e-commerce (SHOPLINE vertical) exception templates (idempotent).
+  import("../seedResolutionTemplates")
+    .then((m) => m.seedRetailExceptionDefaults())
+    .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} retail exception template(s)`); })
+    .catch((e) => console.error("[seed] retail exception templates failed:", e instanceof Error ? e.message : e));
+
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);
 

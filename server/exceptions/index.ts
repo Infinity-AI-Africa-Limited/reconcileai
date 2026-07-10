@@ -50,7 +50,24 @@ import { MOBILE_CHANNEL_EXCEPTIONS } from "./mobile-channels";
 import { CARD_SWITCHING_EXCEPTIONS } from "./card-switching";
 import { CARD_SCHEME_EXCEPTIONS } from "./card-schemes";
 import { CARD_DISPUTE_EXCEPTIONS } from "./card-disputes";
+import { RETAIL_COMMERCE_EXCEPTIONS } from "./retail-commerce";
 import type { NigerianChannelException } from "./types";
+
+/**
+ * Structural supertype shared by the Nigerian and retail taxonomies — the
+ * fields every vertical exposes. Lets a single registry span verticals without
+ * coupling their source-type unions.
+ */
+export interface TaxonomyExceptionEntry {
+  key: string;
+  label: string;
+  severity: "critical" | "high" | "medium" | "low";
+  slaHours: number;
+  sources: readonly string[] | "all";
+  regulatoryContext: string;
+  recommendedResolution: string;
+  aiDiagnosisHint: string;
+}
 
 /**
  * Channel groupings of the exception registry, keyed by channel id. Used by
@@ -93,11 +110,24 @@ export const ALL_NIGERIAN_EXCEPTIONS: NigerianChannelException[] =
 export const ALL_NIGERIAN_EXCEPTION_KEYS = ALL_NIGERIAN_EXCEPTIONS.map((e) => e.key);
 
 /**
- * Lookup map for O(1) access by exception key.
+ * Cross-vertical lookup map for O(1) access by exception key. Spans BOTH the
+ * Nigerian channel taxonomy and the retail/e-commerce taxonomy, so any code
+ * resolving an exception's regulatory context / AI hint by key works for a
+ * retail_commerce org exactly as it does for a bank (keys are unique across
+ * verticals via the `retail_` prefix). Without this, retail keys were orphaned
+ * — the O(1) lookup and any registry-driven prompt injection silently missed
+ * every retail exception.
  */
-export const EXCEPTION_REGISTRY = new Map<string, NigerianChannelException>(
-  ALL_NIGERIAN_EXCEPTIONS.map((e) => [e.key, e])
-);
+export const EXCEPTION_REGISTRY = new Map<string, TaxonomyExceptionEntry>([
+  ...ALL_NIGERIAN_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
+  ...RETAIL_COMMERCE_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
+]);
+
+/** Every exception across all verticals (Nigerian channels + retail commerce). */
+export const ALL_EXCEPTIONS: TaxonomyExceptionEntry[] = [
+  ...ALL_NIGERIAN_EXCEPTIONS,
+  ...RETAIL_COMMERCE_EXCEPTIONS,
+];
 
 /**
  * Channel groupings for UI/reporting purposes.

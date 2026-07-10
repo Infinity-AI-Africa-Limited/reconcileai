@@ -53,6 +53,29 @@ export interface GatewayFeeSchedule {
   tolerance: number;
 }
 
+// ─── Duplicate-detection index (O(1) same-side sibling lookup) ──────────────
+// Duplicate chargebacks/authorisations are two rows on the SAME feed sharing an
+// ARN / order reference. Building count maps ONCE per side turns the classifier
+// from O(n) scans-per-txn (O(n²) over a batch) into O(1) lookups — essential at
+// the 50k-row "Scale" band where per-txn array scans would be billions of ops.
+export interface RetailDupIndex {
+  byArn: Map<string, number>;
+  byOrderRef: Map<string, number>;
+}
+
+export function buildRetailDupIndex(txns: Transaction[]): RetailDupIndex {
+  const byArn = new Map<string, number>();
+  const byOrderRef = new Map<string, number>();
+  for (const t of txns) {
+    const raw = (t.rawData as Record<string, unknown>) ?? {};
+    const arn = raw.chargebackArn;
+    if (typeof arn === "string" && arn) byArn.set(arn, (byArn.get(arn) ?? 0) + 1);
+    const ref = raw.originalOrderRef;
+    if (typeof ref === "string" && ref) byOrderRef.set(ref, (byOrderRef.get(ref) ?? 0) + 1);
+  }
+  return { byArn, byOrderRef };
+}
+
 // ─── Retail Exception Classification ────────────────────────────────────────
 
 export interface RetailExceptionResult {
@@ -95,22 +118,43 @@ export interface RetailExceptionResult {
  */
 export function classifyRetailException(
   txn: Transaction,
-  allTargetTxns: Transaction[],
+  relatedTxns: Transaction[],
   config: RetailReconciliationConfig,
+  /**
+   * Same-side duplicate index (from buildRetailDupIndex over the txn's OWN
+   * feed). When supplied, duplicate detection is O(1) and semantically correct
+   * (duplicates are same-feed siblings). When omitted, it falls back to scanning
+   * `relatedTxns` — the behaviour the standalone unit tests rely on.
+   */
+  sameSideDupIndex?: RetailDupIndex,
 ): RetailExceptionResult {
   const rawData = (txn.rawData as Record<string, unknown>) ?? {};
   const gatewayEventType = rawData.gatewayEventType as string | undefined;
   const txnAmt = parseFloat(String(txn.amount));
+  if (!Number.isFinite(txnAmt)) {
+    // A non-numeric amount can't be classified financially — surface it loudly
+    // rather than emitting NaN-laden descriptions into the exception record.
+    return {
+      category: "format_error",
+      severity: "high",
+      description: `Retail transaction ${txn.transactionRef ?? txn.id} has a non-numeric amount ("${String(txn.amount)}").`,
+      suggestedResolution: "Verify the source data type for the amount field; re-ingest the affected row.",
+      slaHours: 48,
+      hasRetailTaxonomy: false,
+    };
+  }
 
   // ─── Chargeback Detection ─────────────────────────────────────────────────
   if (gatewayEventType === "chargeback") {
     const chargebackArn = rawData.chargebackArn as string | undefined;
 
-    // Check for duplicate chargeback (same ARN already exists in target)
-    const duplicateChargeback = allTargetTxns.find((t) => {
-      const tRaw = (t.rawData as Record<string, unknown>) ?? {};
-      return tRaw.chargebackArn === chargebackArn && chargebackArn !== undefined;
-    });
+    // Duplicate chargeback = more than one chargeback with this ARN on the SAME
+    // feed. O(1) via the same-side index; fall back to scanning relatedTxns.
+    const duplicateChargeback = chargebackArn
+      ? sameSideDupIndex
+        ? (sameSideDupIndex.byArn.get(chargebackArn) ?? 0) > 1
+        : relatedTxns.some((t) => ((t.rawData as Record<string, unknown>) ?? {}).chargebackArn === chargebackArn)
+      : false;
 
     if (duplicateChargeback) {
       const taxonomy = getRetailException("retail_chargeback_duplicate")!;
@@ -212,16 +256,17 @@ export function classifyRetailException(
   if (gatewayEventType === "payment") {
     const orderRef = rawData.originalOrderRef as string | undefined;
     if (orderRef) {
-      const sameOrderTxns = allTargetTxns.filter((t) => {
-        const tRaw = (t.rawData as Record<string, unknown>) ?? {};
-        return tRaw.originalOrderRef === orderRef;
-      });
-      if (sameOrderTxns.length > 1) {
+      // Same-feed count of charges for this order. O(1) via the index; fall back
+      // to scanning relatedTxns for the standalone unit-test contract.
+      const sameOrderCount = sameSideDupIndex
+        ? sameSideDupIndex.byOrderRef.get(orderRef) ?? 0
+        : relatedTxns.filter((t) => ((t.rawData as Record<string, unknown>) ?? {}).originalOrderRef === orderRef).length;
+      if (sameOrderCount > 1) {
         const taxonomy = getRetailException("retail_duplicate_authorisation")!;
         return {
           category: "retail_duplicate_authorisation",
           severity: taxonomy.severity,
-          description: `Duplicate authorisation detected for order ${orderRef}: ${sameOrderTxns.length} charges of ${txn.currency} ${txnAmt.toLocaleString()} found. Customer may have been double-charged.`,
+          description: `Duplicate authorisation detected for order ${orderRef}: ${sameOrderCount} charges of ${txn.currency} ${txnAmt.toLocaleString()} found. Customer may have been double-charged.`,
           suggestedResolution: taxonomy.recommendedResolution,
           slaHours: taxonomy.slaHours,
           hasRetailTaxonomy: true,
@@ -289,27 +334,29 @@ export function classifyRetailException(
   if (config.settlementCycleDays) {
     const captureDate = rawData.captureDate as string | undefined;
     if (captureDate) {
-      const capDate = new Date(captureDate);
-      const txnDate = new Date(txn.transactionDate);
-      const businessDays = Math.ceil(
-        (txnDate.getTime() - capDate.getTime()) / (1000 * 60 * 60 * 24)
-      );
-      if (businessDays > config.settlementCycleDays + 2) {
-        const taxonomy = getRetailException("retail_settlement_delay")!;
-        return {
-          category: "retail_settlement_delay",
-          severity: taxonomy.severity,
-          description: `Settlement delayed ${businessDays} days beyond capture (SLA: T+${config.settlementCycleDays}). Transaction ${txn.transactionRef ?? txn.id} captured on ${captureDate}.`,
-          suggestedResolution: taxonomy.recommendedResolution,
-          slaHours: taxonomy.slaHours,
-          hasRetailTaxonomy: true,
-        };
+      const capMs = new Date(captureDate).getTime();
+      const txnMs = new Date(txn.transactionDate).getTime();
+      // Guard unparseable/out-of-order dates: a settlement before its capture is
+      // a data error, not a delay — don't emit a negative-day "delay".
+      if (Number.isFinite(capMs) && Number.isFinite(txnMs) && txnMs >= capMs) {
+        const elapsedDays = Math.floor((txnMs - capMs) / (1000 * 60 * 60 * 24));
+        if (elapsedDays > config.settlementCycleDays + 2) {
+          const taxonomy = getRetailException("retail_settlement_delay")!;
+          return {
+            category: "retail_settlement_delay",
+            severity: taxonomy.severity,
+            description: `Settlement delayed ${elapsedDays} days beyond capture (SLA: T+${config.settlementCycleDays}). Transaction ${txn.transactionRef ?? txn.id} captured on ${captureDate}.`,
+            suggestedResolution: taxonomy.recommendedResolution,
+            slaHours: taxonomy.slaHours,
+            hasRetailTaxonomy: true,
+          };
+        }
       }
     }
   }
 
   // ─── Fallback: Use core engine categorisation ─────────────────────────────
-  const coreResult = categorizeException(txn, allTargetTxns, config);
+  const coreResult = categorizeException(txn, relatedTxns, config);
   return {
     category: coreResult.category,
     severity: coreResult.severity as "critical" | "high" | "medium" | "low",
@@ -341,30 +388,31 @@ export function runRetailReconciliation(
   // Step 1: Run the core 3-pass matching engine
   const coreResult = runMatchingEngine(sourceTxns, targetTxns, config);
 
-  // Step 2: Classify unmatched source transactions with retail-specific logic
+  // Pre-index each side ONCE for O(1) same-side duplicate detection, and build
+  // id→txn maps so lookups are O(1) instead of Array.find per unmatched id.
+  const sourceDupIndex = buildRetailDupIndex(sourceTxns);
+  const targetDupIndex = buildRetailDupIndex(targetTxns);
+  const sourceById = new Map(sourceTxns.map((t) => [t.id, t]));
+  const targetById = new Map(targetTxns.map((t) => [t.id, t]));
+
+  // Step 2: Classify unmatched source transactions with retail-specific logic.
+  // Duplicates are same-feed siblings → pass the SOURCE index; the opposite
+  // (target) side is passed only for the core-engine fallback.
   const retailExceptions: RetailExceptionClassification[] = [];
 
   for (const unmatchedId of coreResult.unmatchedSource) {
-    const txn = sourceTxns.find((t) => t.id === unmatchedId);
+    const txn = sourceById.get(unmatchedId);
     if (!txn) continue;
-
-    const classification = classifyRetailException(txn, targetTxns, config);
-    retailExceptions.push({
-      transactionId: unmatchedId,
-      ...classification,
-    });
+    const classification = classifyRetailException(txn, targetTxns, config, sourceDupIndex);
+    retailExceptions.push({ transactionId: unmatchedId, ...classification });
   }
 
-  // Step 3: Classify unmatched target transactions
+  // Step 3: Classify unmatched target transactions (same-feed = TARGET index).
   for (const unmatchedId of coreResult.unmatchedTarget) {
-    const txn = targetTxns.find((t) => t.id === unmatchedId);
+    const txn = targetById.get(unmatchedId);
     if (!txn) continue;
-
-    const classification = classifyRetailException(txn, sourceTxns, config);
-    retailExceptions.push({
-      transactionId: unmatchedId,
-      ...classification,
-    });
+    const classification = classifyRetailException(txn, sourceTxns, config, targetDupIndex);
+    retailExceptions.push({ transactionId: unmatchedId, ...classification });
   }
 
   return {

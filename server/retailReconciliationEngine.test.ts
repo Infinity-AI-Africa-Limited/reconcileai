@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyRetailException,
   runRetailReconciliation,
+  buildRetailDupIndex,
   type RetailReconciliationConfig,
 } from "./retailReconciliationEngine";
 import type { Transaction } from "../drizzle/schema";
@@ -274,6 +275,53 @@ describe("Retail Exception Classification", () => {
       expect(result.slaHours).toBe(72); // Default SLA
     });
   });
+
+  describe("Data-quality guards (hardening)", () => {
+    it("flags a non-numeric amount instead of emitting NaN", () => {
+      const txn = makeTxn({ amount: "N/A", rawData: { gatewayEventType: "payout", expectedPayoutAmount: 100 } });
+      const result = classifyRetailException(txn, [], baseConfig);
+      expect(result.category).toBe("format_error");
+      expect(result.description).not.toContain("NaN");
+    });
+
+    it("does not report a settlement 'delay' when settlement precedes capture", () => {
+      const txn = makeTxn({
+        transactionDate: new Date("2025-06-01"),
+        rawData: { gatewayEventType: "payment", captureDate: "2025-06-10" }, // capture AFTER settlement
+      });
+      const result = classifyRetailException(txn, [], baseConfig);
+      expect(result.category).not.toBe("retail_settlement_delay");
+    });
+  });
+
+  describe("Same-side duplicate detection (O(1) index)", () => {
+    it("buildRetailDupIndex counts ARNs and order refs on a feed", () => {
+      const feed = [
+        makeTxn({ id: 1, rawData: { chargebackArn: "ARN-1" } }),
+        makeTxn({ id: 2, rawData: { chargebackArn: "ARN-1" } }),
+        makeTxn({ id: 3, rawData: { originalOrderRef: "ORD-9" } }),
+      ];
+      const idx = buildRetailDupIndex(feed);
+      expect(idx.byArn.get("ARN-1")).toBe(2);
+      expect(idx.byOrderRef.get("ORD-9")).toBe(1);
+    });
+
+    it("uses the same-side index to flag a duplicate chargeback (not the opposite side)", () => {
+      const txn = makeTxn({ id: 1, rawData: { gatewayEventType: "chargeback", chargebackArn: "ARN-1" } });
+      const sameSide = [txn, makeTxn({ id: 2, rawData: { gatewayEventType: "chargeback", chargebackArn: "ARN-1" } })];
+      const idx = buildRetailDupIndex(sameSide);
+      // Opposite side is empty — the OLD code would have missed this.
+      const result = classifyRetailException(txn, [], baseConfig, idx);
+      expect(result.category).toBe("retail_chargeback_duplicate");
+    });
+
+    it("a lone chargeback (count 1 on its feed) is 'not posted', not 'duplicate'", () => {
+      const txn = makeTxn({ id: 1, rawData: { gatewayEventType: "chargeback", chargebackArn: "ARN-SOLO" } });
+      const idx = buildRetailDupIndex([txn]);
+      const result = classifyRetailException(txn, [], baseConfig, idx);
+      expect(result.category).toBe("retail_chargeback_not_posted");
+    });
+  });
 });
 
 // ─── Integration Test: Full Retail Reconciliation Run ────────────────────────
@@ -304,5 +352,25 @@ describe("runRetailReconciliation", () => {
     expect(result.retailStats.totalRetailExceptions).toBeGreaterThanOrEqual(0);
     expect(result.retailStats).toHaveProperty("chargebackCount");
     expect(result.retailStats).toHaveProperty("taxonomyCoverage");
+  });
+
+  it("detects a same-feed duplicate chargeback end-to-end (integration, not just unit)", () => {
+    // Two unmatched chargebacks with the SAME ARN on the SOURCE feed. Before the
+    // fix, runRetailReconciliation passed the opposite (target) side to the
+    // classifier, so it could never see these siblings.
+    const sourceTxns: Transaction[] = [
+      makeTxn({ id: 1, transactionRef: "CB-1", amount: "50.00", rawData: { gatewayEventType: "chargeback", chargebackArn: "ARN-DUP" } }),
+      makeTxn({ id: 2, transactionRef: "CB-2", amount: "50.00", rawData: { gatewayEventType: "chargeback", chargebackArn: "ARN-DUP" } }),
+    ];
+    const targetTxns: Transaction[] = []; // opposite side empty on purpose
+
+    const result = runRetailReconciliation(sourceTxns, targetTxns, baseConfig);
+    const dupes = result.retailExceptions.filter((e) => e.category === "retail_chargeback_duplicate");
+    expect(dupes.length).toBeGreaterThanOrEqual(1);
+    expect(result.retailStats.chargebackCount).toBeGreaterThanOrEqual(1);
+    // Zero-data-loss: every unmatched txn is accounted for as an exception.
+    expect(result.retailExceptions).toHaveLength(
+      result.unmatchedSource.length + result.unmatchedTarget.length,
+    );
   });
 });
