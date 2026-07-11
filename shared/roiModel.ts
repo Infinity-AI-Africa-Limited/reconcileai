@@ -176,6 +176,7 @@ export function computeRoi(
 // ─── Currency presets for the page ───────────────────────────────────────────
 export const CURRENCY_PRESETS = [
   { code: "NGN", symbol: "₦", label: "Nigerian Naira", defaultFxPerUsd: 1600 },
+  { code: "UGX", symbol: "USh ", label: "Ugandan Shilling", defaultFxPerUsd: 3800 },
   { code: "USD", symbol: "$", label: "US Dollar", defaultFxPerUsd: 1 },
   { code: "KES", symbol: "KSh", label: "Kenyan Shilling", defaultFxPerUsd: 130 },
   { code: "GHS", symbol: "GH₵", label: "Ghanaian Cedi", defaultFxPerUsd: 15 },
