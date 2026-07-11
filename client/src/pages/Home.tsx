@@ -66,6 +66,12 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <a
+              href="/roi-calculator"
+              className="hidden sm:inline-flex items-center gap-1.5 text-sm font-medium text-[#1B365D] hover:text-[#142847] transition-colors"
+            >
+              ROI Calculator
+            </a>
+            <a
               href="/compliance-assessment"
               className="hidden sm:inline-flex items-center gap-1.5 text-sm font-medium text-[#F47458] hover:text-[#e0644a] transition-colors"
             >

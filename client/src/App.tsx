@@ -51,6 +51,7 @@ import MobileMoneyPOC from "./pages/MobileMoneyPOC";
 import SharedReport from "./pages/SharedReport";
 import SharedReportPublic from "./pages/SharedReportPublic";
 import ComplianceAssessmentLanding from "./pages/ComplianceAssessmentLanding";
+import RoiCalculator from "./pages/RoiCalculator";
 import ComplianceAssessmentQuiz from "./pages/ComplianceAssessmentQuiz";
 import ComplianceAssessmentResult from "./pages/ComplianceAssessmentResult";
 import AdminAssessments from "./pages/AdminAssessments";
@@ -122,6 +123,7 @@ function Router() {
       <Route path="/admin/poc">{() => <DashboardPage component={PocHub} />}</Route>
       <Route path="/shared-report/:token" component={SharedReport} />
       <Route path="/r/:token" component={SharedReportPublic} />
+      <Route path="/roi-calculator" component={RoiCalculator} />
       <Route path="/compliance-assessment" component={ComplianceAssessmentLanding} />
       <Route path="/compliance-assessment/quiz" component={ComplianceAssessmentQuiz} />
           <Route path="/compliance-assessment/unsubscribe/:token" component={ComplianceAssessmentUnsubscribe} />
