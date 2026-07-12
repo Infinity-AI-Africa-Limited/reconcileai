@@ -22,7 +22,8 @@ import {
 type ReportType =
   | "daily_recon_summary" | "exception_log" | "counterparty_exposure" | "interbank_settlement"
   | "mfb_unreconciled_aging" | "failed_transactions_return"
-  | "bou_trust_integrity" | "bou_agent_settlement" | "bou_failed_transactions";
+  | "bou_trust_integrity" | "bou_agent_settlement" | "bou_failed_transactions"
+  | "bou_suspense_aging" | "bou_digital_lending";
 
 type Regulator = "CBN" | "BoU";
 
@@ -38,6 +39,8 @@ const REPORTS: { type: ReportType; title: string; desc: string; period: "day" | 
   { type: "bou_trust_integrity", title: "E-Money Trust Account & Suspense Integrity", desc: "The licence-critical control return: e-money 1:1 trust-account backing, wallet-liability orphans, and suspense-account integrity (the MTN-style fraud surface) — with control status per area.", period: "range", regulator: "BoU" },
   { type: "bou_agent_settlement", title: "Agent Rail & Mobile Money Settlement", desc: "Per-rail settlement position for the ABC shared agent rail, MTN MoMo, Airtel Money, UNISS and cards — volume, value, matched and unreconciled (Agent Banking Regulations 2017).", period: "range", regulator: "BoU" },
   { type: "bou_failed_transactions", title: "Failed Transactions & Reversals Return", desc: "Failed transactions on the Ugandan mobile-money and agent rails with reversal compliance — BoU NPS Act consumer-protection framing.", period: "range", regulator: "BoU" },
+  { type: "bou_suspense_aging", title: "Suspense & Integrity Aging Schedule", desc: "Open suspense entries, orphan reversals, wallet-liability orphans and duplicate credits aged 0–3 / 4–7 / 8–30 / 30+ days — the fraud-adjacent classes BoU examiners scrutinise (the MTN suspense-manipulation precedent).", period: "range", regulator: "BoU" },
+  { type: "bou_digital_lending", title: "Digital Nano-Lending Reconciliation", desc: "MoKash / Wewole disbursement↔repayment integrity: unbooked disbursements, unapplied repayments, 72h CRB-window breaches, and dormant balances (telco↔bank).", period: "range", regulator: "BoU" },
 ];
 
 const REGULATOR_LABEL: Record<Regulator, string> = {

@@ -37,6 +37,7 @@ const reportTypeEnum = z.enum([
   "mfb_unreconciled_aging", "failed_transactions_return",
   // BoU (Uganda) — NPS framework
   "bou_trust_integrity", "bou_agent_settlement", "bou_failed_transactions",
+  "bou_suspense_aging", "bou_digital_lending",
 ]);
 const reportParams = z.object({
   reportType: reportTypeEnum,
@@ -65,6 +66,8 @@ async function runReport(orgId: number, input: z.infer<typeof reportParams>) {
   if (input.reportType === "bou_trust_integrity") return bouReports.buildTrustIntegrityReturn(orgId, from, to);
   if (input.reportType === "bou_agent_settlement") return bouReports.buildAgentRailSettlement(orgId, from, to);
   if (input.reportType === "bou_failed_transactions") return bouReports.buildBouFailedTransactions(orgId, from, to);
+  if (input.reportType === "bou_suspense_aging") return bouReports.buildSuspenseIntegrityAging(orgId, from, to);
+  if (input.reportType === "bou_digital_lending") return bouReports.buildDigitalLendingRecon(orgId, from, to);
   if (input.reportType === "exception_log") return cbnReports.buildExceptionLog(orgId, from, to);
   if (input.reportType === "counterparty_exposure") return cbnReports.buildCounterpartyExposure(orgId, from, to);
   return cbnReports.buildInterbankSettlement(orgId, from, to);

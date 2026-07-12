@@ -61,14 +61,23 @@ file-hash idempotency, completeness watchdog, day-first date parsing).
 Provisioned via DIRECT onboarding (custom-channel selector) + `uganda.provision`;
 taxonomy in the cross-market `EXCEPTION_REGISTRY` + boot/per-org seeding.
 
-**G2 — BoU report pack — ✅ DONE (July 2026).** `server/bouReports.ts` — three
-NPS-framework returns (E-Money Trust Account & Suspense Integrity; Agent Rail
-& Mobile Money Settlement; Failed Transactions & Reversals), UGX + BoU
-regulatory basis. The report module is now regulator-parameterized: `buildMeta`
-takes currency + regulator, `toCsv` labels the identity block neutrally
-(Registration No./BoU Licence for Uganda), and the Regulatory Reports picker is
-grouped by regulator (CBN / BoU). Formats are conventions-based, refining when
-a licensed Ugandan institution confirms BoU's exact templates.
+**G2 — BoU report pack — ✅ DONE (July 2026), hardened round 2.**
+`server/bouReports.ts` — **five** NPS-framework returns: E-Money Trust Account
+& Suspense Integrity; Agent Rail & Mobile Money Settlement; Failed
+Transactions & Reversals; **Suspense & Integrity Aging Schedule** (0–3/4–7/
+8–30/30+ days over the fraud-adjacent classes — the MTN suspense precedent);
+**Digital Nano-Lending Reconciliation** (MoKash/Wewole disbursement↔repayment
+integrity + 72h CRB-window breaches). Report module regulator-parameterized
+(`buildMeta` currency+regulator, `toCsv` neutral labels), picker grouped by
+regulator (CBN / BoU).
+
+**Uganda round 2 (July 2026):** the pack went from 8→**11 rails** (added
+digital nano-lending MoKash/Wewole, bill/utility Yaka/NWSC/URA, aggregator
+switch PayWay/EzeeMoney) and 12→**22 exception categories** (bill-debited-
+no-token, airtime non-delivery, loan disbursement/repayment integrity, dormant
+balances, duplicate wallet credit / excess e-money, orphan reversal,
+aggregator + agent-commission + FX variance). All research-grounded; migration
+0069 (additive enum).
 
 **G3 — CBN monthly failed-transaction return — ✅ DONE (July 2026).**
 `buildFailedTransactionsReturn` in the CBN module: per-channel failed

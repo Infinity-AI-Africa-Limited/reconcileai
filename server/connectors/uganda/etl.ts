@@ -83,8 +83,12 @@ function parseAmount(raw: string): number | null {
 const DIRECTION_WORDS: Record<string, "debit" | "credit"> = {
   DEBIT: "debit", DR: "debit", D: "debit", WITHDRAWAL: "debit", "CASH-OUT": "debit",
   CASH_OUT: "debit", CASHOUT: "debit", PAYMENT: "debit", OUTWARD: "debit", TRANSFER_OUT: "debit",
+  // Nano-lending: repayment is collected FROM the wallet/account (debit).
+  REPAYMENT: "debit", LOAN_REPAYMENT: "debit",
   CREDIT: "credit", CR: "credit", C: "credit", DEPOSIT: "credit", "CASH-IN": "credit",
   CASH_IN: "credit", CASHIN: "credit", INWARD: "credit", TRANSFER_IN: "credit", REFUND: "credit",
+  // Nano-lending: disbursement is credited TO the wallet.
+  DISBURSEMENT: "credit", LOAN_DISBURSEMENT: "credit",
 };
 
 export interface UgandaRowResult {

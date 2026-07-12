@@ -34,6 +34,15 @@ import {
 const UGX = "UGX";
 const fmtUgx = (n: number) => n.toLocaleString("en-UG", { minimumFractionDigits: 0 });
 
+/** Age band for an open control item — pure, unit-tested. */
+export type AgeBand = "0-3d" | "4-7d" | "8-30d" | "30+d";
+export function bucketByAgeDays(days: number): AgeBand {
+  if (days <= 3) return "0-3d";
+  if (days <= 7) return "4-7d";
+  if (days <= 30) return "8-30d";
+  return "30+d";
+}
+
 /** UG_* channels for this org (the Uganda channel pack). */
 async function ugandaChannelIds(organizationId: number): Promise<Map<number, string>> {
   const chans = await channelMap(organizationId);
@@ -174,6 +183,145 @@ export async function buildAgentRailSettlement(
       "Matched value (UGX)": fmtUgx(totMatched),
       "Unreconciled value (UGX)": fmtUgx(totUnrec),
       "Overall match rate": totVal > 0 ? `${round2((totMatched / totVal) * 100).toFixed(1)}%` : "100.0%",
+    },
+  };
+}
+
+// ─── 4. Suspense & Integrity Aging Schedule ──────────────────────────────────
+// The MTN Uganda fraud was suspense-account manipulation; BoU examiners
+// scrutinise how long integrity items sit open. This ages the fraud-adjacent
+// classes and flags anything beyond the 3-day control window.
+const INTEGRITY_CATEGORIES: Record<string, string> = {
+  ug_suspense_aged_entry: "Suspense Account Entries",
+  ug_orphan_reversal: "Reversals Without Original",
+  ug_wallet_liability_orphan: "Wallet Liabilities Without Rail Record",
+  ug_duplicate_wallet_credit: "Duplicate Wallet Credits (Excess E-Money)",
+};
+
+export async function buildSuspenseIntegrityAging(
+  organizationId: number,
+  from: Date,
+  to: Date,
+): Promise<ReportResult> {
+  const meta = await buildMeta(
+    organizationId,
+    "SUSPENSE & INTEGRITY AGING SCHEDULE",
+    `Open items as of ${dayKey(to)} (raised ${dayKey(from)}–${dayKey(to)})`,
+    "Bank of Uganda internal-control and fraud-risk standards on suspense-account integrity (NPS Act 2020; the MTN suspense-manipulation precedent)",
+    { currency: UGX, regulator: "BoU" },
+  );
+  const rows_ex = await exceptionsInRange(organizationId, from, to);
+  const open = rows_ex.filter(
+    (e) => e.category != null && e.category in INTEGRITY_CATEGORIES && !e.resolvedAt,
+  );
+
+  interface Agg { count: number; value: number; b0: number; b1: number; b2: number; b3: number; oldest: number }
+  const byCat = new Map<string, Agg>();
+  for (const key of Object.keys(INTEGRITY_CATEGORIES)) {
+    byCat.set(key, { count: 0, value: 0, b0: 0, b1: 0, b2: 0, b3: 0, oldest: 0 });
+  }
+  for (const e of open) {
+    const a = byCat.get(e.category as string)!;
+    const days = Math.max(0, Math.floor((to.getTime() - new Date(e.createdAt).getTime()) / 86_400_000));
+    a.count += 1;
+    a.value = round2(a.value + num(e.amount));
+    a.oldest = Math.max(a.oldest, days);
+    const band = bucketByAgeDays(days);
+    if (band === "0-3d") a.b0 += 1;
+    else if (band === "4-7d") a.b1 += 1;
+    else if (band === "8-30d") a.b2 += 1;
+    else a.b3 += 1;
+  }
+
+  const columns = [
+    "S/N", "Integrity Control Area", "Open Items", "Value (UGX)",
+    "0–3 days", "4–7 days", "8–30 days", "30+ days", "Oldest (days)", "Control Status",
+  ];
+  const rows: (string | number)[][] = Object.entries(INTEGRITY_CATEGORIES).map(([key, label], i) => {
+    const a = byCat.get(key)!;
+    const beyondWindow = a.b1 + a.b2 + a.b3; // anything past the 3-day control window
+    const status = a.count === 0 ? "CLEAN" : beyondWindow === 0 ? "WITHIN WINDOW" : a.b3 > 0 ? "OVERDUE — INVESTIGATE" : "ATTENTION";
+    return [i + 1, label, a.count, fmtUgx(a.value), a.b0, a.b1, a.b2, a.b3, a.oldest, status];
+  });
+
+  const tot = Array.from(byCat.values()).reduce(
+    (t, a) => ({ count: t.count + a.count, beyond: t.beyond + a.b1 + a.b2 + a.b3, over30: t.over30 + a.b3 }),
+    { count: 0, beyond: 0, over30: 0 },
+  );
+  return {
+    meta, columns, rows,
+    summary: {
+      "Total open integrity items": tot.count,
+      "Beyond the 3-day control window": tot.beyond,
+      "Aged over 30 days (examiner red flags)": tot.over30,
+      "Overall integrity posture": tot.over30 > 0 ? "OVERDUE ITEMS PRESENT — INVESTIGATE" : tot.beyond > 0 ? "ATTENTION" : "SATISFACTORY",
+    },
+  };
+}
+
+// ─── 5. Digital Nano-Lending Reconciliation (MoKash / Wewole) ────────────────
+export async function buildDigitalLendingRecon(
+  organizationId: number,
+  from: Date,
+  to: Date,
+): Promise<ReportResult> {
+  const meta = await buildMeta(
+    organizationId,
+    "DIGITAL NANO-LENDING RECONCILIATION (MoKash / Wewole)",
+    `${dayKey(from)} to ${dayKey(to)}`,
+    "Telco↔bank nano-loan reconciliation (MoKash MTN/NCBA, Wewole Airtel/Jumo): disbursement/repayment integrity and 72h CRB update obligation",
+    { currency: UGX, regulator: "BoU" },
+  );
+  const ugChannels = await ugandaChannelIds(organizationId);
+  const lendingChannelId = Array.from(ugChannels.entries()).find(([, name]) => /Nano-Lending/i.test(name))?.[0];
+
+  // Volume/value of disbursements (credits) and repayments (debits) on the rail.
+  let disbCount = 0, disbValue = 0, repayCount = 0, repayValue = 0;
+  const db = await getDb();
+  if (db && lendingChannelId != null) {
+    const txns = await db.select({
+      amount: transactions.amount,
+      debitCredit: transactions.debitCredit,
+    }).from(transactions).where(and(
+      eq(transactions.organizationId, organizationId),
+      eq(transactions.channelId, lendingChannelId),
+      gte(transactions.transactionDate, from),
+      lte(transactions.transactionDate, to),
+    ));
+    for (const t of txns) {
+      const amt = num(t.amount);
+      if (t.debitCredit === "credit") { disbCount++; disbValue = round2(disbValue + amt); }
+      else { repayCount++; repayValue = round2(repayValue + amt); }
+    }
+  }
+
+  // Open lending-integrity exceptions.
+  const rows_ex = await exceptionsInRange(organizationId, from, to);
+  const cat = (e: { category: unknown }) => String(e.category ?? "");
+  const disbMismatch = rows_ex.filter((e) => cat(e) === "ug_digital_loan_disbursement_mismatch" && !e.resolvedAt);
+  const repayUnapplied = rows_ex.filter((e) => cat(e) === "ug_digital_loan_repayment_unapplied" && !e.resolvedAt);
+  const dormant = rows_ex.filter((e) => cat(e) === "ug_dormant_wallet_balance" && !e.resolvedAt);
+  const crbAtRisk = repayUnapplied.filter(
+    (e) => Math.floor((to.getTime() - new Date(e.createdAt).getTime()) / 3_600_000) > 72,
+  ).length;
+
+  const columns = ["Metric", "Count", "Value (UGX)"];
+  const rows: (string | number)[][] = [
+    ["Disbursements to wallet", disbCount, fmtUgx(disbValue)],
+    ["Repayments collected", repayCount, fmtUgx(repayValue)],
+    ["Disbursements not booked in lending ledger", disbMismatch.length, fmtUgx(disbMismatch.reduce((s, e) => s + num(e.amount), 0))],
+    ["Repayments collected not applied", repayUnapplied.length, fmtUgx(repayUnapplied.reduce((s, e) => s + num(e.amount), 0))],
+    ["Dormant loan/savings balances flagged", dormant.length, fmtUgx(dormant.reduce((s, e) => s + num(e.amount), 0))],
+  ];
+
+  return {
+    meta, columns, rows,
+    summary: {
+      "Net lending flow (disbursed − repaid) (UGX)": fmtUgx(round2(disbValue - repayValue)),
+      "Open disbursement mismatches": disbMismatch.length,
+      "Open unapplied repayments": repayUnapplied.length,
+      "Unapplied repayments past the 72h CRB window": crbAtRisk,
+      "Reconciliation status": disbMismatch.length + repayUnapplied.length === 0 ? "RECONCILED" : "OPEN ITEMS — REVIEW",
     },
   };
 }

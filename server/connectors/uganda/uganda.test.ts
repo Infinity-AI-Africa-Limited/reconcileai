@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { mapUgandaRow, parseUgandaDate } from "./etl";
-import { UGANDA_SOURCES } from "@shared/ugandaSources";
+import { UGANDA_SOURCES, UGANDA_SOURCE_KEYS } from "@shared/ugandaSources";
 import {
   UGANDA_EXCEPTIONS,
   UGANDA_EXCEPTION_KEYS,
@@ -92,9 +92,57 @@ describe("mapUgandaRow — rail file mapping", () => {
   });
 });
 
+describe("Uganda round-2 rails + categories", () => {
+  it("registers the 3 round-2 rails (digital lending, bill/utility, aggregator)", () => {
+    for (const k of ["digital_lending", "bill_utility", "aggregator_switch"] as const) {
+      expect(UGANDA_SOURCES[k], k).toBeDefined();
+    }
+  });
+
+  it("maps a MoKash disbursement (credit to wallet) on the digital-lending rail", () => {
+    const r = mapUgandaRow(UGANDA_SOURCES.digital_lending, {
+      "Loan ID": "MK-778812",
+      MSISDN: "256772000000",
+      Amount: "250000",
+      Type: "DISBURSEMENT",
+      "Transaction Date": "12/07/2026",
+      "Loan Status": "ACTIVE",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.value!.externalRef).toBe("ug:digital_lending:MK-778812");
+    expect(r.value!.debitCredit).toBe("credit");
+  });
+
+  it("maps a Yaka bill payment (debit) with a token reference", () => {
+    const r = mapUgandaRow(UGANDA_SOURCES.bill_utility, {
+      "Payment Ref": "YK-99001",
+      "Biller Code": "UMEME",
+      "Meter Number": "01234567890",
+      Amount: "50000",
+      Type: "PAYMENT",
+      "Transaction Date": "12/07/2026 09:15",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.value!.debitCredit).toBe("debit");
+    expect(r.value!.counterparty).toBe("UMEME");
+  });
+
+  it("covers the round-2 exception surfaces", () => {
+    const keys = new Set(UGANDA_EXCEPTION_KEYS);
+    for (const k of [
+      "ug_bill_payment_no_token", "ug_airtime_data_not_delivered",
+      "ug_digital_loan_disbursement_mismatch", "ug_digital_loan_repayment_unapplied",
+      "ug_dormant_wallet_balance", "ug_duplicate_wallet_credit", "ug_orphan_reversal",
+      "ug_aggregator_settlement_variance", "ug_agent_commission_variance", "ug_fx_settlement_variance",
+    ]) {
+      expect(keys.has(k), k).toBe(true);
+    }
+  });
+});
+
 describe("Uganda taxonomy — integrity + moat wiring", () => {
-  it("defines the 12 BoU-framework categories with full metadata", () => {
-    expect(UGANDA_EXCEPTIONS).toHaveLength(12);
+  it("defines the full BoU-framework catalogue (12 round-1 + 10 round-2)", () => {
+    expect(UGANDA_EXCEPTIONS).toHaveLength(22);
     for (const e of UGANDA_EXCEPTIONS) {
       expect(e.regulatoryContext.length, `${e.key} context`).toBeGreaterThan(40);
       expect(e.recommendedResolution.length, `${e.key} resolution`).toBeGreaterThan(40);
@@ -132,5 +180,9 @@ describe("Uganda taxonomy — integrity + moat wiring", () => {
     const block = ugandaExceptionsTaxonomyPromptBlock();
     for (const e of UGANDA_EXCEPTIONS) expect(block).toContain(e.key);
     expect(block.split("\n")).toHaveLength(UGANDA_EXCEPTIONS.length);
+  });
+
+  it("provisioning iterates every rail (round-1 + round-2 = 11)", () => {
+    expect(UGANDA_SOURCE_KEYS).toHaveLength(11);
   });
 });

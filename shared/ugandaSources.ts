@@ -26,7 +26,11 @@ export type UgandaSourceKey =
   | "uniss_rtgs"
   | "ach_eft"
   | "card_switch"
-  | "trust_account";
+  | "trust_account"
+  // Round 2 (research-grounded)
+  | "digital_lending" // MoKash (MTN/NCBA) & Wewole (Airtel/Jumo) nano-loans
+  | "bill_utility" // Yaka/Umeme tokens, NWSC, URA, TV, school fees
+  | "aggregator_switch"; // PayWay, EzeeMoney, MCash switching platforms
 
 export const UGANDA_SOURCE_KEYS: UgandaSourceKey[] = [
   "cbs_ledger",
@@ -37,6 +41,9 @@ export const UGANDA_SOURCE_KEYS: UgandaSourceKey[] = [
   "ach_eft",
   "card_switch",
   "trust_account",
+  "digital_lending",
+  "bill_utility",
+  "aggregator_switch",
 ];
 
 /** Column aliases normalized: lowercase, quotes stripped, spaces → _ . */
@@ -312,6 +319,99 @@ export const UGANDA_SOURCES: Record<UgandaSourceKey, UgandaSourceProfile> = {
     },
     regulatoryNote:
       "BoU NPS Act 2020: issued e-money must be fully backed by the trust account. Wallet-liability vs trust-balance variance (ug_trust_account_mismatch) is THE licence-threatening exception class.",
+  },
+
+  // ─── Round 2 rails ─────────────────────────────────────────────────────────
+  digital_lending: {
+    key: "digital_lending",
+    label: "Digital Nano-Lending (MoKash / Wewole)",
+    systemDescription:
+      "Telco↔bank nano-loan ledger: MoKash (MTN/NCBA), Wewole (Airtel/Jumo) — disbursement to wallet + repayment collection. Reconciles the lending ledger against the wallet movement.",
+    channelType: "bank_core",
+    transport: "both",
+    expectedDailyFile: true,
+    settlementLagDays: 0,
+    cutoffHourLocal: 23,
+    matching: { amountTolerancePct: 0, dateWindowDays: 2 },
+    identityFields: ["loan_id"],
+    format: {
+      id: "ug_digital_lending",
+      signature: ["loan_id", "msisdn"],
+      aliases: {
+        transactionRef: ["loan_id", "disbursement_ref", "repayment_ref", "reference"],
+        externalRef: ["loan_id", "wallet_transaction_id"],
+        transactionDate: ["transaction_date", "datetime", "value_date"],
+        amount: ["amount", "principal", "repayment_amount"],
+        debitCredit: ["type", "transaction_type"], // DISBURSEMENT (credit to wallet) / REPAYMENT (debit)
+        counterparty: ["msisdn", "customer_id", "account_number"],
+        description: ["narration", "loan_status"],
+        currency: ["currency"],
+      },
+    },
+    regulatoryNote:
+      "MoKash lends UGX 3k–1m (30-day); the lender bank (NCBA) must reconcile disbursements/repayments against the telco wallet and update CRB within 72h. Un-booked disbursements or unapplied repayments feed ug_digital_loan_* categories; dormant loan/savings balances have a BoU-mandated handling process.",
+  },
+
+  bill_utility: {
+    key: "bill_utility",
+    label: "Bill / Utility Payments (Yaka, NWSC, URA, TV)",
+    systemDescription:
+      "Utility and biller payment log via the payment rails — Umeme/UEDCL Yaka electricity tokens, NWSC water, URA tax, TV subscriptions, school fees.",
+    channelType: "bank_transfer",
+    transport: "both",
+    expectedDailyFile: true,
+    settlementLagDays: 1,
+    cutoffHourLocal: 23,
+    matching: { amountTolerancePct: 0, dateWindowDays: 2 },
+    identityFields: ["payment_ref"],
+    format: {
+      id: "ug_bill_utility",
+      signature: ["payment_ref", "biller_code"],
+      aliases: {
+        transactionRef: ["payment_ref", "reference", "token_ref"],
+        externalRef: ["payment_ref", "token"],
+        transactionDate: ["transaction_date", "datetime"],
+        amount: ["amount", "transaction_amount"],
+        debitCredit: ["type", "transaction_type"],
+        counterparty: ["biller_code", "biller_name", "meter_number", "account_number"],
+        description: ["narration", "service", "token"],
+        currency: ["currency"],
+      },
+    },
+    defaultDirection: "debit",
+    regulatoryNote:
+      "Yaka electricity tokens are the single largest utility-payment complaint class in Uganda — network fluctuation debits the customer without issuing a token. Debited-but-no-value feeds ug_bill_payment_no_token (BoU consumer-protection reversal timeline applies).",
+  },
+
+  aggregator_switch: {
+    key: "aggregator_switch",
+    label: "Aggregator / Switch (PayWay, EzeeMoney, MCash)",
+    systemDescription:
+      "Third-party switching platform settlement — PayWay, EzeeMoney, MCash — that switch funds across wallets, bank accounts and utilities on the institution's behalf.",
+    channelType: "bank_transfer",
+    transport: "sftp_batch",
+    expectedDailyFile: true,
+    settlementLagDays: 1,
+    cutoffHourLocal: 22,
+    matching: { amountTolerancePct: 0, dateWindowDays: 2 },
+    identityFields: ["switch_ref"],
+    format: {
+      id: "ug_aggregator_switch",
+      signature: ["switch_ref", "aggregator"],
+      aliases: {
+        transactionRef: ["switch_ref", "reference"],
+        externalRef: ["switch_ref", "partner_ref"],
+        transactionDate: ["transaction_date", "settlement_date", "datetime"],
+        valueDate: ["settlement_date"],
+        amount: ["amount", "net_amount", "settlement_amount"],
+        debitCredit: ["type", "dr_cr"],
+        counterparty: ["aggregator", "merchant", "biller"],
+        description: ["narration", "service_type"],
+        currency: ["currency"],
+      },
+    },
+    regulatoryNote:
+      "Aggregators switch high daily volumes across networks; their settlement file vs the bank position is a heavy daily reconciliation burden (ug_aggregator_settlement_variance). Net-of-commission settlement means commission-config drift is the common variance.",
   },
 };
 

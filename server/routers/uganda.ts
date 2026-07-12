@@ -22,6 +22,7 @@ import { UGANDA_EXCEPTIONS } from "../exceptions/uganda";
 const sourceKeySchema = z.enum([
   "cbs_ledger", "mtn_momo", "airtel_money", "abc_agent_rail",
   "uniss_rtgs", "ach_eft", "card_switch", "trust_account",
+  "digital_lending", "bill_utility", "aggregator_switch",
 ]);
 
 const adminProcedure = protectedProcedure.use(async (opts) => {

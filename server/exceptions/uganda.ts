@@ -183,6 +183,138 @@ export const UGANDA_EXCEPTIONS: UgandaChannelException[] = [
     aiDiagnosisHint:
       "Liability entries with no rail counterpart: single occurrences near shift changes = fat-finger; repeated amounts by one user = fraud pattern (check segregation of duties); bursts after an integration deploy = software defect double-posting.",
   },
+
+  // ─── Round 2: bill/utility, digital lending, aggregator, integrity ─────────
+  {
+    key: "ug_bill_payment_no_token",
+    label: "Bill / Utility Debited Without Value (Yaka Token Not Issued)",
+    severity: "critical",
+    slaHours: 24,
+    sources: ["bill_utility", "mtn_momo", "airtel_money", "aggregator_switch", "cbs_ledger"],
+    regulatoryContext:
+      "Yaka electricity-token failures are the single largest utility-payment complaint class in Uganda — network fluctuation between the rail and Umeme/UEDCL debits the customer without issuing a token. BoU consumer-protection expectations require prompt reversal or value delivery; a customer with no power and a debited account is the archetypal complaint.",
+    recommendedResolution:
+      "1) Locate the payment by payment_ref and confirm the biller/token status with the biller (Umeme/UEDCL/NWSC) or aggregator. 2) If a token was generated, re-deliver it to the customer (SMS/USSD). 3) If the biller was never credited, reverse the debit same-day. 4) If the biller was credited but no token issued, raise a biller-side dispute with the payment_ref. 5) Track the debited-without-token count per biller — spikes indicate a biller/aggregator integration outage, not customer error.",
+    aiDiagnosisHint:
+      "Rail debit with no biller confirmation / token: cluster by biller and by time — a burst on one biller = integration outage (chase the biller/aggregator, mass-reverse); scattered singles = per-transaction network drops (re-query token first, reverse if truly absent). Distinguish 'biller credited, token delivery failed' (re-deliver) from 'biller never credited' (reverse).",
+  },
+  {
+    key: "ug_airtime_data_not_delivered",
+    label: "Airtime / Data Purchase Debited Not Delivered",
+    severity: "high",
+    slaHours: 24,
+    sources: ["bill_utility", "mtn_momo", "airtel_money", "aggregator_switch"],
+    regulatoryContext:
+      "Airtime/data top-ups debit the wallet/account instantly; non-delivery is a consumer-protection reversal obligation on the same rails as failed transfers.",
+    recommendedResolution:
+      "1) Confirm the top-up outcome in the telco/aggregator log by reference. 2) If not delivered, reverse the debit or re-deliver the airtime/data. 3) Notify the customer. 4) Feed recurring non-delivery by product into the failed-transactions return.",
+    aiDiagnosisHint:
+      "Debit with no matching successful top-up: self-top-ups vs third-party (gifting) — third-party failures often carry a wrong-MSISDN cause; verify the target number before reversing vs re-delivering.",
+  },
+  {
+    key: "ug_digital_loan_disbursement_mismatch",
+    label: "Nano-Loan Disbursed to Wallet Not Booked in Lending Ledger",
+    severity: "critical",
+    slaHours: 24,
+    sources: ["digital_lending", "mtn_momo", "airtel_money", "cbs_ledger"],
+    regulatoryContext:
+      "MoKash (MTN/NCBA) and Wewole (Airtel/Jumo) disburse nano-loans to the customer wallet; the lender bank must book the corresponding loan asset. A wallet credit with no loan-ledger entry is unrecorded credit exposure (and the minting risk in reverse); a loan booked with no wallet credit means the customer never received funds but owes.",
+    recommendedResolution:
+      "1) Match each disbursement (loan_id) between the telco wallet-credit feed and the lender loan ledger. 2) Wallet credit without loan booking → book the loan asset and confirm CRB reporting. 3) Loan booked without wallet credit → confirm the customer received value; if not, reverse the loan and re-disburse. 4) Reconcile the daily disbursement control totals telco↔lender.",
+    aiDiagnosisHint:
+      "Join by loan_id: wallet-side present + ledger-side absent = unbooked asset (book it); ledger present + wallet absent = failed disbursement (reverse/re-send). Timing within the same day is normal; overnight gaps are true breaks.",
+  },
+  {
+    key: "ug_digital_loan_repayment_unapplied",
+    label: "Nano-Loan Repayment Collected Not Applied / CRB Not Updated",
+    severity: "high",
+    slaHours: 72,
+    sources: ["digital_lending", "mtn_momo", "airtel_money", "cbs_ledger"],
+    regulatoryContext:
+      "MoKash repayments are collected from the wallet; NCBA must apply them and update the Credit Reference Bureau within 72h of clearance. Unapplied repayments keep a settled loan showing as outstanding — a customer-harm and CRB-accuracy breach.",
+    recommendedResolution:
+      "1) Match wallet-side repayment debits to loan-ledger repayment postings by loan_id. 2) Apply any collected-but-unposted repayments and recompute balances. 3) Trigger the CRB status update for cleared loans within the 72h window. 4) Where a customer was wrongly reported delinquent, file a CRB correction and notify the customer.",
+    aiDiagnosisHint:
+      "Wallet repayment present, ledger application absent: check whether the repayment cleared (not just initiated). Cleared-but-unapplied older than 72h risks a wrong CRB status — prioritise those for both application and CRB correction.",
+  },
+  {
+    key: "ug_dormant_wallet_balance",
+    label: "Dormant E-Money / Loan-Savings Balance Not Handled",
+    severity: "medium",
+    slaHours: 168,
+    sources: ["digital_lending", "mtn_momo", "airtel_money", "trust_account"],
+    regulatoryContext:
+      "BoU and the lender's own policy (e.g. NCBA's MoKash dormant-accounts process) require dormant wallet/savings balances to be identified, flagged and handled per the dormancy schedule — not silently retained. Dormant balances must still reconcile to the trust-account backing.",
+    recommendedResolution:
+      "1) Identify wallet/savings balances with no activity beyond the dormancy threshold. 2) Apply the dormancy handling (customer notification, restricted status, escheatment schedule per policy/BoU). 3) Confirm dormant balances remain within the trust-account backing. 4) Maintain the dormant-account register for examination.",
+    aiDiagnosisHint:
+      "Balances with last-activity beyond threshold and not flagged dormant. Reconcile the dormant register total against the trust account — dormant funds not backed are a compliance and integrity flag.",
+  },
+  {
+    key: "ug_duplicate_wallet_credit",
+    label: "Duplicate Wallet Credit / Excess E-Money Created",
+    severity: "critical",
+    slaHours: 24,
+    sources: ["mtn_momo", "airtel_money", "aggregator_switch", "trust_account", "cbs_ledger"],
+    regulatoryContext:
+      "A wallet credited twice for one funding event creates e-money not backed by the trust account — the exact excess-e-money mechanism behind Uganda's largest mobile-money fraud, and a direct trust-backing breach.",
+    recommendedResolution:
+      "1) Identify wallet credits sharing one funding reference (same bank credit / same rail event). 2) Confirm only one funding actually occurred. 3) Reverse the duplicate credit and restore the wallet-liability↔trust balance. 4) If already spent, open recovery; treat as an integrity incident and review the crediting user/process. 5) Verify ingestion idempotency held (the platform dedupes on externalRef; a true duplicate here is provider/posting-side).",
+    aiDiagnosisHint:
+      "Two wallet credits, one funding reference: same amount + same funding ref = duplicate (reverse one, expect trust-balance restoration); different funding refs = two real fundings. Bursts from one channel after a retry/deploy = systematic double-credit.",
+  },
+  {
+    key: "ug_orphan_reversal",
+    label: "Reversal Without Matching Original",
+    severity: "high",
+    slaHours: 48,
+    sources: "all",
+    regulatoryContext:
+      "A reversal entry with no matching original debit either credits a customer/agent without cause or masks a fraudulent withdrawal — an integrity red flag BoU examiners treat as incident material, adjacent to the suspense-manipulation class.",
+    recommendedResolution:
+      "1) For each reversal, locate the original transaction it claims to reverse. 2) If none exists, freeze the credited balance and investigate the posting origin (user, timestamp). 3) Reverse the unjustified reversal with maker-checker. 4) Review the initiating user's other reversals for a pattern; escalate to the fraud desk if clustered.",
+    aiDiagnosisHint:
+      "Reversal with no original: same user posting original-less reversals repeatedly = fraud pattern (segregation-of-duties check); isolated = mispost. Round amounts and end-of-day timing raise the fraud probability.",
+  },
+  {
+    key: "ug_aggregator_settlement_variance",
+    label: "Aggregator / Switch Settlement Variance",
+    severity: "high",
+    slaHours: 48,
+    sources: ["aggregator_switch", "cbs_ledger"],
+    regulatoryContext:
+      "PayWay/EzeeMoney/MCash switch high daily volumes and settle net of commission; their settlement file vs the bank position is a heavy daily reconciliation burden, and net-of-commission settlement makes commission-config drift the common silent variance.",
+    recommendedResolution:
+      "1) Reconcile the aggregator settlement file against bank postings by switch_ref. 2) Recompute expected net (gross − contracted commission) and compare with the settled amount. 3) Raise file-level or commission-rate variances with the aggregator citing references. 4) Track recovery through suspense with aging.",
+    aiDiagnosisHint:
+      "Whole-file variance = aggregator-side (compare counts first); per-transaction = local posting. Variance proportional to volume = commission-rate drift; fixed = a flat-fee misapplication.",
+  },
+  {
+    key: "ug_agent_commission_variance",
+    label: "Agent Commission Calculation Variance",
+    severity: "medium",
+    slaHours: 120,
+    sources: ["abc_agent_rail", "mtn_momo", "airtel_money"],
+    regulatoryContext:
+      "Agents earn tiered commission on cash-in/cash-out; wrong tiers or rates over- or under-pay agents, distinct from float mismatches. Systematic errors erode the agent network BoU tracks for financial inclusion.",
+    recommendedResolution:
+      "1) Recompute expected commission per agent per the tier/rate card for the period. 2) Compare with commission credited on the rail/agent statement. 3) Correct rate-card misconfigurations and post adjustments. 4) Cluster variances by tier to find the misconfigured band.",
+    aiDiagnosisHint:
+      "Commission ÷ transaction value implies the applied rate — compare to the rate card rather than absolute amounts. Single-tier drift = one band misconfigured; uniform drift from a date = rate-card change not applied.",
+  },
+  {
+    key: "ug_fx_settlement_variance",
+    label: "Multi-Currency (FX) Settlement Variance",
+    severity: "high",
+    slaHours: 48,
+    sources: ["cbs_ledger", "uniss_rtgs", "card_switch", "aggregator_switch"],
+    regulatoryContext:
+      "Ugandan institutions hold USD (and other) accounts alongside UGX; cross-currency settlements (card scheme USD settlement, remittance inflows, multi-currency wallets) must convert at the agreed rate. Wrong rate or wrong date is either customer harm or income leakage, and BoU FX-position reporting depends on correct conversion.",
+    recommendedResolution:
+      "1) Identify the transaction's original currency and the settlement currency. 2) Determine the expected rate (BoU/interbank rate on the settlement date + agreed margin). 3) Recompute expected settlement and compare with actual. 4) Dispute out-of-band rates with the counterparty; correct wrong-date conversions. 5) Reconcile the FX position daily for BoU reporting.",
+    aiDiagnosisHint:
+      "Settlement in base currency ≠ expected at the contracted rate: check rate date first (auth-date vs settlement-date), then margin, then double-conversion via an intermediary currency. Proportional variance = rate/margin; fixed = a mis-booked leg.",
+  },
 ];
 
 export const UGANDA_EXCEPTION_KEYS = UGANDA_EXCEPTIONS.map((e) => e.key);

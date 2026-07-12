@@ -1029,6 +1029,17 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "ug_excise_duty_variance",
   "ug_card_switch_variance",
   "ug_wallet_liability_orphan",
+  // Uganda round 2 — bill/utility, digital lending, aggregator, integrity
+  "ug_bill_payment_no_token",
+  "ug_airtime_data_not_delivered",
+  "ug_digital_loan_disbursement_mismatch",
+  "ug_digital_loan_repayment_unapplied",
+  "ug_dormant_wallet_balance",
+  "ug_duplicate_wallet_credit",
+  "ug_orphan_reversal",
+  "ug_aggregator_settlement_variance",
+  "ug_agent_commission_variance",
+  "ug_fx_settlement_variance",
   // Card Switching & Processors (Interswitch / UP / eTranzact)
   "card_switch_settlement_variance",
   "card_rrn_stan_mismatch",

@@ -5,6 +5,20 @@
  */
 import { describe, expect, it } from "vitest";
 import { toCsv, type ReportResult } from "./cbnReports";
+import { bucketByAgeDays } from "./bouReports";
+
+describe("bucketByAgeDays — suspense/integrity aging bands", () => {
+  it("bands against the 3-day control window and examiner thresholds", () => {
+    expect(bucketByAgeDays(0)).toBe("0-3d");
+    expect(bucketByAgeDays(3)).toBe("0-3d");
+    expect(bucketByAgeDays(4)).toBe("4-7d");
+    expect(bucketByAgeDays(7)).toBe("4-7d");
+    expect(bucketByAgeDays(8)).toBe("8-30d");
+    expect(bucketByAgeDays(30)).toBe("8-30d");
+    expect(bucketByAgeDays(31)).toBe("30+d");
+    expect(bucketByAgeDays(365)).toBe("30+d");
+  });
+});
 
 function fakeReport(regulator: "CBN" | "BoU", currency: string): ReportResult {
   return {
