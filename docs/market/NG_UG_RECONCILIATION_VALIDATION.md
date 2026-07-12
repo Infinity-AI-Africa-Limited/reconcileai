@@ -48,23 +48,27 @@ requirement, not an option.**
 
 ## 3. Gaps and remediation plan (priority order)
 
-**G1 — Uganda is POC-grade, not tenant-grade (HIGH; gate: first UG prospect).**
-Uganda flows live in the public mobile-money POC engine (`mm_*`, poc-scoped),
-not the main tenant pipeline, and there is no Uganda channel-source taxonomy
-comparable to the 17 Nigerian files. *Remediation:* an `uganda/` channel pack
-mirroring the LAPO pattern — source profiles (MTN MoMo, Airtel Money, **ABC
-shared agent rail**, UNISS/RTGS, EFT/ACH) with timing tolerances for the
-24–48h inter-network float problem, plus a taxonomy centred on: suspense-
-account integrity (the MTN fraud class), agent float/settlement vs the shared
-rail, excise-duty variance, interoperability lag, and trust-account (e-money
-float) reconciliation which BoU requires of licensed PSPs. Estimated: one
-focused session, same shape as the LAPO build.
+**G1 — Uganda channel pack — ✅ DONE (July 2026).** Tenant-grade Uganda pack
+mirroring the LAPO pattern: `shared/ugandaSources.ts` (8 rails — CBS ledger,
+MTN MoMo, Airtel Money, **ABC shared agent rail**, UNISS/RTGS, ACH/EFT, card
+switch, **e-money trust account** — with 24–48h inter-network timing
+tolerances in matchingConfig), `server/exceptions/uganda.ts` (12 BoU-framework
+categories: trust-account backing, suspense integrity, wallet-liability
+orphan, MoMo debit-no-credit, owed reversals, agent-rail settlement, agent
+float trapped, interop lag, UNISS break, ACH return, excise-duty variance,
+card-switch variance), `server/connectors/uganda/etl.ts` (per-rail ingestion,
+file-hash idempotency, completeness watchdog, day-first date parsing).
+Provisioned via DIRECT onboarding (custom-channel selector) + `uganda.provision`;
+taxonomy in the cross-market `EXCEPTION_REGISTRY` + boot/per-org seeding.
 
-**G2 — BoU report pack (MEDIUM; gate: first UG paying tenant).** Parameterize
-the regulator-report module (currently CBN-specific) by regulator; add BoU
-NPS-framework returns (trust-account reconciliation evidence, agent
-settlement summary) once a Ugandan prospect confirms the exact formats. The
-report engine's builder pattern already supports this cleanly.
+**G2 — BoU report pack — ✅ DONE (July 2026).** `server/bouReports.ts` — three
+NPS-framework returns (E-Money Trust Account & Suspense Integrity; Agent Rail
+& Mobile Money Settlement; Failed Transactions & Reversals), UGX + BoU
+regulatory basis. The report module is now regulator-parameterized: `buildMeta`
+takes currency + regulator, `toCsv` labels the identity block neutrally
+(Registration No./BoU Licence for Uganda), and the Regulatory Reports picker is
+grouped by regulator (CBN / BoU). Formats are conventions-based, refining when
+a licensed Ugandan institution confirms BoU's exact templates.
 
 **G3 — CBN monthly failed-transaction return — ✅ DONE (July 2026).**
 `buildFailedTransactionsReturn` in the CBN module: per-channel failed

@@ -9,6 +9,7 @@ import { mobileMoneyRouter } from "./routers/mobileMoney";
 import { erpExportRouter } from "./routers/erpExport";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { lapoRouter } from "./routers/lapo";
+import { ugandaRouter } from "./routers/uganda";
 import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -3900,7 +3901,7 @@ export const appRouter = router({
         // build. "lapo" provisions the LAPO multi-source integration (connector
         // config + 8 source channels + exception taxonomy). Direct clients that
         // run a proprietary channel estate get it here, NOT via the CBS picker.
-        customChannel: z.enum(["none", "lapo"]).default("none"),
+        customChannel: z.enum(["none", "lapo", "uganda"]).default("none"),
       }))
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
@@ -3938,6 +3939,16 @@ export const appRouter = router({
             customChannelResult = { channels: r.channelIds.length, templates: r.templates.inserted };
           } catch (err) {
             console.error("[createOrganization] LAPO channel pack failed (re-run lapo.provision):", err);
+          }
+        } else if (input.customChannel === "uganda") {
+          // Uganda market pack: eight rail channels (MTN/Airtel, ABC shared
+          // agent rail, UNISS, ACH, cards, trust account) + BoU taxonomy.
+          try {
+            const { provisionUgandaForOrg } = await import("./connectors/uganda/etl");
+            const r = await provisionUgandaForOrg(newOrgId);
+            customChannelResult = { channels: r.channelIds.length, templates: r.templates.inserted };
+          } catch (err) {
+            console.error("[createOrganization] Uganda channel pack failed (re-run uganda.provision):", err);
           }
         }
         // Retail / e-commerce vertical (SHOPLINE): seed the retail exception
@@ -6132,6 +6143,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   cbsConnector: woodcoreConnectorRouter,
   // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
   lapo: lapoRouter,
+  uganda: ugandaRouter,
   roadmap: router({
     // Public: submit an access request
     requestAccess: publicProcedure

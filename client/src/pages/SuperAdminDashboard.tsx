@@ -186,7 +186,7 @@ function CreateOrgDialog({
   const [cbsType, setCbsType] = useState<"woodcore" | "t24" | "mambu" | "flexcube">("woodcore");
   // Optional custom channel pack for a DIRECT client (e.g. LAPO's multi-source
   // integration). Not a CBS vendor — added to a directly-onboarded org's build.
-  const [customChannel, setCustomChannel] = useState<"none" | "lapo">("none");
+  const [customChannel, setCustomChannel] = useState<"none" | "lapo" | "uganda">("none");
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [segment, setSegment] = useState<Segment>("financial_services");
@@ -215,7 +215,7 @@ function CreateOrgDialog({
       const cc = r.customChannel;
       toast.success(
         cc
-          ? `Organisation created — LAPO channel pack added (${cc.channels} channels, ${cc.templates} templates)`
+          ? `Organisation created — channel pack added (${cc.channels} channels, ${cc.templates} templates)`
           : "Organisation created successfully",
       );
       resetForm();
@@ -376,13 +376,14 @@ function CreateOrgDialog({
                     <label className="text-xs font-medium text-muted-foreground mb-1 block">
                       Custom channel integration (optional)
                     </label>
-                    <Select value={customChannel} onValueChange={(v) => setCustomChannel(v as "none" | "lapo")}>
+                    <Select value={customChannel} onValueChange={(v) => setCustomChannel(v as "none" | "lapo" | "uganda")}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="none">None — standard uploads / API / SFTP</SelectItem>
                         <SelectItem value="lapo">LAPO MFB (multi-source) — 8 source channels + taxonomy</SelectItem>
+                        <SelectItem value="uganda">Uganda market pack — 8 rails + BoU taxonomy</SelectItem>
                       </SelectContent>
                     </Select>
                     {customChannel === "lapo" && (
@@ -391,6 +392,15 @@ function CreateOrgDialog({
                         mobile, USSD, agent, NIP, Interswitch/UPSL/eTranzact) with per-source timing
                         tolerances, and the LAPO exception taxonomy. Point SFTP/webhook at LAPO
                         after onboarding.
+                      </p>
+                    )}
+                    {customChannel === "uganda" && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Provisions all 8 Ugandan rails (CBS ledger, MTN MoMo, Airtel Money, the ABC
+                        shared agent rail, UNISS/RTGS, ACH, card switch, e-money trust account) with
+                        24–48h inter-network timing tolerances, plus the BoU-framework taxonomy
+                        (trust-account backing, suspense integrity, agent float, excise duty). Set
+                        UGX currency; deploy on-prem for the DP&amp;P Act.
                       </p>
                     )}
                   </div>

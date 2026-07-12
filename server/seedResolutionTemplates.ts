@@ -351,3 +351,12 @@ export async function seedRetailExceptionDefaults(): Promise<{ inserted: number 
   const { seedRetailExceptionGlobalDefaults } = await import("./exceptions/retail-commerce");
   return seedRetailExceptionGlobalDefaults();
 }
+
+/**
+ * Seed the Uganda market-pack taxonomy as global defaults. Called on boot so
+ * Ugandan institutions inherit the BoU-framework templates.
+ */
+export async function seedUgandaExceptionDefaults(): Promise<{ inserted: number }> {
+  const { seedUgandaExceptionGlobalDefaults } = await import("./exceptions/uganda");
+  return seedUgandaExceptionGlobalDefaults();
+}

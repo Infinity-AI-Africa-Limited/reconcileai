@@ -51,6 +51,7 @@ import { CARD_SWITCHING_EXCEPTIONS } from "./card-switching";
 import { CARD_SCHEME_EXCEPTIONS } from "./card-schemes";
 import { CARD_DISPUTE_EXCEPTIONS } from "./card-disputes";
 import { RETAIL_COMMERCE_EXCEPTIONS } from "./retail-commerce";
+import { UGANDA_EXCEPTIONS } from "./uganda";
 import type { NigerianChannelException } from "./types";
 
 /**
@@ -121,12 +122,14 @@ export const ALL_NIGERIAN_EXCEPTION_KEYS = ALL_NIGERIAN_EXCEPTIONS.map((e) => e.
 export const EXCEPTION_REGISTRY = new Map<string, TaxonomyExceptionEntry>([
   ...ALL_NIGERIAN_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
   ...RETAIL_COMMERCE_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
+  ...UGANDA_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
 ]);
 
-/** Every exception across all verticals (Nigerian channels + retail commerce). */
+/** Every exception across all markets/verticals (Nigeria + retail + Uganda). */
 export const ALL_EXCEPTIONS: TaxonomyExceptionEntry[] = [
   ...ALL_NIGERIAN_EXCEPTIONS,
   ...RETAIL_COMMERCE_EXCEPTIONS,
+  ...UGANDA_EXCEPTIONS,
 ];
 
 /**
@@ -155,3 +158,7 @@ export const EXCEPTION_CHANNELS = {
 // Retail / E-Commerce (SHOPLINE vertical)
 export { RETAIL_COMMERCE_EXCEPTIONS, RETAIL_COMMERCE_EXCEPTION_KEYS } from "./retail-commerce";
 export type { RetailCommerceException, RetailChannelSource } from "./retail-commerce";
+
+// Uganda market pack (BoU NPS framework)
+export { UGANDA_EXCEPTIONS, UGANDA_EXCEPTION_KEYS } from "./uganda";
+export type { UgandaChannelException } from "./uganda";

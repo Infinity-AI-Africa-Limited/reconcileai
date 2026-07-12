@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import {
   FileSpreadsheet, Download, Loader2, Building2, ShieldCheck, CheckCircle2,
@@ -21,16 +21,29 @@ import {
 
 type ReportType =
   | "daily_recon_summary" | "exception_log" | "counterparty_exposure" | "interbank_settlement"
-  | "mfb_unreconciled_aging" | "failed_transactions_return";
+  | "mfb_unreconciled_aging" | "failed_transactions_return"
+  | "bou_trust_integrity" | "bou_agent_settlement" | "bou_failed_transactions";
 
-const REPORTS: { type: ReportType; title: string; desc: string; period: "day" | "range" }[] = [
-  { type: "daily_recon_summary", title: "Daily Reconciliation Summary", desc: "Per-channel reconciliation position for a single day — the CBN daily attestation that reconciliation was performed.", period: "day" },
-  { type: "exception_log", title: "Exception Log & Resolution Register", desc: "Every exception with resolution status, days outstanding, CBS reflection, and audit-trail event count.", period: "range" },
-  { type: "counterparty_exposure", title: "Counterparty Exposure Report", desc: "Open unreconciled exposure aggregated by counterparty, with concentration-risk rating.", period: "range" },
-  { type: "interbank_settlement", title: "Interbank Settlement Reconciliation (NIBSS)", desc: "NIBSS / RTGS / SWIFT settlement reconciliation — volume, value, matched value and variance.", period: "range" },
-  { type: "mfb_unreconciled_aging", title: "Unreconciled Items Aging Schedule (MFB)", desc: "Unreconciled items aged 0–30 / 31–60 / 61–90 / 90+ days per channel, with provisioning flags — the MFB examination and OFISD monthly-return staple.", period: "day" },
-  { type: "failed_transactions_return", title: "Failed Transactions Monthly Return", desc: "Per-channel failed e-transactions with reversal buckets against the CBN 24h/48h windows, compliance rate, and indicative ₦10,000-per-item sanction exposure — the return required by CBN's April 2026 directive.", period: "range" },
+type Regulator = "CBN" | "BoU";
+
+const REPORTS: { type: ReportType; title: string; desc: string; period: "day" | "range"; regulator: Regulator }[] = [
+  // CBN (Nigeria)
+  { type: "daily_recon_summary", title: "Daily Reconciliation Summary", desc: "Per-channel reconciliation position for a single day — the CBN daily attestation that reconciliation was performed.", period: "day", regulator: "CBN" },
+  { type: "exception_log", title: "Exception Log & Resolution Register", desc: "Every exception with resolution status, days outstanding, CBS reflection, and audit-trail event count.", period: "range", regulator: "CBN" },
+  { type: "counterparty_exposure", title: "Counterparty Exposure Report", desc: "Open unreconciled exposure aggregated by counterparty, with concentration-risk rating.", period: "range", regulator: "CBN" },
+  { type: "interbank_settlement", title: "Interbank Settlement Reconciliation (NIBSS)", desc: "NIBSS / RTGS / SWIFT settlement reconciliation — volume, value, matched value and variance.", period: "range", regulator: "CBN" },
+  { type: "mfb_unreconciled_aging", title: "Unreconciled Items Aging Schedule (MFB)", desc: "Unreconciled items aged 0–30 / 31–60 / 61–90 / 90+ days per channel, with provisioning flags — the MFB examination and OFISD monthly-return staple.", period: "day", regulator: "CBN" },
+  { type: "failed_transactions_return", title: "Failed Transactions Monthly Return", desc: "Per-channel failed e-transactions with reversal buckets against the CBN 24h/48h windows, compliance rate, and indicative ₦10,000-per-item sanction exposure — the return required by CBN's April 2026 directive.", period: "range", regulator: "CBN" },
+  // Bank of Uganda (NPS framework)
+  { type: "bou_trust_integrity", title: "E-Money Trust Account & Suspense Integrity", desc: "The licence-critical control return: e-money 1:1 trust-account backing, wallet-liability orphans, and suspense-account integrity (the MTN-style fraud surface) — with control status per area.", period: "range", regulator: "BoU" },
+  { type: "bou_agent_settlement", title: "Agent Rail & Mobile Money Settlement", desc: "Per-rail settlement position for the ABC shared agent rail, MTN MoMo, Airtel Money, UNISS and cards — volume, value, matched and unreconciled (Agent Banking Regulations 2017).", period: "range", regulator: "BoU" },
+  { type: "bou_failed_transactions", title: "Failed Transactions & Reversals Return", desc: "Failed transactions on the Ugandan mobile-money and agent rails with reversal compliance — BoU NPS Act consumer-protection framing.", period: "range", regulator: "BoU" },
 ];
+
+const REGULATOR_LABEL: Record<Regulator, string> = {
+  CBN: "Central Bank of Nigeria (CBN)",
+  BoU: "Bank of Uganda (BoU · NPS framework)",
+};
 
 function downloadCsv(filename: string, csv: string) {
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -175,7 +188,16 @@ function ReportGenerator() {
             <Label className="text-xs">Report</Label>
             <Select value={reportType} onValueChange={(v) => { setReportType(v as ReportType); setPreview(null); }}>
               <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>{REPORTS.map((r) => <SelectItem key={r.type} value={r.type}>{r.title}</SelectItem>)}</SelectContent>
+              <SelectContent>
+                {(["CBN", "BoU"] as Regulator[]).map((reg) => (
+                  <SelectGroup key={reg}>
+                    <SelectLabel>{REGULATOR_LABEL[reg]}</SelectLabel>
+                    {REPORTS.filter((r) => r.regulator === reg).map((r) => (
+                      <SelectItem key={r.type} value={r.type}>{r.title}</SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
             </Select>
           </div>
           {spec.period === "day" ? (

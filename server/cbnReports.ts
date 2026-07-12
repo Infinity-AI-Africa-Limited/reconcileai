@@ -37,6 +37,8 @@ export interface ReportMeta {
   generatedAt: string;
   currency: string;
   regulatoryBasis: string;
+  /** Which regulator this return is for — drives the CSV identity-block labels. */
+  regulator: "CBN" | "BoU";
 }
 
 export interface ReportResult {
@@ -69,16 +71,17 @@ export async function getReportSettings(organizationId: number) {
   return created ?? null;
 }
 
-async function buildMeta(
+export async function buildMeta(
   organizationId: number,
   title: string,
   periodLabel: string,
   regulatoryBasis: string,
+  opts: { currency?: string; regulator?: "CBN" | "BoU" } = {},
 ): Promise<ReportMeta> {
   const s = await getReportSettings(organizationId);
   return {
     title,
-    institutionName: s?.institutionName || "[Institution name not set — configure in CBN Report settings]",
+    institutionName: s?.institutionName || "[Institution name not set — configure in Report settings]",
     institutionType: INSTITUTION_TYPE_LABEL[s?.institutionType ?? "microfinance_bank"] ?? s?.institutionType ?? "",
     rcNumber: s?.rcNumber || "—",
     cbnLicenseNumber: s?.cbnLicenseNumber || "—",
@@ -86,10 +89,15 @@ async function buildMeta(
     periodLabel,
     preparedBy: s?.preparedByName ? `${s.preparedByName}${s.preparedByTitle ? `, ${s.preparedByTitle}` : ""}` : "—",
     generatedAt: new Date().toISOString(),
-    currency: "NGN",
+    currency: opts.currency ?? "NGN",
     regulatoryBasis,
+    regulator: opts.regulator ?? "CBN",
   };
 }
+
+// Shared report primitives, exported for the BoU pack (server/bouReports.ts).
+export { num, round2, dayKey };
+export { exceptionsInRange, channelMap };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -103,11 +111,14 @@ export function toCsv(r: ReportResult): string {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  // Regulator-neutral labels so the same builder serves CBN (Nigeria) and BoU (Uganda).
+  const regLabel = r.meta.regulator === "BoU" ? "BoU Licence" : "CBN Licence";
+  const regNumLabel = r.meta.regulator === "BoU" ? "Registration No." : "RC Number";
   const header = [
     `"${r.meta.title}"`,
     `"Institution:","${r.meta.institutionName}"`,
     `"Type:","${r.meta.institutionType}"`,
-    `"RC Number:","${r.meta.rcNumber}","CBN Licence:","${r.meta.cbnLicenseNumber}","Institution Code:","${r.meta.cbnInstitutionCode}"`,
+    `"${regNumLabel}:","${r.meta.rcNumber}","${regLabel}:","${r.meta.cbnLicenseNumber}","Institution Code:","${r.meta.cbnInstitutionCode}"`,
     `"Reporting Period:","${r.meta.periodLabel}","Currency:","${r.meta.currency}"`,
     `"Prepared By:","${r.meta.preparedBy}"`,
     `"Regulatory Basis:","${r.meta.regulatoryBasis}"`,

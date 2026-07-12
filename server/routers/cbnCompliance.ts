@@ -28,11 +28,15 @@ import { getDb } from "../db";
 import { signReport, publicKeyFingerprint, publicKeyPem } from "../signing";
 import { cbnAuditLog, cbnDeadlineSubmissions, cbnReportSettings, cbnReportRuns } from "../../drizzle/schema";
 import * as cbnReports from "../cbnReports";
+import * as bouReports from "../bouReports";
 
 // ─── CBN report builders: dispatch + shared input ─────────────────────────────
 const reportTypeEnum = z.enum([
+  // CBN (Nigeria)
   "daily_recon_summary", "exception_log", "counterparty_exposure", "interbank_settlement",
   "mfb_unreconciled_aging", "failed_transactions_return",
+  // BoU (Uganda) — NPS framework
+  "bou_trust_integrity", "bou_agent_settlement", "bou_failed_transactions",
 ]);
 const reportParams = z.object({
   reportType: reportTypeEnum,
@@ -57,6 +61,10 @@ async function runReport(orgId: number, input: z.infer<typeof reportParams>) {
     // reversal-window compliance and sanction exposure.
     return cbnReports.buildFailedTransactionsReturn(orgId, from, to);
   }
+  // Bank of Uganda (NPS framework) returns.
+  if (input.reportType === "bou_trust_integrity") return bouReports.buildTrustIntegrityReturn(orgId, from, to);
+  if (input.reportType === "bou_agent_settlement") return bouReports.buildAgentRailSettlement(orgId, from, to);
+  if (input.reportType === "bou_failed_transactions") return bouReports.buildBouFailedTransactions(orgId, from, to);
   if (input.reportType === "exception_log") return cbnReports.buildExceptionLog(orgId, from, to);
   if (input.reportType === "counterparty_exposure") return cbnReports.buildCounterpartyExposure(orgId, from, to);
   return cbnReports.buildInterbankSettlement(orgId, from, to);
