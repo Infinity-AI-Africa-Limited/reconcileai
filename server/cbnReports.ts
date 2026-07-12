@@ -186,6 +186,147 @@ async function channelMap(organizationId: number): Promise<Map<number, { name: s
   return m;
 }
 
+// ─── 0a. Failed Transactions Monthly Return (CBN, April 2026 directive) ──────
+// CBN now requires monthly reporting of failed electronic transactions and
+// their reversal timelines. The sanction frame: ₦10,000 per failed NIP item
+// not reversed within 24h of complaint; ATM refunds within 24h (on-us) / 48h
+// (not-on-us). This return gives per-channel failed volume/value, reversal
+// buckets against those windows, a compliance rate, and the indicative
+// sanction exposure — one click instead of a month-end spreadsheet hunt.
+
+/**
+ * Which exception categories represent a FAILED CUSTOMER TRANSACTION
+ * (debited-without-value / credit-not-applied / reversal-owed), as opposed to
+ * fee variances, aging analyses or settlement breaks. Curated across the
+ * Nigerian channel, mobile-money, LAPO and core taxonomies by suffix pattern —
+ * new taxonomy keys following the same naming automatically participate.
+ */
+export const FAILED_TXN_CATEGORY_PATTERN =
+  /(timeout_debit|debit_no_credit|debit_no_value|debit_unsettled|not_credited|credit_not_applied|inward_credit|dispense_error|short_dispense|declined_but_debited|debited_biller|dry_posting|reversal_missing|reversal_not_credited|reversal_unmatched|expired_session_debit|expired_code_debit|transaction_not_posted|fallback_debit|wallet_to_bank_failed|bank_to_wallet_failed|wallet_credit_failed|failed_ussd_debit)/;
+
+export function isFailedTransactionCategory(category: string): boolean {
+  return FAILED_TXN_CATEGORY_PATTERN.test(category);
+}
+
+export type FailedTxnBucket =
+  | "reversed_within_24h"
+  | "reversed_within_48h"
+  | "reversed_late"
+  | "unresolved";
+
+/**
+ * Bucket one failed-transaction exception against the CBN reversal windows.
+ * Pure — unit-tested; `asOf` bounds the "unresolved" clock for month-end runs.
+ */
+export function bucketFailedTransaction(
+  e: { createdAt: Date | string; resolvedAt: Date | string | null },
+  asOf: Date,
+): { bucket: FailedTxnBucket; resolutionHours: number | null } {
+  const created = new Date(e.createdAt).getTime();
+  if (e.resolvedAt) {
+    const resolved = new Date(e.resolvedAt).getTime();
+    const hours = Math.max(0, (resolved - created) / 3_600_000);
+    if (hours <= 24) return { bucket: "reversed_within_24h", resolutionHours: hours };
+    if (hours <= 48) return { bucket: "reversed_within_48h", resolutionHours: hours };
+    return { bucket: "reversed_late", resolutionHours: hours };
+  }
+  const openHours = Math.max(0, (asOf.getTime() - created) / 3_600_000);
+  return { bucket: "unresolved", resolutionHours: openHours };
+}
+
+/** ₦10,000 per item beyond the 24h window (CBN Instant EFT regulations). */
+export const CBN_FAILED_TXN_SANCTION_NGN = 10_000;
+
+export async function buildFailedTransactionsReturn(
+  organizationId: number,
+  from: Date,
+  to: Date,
+): Promise<ReportResult> {
+  const meta = await buildMeta(
+    organizationId,
+    "FAILED TRANSACTIONS MONTHLY RETURN",
+    `${dayKey(from)} to ${dayKey(to)}`,
+    "CBN Directive on Monthly Reporting of Failed Transactions (April 2026); CBN Regulations on Instant EFT (₦10,000 per item unreversed >24h); CBN ATM Refund Guidelines (Oct 2025: 24h on-us / 48h not-on-us)",
+  );
+  const chans = await channelMap(organizationId);
+  const all = await exceptionsInRange(organizationId, from, to);
+  const failed = all.filter((e) => isFailedTransactionCategory(e.category ?? ""));
+
+  interface ChannelAgg {
+    count: number; value: number;
+    w24: number; w48: number; late: number; unresolved: number;
+    resolutionHoursSum: number; resolvedCount: number;
+  }
+  const byChannel = new Map<string, ChannelAgg>();
+  let oldestUnresolvedDays = 0;
+
+  for (const e of failed) {
+    const channelName = chans.get(e.channelId)?.name ?? `Channel ${e.channelId}`;
+    const agg = byChannel.get(channelName) ?? {
+      count: 0, value: 0, w24: 0, w48: 0, late: 0, unresolved: 0,
+      resolutionHoursSum: 0, resolvedCount: 0,
+    };
+    const amt = num(e.amount);
+    agg.count += 1;
+    agg.value = round2(agg.value + amt);
+    const { bucket, resolutionHours } = bucketFailedTransaction(e, to);
+    if (bucket === "reversed_within_24h") agg.w24 += 1;
+    else if (bucket === "reversed_within_48h") agg.w48 += 1;
+    else if (bucket === "reversed_late") agg.late += 1;
+    else {
+      agg.unresolved += 1;
+      oldestUnresolvedDays = Math.max(oldestUnresolvedDays, Math.floor((resolutionHours ?? 0) / 24));
+    }
+    if (bucket !== "unresolved" && resolutionHours !== null) {
+      agg.resolutionHoursSum += resolutionHours;
+      agg.resolvedCount += 1;
+    }
+    byChannel.set(channelName, agg);
+  }
+
+  const columns = [
+    "S/N", "Channel", "Failed Count", "Failed Value (NGN)",
+    "Reversed ≤24h", "Reversed 24–48h", "Reversed >48h", "Unresolved at Period End",
+    "24h Compliance Rate (%)", "Avg Resolution (hours)",
+  ];
+  const sorted = Array.from(byChannel.entries()).sort((a, b) => b[1].value - a[1].value);
+  const rows: (string | number)[][] = sorted.map(([name, a], i) => {
+    const compliance = a.count > 0 ? round2((a.w24 / a.count) * 100) : 100;
+    const avgHours = a.resolvedCount > 0 ? round2(a.resolutionHoursSum / a.resolvedCount) : 0;
+    return [
+      i + 1, name, a.count, a.value.toLocaleString("en-NG", { minimumFractionDigits: 2 }),
+      a.w24, a.w48, a.late, a.unresolved, compliance.toFixed(1) + "%", avgHours,
+    ];
+  });
+  if (rows.length === 0) {
+    rows.push([1, "No failed transactions recorded in period", 0, "0.00", 0, 0, 0, 0, "100.0%", 0]);
+  }
+
+  const totals = sorted.reduce(
+    (t, [, a]) => ({
+      count: t.count + a.count, value: round2(t.value + a.value),
+      w24: t.w24 + a.w24, beyond: t.beyond + a.w48 + a.late + a.unresolved,
+      unresolved: t.unresolved + a.unresolved,
+    }),
+    { count: 0, value: 0, w24: 0, beyond: 0, unresolved: 0 },
+  );
+  const sanctionExposure = totals.beyond * CBN_FAILED_TXN_SANCTION_NGN;
+
+  return {
+    meta, columns, rows,
+    summary: {
+      "Total failed transactions": totals.count,
+      "Total failed value (NGN)": totals.value.toLocaleString("en-NG", { minimumFractionDigits: 2 }),
+      "Reversed within 24h (compliant)": totals.w24,
+      "Beyond the 24h window (48h/late/unresolved)": totals.beyond,
+      "Overall 24h compliance rate": totals.count > 0 ? `${round2((totals.w24 / totals.count) * 100).toFixed(1)}%` : "100.0%",
+      "Unresolved at period end": totals.unresolved,
+      "Oldest unresolved item (days)": oldestUnresolvedDays,
+      "Indicative sanction exposure @ ₦10,000/item (NGN)": sanctionExposure.toLocaleString("en-NG"),
+    },
+  };
+}
+
 // ─── 0. Unreconciled Items Aging Schedule (MFB-specific) ─────────────────────
 // The MFB examination staple the original five reports lacked: unreconciled
 // items aged 0–30 / 31–60 / 61–90 / 90+ days per channel, as of a date.

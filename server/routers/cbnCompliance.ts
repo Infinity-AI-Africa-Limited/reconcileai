@@ -32,7 +32,7 @@ import * as cbnReports from "../cbnReports";
 // ─── CBN report builders: dispatch + shared input ─────────────────────────────
 const reportTypeEnum = z.enum([
   "daily_recon_summary", "exception_log", "counterparty_exposure", "interbank_settlement",
-  "mfb_unreconciled_aging",
+  "mfb_unreconciled_aging", "failed_transactions_return",
 ]);
 const reportParams = z.object({
   reportType: reportTypeEnum,
@@ -52,6 +52,11 @@ async function runReport(orgId: number, input: z.infer<typeof reportParams>) {
   }
   const from = new Date(`${input.from ?? today}T00:00:00.000Z`);
   const to = new Date(`${input.to ?? today}T23:59:59.999Z`);
+  if (input.reportType === "failed_transactions_return") {
+    // CBN April-2026 directive: monthly return of failed e-transactions with
+    // reversal-window compliance and sanction exposure.
+    return cbnReports.buildFailedTransactionsReturn(orgId, from, to);
+  }
   if (input.reportType === "exception_log") return cbnReports.buildExceptionLog(orgId, from, to);
   if (input.reportType === "counterparty_exposure") return cbnReports.buildCounterpartyExposure(orgId, from, to);
   return cbnReports.buildInterbankSettlement(orgId, from, to);

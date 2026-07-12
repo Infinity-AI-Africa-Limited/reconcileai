@@ -21,7 +21,7 @@ import {
 
 type ReportType =
   | "daily_recon_summary" | "exception_log" | "counterparty_exposure" | "interbank_settlement"
-  | "mfb_unreconciled_aging";
+  | "mfb_unreconciled_aging" | "failed_transactions_return";
 
 const REPORTS: { type: ReportType; title: string; desc: string; period: "day" | "range" }[] = [
   { type: "daily_recon_summary", title: "Daily Reconciliation Summary", desc: "Per-channel reconciliation position for a single day — the CBN daily attestation that reconciliation was performed.", period: "day" },
@@ -29,6 +29,7 @@ const REPORTS: { type: ReportType; title: string; desc: string; period: "day" | 
   { type: "counterparty_exposure", title: "Counterparty Exposure Report", desc: "Open unreconciled exposure aggregated by counterparty, with concentration-risk rating.", period: "range" },
   { type: "interbank_settlement", title: "Interbank Settlement Reconciliation (NIBSS)", desc: "NIBSS / RTGS / SWIFT settlement reconciliation — volume, value, matched value and variance.", period: "range" },
   { type: "mfb_unreconciled_aging", title: "Unreconciled Items Aging Schedule (MFB)", desc: "Unreconciled items aged 0–30 / 31–60 / 61–90 / 90+ days per channel, with provisioning flags — the MFB examination and OFISD monthly-return staple.", period: "day" },
+  { type: "failed_transactions_return", title: "Failed Transactions Monthly Return", desc: "Per-channel failed e-transactions with reversal buckets against the CBN 24h/48h windows, compliance rate, and indicative ₦10,000-per-item sanction exposure — the return required by CBN's April 2026 directive.", period: "range" },
 ];
 
 function downloadCsv(filename: string, csv: string) {

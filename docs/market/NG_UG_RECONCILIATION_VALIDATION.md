@@ -66,11 +66,12 @@ NPS-framework returns (trust-account reconciliation evidence, agent
 settlement summary) once a Ugandan prospect confirms the exact formats. The
 report engine's builder pattern already supports this cleanly.
 
-**G3 — CBN monthly failed-transaction return (NEW, HIGH for Nigeria; from the
-April 2026 directive).** Our exception log covers the data; a dedicated
-"Failed Transactions Monthly Return" builder in the CBN module would make the
-new directive a one-click export. Small task; high sales value ("the return
-your competitors assemble manually").
+**G3 — CBN monthly failed-transaction return — ✅ DONE (July 2026).**
+`buildFailedTransactionsReturn` in the CBN module: per-channel failed
+volume/value, reversal buckets against the 24h/48h windows, compliance rate,
+and indicative ₦10,000-per-item sanction exposure. One-click preview + CBN-
+format CSV from the Regulatory Reports tab ("Failed Transactions Monthly
+Return"). Category classification and window bucketing are unit-tested.
 
 **G4 — The on-prem deploy pack is still uncommitted (URGENT, one disk from
 gone).** Uganda's data-residency law makes `deploy/on-prem` + the egress
