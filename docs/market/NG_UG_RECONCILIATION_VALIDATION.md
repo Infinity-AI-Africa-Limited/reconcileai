@@ -86,11 +86,16 @@ and indicative ₦10,000-per-item sanction exposure. One-click preview + CBN-
 format CSV from the Regulatory Reports tab ("Failed Transactions Monthly
 Return"). Category classification and window bucketing are unit-tested.
 
-**G4 — The on-prem deploy pack is still uncommitted (URGENT, one disk from
-gone).** Uganda's data-residency law makes `deploy/on-prem` + the egress
-guard the literal market-entry artifact, and it exists only on this laptop
-(`deploy/`, `ml/`, `run-sync.ts` untracked since the local-deployment track).
-Committing it is now Uganda-critical, not just hygiene.
+**G4 — On-prem deploy pack — ✅ DONE (July 2026).** `deploy/on-prem/` (CPU/GPU
+compose stacks, Dockerfile, Modelfile), `ml/` (dataset builder + QLoRA
+fine-tune + eval, grounded in the real Woodcore taxonomy), and `run-sync.ts`
+are committed. The pack was hardened for real air-gapped installs: in-container
+migrations (`npx drizzle-kit migrate` — config + scripts now ship in the
+runtime image) and `scripts/bootstrap-admin.mjs`, which mints the first
+super-admin and prints a single-use sign-in link to the console (magic-link
+auth needs no email/internet on first login). Authoritative runbook:
+`docs/deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md` (supersedes the
+June-2026 planning note).
 
 **G5 — UGX in the ROI calculator (DONE in this commit).** Uganda sales
 meetings can now run the before/after in shillings.

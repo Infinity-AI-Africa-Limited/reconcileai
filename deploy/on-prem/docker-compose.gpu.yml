@@ -1,0 +1,86 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ReconcileAI — Option 3, GPU stack (NVIDIA GPU REQUIRED)
+#
+#   app  ──http──►  vllm (serves a 7-8B model on the GPU, high throughput)
+#   app  ──sql───►  db (MySQL)
+#
+# Requires the NVIDIA Container Toolkit on the host. Use this for banks that have
+# (or rent) a GPU server and want full-quality, low-latency inference.
+#
+# Run:
+#   cp .env.onprem.example .env.onprem   # then edit secrets
+#   docker compose -f docker-compose.gpu.yml --env-file .env.onprem up -d --build
+# ─────────────────────────────────────────────────────────────────────────────
+name: reconcileai-onprem-gpu
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: reconcileai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    # For air-gapped hosts: pre-populate hf-cache on a connected machine and ship
+    # the volume, OR bake the weights into a derived image. HF_TOKEN only needed
+    # at first download on a connected machine.
+    command: >
+      --model ${RECON_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      --served-model-name reconcileai
+      --max-model-len 8192
+      --gpu-memory-utilization 0.90
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/on-prem/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      vllm:
+        condition: service_healthy
+    env_file: .env.onprem
+    environment:
+      DEPLOYMENT_MODE: on_premise
+      EGRESS_ALLOWLIST: vllm                # in-stack model host
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
+      DIRECT_LLM_API_KEY: local
+      DIRECT_LLM_API_URL: http://vllm:8000/v1
+      DIRECT_LLM_PROVIDER: openai
+      DIRECT_LLM_MODEL: reconcileai          # matches --served-model-name above
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  hf-cache:

@@ -1,0 +1,11 @@
+# ReconcileAI fine-tuning toolkit — install on the GPU training host.
+# build_dataset.py and evaluate.py need NONE of these (standard library only);
+# they are required for finetune.py.
+torch>=2.3
+transformers>=4.45
+peft>=0.13
+trl>=0.11
+datasets>=3.0
+accelerate>=1.0
+bitsandbytes>=0.44   # 4-bit QLoRA (GPU only)
+sentencepiece>=0.2

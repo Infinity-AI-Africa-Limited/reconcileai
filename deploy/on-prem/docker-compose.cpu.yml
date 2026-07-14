@@ -1,0 +1,86 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ReconcileAI — Option 3, CPU stack (NO GPU REQUIRED)
+#
+#   app  ──http──►  ollama (serves a small quantized model on CPU)
+#   app  ──sql───►  db (MySQL)
+#
+# Everything runs on the bank's hardware. DEPLOYMENT_MODE=on_premise makes the
+# egress guard block any outbound internet call; the in-stack model host
+# (`ollama`) is permitted via EGRESS_ALLOWLIST.
+#
+# Run:
+#   cp .env.onprem.example .env.onprem   # then edit secrets
+#   docker compose -f docker-compose.cpu.yml --env-file .env.onprem up -d --build
+# ─────────────────────────────────────────────────────────────────────────────
+name: reconcileai-onprem-cpu
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: reconcileai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: pulls (or, for the fine-tuned model, expects a pre-imported) model.
+  model-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "ollama pull ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M} && echo 'model ready: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}'"
+    restart: "no"
+
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/on-prem/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    env_file: .env.onprem
+    environment:
+      # ── Residency: lock the box down ──
+      DEPLOYMENT_MODE: on_premise
+      # `ollama` is an in-stack host — permit it past the egress guard.
+      EGRESS_ALLOWLIST: ollama
+      # ── Database (bundled MySQL) ──
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
+      # ── LLM: local, OpenAI-compatible (Ollama) ──
+      DIRECT_LLM_API_KEY: local                       # non-empty placeholder; Ollama ignores it
+      DIRECT_LLM_API_URL: http://ollama:11434/v1
+      DIRECT_LLM_PROVIDER: openai
+      DIRECT_LLM_MODEL: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  ollama-models:
