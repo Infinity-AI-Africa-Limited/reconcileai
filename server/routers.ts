@@ -7,6 +7,7 @@ import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
 import { mobileMoneyRouter } from "./routers/mobileMoney";
 import { erpExportRouter } from "./routers/erpExport";
+import { enqueueReconciliationRun, registerReconciliationRunner } from "./reconciliationQueue";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { lapoRouter } from "./routers/lapo";
 import { ugandaRouter } from "./routers/uganda";
@@ -738,7 +739,7 @@ export const appRouter = router({
       .input(
         z.object({
           name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]).default("settlement"),
+          moduleType: z.enum(["settlement", "account_level"]).default("settlement"),
           sourceChannelId: z.number().int().positive(),
           targetChannelId: z.number().int().positive(),
           dateFrom: z.string().min(1),
@@ -791,12 +792,18 @@ export const appRouter = router({
 
         await logAudit(ctx.user.id, "create_reconciliation_job", "reconciliation_job", jobId, input, ip, ua);
 
-        // Run reconciliation asynchronously
-        runReconciliation(jobId, input.sourceChannelId, input.targetChannelId,
-          dateFrom, dateTo,
-          { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-          ctx.user.id
-        ).catch(err => console.error("[Reconciliation] Job failed:", err));
+        // Run asynchronously through the durable queue (BullMQ when REDIS_URL
+        // is set, in-process otherwise) — retried with a clean artifact reset
+        // per attempt; never lost silently on restart under BullMQ.
+        enqueueReconciliationRun({
+          jobId,
+          sourceChannelId: input.sourceChannelId,
+          targetChannelId: input.targetChannelId,
+          dateFromIso: dateFrom.toISOString(),
+          dateToIso: dateTo.toISOString(),
+          config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+          userId: ctx.user.id,
+        }).catch(err => console.error("[Reconciliation] enqueue failed:", err));
 
         return { jobId };
       }),
@@ -810,7 +817,7 @@ export const appRouter = router({
       .input(
         z.object({
           name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["transaction_integrity", "settlement", "account_level"]).default("settlement"),
+          moduleType: z.enum(["settlement", "account_level"]).default("settlement"),
           sourceChannelId: z.number().int().positive(),
           // Explicit target channels, or omit + set allActiveTargets to use every
           // other active channel.
@@ -883,10 +890,15 @@ export const appRouter = router({
           });
           if (jobId) {
             jobIds.push(jobId);
-            runReconciliation(jobId, input.sourceChannelId, target.id, dateFrom, dateTo,
-              { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-              ctx.user.id
-            ).catch((err) => console.error("[Reconciliation] Multi-channel child job failed:", err));
+            enqueueReconciliationRun({
+              jobId,
+              sourceChannelId: input.sourceChannelId,
+              targetChannelId: target.id,
+              dateFromIso: dateFrom.toISOString(),
+              dateToIso: dateTo.toISOString(),
+              config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+              userId: ctx.user.id,
+            }).catch((err) => console.error("[Reconciliation] Multi-channel child enqueue failed:", err));
           }
         }
 
@@ -4840,49 +4852,24 @@ Always be specific, reference actual exception IDs and amounts where available, 
   docs: router({
     download: publicProcedure
       .input(z.object({
-        filename: z.enum(["ReconcileAI_Quick_Start.md", "ReconcileAI_User_Guide.md", "ReconcileAI_Admin_Guide.md", "ReconcileAI_Quick_Start.docx", "ReconcileAI_User_Guide.docx", "ReconcileAI_Admin_Guide.docx"]),
+        filename: z.enum(["ReconcileAI_Quick_Start.md", "ReconcileAI_User_Guide.md", "ReconcileAI_Admin_Guide.md"]),
       }))
       .query(async ({ input }) => {
-        // Map filenames to S3 CDN URLs
-        const fileUrls: Record<string, string> = {
-          "ReconcileAI_Quick_Start.md": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/XqoRUpsesmquaKWW.md",
-          "ReconcileAI_User_Guide.md": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/vGDalcLJIHenxGOX.md",
-          "ReconcileAI_Admin_Guide.md": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/UJWSitfkNmYbknnF.md",
-          "ReconcileAI_Quick_Start.docx": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/wQbWtJmZrTsvYFql.docx",
-          "ReconcileAI_User_Guide.docx": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/dqZmSHeiUaEqLfiR.docx",
-          "ReconcileAI_Admin_Guide.docx": "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029108989/xcMlkwIotMjyWZGq.docx",
-        };
-        
-        const fileUrl = fileUrls[input.filename];
-        if (!fileUrl) {
-          throw new TRPCError({
-            code: "NOT_FOUND",
-            message: `Documentation file not found: ${input.filename}`,
-          });
-        }
-        
+        // Guides ship inside the repo (docs/guides/) so documentation cannot
+        // drift from the deployed code or depend on an external host.
+        const { readFile } = await import("fs/promises");
+        const { join } = await import("path");
         try {
-          // Fetch file content from S3 CDN
-          const response = await fetch(fileUrl);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch file: ${response.statusText}`);
-          }
-          
-          const content = await response.text();
-          const contentType = input.filename.endsWith('.docx') 
-            ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-            : 'text/markdown';
-          
+          const content = await readFile(join(process.cwd(), "docs", "guides", input.filename), "utf-8");
           return {
             filename: input.filename,
             content,
-            contentType,
-            url: fileUrl,
+            contentType: "text/markdown",
           };
-        } catch (error) {
+        } catch {
           throw new TRPCError({
-            code: "INTERNAL_SERVER_ERROR",
-            message: `Failed to fetch documentation file: ${input.filename}`,
+            code: "NOT_FOUND",
+            message: `Documentation file not found: ${input.filename}`,
           });
         }
       }),
@@ -6920,3 +6907,8 @@ setImmediate(() => {
     console.error("[Boot] prewarmDemoUser failed:", err)
   );
 });
+
+// Register the reconciliation runner with the durable queue (see
+// server/reconciliationQueue.ts). Done at module load so enqueued jobs can
+// execute; the function stays in this file until split-plan item 12 extracts it.
+registerReconciliationRunner(runReconciliation);

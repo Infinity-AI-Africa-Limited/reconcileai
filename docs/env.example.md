@@ -11,6 +11,18 @@ DATABASE_URL=mysql://user:password@host:4000/reconcileai?ssl={"rejectUnauthorize
 ```
 MySQL-compatible connection string. Supported: TiDB Cloud, PlanetScale, AWS RDS MySQL, Supabase (MySQL mode).
 
+## Job queue (optional — activates durability)
+
+```bash
+REDIS_URL=redis://default:password@host:6379
+```
+When set, reconciliation runs and webhook deliveries execute as durable BullMQ
+jobs (survive restarts, retry with backoff across instances). When unset, the
+in-process retry queue is used — correct for single-instance deployments; a
+crash mid-run is caught by the boot sweep, which fails jobs stuck >2h.
+Provision on Railway: project → New → Database → Redis, then reference its
+`REDIS_URL` in the app service variables. Required before scaling horizontally.
+
 ## Authentication
 
 ```bash

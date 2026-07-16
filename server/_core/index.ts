@@ -498,6 +498,13 @@ async function startServer() {
     serveStatic(app);
   }
 
+  // Boot sweep: mark reconciliation jobs stuck in pending/running >2h as
+  // failed — crash orphans from the pre-queue era or in-process restarts
+  // (fire-and-forget; see server/reconciliationQueue.ts).
+  import("../reconciliationQueue")
+    .then((q) => q.recoverStuckReconciliationJobs())
+    .catch((e) => console.error("[boot] stuck-job sweep failed:", e instanceof Error ? e.message : e));
+
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).
   seedDefaultResolutionTemplates()
