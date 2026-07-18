@@ -4852,19 +4852,42 @@ Always be specific, reference actual exception IDs and amounts where available, 
   docs: router({
     download: publicProcedure
       .input(z.object({
-        filename: z.enum(["ReconcileAI_Quick_Start.md", "ReconcileAI_User_Guide.md", "ReconcileAI_Admin_Guide.md"]),
+        filename: z.enum([
+          "ReconcileAI_Quick_Start.md",
+          "ReconcileAI_User_Guide.md",
+          "ReconcileAI_Admin_Guide.md",
+          "ReconcileAI_Quick_Start.docx",
+          "ReconcileAI_User_Guide.docx",
+          "ReconcileAI_Admin_Guide.docx",
+        ]),
       }))
       .query(async ({ input }) => {
         // Guides ship inside the repo (docs/guides/) so documentation cannot
         // drift from the deployed code or depend on an external host.
         const { readFile } = await import("fs/promises");
         const { join } = await import("path");
+        const CDN_BASE = "https://files.manuscdn.com/reconcileai/docs";
+        const isDocx = input.filename.endsWith(".docx");
+        const contentType = isDocx
+          ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          : "text/markdown";
+        const url = `${CDN_BASE}/${input.filename}`;
+        if (isDocx) {
+          // For .docx files, return the CDN URL; the client fetches the binary directly.
+          return {
+            filename: input.filename,
+            content: url,
+            contentType,
+            url,
+          };
+        }
         try {
           const content = await readFile(join(process.cwd(), "docs", "guides", input.filename), "utf-8");
           return {
             filename: input.filename,
             content,
-            contentType: "text/markdown",
+            contentType,
+            url,
           };
         } catch {
           throw new TRPCError({
