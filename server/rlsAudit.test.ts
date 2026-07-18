@@ -142,6 +142,11 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   wc_connector_dead_letters: "tenant_required",
   wc_connector_field_mappings: "tenant_required",
 
+  // SHOPLINE retail connector — each row is scoped to an org (orgId NOT NULL)
+  sl_connector_stores: "tenant_required",
+  sl_connector_tokens: "tenant_required",
+  sl_connector_webhook_events: "tenant_required",
+
   // Tenant infrastructure (this hardening work)
   tenant_encryption_keys: "tenant_required",
   tenant_quotas: "tenant_required",

@@ -23,7 +23,7 @@ enforced at three layers:
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 12 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 15 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 39 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
 | `derived` | 6 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
@@ -60,7 +60,19 @@ File keys are access-controlled by signed URLs but not prefixed per tenant.
 *Remediation:* prefix new uploads with `org/<id>/` and add an ownership check
 in `storageGet` (tracked in CLAUDE.md tech-debt table).
 
-## 4. The ratchet rule (for every future PR)
+## 4. SHOPLINE connector tables (Phase 1, July 2026)
+
+Three new tables added in the SHOPLINE Phase 1 connector. All three are
+classified `tenant_required` — `organizationId NOT NULL` with an index,
+following the post-hardening standard for all connector tables.
+
+| Table | Class | Notes |
+|---|---|---|
+| `sl_connector_stores` | `tenant_required` | One row per SHOPLINE merchant store, scoped to the org that installed the connector. |
+| `sl_connector_tokens` | `tenant_required` | Encrypted OAuth access/refresh tokens; FK to `sl_connector_stores` which is itself org-scoped. |
+| `sl_connector_webhook_events` | `tenant_required` | Idempotent webhook event log; scoped to the org that owns the store. |
+
+## 5. The ratchet rule (for every future PR)
 
 Adding a table? The build fails until it is classified in
 `server/rlsAudit.test.ts`. New tenant-data tables **must** be

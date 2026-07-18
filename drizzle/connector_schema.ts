@@ -201,3 +201,103 @@ export const wcConnectorFieldMappings = mysqlTable(
 
 export type WcConnectorFieldMapping = typeof wcConnectorFieldMappings.$inferSelect;
 export type InsertWcConnectorFieldMapping = typeof wcConnectorFieldMappings.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHOPLINE Connector Schema
+// Three tables mirror the WoodCore connector pattern:
+//   sl_connector_stores        — one row per installed SHOPLINE store (tenant-scoped)
+//   sl_connector_tokens        — encrypted OAuth tokens (10h TTL, HMAC refresh)
+//   sl_connector_webhook_events — idempotent webhook event log + DLQ linkage
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const slConnectorStores = mysqlTable(
+  "sl_connector_stores",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    /** SHOPLINE store handle (subdomain, e.g. "mystore") */
+    storeHandle: varchar("storeHandle", { length: 128 }).notNull(),
+    /** SHOPLINE-assigned store ID */
+    storeId: varchar("storeId", { length: 64 }).notNull(),
+    /** SHOPLINE-assigned merchant ID */
+    merchantId: varchar("merchantId", { length: 64 }),
+    /** Primary domain of the store */
+    domain: varchar("domain", { length: 255 }),
+    /** ISO 4217 store currency (e.g. "NGN", "USD") */
+    currency: varchar("currency", { length: 8 }),
+    /** IANA timezone (e.g. "Africa/Lagos") */
+    ianaTimezone: varchar("ianaTimezone", { length: 64 }),
+    /** Comma-separated list of granted OAuth scopes */
+    grantedScopes: text("grantedScopes"),
+    /** API version used at install time (e.g. "v20260601") */
+    apiVersion: varchar("apiVersion", { length: 16 }).default("v20260601").notNull(),
+    /** Install status */
+    status: mysqlEnum("status", ["active", "suspended", "uninstalled"]).default("active").notNull(),
+    installedAt: timestamp("installedAt").defaultNow().notNull(),
+    uninstalledAt: timestamp("uninstalledAt"),
+    lastSyncAt: timestamp("lastSyncAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("idx_sl_store_org_handle").on(t.organizationId, t.storeHandle),
+    index("idx_sl_store_status").on(t.status),
+  ],
+);
+export type SlConnectorStore = typeof slConnectorStores.$inferSelect;
+export type InsertSlConnectorStore = typeof slConnectorStores.$inferInsert;
+
+export const slConnectorTokens = mysqlTable(
+  "sl_connector_tokens",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    /** FK to sl_connector_stores.id */
+    slStoreId: int("slStoreId").notNull(),
+    organizationId: int("organizationId").notNull(),
+    /**
+     * Encrypted access token using tenant envelope encryption (tk1: format).
+     * Tokens expire after 10 hours; refresh is authenticated by app-secret HMAC.
+     */
+    encryptedToken: text("encryptedToken").notNull(),
+    /** UTC expiry timestamp (installedAt + 10h, refreshed on each rotation) */
+    expiresAt: timestamp("expiresAt").notNull(),
+    refreshedAt: timestamp("refreshedAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("idx_sl_token_store").on(t.slStoreId),
+    index("idx_sl_token_expires").on(t.expiresAt),
+  ],
+);
+export type SlConnectorToken = typeof slConnectorTokens.$inferSelect;
+export type InsertSlConnectorToken = typeof slConnectorTokens.$inferInsert;
+
+export const slConnectorWebhookEvents = mysqlTable(
+  "sl_connector_webhook_events",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    slStoreId: int("slStoreId").notNull(),
+    /** SHOPLINE webhook ID (idempotency key — from X-Shopline-Webhook-Id header) */
+    webhookId: varchar("webhookId", { length: 64 }).notNull(),
+    /** Webhook topic (e.g. "orders/paid", "refunds/create") */
+    topic: varchar("topic", { length: 64 }).notNull(),
+    /** Raw payload stored as JSON for replay */
+    payloadJson: json("payloadJson"),
+    /** Processing status */
+    status: mysqlEnum("status", ["pending", "processed", "failed", "dlq"]).default("pending").notNull(),
+    /** Number of processing attempts */
+    attempts: int("attempts").default(0).notNull(),
+    /** Error message if failed */
+    errorMessage: text("errorMessage"),
+    receivedAt: timestamp("receivedAt").defaultNow().notNull(),
+    processedAt: timestamp("processedAt"),
+  },
+  (t) => [
+    uniqueIndex("idx_sl_webhook_id").on(t.webhookId),
+    index("idx_sl_webhook_org_status").on(t.organizationId, t.status),
+    index("idx_sl_webhook_topic").on(t.topic),
+  ],
+);
+export type SlConnectorWebhookEvent = typeof slConnectorWebhookEvents.$inferSelect;
+export type InsertSlConnectorWebhookEvent = typeof slConnectorWebhookEvents.$inferInsert;

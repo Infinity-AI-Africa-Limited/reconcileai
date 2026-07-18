@@ -92,4 +92,10 @@ export const ENV = {
   woodcoreDbUser: process.env.WOODCORE_DB_USER ?? "",
   woodcoreDbPassword: process.env.WOODCORE_DB_PASSWORD ?? "",
   woodcoreDbName: process.env.WOODCORE_DB_NAME ?? "",
+  // ── SHOPLINE App Store connector (set in SHOPLINE Partner Portal) ──────────
+  // App key and app secret are obtained after creating a Public app in the
+  // SHOPLINE Developer Center. Required for OAuth install, token refresh,
+  // and webhook HMAC verification.
+  shoplineAppKey: cleanSecret(process.env.SHOPLINE_APP_KEY),
+  shoplineAppSecret: cleanSecret(process.env.SHOPLINE_APP_SECRET),
 };
