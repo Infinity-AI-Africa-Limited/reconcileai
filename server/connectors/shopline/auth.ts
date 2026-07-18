@@ -1,123 +1,168 @@
 /**
  * SHOPLINE OAuth 2.0 + Token Management
  *
- * OAuth flow (verified from SHOPLINE API docs, v20260601):
+ * OAuth flow (verified from SHOPLINE API docs §A2, v20260601):
  *
- * 1. Install request: redirect merchant to SHOPLINE authorization URL
- *    GET https://{store}.myshopline.com/admin/oauth/authorize
- *        ?app_key={appKey}&scope={scopes}&redirect_uri={callbackUrl}&state={nonce}
+ * 1. Install request: SHOPLINE sends merchant to our App URL with
+ *    `appkey`, `handle`, `timestamp`, `sign`. We verify `sign`, then
+ *    redirect the merchant to the SHOPLINE authorize URL.
  *
- * 2. Callback: SHOPLINE redirects to callbackUrl with `code` + `hmac` + store params.
- *    Verify HMAC (Mode 1), then exchange code for token.
+ * 2. Authorize URL (merchant's browser):
+ *    https://{handle}.myshopline.com/admin/oauth-web/#/oauth/authorize
+ *      ?appKey={appKey}&responseType=code&scope={comma-separated}
+ *      &redirectUri={urlencoded}&customField={optional}
  *
- * 3. Token exchange:
- *    POST https://{store}.myshopline.com/admin/oauth/token
- *    Body: { app_key, app_secret, code }
- *    Response: { access_token, scope, expires_in (36000 = 10h) }
+ * 3. Callback: SHOPLINE redirects to our redirectUri with:
+ *    ?appkey&code&handle&timestamp&sign (+customField)
+ *    Verify `sign`. Code expires in 10 minutes.
  *
- * 4. Token refresh (before expiry, within 5-minute grace):
- *    POST https://{store}.myshopline.com/admin/oauth/token/refresh
- *    Body: { app_key, access_token, timestamp, signature }
- *    signature = HMAC-SHA256(accessToken + appKey + timestamp, appSecret) [Mode 3]
+ * 4. Token create:
+ *    POST https://{handle}.myshopline.com/admin/oauth/token/create
+ *    Headers: `appkey`, `timestamp`, `sign` (POST signature: body + timestamp)
+ *    Body: {"code": "..."}
+ *    Response data: { accessToken, expireTime (UTC ISO), scope }
  *
- * Token TTL: 10 hours (36000 seconds). Refresh proactively at 9h to stay within grace.
+ * 5. Token refresh:
+ *    POST https://{handle}.myshopline.com/admin/oauth/token/refresh
+ *    Headers: `appkey`, `timestamp`, `sign` (POST signature: body + timestamp)
+ *    Body: {} (empty or minimal)
+ *    Token lifetime: 10 hours. Old token stays valid for 5 minutes after refresh.
+ *    Do not refresh immediately after minting (rate-limited: REQUEST_FREQUENTLY).
+ *
+ * 6. Revoke: Cancel Authorization endpoint exists (call on tenant offboard).
  */
 
 import { ENV } from "../../_core/env";
-import { SHOPLINE_API_VERSION, SHOPLINE_REQUIRED_SCOPES, SHOPLINE_TOKEN_TTL_HOURS } from "../../../shared/shoplineConstants";
-import { buildRefreshSignature, verifyOAuthHmac } from "./signature";
+import {
+  SHOPLINE_API_VERSION,
+  SHOPLINE_REQUIRED_SCOPES,
+  SHOPLINE_TOKEN_TTL_HOURS,
+} from "../../../shared/shoplineConstants";
+import { verifyOAuthSignature, buildPostSignature } from "./signature";
 
 export interface ShoplineTokenResponse {
-  access_token: string;
+  /** The access token string */
+  accessToken: string;
+  /** UTC ISO-8601 expiry time (e.g. "2026-07-19T05:00:00Z") */
+  expireTime: string;
+  /** Comma-separated granted scopes */
   scope: string;
-  expires_in: number; // seconds (36000 = 10h)
 }
 
 export interface ShoplineInstallParams {
   storeHandle: string;
   callbackUrl: string;
-  state: string;
+  state?: string; // optional customField for CSRF
 }
 
 /**
  * Build the OAuth authorization URL to redirect the merchant to SHOPLINE.
+ *
+ * Per spec §A2 step 2:
+ *   https://{handle}.myshopline.com/admin/oauth-web/#/oauth/authorize
+ *     ?appKey={appKey}&responseType=code&scope={scopes}&redirectUri={encoded}
  */
 export function buildAuthorizationUrl(params: ShoplineInstallParams): string {
   const { storeHandle, callbackUrl, state } = params;
   const appKey = ENV.shoplineAppKey;
   const scopes = SHOPLINE_REQUIRED_SCOPES.join(",");
 
-  const url = new URL(`https://${storeHandle}.myshopline.com/admin/oauth/authorize`);
-  url.searchParams.set("app_key", appKey);
-  url.searchParams.set("scope", scopes);
-  url.searchParams.set("redirect_uri", callbackUrl);
-  url.searchParams.set("state", state);
-  return url.toString();
+  // Note: this is a hash-based URL (#/oauth/authorize) — we build it manually
+  const base = `https://${storeHandle}.myshopline.com/admin/oauth-web/#/oauth/authorize`;
+  const qs = new URLSearchParams();
+  qs.set("appKey", appKey);
+  qs.set("responseType", "code");
+  qs.set("scope", scopes);
+  qs.set("redirectUri", callbackUrl);
+  if (state) qs.set("customField", state);
+
+  return `${base}?${qs.toString()}`;
 }
 
 /**
- * Verify the HMAC on the OAuth callback and return whether it is valid.
+ * Verify the `sign` on an OAuth install request or callback.
+ *
+ * Per spec §A3 Mode 1: sorted query params (excluding `sign`), joined
+ * as `k=v&k=v`, HMAC-SHA256 with app secret → hex.
  */
-export function verifyCallbackHmac(queryParams: Record<string, string>): boolean {
-  return verifyOAuthHmac(queryParams, ENV.shoplineAppSecret);
+export function verifyCallbackSignature(queryParams: Record<string, string>): boolean {
+  return verifyOAuthSignature(queryParams, ENV.shoplineAppSecret);
 }
 
 /**
  * Exchange the authorization code for an access token.
+ *
+ * Per spec §A2 step 4:
+ *   POST https://{handle}.myshopline.com/admin/oauth/token/create
+ *   Headers: appkey, timestamp (ms), sign (HMAC of body + timestamp)
+ *   Body: {"code": "..."}
+ *   Response: { data: { accessToken, expireTime, scope } }
  */
 export async function exchangeCodeForToken(
   storeHandle: string,
   code: string,
 ): Promise<ShoplineTokenResponse> {
-  const url = `https://${storeHandle}.myshopline.com/admin/oauth/token`;
-  const body = {
-    app_key: ENV.shoplineAppKey,
-    app_secret: ENV.shoplineAppSecret,
-    code,
-  };
+  const url = `https://${storeHandle}.myshopline.com/admin/oauth/token/create`;
+  const body = JSON.stringify({ code });
+  const timestamp = Date.now();
+  const sign = buildPostSignature(body, timestamp, ENV.shoplineAppSecret);
 
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: {
+      "Content-Type": "application/json",
+      "appkey": ENV.shoplineAppKey,
+      "timestamp": String(timestamp),
+      "sign": sign,
+    },
+    body,
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`SHOPLINE token exchange failed (${response.status}): ${text}`);
+    throw new Error(`SHOPLINE token create failed (${response.status}): ${text}`);
   }
 
-  return response.json() as Promise<ShoplineTokenResponse>;
+  const json = await response.json() as { data?: ShoplineTokenResponse; code?: string; message?: string };
+
+  if (!json.data?.accessToken) {
+    throw new Error(`SHOPLINE token create returned error: ${json.code} — ${json.message}`);
+  }
+
+  return json.data;
 }
 
 /**
- * Refresh an expiring access token using HMAC-authenticated refresh.
+ * Refresh an expiring access token.
+ *
+ * Per spec §A2 step 5:
+ *   POST https://{handle}.myshopline.com/admin/oauth/token/refresh
+ *   Headers: appkey, timestamp (ms), sign (HMAC of body + timestamp)
+ *   Body: {} (the current access token is identified server-side by the app session)
+ *
+ * Note: After refresh the old token stays valid for 5 minutes (grace window).
+ * Do not refresh immediately after minting (rate-limited: REQUEST_FREQUENTLY).
+ *
  * Call this proactively at ~9h (1h before the 10h expiry).
  */
 export async function refreshAccessToken(
   storeHandle: string,
-  currentAccessToken: string,
+  _currentAccessToken: string,
 ): Promise<ShoplineTokenResponse> {
-  const timestamp = Math.floor(Date.now() / 1000);
-  const signature = buildRefreshSignature(
-    currentAccessToken,
-    ENV.shoplineAppKey,
-    timestamp,
-    ENV.shoplineAppSecret,
-  );
-
   const url = `https://${storeHandle}.myshopline.com/admin/oauth/token/refresh`;
-  const body = {
-    app_key: ENV.shoplineAppKey,
-    access_token: currentAccessToken,
-    timestamp,
-    signature,
-  };
+  const body = JSON.stringify({});
+  const timestamp = Date.now();
+  const sign = buildPostSignature(body, timestamp, ENV.shoplineAppSecret);
 
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: {
+      "Content-Type": "application/json",
+      "appkey": ENV.shoplineAppKey,
+      "timestamp": String(timestamp),
+      "sign": sign,
+    },
+    body,
   });
 
   if (!response.ok) {
@@ -125,15 +170,25 @@ export async function refreshAccessToken(
     throw new Error(`SHOPLINE token refresh failed (${response.status}): ${text}`);
   }
 
-  return response.json() as Promise<ShoplineTokenResponse>;
+  const json = await response.json() as { data?: ShoplineTokenResponse; code?: string; message?: string };
+
+  if (!json.data?.accessToken) {
+    throw new Error(`SHOPLINE token refresh returned error: ${json.code} — ${json.message}`);
+  }
+
+  return json.data;
 }
 
 /**
- * Calculate the expiry timestamp for a new token.
- * Returns a Date object set to `now + expires_in seconds`.
+ * Calculate the expiry timestamp from the SHOPLINE `expireTime` ISO string.
+ * Falls back to `now + 10h` if the string is unparseable.
  */
-export function calculateTokenExpiry(expiresIn: number = SHOPLINE_TOKEN_TTL_HOURS * 3600): Date {
-  return new Date(Date.now() + expiresIn * 1000);
+export function calculateTokenExpiry(expireTime?: string): Date {
+  if (expireTime) {
+    const parsed = new Date(expireTime);
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(Date.now() + SHOPLINE_TOKEN_TTL_HOURS * 3600 * 1000);
 }
 
 /**

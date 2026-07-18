@@ -33,7 +33,7 @@ import { exchangeCodeForToken } from "../connectors/shopline/auth";
 import { getValidToken, saveToken, deleteToken } from "../connectors/shopline/tokenStore";
 import { ingestWebhook } from "../connectors/shopline/webhookHandler";
 import { runSettlementSync } from "../connectors/shopline/settlementSync";
-import { registerWebhook, listWebhooks, fetchShopMetadata } from "../connectors/shopline/apiClient";
+import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
 import { ENV } from "../_core/env";
 import {
   SHOPLINE_WEBHOOK_TOPICS,
@@ -115,10 +115,10 @@ export const shoplineConnectorRouter = router({
       // Exchange code for token
       const tokenResponse = await exchangeCodeForToken(input.shop, input.code);
 
-      // Fetch shop metadata
-      const shopMeta = await fetchShopMetadata({
+      // Fetch store metadata
+      const shopMeta = await fetchStoreMetadata({
         storeHandle: input.shop,
-        accessToken: tokenResponse.access_token,
+        accessToken: tokenResponse.accessToken,
       });
 
       // Upsert store record
@@ -406,7 +406,7 @@ export const shoplineConnectorRouter = router({
 
       const newStoreId = (inserted as { insertId: number }).insertId;
 
-      const installUrl = `https://${input.storeHandle}.myshopline.com/admin/oauth/authorize?client_id=${ENV.shoplineAppKey}&scope=${SHOPLINE_REQUIRED_SCOPES.join(",")}&redirect_uri=${encodeURIComponent(`${ENV.forgeApiUrl}/shopline/oauth/callback`)}&state=${Buffer.from(JSON.stringify({ orgId: input.organizationId })).toString("base64")}`;
+      const installUrl = `https://${input.storeHandle}.myshopline.com/admin/oauth-web/#/oauth/authorize?appKey=${ENV.shoplineAppKey}&responseType=code&scope=${SHOPLINE_REQUIRED_SCOPES.join(",")}&redirectUri=${encodeURIComponent(`${ENV.forgeApiUrl}/shopline/oauth/callback`)}&customField=${Buffer.from(JSON.stringify({ orgId: input.organizationId })).toString("base64")}`;
 
       return { success: true, storeId: newStoreId, installUrl };
     }),

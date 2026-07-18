@@ -2,7 +2,7 @@
  * SHOPLINE Token Store
  *
  * Persists encrypted SHOPLINE access tokens in the `sl_connector_tokens` table.
- * Tokens are AES-256-GCM encrypted using the tenant envelope key before storage.
+ * Tokens are AES-256-GCM encrypted using a key derived from JWT_SECRET before storage.
  * Refresh is triggered proactively at 9h (1h before the 10h TTL expires).
  *
  * Public API:
@@ -80,7 +80,7 @@ export async function getValidToken(
     try {
       const refreshed = await refreshAccessToken(storeHandle, plainToken);
       await saveToken(db, slStoreId, organizationId, refreshed);
-      return refreshed.access_token;
+      return refreshed.accessToken;
     } catch (err) {
       // If refresh fails, return the existing token (may still be valid for up to 1h)
       console.error(`[SHOPLINE] Token refresh failed for store ${slStoreId}:`, err);
@@ -101,8 +101,8 @@ export async function saveToken(
   organizationId: number,
   tokenResponse: ShoplineTokenResponse,
 ): Promise<void> {
-  const encryptedToken = encryptToken(tokenResponse.access_token);
-  const expiresAt = calculateTokenExpiry(tokenResponse.expires_in);
+  const encryptedToken = encryptToken(tokenResponse.accessToken);
+  const expiresAt = calculateTokenExpiry(tokenResponse.expireTime);
 
   // Upsert: delete existing then insert (MySQL doesn't have ON CONFLICT DO UPDATE for composite keys easily)
   await db

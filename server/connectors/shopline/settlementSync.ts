@@ -10,11 +10,14 @@
  *   - Manual "Sync Now" from the Super Admin portal
  *   - The initial 90-day historical backfill on install
  *
- * Data flow:
- *   SHOPLINE API → fetchOrders/fetchTransactions/fetchPayouts
- *     → normaliseToRawData()
- *       → retailReconciliationEngine.runRetailReconciliation()
- *         → exceptions stored in DB
+ * Data flow (spec §A6 three-leg join):
+ *   Orders (source leg) — what the merchant sold
+ *   Payment Transactions (gateway leg) — what the gateway captured
+ *   Balance Transactions (settlement leg) — what was actually settled/paid out
+ *
+ * The reconciliation engine matches source ↔ target:
+ *   Source = orders (expected settlement amounts)
+ *   Target = payment transactions with settlement confirmation
  */
 
 import { getDb } from "../../db";
@@ -24,10 +27,10 @@ import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { getValidToken } from "./tokenStore";
 import {
   fetchOrders,
-  fetchTransactions,
+  fetchPaymentTransactions,
   fetchPayouts,
   type ShoplineOrder,
-  type ShoplineTransaction,
+  type ShoplinePaymentTransaction,
   type ShoplinePayout,
 } from "./apiClient";
 import {
@@ -108,14 +111,14 @@ export async function runSettlementSync(
     const fromIso = window.from.toISOString();
     const toIso = window.to.toISOString();
 
-    // ── Fetch all orders in window (paginated) ──────────────────────────────
+    // ── Fetch all orders in window (paginated, using updated_at watermark) ──
     const orders: ShoplineOrder[] = [];
     let orderPageInfo: string | null = null;
     do {
       const page = await fetchOrders(opts, {
-        status: "paid",
-        createdAtMin: fromIso,
-        createdAtMax: toIso,
+        financialStatus: "paid",
+        updatedAtMin: fromIso,
+        updatedAtMax: toIso,
         limit: 250,
         pageInfo: orderPageInfo ?? undefined,
       });
@@ -123,13 +126,14 @@ export async function runSettlementSync(
       orderPageInfo = page.nextPageInfo;
     } while (orderPageInfo);
 
-    // ── Fetch payment transactions in window (paginated) ────────────────────
-    const transactions: ShoplineTransaction[] = [];
+    // ── Fetch payment transactions in window (paginated, ≤6 months) ─────────
+    // Spec: date_min/date_max required, max 6 months apart
+    const transactions: ShoplinePaymentTransaction[] = [];
     let txPageInfo: string | null = null;
     do {
-      const page = await fetchTransactions(opts, {
-        createdAtMin: fromIso,
-        createdAtMax: toIso,
+      const page = await fetchPaymentTransactions(opts, {
+        dateMin: fromIso,
+        dateMax: toIso,
         limit: 250,
         pageInfo: txPageInfo ?? undefined,
       });
@@ -137,16 +141,14 @@ export async function runSettlementSync(
       txPageInfo = page.nextPageInfo;
     } while (txPageInfo);
 
-    // ── Fetch payouts in window ─────────────────────────────────────────────
+    // ── Fetch payouts in window (paginated, ≤3 months) ─────────────────────
     const payouts: ShoplinePayout[] = [];
     let payoutPageInfo: string | null = null;
-    const dateMin = window.from.toISOString().slice(0, 10);
-    const dateMax = window.to.toISOString().slice(0, 10);
     do {
       const page = await fetchPayouts(opts, {
-        dateMin,
-        dateMax,
-        limit: 250,
+        startTime: fromIso,
+        endTime: toIso,
+        limit: 50,
         pageInfo: payoutPageInfo ?? undefined,
       });
       payouts.push(...page.data);
@@ -211,70 +213,83 @@ export async function runSettlementSync(
  * expected by the retail reconciliation engine.
  *
  * Source = SHOPLINE order-level expected amounts (what should have been settled)
- * Target = SHOPLINE payout transactions (what was actually settled)
+ * Target = SHOPLINE payment transactions (what was actually captured by the gateway)
+ *
+ * The three-leg join (spec §A6):
+ *   Order.id → PaymentTransaction.seller_order_id (join key)
+ *   PaymentTransaction.channel_deal_id → BalanceTransaction.source_order_transaction_id
  */
 function normaliseToTransactions(
   orders: ShoplineOrder[],
-  transactions: ShoplineTransaction[],
-  payouts: ShoplinePayout[],
+  transactions: ShoplinePaymentTransaction[],
+  _payouts: ShoplinePayout[],
   currency: string,
 ): { sourceTxns: Transaction[]; targetTxns: Transaction[] } {
   // Synthetic batch/channel/user IDs for engine compatibility
-  // (the engine only uses id, amount, currency, transactionDate, transactionRef, description, rawData)
   const SYNTHETIC_BATCH = -1;
   const SYNTHETIC_CHANNEL = -1;
   const SYNTHETIC_USER = -1;
 
   // Source = paid orders (expected settlement amounts)
   const sourceTxns: Transaction[] = orders
-    .filter((o) => o.financial_status === "paid")
-    .map((o, idx) => ({
-      id: -(idx + 1), // negative IDs to avoid DB collision — engine uses these for matching only
-      batchId: SYNTHETIC_BATCH,
-      channelId: SYNTHETIC_CHANNEL,
-      userId: SYNTHETIC_USER,
-      organizationId: null,
-      transactionRef: o.order_number,
-      externalRef: o.id,
-      description: `Order ${o.order_number} via ${o.gateway}`,
-      amount: o.total_price, // keep as string (decimal type)
-      currency,
-      transactionDate: new Date(o.processed_at),
-      valueDate: null,
-      debitCredit: "credit" as const,
-      counterparty: o.gateway,
-      isReversal: false,
-      originalTransactionRef: null,
-      status: "unmatched" as const,
-      matchId: null,
-      rawData: { orderId: o.id, gateway: o.gateway, financialStatus: o.financial_status },
-      createdAt: new Date(o.created_at),
-    }));
+    .filter((o) => o.financial_status === "paid" || o.financial_status === "partially_refunded")
+    .map((o, idx) => {
+      const totalPrice = o.current_total_price_set?.shop_money?.amount ?? "0";
+      const gateway = o.payment_gateway_names?.[0] ?? "unknown";
+      return {
+        id: -(idx + 1), // negative IDs to avoid DB collision — engine uses these for matching only
+        batchId: SYNTHETIC_BATCH,
+        channelId: SYNTHETIC_CHANNEL,
+        userId: SYNTHETIC_USER,
+        organizationId: null,
+        transactionRef: o.name, // order name/number (e.g. "#1001")
+        externalRef: o.id,
+        description: `Order ${o.name} via ${gateway}`,
+        amount: totalPrice,
+        currency,
+        transactionDate: new Date(o.processed_at),
+        valueDate: null,
+        debitCredit: "credit" as const,
+        counterparty: gateway,
+        isReversal: false,
+        originalTransactionRef: null,
+        status: "unmatched" as const,
+        matchId: null,
+        rawData: { orderId: o.id, gateway, financialStatus: o.financial_status },
+        createdAt: new Date(o.created_at),
+      };
+    });
 
   // Target = successful payment transactions (actual gateway captures)
   const targetTxns: Transaction[] = transactions
-    .filter((t) => t.status === "success" && t.kind === "capture")
+    .filter((t) => t.status === "SUCCESS" || t.status === "success")
     .map((t, idx) => ({
       id: -(orders.length + idx + 1),
       batchId: SYNTHETIC_BATCH,
       channelId: SYNTHETIC_CHANNEL,
       userId: SYNTHETIC_USER,
       organizationId: null,
-      transactionRef: t.authorization ?? t.id,
-      externalRef: t.id,
-      description: `${t.kind} via ${t.gateway}`,
-      amount: t.amount,
+      transactionRef: t.channel_deal_id ?? t.trade_order_id,
+      externalRef: t.trade_order_id,
+      description: `${t.payment_method} capture via ${t.sub_payment_method ?? t.payment_method}`,
+      amount: t.paid_amount ?? t.amount,
       currency: t.currency,
-      transactionDate: new Date(t.processed_at),
+      transactionDate: new Date(t.create_time),
       valueDate: null,
       debitCredit: "credit" as const,
-      counterparty: t.gateway,
+      counterparty: t.payment_method,
       isReversal: false,
       originalTransactionRef: null,
       status: "unmatched" as const,
       matchId: null,
-      rawData: { transactionId: t.id, orderId: t.order_id, gateway: t.gateway, kind: t.kind },
-      createdAt: new Date(t.created_at),
+      rawData: {
+        tradeOrderId: t.trade_order_id,
+        sellerOrderId: t.seller_order_id,
+        channelDealId: t.channel_deal_id,
+        fee: t.fee,
+        disputeType: t.dispute_type,
+      },
+      createdAt: new Date(t.create_time),
     }));
 
   return { sourceTxns, targetTxns };

@@ -1,30 +1,40 @@
 /**
  * SHOPLINE Signature Verification
  *
- * SHOPLINE uses three HMAC-SHA256 signature modes (verified from API docs):
+ * SHOPLINE uses three HMAC-SHA256 signature modes (verified from API docs §A3):
  *
- * Mode 1 — OAuth install/callback: HMAC-SHA256 of the sorted query params
- *   (excluding `hmac` itself), joined as `key=value&key=value`, keyed by app secret.
+ * Mode 1 — GET requests (install request, OAuth callback):
+ *   Source string: URL-encoded query params, `sign` removed, remaining params
+ *   sorted alphabetically, joined `k=v&k=v`. Key = app secret. Result = hex.
+ *   The signature travels as the `sign` query param.
+ *   Enforce a ±10-minute timestamp window for replay protection.
  *
- * Mode 2 — Webhook delivery: HMAC-SHA256 of the raw request body, keyed by
- *   app secret. Signature is in the `X-Shopline-Hmac-Sha256` header (base64).
+ * Mode 2 — Webhook delivery:
+ *   Source string: raw request body. Key = app secret.
+ *   Signature in `X-Shopline-Hmac-Sha256` header.
+ *   SHOPLINE's Go sample compares hex digests, but their header example looks
+ *   base64 — implement a tolerant verifier that accepts either encoding.
  *
- * Mode 3 — Token refresh: HMAC-SHA256 of `access_token + app_key + timestamp`,
- *   keyed by app secret. Used to authenticate the refresh request.
+ * Mode 3 — POST requests (token create/refresh):
+ *   Source string: `body + timestamp` (millisecond timestamp appended to raw
+ *   JSON body string). Key = app secret. Result = hex.
+ *   Signature travels in `sign` header alongside `timestamp` header.
  *
  * All comparisons use `timingSafeEqual` to prevent timing attacks.
  */
 
 import { createHmac, timingSafeEqual } from "crypto";
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
 /** Compute HMAC-SHA256 and return as hex string. */
-function hmacHex(secret: string, data: string): string {
-  return createHmac("sha256", secret).update(data, "utf8").digest("hex");
+function hmacHex(secret: string, data: string | Buffer): string {
+  return createHmac("sha256", secret).update(data).digest("hex");
 }
 
 /** Compute HMAC-SHA256 and return as base64 string. */
-function hmacBase64(secret: string, data: string): string {
-  return createHmac("sha256", secret).update(data, "utf8").digest("base64");
+function hmacBase64(secret: string, data: string | Buffer): string {
+  return createHmac("sha256", secret).update(data).digest("base64");
 }
 
 /** Constant-time string comparison. */
@@ -39,18 +49,38 @@ function safeEqual(a: string, b: string): boolean {
   }
 }
 
+/** Check whether a timestamp (in seconds) is within ±10 minutes of now. */
+export function isTimestampValid(timestampSec: number, windowMs = 10 * 60 * 1000): boolean {
+  const nowMs = Date.now();
+  const tsMs = timestampSec * 1000;
+  return Math.abs(nowMs - tsMs) <= windowMs;
+}
+
+// ─── Mode 1: OAuth GET request signature ────────────────────────────────────
+
 /**
- * Mode 1: Verify the HMAC on an OAuth install/callback request.
+ * Verify the HMAC on an OAuth install/callback GET request.
  *
- * @param queryParams - Raw query string params as a plain object (including `hmac`)
+ * Per SHOPLINE spec §A3:
+ *   - The signature param is named `sign` (not `hmac`)
+ *   - Remove `sign` from the params, sort remaining alphabetically
+ *   - Join as `key=value&key=value`
+ *   - HMAC-SHA256 with app secret → hex
+ *   - Enforce ±10 minute timestamp window
+ *
+ * @param queryParams - Raw query string params as a plain object (including `sign`)
  * @param appSecret   - The app secret from the SHOPLINE Partner Portal
  */
-export function verifyOAuthHmac(
+export function verifyOAuthSignature(
   queryParams: Record<string, string>,
   appSecret: string,
 ): boolean {
-  const { hmac, ...rest } = queryParams;
-  if (!hmac) return false;
+  const { sign, ...rest } = queryParams;
+  if (!sign) return false;
+
+  // Enforce timestamp window (SHOPLINE sends `timestamp` as seconds)
+  const ts = rest["timestamp"];
+  if (ts && !isTimestampValid(Number(ts))) return false;
 
   // Sort keys, join as key=value pairs, compute HMAC
   const message = Object.keys(rest)
@@ -59,14 +89,22 @@ export function verifyOAuthHmac(
     .join("&");
 
   const expected = hmacHex(appSecret, message);
-  return safeEqual(hmac, expected);
+  return safeEqual(sign, expected);
 }
 
+// ─── Mode 2: Webhook delivery signature ─────────────────────────────────────
+
 /**
- * Mode 2: Verify the HMAC on an inbound webhook delivery.
+ * Verify the HMAC on an inbound webhook delivery.
+ *
+ * Per SHOPLINE spec §A3:
+ *   - Source string = raw request body
+ *   - Key = app secret
+ *   - Signature is in `X-Shopline-Hmac-Sha256` header
+ *   - Tolerant verifier: accept either hex or base64 encoding
  *
  * @param rawBody   - Raw request body as a Buffer or string
- * @param signature - Value of the `X-Shopline-Hmac-Sha256` header (base64)
+ * @param signature - Value of the `X-Shopline-Hmac-Sha256` header
  * @param appSecret - The app secret from the SHOPLINE Partner Portal
  */
 export function verifyWebhookHmac(
@@ -76,27 +114,55 @@ export function verifyWebhookHmac(
 ): boolean {
   if (!signature) return false;
   const body = typeof rawBody === "string" ? rawBody : rawBody.toString("utf8");
-  const expected = hmacBase64(appSecret, body);
-  return safeEqual(signature, expected);
+
+  // Try base64 first (SHOPLINE's documented format)
+  const expectedBase64 = hmacBase64(appSecret, body);
+  if (safeEqual(signature, expectedBase64)) return true;
+
+  // Fallback: try hex (SHOPLINE's Go sample uses hex)
+  const expectedHex = hmacHex(appSecret, body);
+  if (safeEqual(signature, expectedHex)) return true;
+
+  return false;
 }
 
+// ─── Mode 3: POST request signature (token create/refresh) ──────────────────
+
 /**
- * Mode 3: Generate the HMAC signature for a token refresh request.
+ * Build the HMAC signature for a POST request (token create or refresh).
  *
- * The refresh endpoint requires:
- *   signature = HMAC-SHA256(accessToken + appKey + timestamp, appSecret)
+ * Per SHOPLINE spec §A3:
+ *   Source string = `body + timestamp` (raw JSON body string concatenated
+ *   with the millisecond timestamp). Key = app secret. Result = hex.
  *
- * @param accessToken - The current (expiring) access token
- * @param appKey      - The app key from the SHOPLINE Partner Portal
- * @param timestamp   - Unix timestamp in seconds (use Math.floor(Date.now() / 1000))
- * @param appSecret   - The app secret from the SHOPLINE Partner Portal
+ * @param bodyJson   - The raw JSON body string
+ * @param timestamp  - Millisecond timestamp (Date.now())
+ * @param appSecret  - The app secret from the SHOPLINE Partner Portal
  */
-export function buildRefreshSignature(
-  accessToken: string,
-  appKey: string,
+export function buildPostSignature(
+  bodyJson: string,
   timestamp: number,
   appSecret: string,
 ): string {
-  const message = `${accessToken}${appKey}${timestamp}`;
+  const message = `${bodyJson}${timestamp}`;
   return hmacHex(appSecret, message);
+}
+
+/**
+ * Build the HMAC signature specifically for the token refresh endpoint.
+ *
+ * Per SHOPLINE spec §A2 step 5:
+ *   POST /admin/oauth/token/refresh authenticated by app signature alone.
+ *   The signature is computed over `body + timestamp` (same as Mode 3).
+ *
+ * @param bodyJson   - The raw JSON body string for the refresh request
+ * @param timestamp  - Millisecond timestamp
+ * @param appSecret  - The app secret from the SHOPLINE Partner Portal
+ */
+export function buildRefreshSignature(
+  bodyJson: string,
+  timestamp: number,
+  appSecret: string,
+): string {
+  return buildPostSignature(bodyJson, timestamp, appSecret);
 }

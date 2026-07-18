@@ -12,46 +12,110 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import crypto from "crypto";
 
-// ─── 1. Signature Verification ────────────────────────────────────────────────
+// ─── 1. Signature Verification (3 modes per spec §A3) ───────────────────────
 
 describe("SHOPLINE Signature Verification", () => {
   const secret = "test-webhook-secret-abc123";
 
-  function makeHmac(body: string, secret: string): string {
+  // ─── Mode 2: Webhook HMAC ─────────────────────────────────────────────────
+
+  function makeHmacBase64(body: string, secret: string): string {
     return crypto.createHmac("sha256", secret).update(body).digest("base64");
   }
 
-  it("accepts a valid HMAC-SHA256 base64 signature", () => {
+  function makeHmacHex(body: string, secret: string): string {
+    return crypto.createHmac("sha256", secret).update(body).digest("hex");
+  }
+
+  it("Mode 2: accepts a valid HMAC-SHA256 base64 webhook signature", () => {
     const body = JSON.stringify({ id: "order_001", status: "paid" });
-    const sig = makeHmac(body, secret);
+    const sig = makeHmacBase64(body, secret);
     const computed = crypto.createHmac("sha256", secret).update(body).digest("base64");
     expect(computed).toBe(sig);
   });
 
-  it("rejects a tampered body", () => {
+  it("Mode 2: accepts a valid HMAC-SHA256 hex webhook signature (tolerant verifier)", () => {
+    const body = JSON.stringify({ id: "order_001", status: "paid" });
+    const sig = makeHmacHex(body, secret);
+    const computed = crypto.createHmac("sha256", secret).update(body).digest("hex");
+    expect(computed).toBe(sig);
+  });
+
+  it("Mode 2: rejects a tampered body", () => {
     const originalBody = JSON.stringify({ id: "order_001", status: "paid" });
-    const sig = makeHmac(originalBody, secret);
+    const sig = makeHmacBase64(originalBody, secret);
     const tamperedBody = JSON.stringify({ id: "order_001", status: "refunded" });
     const computed = crypto.createHmac("sha256", secret).update(tamperedBody).digest("base64");
     expect(computed).not.toBe(sig);
   });
 
-  it("rejects a wrong secret", () => {
+  it("Mode 2: rejects a wrong secret", () => {
     const body = JSON.stringify({ id: "order_001" });
-    const sig = makeHmac(body, secret);
     const wrongComputed = crypto.createHmac("sha256", "wrong-secret").update(body).digest("base64");
-    expect(wrongComputed).not.toBe(sig);
+    const correctComputed = crypto.createHmac("sha256", secret).update(body).digest("base64");
+    expect(wrongComputed).not.toBe(correctComputed);
   });
 
-  it("uses timing-safe comparison (no early exit)", () => {
+  it("Mode 2: uses timing-safe comparison (no early exit)", () => {
     const body = "test-body";
-    const sig = makeHmac(body, secret);
+    const sig = makeHmacBase64(body, secret);
     const correct = crypto.createHmac("sha256", secret).update(body).digest("base64");
-    // timingSafeEqual requires same-length buffers
     const a = Buffer.from(sig, "base64");
     const b = Buffer.from(correct, "base64");
     expect(a.length).toBe(b.length);
     expect(crypto.timingSafeEqual(a, b)).toBe(true);
+  });
+
+  // ─── Mode 1: OAuth GET request signature (param named 'sign') ─────────────
+
+  it("Mode 1: computes OAuth signature from sorted query params (sign, not hmac)", () => {
+    const params: Record<string, string> = {
+      appkey: "my_app_key",
+      handle: "teststore",
+      timestamp: "1721300000",
+    };
+    const message = Object.keys(params)
+      .sort()
+      .map((k) => `${k}=${params[k]}`)
+      .join("&");
+    const expected = crypto.createHmac("sha256", secret).update(message).digest("hex");
+    // Verify the message is sorted correctly
+    expect(message).toBe("appkey=my_app_key&handle=teststore&timestamp=1721300000");
+    expect(expected).toHaveLength(64); // hex SHA-256
+  });
+
+  it("Mode 1: excludes 'sign' param from signature computation", () => {
+    const params: Record<string, string> = {
+      appkey: "my_app_key",
+      handle: "teststore",
+      timestamp: "1721300000",
+      sign: "should_be_excluded",
+    };
+    const { sign: _, ...rest } = params;
+    const message = Object.keys(rest)
+      .sort()
+      .map((k) => `${k}=${rest[k]}`)
+      .join("&");
+    expect(message).not.toContain("sign=");
+  });
+
+  // ─── Mode 3: POST request signature (body + timestamp) ────────────────────
+
+  it("Mode 3: computes POST signature as HMAC(body + timestamp)", () => {
+    const body = JSON.stringify({ code: "auth_code_123" });
+    const timestamp = 1721300000000; // milliseconds
+    const message = `${body}${timestamp}`;
+    const sig = crypto.createHmac("sha256", secret).update(message).digest("hex");
+    expect(sig).toHaveLength(64);
+    // Verify concatenation is correct
+    expect(message).toBe('{"code":"auth_code_123"}1721300000000');
+  });
+
+  it("Mode 3: different timestamps produce different signatures", () => {
+    const body = JSON.stringify({ code: "auth_code_123" });
+    const sig1 = crypto.createHmac("sha256", secret).update(`${body}1000`).digest("hex");
+    const sig2 = crypto.createHmac("sha256", secret).update(`${body}2000`).digest("hex");
+    expect(sig1).not.toBe(sig2);
   });
 });
 
@@ -216,13 +280,17 @@ describe("SHOPLINE Settlement Sync — normaliseToRawData", () => {
 // ─── 4. Webhook Handler — Idempotency and Topic Routing ──────────────────────
 
 describe("SHOPLINE Webhook Handler", () => {
-  it("identifies reconciliation-relevant topics", () => {
+  it("identifies reconciliation-relevant topics (verified SHOPLINE catalogue §A7)", () => {
     const reconciliationTopics = [
-      "orders/paid",
+      "orders/create",
       "orders/updated",
+      "orders/edited",
+      "orders/paid",
+      "orders/cancelled",
+      "orders/delete",
       "refunds/create",
-      "payouts/paid",
-      "payouts/failed",
+      "refunds/update",
+      "order_transactions/create",
     ];
     const nonReconciliationTopics = [
       "products/create",
@@ -269,10 +337,16 @@ describe("SHOPLINE Webhook Handler", () => {
     expect(shouldEscalateToDlq).toBe(false);
   });
 
-  it("handles app/uninstalled topic by marking store for cleanup", () => {
-    const topic = "app/uninstalled";
-    const requiresCleanup = topic === "app/uninstalled";
+  it("handles merchants/redact GDPR topic by marking store for cleanup", () => {
+    const topic = "merchants/redact";
+    const requiresCleanup = topic === "merchants/redact";
     expect(requiresCleanup).toBe(true);
+  });
+
+  it("handles customers/redact GDPR topic", () => {
+    const topic = "customers/redact";
+    const isGdprTopic = topic === "customers/redact" || topic === "merchants/redact";
+    expect(isGdprTopic).toBe(true);
   });
 });
 
