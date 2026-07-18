@@ -67,10 +67,38 @@ export type RetailChannelType = (typeof RETAIL_CHANNEL_TYPES)[number];
 export const SHOPLINE_REVENUE_SHARE_PERCENT = 15;
 
 // ─── API Scopes ──────────────────────────────────────────────────────────────
-// Required OAuth scopes for the SHOPLINE App Store integration (Tier 1)
+// Required OAuth scopes for the SHOPLINE App Store integration (Tier 1).
+// VERIFIED against the published AccessScope list (developer.shopline.com,
+// 2026-07-18 — see docs/SHOPLINE_PHASE1_API_EXTRACT.md §A4). Note: settlement
+// and payout data live under `read_payment` (singular); there is no
+// `read_settlements` scope, and store info is `read_store_information`.
 export const SHOPLINE_REQUIRED_SCOPES = [
-  "read_orders",
-  "read_payments",
-  "read_settlements",
-  "read_shop",
+  "read_orders", // orders, transactions, fulfillments, order payment
+  "read_payment", // SHOPLINE Payments: payouts, balance, transactions, billing records
+  "read_store_information", // store info incl. currency + iana_timezone
+  "read_returns", // returns / return orders (refund-leg reconciliation)
+  "read_gift_card", // gift card ops (retail_giftcard_split_tender category)
 ] as const;
+
+// ─── Verified API constants (docs/SHOPLINE_PHASE1_API_EXTRACT.md) ────────────
+/** Current stable Admin REST API version (quarterly cadence, 12-month support). */
+export const SHOPLINE_API_VERSION = "v20260601";
+
+/** Access tokens expire after 10 hours; refresh proactively well before. */
+export const SHOPLINE_TOKEN_TTL_HOURS = 10;
+
+/** Webhook topics the Tier 1 connector subscribes to per store. */
+export const SHOPLINE_WEBHOOK_TOPICS = [
+  "orders/create",
+  "orders/updated",
+  "orders/edited",
+  "orders/paid",
+  "orders/cancelled",
+  "orders/delete",
+  "refunds/create",
+  "refunds/update",
+  "order_transactions/create",
+] as const;
+
+/** Mandatory GDPR topics (configured in the SHOPLINE Developer Center, not via API). */
+export const SHOPLINE_GDPR_TOPICS = ["customers/redact", "merchants/redact"] as const;
