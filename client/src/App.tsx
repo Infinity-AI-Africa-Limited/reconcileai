@@ -66,6 +66,8 @@ import MagicLogin from "./pages/MagicLogin";
 import Login from "./pages/Login";
 import SuperAdminDashboard from "./pages/SuperAdminDashboard";
 import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
+import SettlementMonitor from "./pages/SettlementMonitor";
+import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -138,6 +140,9 @@ function Router() {
           <Route path="/admin/super-admin/analytics">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
+      <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
+      <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
+      <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
       <Route path="/shopline/welcome" component={ShoplineWelcome} />
       <Route path="/shopline/error" component={ShoplineError} />
       <Route path="/login" component={Login} />

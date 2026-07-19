@@ -412,6 +412,153 @@ export const shoplineConnectorRouter = router({
     }),
 
   /**
+   * Sync status overview — aggregated metrics for the settlement monitor.
+   */
+  syncStatus: protectedProcedure.query(async ({ ctx }) => {
+    const db = await getDb();
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+    const orgId = requireOrgId(ctx.user);
+
+    // Get recent webhook events for this org
+    const events = await db
+      .select()
+      .from(slConnectorWebhookEvents)
+      .where(eq(slConnectorWebhookEvents.organizationId, orgId))
+      .orderBy(desc(slConnectorWebhookEvents.receivedAt))
+      .limit(100);
+
+    const processedEvents = events.filter((e) => e.status === "processed");
+    const failedEvents = events.filter((e) => e.status === "failed" || e.status === "dlq");
+
+    // Calculate basic metrics from webhook event data
+    // In production, these would come from the transactions/exceptions tables
+    const totalEvents = events.length;
+    const matchRate = totalEvents > 0 ? (processedEvents.length / totalEvents) * 100 : 0;
+
+    return {
+      totalSettled: 0, // Will be populated from transactions table once data flows
+      totalPending: 0,
+      totalExceptions: failedEvents.length,
+      matchRate,
+      recentPayouts: [] as Array<{
+        id: number;
+        date: string;
+        storeHandle: string;
+        amount: number;
+        currency: string;
+        status: string;
+        reconciled: boolean;
+      }>,
+    };
+  }),
+
+  /**
+   * Recent webhook events for the sync status page.
+   */
+  recentWebhookEvents: protectedProcedure
+    .input(z.object({ limit: z.number().min(1).max(200).default(50) }))
+    .query(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const orgId = requireOrgId(ctx.user);
+
+      const events = await db
+        .select({
+          id: slConnectorWebhookEvents.id,
+          topic: slConnectorWebhookEvents.topic,
+          status: slConnectorWebhookEvents.status,
+          receivedAt: slConnectorWebhookEvents.receivedAt,
+          slStoreId: slConnectorWebhookEvents.slStoreId,
+        })
+        .from(slConnectorWebhookEvents)
+        .where(eq(slConnectorWebhookEvents.organizationId, orgId))
+        .orderBy(desc(slConnectorWebhookEvents.receivedAt))
+        .limit(input.limit);
+
+      // Enrich with store handle
+      const storeIds = Array.from(new Set(events.map((e) => e.slStoreId)));
+      const stores = storeIds.length > 0
+        ? await db
+            .select({ id: slConnectorStores.id, storeHandle: slConnectorStores.storeHandle })
+            .from(slConnectorStores)
+            .where(eq(slConnectorStores.organizationId, orgId))
+        : [];
+      const storeMap = new Map(stores.map((s) => [s.id, s.storeHandle]));
+
+      return events.map((e) => ({
+        ...e,
+        storeHandle: storeMap.get(e.slStoreId) ?? "unknown",
+      }));
+    }),
+
+  /**
+   * Trigger a manual sync for a specific store (any authenticated user).
+   */
+  triggerManualSync: protectedProcedure
+    .input(z.object({ storeId: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const orgId = requireOrgId(ctx.user);
+
+      // Verify store belongs to org
+      const stores = await db
+        .select()
+        .from(slConnectorStores)
+        .where(
+          and(
+            eq(slConnectorStores.id, input.storeId),
+            eq(slConnectorStores.organizationId, orgId),
+          ),
+        )
+        .limit(1);
+
+      if (stores.length === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Store not found" });
+      }
+
+      const store = stores[0];
+      const { runSyncCycle } = await import("../connectors/shopline/syncOrchestrator");
+
+      const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000);
+      const now = new Date();
+
+      const report = await runSyncCycle({
+        organizationId: orgId,
+        slStoreId: store.id,
+        from: fifteenMinAgo,
+        to: now,
+        triggeredBy: ctx.user.id,
+      });
+
+      if (!report.success) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: report.error ?? "Sync failed",
+        });
+      }
+
+      // Update lastSyncAt
+      await db
+        .update(slConnectorStores)
+        .set({ lastSyncAt: new Date() })
+        .where(eq(slConnectorStores.id, input.storeId));
+
+      return {
+        storeHandle: store.storeHandle,
+        ordersIngested: report.ordersIngested,
+        paymentsIngested: report.paymentsIngested,
+        payoutsIngested: report.payoutsIngested,
+        matchedCount: report.matchedCount,
+        exceptionCount: report.exceptionCount,
+        durationMs: report.durationMs,
+      };
+    }),
+
+  /**
    * Super admin: list all SHOPLINE stores across all organizations.
    */
   listAllStores: superAdminProcedure
