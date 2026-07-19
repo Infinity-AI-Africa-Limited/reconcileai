@@ -5,20 +5,18 @@
  */
 import mysql from "mysql2/promise";
 import { ENV } from "./_core/env";
+import { createResilientPool, isConnectionError } from "./mysqlPool";
 
 let pool: mysql.Pool | null = null;
 
 function createPool(): mysql.Pool {
-  return mysql.createPool({
+  return createResilientPool({
     host: ENV.woodcoreDbHost,
     port: ENV.woodcoreDbPort,
     user: ENV.woodcoreDbUser,
     password: ENV.woodcoreDbPassword,
     database: ENV.woodcoreDbName,
-    waitForConnections: true,
     connectionLimit: 5,
-    queueLimit: 0,
-    connectTimeout: 15000,
     // Force all DATE/DATETIME columns to return as strings, not JS Date objects.
     // This prevents React "Objects are not valid as a React child" errors when
     // rendering date fields directly in JSX.
@@ -43,9 +41,10 @@ export async function woodcoreQuery<T = Record<string, unknown>>(
     const [rows] = await p.execute(sql, params);
     return rows as T[];
   } catch (err: unknown) {
-    // If the pool has gone stale (e.g. server restarted), recreate it and retry once
-    const code = (err as { code?: string }).code;
-    if (code === "ECONNRESET" || code === "PROTOCOL_CONNECTION_LOST" || code === "ECONNREFUSED") {
+    // The pool already retried once on a fresh connection (mysqlPool.ts).
+    // If that also failed, the whole pool is likely stale (e.g. server
+    // restarted): recreate it and retry one last time.
+    if (isConnectionError(err)) {
       pool = null;
       const p = getWoodcorePool();
       const [rows] = await p.execute(sql, params);

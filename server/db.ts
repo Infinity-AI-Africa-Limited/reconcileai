@@ -1,5 +1,5 @@
 import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
+import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import * as schema from "../drizzle/schema";
 import {
   InsertUser, users,
@@ -35,6 +35,7 @@ import {
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 import { computeRecordHash } from "./auditChain";
+import { createResilientPool } from "./mysqlPool";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -47,12 +48,16 @@ const BATCH_INSERT_SIZE = 1000;
 
 // ─── Database Connection ────────────────────────────────────────────
 
-let _db: ReturnType<typeof drizzle> | null = null;
+let _db: MySql2Database<typeof schema> | null = null;
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL, { schema, mode: "default" });
+      // Explicit pool instead of letting drizzle create a default one:
+      // TiDB Cloud serverless drops idle connections, and the default pool
+      // never recovers (every query fails with ECONNRESET until restart).
+      const pool = createResilientPool({ uri: process.env.DATABASE_URL });
+      _db = drizzle(pool, { schema, mode: "default" });
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;

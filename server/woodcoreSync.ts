@@ -18,6 +18,7 @@
  */
 import mysql from "mysql2/promise";
 import { getWoodcorePool } from "./woodcoreDb";
+import { createResilientPool } from "./mysqlPool";
 import { ENV } from "./_core/env";
 
 type TableSpec = { live: string; mirror: string; cols: string[]; batch: number };
@@ -75,7 +76,7 @@ let tidbPool: mysql.Pool | null = null;
 function getTidbPool(): mysql.Pool {
   if (!tidbPool) {
     if (!ENV.databaseUrl) throw new Error("DATABASE_URL is not set");
-    tidbPool = mysql.createPool(ENV.databaseUrl);
+    tidbPool = createResilientPool({ uri: ENV.databaseUrl });
   }
   return tidbPool;
 }
