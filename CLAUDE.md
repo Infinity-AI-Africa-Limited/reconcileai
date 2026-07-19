@@ -92,7 +92,7 @@ integration — it is the **onboarding bridge for CBS-partner client banks**:
 
 ---
 
-## 2A. SHOPLINE × ReconcileAI — Retail Commerce Partnership (GTM Roadmap)
+## 2A. SHOPLINE × ReconcileAI — Retail Commerce Partnership
 
 A GTM partnership that adds a **`retail_commerce`** vertical to the platform for
 SHOPLINE (e-commerce platform) merchants. Source roadmap:
@@ -102,20 +102,20 @@ SHOPLINE (e-commerce platform) merchants. Source roadmap:
 ### Three-tier partnership model
 | Tier | What | `organizations.onboardingChannel` |
 |---|---|---|
-| **Tier 1** | SHOPLINE App Store — self-serve merchants install via OAuth; Stripe subscription billing; 15% SHOPLINE rev share | `shopline_app_store` |
+| **Tier 1** | SHOPLINE App Store — self-serve merchants install via OAuth; SHOPLINE-managed billing (no Stripe); 15% SHOPLINE rev share | `shopline_app_store` |
 | **Tier 2** | SHOPLINE Payments — white-label reconciliation embedded, as a single API-client tenant | `shopline_payments_api` |
 | **Tier 3** | Enterprise bundle — on-premise deployment for enterprise merchants | `shopline_enterprise` |
 
 Constants live in `shared/shoplineConstants.ts` (tiers, channels, subscription
 bands, required OAuth scopes, rev share).
 
-### THE SEQUENCING RULE (non-negotiable)
-Three phases mirror the commercial dependency chain: **Phase 0** (pre-commercial,
-no API docs needed) → **Phase 1** (post-API-docs, pre-pilot) → **Phase 2**
-(post-signed-agreement, production build).
-**Do NOT begin Phase 2 until a signed commercial agreement exists. Do NOT begin
-Phase 1 until SHOPLINE delivers API documentation.** Phase 0 is the only
-low-risk internal work that can proceed unconditionally.
+### Phase Status (as of 2026-07-19)
+
+| Phase | Status | Notes |
+|---|---|---|
+| **Phase 0** | DONE + CTO-hardened | Retail-vertical foundation (commit `c5976b4`) |
+| **Phase 1** | BUILT — 4 PRs open for review | Full Tier 1 App Store connector, billing, compliance |
+| **Phase 2** | Not started | Tier 2/3 — post-signed-agreement only |
 
 ### Phase 0 — DONE + CTO-hardened (commit `c5976b4`)
 Retail-vertical foundation, built without SHOPLINE API docs (all shapes are
@@ -144,19 +144,275 @@ config/placeholders, swappable when docs arrive):
 - **Super Admin vertical selector** — All / Financial Services / Retail & Commerce
   toggle + SHOPLINE Tier column, in `SuperAdminDashboard.tsx`.
 
-### Phase 1 — needs SHOPLINE API docs (do NOT start until received)
-SHOPLINE App Store OAuth connector (Tier 1), settlement batch ingestion endpoint
-(Tier 2), merchant self-serve onboarding UI, simplified retail-facing dashboard,
-App Store listing assets. Also: inject `retailExceptionsTaxonomyPromptBlock` into
-the Super Agent by segment.
+### Phase 1 — BUILT (4 PRs open for Claude Code review)
+
+The SHOPLINE API documentation was obtained (2026-07-18) from the public developer
+docs at https://developer.shopline.com. The Partner Portal was configured by the
+project owner (2026-07-19). Phase 1 is now **fully implemented** across 4 incremental
+PRs. See **§2B** below for the complete implementation context.
 
 ### Phase 2 — post-signed-agreement ONLY
 Tier 2 white-label API response format, on-premise Docker container packaging
-(Tier 3), Tier 1 Stripe subscription billing integration.
+(Tier 3). **No Stripe billing** — Tier 1 billing is SHOPLINE App Store managed.
 
 > **CBN reports do NOT apply to SHOPLINE** — retail merchants are governed by
 > card-scheme/gateway terms, not CBN. The CBN report engine stays scoped to the
 > financial-services vertical.
+
+---
+
+## 2B. SHOPLINE Phase 1 Implementation — Full Context for PR Review
+
+This section provides the complete context Claude Code needs to review the 4 SHOPLINE
+Tier 1 PRs. It covers: what was verified from public documentation, what was configured
+in the Partner Portal, the architectural decisions made, and how each module works.
+
+### Pull Requests (review in order — each builds on the previous)
+
+| PR | Branch | Base | URL | Scope |
+|---|---|---|---|---|
+| **PR #8** | `manus/shopline-phase1-connector` | `main` | https://github.com/MistaRichMan/reconcileai/pull/8 | OAuth, token management, webhook ingestion, settlement sync |
+| **PR #9** | `manus/shopline-tier1-onboarding` | `manus/shopline-phase1-connector` | https://github.com/MistaRichMan/reconcileai/pull/9 | Merchant onboarding, ingest normalisation, sync orchestrator, GDPR, ShoplineConnect UI |
+| **PR #10** | `manus/shopline-tier1-dashboard-sync` | `manus/shopline-tier1-onboarding` | https://github.com/MistaRichMan/reconcileai/pull/10 | Retail merchant dashboard, settlement monitor, scheduled sync handlers |
+| **PR #11** | `manus/shopline-tier1-billing-compliance` | `manus/shopline-tier1-dashboard-sync` | https://github.com/MistaRichMan/reconcileai/pull/11 | Billing webhook handler, subscription management, compliance pages |
+
+**Test status (final branch):** 761/761 tests passing, 0 TypeScript errors.
+
+### 2B.1 SHOPLINE Partner Portal Configuration (Confirmed 2026-07-19)
+
+The following was configured by the project owner (Richard) in the SHOPLINE Partner
+Portal at https://developer.myshopline.com. This is login-gated and cannot be verified
+from public docs — treat these as **confirmed ground truth** for review purposes.
+
+| Setting | Value |
+|---|---|
+| App Type | Public App (App Store distribution) |
+| APP Key | `6435ec37c7a1165c93d90af2f43ca2809010001d` |
+| APP Secret | `e5d30f5aee513ad8762ba20ad04b88eb92ee8d31` |
+| Webhook Signing Key | Same as APP Secret (SHOPLINE does not expose a separate signing key) |
+| App URL | `https://www.reconcileaiafrica.com/api/shopline/install` |
+| Callback URL | `https://www.reconcileaiafrica.com/api/shopline/callback` |
+| GDPR Customer Redact | `https://www.reconcileaiafrica.com/api/shopline/gdpr/customers-redact` |
+| GDPR Merchant Redact | `https://www.reconcileaiafrica.com/api/shopline/gdpr/merchants-redact` |
+| Privacy Policy URL | `https://www.reconcileaiafrica.com/privacy` |
+| Terms of Service URL | `https://www.reconcileaiafrica.com/terms` |
+| Support URL | `https://www.reconcileaiafrica.com/support` |
+| Production Domain | `https://www.reconcileaiafrica.com` (NOT reconcileai.vip) |
+
+**Pricing Plans (5 bands, 7-day free trial):**
+
+| Plan | spuKey | Monthly Price (USD) | Max Orders | Max Stores |
+|---|---|---|---|---|
+| Starter | `starter` | $29 | 500 | 1 |
+| Growth | `growth` | $79 | 2,000 | 3 |
+| Professional | `professional` | $149 | 10,000 | 10 |
+| Scale | `enterprise` | $299 | 50,000 | 50 |
+| Enterprise | `enterprise_plus` | $499 | Unlimited | Unlimited |
+
+> **Note on spuKeys:** The portal plan names (Starter, Growth, Professional, Scale,
+> Enterprise) differ from the spuKeys (`starter`, `growth`, `professional`, `enterprise`,
+> `enterprise_plus`). The spuKeys are what arrive in billing webhook payloads.
+
+**Registered Webhooks (9 topics, latest API version):**
+- `orders/create`, `orders/updated`, `orders/edited`, `orders/paid`, `orders/cancelled`,
+  `orders/delete`, `refunds/create`, `refunds/update`, `order_transactions/create`
+
+**Billing Webhooks (5 topics, registered in portal):**
+- `app_plan/activated`, `app_plan/expired`, `billing_attempts/succeed`,
+  `billing_attempts/fail`, `app/installation_status_changed`
+
+**GDPR Mandatory Topics (configured in Developer Center):**
+- `customers/redact`, `merchants/redact`
+
+### 2B.2 Billing Model — SHOPLINE App Store Managed (No Stripe)
+
+This is a critical architectural decision: **there is no Stripe integration for
+SHOPLINE Tier 1 billing.** The billing lifecycle is entirely managed by the SHOPLINE
+App Store platform:
+
+1. Merchants subscribe to a plan when they install the app from the SHOPLINE App Store.
+2. SHOPLINE collects payment from the merchant (credit card, PayPal, etc.).
+3. SHOPLINE takes a **15% revenue share** and pays ReconcileAI via **PayPal payouts**.
+4. ReconcileAI receives billing lifecycle events via webhooks (plan activated, expired,
+   billing success/failure).
+5. ReconcileAI tracks subscription state in `sl_connector_subscriptions` to gate features.
+
+The `billingWebhook.ts` handler processes these 5 topics:
+- `app_plan/activated` → creates/updates subscription record (trial or active)
+- `app_plan/expired` → marks subscription as expired
+- `billing_attempts/succeed` → confirms active status, resets failure counter
+- `billing_attempts/fail` → increments failure counter, marks `past_due` after 3 failures
+- `app/installation_status_changed` → handles uninstall (cancels subscription + marks store)
+
+### 2B.3 Verified API Specification (from public docs)
+
+The implementation is built against the SHOPLINE public developer documentation
+(https://developer.shopline.com), extracted 2026-07-18. The full extract is in
+`docs/SHOPLINE_PHASE1_API_EXTRACT.md`. Key verified facts:
+
+**OAuth 2.0 Flow (per store):**
+- Authorization-code grant; `code` expires in 10 minutes
+- Token endpoint: `POST https://{handle}.myshopline.com/admin/oauth/token/create`
+- Token lifetime: **10 hours** (no refresh token; refresh via `/admin/oauth/token/refresh`)
+- Old token stays valid for 5 minutes after refresh (grace window)
+- Proactive refresh at ~9 hours (1-hour buffer before expiry)
+
+**Three HMAC-SHA256 Signature Modes (key = APP Secret):**
+
+| Mode | Context | Source String | Signature Location |
+|---|---|---|---|
+| GET | Install request, OAuth callback | Sorted query params (excl. `sign`), joined `k=v&k=v` | `sign` query param |
+| POST | Token create/refresh | `body + timestamp` (ms timestamp appended to JSON body) | `sign` + `timestamp` headers |
+| Webhook | Webhook delivery | Raw request body | `X-Shopline-Hmac-Sha256` header |
+
+The implementation uses `timingSafeEqual` for all comparisons and accepts both hex and
+base64 encodings of the webhook HMAC (SHOPLINE's docs are inconsistent on encoding).
+
+**Required OAuth Scopes (read-only only — smoother App Store review):**
+```
+read_orders, read_payment, read_store_information, read_returns, read_gift_card
+```
+
+> **Scope corrections from Phase 0:** `read_payments` → `read_payment` (singular);
+> `read_settlements` does not exist (settlement data is under `read_payment`);
+> `read_shop` → `read_store_information`; `read_analytics` dropped (not in scope list).
+
+**API Versioning:** Pinned to `v20260601` (stable, 12-month support). URL shape:
+`https://{handle}.myshopline.com/admin/openapi/v20260601/{endpoint}.json`
+
+**Rate Limiting:** Leaky bucket — burst 40, drain 4 req/s per store. Implementation
+uses a conservative 3 req/s ceiling with exponential backoff on 429.
+
+**Webhook Delivery Contract:**
+- Must ack within **5 seconds** (queue-first design)
+- SHOPLINE retries **19 times over 48 hours** on non-2xx
+- After 19 consecutive failures, SHOPLINE **deletes the subscription** and emails dev
+- `X-Shopline-Webhook-Id` header is stable across resends → idempotency key
+- Duplicates are possible by design → always deduplicate
+
+**Three-Leg Join Model (order ↔ payment ↔ payout):**
+- Order ↔ gateway txn: `orders.payment_details[].pay_channel_deal_id` ↔ `transactions[].channel_deal_id`
+- Gateway txn ↔ settlement: `additional_data.is_settled` / `settle_time`; billing records via `source_order_id`
+- Settlement ↔ payout: billing records `payout_id` query + `type=PAYOUT`
+
+### 2B.4 Module Architecture (`server/connectors/shopline/`)
+
+The SHOPLINE connector follows the same pattern as `server/connectors/woodcore/`:
+
+| Module | Responsibility |
+|---|---|
+| `signature.ts` | Three HMAC-SHA256 modes (GET sorted params, webhook body, POST body+timestamp); tolerant hex/base64; `timingSafeEqual` |
+| `auth.ts` | OAuth handlers: install-request verify → authorize redirect; callback verify → token create; proactive refresh at 9h |
+| `tokenStore.ts` | AES-256-GCM encrypted token persistence (`tk1:` envelope format); key derived from `JWT_SECRET`; auto-refresh on read |
+| `apiClient.ts` | Signed/Bearer REST client: version pinning, link-header pagination, 429 backoff (≤3 rps), `traceId` logging |
+| `ingest.ts` | Normalises SHOPLINE orders/payments/payouts → canonical `transactions` rows with `rawData` metadata contract |
+| `webhookHandler.ts` | Express receiver: raw-body HMAC verify → resolve store → dedupe on `X-Shopline-Webhook-Id` → persist → process inline → ack 200 |
+| `billingWebhook.ts` | Billing lifecycle: 5 topics → `sl_connector_subscriptions` state machine |
+| `syncOrchestrator.ts` | Full sync cycle: fetch orders+payments+payouts → normalise → persist → run retail reconciliation engine → create exceptions |
+| `settlementSync.ts` | Settlement-specific sync: normalises settlement records and runs retail reconciliation |
+| `onboarding.ts` | Self-serve provisioning: creates org (segment `retail_commerce`), admin user, channels, connector rows, seeds templates |
+| `routes.ts` | Express routes: `/api/shopline/install`, `/api/shopline/callback`, `/api/webhooks/shopline`, GDPR endpoints |
+
+### 2B.5 Database Schema (4 new tables)
+
+All tables are in `drizzle/connector_schema.ts`, prefixed `sl_connector_*`:
+
+| Table | Purpose | RLS Classification |
+|---|---|---|
+| `sl_connector_stores` | One row per installed SHOPLINE store (handle, storeId, merchantId, domain, currency, timezone, scopes, status) | `tenant_required` |
+| `sl_connector_tokens` | Encrypted OAuth tokens per store (AES-256-GCM, 10h TTL) | `tenant_required` |
+| `sl_connector_webhook_events` | Idempotent webhook event log (deduped on `webhookId`, DLQ linkage) | `tenant_required` |
+| `sl_connector_subscriptions` | Billing lifecycle state (planId, status, trial dates, billing attempts) | `tenant_required` |
+
+**Subscription statuses:** `trialing` → `active` → `past_due` → `expired` / `cancelled`
+
+### 2B.6 tRPC Router (`server/routers/shoplineConnector.ts`)
+
+Three procedures added in PR #3:
+- `shoplineConnector.syncStatus` — returns sync state for the merchant dashboard
+- `shoplineConnector.recentWebhookEvents` — last N webhook events for the store
+- `shoplineConnector.triggerManualSync` — triggers an on-demand sync cycle
+
+### 2B.7 Scheduled Sync Handlers (registered in `server/_core/index.ts`)
+
+| Handler | Interval | Purpose |
+|---|---|---|
+| 15-minute polling | Every 15 min | Fetch new orders/payments since last watermark |
+| Daily batch sync | Once daily | Full reconciliation run across all active stores |
+| Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
+
+### 2B.8 Frontend Pages
+
+| Route | Component | Purpose |
+|---|---|---|
+| `/shopline/connect` | `ShoplineConnect.tsx` | Install landing + connection status |
+| `/shopline/sync-status` | `ShoplineSyncStatus.tsx` | Sync status dashboard for merchants |
+| `/settlement-monitor` | `SettlementMonitor.tsx` | Settlement monitoring dashboard |
+| `/privacy` | `Privacy.tsx` | Privacy Policy (App Store required) |
+| `/terms` | `Terms.tsx` | Terms of Service (App Store required) |
+| `/support` | `Support.tsx` | Support page (App Store required) |
+
+### 2B.9 Environment Variables (SHOPLINE-specific)
+
+| Variable | Value | Notes |
+|---|---|---|
+| `SHOPLINE_APP_KEY` | `6435ec37c7a1165c93d90af2f43ca2809010001d` | From Partner Portal |
+| `SHOPLINE_APP_SECRET` | `e5d30f5aee513ad8762ba20ad04b88eb92ee8d31` | From Partner Portal |
+| `SHOPLINE_WEBHOOK_SECRET` | Same as APP Secret | SHOPLINE does not expose a separate signing key |
+
+These are set via `webdev_request_secrets` and injected at runtime. The code reads
+them from `ENV.SHOPLINE_APP_KEY`, `ENV.SHOPLINE_APP_SECRET`, `ENV.SHOPLINE_WEBHOOK_SECRET`.
+
+### 2B.10 Key Design Decisions (Reviewer Context)
+
+1. **No Stripe** — billing is SHOPLINE App Store managed. PayPal is SHOPLINE's payout
+   method to developers. ReconcileAI only tracks subscription state via webhooks.
+
+2. **No BullMQ/Redis for webhooks** — webhooks are processed inline (not queued) because
+   the processing is lightweight (DB upsert + sync trigger). The 5-second ack budget is
+   met by responding 200 immediately after signature verification and event persistence,
+   then processing asynchronously via `setImmediate`. If processing becomes heavy in
+   future, a job queue can be added without changing the public HTTP contract.
+
+3. **Token refresh without refresh tokens** — SHOPLINE's OAuth model has no refresh
+   token. Refresh is done via `POST /admin/oauth/token/refresh` authenticated by the
+   app-secret signature alone. The `tokenStore.ts` module proactively refreshes 1 hour
+   before the 10-hour expiry.
+
+4. **Webhook secret = APP Secret** — SHOPLINE does not provide a separate webhook
+   signing key. The APP Secret is used for all three HMAC modes. This is confirmed
+   from the Partner Portal (there is no separate "webhook secret" field).
+
+5. **Tolerant HMAC verification** — the webhook verifier accepts both hex and base64
+   encodings because SHOPLINE's documentation is inconsistent (Go sample uses hex,
+   header examples look base64).
+
+6. **Self-serve onboarding** — when a merchant installs from the App Store, the OAuth
+   callback automatically provisions a full ReconcileAI tenant (organization, admin
+   user, channels, connector config, resolution templates). No manual setup required.
+
+7. **Settlement data via polling, not webhooks** — SHOPLINE has no payout/settlement
+   webhook topic. Settlement data is fetched via scheduled API pulls (15-min + daily).
+
+8. **7-day free trial** (not 14 days) — confirmed in the Partner Portal pricing config.
+
+### 2B.11 What the App Store Review Will Check
+
+Before submitting for App Store review, these must be verified:
+- GDPR endpoints respond 200 and process within 30 days
+- Webhook receiver acks < 5 seconds (queue-first design)
+- Read-only scopes only (no write operations on merchant stores)
+- Privacy policy + Terms of Service pages accessible at public URLs
+- Full OAuth flow works end-to-end on a SHOPLINE developer store
+- App listing assets: logo 120×120, 3 feature bullets, EN default language
+
+### 2B.12 Remaining Steps After PR Merge
+
+1. Run `pnpm db:push` to apply the `sl_connector_subscriptions` table migration
+2. Deploy to `https://www.reconcileaiafrica.com`
+3. Test full OAuth flow on a SHOPLINE developer store
+4. Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
+5. Address any App Store review feedback
 
 ---
 
@@ -405,11 +661,11 @@ Module state is stored in `moduleConfigurations` (per-org toggle) and `moduleOve
 - If a feature claims flywheel/learning integration, verify the write-path and read-path actually exist in code — a comment is not an integration.
 - When two features compete for capacity, pick the one that makes recommendations **more accurate, more personalised, or harder to replicate** — in that order.
 
-## 9B. SHOPLINE Retail Commerce Vertical (Phase 0 Complete)
+## 9B. SHOPLINE Retail Commerce Vertical (Phase 0 + Phase 1 Complete)
 
 ### Strategic Context
 
-ReconcileAI is extending into **retail/e-commerce reconciliation** through a partnership with **SHOPLINE** (Asia-Pacific’s largest e-commerce SaaS platform, 600K+ merchants, $30B+ GMV). The commercial model is a three-tier partnership:
+ReconcileAI is extending into **retail/e-commerce reconciliation** through a partnership with **SHOPLINE** (Asia-Pacific's largest e-commerce SaaS platform, 600K+ merchants, $30B+ GMV). The commercial model is a three-tier partnership:
 
 | Tier | Model | Description |
 |---|---|---|
@@ -421,54 +677,28 @@ ReconcileAI is extending into **retail/e-commerce reconciliation** through a par
 
 The SHOPLINE vertical is **not a fork**. It is a new tenant segment (`retail_commerce`) on the existing multi-tenant platform. The core 3-pass matching engine, exception intelligence layer, AI Super Agent, and multi-tenant infrastructure are shared. What differs is:
 - The **exception taxonomy** (retail-specific: chargebacks, gateway fees, FX, settlements)
-- The **data connector** (SHOPLINE API instead of CBS API — Phase 1, pending API docs)
+- The **data connector** (SHOPLINE API — now fully implemented in Phase 1)
 - The **UI configuration** (merchant self-serve dashboard instead of bank operations portal)
 
-### What Was Built (Phase 0 — July 2026)
+### Current Status
 
-Phase 0 lays the foundation that all three tiers build upon. No external dependencies (SHOPLINE API docs not required).
+**Phase 0:** DONE + CTO-hardened (commit `c5976b4`). Retail-vertical foundation.
 
-**Schema changes:**
-- `organizations.segment` enum: added `retail_commerce`
-- `channels.channelType` enum: added `shopline_payments`, `shopline_orders`, `stripe_connect`, `adyen_platform`, `paypal_commerce`
-- `RESOLUTION_TEMPLATE_CATEGORIES`: added 14 retail exception category keys
+**Phase 1:** BUILT — 4 PRs open for Claude Code review. Full Tier 1 App Store connector
+including OAuth, webhooks, billing, onboarding, sync, dashboard, and compliance pages.
+See **§2B** for the complete implementation context, Partner Portal configuration,
+and PR URLs.
 
-**New files:**
+### SHOPLINE Constants Reference (UPDATED — portal-confirmed values)
 
-| File | Purpose |
-|---|---|
-| `shared/shoplineConstants.ts` | Onboarding channel codes (Tier 1/2/3), tier metadata, subscription pricing bands, OAuth scopes, revenue share percentage |
-| `server/exceptions/retail-commerce.ts` | 14-category retail exception taxonomy with severity, SLA, regulatory context, resolution templates, and AI diagnosis hints |
-| `server/retailReconciliationEngine.ts` | Retail reconciliation engine adapter — wraps core `runMatchingEngine` + retail-specific exception classifier |
-| `server/retailReconciliationEngine.test.ts` | 14 unit tests covering all retail exception categories + integration test |
-
-**Super Admin portal:**
-- `PortalContext.tsx`: `OrgSegment` type includes `retail_commerce` with amber accent
-- `SuperAdminDashboard.tsx`: Retail Commerce in segment filter, create-org dialog, stats cards, and segment update
-- `server/routers.ts`: `z.enum` validators for `createOrganization` and `updateOrganizationSegment` include `retail_commerce`
-
-### Retail Exception Taxonomy (14 Categories)
-
-The taxonomy in `server/exceptions/retail-commerce.ts` covers:
-
-| Category Key | Severity | SLA | Description |
-|---|---|---|---|
-| `retail_chargeback_not_posted` | critical | 24h | Chargeback not reflected in merchant ledger |
-| `retail_chargeback_duplicate` | high | 48h | Same ARN charged twice |
-| `retail_gateway_fee_variance` | high | 48h | Fee deviates from contracted rate schedule |
-| `retail_fx_rate_mismatch` | high | 48h | Auth-to-settlement FX rate exceeds tolerance |
-| `retail_settlement_shortfall` | critical | 24h | Payout amount less than expected |
-| `retail_settlement_delay` | medium | 72h | Settlement beyond SLA (T+n) |
-| `retail_refund_not_settled` | high | 48h | Refund issued but not deducted from settlement |
-| `retail_void_not_reversed` | medium | 72h | Voided transaction still in settlement |
-| `retail_duplicate_authorisation` | critical | 24h | Customer double-charged |
-| `retail_partial_capture_mismatch` | medium | 72h | Captured ≠ settled amount |
-| `retail_currency_conversion_error` | high | 48h | DCC/MCC conversion applied incorrectly |
-| `retail_payout_discrepancy` | high | 48h | Marketplace payout does not match order sum |
-| `retail_reserve_hold_unexplained` | medium | 72h | Reserve deduction not matching contract |
-| `retail_interchange_overcharge` | medium | 72h | Interchange fee exceeds scheme cap |
-
-Each category includes `regulatoryContext` (PCI DSS, card scheme rules, consumer protection law), `recommendedResolution` (step-by-step), and `aiDiagnosisHint` (prompt guidance for the AI Super Agent).
+`shared/shoplineConstants.ts` defines the commercial and technical contract:
+- **Revenue share:** 15% to SHOPLINE (Tier 1 App Store)
+- **Free trial:** 7 days (confirmed in Partner Portal)
+- **Tier 1 pricing bands:** Starter ($29/mo, ≤500 orders), Growth ($79/mo, ≤2K), Professional ($149/mo, ≤10K), Scale ($299/mo, ≤50K), Enterprise ($499/mo, unlimited)
+- **OAuth scopes required:** `read_orders`, `read_payment`, `read_store_information`, `read_returns`, `read_gift_card`
+- **Onboarding channels:** `shopline_app_store` (Tier 1), `shopline_payments_api` (Tier 2), `shopline_enterprise` (Tier 3)
+- **API version:** `v20260601` (stable, 12-month support)
+- **Token TTL:** 10 hours (proactive refresh at 9h)
 
 ### Retail Reconciliation Engine Adapter
 
@@ -477,7 +707,7 @@ Each category includes `regulatoryContext` (PCI DSS, card scheme rules, consumer
 2. Post-processes unmatched transactions through `classifyRetailException()` which examines `rawData` metadata injected by the SHOPLINE connector
 3. Returns `RetailReconciliationResult` (extends `ReconciliationResult` with `retailExceptions[]` and `retailStats`)
 
-The `rawData` contract expected from the Phase 1 SHOPLINE connector:
+The `rawData` contract implemented by the Phase 1 SHOPLINE connector (`ingest.ts`):
 ```typescript
 {
   gatewayEventType: "payment" | "refund" | "chargeback" | "payout" | "fee" | "reserve";
@@ -500,24 +730,6 @@ The `rawData` contract expected from the Phase 1 SHOPLINE connector:
   captureDate?: string; // ISO date
 }
 ```
-
-### Phase 1 Gate (Blocked on External Dependency)
-
-Phase 1 requires the **SHOPLINE API documentation** to build:
-- OAuth2 App Store connector (install flow, token lifecycle)
-- Transaction/settlement webhook ingestion
-- Merchant self-serve dashboard UI
-- App Store billing integration (usage metering)
-
-**Do not begin Phase 1 until the API documentation is received AND a signed Pilot agreement is in place.** The Pilot pricing is $3,500/month for 90 days, credited against the annual contract.
-
-### SHOPLINE Constants Reference
-
-`shared/shoplineConstants.ts` defines the commercial and technical contract:
-- **Revenue share:** 15% to SHOPLINE (Tier 1 App Store)
-- **Tier 1 pricing bands:** Starter ($49/mo, ≤500 txns), Growth ($99/mo), Professional ($199/mo), Scale ($349/mo), Enterprise (custom)
-- **OAuth scopes required:** `read_orders`, `read_payments`, `read_settlements`, `read_shop`, `read_analytics`
-- **Onboarding channels:** `shopline_appstore` (Tier 1), `shopline_payments_api` (Tier 2), `shopline_enterprise` (Tier 3)
 
 ---
 
