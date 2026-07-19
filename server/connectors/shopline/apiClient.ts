@@ -337,9 +337,10 @@ export async function fetchBalanceTransactions(
 // ─── Store Balance (spec §A6: /payments/store/balance.json) ─────────────────
 
 export interface ShoplineStoreBalance {
+  account_identify_code?: string;
   pending_settlement_balance: string;
-  payout_account_available: string;
-  payout_account_frozen: string;
+  payout_account_available_balance: string;
+  payout_account_frozen_balance: string;
   payout_account_balance: string;
   fixed_margin_account_balance: string;
   revolving_margin_account_balance: string;
@@ -347,11 +348,15 @@ export interface ShoplineStoreBalance {
 }
 
 export async function fetchStoreBalance(opts: ShoplineApiOptions): Promise<ShoplineStoreBalance> {
-  const { data } = await shoplineRequest<ShoplineStoreBalance>(opts, "/payments/store/balance.json");
-  return data;
+  // Response shape per the endpoint spec: { balance: { ... } }
+  const { data } = await shoplineRequest<{ balance: ShoplineStoreBalance }>(
+    opts,
+    "/payments/store/balance.json",
+  );
+  return data.balance;
 }
 
-// ─── Store Metadata (spec §A6: /store.json) ─────────────────────────────────
+// ─── Store Metadata (GET /merchants/shop.json) ──────────────────────────────
 
 export interface ShoplineStore {
   id: string;
@@ -366,8 +371,10 @@ export interface ShoplineStore {
 }
 
 export async function fetchStoreMetadata(opts: ShoplineApiOptions): Promise<ShoplineStore> {
-  const { data } = await shoplineRequest<{ store: ShoplineStore }>(opts, "/store.json");
-  return data.store;
+  // Endpoint is /merchants/shop.json with a `data` wrapper (query-store-information
+  // spec) — NOT /store.json as an earlier draft of the extract stated.
+  const { data } = await shoplineRequest<{ data: ShoplineStore }>(opts, "/merchants/shop.json");
+  return data.data;
 }
 
 // ─── Refunds (spec §A6: /orders/{id}/refunds) ──────────────────────────────

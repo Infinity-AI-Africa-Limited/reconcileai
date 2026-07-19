@@ -485,3 +485,145 @@ describe("SHOPLINE Retail Exception Categories", () => {
     expect(RETAIL_EXCEPTION_CATEGORIES).toContain("BANK_TRANSFER_SHORTFALL");
   });
 });
+
+// ─── 7. Hardening tests — exercise the REAL module functions ─────────────────
+// The blocks above mirror the logic inline; these import the actual
+// implementations so spec regressions (e.g. timestamp units) cannot hide.
+
+import {
+  verifyOAuthSignature,
+  verifyWebhookHmac,
+  isTimestampValid,
+  buildPostSignature,
+} from "./connectors/shopline/signature";
+import { normaliseToTransactions } from "./connectors/shopline/settlementSync";
+import type { ShoplineOrder, ShoplinePaymentTransaction } from "./connectors/shopline/apiClient";
+
+describe("SHOPLINE signature module (real functions)", () => {
+  const secret = "real-fn-secret";
+
+  function signParams(params: Record<string, string>): string {
+    const message = Object.keys(params)
+      .sort()
+      .map((k) => `${k}=${params[k]}`)
+      .join("&");
+    return crypto.createHmac("sha256", secret).update(message).digest("hex");
+  }
+
+  it("accepts a valid callback with a MILLISECOND timestamp (SHOPLINE's actual unit)", () => {
+    const params: Record<string, string> = {
+      appkey: "k1",
+      code: "auth_code",
+      handle: "mystore",
+      timestamp: String(Date.now()), // milliseconds — the wire format
+    };
+    const sign = signParams(params);
+    expect(verifyOAuthSignature({ ...params, sign }, secret)).toBe(true);
+  });
+
+  it("tolerates a second-resolution timestamp (fails safe on a unit change)", () => {
+    const params: Record<string, string> = {
+      appkey: "k1",
+      handle: "mystore",
+      timestamp: String(Math.floor(Date.now() / 1000)),
+    };
+    const sign = signParams(params);
+    expect(verifyOAuthSignature({ ...params, sign }, secret)).toBe(true);
+  });
+
+  it("rejects a stale timestamp outside the ±10 minute window", () => {
+    const params: Record<string, string> = {
+      appkey: "k1",
+      handle: "mystore",
+      timestamp: String(Date.now() - 11 * 60 * 1000),
+    };
+    const sign = signParams(params);
+    expect(verifyOAuthSignature({ ...params, sign }, secret)).toBe(false);
+  });
+
+  it("rejects a tampered parameter", () => {
+    const params: Record<string, string> = {
+      appkey: "k1",
+      handle: "mystore",
+      timestamp: String(Date.now()),
+    };
+    const sign = signParams(params);
+    expect(verifyOAuthSignature({ ...params, handle: "evilstore", sign }, secret)).toBe(false);
+  });
+
+  it("isTimestampValid handles both ms and seconds", () => {
+    expect(isTimestampValid(Date.now())).toBe(true);
+    expect(isTimestampValid(Math.floor(Date.now() / 1000))).toBe(true);
+    expect(isTimestampValid(Date.now() - 20 * 60 * 1000)).toBe(false);
+    expect(isTimestampValid(Number.NaN)).toBe(false);
+  });
+
+  it("verifyWebhookHmac (real fn) accepts hex and base64, rejects tampering", () => {
+    const body = Buffer.from('{"id":"1"}');
+    const hex = crypto.createHmac("sha256", secret).update(body).digest("hex");
+    const b64 = crypto.createHmac("sha256", secret).update(body).digest("base64");
+    expect(verifyWebhookHmac(body, hex, secret)).toBe(true);
+    expect(verifyWebhookHmac(body, b64, secret)).toBe(true);
+    expect(verifyWebhookHmac(Buffer.from('{"id":"2"}'), hex, secret)).toBe(false);
+  });
+
+  it("buildPostSignature signs body + timestamp", () => {
+    const body = '{"code":"c1"}';
+    const ts = 1784400000000;
+    const expected = crypto.createHmac("sha256", secret).update(`${body}${ts}`).digest("hex");
+    expect(buildPostSignature(body, ts, secret)).toBe(expected);
+  });
+});
+
+describe("SHOPLINE settlement normalisation (real function)", () => {
+  const order = {
+    id: "order-1001",
+    name: "#1001",
+    financial_status: "paid",
+    currency: "USD",
+    presentment_currency: "USD",
+    current_total_price_set: { shop_money: { amount: "100.00", currency_code: "USD" } },
+    total_outstanding: "0",
+    payment_details: [],
+    payment_gateway_names: ["shopline_payments"],
+    refunds: [],
+    created_at: "2026-07-01T00:00:00+00:00",
+    updated_at: "2026-07-01T00:00:00+00:00",
+    processed_at: "2026-07-01T00:00:00+00:00",
+  } as unknown as ShoplineOrder;
+
+  const paymentTx = {
+    trade_order_id: "trade-1",
+    seller_order_id: "order-1001",
+    channel_deal_id: "ch-deal-1",
+    amount: "100.00",
+    paid_amount: "100.00",
+    currency: "USD",
+    fee: "-2.90",
+    fee_type: "domestic",
+    status: "SUCCEEDED", // PAYMENT rows use SUCCEEDED, not SUCCESS
+    payment_method: "CreditCard",
+    create_time: "2026-07-01T00:01:00+00:00",
+    update_time: "2026-07-01T00:01:00+00:00",
+  } as unknown as ShoplinePaymentTransaction;
+
+  it("keeps SUCCEEDED payment transactions as targets", () => {
+    const { targetTxns } = normaliseToTransactions([order], [paymentTx], [], "USD");
+    expect(targetTxns).toHaveLength(1);
+  });
+
+  it("drops non-SUCCEEDED payment transactions (SUCCESS is a payout status, not a payment status)", () => {
+    const failed = { ...paymentTx, status: "FAILED" } as ShoplinePaymentTransaction;
+    const legacySuccess = { ...paymentTx, status: "SUCCESS" } as ShoplinePaymentTransaction;
+    const { targetTxns } = normaliseToTransactions([order], [failed, legacySuccess], [], "USD");
+    expect(targetTxns).toHaveLength(0);
+  });
+
+  it("joins source and target on the order id ↔ seller_order_id key (engine pass-1 exact ref match)", () => {
+    const { sourceTxns, targetTxns } = normaliseToTransactions([order], [paymentTx], [], "USD");
+    expect(sourceTxns[0].transactionRef).toBe("order-1001");
+    expect(targetTxns[0].transactionRef).toBe("order-1001");
+    expect(sourceTxns[0].externalRef).toBe("#1001");
+    expect(targetTxns[0].externalRef).toBe("trade-1");
+  });
+});
