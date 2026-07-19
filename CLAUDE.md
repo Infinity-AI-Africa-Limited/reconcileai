@@ -187,8 +187,8 @@ from public docs — treat these as **confirmed ground truth** for review purpos
 | Setting | Value |
 |---|---|
 | App Type | Public App (App Store distribution) |
-| APP Key | `6435ec37c7a1165c93d90af2f43ca2809010001d` |
-| APP Secret | `e5d30f5aee513ad8762ba20ad04b88eb92ee8d31` |
+| APP Key | set in env `SHOPLINE_APP_KEY` (Partner Portal → App credentials) |
+| APP Secret | set in env `SHOPLINE_APP_SECRET` — **never commit this value** (see security note below) |
 | Webhook Signing Key | Same as APP Secret (SHOPLINE does not expose a separate signing key) |
 | App URL | `https://www.reconcileaiafrica.com/api/shopline/install` |
 | Callback URL | `https://www.reconcileaiafrica.com/api/shopline/callback` |
@@ -356,12 +356,21 @@ Three procedures added in PR #3:
 
 | Variable | Value | Notes |
 |---|---|---|
-| `SHOPLINE_APP_KEY` | `6435ec37c7a1165c93d90af2f43ca2809010001d` | From Partner Portal |
-| `SHOPLINE_APP_SECRET` | `e5d30f5aee513ad8762ba20ad04b88eb92ee8d31` | From Partner Portal |
+| `SHOPLINE_APP_KEY` | *(secret — hosting env only)* | From Partner Portal → App credentials |
+| `SHOPLINE_APP_SECRET` | *(secret — hosting env only)* | From Partner Portal; HMAC signing key |
 | `SHOPLINE_WEBHOOK_SECRET` | Same as APP Secret | SHOPLINE does not expose a separate signing key |
 
-These are set via `webdev_request_secrets` and injected at runtime. The code reads
-them from `ENV.SHOPLINE_APP_KEY`, `ENV.SHOPLINE_APP_SECRET`, `ENV.SHOPLINE_WEBHOOK_SECRET`.
+Set these only in the hosting platform's secret store (Railway env / `.env`,
+which is gitignored). The code reads them from `ENV.shoplineAppKey` /
+`ENV.shoplineAppSecret`.
+
+> **⚠️ Security note (2026-07-19):** earlier revisions of this file pasted the
+> live APP Key and APP Secret here in plaintext. The APP Secret is the HMAC
+> signing key for OAuth callbacks and webhook verification — a leaked secret
+> lets an attacker forge either. It has been redacted, but because it was
+> committed to git history on two remotes it must be treated as compromised:
+> **rotate the app secret in the SHOPLINE Partner Portal** and update the
+> hosting env var. Never paste real credentials into tracked files.
 
 ### 2B.10 Key Design Decisions (Reviewer Context)
 

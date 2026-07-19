@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { processBillingWebhook, hasActiveSubscription, getStoreSubscription } from "./connectors/shopline/billingWebhook";
+import { processBillingWebhook, hasActiveSubscription, getStoreSubscription, isSyncBlockedBySubscription } from "./connectors/shopline/billingWebhook";
 import { SHOPLINE_BILLING_WEBHOOK_TOPICS, TIER_1_SUBSCRIPTION_BANDS, SHOPLINE_WEBHOOK_TOPICS } from "../shared/shoplineConstants";
 
 // ─── Constants validation ─────────────────────────────────────────────────────
@@ -215,6 +215,36 @@ describe("Subscription query helpers", () => {
     };
     const result = await getStoreSubscription(mockDb as any, 1);
     expect(result).toEqual(sub);
+  });
+});
+
+// ─── Sync gate semantics (isSyncBlockedBySubscription) ───────────────────────
+
+describe("isSyncBlockedBySubscription — lenient gating", () => {
+  const mkDb = (rows: unknown[]) => ({
+    select: vi.fn().mockReturnThis(),
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockResolvedValue(rows),
+  });
+
+  it("does NOT block when there is no subscription row (fresh/pre-billing store)", async () => {
+    const r = await isSyncBlockedBySubscription(mkDb([]) as any, 1);
+    expect(r.blocked).toBe(false);
+  });
+
+  it.each(["trialing", "active", "past_due"])(
+    "does NOT block a %s subscription",
+    async (status) => {
+      const r = await isSyncBlockedBySubscription(mkDb([{ status }]) as any, 1);
+      expect(r.blocked).toBe(false);
+    },
+  );
+
+  it.each(["expired", "cancelled"])("blocks a %s subscription", async (status) => {
+    const r = await isSyncBlockedBySubscription(mkDb([{ status }]) as any, 1);
+    expect(r.blocked).toBe(true);
+    expect(r.status).toBe(status);
   });
 });
 

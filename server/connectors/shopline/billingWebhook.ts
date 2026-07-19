@@ -228,8 +228,9 @@ export async function handleBillingFailure(
     .limit(1);
 
   const attempts = (existing?.failedBillingAttempts ?? 0) + 1;
-  // After 3 failed attempts, mark as past_due (SHOPLINE may cancel after their own threshold)
-  const newStatus = attempts >= 3 ? "past_due" as const : (existing?.status ?? "active") as "active";
+  // After 3 failed attempts, mark as past_due (SHOPLINE may cancel after their
+  // own threshold); before that, preserve whatever status the row already had.
+  const newStatus = attempts >= 3 ? "past_due" : (existing?.status ?? "active");
 
   await db
     .update(slConnectorSubscriptions)
@@ -328,7 +329,6 @@ export async function processBillingWebhook(
 
 /**
  * Check if a store has an active (or trialing) subscription.
- * Used by the sync orchestrator to gate data processing.
  */
 export async function hasActiveSubscription(
   db: Db,
@@ -341,6 +341,29 @@ export async function hasActiveSubscription(
     .limit(1);
   if (!sub) return false;
   return sub.status === "active" || sub.status === "trialing";
+}
+
+/**
+ * Whether a store's subscription state should BLOCK data sync.
+ *
+ * Deliberately lenient: a store with NO subscription row yet (freshly
+ * onboarded, before app_plan/activated fires) and one that is still trialing/
+ * active/past_due keeps syncing. Only an explicitly lapsed subscription
+ * (expired or cancelled) stops sync — so billing-webhook gaps never silently
+ * strand a paying merchant, while a churned one stops consuming API quota.
+ */
+export async function isSyncBlockedBySubscription(
+  db: Db,
+  slStoreId: number,
+): Promise<{ blocked: boolean; status?: string }> {
+  const [sub] = await db
+    .select({ status: slConnectorSubscriptions.status })
+    .from(slConnectorSubscriptions)
+    .where(eq(slConnectorSubscriptions.slStoreId, slStoreId))
+    .limit(1);
+  if (!sub) return { blocked: false };
+  const blocked = sub.status === "expired" || sub.status === "cancelled";
+  return { blocked, status: sub.status };
 }
 
 /**

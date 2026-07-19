@@ -42,6 +42,7 @@ import {
   shoplineOrdersChannelCode,
   shoplinePaymentsChannelCode,
 } from "./onboarding";
+import { isSyncBlockedBySubscription } from "./billingWebhook";
 import {
   runRetailReconciliation,
   type RetailReconciliationConfig,
@@ -107,6 +108,14 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
 
   const store = stores[0];
   const storeHandle = store.storeHandle;
+
+  // Gate on subscription state — a churned (expired/cancelled) store should not
+  // consume SHOPLINE API quota. Lenient: no-subscription and trialing/active/
+  // past_due all proceed (see isSyncBlockedBySubscription).
+  const gate = await isSyncBlockedBySubscription(db, opts.slStoreId);
+  if (gate.blocked) {
+    return errorReport(opts, `Sync skipped — subscription ${gate.status}`, startedAt, storeHandle);
+  }
 
   // Time window (default: last 24h)
   const to = opts.to ?? new Date();
