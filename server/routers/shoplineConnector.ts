@@ -21,12 +21,13 @@
  */
 
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   slConnectorStores,
   slConnectorWebhookEvents,
 } from "../../drizzle/connector_schema";
+import { channels, transactions, exceptions } from "../../drizzle/schema";
 import { protectedProcedure, publicProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import {
@@ -428,6 +429,8 @@ export const shoplineConnectorRouter = router({
 
   /**
    * Sync status overview — aggregated metrics for the settlement monitor.
+   * Derived from real reconciliation state in the transactions table (scoped
+   * to this org's SHOPLINE channels), not from webhook-delivery counts.
    */
   syncStatus: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
@@ -435,27 +438,47 @@ export const shoplineConnectorRouter = router({
 
     const orgId = requireOrgId(ctx.user);
 
-    // Get recent webhook events for this org
-    const events = await db
-      .select()
-      .from(slConnectorWebhookEvents)
-      .where(eq(slConnectorWebhookEvents.organizationId, orgId))
-      .orderBy(desc(slConnectorWebhookEvents.receivedAt))
-      .limit(100);
+    // This org's SHOPLINE channels (retail_commerce orgs are SHOPLINE-only, but
+    // filter by channel type so a mixed org stays correct).
+    const orgChannels = await db
+      .select({ id: channels.id })
+      .from(channels)
+      .where(and(eq(channels.organizationId, orgId), eq(channels.channelType, "ecommerce_gateway")));
+    const channelIds = orgChannels.map((c) => c.id);
 
-    const processedEvents = events.filter((e) => e.status === "processed");
-    const failedEvents = events.filter((e) => e.status === "failed" || e.status === "dlq");
+    // Reconciliation state, computed in-DB in a single pass.
+    const [agg] = channelIds.length
+      ? await db
+          .select({
+            matched: sql<number>`sum(case when ${transactions.status} in ('matched','manually_matched') then 1 else 0 end)`,
+            settledAmount: sql<number>`coalesce(sum(case when ${transactions.status} in ('matched','manually_matched') then abs(${transactions.amount}) else 0 end), 0)`,
+            pendingAmount: sql<number>`coalesce(sum(case when ${transactions.status} = 'unmatched' then abs(${transactions.amount}) else 0 end), 0)`,
+            pendingCount: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
+            total: sql<number>`count(*)`,
+          })
+          .from(transactions)
+          .where(inArray(transactions.channelId, channelIds))
+      : [{ matched: 0, settledAmount: 0, pendingAmount: 0, pendingCount: 0, total: 0 }];
 
-    // Calculate basic metrics from webhook event data
-    // In production, these would come from the transactions/exceptions tables
-    const totalEvents = events.length;
-    const matchRate = totalEvents > 0 ? (processedEvents.length / totalEvents) * 100 : 0;
+    const matched = Number(agg?.matched ?? 0);
+    const total = Number(agg?.total ?? 0);
+
+    // Open exceptions on this org's SHOPLINE transactions.
+    const [exAgg] = channelIds.length
+      ? await db
+          .select({ open: sql<number>`count(*)` })
+          .from(exceptions)
+          .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
+          .where(and(inArray(transactions.channelId, channelIds), eq(exceptions.status, "open")))
+      : [{ open: 0 }];
 
     return {
-      totalSettled: 0, // Will be populated from transactions table once data flows
-      totalPending: 0,
-      totalExceptions: failedEvents.length,
-      matchRate,
+      totalSettled: Number(agg?.settledAmount ?? 0),
+      totalPending: Number(agg?.pendingAmount ?? 0),
+      totalExceptions: Number(exAgg?.open ?? 0),
+      matchRate: total > 0 ? (matched / total) * 100 : 0,
+      matchedCount: matched,
+      pendingCount: Number(agg?.pendingCount ?? 0),
       recentPayouts: [] as Array<{
         id: number;
         date: string;
@@ -538,13 +561,15 @@ export const shoplineConnectorRouter = router({
       const store = stores[0];
       const { runSyncCycle } = await import("../connectors/shopline/syncOrchestrator");
 
-      const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000);
+      // A manual "Sync Now" is a catch-up action — use a 24h window (not the
+      // 15-min incremental window) so a merchant clicking it actually backfills.
       const now = new Date();
+      const from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
       const report = await runSyncCycle({
         organizationId: orgId,
         slStoreId: store.id,
-        from: fifteenMinAgo,
+        from,
         to: now,
         triggeredBy: ctx.user.id,
       });
