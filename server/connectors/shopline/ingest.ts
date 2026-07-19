@@ -90,8 +90,11 @@ export function normaliseOrder(
     channelId: ctx.ordersChannelId,
     userId: ctx.userId,
     organizationId: ctx.organizationId,
-    transactionRef: order.name || order.id, // e.g. "#1001"
-    externalRef: order.id,
+    // Join key: the engine's pass-1 exact match is on transactionRef, and the
+    // payment leg carries the order id back as seller_order_id — so the order's
+    // ref MUST be order.id (order.name like "#1001" never appears gateway-side).
+    transactionRef: order.id,
+    externalRef: order.name || order.id, // human-readable order number
     description: `SHOPLINE Order ${order.name || order.id}`,
     amount: String(amount),
     currency,
@@ -138,7 +141,9 @@ export function normalisePaymentTransaction(
     channelId: ctx.paymentsChannelId,
     userId: ctx.userId,
     organizationId: ctx.organizationId,
-    transactionRef: txn.channel_deal_id || txn.trade_order_id,
+    // Join key: seller_order_id === the order's id (matches normaliseOrder's ref).
+    // channel_deal_id is retained in rawData.gatewayRef for the settlement leg.
+    transactionRef: txn.seller_order_id || txn.trade_order_id,
     externalRef: txn.trade_order_id,
     description: `SHOPLINE payment — ${txn.payment_method || "unknown"} (${txn.status})`,
     amount: String(Math.abs(amount)),
