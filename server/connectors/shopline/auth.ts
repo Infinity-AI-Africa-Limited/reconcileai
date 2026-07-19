@@ -150,33 +150,44 @@ export async function refreshAccessToken(
   _currentAccessToken: string,
 ): Promise<ShoplineTokenResponse> {
   const url = `https://${storeHandle}.myshopline.com/admin/oauth/token/refresh`;
-  const body = JSON.stringify({});
-  const timestamp = Date.now();
-  const sign = buildPostSignature(body, timestamp, ENV.shoplineAppSecret);
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "appkey": ENV.shoplineAppKey,
-      "timestamp": String(timestamp),
-      "sign": sign,
-    },
-    body,
-  });
-
-  if (!response.ok) {
+  // The refresh endpoint documents headers only — no request body. The exact
+  // signature source for a body-less POST is unverifiable from public docs
+  // (HMAC of "" + timestamp, or of "{}" + timestamp), so try the docs-literal
+  // empty body first and fall back to "{}". A wrong guess here would kill
+  // every token at the 10-hour mark, so both are attempted.
+  const attempt = async (body: string) => {
+    const timestamp = Date.now();
+    const sign = buildPostSignature(body, timestamp, ENV.shoplineAppSecret);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "appkey": ENV.shoplineAppKey,
+        "timestamp": String(timestamp),
+        "sign": sign,
+      },
+      body: body === "" ? undefined : body,
+    });
     const text = await response.text();
-    throw new Error(`SHOPLINE token refresh failed (${response.status}): ${text}`);
-  }
+    let json: { data?: ShoplineTokenResponse; code?: number | string; i18nCode?: string; message?: string } = {};
+    try {
+      json = JSON.parse(text);
+    } catch {
+      /* non-JSON error body */
+    }
+    return { ok: response.ok && !!json.data?.accessToken, status: response.status, json, text };
+  };
 
-  const json = await response.json() as { data?: ShoplineTokenResponse; code?: string; message?: string };
+  const first = await attempt("");
+  if (first.ok) return first.json.data as ShoplineTokenResponse;
 
-  if (!json.data?.accessToken) {
-    throw new Error(`SHOPLINE token refresh returned error: ${json.code} — ${json.message}`);
-  }
+  const second = await attempt(JSON.stringify({}));
+  if (second.ok) return second.json.data as ShoplineTokenResponse;
 
-  return json.data;
+  throw new Error(
+    `SHOPLINE token refresh failed (${second.status}): ${second.json.i18nCode ?? second.json.code ?? ""} ${second.json.message ?? second.text}`,
+  );
 }
 
 /**
