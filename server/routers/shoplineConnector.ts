@@ -29,7 +29,11 @@ import {
 } from "../../drizzle/connector_schema";
 import { protectedProcedure, publicProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
-import { exchangeCodeForToken } from "../connectors/shopline/auth";
+import {
+  buildAuthorizationUrl,
+  exchangeCodeForToken,
+  verifyCallbackSignature,
+} from "../connectors/shopline/auth";
 import { getValidToken, saveToken, deleteToken } from "../connectors/shopline/tokenStore";
 import { ingestWebhook } from "../connectors/shopline/webhookHandler";
 import { runSettlementSync } from "../connectors/shopline/settlementSync";
@@ -88,29 +92,62 @@ export const shoplineConnectorRouter = router({
    * SHOPLINE OAuth callback — called by SHOPLINE after merchant approves install.
    * Exchanges the authorization code for an access token and creates the store record.
    *
-   * Query params: code, shop (store handle), state (contains orgId)
+   * Security model:
+   *  - The `sign` over the callback query params is verified (HMAC-SHA256 with
+   *    the app secret) — without it anyone could post codes at this endpoint.
+   *  - The organization is resolved from the already-provisioned store row for
+   *    this handle. The `customField`/state value is attacker-controllable (a
+   *    merchant can hand-craft the authorize URL), so it is NEVER trusted to
+   *    bind a store to an existing organization. Unknown stores are rejected
+   *    here; self-serve onboarding provisions its own org in the onboarding
+   *    module before re-entering this exchange.
    */
   oauthCallback: publicProcedure
     .input(
       z.object({
         code: z.string(),
+        /** Store handle — arrives as `handle` on the wire */
         shop: z.string(),
-        state: z.string(),
+        appkey: z.string(),
+        timestamp: z.string(),
+        sign: z.string(),
+        customField: z.string().optional(),
+        lang: z.string().optional(),
       }),
     )
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      // Decode state to get organizationId
-      let organizationId: number;
-      try {
-        const decoded = JSON.parse(Buffer.from(input.state, "base64").toString("utf8"));
-        organizationId = Number(decoded.orgId);
-        if (!organizationId || isNaN(organizationId)) throw new Error("Invalid orgId");
-      } catch {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid OAuth state parameter" });
+      // Reconstruct the wire query params exactly as SHOPLINE signed them
+      const wireParams: Record<string, string> = {
+        appkey: input.appkey,
+        code: input.code,
+        handle: input.shop,
+        timestamp: input.timestamp,
+        sign: input.sign,
+      };
+      if (input.customField !== undefined) wireParams.customField = input.customField;
+      if (input.lang !== undefined) wireParams.lang = input.lang;
+
+      if (input.appkey !== ENV.shoplineAppKey || !verifyCallbackSignature(wireParams)) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid SHOPLINE callback signature" });
       }
+
+      // Resolve the organization from the provisioned store row — not from state
+      const provisioned = await db
+        .select({ id: slConnectorStores.id, organizationId: slConnectorStores.organizationId })
+        .from(slConnectorStores)
+        .where(eq(slConnectorStores.storeHandle, input.shop))
+        .limit(1);
+
+      if (provisioned.length === 0) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: `Store ${input.shop} is not provisioned for any organization — run provisioning (or self-serve onboarding) first`,
+        });
+      }
+      const organizationId = provisioned[0].organizationId;
 
       // Exchange code for token
       const tokenResponse = await exchangeCodeForToken(input.shop, input.code);
@@ -121,50 +158,22 @@ export const shoplineConnectorRouter = router({
         accessToken: tokenResponse.accessToken,
       });
 
-      // Upsert store record
-      const existing = await db
-        .select({ id: slConnectorStores.id })
-        .from(slConnectorStores)
-        .where(
-          and(
-            eq(slConnectorStores.storeHandle, input.shop),
-            eq(slConnectorStores.organizationId, organizationId),
-          ),
-        )
-        .limit(1);
-
-      let storeId: number;
-      if (existing.length > 0) {
-        storeId = existing[0].id;
-        await db
-          .update(slConnectorStores)
-          .set({
-            status: "active",
-            storeId: shopMeta.id,
-            
-            domain: shopMeta.domain,
-            currency: shopMeta.currency,
-            ianaTimezone: shopMeta.iana_timezone,
-            installedAt: new Date(),
-            uninstalledAt: null,
-            grantedScopes: SHOPLINE_REQUIRED_SCOPES.join(","),
-          })
-          .where(eq(slConnectorStores.id, storeId));
-      } else {
-        const [inserted] = await db.insert(slConnectorStores).values({
-          organizationId,
-          storeHandle: input.shop,
+      // Activate the provisioned store row with live metadata
+      const storeId = provisioned[0].id;
+      await db
+        .update(slConnectorStores)
+        .set({
+          status: "active",
           storeId: shopMeta.id,
-          
+          merchantId: shopMeta.merchant_id,
           domain: shopMeta.domain,
           currency: shopMeta.currency,
           ianaTimezone: shopMeta.iana_timezone,
-          status: "active",
           installedAt: new Date(),
-          grantedScopes: SHOPLINE_REQUIRED_SCOPES.join(","),
-        });
-        storeId = (inserted as { insertId: number }).insertId;
-      }
+          uninstalledAt: null,
+          grantedScopes: tokenResponse.scope || SHOPLINE_REQUIRED_SCOPES.join(","),
+        })
+        .where(eq(slConnectorStores.id, storeId));
 
       // Persist encrypted token
       await saveToken(db, storeId, organizationId, tokenResponse);
@@ -406,7 +415,13 @@ export const shoplineConnectorRouter = router({
 
       const newStoreId = (inserted as { insertId: number }).insertId;
 
-      const installUrl = `https://${input.storeHandle}.myshopline.com/admin/oauth-web/#/oauth/authorize?appKey=${ENV.shoplineAppKey}&responseType=code&scope=${SHOPLINE_REQUIRED_SCOPES.join(",")}&redirectUri=${encodeURIComponent(`${ENV.forgeApiUrl}/shopline/oauth/callback`)}&customField=${Buffer.from(JSON.stringify({ orgId: input.organizationId })).toString("base64")}`;
+      // The callback resolves the org from this provisioned row, so no org
+      // data needs to travel in customField. APP_URL is the canonical origin
+      // and must match a callback URL registered in the Partner Portal.
+      const installUrl = buildAuthorizationUrl({
+        storeHandle: input.storeHandle,
+        callbackUrl: `${ENV.appUrl}/api/shopline/callback`,
+      });
 
       return { success: true, storeId: newStoreId, installUrl };
     }),
@@ -416,7 +431,7 @@ export const shoplineConnectorRouter = router({
    */
   listAllStores: superAdminProcedure
     .input(z.object({ limit: z.number().min(1).max(200).default(50) }))
-    .query(async () => {
+    .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -424,6 +439,6 @@ export const shoplineConnectorRouter = router({
         .select()
         .from(slConnectorStores)
         .orderBy(desc(slConnectorStores.installedAt))
-        .limit(50);
+        .limit(input.limit);
     }),
 });
