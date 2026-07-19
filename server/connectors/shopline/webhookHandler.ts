@@ -35,6 +35,8 @@ import { slConnectorWebhookEvents, slConnectorStores } from "../../../drizzle/co
 import { verifyWebhookHmac } from "./signature";
 import { ENV } from "../../_core/env";
 import { deleteToken } from "./tokenStore";
+import { processBillingWebhook } from "./billingWebhook";
+import { SHOPLINE_BILLING_WEBHOOK_TOPICS } from "../../../shared/shoplineConstants";
 
 export interface InboundWebhook {
   /** Value of X-Shopline-Webhook-Id header */
@@ -205,8 +207,19 @@ async function processWebhookEvent(
       break;
 
     default:
-      // Unknown topic — log and ignore (return 200 to SHOPLINE to prevent retries)
-      console.warn(`[SHOPLINE] Unhandled webhook topic: ${topic}`);
+      // Check if this is a billing/lifecycle topic
+      if ((SHOPLINE_BILLING_WEBHOOK_TOPICS as readonly string[]).includes(topic)) {
+        await processBillingWebhook(
+          db,
+          organizationId,
+          slStoreId,
+          topic,
+          (payload ?? {}) as Record<string, unknown>,
+        );
+      } else {
+        // Unknown topic — log and ignore (return 200 to SHOPLINE to prevent retries)
+        console.warn(`[SHOPLINE] Unhandled webhook topic: ${topic}`);
+      }
   }
 }
 

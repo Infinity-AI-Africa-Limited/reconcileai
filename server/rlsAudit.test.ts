@@ -144,6 +144,7 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
 
   // SHOPLINE retail connector — each row is scoped to an org (orgId NOT NULL)
   sl_connector_stores: "tenant_required",
+  sl_connector_subscriptions: "tenant_required",
   sl_connector_tokens: "tenant_required",
   sl_connector_webhook_events: "tenant_required",
 

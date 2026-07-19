@@ -66,6 +66,9 @@ import MagicLogin from "./pages/MagicLogin";
 import Login from "./pages/Login";
 import SuperAdminDashboard from "./pages/SuperAdminDashboard";
 import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
+import Privacy from "./pages/Privacy";
+import Terms from "./pages/Terms";
+import Support from "./pages/Support";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -140,6 +143,9 @@ function Router() {
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/shopline/welcome" component={ShoplineWelcome} />
       <Route path="/shopline/error" component={ShoplineError} />
+      <Route path="/privacy" component={Privacy} />
+      <Route path="/terms" component={Terms} />
+      <Route path="/support" component={Support} />
       <Route path="/login" component={Login} />
       <Route path="/magic-login" component={MagicLogin} />
       <Route path="/404" component={NotFound} />

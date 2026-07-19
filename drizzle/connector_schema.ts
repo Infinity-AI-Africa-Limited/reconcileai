@@ -301,3 +301,52 @@ export const slConnectorWebhookEvents = mysqlTable(
 );
 export type SlConnectorWebhookEvent = typeof slConnectorWebhookEvents.$inferSelect;
 export type InsertSlConnectorWebhookEvent = typeof slConnectorWebhookEvents.$inferInsert;
+
+// ─── SHOPLINE App Store Subscription State ──────────────────────────────────
+// Tracks the billing lifecycle for each store's ReconcileAI subscription.
+// Updated by billing webhooks (app_plan/activated, app_plan/expired,
+// billing_attempts/succeed, billing_attempts/fail).
+export const slConnectorSubscriptions = mysqlTable(
+  "sl_connector_subscriptions",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    slStoreId: int("slStoreId").notNull(),
+    /** SHOPLINE subscription/charge ID (from webhook payload) */
+    shoplineSubscriptionId: varchar("shoplineSubscriptionId", { length: 128 }),
+    /** Our plan spuKey (starter, growth, professional, enterprise, enterprise_plus) */
+    planId: varchar("planId", { length: 32 }).notNull(),
+    /** Subscription status */
+    status: mysqlEnum("status", [
+      "trialing",
+      "active",
+      "past_due",
+      "cancelled",
+      "expired",
+    ]).default("trialing").notNull(),
+    /** Trial start (set on app_plan/activated with trial) */
+    trialStartedAt: timestamp("trialStartedAt"),
+    /** Trial end (trialStartedAt + 7 days) */
+    trialEndsAt: timestamp("trialEndsAt"),
+    /** When the paid subscription activated (first billing_attempts/succeed) */
+    activatedAt: timestamp("activatedAt"),
+    /** Current billing period start */
+    currentPeriodStart: timestamp("currentPeriodStart"),
+    /** Current billing period end */
+    currentPeriodEnd: timestamp("currentPeriodEnd"),
+    /** When the subscription was cancelled or expired */
+    cancelledAt: timestamp("cancelledAt"),
+    /** Number of consecutive failed billing attempts */
+    failedBillingAttempts: int("failedBillingAttempts").default(0).notNull(),
+    /** Last billing failure reason */
+    lastFailureReason: text("lastFailureReason"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("idx_sl_sub_store").on(t.slStoreId),
+    index("idx_sl_sub_org_status").on(t.organizationId, t.status),
+  ],
+);
+export type SlConnectorSubscription = typeof slConnectorSubscriptions.$inferSelect;
+export type InsertSlConnectorSubscription = typeof slConnectorSubscriptions.$inferInsert;

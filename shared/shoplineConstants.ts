@@ -43,13 +43,19 @@ export const SHOPLINE_TIERS = {
 } as const;
 
 // ─── Subscription Bands (Tier 1) ─────────────────────────────────────────────
+// CONFIRMED in SHOPLINE Partner Portal (2026-07-19).
+// Plan names and spuKeys match the portal configuration exactly.
+export const TIER_1_FREE_TRIAL_DAYS = 7;
+
 export const TIER_1_SUBSCRIPTION_BANDS = [
-  { id: "starter", label: "Starter", maxTransactions: 500, monthlyPriceUsd: 49 },
-  { id: "growth", label: "Growth", maxTransactions: 2_000, monthlyPriceUsd: 99 },
-  { id: "professional", label: "Professional", maxTransactions: 10_000, monthlyPriceUsd: 199 },
-  { id: "scale", label: "Scale", maxTransactions: 50_000, monthlyPriceUsd: 349 },
-  { id: "enterprise", label: "Enterprise", maxTransactions: Infinity, monthlyPriceUsd: null },
+  { id: "starter", spuKey: "starter", label: "Starter", maxOrders: 500, maxStores: 1, monthlyPriceUsd: 29 },
+  { id: "growth", spuKey: "growth", label: "Growth", maxOrders: 2_000, maxStores: 3, monthlyPriceUsd: 79 },
+  { id: "professional", spuKey: "professional", label: "Professional", maxOrders: 10_000, maxStores: 10, monthlyPriceUsd: 149 },
+  { id: "enterprise", spuKey: "enterprise", label: "Scale", maxOrders: 50_000, maxStores: 50, monthlyPriceUsd: 299 },
+  { id: "enterprise_plus", spuKey: "enterprise_plus", label: "Enterprise", maxOrders: Infinity, maxStores: Infinity, monthlyPriceUsd: 499 },
 ] as const;
+
+export type SubscriptionBandId = (typeof TIER_1_SUBSCRIPTION_BANDS)[number]["id"];
 
 // ─── Retail Channel Type Codes ───────────────────────────────────────────────
 // Corresponds to the new channelType enum values added in drizzle/schema.ts
@@ -87,7 +93,7 @@ export const SHOPLINE_API_VERSION = "v20260601";
 /** Access tokens expire after 10 hours; refresh proactively well before. */
 export const SHOPLINE_TOKEN_TTL_HOURS = 10;
 
-/** Webhook topics the Tier 1 connector subscribes to per store. */
+/** Webhook topics the Tier 1 connector subscribes to per store (reconciliation). */
 export const SHOPLINE_WEBHOOK_TOPICS = [
   "orders/create",
   "orders/updated",
@@ -99,6 +105,21 @@ export const SHOPLINE_WEBHOOK_TOPICS = [
   "refunds/update",
   "order_transactions/create",
 ] as const;
+
+/**
+ * Billing & lifecycle webhook topics registered in the SHOPLINE Partner Portal.
+ * These are received at the same /api/webhooks/shopline endpoint.
+ * CONFIRMED in portal (2026-07-19).
+ */
+export const SHOPLINE_BILLING_WEBHOOK_TOPICS = [
+  "app_plan/activated",
+  "app_plan/expired",
+  "billing_attempts/succeed",
+  "billing_attempts/fail",
+  "app/installation_status_changed",
+] as const;
+
+export type ShoplineBillingWebhookTopic = (typeof SHOPLINE_BILLING_WEBHOOK_TOPICS)[number];
 
 /** Mandatory GDPR topics (configured in the SHOPLINE Developer Center, not via API). */
 export const SHOPLINE_GDPR_TOPICS = ["customers/redact", "merchants/redact"] as const;
