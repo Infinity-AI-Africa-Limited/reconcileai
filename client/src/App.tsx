@@ -65,6 +65,7 @@ import CBNCompliance from "./pages/CBNCompliance";
 import MagicLogin from "./pages/MagicLogin";
 import Login from "./pages/Login";
 import SuperAdminDashboard from "./pages/SuperAdminDashboard";
+import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -137,6 +138,8 @@ function Router() {
           <Route path="/admin/super-admin/analytics">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
+      <Route path="/shopline/welcome" component={ShoplineWelcome} />
+      <Route path="/shopline/error" component={ShoplineError} />
       <Route path="/login" component={Login} />
       <Route path="/magic-login" component={MagicLogin} />
       <Route path="/404" component={NotFound} />

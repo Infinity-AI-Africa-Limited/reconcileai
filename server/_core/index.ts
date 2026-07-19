@@ -483,6 +483,10 @@ async function startServer() {
   // (/api/oauth/{google|microsoft}/{start|callback})
   const { registerSsoRoutes } = await import("./sso");
   registerSsoRoutes(app);
+  // SHOPLINE App Store connector routes (OAuth install, webhooks, GDPR)
+  const { createShoplineRouter } = await import("../connectors/shopline/routes");
+  app.use(createShoplineRouter());
+
   // tRPC API
   app.use(
     "/api/trpc",

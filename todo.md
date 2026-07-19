@@ -1167,3 +1167,75 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Task 0.4: Add retail channel types to channels table schema
 - [x] Task 0.5: Extend Super Admin portal with vertical selector
 - [x] Task 0.6: Write retail reconciliation engine adapter (server/retailReconciliationEngine.ts)
+
+## SHOPLINE Tier 1 — App Store Integration (End-to-End)
+
+### T1-A: Merchant Self-Serve Onboarding (auto-provisioning on install)
+- [ ] T1-A1: Build `server/connectors/shopline/onboarding.ts` — auto-create org (segment=retail_commerce, channel=shopline_app_store), admin user, connector config, channels (shopline_payments, shopline_orders), retail resolution-template seed
+- [ ] T1-A2: Wire onboarding into OAuth callback — when store is unknown, call onboardShoplineMerchant() to provision tenant
+- [ ] T1-A3: Build Express route `GET /api/shopline/install` — validate HMAC sign from SHOPLINE install request, redirect to authorize URL
+- [ ] T1-A4: Build Express route `GET /api/shopline/callback` — validate sign, exchange code, provision merchant, redirect to dashboard
+- [ ] T1-A5: Build Express route `POST /api/webhooks/shopline` — raw-body HMAC verify, enqueue+ack 200 within 5s
+- [ ] T1-A6: Build `client/src/pages/ShoplineConnect.tsx` — install landing + connection status page for merchants
+- [ ] T1-A7: Post-install first-run UX — "connected — first sync running" state driven by shoplineConnector.health
+- [ ] T1-A8: Build merchant identity via SHOPLINE session — no separate ReconcileAI password, auth derived from SHOPLINE OAuth
+
+### T1-B: Subscription & Billing (Stripe)
+- [ ] T1-B1: Add Stripe integration via webdev_add_feature (stripe)
+- [ ] T1-B2: Create Stripe Products/Prices for 5 bands: Starter ($49/mo, $490/yr), Growth ($99/mo, $990/yr), Professional ($199/mo, $1990/yr), Scale ($349/mo, $3490/yr), Enterprise (custom)
+- [ ] T1-B3: Build subscription state machine: trial(14d) → active → paused → cancelled
+- [ ] T1-B4: Build trial flow — 14-day free trial on install, no credit card required
+- [ ] T1-B5: Build trial expiry handler — day 12 email prompt, day 14 pause reconciliation (retain data)
+- [ ] T1-B6: Build tier auto-assignment based on prior 30 days transaction volume
+- [ ] T1-B7: Build annual billing as default (2 months free = ~17% discount)
+- [ ] T1-B8: Build subscription upgrade/downgrade flow based on volume changes
+- [ ] T1-B9: Build SHOPLINE revenue share tracking — 15% of all subscription revenue, monthly report
+- [ ] T1-B10: Build billing portal page for merchants (current plan, usage, invoices, upgrade)
+- [ ] T1-B11: Add `subscriptions` table to schema (orgId, stripeCustomerId, stripeSubscriptionId, tier, status, trialEndsAt, currentPeriodEnd, billingInterval)
+
+### T1-C: Retail Merchant Dashboard
+- [ ] T1-C1: Build retail-commerce navigation set in DashboardLayout (Dashboard, Reconciliation, Exceptions, Settlement Monitor, Reports, Settings)
+- [ ] T1-C2: Build retail Dashboard page — match rate, exception count, settlement status, last sync time
+- [ ] T1-C3: Build retail Reconciliation page — order↔payment↔settlement three-leg view
+- [ ] T1-C4: Build retail Exceptions page — chargeback tracker, fee variance, settlement shortfall, with AI diagnosis
+- [ ] T1-C5: Build retail Settlement Monitor page — payout timeline, expected vs actual, shortfall alerts
+- [ ] T1-C6: Build retail Reports page — daily/weekly/monthly reconciliation summary, exportable
+- [ ] T1-C7: Build retail Settings page — connected stores, sync frequency, notification preferences, billing
+- [ ] T1-C8: Wire segment-based routing — retail_commerce orgs see retail nav, not banking nav
+
+### T1-D: Scheduled Sync Jobs (Polling Fallback + Webhook Reconciler)
+- [ ] T1-D1: Build `server/connectors/shopline/subscriptions.ts` — desired-state webhook subscriber (on install + daily: list webhooks, create missing topics from A7, alert if SHOPLINE deleted one)
+- [ ] T1-D2: Build polling fallback job — every 15 minutes, poll for new records using updated_at_min watermark
+- [ ] T1-D3: Build daily batch sync — full reconciliation run at 02:00 UTC (catches missed webhooks)
+- [ ] T1-D4: Build initial 90-day historical pull on first install (background job, paginated)
+- [ ] T1-D5: Build watermark tracking — store last sync timestamp per store per entity type
+- [ ] T1-D6: Wire sync jobs into Heartbeat SDK (periodic updates skill)
+- [ ] T1-D7: Build sync health monitoring — alert if no data received for >1 hour during business hours
+
+### T1-E: GDPR & App Store Compliance
+- [ ] T1-E1: Build Express route `POST /api/shopline/gdpr/customers-redact` — customer PII deletion within 30 days
+- [ ] T1-E2: Build Express route `POST /api/shopline/gdpr/merchants-redact` — full merchant data deletion (fires 48h after uninstall)
+- [ ] T1-E3: Build data retention policy — archive merchant data on uninstall, purge after 30 days per GDPR
+- [ ] T1-E4: Ensure webhook receiver acks < 5 seconds (queue-first design already in place)
+- [ ] T1-E5: Build privacy policy page at /privacy (SHOPLINE App Store requirement)
+- [ ] T1-E6: Build terms of service page at /terms (SHOPLINE App Store requirement)
+- [ ] T1-E7: Prepare App Store listing assets — logo 120×120, 3 feature bullets, EN default language, screenshots
+
+### T1-F: Integration Wiring & Engine
+- [ ] T1-F1: Build `server/connectors/shopline/ingest.ts` — map SHOPLINE API responses to canonical transaction rows with namespaced dedupe keys
+- [ ] T1-F2: Wire SHOPLINE channels (shopline_orders, shopline_payments) into retailReconciliationEngine
+- [ ] T1-F3: Build three-leg join matching — order.payment_details[].pay_channel_deal_id ↔ transactions[].channel_deal_id ↔ billing_records.source_order_transaction_id
+- [ ] T1-F4: Wire dispute lifecycle (WON/LOST/EXPIRED, pre-chargeback) into existing 25 retail exception categories
+- [ ] T1-F5: Inject retailExceptionsTaxonomyPromptBlock into Super Agent for retail_commerce segment orgs
+- [ ] T1-F6: Build isSettlementBatchOverdue watchdog using real settlement_batch_ids from billing records
+
+### T1-G: Dependencies & Blockers (Owner Actions Required)
+- [ ] T1-G1: SHOPLINE Partner Portal registration — create Public App, obtain app key + app secret
+- [ ] T1-G2: Configure App URL + callback URLs in Partner Portal
+- [ ] T1-G3: Configure GDPR webhook URLs in Developer Center
+- [ ] T1-G4: Create SHOPLINE developer store for end-to-end testing
+- [ ] T1-G5: Confirm App Store billing model — platform-managed or ReconcileAI-side (Stripe)
+- [ ] T1-G6: Set env vars: SHOPLINE_CLIENT_ID, SHOPLINE_CLIENT_SECRET, SHOPLINE_WEBHOOK_SECRET
+- [ ] T1-G7: App Store slot application + listing submission (after all code complete)
+- [ ] T1-G8: DPA (Data Processing Agreement) negotiation with SHOPLINE legal
+- [ ] T1-G9: Revenue share agreement (15% target) with SHOPLINE
