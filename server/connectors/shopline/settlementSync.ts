@@ -134,6 +134,10 @@ export async function runSettlementSync(
       const page = await fetchPaymentTransactions(opts, {
         dateMin: fromIso,
         dateMax: toIso,
+        // Only PAYMENT rows form the gateway capture leg; REFUND/DISPUTE rows
+        // would otherwise be mis-counted as captures. They are pulled
+        // separately by the sync orchestrator for exception classification.
+        transactionType: "PAYMENT",
         limit: 250,
         pageInfo: txPageInfo ?? undefined,
       });
@@ -219,7 +223,7 @@ export async function runSettlementSync(
  *   Order.id → PaymentTransaction.seller_order_id (join key)
  *   PaymentTransaction.channel_deal_id → BalanceTransaction.source_order_transaction_id
  */
-function normaliseToTransactions(
+export function normaliseToTransactions(
   orders: ShoplineOrder[],
   transactions: ShoplinePaymentTransaction[],
   _payouts: ShoplinePayout[],
@@ -230,7 +234,10 @@ function normaliseToTransactions(
   const SYNTHETIC_CHANNEL = -1;
   const SYNTHETIC_USER = -1;
 
-  // Source = paid orders (expected settlement amounts)
+  // Source = paid orders (expected settlement amounts).
+  // Match key: the engine's pass-1 exact match is on transactionRef, so the
+  // source ref must be the order id — payment transactions carry it back as
+  // seller_order_id. (o.name like "#1001" never appears on the gateway leg.)
   const sourceTxns: Transaction[] = orders
     .filter((o) => o.financial_status === "paid" || o.financial_status === "partially_refunded")
     .map((o, idx) => {
@@ -242,8 +249,8 @@ function normaliseToTransactions(
         channelId: SYNTHETIC_CHANNEL,
         userId: SYNTHETIC_USER,
         organizationId: null,
-        transactionRef: o.name, // order name/number (e.g. "#1001")
-        externalRef: o.id,
+        transactionRef: o.id,
+        externalRef: o.name, // human-readable order number (e.g. "#1001")
         description: `Order ${o.name} via ${gateway}`,
         amount: totalPrice,
         currency,
@@ -260,16 +267,18 @@ function normaliseToTransactions(
       };
     });
 
-  // Target = successful payment transactions (actual gateway captures)
+  // Target = successful payment transactions (actual gateway captures).
+  // PAYMENT rows use status SUCCEEDED (spec §A6) — payouts use SUCCESS.
+  // Match key: seller_order_id joins back to the order id on the source leg.
   const targetTxns: Transaction[] = transactions
-    .filter((t) => t.status === "SUCCESS" || t.status === "success")
+    .filter((t) => t.status === "SUCCEEDED")
     .map((t, idx) => ({
       id: -(orders.length + idx + 1),
       batchId: SYNTHETIC_BATCH,
       channelId: SYNTHETIC_CHANNEL,
       userId: SYNTHETIC_USER,
       organizationId: null,
-      transactionRef: t.channel_deal_id ?? t.trade_order_id,
+      transactionRef: t.seller_order_id ?? t.trade_order_id,
       externalRef: t.trade_order_id,
       description: `${t.payment_method} capture via ${t.sub_payment_method ?? t.payment_method}`,
       amount: t.paid_amount ?? t.amount,

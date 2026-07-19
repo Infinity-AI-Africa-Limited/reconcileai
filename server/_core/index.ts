@@ -442,6 +442,26 @@ async function startServer() {
     }
   });
 
+  // ── SHOPLINE Scheduled Sync Handlers ────────────────────────────────────────
+  // POST /api/scheduled/shoplineSyncCycle — 15-min incremental sync for all stores
+  app.post("/api/scheduled/shoplineSyncCycle", async (req, res) => {
+    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    const { handleShoplineSyncCycle } = await import("../connectors/shopline/scheduledSync");
+    return handleShoplineSyncCycle(req, res);
+  });
+  // POST /api/scheduled/shoplineDailyBatch — daily full 24h reconciliation
+  app.post("/api/scheduled/shoplineDailyBatch", async (req, res) => {
+    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    const { handleShoplineDailyBatch } = await import("../connectors/shopline/scheduledSync");
+    return handleShoplineDailyBatch(req, res);
+  });
+  // POST /api/scheduled/shoplineWebhookReconciler — daily webhook health check
+  app.post("/api/scheduled/shoplineWebhookReconciler", async (req, res) => {
+    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    const { handleShoplineWebhookReconciler } = await import("../connectors/shopline/scheduledSync");
+    return handleShoplineWebhookReconciler(req, res);
+  });
+
   // ── Live monitoring stream (SSE) ───────────────────────────────────────────
   // GET /api/monitoring/stream — relays reconciliation job-progress events to the
   // dashboard in real time (replaces timer polling). Auth via session cookie.

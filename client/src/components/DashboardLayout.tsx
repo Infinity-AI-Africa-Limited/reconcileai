@@ -160,6 +160,20 @@ const corporateB2BMenuItems: NavItem[] = [
   { icon: Calendar, label: "Schedules", path: "/schedules" },
 ];
 
+// Retail Commerce portal nav (shown for SHOPLINE merchants / retail_commerce orgs)
+const retailCommerceMenuItems: NavItem[] = [
+  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
+  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
+  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
+  { icon: Search, label: "Transactions", path: "/transactions" },
+  { icon: TrendingUp, label: "Settlement Monitor", path: "/settlement-monitor" },
+  { icon: Activity, label: "Sync Status", path: "/shopline/sync-status" },
+  { icon: FileText, label: "Reports", path: "/reports" },
+  { icon: Shield, label: "Audit Trail", path: "/audit" },
+  { icon: Plug, label: "SHOPLINE Connection", path: "/shopline/connect" },
+  { icon: Users, label: "User Management", path: "/admin/users" },
+];
+
 // Super Admin items — only visible to super_admin role (Infinity AI staff)
 const superAdminItems: NavItem[] = [
   { icon: Globe, label: "Platform Overview", path: "/admin/super-admin", roles: ["super_admin"] },
@@ -316,7 +330,9 @@ function DashboardLayoutContent({
       ? financialServicesMenuItems
       : viewAsOrg.segment === "corporate_b2b"
         ? corporateB2BMenuItems
-        : menuItems
+        : viewAsOrg.segment === "retail_commerce"
+          ? retailCommerceMenuItems
+          : menuItems
     : null;
 
   // Advanced items for portal context (Financial Services gets the full advanced tools set)
