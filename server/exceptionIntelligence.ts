@@ -88,6 +88,14 @@ export function counterpartyTypeOf(raw: string | null | undefined): string {
   const t = (raw ?? "").toLowerCase();
   if (/bank|mfb|microfinance/.test(t)) return "bank";
   if (/distributor|dealer|wholesaler/.test(t)) return "distributor";
+  // Retail / e-commerce (SHOPLINE) counterparties — card schemes, gateways,
+  // wallets, BNPL and marketplace payouts, so retail pattern signatures carry a
+  // meaningful counterparty type instead of collapsing to "unknown"/"fintech".
+  if (/visa|mastercard|amex|american express|unionpay|discover|jcb|card scheme/.test(t)) return "card_scheme";
+  if (/paypal|apple\s*pay|google\s*pay|wallet|alipay|wechat/.test(t)) return "digital_wallet";
+  if (/klarna|afterpay|affirm|bnpl|installment|instalment/.test(t)) return "bnpl";
+  if (/shopline\s*payments|gateway|acquirer|psp|stripe|adyen|checkout\.com|settlement/.test(t)) return "payment_gateway";
+  if (/marketplace|payout/.test(t)) return "marketplace";
   if (/fintech|paystack|flutterwave|interswitch/.test(t)) return "fintech";
   if (/merchant|store|retail/.test(t)) return "merchant";
   return "unknown";
@@ -326,6 +334,7 @@ export async function captureExceptionOutcome(params: {
     const [row] = await db
       .select({
         category: exceptionsTable.category,
+        subCategory: exceptionsTable.subCategory,
         description: exceptionsTable.description,
         amount: transactionsTable.amount,
         counterparty: transactionsTable.counterparty,
@@ -340,11 +349,15 @@ export async function captureExceptionOutcome(params: {
     const amt = parseFloat(String(row.amount)) || 0;
     const cpType = counterpartyTypeOf(row.counterparty);
     const actionClass = classifyResolutionAction(params.resolutionText);
+    // Learn on the PRECISE category when a vertical set one (e.g. a retail
+    // `retail_chargeback_not_posted`), so the flywheel keeps retail patterns
+    // distinct from the coarse core buckets. Falls back to the core enum.
+    const learnCategory = row.subCategory ?? row.category;
 
     await db.insert(agentMemory).values({
       organizationId: params.organizationId,
       exceptionId: params.exceptionId,
-      exceptionCategory: row.category,
+      exceptionCategory: learnCategory,
       transactionRef: row.transactionRef ?? null,
       amountRange: amountBucketOf(amt),
       counterpartyType: cpType,
@@ -352,12 +365,12 @@ export async function captureExceptionOutcome(params: {
       resolution: params.resolutionText,
       outcome: params.outcome,
       reasoning: row.description || `Exception ${params.outcome} by operations team`,
-      embeddingText: `category:${row.category} amount:${amountBucketOf(amt)} counterparty:${cpType} resolution:${actionClass} outcome:${params.outcome}`,
+      embeddingText: `category:${learnCategory} amount:${amountBucketOf(amt)} counterparty:${cpType} resolution:${actionClass} outcome:${params.outcome}`,
       resolvedBy: params.actorUserId,
     });
 
     const sig = deriveSignature({
-      exceptionCategory: row.category,
+      exceptionCategory: learnCategory,
       amount: amt,
       counterparty: row.counterparty,
       resolution: params.resolutionText,

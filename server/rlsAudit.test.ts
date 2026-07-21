@@ -147,6 +147,10 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   sl_connector_subscriptions: "tenant_required",
   sl_connector_tokens: "tenant_required",
   sl_connector_webhook_events: "tenant_required",
+  // GDPR requests may arrive for a shop we can no longer resolve to a tenant
+  // (already offboarded), so organizationId is nullable by design — retained
+  // for audit. Queries scope by org when present.
+  sl_connector_gdpr_requests: "tenant_nullable",
 
   // Tenant infrastructure (this hardening work)
   tenant_encryption_keys: "tenant_required",

@@ -261,6 +261,109 @@ export default function SettlementMonitor() {
           )}
         </CardContent>
       </Card>
+
+      {/* Exception Resolution Intelligence — both learning layers */}
+      <ResolutionIntelligenceCard />
     </div>
+  );
+}
+
+// A merchant picks a retail exception category and sees both intelligence
+// layers: their OWN past resolutions (intra-org, private) and the anonymised
+// cross-merchant network recommendations (cross-org, k-anonymous).
+const RETAIL_CATEGORY_CHOICES: Array<{ key: string; label: string }> = [
+  { key: "retail_chargeback_not_posted", label: "Chargeback not posted" },
+  { key: "retail_gateway_fee_variance", label: "Gateway fee variance" },
+  { key: "retail_settlement_shortfall", label: "Settlement shortfall" },
+  { key: "retail_refund_not_settled", label: "Refund not settled" },
+  { key: "retail_fx_rate_mismatch", label: "FX rate mismatch" },
+  { key: "retail_payout_bank_variance", label: "Payout vs bank variance" },
+];
+
+function ResolutionIntelligenceCard() {
+  const [category, setCategory] = useState(RETAIL_CATEGORY_CHOICES[0].key);
+  const { data, isLoading } = trpc.shoplineConnector.exceptionIntelligence.useQuery(
+    { category },
+    { staleTime: 60_000 },
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Exception Resolution Intelligence</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          How this exception has been resolved — by you, and (anonymously) across the merchant network.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          {RETAIL_CATEGORY_CHOICES.map((c) => (
+            <Button
+              key={c.key}
+              size="sm"
+              variant={c.key === category ? "default" : "outline"}
+              onClick={() => setCategory(c.key)}
+            >
+              {c.label}
+            </Button>
+          ))}
+        </div>
+
+        {isLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading intelligence…
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Layer 1 — intra-org */}
+            <div className="rounded-lg border p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Badge variant="secondary">Your history</Badge>
+                <span className="text-xs text-muted-foreground">private to your store</span>
+              </div>
+              {data && data.ownHistory.length > 0 ? (
+                <ul className="space-y-2 text-sm">
+                  {data.ownHistory.map((h, i) => (
+                    <li key={i} className="border-l-2 border-primary/40 pl-2">
+                      <span className="font-medium">{h.resolutionActionClass}</span> → {h.outcome}
+                      <p className="text-muted-foreground text-xs">{h.resolution}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No past resolutions yet — your first resolution of this exception starts building your history.
+                </p>
+              )}
+            </div>
+
+            {/* Layer 2 — cross-org */}
+            <div className="rounded-lg border p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Badge>Network</Badge>
+                <span className="text-xs text-muted-foreground">anonymised · k-anonymous</span>
+              </div>
+              {data && data.network.length > 0 ? (
+                <ul className="space-y-2 text-sm">
+                  {data.network.map((n, i) => (
+                    <li key={i} className="border-l-2 border-emerald-400/50 pl-2">
+                      <span className="font-medium">{n.resolutionActionClass}</span> → {n.outcome}
+                      <p className="text-muted-foreground text-xs">
+                        used by {n.contributorCount} merchants · {n.observationCount} times
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No network recommendations yet. Enable exception-intelligence sharing (Settings) to
+                  benefit from and contribute to anonymised cross-merchant patterns.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

@@ -1,0 +1,1 @@
+ALTER TABLE `exceptions` ADD `subCategory` varchar(64);

@@ -21,8 +21,9 @@ import {
   exchangeCodeForToken,
 } from "./auth";
 import { verifyWebhookHmac } from "./signature";
-import { onboardShoplineMerchant, handleShoplineUninstall } from "./onboarding";
+import { onboardShoplineMerchant } from "./onboarding";
 import { ingestWebhook } from "./webhookHandler";
+import { processGdprRequest, verifyGdprSignature, type GdprKind } from "./gdpr";
 import { fetchStoreMetadata, registerWebhook as apiRegisterWebhook } from "./apiClient";
 import type { ShoplineApiOptions } from "./apiClient";
 
@@ -192,67 +193,50 @@ export function createShoplineRouter(): Router {
     }
   });
 
-  // ─── GDPR: Customer Data Erasure ──────────────────────────────────────────
-  // POST /api/shopline/gdpr/customers-redact
-  // SHOPLINE sends this when a customer requests their data be erased.
-  router.post("/api/shopline/gdpr/customers-redact", async (req: Request, res: Response) => {
+  // ─── GDPR / Mandatory Compliance Endpoints ────────────────────────────────
+  // SHOPLINE's mandatory data-protection webhooks. The Partner Portal registers
+  // one URL per subject; the canonical paths below match the portal config:
+  //   POST /api/shopline/gdpr/customers-data-request  (customer access + redact)
+  //   POST /api/shopline/gdpr/shop-data-request       (shop/merchant data deletion)
+  // The older customers-redact / merchants-redact paths are kept as aliases so a
+  // previously-registered URL keeps working. All share one signed handler.
+  const gdprHandler = (endpointKind: GdprKind) => async (req: Request, res: Response) => {
     try {
       const rawBody =
         (req as Request & { rawBody?: Buffer }).rawBody ??
         Buffer.from(JSON.stringify(req.body ?? {}));
-
       const hmacHeader = (req.headers["x-shopline-hmac-sha256"] as string) || "";
-      if (hmacHeader && !verifyWebhookHmac(rawBody, hmacHeader, ENV.shoplineAppSecret)) {
+
+      // Signature is MANDATORY — without it a forged POST could trigger a shop
+      // uninstall or a redaction. No/invalid signature ⇒ 401, no action taken.
+      if (!verifyGdprSignature(rawBody, hmacHeader)) {
         return res.status(401).json({ error: "Invalid signature" });
       }
 
-      const { shop_domain, customer } = req.body ?? {};
-      console.log(
-        `[shopline-gdpr] Customer redact request: shop=${shop_domain}, customer_id=${customer?.id}`,
-      );
+      const topic = (req.headers["x-shopline-topic"] as string) || undefined;
+      const result = await processGdprRequest({
+        rawBody,
+        hmacHeader,
+        topic,
+        payload: (req.body ?? {}) as Parameters<typeof processGdprRequest>[0]["payload"],
+        endpointKind,
+      });
 
-      // ReconcileAI stores transaction data by organization, not by individual customer.
-      // For GDPR compliance, we log the request. Actual PII is not stored in transaction
-      // records (only amounts, refs, dates). If customer email/name is stored in rawData,
-      // a background job will scrub it.
-      // TODO: Implement rawData PII scrubbing for the affected customer
-
-      return res.status(200).json({ ok: true, message: "Customer redact acknowledged" });
+      // Always 200 once verified — SHOPLINE only needs the ack.
+      return res.status(200).json({ ok: true, ...result });
     } catch (err) {
-      console.error("[shopline-gdpr] customers-redact error:", err);
+      console.error(`[shopline-gdpr] ${endpointKind} error:`, err);
+      // Still 200 to avoid retries; the request is logged for manual follow-up.
       return res.status(200).json({ ok: true });
     }
-  });
+  };
 
-  // ─── GDPR: Merchant Data Erasure ──────────────────────────────────────────
-  // POST /api/shopline/gdpr/merchants-redact
-  // SHOPLINE sends this 48h after a merchant uninstalls the app.
-  router.post("/api/shopline/gdpr/merchants-redact", async (req: Request, res: Response) => {
-    try {
-      const rawBody =
-        (req as Request & { rawBody?: Buffer }).rawBody ??
-        Buffer.from(JSON.stringify(req.body ?? {}));
-
-      const hmacHeader = (req.headers["x-shopline-hmac-sha256"] as string) || "";
-      if (hmacHeader && !verifyWebhookHmac(rawBody, hmacHeader, ENV.shoplineAppSecret)) {
-        return res.status(401).json({ error: "Invalid signature" });
-      }
-
-      const { shop_domain } = req.body ?? {};
-      console.log(`[shopline-gdpr] Merchant redact request: shop=${shop_domain}`);
-
-      // Mark the store as uninstalled and begin data retention countdown
-      if (shop_domain) {
-        const handle = shop_domain.replace(/\.myshopline\.com$/, "");
-        await handleShoplineUninstall(handle);
-      }
-
-      return res.status(200).json({ ok: true, message: "Merchant redact acknowledged" });
-    } catch (err) {
-      console.error("[shopline-gdpr] merchants-redact error:", err);
-      return res.status(200).json({ ok: true });
-    }
-  });
+  // Canonical paths (match Partner Portal registration).
+  router.post("/api/shopline/gdpr/customers-data-request", gdprHandler("customer_data_request"));
+  router.post("/api/shopline/gdpr/shop-data-request", gdprHandler("shop_redact"));
+  // Backward-compatible aliases.
+  router.post("/api/shopline/gdpr/customers-redact", gdprHandler("customer_redact"));
+  router.post("/api/shopline/gdpr/merchants-redact", gdprHandler("shop_redact"));
 
   return router;
 }

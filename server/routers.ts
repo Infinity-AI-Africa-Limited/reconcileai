@@ -4249,15 +4249,48 @@ export const appRouter = router({
             ).join("\n")
           : "";
 
-        // Inject the Nigerian channel exception taxonomy — only the channels the
-        // user's question actually touches, so channel-specific questions get the
-        // catalogued failure modes without bloating unrelated queries.
-        const { nigerianExceptionsTaxonomyPromptBlock, relevantNigerianChannelsForText } =
-          await import("./exceptions/seed");
-        const taxonomyChannels = relevantNigerianChannelsForText(input.query);
-        const taxonomyBlock = taxonomyChannels.length > 0
-          ? `\n\nCatalogued Nigerian channel exception patterns (relevant to this question):\n${nigerianExceptionsTaxonomyPromptBlock(taxonomyChannels)}`
-          : "";
+        // Taxonomy injection is segment-aware. Retail (SHOPLINE) merchants get
+        // the retail exception taxonomy PLUS live exception intelligence — their
+        // own past resolutions (intra-org) and the anonymised cross-merchant
+        // network (cross-org) — for the categories their question touches. Other
+        // segments keep the Nigerian channel taxonomy.
+        let orgSegment: string | null = null;
+        if (orgId) {
+          const segDb = await getDb();
+          if (segDb) {
+            const [orgRow] = await segDb
+              .select({ segment: organizations.segment })
+              .from(organizations)
+              .where(eq(organizations.id, orgId))
+              .limit(1);
+            orgSegment = orgRow?.segment ?? null;
+          }
+        }
+
+        let taxonomyBlock = "";
+        if (orgSegment === "retail_commerce") {
+          const { retailExceptionsTaxonomyPromptBlock } = await import("./exceptions/retail-commerce");
+          const {
+            relevantRetailCategoriesForText,
+            getRetailExceptionIntelligence,
+            retailIntelligencePromptBlock,
+          } = await import("./connectors/shopline/retailIntelligence");
+          taxonomyBlock = `\n\nRetail / e-commerce settlement exception taxonomy:\n${retailExceptionsTaxonomyPromptBlock()}`;
+          if (orgId) {
+            const cats = relevantRetailCategoriesForText(input.query);
+            for (const cat of cats) {
+              const intel = await getRetailExceptionIntelligence(orgId, cat);
+              taxonomyBlock += retailIntelligencePromptBlock(intel);
+            }
+          }
+        } else {
+          const { nigerianExceptionsTaxonomyPromptBlock, relevantNigerianChannelsForText } =
+            await import("./exceptions/seed");
+          const taxonomyChannels = relevantNigerianChannelsForText(input.query);
+          taxonomyBlock = taxonomyChannels.length > 0
+            ? `\n\nCatalogued Nigerian channel exception patterns (relevant to this question):\n${nigerianExceptionsTaxonomyPromptBlock(taxonomyChannels)}`
+            : "";
+        }
 
         const systemPrompt = `You are the ReconcileAI Super Agent — an autonomous financial reconciliation intelligence for African FMCG and corporate B2B payment environments.
 

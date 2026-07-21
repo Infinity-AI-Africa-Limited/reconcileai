@@ -275,6 +275,13 @@ export const exceptions = mysqlTable("exceptions", {
     "fx_rate_variance",
     "format_error",
   ]).notNull(),
+  // Fine-grained vertical category that does NOT fit the fixed core enum above —
+  // e.g. a retail `retail_chargeback_not_posted`. The `category` column stays a
+  // coarse core enum (for list filters/reports), while the exception intelligence
+  // flywheel (agentMemory + shared pattern pool) learns on this precise category
+  // when present, so retail moat isn't blended into the coarse buckets. Null for
+  // ordinary financial-services exceptions.
+  subCategory: varchar("subCategory", { length: 64 }),
   severity: mysqlEnum("severity", ["low", "medium", "high", "critical"])
     .default("medium")
     .notNull(),

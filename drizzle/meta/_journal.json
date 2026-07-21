@@ -505,6 +505,20 @@
       "when": 1784478996676,
       "tag": "0071_shopline_subscriptions",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "5",
+      "when": 1784597914940,
+      "tag": "0072_shopline_gdpr_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "5",
+      "when": 1784598232254,
+      "tag": "0073_exceptions_subcategory",
+      "breakpoints": true
     }
   ]
 }

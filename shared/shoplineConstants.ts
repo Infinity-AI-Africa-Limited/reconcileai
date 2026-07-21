@@ -122,4 +122,18 @@ export const SHOPLINE_BILLING_WEBHOOK_TOPICS = [
 export type ShoplineBillingWebhookTopic = (typeof SHOPLINE_BILLING_WEBHOOK_TOPICS)[number];
 
 /** Mandatory GDPR topics (configured in the SHOPLINE Developer Center, not via API). */
-export const SHOPLINE_GDPR_TOPICS = ["customers/redact", "merchants/redact"] as const;
+export const SHOPLINE_GDPR_TOPICS = [
+  "customers/data_request",
+  "customers/redact",
+  "shop/redact",
+] as const;
+
+/**
+ * Canonical GDPR endpoint paths registered in the SHOPLINE Partner Portal.
+ * (The older customers-redact / merchants-redact paths remain as aliases in
+ * the Express router for any previously-registered URL.)
+ */
+export const SHOPLINE_GDPR_ENDPOINTS = {
+  customerDataRequest: "/api/shopline/gdpr/customers-data-request",
+  shopDataRequest: "/api/shopline/gdpr/shop-data-request",
+} as const;

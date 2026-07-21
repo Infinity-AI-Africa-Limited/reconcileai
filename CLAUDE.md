@@ -192,8 +192,9 @@ from public docs — treat these as **confirmed ground truth** for review purpos
 | Webhook Signing Key | Same as APP Secret (SHOPLINE does not expose a separate signing key) |
 | App URL | `https://www.reconcileaiafrica.com/api/shopline/install` |
 | Callback URL | `https://www.reconcileaiafrica.com/api/shopline/callback` |
-| GDPR Customer Redact | `https://www.reconcileaiafrica.com/api/shopline/gdpr/customers-redact` |
-| GDPR Merchant Redact | `https://www.reconcileaiafrica.com/api/shopline/gdpr/merchants-redact` |
+| GDPR Customer Data Request | `https://www.reconcileaiafrica.com/api/shopline/gdpr/customers-data-request` (canonical; access + customer redact) |
+| GDPR Shop Data Request | `https://www.reconcileaiafrica.com/api/shopline/gdpr/shop-data-request` (canonical; shop deletion / uninstall purge) |
+| GDPR legacy aliases | `.../gdpr/customers-redact` and `.../gdpr/merchants-redact` still routed for any previously-registered URL |
 | Privacy Policy URL | `https://www.reconcileaiafrica.com/privacy` |
 | Terms of Service URL | `https://www.reconcileaiafrica.com/terms` |
 | Support URL | `https://www.reconcileaiafrica.com/support` |
@@ -368,9 +369,34 @@ which is gitignored). The code reads them from `ENV.shoplineAppKey` /
 > live APP Key and APP Secret here in plaintext. The APP Secret is the HMAC
 > signing key for OAuth callbacks and webhook verification — a leaked secret
 > lets an attacker forge either. It has been redacted, but because it was
-> committed to git history on two remotes it must be treated as compromised:
-> **rotate the app secret in the SHOPLINE Partner Portal** and update the
-> hosting env var. Never paste real credentials into tracked files.
+> committed to git history on two remotes it must be treated as compromised.
+> Rotation is currently **not available** in the Partner Portal (app in Draft,
+> no regenerate control); the secret is env-only (`.env` gitignored) and
+> derived tokens are AES-256-GCM encrypted at rest. Rotate if a control appears
+> post-publish. Never paste real credentials into tracked files.
+
+### 2B.9a Retail Exception Intelligence — the two learning layers (2026-07-19)
+
+The moat (§9A) applied to retail: retail exceptions feed the SAME exception
+intelligence engine (`server/exceptionIntelligence.ts`) as financial services,
+keyed on their precise `retail_*` category rather than a coarse bucket.
+
+- **Carrier for the category:** `exceptions.subCategory` (migration 0073, nullable
+  varchar) holds the precise `retail_*` key; `exceptions.category` stays the
+  coarse core enum for list filters. `captureExceptionOutcome` learns on
+  `subCategory ?? category`, so retail patterns stay distinct.
+- **Layer 1 — intra-organizational** (`getOwnResolutionHistory`): this merchant's
+  OWN past resolutions for a category, from `agentMemory` (org-scoped, private).
+- **Layer 2 — cross-organizational** (`getSharedRecommendations`): the anonymised,
+  k-anonymous (`K≥3`) pattern pool across consenting merchants; reciprocal opt-in;
+  PII-scrubbed by construction. Retail-aware `counterpartyTypeOf` adds
+  card_scheme / payment_gateway / digital_wallet / bnpl / marketplace types.
+- **Consumption:** `server/connectors/shopline/retailIntelligence.ts` combines both
+  (`getRetailExceptionIntelligence`), surfaced via the `shoplineConnector.
+  exceptionIntelligence` tRPC query, the SettlementMonitor "Resolution
+  Intelligence" card, and injected into the Super Agent **by segment**
+  (`retail_commerce` orgs get the retail taxonomy + live per-category intelligence
+  instead of the Nigerian channel taxonomy).
 
 ### 2B.10 Key Design Decisions (Reviewer Context)
 

@@ -350,3 +350,44 @@ export const slConnectorSubscriptions = mysqlTable(
 );
 export type SlConnectorSubscription = typeof slConnectorSubscriptions.$inferSelect;
 export type InsertSlConnectorSubscription = typeof slConnectorSubscriptions.$inferInsert;
+
+// ─── SHOPLINE GDPR / Mandatory Compliance Requests ──────────────────────────
+// Auditable trail of SHOPLINE's mandatory GDPR webhooks (customer data request,
+// customer redact, shop redact). Required for App Store review and the "respond
+// 200, complete within 30 days" obligation — each row records the request and
+// the action taken so the compliance state is queryable. organizationId is
+// nullable because a request may arrive for a shop we can't resolve to a tenant
+// (already uninstalled); such rows are still retained for audit.
+export const slConnectorGdprRequests = mysqlTable(
+  "sl_connector_gdpr_requests",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId"),
+    slStoreId: int("slStoreId"),
+    /** SHOPLINE topic: customers/data_request | customers/redact | shop/redact | merchants/redact */
+    topic: varchar("topic", { length: 64 }).notNull(),
+    /** Store domain from the request payload. */
+    shopDomain: varchar("shopDomain", { length: 255 }),
+    /**
+     * SHA-256 of the data subject's identifier (customer id, or shop domain for
+     * shop requests). Hashed so this audit table never itself stores a raw
+     * customer identifier.
+     */
+    subjectHash: varchar("subjectHash", { length: 64 }),
+    status: mysqlEnum("status", ["received", "completed", "failed", "unresolved_store"])
+      .default("received")
+      .notNull(),
+    /** How many stored records were scrubbed/affected by the action. */
+    recordsAffected: int("recordsAffected").default(0).notNull(),
+    note: text("note"),
+    receivedAt: timestamp("receivedAt").defaultNow().notNull(),
+    completedAt: timestamp("completedAt"),
+  },
+  (t) => [
+    index("idx_sl_gdpr_org").on(t.organizationId),
+    index("idx_sl_gdpr_topic").on(t.topic),
+    index("idx_sl_gdpr_shop").on(t.shopDomain),
+  ],
+);
+export type SlConnectorGdprRequest = typeof slConnectorGdprRequests.$inferSelect;
+export type InsertSlConnectorGdprRequest = typeof slConnectorGdprRequests.$inferInsert;

@@ -411,26 +411,19 @@ async function runReconciliationOnPersistedData(
   }
 
   // Persist exceptions
-  // The exceptions table requires a jobId — we use batchId=0 as a synthetic job
-  // since SHOPLINE sync doesn't create reconciliation jobs (it runs inline).
-  // The category must map to the exceptions table enum. Retail-specific categories
-  // are stored in the description field; the enum category is the closest match.
+  // The exceptions table requires a jobId — we use 0 as a synthetic job since
+  // SHOPLINE sync runs inline (no reconciliation job). `category` is the coarse
+  // core enum (for list filters/reports); the PRECISE retail category is stored
+  // in `subCategory` so the exception intelligence flywheel learns on it (both
+  // the intra-org agentMemory recall and the cross-org shared pool key on it).
   if (result.retailExceptions.length > 0) {
-    const mapToExceptionCategory = (retailCategory: string) => {
-      // Map retail categories to the exceptions table enum
-      if (retailCategory.includes("chargeback")) return "reversal_unmatched" as const;
-      if (retailCategory.includes("refund")) return "reversal_unmatched" as const;
-      if (retailCategory.includes("duplicate")) return "duplicate_transaction" as const;
-      if (retailCategory.includes("fee") || retailCategory.includes("commission")) return "amount_mismatch" as const;
-      if (retailCategory.includes("settlement")) return "timing_difference" as const;
-      if (retailCategory.includes("fx") || retailCategory.includes("currency")) return "fx_rate_variance" as const;
-      return "unmatched" as const;
-    };
+    const { mapRetailToCoreCategory } = await import("./retailIntelligence");
 
     const exceptionRows = result.retailExceptions.map((ex) => ({
       jobId: 0, // synthetic — no reconciliation job for inline sync
       transactionId: ex.transactionId,
-      category: mapToExceptionCategory(ex.category),
+      category: mapRetailToCoreCategory(ex.category),
+      subCategory: ex.category, // precise retail_* key — feeds the flywheel
       severity: ex.severity,
       description: `[${ex.category}] ${ex.description}`,
       suggestedResolution: ex.suggestedResolution,

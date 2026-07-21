@@ -269,6 +269,28 @@ export const shoplineConnectorRouter = router({
     }),
 
   /**
+   * Exception intelligence for a retail exception category — both layers:
+   *   ownHistory : this merchant's own past resolutions (intra-org, private)
+   *   network    : anonymised cross-merchant recommendations (k-anonymous)
+   * Powers the exception-detail / settlement-monitor "how to resolve" panel.
+   */
+  exceptionIntelligence: protectedProcedure
+    .input(
+      z.object({
+        category: z.string().min(1),
+        amount: z.number().optional(),
+        organizationId: z.number().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+      const { getRetailExceptionIntelligence } = await import("../connectors/shopline/retailIntelligence");
+      return getRetailExceptionIntelligence(orgId, input.category, input.amount ?? 0);
+    }),
+
+  /**
    * Trigger a manual settlement sync for a store.
    * Defaults to the last 7 days if no window is specified.
    */
