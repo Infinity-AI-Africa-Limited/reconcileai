@@ -12,15 +12,22 @@
 
 **Owner:** Richard Anwanakak — Founder & CEO, Infinity AI Africa Limited.
 
-**Live prototype:** https://reconcileai.vip
+**Live production:** https://www.reconcileaiafrica.com/ (hosted on Railway)
+- Health/liveness: `/api/healthz` (returns 200 whenever the process is alive; used by the Railway health check)
+- Deep readiness: `/api/health` (checks DB and dependencies)
+- Older docs may reference `reconcileai.vip` — that domain is **historical**; the live domain is **reconcileaiafrica.com**.
 
-**GitHub repositories:**
-- Primary: `Infinity-AI-Africa-Limited/reconcileai`
-- Mirror: `MistaRichMan/reconcileai`
+**GitHub repositories** (every commit is dual-pushed to BOTH — keep them at par):
+- `origin` (Primary): `Infinity-AI-Africa-Limited/reconcileai`
+- `mirror`: `MistaRichMan/reconcileai`
 
-**Current stage:** Working prototype built in Manus. Being transferred to Claude Code for production engineering.
+**Current stage:** **Live in production on Railway.** The Manus prototype has graduated to a production platform: magic-link auth, Anthropic Claude LLM, a durable job queue, email delivery, a test suite, CI, and the full SHOPLINE Tier 1 retail vertical are all shipped. Claude Code owns production engineering; Manus contributes features via PR (see Section 15).
 
-**Target deployment:** https://reconcileai.vip (custom domain, already configured)
+**Production deployment:** https://www.reconcileaiafrica.com/ on Railway. Auto-deploys from `main`; `pnpm db:migrate` runs as a pre-deploy step (see `railway.json` and Section 12).
+
+> ⚠️ **Working-tree note (2026-07-23):** a local checkout may sit *behind* `origin/main`.
+> Production `main` is the source of truth (it carries the SHOPLINE Phase 1 work and the
+> §2B docs). Before starting new work, sync local `main` to `origin/main`.
 
 ---
 
@@ -38,7 +45,10 @@ The goal is to convert the current POC into a paid pilot by demonstrating:
 3. AI Super Agent providing actionable resolution recommendations
 4. A shareable report that a CFO or Operations Manager can act on
 
-**Do not scope work for Lapo MFB** until the data format and integration requirements are confirmed. Lapo is a future track; Woodcore is the immediate priority.
+**Woodcore remains the immediate priority.** A LAPO MFB channel pack has since shipped
+ahead of docs (8 sources, all formats config in `shared/lapoSources.ts`, onboarded via the
+CBS picker with `cbsType=lapo`) — but do not build LAPO-specific integration logic until
+real data samples and SFTP credentials are confirmed.
 
 **Woodcore connection details (environment variables — already set):**
 ```
@@ -56,7 +66,8 @@ WOODCORE_DB_PASSWORD=<set in environment>
 - `server/woodcoreDb.ts` — MySQL2 connection pool for direct Fineract DB access
 - `drizzle/woodcore_schema.ts` — Drizzle ORM mirror of key Fineract tables (prefixed `wc_`)
 - `client/src/pages/WoodcorePOC.tsx` — Frontend POC dashboard
-- `server/routers.ts` — `woodcore.*` tRPC procedures (lines ~3926–4316)
+- `server/routers.ts` — `woodcore.*` tRPC procedures (search for `woodcore: router({`)
+- The **connector** (separate from the POC engine) lives in `server/connectors/` and `server/routers/woodcoreConnector.ts` — see the model below.
 
 ### Connector-as-Onboarding-Channel Model (applies to ALL CBS connectors)
 
@@ -109,12 +120,12 @@ SHOPLINE (e-commerce platform) merchants. Source roadmap:
 Constants live in `shared/shoplineConstants.ts` (tiers, channels, subscription
 bands, required OAuth scopes, rev share).
 
-### Phase Status (as of 2026-07-19)
+### Phase Status (updated 2026-07-23)
 
 | Phase | Status | Notes |
 |---|---|---|
 | **Phase 0** | DONE + CTO-hardened | Retail-vertical foundation (commit `c5976b4`) |
-| **Phase 1** | BUILT — 4 PRs open for review | Full Tier 1 App Store connector, billing, compliance |
+| **Phase 1** | ✅ MERGED & LIVE on production | Full Tier 1 App Store connector, billing, compliance. PRs #8–#11 merged to `main` (HEAD `e4a8290`), deployed by Railway. Go-live steps (App Store submission) remain — see §2B.12 |
 | **Phase 2** | Not started | Tier 2/3 — post-signed-agreement only |
 
 ### Phase 0 — DONE + CTO-hardened (commit `c5976b4`)
@@ -144,12 +155,15 @@ config/placeholders, swappable when docs arrive):
 - **Super Admin vertical selector** — All / Financial Services / Retail & Commerce
   toggle + SHOPLINE Tier column, in `SuperAdminDashboard.tsx`.
 
-### Phase 1 — BUILT (4 PRs open for Claude Code review)
+### Phase 1 — MERGED & LIVE on production
 
 The SHOPLINE API documentation was obtained (2026-07-18) from the public developer
 docs at https://developer.shopline.com. The Partner Portal was configured by the
-project owner (2026-07-19). Phase 1 is now **fully implemented** across 4 incremental
-PRs. See **§2B** below for the complete implementation context.
+project owner (2026-07-19). Phase 1 was implemented across 4 incremental PRs (#8–#11),
+**reviewed, hardened, and merged to `main` on both remotes** (HEAD `e4a8290`) — Railway
+has deployed it to `https://www.reconcileaiafrica.com`. See **§2B** below for the complete
+implementation context. What remains is external go-live (App Store submission), not code —
+see §2B.12.
 
 ### Phase 2 — post-signed-agreement ONLY
 Tier 2 white-label API response format, on-premise Docker container packaging
@@ -161,13 +175,15 @@ Tier 2 white-label API response format, on-premise Docker container packaging
 
 ---
 
-## 2B. SHOPLINE Phase 1 Implementation — Full Context for PR Review
+## 2B. SHOPLINE Phase 1 Implementation — Full Context (now merged & live)
 
-This section provides the complete context Claude Code needs to review the 4 SHOPLINE
-Tier 1 PRs. It covers: what was verified from public documentation, what was configured
-in the Partner Portal, the architectural decisions made, and how each module works.
+This section documents the shipped Phase 1 implementation: what was verified from public
+documentation, what was configured in the Partner Portal, the architectural decisions made,
+and how each module works. It was originally written as PR-review context; **all 4 PRs are
+now merged to `main` and deployed** — treat it as the reference for the live code under
+`server/connectors/shopline/`.
 
-### Pull Requests (review in order — each builds on the previous)
+### Pull Requests (all MERGED to `main`, in this order — each built on the previous)
 
 | PR | Branch | Base | URL | Scope |
 |---|---|---|---|---|
@@ -176,7 +192,7 @@ in the Partner Portal, the architectural decisions made, and how each module wor
 | **PR #10** | `manus/shopline-tier1-dashboard-sync` | `manus/shopline-tier1-onboarding` | https://github.com/MistaRichMan/reconcileai/pull/10 | Retail merchant dashboard, settlement monitor, scheduled sync handlers |
 | **PR #11** | `manus/shopline-tier1-billing-compliance` | `manus/shopline-tier1-dashboard-sync` | https://github.com/MistaRichMan/reconcileai/pull/11 | Billing webhook handler, subscription management, compliance pages |
 
-**Test status (final branch):** 761/761 tests passing, 0 TypeScript errors.
+**Test status at merge:** 761/761 tests passing, 0 TypeScript errors. Migrations `0071_shopline_subscriptions.sql` and `0072_shopline_gdpr_requests.sql` shipped with this work.
 
 ### 2B.1 SHOPLINE Partner Portal Configuration (Confirmed 2026-07-19)
 
@@ -441,13 +457,16 @@ Before submitting for App Store review, these must be verified:
 - Full OAuth flow works end-to-end on a SHOPLINE developer store
 - App listing assets: logo 120×120, 3 feature bullets, EN default language
 
-### 2B.12 Remaining Steps After PR Merge
+### 2B.12 Remaining Steps to Go Live (code is merged & deployed)
 
-1. Run `pnpm db:push` to apply the `sl_connector_subscriptions` table migration
-2. Deploy to `https://www.reconcileaiafrica.com`
-3. Test full OAuth flow on a SHOPLINE developer store
-4. Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
-5. Address any App Store review feedback
+The code is merged to `main` and Railway has deployed it (migrations run automatically on
+deploy via `pnpm db:migrate`). What remains is external go-live, not engineering:
+
+1. ✅ Migrations applied on deploy (`0071_shopline_subscriptions`, `0072_shopline_gdpr_requests`)
+2. ✅ Deployed to `https://www.reconcileaiafrica.com`
+3. ⬜ Test the full OAuth flow on a SHOPLINE developer store
+4. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
+5. ⬜ Address any App Store review feedback
 
 ---
 
@@ -455,27 +474,40 @@ Before submitting for App Store review, these must be verified:
 
 | Layer | Technology | Version |
 |---|---|---|
-| Runtime | Node.js | 22.13.0 |
+| Runtime | Node.js | 22.x |
 | Frontend | React | 19 |
 | Styling | Tailwind CSS | 4 |
 | UI Components | shadcn/ui + Radix UI | latest |
 | API Layer | tRPC | 11 |
 | Backend | Express | 4 |
 | ORM | Drizzle ORM | latest |
-| Database | MySQL / TiDB | (managed) |
-| Auth (prototype) | Manus OAuth | replace in production |
-| File Storage | AWS S3 / Cloudflare R2 | via `server/storage.ts` |
-| LLM | Manus Forge (dev) / Anthropic Claude (production) | see Section 4 |
-| Build | Vite | latest |
-| Testing | Vitest | latest |
+| Database | MySQL / TiDB (managed, TiDB Cloud) | managed |
+| Job queue | BullMQ + Redis (durable) / in-process fallback | see Section 12 |
+| Auth (production) | Email magic link (JWT session cookie) | live — see Section 5 |
+| File Storage | AWS S3 / Cloudflare R2 | via `server/storage.ts` (org-scoped keys) |
+| LLM | Anthropic Claude (production) / Manus Forge (fallback) | see Section 4 |
+| Email | Resend | `server/_core/email.ts` |
+| Build | Vite + esbuild | latest |
+| Hosting | Railway (production) | auto-deploy from `main` |
+| Testing | Vitest | broad coverage (engines, routers, reports) |
 | Language | TypeScript | strict mode |
 
 **Key file locations:**
 ```
-drizzle/schema.ts          ← All 50+ database tables
-server/routers.ts          ← All tRPC procedures (~5,500 lines)
-server/db.ts               ← Query helpers
-server/_core/llm.ts        ← LLM provider (dual-mode)
+drizzle/schema.ts          ← All 50+ database tables (single source of truth)
+drizzle/00xx_*.sql         ← Versioned migrations (run pre-deploy on Railway)
+server/_core/index.ts      ← Server entry point (Express + tRPC bootstrap)
+server/routers.ts          ← Core tRPC procedures (~6,900 lines; still the main router)
+server/routers/            ← Domain routers extracted from routers.ts (uganda, lapo,
+                             cbnCompliance, mobileMoney, poc, pocKpi, erpExport,
+                             regulatorPortal, woodcoreConnector, shoplineConnector, shared)
+server/reconciliationEngine.ts   ← Core 3-pass matching engine (has test coverage)
+server/connectors/shopline/      ← SHOPLINE Tier 1 connector (Phase 1, live — see §2B)
+server/exceptions/         ← Per-vertical exception taxonomies
+server/exceptionIntelligence.ts / institutionalLearning.ts  ← Learning flywheel
+server/jobQueue.ts         ← BullMQ/in-process durable job queue
+server/rateLimiter.ts      ← Public API + ingestion rate limiting
+server/_core/llm.ts        ← LLM provider (dual-mode, native Anthropic adapter)
 server/_core/env.ts        ← All environment variables
 client/src/App.tsx         ← Routes and layout
 client/src/components/DashboardLayout.tsx  ← Sidebar + portal switcher
@@ -486,11 +518,14 @@ client/src/pages/          ← All 40+ frontend pages
 
 ## 4. LLM Integration — Production Configuration
 
-### Current State (Prototype / Manus)
-The prototype uses **Manus Forge** (`BUILT_IN_FORGE_API_KEY`), which routes to `gemini-2.5-flash`. This key is injected automatically by the Manus platform and will **not be available** outside Manus.
+### Production runs on Anthropic Claude
+Production sets `DIRECT_LLM_API_KEY` (Anthropic) so all LLM calls go directly to Claude.
+**Manus Forge** (`BUILT_IN_FORGE_API_KEY`, routed to `gemini-2.5-flash`) is only a
+fallback for the Manus sandbox and is **not available** outside it — never rely on it in
+production.
 
-### Production Configuration (Claude Code / Rocket.new)
-Set these environment variables to switch to Anthropic Claude:
+### Production Configuration (Anthropic Claude)
+Set these environment variables (already set in the Railway environment):
 
 ```bash
 # Primary: Anthropic Claude API key
@@ -499,8 +534,8 @@ DIRECT_LLM_API_KEY=sk-ant-api03-...
 # Anthropic API base URL (the native /v1/messages path is appended automatically)
 DIRECT_LLM_API_URL=https://api.anthropic.com
 
-# Model selection — see below
-DIRECT_LLM_MODEL=claude-sonnet-4-5
+# Model selection — see the table below (current-generation Claude models)
+DIRECT_LLM_MODEL=claude-sonnet-5
 
 # Optional explicit selector ("anthropic" | "openai"); auto-detected when omitted
 DIRECT_LLM_PROVIDER=anthropic
@@ -513,15 +548,22 @@ DIRECT_LLM_PROVIDER=anthropic
 
 ### Model Selection by Use Case
 
+Use the current Claude generation (Claude 5 family + Opus 4.8). Model IDs:
+`claude-sonnet-5`, `claude-opus-4-8`, `claude-fable-5` (most intelligent), `claude-haiku-4-5`.
+
 | Use Case | Recommended Model | Reason |
 |---|---|---|
-| Exception classification | `claude-sonnet-4-5` | Best instruction-following for structured financial reasoning |
-| Anomaly detection narrative | `claude-sonnet-4-5` | Fast, accurate, cost-efficient |
-| AI Super Agent (agentic tasks) | `claude-opus-4` | Best multi-step reasoning, tool use, and extended thinking |
-| Report generation | `claude-sonnet-4-5` | Sufficient for structured output |
-| Compliance assessment | `claude-sonnet-4-5` | Accurate for regulatory text interpretation |
+| Exception classification | `claude-sonnet-5` | Best instruction-following for structured financial reasoning |
+| Anomaly detection narrative | `claude-sonnet-5` | Fast, accurate, cost-efficient |
+| AI Super Agent (agentic tasks) | `claude-opus-4-8` | Best multi-step reasoning, tool use, and extended thinking |
+| Report generation | `claude-sonnet-5` | Sufficient for structured output |
+| Compliance assessment | `claude-sonnet-5` | Accurate for regulatory text interpretation |
 
-**Why Claude over OpenAI:** All primary LLM use cases in ReconcileAI are reasoning-heavy, context-long, instruction-following tasks. Claude 3.5 Sonnet and Claude Opus 4 outperform GPT-4o on these benchmarks. Claude also supports 200K token context windows, which is critical when feeding large reconciliation batches or full audit trails to the model.
+> Model IDs are set via `DIRECT_LLM_MODEL`; switching models is a one-env-var change and
+> requires no code changes (all call sites go through `invokeLLM()`). Prefer the latest
+> and most capable Claude model available for a given use case.
+
+**Why Claude over OpenAI:** All primary LLM use cases in ReconcileAI are reasoning-heavy, context-long, instruction-following tasks where current Claude models lead. Claude also supports very large context windows, which is critical when feeding large reconciliation batches or full audit trails to the model.
 
 ### How the Provider Switch Works
 The `invokeLLM()` function in `server/_core/llm.ts` resolves the provider at runtime:
@@ -543,7 +585,7 @@ If you want to route through a proxy for cost tracking, fallback, and observabil
 ```bash
 DIRECT_LLM_API_URL=https://your-litellm-proxy.com/v1
 DIRECT_LLM_API_KEY=<litellm-key>
-DIRECT_LLM_MODEL=anthropic/claude-sonnet-4-5
+DIRECT_LLM_MODEL=anthropic/claude-sonnet-5
 ```
 
 ---
@@ -571,9 +613,13 @@ The Manus `/api/oauth/callback` now simply redirects to `/login`. The session la
 
 | Phase | Method | Target Segment | Status |
 |---|---|---|---|
-| **Phase 1** | Email / Magic Link | Lapo MFB pilot, all early users | ✅ Implemented |
-| **Phase 2 — Q1** | Google OAuth2 | Fintechs, startups on Google Workspace | Pending |
-| **Phase 3 — Q2** | Microsoft Entra ID (Azure AD) OAuth2 | Commercial banks, tier-2/tier-1 institutions | Pending |
+| **Phase 1** | Email / Magic Link | All orgs — the default | ✅ Implemented (live) |
+| **Phase 2** | Google OAuth2 | Fintechs, startups on Google Workspace | Pending |
+| **Phase 3** | Microsoft Entra ID (Azure AD) OAuth2 | Commercial banks, tier-2/tier-1 institutions | Pending |
+
+**SSO policy (standing rule):** email magic link is the **default for every organisation**.
+Google / Entra SSO is a **per-organisation opt-in** recorded on `organizations.ssoProvider` —
+never a global switch. **Super admins never authenticate via SSO** (magic link only).
 
 **Phase 2 & 3:** Standard OAuth2 PKCE flow. Use `passport.js` with `passport-google-oauth20` and `passport-azure-ad` respectively. Map the external account to the existing `users` row on first login (reuse `sdk.createSessionToken`).
 
@@ -646,11 +692,14 @@ All tables are in `drizzle/schema.ts`. The 50+ tables are grouped by domain:
 
 ## 8. tRPC Router Map
 
-All procedures are in `server/routers.ts`. The router is structured as:
+The core procedures live in `server/routers.ts`, with domain routers extracted to
+`server/routers/` (uganda, lapo, cbnCompliance, mobileMoney, poc, pocKpi, erpExport,
+regulatorPortal, woodcoreConnector, shoplineConnector, shared) and mounted onto `appRouter`.
+Structure:
 
 ```
 appRouter
-├── auth.*              — login, logout, me, magic link (prototype: Manus OAuth)
+├── auth.*              — login, logout, me, magic link (email magic-link; Manus OAuth removed)
 ├── dashboard.*         — stats, channel summary, recent activity
 ├── reconciliation.*    — create job, run, status, results, history
 ├── transactions.*      — list, search, upload, manual entry
@@ -663,8 +712,15 @@ appRouter
 ├── admin.*             — users, roles, email settings, module config, API keys
 ├── superAdmin.*        — cross-tenant stats, org management, portal context, module overrides
 ├── woodcore.*          — POC procedures: run reconciliation, get results, live data queries
+├── woodcoreConnector.* / cbsConnector.*  — CBS connector engine (also mounted as cbsConnector)
+├── shoplineConnector.* — SHOPLINE Tier 1 connector (OAuth, sync, billing, GDPR — live)
 ├── compliance.*        — CBN reports, NDPA/NDPR, assessments, deadlines
-├── publicApi.*         — external REST-style API (API key auth)
+├── uganda.* / bou.*    — Uganda channel pack + Bank of Uganda return pack
+├── mobileMoney.*       — mobile-money reconciliation engine + taxonomy
+├── regulatorPortal.*   — live regulator portal (/regulator/:token) + camt.053 ingest
+├── erpExport.*         — ERP-format export
+├── poc.* / pocKpi.*    — per-company POC hub pages + KPI/evidence-pack export
+├── publicApi.*         — external REST-style API (API key auth, rate-limited)
 ├── documentation.*     — roadmap, release notes, API docs
 └── system.*            — health check, notify owner
 ```
@@ -719,10 +775,11 @@ The SHOPLINE vertical is **not a fork**. It is a new tenant segment (`retail_com
 
 **Phase 0:** DONE + CTO-hardened (commit `c5976b4`). Retail-vertical foundation.
 
-**Phase 1:** BUILT — 4 PRs open for Claude Code review. Full Tier 1 App Store connector
-including OAuth, webhooks, billing, onboarding, sync, dashboard, and compliance pages.
-See **§2B** for the complete implementation context, Partner Portal configuration,
-and PR URLs.
+**Phase 1:** ✅ MERGED & LIVE on production (`main` HEAD `e4a8290`, deployed by Railway).
+Full Tier 1 App Store connector including OAuth, webhooks, billing, onboarding, sync,
+dashboard, and compliance pages. See **§2B** for the complete implementation context,
+Partner Portal configuration, and PR provenance. Remaining work is App Store submission
+(external), not code.
 
 ### SHOPLINE Constants Reference (UPDATED — portal-confirmed values)
 
@@ -768,20 +825,23 @@ The `rawData` contract implemented by the Phase 1 SHOPLINE connector (`ingest.ts
 
 ---
 
-## 10. Known Technical Debt — Address in Production Build
+## 10. Technical Debt — Status
 
-These are the most critical items to resolve before the Woodcore pilot goes live:
+Most of the original launch-blocking debt is now **resolved**. Current status:
 
-| Item | Risk | Recommended Fix |
+| Item | Status | Notes |
 |---|---|---|
-| Manus OAuth must be replaced | **Critical** — blocks all external users | Implement email/magic link (Phase 1) |
-| `server/routers.ts` is ~5,500 lines | High — maintainability | Split into `server/routers/` directory by domain |
-| No background job queue | Medium — reconciliation jobs run in-process | Add BullMQ + Redis for async job processing |
-| No test coverage on reconciliation engine | High — correctness risk | Write Vitest unit tests for `woodcore-engine.ts` Layer 1 and Layer 2 |
-| Manus Forge LLM key will not work outside Manus | **Critical** | Set `DIRECT_LLM_API_KEY` (Anthropic) before first external deployment |
-| Direct MySQL access to Woodcore DB (dynamic IPs) | Medium | Migrate to Fineract REST API for production |
-| No rate limiting on public API endpoints | Medium | Add express-rate-limit to `publicApi.*` procedures |
-| S3 file keys are not access-controlled | Low | Add owner-based ACL check in `storageGet()` |
+| Manus OAuth must be replaced | ✅ Done | Email magic-link auth is live (Section 5) |
+| Manus Forge LLM won't work outside Manus | ✅ Done | Production uses `DIRECT_LLM_API_KEY` (Anthropic) |
+| No background job queue | ✅ Code done | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. **Open:** provision Redis on Railway (`REDIS_URL`) to activate durable/multi-instance mode; required before horizontal scaling |
+| No test coverage on reconciliation engine | ✅ Done | Vitest coverage across engines, routers, reports (`*.test.ts` colocated) |
+| No rate limiting on public API | ✅ Done | `server/rateLimiter.ts` guards public API + ingestion |
+| Email delivery | ✅ Done | Resend integration (`server/_core/email.ts`); safe no-op without keys |
+| S3 file keys not access-controlled | 🟡 Improved | New objects use org-scoped keys (`orgScopedKey`, `org/<organizationId>/…` in `server/storage.ts`); audit legacy read paths |
+| `server/routers.ts` is very large (~6,900 lines) | 🟡 In progress | Domain routers extracted to `server/routers/` (uganda, lapo, cbnCompliance, mobileMoney, poc, erpExport, regulatorPortal, woodcoreConnector, shoplineConnector). Core router still large — keep extracting per the 150-line rule and `docs/ROUTERS_SPLIT_PLAN.md` |
+| Direct MySQL access to Woodcore DB (dynamic IPs) | 🔴 Open | Migrate to Fineract REST API for production |
+| CI/CD | ✅ Done | `.github/workflows/ci.yml` (+ `woodcore-sync.yml`); RLS tenant-scoping ratchet enforced in CI |
+| Migration numbering collision (local `0070` vs production `0070`) | 🔴 Watch | Migrations are append-only; a local untracked `0070_*` differs from production's `0070_useful_franklin_richards.sql`. Reconcile before committing new migrations (never renumber an applied one) |
 
 ---
 
@@ -803,12 +863,16 @@ WOODCORE_DB_NAME=fineract_default
 # LLM — SET THIS to activate Claude (replaces Manus Forge)
 DIRECT_LLM_API_KEY=sk-ant-api03-...
 DIRECT_LLM_API_URL=https://api.anthropic.com   # base URL; /v1/messages appended automatically
-DIRECT_LLM_MODEL=claude-sonnet-4-5
+DIRECT_LLM_MODEL=claude-sonnet-5
 DIRECT_LLM_PROVIDER=anthropic                   # optional; auto-detected when omitted
 
-# Auth (replace Manus OAuth) — email/magic-link is implemented
+# Job queue (durable reconciliation runs + webhooks)
+# Unset → in-process fallback (fine for single-instance). Set → BullMQ (durable, multi-instance).
+REDIS_URL=redis://...                            # provision on Railway before horizontal scaling
+
+# Auth (magic-link) — email/magic-link is implemented
 JWT_SECRET=<generate 64-char random string>
-APP_URL=https://reconcileai.vip                 # used to build magic-link URLs
+APP_URL=https://www.reconcileaiafrica.com       # used to build magic-link URLs
 
 # File Storage (Cloudflare R2 recommended)
 AWS_ACCESS_KEY_ID=...
@@ -820,9 +884,9 @@ AWS_BUCKET_NAME=reconcileai-storage
 # Email (magic-link sign-in, invites, CFO reports, alerts, owner notices)
 # Without these, ALL email is a safe no-op (logged, never throws).
 RESEND_API_KEY=re_...
-EMAIL_FROM=noreply@reconcileai.vip
+EMAIL_FROM=noreply@reconcileaiafrica.com
 EMAIL_FROM_NAME=ReconcileAI
-OWNER_EMAIL=ops@reconcileai.vip                 # owner/system notifications; falls back to EMAIL_FROM
+OWNER_EMAIL=ops@reconcileaiafrica.com           # owner/system notifications; falls back to EMAIL_FROM
 
 # Manus-specific (DO NOT set in production — these are Manus-injected)
 # BUILT_IN_FORGE_API_KEY  ← Manus only
@@ -834,9 +898,25 @@ OWNER_EMAIL=ops@reconcileai.vip                 # owner/system notifications; fa
 
 ---
 
-## 12. Deployment — reconcileai.vip
+## 12. Deployment — Railway (production) at reconcileaiafrica.com
 
-The production domain is `reconcileai.vip`. DNS is managed via Cloudflare. The platform is a standard Node.js application and can be deployed to any Node.js-compatible host (Railway, Render, Fly.io, DigitalOcean App Platform, AWS App Runner, Google Cloud Run, or a self-managed VPS).
+**Production runs on Railway**, serving `https://www.reconcileaiafrica.com/`. DNS is managed
+via Cloudflare. The app is a standard Node.js application, so it also runs on any
+Node-compatible host (Render, Fly.io, DigitalOcean App Platform, AWS App Runner, Google
+Cloud Run, or a self-managed VPS) — Railway is simply the current production choice.
+
+### How Railway deploys it (see `railway.json`)
+
+- **Builder:** Nixpacks; **build command:** `pnpm build`
+- **Pre-deploy:** `pnpm db:migrate` — **migrations run automatically on every deploy**
+- **Start:** `pnpm start`
+- **Health check:** `/api/healthz` (liveness; returns 200 while the process is alive)
+- **Restart policy:** ON_FAILURE, up to 10 retries
+- Deploys trigger automatically on push to `main`.
+
+> **Migration safety (learned the hard way):** migrations are **append-only**. Never
+> re-number an already-applied migration — doing so has broken a Railway deploy before
+> (`ER_TABLE_EXISTS`). Add a new migration file; never renumber an old one.
 
 ### Application Build
 
@@ -844,17 +924,17 @@ The production domain is `reconcileai.vip`. DNS is managed via Cloudflare. The p
 # Install dependencies
 pnpm install
 
-# Build frontend and backend
+# Build frontend and backend (Vite for client, esbuild for server)
 pnpm build
 
 # Start production server
 pnpm start
-# or: node dist/server/index.js
+# equivalently: NODE_ENV=production node dist/index.js
 ```
 
 **Build output:**
 - Frontend: `dist/client/` (static assets served by Express)
-- Backend: `dist/server/` (compiled Express + tRPC server)
+- Backend: `dist/index.js` (bundled Express + tRPC server; entry is `server/_core/index.ts`)
 
 **Port:** The server reads `PORT` from the environment (defaults to 3000). Never hardcode the port — hosting platforms inject it at runtime.
 
@@ -864,14 +944,14 @@ Set all variables from Section 11 in your hosting platform's environment/secrets
 - `JWT_SECRET` — session signing (generate a 64-character random string)
 - `DIRECT_LLM_API_KEY` — Anthropic API key (without this, LLM features fail silently)
 
-### DNS Configuration for reconcileai.vip
+### DNS Configuration for reconcileaiafrica.com
 
-DNS is managed in Cloudflare. Once your hosting provider gives you a deployment URL or IP:
+DNS is managed in Cloudflare and points at the Railway deployment. Reference config:
 
 **Option A — CNAME (for platforms that provide a hostname, e.g. Railway, Render, Fly.io):**
 ```
 Type: CNAME
-Name: @  (or reconcileai.vip)
+Name: @  (or reconcileaiafrica.com)
 Target: <your-platform-provided-hostname>  e.g. reconcileai.up.railway.app
 Proxy status: Proxied (orange cloud)
 ```
@@ -884,11 +964,11 @@ Value: <your-server-IP>
 Proxy status: Proxied (orange cloud)
 ```
 
-**www redirect (already configured):**
+**www (production hostname):**
 ```
 Type: CNAME
 Name: www
-Target: reconcileai.vip
+Target: reconcileaiafrica.com  (or the Railway hostname)
 Proxy status: Proxied
 ```
 
@@ -925,15 +1005,15 @@ cp docs/env.example.md .env
 # Edit .env with production values
 
 # 4. Start with PM2
-pm2 start dist/server/index.js --name reconcileai
+pm2 start dist/index.js --name reconcileai
 pm2 save
 pm2 startup  # auto-start on reboot
 
 # 5. Nginx reverse proxy config
-# /etc/nginx/sites-available/reconcileai.vip
+# /etc/nginx/sites-available/reconcileaiafrica.com
 server {
     listen 80;
-    server_name reconcileai.vip www.reconcileai.vip;
+    server_name reconcileaiafrica.com www.reconcileaiafrica.com;
     location / {
         proxy_pass http://localhost:3000;
         proxy_http_version 1.1;
@@ -945,7 +1025,7 @@ server {
 }
 
 # 6. Enable SSL with Certbot (if not using Cloudflare proxy)
-sudo certbot --nginx -d reconcileai.vip -d www.reconcileai.vip
+sudo certbot --nginx -d reconcileaiafrica.com -d www.reconcileaiafrica.com
 ```
 
 ### Database
@@ -961,22 +1041,34 @@ pnpm db:push
 ```
 
 ### Background Jobs
-The current prototype runs reconciliation jobs in-process (synchronous). For production, add **BullMQ + Redis** before going live with high transaction volumes. This is listed as a known technical debt item.
+The durable job queue is **built** (`server/jobQueue.ts`): reconciliation runs and webhook
+delivery are queued with retry-safe artifact reset and a boot sweep for orphaned runs.
+- **`REDIS_URL` unset** → in-process retry queue (fine for a single Railway instance / on-prem).
+- **`REDIS_URL` set** → BullMQ (durable, survives restarts, safe across multiple instances).
+
+The BullMQ path activates the moment `REDIS_URL` is provisioned — no code change. **Provision
+Redis on Railway before running more than one instance (horizontal scaling).**
 
 ---
 
-## 13. What Was Deliberately Left Out of the Prototype
+## 13. Prototype Gaps — Now Mostly Closed
 
-These features are in the PRD but were not built in the prototype. They are first-sprint priorities for the production build:
+These were the PRD features missing from the original prototype. Most are now shipped:
 
-1. **Real authentication** — email/magic link, Google OAuth2, Microsoft Entra ID
-2. **Fineract REST API connector** — replace direct DB access with the official API
-3. **Background job queue** — BullMQ + Redis for async reconciliation processing
-4. **Email delivery** — Resend integration for magic links, alerts, and CFO reports
-5. **Stripe billing** — subscription management and usage-based billing
-6. **Full test suite** — Vitest unit tests for the reconciliation engine and tRPC procedures
-7. **CI/CD pipeline** — GitHub Actions for lint, test, build on every PR
-8. **Lapo MFB connector** — data format and scope TBD pending Lapo engagement
+1. **Real authentication** — ✅ email/magic link live. Google OAuth2 / Microsoft Entra pending (per-org opt-in, Section 5).
+2. **Fineract REST API connector** — 🔴 still pending; Woodcore still uses direct DB access.
+3. **Background job queue** — ✅ built (`server/jobQueue.ts`); provision `REDIS_URL` to activate BullMQ.
+4. **Email delivery** — ✅ Resend integration live (magic links, alerts, CFO reports).
+5. **Billing** — 🟡 SHOPLINE Tier 1 is App-Store-managed (no Stripe needed there); general subscription billing still pending.
+6. **Full test suite** — ✅ broad Vitest coverage across engines, routers, and reports.
+7. **CI/CD pipeline** — ✅ GitHub Actions (`.github/workflows/ci.yml`), incl. the RLS tenant-scoping ratchet.
+8. **Lapo MFB connector** — 🟡 8-source channel pack shipped ahead of docs (formats config in `shared/lapoSources.ts`); awaiting real samples + SFTP creds.
+
+**Also shipped since the prototype** (not in the original list): the full SHOPLINE Tier 1
+retail vertical (§2B), Uganda / Bank of Uganda report pack + 22-category taxonomy,
+mobile-money reconciliation engine, live regulator portal + ISO 20022 (camt.053) ingest,
+one-click evidence-pack export (PDF + CSV), ERP export, the on-prem / air-gapped deployment
+pack (`deploy/`, `ml/`), and the public ROI calculator at `/roi-calculator`.
 
 ---
 
@@ -1038,10 +1130,14 @@ Before merging any `manus/*` branch, verify:
 
 ### GitHub Remotes
 
-| Remote | Repository | Notes |
+| Remote name | Repository | Notes |
 |---|---|---|
-| Primary | `MistaRichMan/reconcileai` | Claude reads and merges PRs here |
-| Mirror | `Infinity-AI-Africa-Limited/reconcileai` | Manus also pushes branches here |
+| `origin` (Primary) | `Infinity-AI-Africa-Limited/reconcileai` | Canonical repo; Claude reads and merges PRs here |
+| `mirror` | `MistaRichMan/reconcileai` | Kept at par |
+
+**Dual-push rule:** every commit is pushed to **both** `origin` and `mirror` — keep them at
+par. Stage files explicitly (never `git add -A`); the working tree is shared with the Manus
+sandbox.
 
 ### What Manus Does NOT Build via PR (commits directly to `main`)
 
@@ -1065,18 +1161,21 @@ Before merging any `manus/*` branch, verify:
 
 ---
 
-## 16. Do Not Change These
+## 17. Do Not Change These
 
 The following are stable foundations that should not be modified without explicit instruction:
 
 - `drizzle/schema.ts` — table structure (add columns/tables, do not rename or drop)
-- `server/_core/` — framework plumbing (context, auth, LLM helper, env)
+- `drizzle/` migrations — **append-only**; never renumber an applied migration
+- `server/_core/` — framework plumbing (context, auth, LLM helper, env, server entry)
 - `client/src/lib/trpc.ts` — tRPC client binding
-- `client/src/contexts/AuthContext.tsx` — auth state management (update, do not replace)
+- `client/src/_core/hooks/useAuth.ts` — auth state (drives off `auth.me`; there is **no** `AuthContext.tsx`)
+- `client/src/contexts/PortalContext.tsx` — super-admin portal context switcher
 - `drizzle/woodcore_schema.ts` — Fineract table mirrors (read-only, do not modify)
 - The four-portal architecture (`organizations.segment` enum and portal context switcher)
 
 ---
 
-*Last updated: July 2026 | Built in Manus | Transferring to Claude Code for production engineering*
+*Last updated: 2026-07-23 | Live in production on Railway at https://www.reconcileaiafrica.com/*
+*SHOPLINE Tier 1 (Phase 1) merged & live. Engineering owned by Claude Code; features contributed by Manus via PR.*
 *Owner: Richard Anwanakak, Infinity AI Africa Limited*
