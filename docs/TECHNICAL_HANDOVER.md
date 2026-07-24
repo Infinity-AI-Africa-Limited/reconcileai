@@ -87,7 +87,7 @@ Features that only add breadth are deprioritised.
 | **Stage** | Working product, live pilots/POCs in progress; hardening for scale |
 | **GitHub repos** | `Infinity-AI-Africa-Limited/reconcileai` (primary) and `MistaRichMan/reconcileai` (mirror) — **every commit is pushed to both** |
 | **Active pilot track** | Woodcore (Nigerian core-banking provider on Apache Fineract) — POC → paid pilot conversion |
-| **Other commercial tracks** | LAPO MFB (channel pack shipped, awaiting real data samples), Uganda market entry (channel pack + BoU reports shipped), SHOPLINE retail partnership (Phase 0 complete, gated) |
+| **Other commercial tracks** | LAPO MFB (channel pack shipped, awaiting real data samples), Uganda market entry (channel pack + BoU reports shipped), SHOPLINE retail partnership (Phase 0 + Phase 1 **merged & live on production**; App Store submission is the only remaining step — see §7.4) |
 | **Authentication** | Passwordless email "magic link" login — live |
 | **Background job queue** | Code complete (BullMQ); needs a Redis instance provisioned on Railway to activate |
 
@@ -425,23 +425,50 @@ established (`onboardCbsClient()` in `server/connectors/woodcore/onboarding.ts`)
   (all formats are config in `shared/lapoSources.ts`, swappable when samples
   arrive), onboarded through the same CBS picker.
 
-### 7.4 SHOPLINE retail commerce (strictly gated — do not jump the gates)
+### 7.4 SHOPLINE retail commerce
 
 A partnership with SHOPLINE (major Asia-Pacific e-commerce platform) adds a
-retail vertical. **The sequencing rule is non-negotiable:**
+retail vertical. Current phase status:
 
 | Phase | Gate | Status |
 |---|---|---|
-| Phase 0 — retail foundation (taxonomy, engine adapter, schema, admin UI) | None (internal) | ✅ **Done** and hardened |
-| Phase 1 — OAuth connector, merchant dashboard, ingestion | **SHOPLINE API documentation received** | ⛔ Blocked — do not start |
-| Phase 2 — white-label API, on-prem packaging, Stripe billing | **Signed commercial agreement** | ⛔ Blocked — do not start |
+| Phase 0 — retail foundation (taxonomy, engine adapter, schema, admin UI) | None (internal) | ✅ Done and hardened |
+| Phase 1 — OAuth App Store connector, merchant onboarding, settlement + scheduled sync, billing webhooks, GDPR endpoints, retail exception intelligence, merchant dashboards | SHOPLINE API docs received | ✅ **Merged to `main` and live on production** (PRs #8–#11; migrations `0071`/`0072`) |
+| Phase 2 — Tier 2 white-label API, Tier 3 on-prem packaging | **Signed commercial agreement** | ⛔ Not started — do not begin until signed |
 
 The retail engine wraps the core engine (no fork), and the 25-category retail
 taxonomy (chargebacks, gateway fees, FX, settlement integrity, COD courier
-remittance, dispute lifecycle, etc.) is already wired into the shared
-exception registry. Note: CBN regulations do **not** apply to retail
-merchants — their regulatory context is card-scheme rules and platform
-agreements.
+remittance, dispute lifecycle, etc.) is already wired into the shared exception
+registry. Billing is **SHOPLINE App-Store-managed (no Stripe)**. CBN regulations
+do **not** apply to retail merchants — their regulatory context is card-scheme
+rules and platform agreements.
+
+**Why the SHOPLINE UI isn't visible yet — and how to see it.** All Phase 1 code
+is deployed to production, but the retail interface is intentionally hidden until
+you are *inside* a retail organisation. This is a deliberate access design, not a
+missing deployment:
+
+1. The retail navigation (Merchant Dashboard, Settlement Monitor, Sync Status,
+   SHOPLINE Connection) renders **only** for `retail_commerce` organisations. A
+   super-admin must create one (All Organisations → New Organisation → **Retail
+   Commerce** segment) and click **Enter Portal** on it. The gate lives in
+   `client/src/components/DashboardLayout.tsx` (`viewAsOrg.segment ===
+   "retail_commerce"`). In the default super-admin view or a bank
+   (`financial_services`) portal, the retail menu is hidden by design — which is
+   why nothing SHOPLINE appears there even though the code is live.
+2. Even inside a retail org, the dashboards stay empty until a real SHOPLINE
+   store connects. Merchants connect by **installing the app from the SHOPLINE
+   App Store via OAuth** — which requires the app to be submitted and approved.
+   The app is currently in **Draft** in the SHOPLINE Partner Portal, so no store
+   has installed and there is no live data yet.
+3. The remaining work is therefore **external, not code**: test the OAuth flow on
+   a SHOPLINE developer store, then submit the app for App Store review (see
+   `CLAUDE.md` §2B.12). Once a store installs, the dashboards populate
+   automatically via webhooks + scheduled sync.
+
+The pages are also directly reachable by URL — `/shopline/connect`,
+`/settlement-monitor`, `/shopline/sync-status` — but show empty states until a
+store is connected.
 
 ---
 
