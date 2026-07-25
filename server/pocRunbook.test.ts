@@ -7,6 +7,8 @@
  *   2. the externally-shared copy stays free of internal-only material.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 
 // ─── Mock the DB so the access checks run against a controllable row ────────
 let accessRow: { pocKey: string; token: string; enabled: boolean } | null = null;
@@ -112,6 +114,27 @@ describe("Deployment runbook — document integrity", () => {
   it("stays free of internal-only material (it is shared outside the company)", () => {
     for (const internal of ["Manus", "acting CTO", "CTO laptop", "project-deployment-modes"]) {
       expect(RUNBOOK_MARKDOWN).not.toContain(internal);
+    }
+  });
+
+  it("is served read-only — no print, PDF export or download route out of the page", () => {
+    // The runbook is shared with prospects and bank reviewers for on-screen
+    // reading only. A print button, a PDF export, or a download-blob would each
+    // hand over the whole document, so none may reappear in the page.
+    const page = fs.readFileSync(
+      path.resolve(process.cwd(), "client/src/pages/DeploymentRunbook.tsx"),
+      "utf8",
+    );
+
+    expect(page).not.toMatch(/window\.print\s*\(/);
+    expect(page).not.toMatch(/createObjectURL/);
+    expect(page).not.toMatch(/\.download\s*=/);
+
+    // …and the on-screen copy deterrents stay wired.
+    expect(page).toContain("user-select: none");
+    expect(page).toContain("@media print");
+    for (const evt of ["copy", "cut", "contextmenu"]) {
+      expect(page).toContain(`document.addEventListener("${evt}"`);
     }
   });
 

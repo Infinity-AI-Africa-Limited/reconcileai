@@ -5,47 +5,83 @@
  * only with an invite link (`/deployment-runbook?key=…`) issued from the POC Hub.
  * The document body is fetched from the access-gated `poc.runbook` procedure
  * rather than bundled into the client, so the link is a real boundary.
+ *
+ * Read-only presentation: printing/PDF export, text selection, copy/cut, the
+ * context menu and file download are all suppressed, and the page is blanked in
+ * print media. Treat this as deterrence, not protection — anything rendered in a
+ * browser can still be read from devtools, the network response, or a photo of
+ * the screen. The access token remains the actual control.
  */
-import { useMemo, useState } from "react";
+import { useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { trpc } from "@/lib/trpc";
-import { Button } from "@/components/ui/button";
-import { Check, Download, Loader2, Lock, Printer, ShieldCheck } from "lucide-react";
-import { toast } from "sonner";
+import { Loader2, Lock, ShieldCheck } from "lucide-react";
 
 const POC_KEY = "deployment_runbook";
 
+/**
+ * Suppresses selection/callout on screen and blanks the document for print, so
+ * Ctrl+P / "Save as PDF" / "Print to PDF" yield a confidentiality notice rather
+ * than the document. Scoped to this page's lifetime because it renders inside
+ * the component.
+ */
+const PROTECTION_CSS = `
+.rb-protected, .rb-protected * {
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
+}
+@media print {
+  body > * { display: none !important; }
+  body::before {
+    content: "ReconcileAI — Confidential. This document is shared under invitation and may not be printed, exported or reproduced. Contact your ReconcileAI representative if you need a copy.";
+    display: block;
+    padding: 4rem 3rem;
+    max-width: 34rem;
+    font: 600 12pt/1.7 Georgia, "Times New Roman", serif;
+    color: #1B365D;
+  }
+}
+`;
+
 export default function DeploymentRunbook() {
-  const [downloaded, setDownloaded] = useState(false);
   const doc = trpc.poc.runbook.useQuery(
     { pocSlug: POC_KEY },
     { refetchOnWindowFocus: false, staleTime: 5 * 60 * 1000 },
   );
 
-  const fileName = useMemo(
-    () => `ReconcileAI_Local_Deployment_and_Model_Training_v${doc.data?.version ?? "2.0"}.md`,
-    [doc.data?.version],
-  );
-
-  const download = () => {
-    if (!doc.data?.markdown) return;
-    try {
-      const blob = new Blob([doc.data.markdown], { type: "text/markdown;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setDownloaded(true);
-      setTimeout(() => setDownloaded(false), 2500);
-    } catch {
-      toast.error("Could not download the document. Try printing to PDF instead.");
-    }
-  };
+  // Block copy/cut/context-menu and the print/save/select shortcuts while this
+  // page is mounted. Listeners are attached in the capture phase so page content
+  // cannot opt out, and are removed on unmount so the rest of the app is normal.
+  useEffect(() => {
+    const swallow = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      // p = print, s = save page, c/x = copy/cut, a = select all
+      if (["p", "s", "c", "x", "a"].includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener("copy", swallow, true);
+    document.addEventListener("cut", swallow, true);
+    document.addEventListener("contextmenu", swallow, true);
+    document.addEventListener("dragstart", swallow, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("copy", swallow, true);
+      document.removeEventListener("cut", swallow, true);
+      document.removeEventListener("contextmenu", swallow, true);
+      document.removeEventListener("dragstart", swallow, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, []);
 
   if (doc.isLoading) {
     return (
@@ -73,9 +109,11 @@ export default function DeploymentRunbook() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 print:bg-white">
+    <div className="rb-protected min-h-screen bg-slate-50">
+      <style>{PROTECTION_CSS}</style>
+
       {/* Document header */}
-      <header className="border-b bg-white print:border-0">
+      <header className="border-b bg-white">
         <div className="mx-auto max-w-4xl px-6 py-8 sm:py-10">
           <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#F47458]">
             ◆ ReconcileAI · Infinity AI Africa Limited
@@ -91,21 +129,12 @@ export default function DeploymentRunbook() {
             <span>Nigeria · Uganda</span>
           </div>
 
-          <div className="mt-6 flex flex-wrap items-center gap-2 print:hidden">
-            <Button size="sm" onClick={download} className="gap-2 bg-[#1B365D] hover:bg-[#16294a]">
-              {downloaded ? <Check className="h-4 w-4" /> : <Download className="h-4 w-4" />}
-              {downloaded ? "Downloaded" : "Download Markdown"}
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => window.print()} className="gap-2">
-              <Printer className="h-4 w-4" /> Print / Save as PDF
-            </Button>
-          </div>
-
-          <div className="mt-6 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12px] leading-relaxed text-amber-900 print:hidden">
+          <div className="mt-6 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12px] leading-relaxed text-amber-900">
             <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              Shared privately by invitation. Please do not forward this link — ask us to issue a
-              separate one for each recipient so access can be revoked individually.
+              Confidential — shared privately by invitation, for reading on screen only. This
+              document may not be printed, exported, copied or forwarded. Ask us to issue a
+              separate link for each recipient so access can be revoked individually.
             </span>
           </div>
         </div>
@@ -133,7 +162,6 @@ export default function DeploymentRunbook() {
             prose-th:bg-[#1B365D] prose-th:text-white prose-th:font-semibold
             prose-th:px-3 prose-th:py-2 prose-th:text-left
             prose-td:px-3 prose-td:py-2 prose-td:align-top
-            print:prose-sm
           "
         >
           <ReactMarkdown
@@ -154,7 +182,7 @@ export default function DeploymentRunbook() {
 
         <footer className="mt-14 border-t pt-6 text-xs text-slate-500">
           ReconcileAI is a product of Infinity AI Africa Limited · Version {doc.data.version} ·{" "}
-          {doc.data.updated} · Shared under invitation.
+          {doc.data.updated} · Confidential, shared under invitation.
         </footer>
       </main>
     </div>
