@@ -11,15 +11,14 @@
  */
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Button } from "@/components/ui/button";
-import { Printer, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import handoverMd from "@/content/technicalHandover.md?raw";
 
 export default function TechnicalHandover() {
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
-      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#1B365D] text-white print:static">
-        <div className="mx-auto flex max-w-4xl items-center justify-between gap-4 px-6 py-3">
+      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#1B365D] text-white">
+        <div className="mx-auto flex max-w-4xl items-center gap-4 px-6 py-3">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5 text-white/80" />
             <div className="leading-tight">
@@ -27,14 +26,6 @@ export default function TechnicalHandover() {
               <p className="text-[11px] text-white/70">Confidential · shared by invitation</p>
             </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="gap-1.5 border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white print:hidden"
-            onClick={() => window.print()}
-          >
-            <Printer className="h-4 w-4" /> Print / Save as PDF
-          </Button>
         </div>
       </header>
 
@@ -68,7 +59,7 @@ export default function TechnicalHandover() {
         </article>
       </main>
 
-      <footer className="border-t bg-white py-6 print:hidden">
+      <footer className="border-t bg-white py-6">
         <p className="mx-auto max-w-4xl px-6 text-center text-xs text-muted-foreground">
           Confidential — Infinity AI Africa Limited. Shared privately by invitation; please do not redistribute.
         </p>
