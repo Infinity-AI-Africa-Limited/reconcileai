@@ -16,7 +16,15 @@ import handoverMd from "@/content/technicalHandover.md?raw";
 
 export default function TechnicalHandover() {
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
+    // Copy-deter: block text selection, copy/cut, and the right-click menu. This
+    // is a deterrent for casual copying, not real protection — the text still
+    // lives in the DOM and can be extracted by technical means.
+    <div
+      className="min-h-screen bg-gray-50 text-gray-900 select-none"
+      onCopy={(e) => e.preventDefault()}
+      onCut={(e) => e.preventDefault()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <header className="sticky top-0 z-10 border-b border-white/10 bg-[#1B365D] text-white">
         <div className="mx-auto flex max-w-4xl items-center gap-4 px-6 py-3">
           <div className="flex items-center gap-2">
