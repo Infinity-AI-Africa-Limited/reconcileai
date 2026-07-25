@@ -21,7 +21,17 @@ function readKeyFromUrl(): string | null {
   }
 }
 
-export default function PocAccessGate({ pocKey, children }: { pocKey: string; children: React.ReactNode }) {
+export default function PocAccessGate({
+  pocKey,
+  children,
+  title = "Protected POC",
+  subtitle = "This proof-of-concept is invite-only. Enter the access code from your invitation link to continue.",
+}: {
+  pocKey: string;
+  children: React.ReactNode;
+  title?: string;
+  subtitle?: string;
+}) {
   // Seed from the URL (?key=) once, falling back to any token already stored.
   const initial = useMemo(() => readKeyFromUrl() ?? sessionStorage.getItem(STORAGE_KEY) ?? "", []);
   const [token, setToken] = useState(initial);
@@ -66,9 +76,9 @@ export default function PocAccessGate({ pocKey, children }: { pocKey: string; ch
         <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
           <Lock className="h-6 w-6 text-primary" />
         </div>
-        <h1 className="text-lg font-semibold text-gray-900">Protected POC</h1>
+        <h1 className="text-lg font-semibold text-gray-900">{title}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          This proof-of-concept is invite-only. Enter the access code from your invitation link to continue.
+          {subtitle}
         </p>
         <form onSubmit={submit} className="mt-5 space-y-3">
           <input

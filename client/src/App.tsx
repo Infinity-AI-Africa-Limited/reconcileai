@@ -27,6 +27,7 @@ import AgeTracker from "./pages/AgeTracker";
 import PocHub from "./pages/PocHub";
 import PocSharedReport from "./pages/PocSharedReport";
 import PocAccessGate from "./components/PocAccessGate";
+import TechnicalHandover from "./pages/TechnicalHandover";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
@@ -126,6 +127,7 @@ function Router() {
       <Route path="/salad-africa-poc">{() => <PocAccessGate pocKey="salad_africa"><SaladAfricaPOC /></PocAccessGate>}</Route>
       <Route path="/lapo-poc">{() => <PocAccessGate pocKey="lapo_mfb"><LapoPOC /></PocAccessGate>}</Route>
       <Route path="/mobile-money-poc">{() => <PocAccessGate pocKey="lapo_mfb"><MobileMoneyPOC pocSlug="lapo_mfb" /></PocAccessGate>}</Route>
+      <Route path="/technical-handover">{() => <PocAccessGate pocKey="technical_handover" title="Protected document" subtitle="This technical handover is invite-only. Enter the access code from your invitation link to continue."><TechnicalHandover /></PocAccessGate>}</Route>
       <Route path="/deployment-runbook">{() => <PocAccessGate pocKey="deployment_runbook"><DeploymentRunbook /></PocAccessGate>}</Route>
       <Route path="/poc-report/:token" component={PocSharedReport} />
       <Route path="/admin/poc">{() => <DashboardPage component={PocHub} />}</Route>
