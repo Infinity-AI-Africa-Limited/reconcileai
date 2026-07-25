@@ -57,6 +57,24 @@ const POCS: Poc[] = [
     accent: "from-[#0E3622] to-[#00954B]",
     status: "Active",
   },
+  {
+    name: "Technical Handover & Architecture",
+    pocKey: "technical_handover",
+    blurb: "Private, read-only handover for an incoming technical team — plain-English product overview, full system architecture, stack, workflows, and onboarding checklist. Share the invite link; the recipient needs no login.",
+    path: "/technical-handover",
+    icon: FileText,
+    accent: "from-[#1B365D] to-[#F4758C]",
+    status: "Live",
+  },
+  {
+    name: "Local Deployment & Model Training — Runbook",
+    pocKey: "deployment_runbook",
+    blurb: "The on-premise deployment and model-training runbook, shared privately with prospects, partner IT teams and bank security reviewers. Document only — no uploads or reconciliation runs.",
+    path: "/deployment-runbook",
+    icon: FileText,
+    accent: "from-[#1B365D] to-[#F47458]",
+    status: "Live",
+  },
 ];
 
 // Per-POC access link: shows the invite link (with token), copy, and regenerate.
@@ -306,7 +324,11 @@ function PocUploads({
 // Generic across every self-service POC. Woodcore is excluded — it keeps its own
 // run store (wc_reconciliation_runs) surfaced on its own page.
 function PocRunsAdmin() {
-  const runnablePocs = POCS.filter((p) => p.pocKey !== "woodcore");
+  // Woodcore keeps its own run store; the Technical Handover and the Deployment
+  // Runbook are documents, not runnable POCs.
+  const runnablePocs = POCS.filter(
+    (p) => p.pocKey !== "woodcore" && p.pocKey !== "technical_handover" && p.pocKey !== "deployment_runbook",
+  );
   const [slug, setSlug] = useState(runnablePocs[0]?.pocKey ?? "salad_africa");
 
   return (

@@ -13,6 +13,9 @@ import * as poc from "../poc-engine";
 import {
   assertPocAccess, checkPocAccess, getOrCreateAccess, regenerateAccess, setAccessEnabled, tokenFromCtx,
 } from "../pocAccess";
+import {
+  RUNBOOK_MARKDOWN, RUNBOOK_SUBTITLE, RUNBOOK_TITLE, RUNBOOK_UPDATED, RUNBOOK_VERSION,
+} from "../content/deploymentRunbook";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
@@ -307,6 +310,22 @@ export const pocRouter = router({
         return { url: null };
       }
     }),
+
+  // ─── Shared documents ─────────────────────────────────────────────────────
+  // Serves a long-form document (currently the Local Deployment & Model Training
+  // runbook) to holders of a POC-style invite link. The body is returned from the
+  // server rather than bundled into the client on purpose: a document shipped in
+  // a JS chunk is readable without a token, which would make the private link
+  // decorative rather than a boundary.
+  runbook: pocProcedure
+    .input(z.object({ pocSlug }))
+    .query(() => ({
+      title: RUNBOOK_TITLE,
+      subtitle: RUNBOOK_SUBTITLE,
+      version: RUNBOOK_VERSION,
+      updated: RUNBOOK_UPDATED,
+      markdown: RUNBOOK_MARKDOWN,
+    })),
 
   // ─── Access control ───────────────────────────────────────────────────────
   // Public: the frontend gate checks whether a presented token unlocks this POC.
