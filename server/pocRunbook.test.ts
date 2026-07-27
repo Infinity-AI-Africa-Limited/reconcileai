@@ -11,18 +11,34 @@ import fs from "node:fs";
 import path from "node:path";
 
 // ─── Mock the DB so the access checks run against a controllable row ────────
-let accessRow: { pocKey: string; token: string; enabled: boolean } | null = null;
+type Row = { pocKey: string; token: string; enabled: boolean; createdAt?: Date };
+
+let accessRow: Row | null = null; // the base row, fetched via .limit(1)
+let inviteRows: Row[] = []; // namespaced per-recipient rows, fetched without .limit
+
+// getAccess() always ends in .limit(1); listRecipientInvites() awaits .where()
+// directly — so the thenable below can serve both off one mock.
+function thenable() {
+  const p = Promise.resolve(inviteRows);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    finally: p.finally.bind(p),
+    limit: async () => (accessRow ? [accessRow] : []),
+  };
+}
 
 const mockDb = {
   select: () => mockDb,
   from: () => mockDb,
-  where: () => mockDb,
-  limit: async () => (accessRow ? [accessRow] : []),
+  where: () => thenable(),
+  insert: () => ({ values: async () => undefined }),
+  delete: () => ({ where: async () => undefined }),
 };
 
 vi.mock("./db", () => ({ getDb: async () => mockDb }));
 
-import { assertPocAccess, checkPocAccess } from "./pocAccess";
+import { assertPocAccess, checkPocAccess, recipientKey, resolveAccess } from "./pocAccess";
 import {
   RUNBOOK_MARKDOWN,
   RUNBOOK_SUBTITLE,
@@ -37,6 +53,7 @@ const TOKEN = "a-valid-invite-token";
 describe("Deployment runbook — private invite link is a real boundary", () => {
   beforeEach(() => {
     accessRow = { pocKey: KEY, token: TOKEN, enabled: true };
+    inviteRows = [];
   });
 
   it("grants access with the exact invite token", async () => {
@@ -67,6 +84,43 @@ describe("Deployment runbook — private invite link is a real boundary", () => 
     accessRow = { pocKey: KEY, token: "freshly-regenerated-token", enabled: true };
     expect(await checkPocAccess(KEY, oldLinkToken)).toBe(false);
     expect(await checkPocAccess(KEY, "freshly-regenerated-token")).toBe(true);
+  });
+});
+
+describe("Deployment runbook — per-recipient invites", () => {
+  beforeEach(() => {
+    accessRow = { pocKey: KEY, token: TOKEN, enabled: true };
+    inviteRows = [
+      { pocKey: `${KEY}:acme-bank`, token: "acme-token", enabled: true },
+      { pocKey: `${KEY}:stanbic-ug`, token: "stanbic-token", enabled: true },
+    ];
+  });
+
+  it("admits a recipient token and reports who the copy was issued to", async () => {
+    expect(await resolveAccess(KEY, "acme-token")).toEqual({ valid: true, recipient: "acme-bank" });
+    expect(await resolveAccess(KEY, "stanbic-token")).toEqual({ valid: true, recipient: "stanbic-ug" });
+  });
+
+  it("reports no recipient for the shared base link", async () => {
+    expect(await resolveAccess(KEY, TOKEN)).toEqual({ valid: true, recipient: null });
+  });
+
+  it("refuses a token that belongs to no invite", async () => {
+    expect(await resolveAccess(KEY, "some-other-token")).toEqual({ valid: false, recipient: null });
+  });
+
+  it("revoking one recipient leaves the others working", async () => {
+    inviteRows = inviteRows.filter((r) => !r.pocKey.endsWith(":acme-bank"));
+    expect(await checkPocAccess(KEY, "acme-token")).toBe(false);
+    expect(await checkPocAccess(KEY, "stanbic-token")).toBe(true);
+    expect(await checkPocAccess(KEY, TOKEN)).toBe(true);
+  });
+
+  it("namespaces invite keys and rejects labels that could collide or inject", () => {
+    expect(recipientKey(KEY, "acme-bank")).toBe(`${KEY}:acme-bank`);
+    for (const bad of ["", "Acme Bank", "acme_bank", "acme:bank", "-acme", "a".repeat(40), "%"]) {
+      expect(() => recipientKey(KEY, bad)).toThrow();
+    }
   });
 });
 

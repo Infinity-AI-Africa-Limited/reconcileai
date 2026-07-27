@@ -47,6 +47,26 @@ const PROTECTION_CSS = `
 }
 `;
 
+/** XML-escape a label before it goes into the inline SVG watermark. */
+function xmlEscape(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Repeating diagonal watermark carrying whoever the link was issued to. It does
+ * not stop a screenshot — it makes a leaked screenshot attributable, which is
+ * the deterrent that actually works on an invited reader.
+ */
+function watermarkStyle(label: string): React.CSSProperties {
+  const text = xmlEscape(label);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="420" height="240">` +
+    `<text x="20" y="130" transform="rotate(-30 210 120)" ` +
+    `font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="15" font-weight="600" ` +
+    `fill="#1B365D" fill-opacity="0.075">${text}</text></svg>`;
+  return { backgroundImage: `url("data:image/svg+xml,${encodeURIComponent(svg)}")` };
+}
+
 export default function DeploymentRunbook() {
   const doc = trpc.poc.runbook.useQuery(
     { pocSlug: POC_KEY },
@@ -108,9 +128,21 @@ export default function DeploymentRunbook() {
     );
   }
 
+  const issuedTo = doc.data.viewer
+    ? `Issued to ${doc.data.viewer}`
+    : "Confidential — shared by invitation";
+  const stamp = `${issuedTo} · ${new Date().toISOString().slice(0, 10)}`;
+
   return (
-    <div className="rb-protected min-h-screen bg-slate-50">
+    <div className="rb-protected relative min-h-screen bg-slate-50">
       <style>{PROTECTION_CSS}</style>
+
+      {/* Attribution watermark — sits above the content, ignores pointer events. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 z-50 select-none"
+        style={watermarkStyle(stamp)}
+      />
 
       {/* Document header */}
       <header className="border-b bg-white">
@@ -133,8 +165,13 @@ export default function DeploymentRunbook() {
             <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
               Confidential — shared privately by invitation, for reading on screen only. This
-              document may not be printed, exported, copied or forwarded. Ask us to issue a
-              separate link for each recipient so access can be revoked individually.
+              document may not be printed, exported, copied or forwarded.
+              {doc.data.viewer ? (
+                <>
+                  {" "}This copy was issued to <strong>{doc.data.viewer}</strong> and is watermarked
+                  throughout; any reproduction remains traceable to that recipient.
+                </>
+              ) : null}
             </span>
           </div>
         </div>
