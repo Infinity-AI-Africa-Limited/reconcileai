@@ -17,6 +17,9 @@ import {
 import {
   RUNBOOK_MARKDOWN, RUNBOOK_SUBTITLE, RUNBOOK_TITLE, RUNBOOK_UPDATED, RUNBOOK_VERSION,
 } from "../content/deploymentRunbook";
+import {
+  HANDOVER_MARKDOWN, HANDOVER_TITLE, HANDOVER_UPDATED,
+} from "../content/technicalHandover";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
@@ -328,6 +331,17 @@ export const pocRouter = router({
       version: RUNBOOK_VERSION,
       updated: RUNBOOK_UPDATED,
       markdown: RUNBOOK_MARKDOWN,
+      viewer: (await resolveAccess(input.pocSlug, tokenFromCtx(ctx))).recipient,
+    })),
+
+  // Technical Handover & Architecture — same access-gated, server-served model as
+  // the runbook above, so the document never ships in the client bundle.
+  handover: pocProcedure
+    .input(z.object({ pocSlug }))
+    .query(async ({ ctx, input }) => ({
+      title: HANDOVER_TITLE,
+      updated: HANDOVER_UPDATED,
+      markdown: HANDOVER_MARKDOWN,
       viewer: (await resolveAccess(input.pocSlug, tokenFromCtx(ctx))).recipient,
     })),
 

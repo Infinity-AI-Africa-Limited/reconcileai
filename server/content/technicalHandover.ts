@@ -1,9 +1,24 @@
-# ReconcileAI — Technical Handover & Architecture Guide
+/**
+ * Technical Handover & Architecture — document body.
+ *
+ * Served ONLY through the access-gated poc.handover procedure so the private
+ * invite link is a real boundary: the text never ships in the client bundle and
+ * cannot be recovered from a JS chunk without a valid access token.
+ *
+ * Source of truth: docs/TECHNICAL_HANDOVER.md (on-screen edition; Mermaid
+ * diagrams are replaced with plain-text diagrams). Regenerate from the source
+ * rather than hand-editing when the handover changes.
+ */
+
+export const HANDOVER_TITLE = "Technical Handover & Architecture";
+export const HANDOVER_UPDATED = "July 2026";
+
+export const HANDOVER_MARKDOWN = `# ReconcileAI — Technical Handover & Architecture Guide
 
 **Prepared for:** Incoming technical team
 **Prepared by:** Richard Anwanakak, Founder & CEO — Infinity AI Africa Limited
 **Date:** July 2026
-**Status:** Current — supersedes `docs/ARCHITECTURE.md` (v2.0, May 2026) for onboarding purposes
+**Status:** Current — supersedes \`docs/ARCHITECTURE.md\` (v2.0, May 2026) for onboarding purposes
 
 ---
 
@@ -16,9 +31,9 @@ explained the first time they appear, and there is a glossary at the end.
 
 If you are an engineer joining the project, read this document first, then:
 
-1. [`docs/DEVELOPER_GETTING_STARTED.md`](DEVELOPER_GETTING_STARTED.md) — how to run the app locally
-2. [`CLAUDE.md`](../CLAUDE.md) (repo root) — the living engineering context file, updated continuously
-3. [`docs/GAP_CLOSURE_PLAN.md`](GAP_CLOSURE_PLAN.md) — the active engineering roadmap
+1. [\`docs/DEVELOPER_GETTING_STARTED.md\`](DEVELOPER_GETTING_STARTED.md) — how to run the app locally
+2. [\`CLAUDE.md\`](../CLAUDE.md) (repo root) — the living engineering context file, updated continuously
+3. [\`docs/GAP_CLOSURE_PLAN.md\`](GAP_CLOSURE_PLAN.md) — the active engineering roadmap
 
 ---
 
@@ -59,7 +74,7 @@ ReconcileAI automates this entire process:
 
 ### The strategic moat
 
-The product strategy (documented in `CLAUDE.md` §9A) is that **intelligence
+The product strategy (documented in \`CLAUDE.md\` §9A) is that **intelligence
 depth beats feature breadth**. Any competitor can build transaction matching.
 What is hard to replicate is:
 
@@ -83,17 +98,17 @@ Features that only add breadth are deprioritised.
 | Item | Status |
 |---|---|
 | **Live production site** | https://www.reconcileaiafrica.com/ (hosted on Railway) |
-| **Health check** | `https://www.reconcileaiafrica.com/api/health` |
+| **Health check** | \`https://www.reconcileaiafrica.com/api/health\` |
 | **Stage** | Working product, live pilots/POCs in progress; hardening for scale |
-| **GitHub repos** | `Infinity-AI-Africa-Limited/reconcileai` (primary) and `MistaRichMan/reconcileai` (mirror) — **every commit is pushed to both** |
+| **GitHub repos** | \`Infinity-AI-Africa-Limited/reconcileai\` (primary) and \`MistaRichMan/reconcileai\` (mirror) — **every commit is pushed to both** |
 | **Active pilot track** | Woodcore (Nigerian core-banking provider on Apache Fineract) — POC → paid pilot conversion |
 | **Other commercial tracks** | LAPO MFB (channel pack shipped, awaiting real data samples), Uganda market entry (channel pack + BoU reports shipped), SHOPLINE retail partnership (Phase 0 + Phase 1 **merged & live on production**; App Store submission is the only remaining step — see §7.4) |
 | **Authentication** | Passwordless email "magic link" login — live |
 | **Background job queue** | Code complete (BullMQ); needs a Redis instance provisioned on Railway to activate |
 
-> **Note on domains:** older documents reference `reconcileai.vip`. The live
+> **Note on domains:** older documents reference \`reconcileai.vip\`. The live
 > production domain is **reconcileaiafrica.com**, deployed on Railway. Treat
-> any `reconcileai.vip` references in older docs as historical.
+> any \`reconcileai.vip\` references in older docs as historical.
 
 ---
 
@@ -101,7 +116,7 @@ Features that only add breadth are deprioritised.
 
 Here is the life of one reconciliation run, in plain English:
 
-```
+\`\`\`
   1. DATA COMES IN
      CSV upload  ·  API feed  ·  SFTP drop  ·  Core-banking connector (webhooks + daily sync)
         |
@@ -129,7 +144,7 @@ Here is the life of one reconciliation run, in plain English:
         v                          v
    Regulator returns          CFO / Ops reports +
    (CBN / BoU packs)          evidence packs (PDF + CSV)
-```
+\`\`\`
 
 1. **Data comes in.** A bank uploads a CSV export, pushes data through the
    public API, drops files on an SFTP server, or — for banks onboarded through
@@ -163,7 +178,7 @@ ReconcileAI is **one application** (a "monorepo" — all code in a single
 repository) with a clear separation between the part users see (the frontend),
 the part that does the work (the backend), and the services it relies on.
 
-```
+\`\`\`
   USERS
     Bank / MFB staff        Infinity AI super admins        External systems
           |                          |                      (API clients, CBS)
@@ -188,7 +203,7 @@ the part that does the work (the backend), and the services it relies on.
     MySQL     (queue +    file      Claude     (email)   systems (Fineract
    (Drizzle,  limits)    storage    (AI)                  DB / REST APIs)
    50+ tables)
-```
+\`\`\`
 
 ### 4.2 What each piece is, in plain English
 
@@ -202,19 +217,19 @@ a standard, well-supported stack any React developer knows.
 gives the frontend and backend a shared, typed contract — if the backend
 changes what a procedure returns, the frontend build fails immediately instead
 of breaking silently in production. All API procedures live under
-`server/routers/` (split by domain) with the main router map in
-`server/routers.ts`.
+\`server/routers/\` (split by domain) with the main router map in
+\`server/routers.ts\`.
 
 **Reconciliation engines (the core product).** The matching and exception
-logic. There is one core engine (`server/reconciliationEngine.ts`) plus
+logic. There is one core engine (\`server/reconciliationEngine.ts\`) plus
 thin adapters per vertical — retail commerce, mobile money, and the
-Woodcore/Fineract three-layer engine (`server/woodcore-engine.ts`). Adapters
+Woodcore/Fineract three-layer engine (\`server/woodcore-engine.ts\`). Adapters
 **wrap** the core engine rather than forking it, so matching improvements
 benefit every vertical at once.
 
 **Exception intelligence (the moat).** Per-vertical taxonomies live in
-`server/exceptions/`, and the learning flywheel in
-`server/exceptionIntelligence.ts` + `server/institutionalLearning.ts`:
+\`server/exceptions/\`, and the learning flywheel in
+\`server/exceptionIntelligence.ts\` + \`server/institutionalLearning.ts\`:
 resolution history per institution, agent memory, and an anonymised
 cross-institution pattern pool.
 
@@ -222,11 +237,11 @@ cross-institution pattern pool.
 webhooks are processed through **BullMQ**, a Redis-backed job queue. If the
 server restarts mid-run, the job resumes safely (retry-safe artifact reset +
 a boot sweep for orphaned runs). The code is complete; it activates when a
-`REDIS_URL` is provisioned (falls back to in-process execution without it).
+\`REDIS_URL\` is provisioned (falls back to in-process execution without it).
 
 **Database.** A MySQL-compatible managed database (TiDB Cloud) accessed
 through **Drizzle ORM** — meaning all database access goes through typed
-TypeScript definitions in `drizzle/schema.ts` (50+ tables), never raw SQL
+TypeScript definitions in \`drizzle/schema.ts\` (50+ tables), never raw SQL
 strings. Schema changes are applied through versioned migration files, which
 run automatically on deploy.
 
@@ -234,8 +249,8 @@ run automatically on deploy.
 are stored in S3-compatible object storage — never in the database.
 
 **AI (LLM) layer.** All AI calls go through **one helper function**,
-`invokeLLM()` in `server/_core/llm.ts`. It is dual-mode: it uses the Anthropic
-Claude API in production (`DIRECT_LLM_API_KEY`) and falls back to the legacy
+\`invokeLLM()\` in \`server/_core/llm.ts\`. It is dual-mode: it uses the Anthropic
+Claude API in production (\`DIRECT_LLM_API_KEY\`) and falls back to the legacy
 prototyping provider otherwise. Because all 20+ call sites use this single
 helper, swapping models or providers is a one-line environment change.
 
@@ -246,7 +261,7 @@ no-op (logged, never crashes) — useful for local development.
 ### 4.3 Multi-tenancy: one app, many isolated customers
 
 ReconcileAI is **multi-tenant**: every bank, merchant, or partner is an
-`organization` in the database, and every piece of data belongs to exactly one
+\`organization\` in the database, and every piece of data belongs to exactly one
 organization. Tenants never see each other's data. Enforcement is layered:
 
 - Every API procedure resolves the caller's organization from their session
@@ -260,10 +275,10 @@ There are four user segments (portals), all served by the same codebase:
 
 | Segment | Who | What they see |
 |---|---|---|
-| `financial_services` | Banks, MFBs, payment processors | Reconciliation, exceptions, CBN/BoU reports, channels, compliance |
-| `corporate_b2b` | FMCG distributors, supply-chain finance | Distributor registry, B2B-specific navigation |
-| `retail_commerce` | E-commerce merchants (SHOPLINE vertical) | Merchant dashboards (Phase 1, gated — see §7.4) |
-| `super_admin` | Infinity AI (us) | Cross-tenant operations: all organisations, onboarding, module overrides, POC hub |
+| \`financial_services\` | Banks, MFBs, payment processors | Reconciliation, exceptions, CBN/BoU reports, channels, compliance |
+| \`corporate_b2b\` | FMCG distributors, supply-chain finance | Distributor registry, B2B-specific navigation |
+| \`retail_commerce\` | E-commerce merchants (SHOPLINE vertical) | Merchant dashboards (Phase 1, gated — see §7.4) |
+| \`super_admin\` | Infinity AI (us) | Cross-tenant operations: all organisations, onboarding, module overrides, POC hub |
 
 Super admins can "enter" any organisation's portal and see the app exactly as
 that customer sees it (the portal context switcher) — essential for support
@@ -275,8 +290,8 @@ The product has exactly **two** modules (deliberately reduced from three):
 
 | Module | Key | What it does |
 |---|---|---|
-| **Settlement Reconciliation** | `settlement` | Validates bulk settlement amounts against detailed transaction reports. Includes all transaction-integrity capabilities: multi-source ingestion, duplicate detection, timestamp normalisation, 5–6-system matching. |
-| **Account-Level Reconciliation** | `account_level` | General-ledger-to-core-banking balance reconciliation at account and product level. The heart of the Woodcore pilot. |
+| **Settlement Reconciliation** | \`settlement\` | Validates bulk settlement amounts against detailed transaction reports. Includes all transaction-integrity capabilities: multi-source ingestion, duplicate detection, timestamp normalisation, 5–6-system matching. |
+| **Account-Level Reconciliation** | \`account_level\` | General-ledger-to-core-banking balance reconciliation at account and product level. The heart of the Woodcore pilot. |
 
 Modules can be toggled per organisation, and super admins can force them
 on/off per institution. **Rule:** transaction integrity is part of settlement —
@@ -288,7 +303,7 @@ it must never reappear as a third module in any user-facing dropdown.
 
 | Layer | Technology | Plain-English explanation |
 |---|---|---|
-| Language | TypeScript (strict mode) | JavaScript with a type system that catches whole classes of bugs at build time. "Strict mode" means no escape hatches (`any`, `ts-ignore`) are allowed. |
+| Language | TypeScript (strict mode) | JavaScript with a type system that catches whole classes of bugs at build time. "Strict mode" means no escape hatches (\`any\`, \`ts-ignore\`) are allowed. |
 | Runtime | Node.js 22 | The engine that runs the server code. |
 | Frontend | React 19 + Vite | Industry-standard UI framework + a fast build tool. |
 | Styling | Tailwind CSS 4 + shadcn/ui | Utility CSS + a high-quality component library. Consistent look with minimal custom CSS. |
@@ -297,24 +312,24 @@ it must never reappear as a third module in any user-facing dropdown.
 | Database | TiDB (MySQL-compatible) via Drizzle ORM | Managed cloud database; all access is typed TypeScript, never raw SQL. |
 | Job queue | BullMQ + Redis | Durable background processing for reconciliation runs and webhooks. |
 | File storage | S3 / Cloudflare R2 | Object storage for all files. |
-| AI | Anthropic Claude (via `invokeLLM()`) | Sonnet-class models for classification/reports; Opus-class for the multi-step Super Agent. |
+| AI | Anthropic Claude (via \`invokeLLM()\`) | Sonnet-class models for classification/reports; Opus-class for the multi-step Super Agent. |
 | Email | Resend | Transactional email (login links, alerts, reports). |
 | Auth | Magic link + JWT session cookies | Passwordless login (see §8). |
 | Testing | Vitest | Unit/integration test framework; extensive coverage across engines, routers, and reports. |
 | Hosting | Railway | Deploys automatically from GitHub; migrations run on deploy. |
 
-Key commands (from `package.json`):
+Key commands (from \`package.json\`):
 
-```bash
+\`\`\`bash
 pnpm dev        # run locally with hot reload
 pnpm check      # TypeScript type-check (must be 0 errors)
 pnpm test       # run the full Vitest suite
 pnpm build      # production build (frontend + backend)
 pnpm start      # run the production build
 pnpm db:push    # generate + apply database migrations
-```
+\`\`\`
 
-> **Local environment caution:** the local `.env` may contain the **live**
+> **Local environment caution:** the local \`.env\` may contain the **live**
 > shared database URL. Database-touching tests snapshot/restore, but be
 > deliberate before running anything destructive locally.
 
@@ -322,7 +337,7 @@ pnpm db:push    # generate + apply database migrations
 
 ## 6. Codebase map
 
-```
+\`\`\`
 reconcileai/
 ├── client/src/
 │   ├── pages/                  # 40+ frontend pages
@@ -354,7 +369,7 @@ reconcileai/
 ├── ml/                         # local model training assets (on-prem track)
 ├── docs/                       # PRD, runbooks, market docs, this file
 └── CLAUDE.md                   # living engineering context (read it!)
-```
+\`\`\`
 
 ---
 
@@ -372,10 +387,10 @@ a **paid pilot** by demonstrating live reconciliation of real savings, loan,
 and general-ledger data, with accurate exception detection and an actionable
 CFO-ready report.
 
-- Engine: `server/woodcore-engine.ts` (three layers: balance → exception → agent)
-- DB access: `server/woodcoreDb.ts` (direct MySQL — production path is the
+- Engine: \`server/woodcore-engine.ts\` (three layers: balance → exception → agent)
+- DB access: \`server/woodcoreDb.ts\` (direct MySQL — production path is the
   Fineract REST API instead; this is a known migration item)
-- Frontend: `client/src/pages/WoodcorePOC.tsx` (public demo page, intentionally unauthenticated)
+- Frontend: \`client/src/pages/WoodcorePOC.tsx\` (public demo page, intentionally unauthenticated)
 
 ### 7.2 CBS connectors — the onboarding channel model
 
@@ -383,12 +398,12 @@ The core strategic insight: a core-banking-system (CBS) partner is not just a
 data source, it is a **distribution channel**. When a CBS partner refers a
 client bank, that bank is onboarded *through the connector* in one step:
 organisation created + admin invited + connector configured + data channel
-established (`onboardCbsClient()` in `server/connectors/woodcore/onboarding.ts`).
+established (\`onboardCbsClient()\` in \`server/connectors/woodcore/onboarding.ts\`).
 
 - **One engine, four platforms**: WoodCore (live/tested), Temenos T24, Mambu,
   Oracle FLEXCUBE. The engine (auth, webhooks, batch sync, dead-letter queue,
   health checks, canonical ingest) is shared; per-platform differences are
-  **data** in a registry (`server/connectors/cbs/registry.ts`), not code forks.
+  **data** in a registry (\`server/connectors/cbs/registry.ts\`), not code forks.
   Adding a new CBS platform = adding a registry profile.
 - **CSV fallback**: every connector accepts CSV exports through the same
   mapping + dedupe pipeline, so a client is productive before API credentials
@@ -396,8 +411,8 @@ established (`onboardCbsClient()` in `server/connectors/woodcore/onboarding.ts`)
 - **Onboarding hub**: the "New Organisation" dialog in the super-admin portal
   offers "Direct" vs "Via Core Banking Connector" side by side. The
   organisation record permanently stores its acquisition path
-  (`organizations.onboardingChannel`).
-- Inbound webhook path: `/api/webhooks/cbs/:configId`.
+  (\`organizations.onboardingChannel\`).
+- Inbound webhook path: \`/api/webhooks/cbs/:configId\`.
 
 ### 7.3 Nigeria + Uganda regulatory packs
 
@@ -411,7 +426,7 @@ established (`onboardCbsClient()` in `server/connectors/woodcore/onboarding.ts`)
   law requires an on-premise deployment option**, which is why the on-prem
   pack (§9) exists.
 - **LAPO MFB**: an 8-source channel pack shipped ahead of receiving real data
-  (all formats are config in `shared/lapoSources.ts`, swappable when samples
+  (all formats are config in \`shared/lapoSources.ts\`, swappable when samples
   arrive), onboarded through the same CBS picker.
 
 ### 7.4 SHOPLINE retail commerce
@@ -422,7 +437,7 @@ retail vertical. Current phase status:
 | Phase | Gate | Status |
 |---|---|---|
 | Phase 0 — retail foundation (taxonomy, engine adapter, schema, admin UI) | None (internal) | ✅ Done and hardened |
-| Phase 1 — OAuth App Store connector, merchant onboarding, settlement + scheduled sync, billing webhooks, GDPR endpoints, retail exception intelligence, merchant dashboards | SHOPLINE API docs received | ✅ **Merged to `main` and live on production** (PRs #8–#11; migrations `0071`/`0072`) |
+| Phase 1 — OAuth App Store connector, merchant onboarding, settlement + scheduled sync, billing webhooks, GDPR endpoints, retail exception intelligence, merchant dashboards | SHOPLINE API docs received | ✅ **Merged to \`main\` and live on production** (PRs #8–#11; migrations \`0071\`/\`0072\`) |
 | Phase 2 — Tier 2 white-label API, Tier 3 on-prem packaging | **Signed commercial agreement** | ⛔ Not started — do not begin until signed |
 
 The retail engine wraps the core engine (no fork), and the 25-category retail
@@ -438,12 +453,12 @@ you are *inside* a retail organisation. This is a deliberate access design, not 
 missing deployment:
 
 1. The retail navigation (Merchant Dashboard, Settlement Monitor, Sync Status,
-   SHOPLINE Connection) renders **only** for `retail_commerce` organisations. A
+   SHOPLINE Connection) renders **only** for \`retail_commerce\` organisations. A
    super-admin must create one (All Organisations → New Organisation → **Retail
    Commerce** segment) and click **Enter Portal** on it. The gate lives in
-   `client/src/components/DashboardLayout.tsx` (`viewAsOrg.segment ===
-   "retail_commerce"`). In the default super-admin view or a bank
-   (`financial_services`) portal, the retail menu is hidden by design — which is
+   \`client/src/components/DashboardLayout.tsx\` (\`viewAsOrg.segment ===
+   "retail_commerce"\`). In the default super-admin view or a bank
+   (\`financial_services\`) portal, the retail menu is hidden by design — which is
    why nothing SHOPLINE appears there even though the code is live.
 2. Even inside a retail org, the dashboards stay empty until a real SHOPLINE
    store connects. Merchants connect by **installing the app from the SHOPLINE
@@ -452,11 +467,11 @@ missing deployment:
    has installed and there is no live data yet.
 3. The remaining work is therefore **external, not code**: test the OAuth flow on
    a SHOPLINE developer store, then submit the app for App Store review (see
-   `CLAUDE.md` §2B.12). Once a store installs, the dashboards populate
+   \`CLAUDE.md\` §2B.12). Once a store installs, the dashboards populate
    automatically via webhooks + scheduled sync.
 
-The pages are also directly reachable by URL — `/shopline/connect`,
-`/settlement-monitor`, `/shopline/sync-status` — but show empty states until a
+The pages are also directly reachable by URL — \`/shopline/connect\`,
+\`/settlement-monitor\`, \`/shopline/sync-status\` — but show empty states until a
 store is connected.
 
 ---
@@ -470,14 +485,14 @@ store is connected.
   enumeration).
 - **SSO policy (standing rule):** magic link is the default for all
   organisations. Google or Microsoft Entra SSO is a **per-organisation
-  opt-in** (`organizations.ssoProvider`); super admins never log in via SSO.
+  opt-in** (\`organizations.ssoProvider\`); super admins never log in via SSO.
 - **Roles:** super admin (Infinity AI), org admin, and read-only roles
   (CFO, Compliance) enforced both in the sidebar and at the API layer.
   All administrative actions are audit-logged.
 - **Public API:** external systems authenticate with API keys
-  (`publicApi.*` procedures); ingestion endpoints have logging and rate
-  limiting (`server/rateLimiter.ts`).
-- **Demo/POC pages** (`/woodcore-poc`, `/salad-africa-poc`, etc.) are
+  (\`publicApi.*\` procedures); ingestion endpoints have logging and rate
+  limiting (\`server/rateLimiter.ts\`).
+- **Demo/POC pages** (\`/woodcore-poc\`, \`/salad-africa-poc\`, etc.) are
   **intentionally public** — they are sales tools. Do not add auth gates to
   them without an explicit decision.
 
@@ -493,23 +508,23 @@ store is connected.
 | **On-prem + cloud LLM** | The app runs on the customer's servers; only AI calls go out to Anthropic | Data-residency-sensitive banks (e.g. Uganda) |
 | **Fully local / air-gapped** | Everything, including a locally trained model, runs inside the customer's network with zero internet | The most regulated deployments |
 
-The on-prem pack lives in `deploy/` (Docker-based) with `ml/` for local model
-training, an air-gapped first-login bootstrap (`scripts/bootstrap-admin.mjs`),
+The on-prem pack lives in \`deploy/\` (Docker-based) with \`ml/\` for local model
+training, an air-gapped first-login bootstrap (\`scripts/bootstrap-admin.mjs\`),
 and an authoritative runbook at
-[`docs/deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md`](deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md).
+[\`docs/deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md\`](deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md).
 
 ### 9.2 Production (SaaS) topology
 
 - **Railway** hosts the Node.js app; deploys trigger automatically from
-  GitHub `main`. Database migrations run automatically on deploy.
+  GitHub \`main\`. Database migrations run automatically on deploy.
 - **TiDB Cloud** is the database; **Cloudflare** manages DNS.
 - One pending infrastructure task: provision **Redis on Railway** and set
-  `REDIS_URL` — this activates the already-shipped durable job queue and is
+  \`REDIS_URL\` — this activates the already-shipped durable job queue and is
   required before horizontal scaling (running more than one server instance).
 - Environment variables are the single switchboard for all external services;
-  the annotated list is in [`docs/env.example.md`](env.example.md). The
-  critical ones: `DATABASE_URL`, `JWT_SECRET`, `DIRECT_LLM_API_KEY`,
-  `RESEND_API_KEY`, S3 credentials. **No secrets are ever committed to the
+  the annotated list is in [\`docs/env.example.md\`](env.example.md). The
+  critical ones: \`DATABASE_URL\`, \`JWT_SECRET\`, \`DIRECT_LLM_API_KEY\`,
+  \`RESEND_API_KEY\`, S3 credentials. **No secrets are ever committed to the
   repository.**
 
 ---
@@ -519,9 +534,9 @@ and an authoritative runbook at
 ### 10.1 The Manus → review → merge workflow
 
 New features are prototyped by **Manus** (an AI prototyping agent) on branches
-named `manus/<description>`, submitted as pull requests. **Manus never merges
+named \`manus/<description>\`, submitted as pull requests. **Manus never merges
 its own PRs.** Every PR is reviewed against a checklist before merge
-(`CLAUDE.md` §15): zero TypeScript errors, all tests passing, no
+(\`CLAUDE.md\` §15): zero TypeScript errors, all tests passing, no
 prototype-only code, migrations present, no secrets, LLM calls
 production-compatible.
 
@@ -529,7 +544,7 @@ production-compatible.
 
 1. **Dual-push:** every commit goes to **both** GitHub remotes (primary and
    mirror). Keep them at par.
-2. **Stage files explicitly** — never `git add -A`. The working tree is shared
+2. **Stage files explicitly** — never \`git add -A\`. The working tree is shared
    with Manus's sandbox.
 3. **Never re-number an already-applied migration.** This has broken a
    production deploy before (the deploy fails with "table already exists").
@@ -537,27 +552,27 @@ production-compatible.
 4. **Two modules only** (settlement, account_level) in any user-facing UI.
 5. **Every new DB table must be classified for tenant scoping** or CI fails.
 6. **Respect the SHOPLINE gates** (§7.4).
-7. **Pricing lives in one place**: `shared/roiModel.ts`.
+7. **Pricing lives in one place**: \`shared/roiModel.ts\`.
 
 ### 10.3 Coding conventions (enforced)
 
-- TypeScript strict; no `any`, no `ts-ignore`.
-- tRPC for all frontend↔backend calls — never raw `fetch`/Axios in the client.
+- TypeScript strict; no \`any\`, no \`ts-ignore\`.
+- tRPC for all frontend↔backend calls — never raw \`fetch\`/Axios in the client.
 - Drizzle ORM for all queries — no raw SQL strings (sole exception: the
   Woodcore direct-DB helper).
 - shadcn/ui for all UI components; optimistic updates for list mutations.
 - UTC timestamps everywhere; convert to local time only at display.
 - All files to S3 — never bytes in database columns.
-- Router files split at ~150 lines into `server/routers/<feature>.ts`.
+- Router files split at ~150 lines into \`server/routers/<feature>.ts\`.
 - **Vitest tests are required** for every new procedure and engine function.
 
 ### 10.4 Stable foundations — do not modify without explicit sign-off
 
-- `drizzle/schema.ts` structure (add tables/columns; never rename/drop)
-- `server/_core/` (framework plumbing)
-- `drizzle/woodcore_schema.ts` (read-only Fineract mirror)
-- The four-portal architecture and `organizations.segment` enum
-- `client/src/lib/trpc.ts` (tRPC client binding)
+- \`drizzle/schema.ts\` structure (add tables/columns; never rename/drop)
+- \`server/_core/\` (framework plumbing)
+- \`drizzle/woodcore_schema.ts\` (read-only Fineract mirror)
+- The four-portal architecture and \`organizations.segment\` enum
+- \`client/src/lib/trpc.ts\` (tRPC client binding)
 
 ---
 
@@ -565,12 +580,12 @@ production-compatible.
 
 | Item | Priority | Notes |
 |---|---|---|
-| Provision Redis on Railway (`REDIS_URL`) | High | Activates the shipped durable job queue; prerequisite for horizontal scaling |
+| Provision Redis on Railway (\`REDIS_URL\`) | High | Activates the shipped durable job queue; prerequisite for horizontal scaling |
 | Migrate Woodcore from direct MySQL to Fineract REST API | Medium | Direct DB access is fine for the POC, not for production |
 | WoodCore connector: obtain real API docs/credentials/webhook specs | High | T24/Mambu/FLEXCUBE registry profiles are built but unvalidated against real systems |
 | LAPO: real data samples + SFTP credentials | Blocked on partner | All formats are config, ready to swap |
 | SHOPLINE Phase 1 | Blocked on partner API docs | Do not start early |
-| Gap-closure plan workstreams | Ongoing | See `docs/GAP_CLOSURE_PLAN.md` — mobile-money parser depth, RAG audit, rate-limit hardening |
+| Gap-closure plan workstreams | Ongoing | See \`docs/GAP_CLOSURE_PLAN.md\` — mobile-money parser depth, RAG audit, rate-limit hardening |
 | Large-table migration strategy | Watch item | Auto-migrate-on-deploy is fine now; switch to online schema-change tooling when core tables near tens of millions of rows |
 
 ---
@@ -604,14 +619,14 @@ production-compatible.
 ## 13. First-week checklist for a new engineer
 
 1. Get access to both GitHub repos; clone the primary.
-2. Read this document, then `CLAUDE.md` end-to-end.
-3. Follow `docs/DEVELOPER_GETTING_STARTED.md` to run locally
-   (`pnpm install && pnpm dev`). Confirm `pnpm check` and `pnpm test` pass.
+2. Read this document, then \`CLAUDE.md\` end-to-end.
+3. Follow \`docs/DEVELOPER_GETTING_STARTED.md\` to run locally
+   (\`pnpm install && pnpm dev\`). Confirm \`pnpm check\` and \`pnpm test\` pass.
 4. Browse the live product (ask for a super-admin invite) and use the portal
    switcher to see each segment's experience.
-5. Read `server/reconciliationEngine.ts` and one taxonomy file in
-   `server/exceptions/` — that pairing is the heart of the product.
-6. Read `docs/GAP_CLOSURE_PLAN.md` for the active roadmap, and pick up the
+5. Read \`server/reconciliationEngine.ts\` and one taxonomy file in
+   \`server/exceptions/\` — that pairing is the heart of the product.
+6. Read \`docs/GAP_CLOSURE_PLAN.md\` for the active roadmap, and pick up the
    Redis provisioning task as a well-scoped first contribution.
 7. Before your first PR: re-read §10.2 (standing rules) and §10.4
    (do-not-touch list).
@@ -622,20 +637,21 @@ production-compatible.
 
 | Document | What it covers |
 |---|---|
-| [`CLAUDE.md`](../CLAUDE.md) | The living engineering context — always current |
-| [`docs/DEVELOPER_GETTING_STARTED.md`](DEVELOPER_GETTING_STARTED.md) | Local setup |
-| [`docs/env.example.md`](env.example.md) | Every environment variable, annotated |
-| [`docs/GAP_CLOSURE_PLAN.md`](GAP_CLOSURE_PLAN.md) | Active engineering roadmap |
-| [`docs/PRD.md`](PRD.md) | Product requirements |
-| [`docs/deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md`](deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md) | On-prem / air-gapped runbook |
-| [`docs/DEPLOYMENT_RAILWAY.md`](DEPLOYMENT_RAILWAY.md) | Production hosting |
-| [`docs/REGULATORY_MOAT_STRATEGY.md`](REGULATORY_MOAT_STRATEGY.md) | Compliance-first positioning |
-| [`docs/CTO_OPERATING_MODEL.md`](CTO_OPERATING_MODEL.md) | How the technical org operates |
-| [`docs/ROUTERS_SPLIT_PLAN.md`](ROUTERS_SPLIT_PLAN.md) | Router refactoring plan |
-| [`docs/security/`](security/) | Security documentation |
+| [\`CLAUDE.md\`](../CLAUDE.md) | The living engineering context — always current |
+| [\`docs/DEVELOPER_GETTING_STARTED.md\`](DEVELOPER_GETTING_STARTED.md) | Local setup |
+| [\`docs/env.example.md\`](env.example.md) | Every environment variable, annotated |
+| [\`docs/GAP_CLOSURE_PLAN.md\`](GAP_CLOSURE_PLAN.md) | Active engineering roadmap |
+| [\`docs/PRD.md\`](PRD.md) | Product requirements |
+| [\`docs/deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md\`](deployment/LOCAL_DEPLOYMENT_AND_MODEL_TRAINING.md) | On-prem / air-gapped runbook |
+| [\`docs/DEPLOYMENT_RAILWAY.md\`](DEPLOYMENT_RAILWAY.md) | Production hosting |
+| [\`docs/REGULATORY_MOAT_STRATEGY.md\`](REGULATORY_MOAT_STRATEGY.md) | Compliance-first positioning |
+| [\`docs/CTO_OPERATING_MODEL.md\`](CTO_OPERATING_MODEL.md) | How the technical org operates |
+| [\`docs/ROUTERS_SPLIT_PLAN.md\`](ROUTERS_SPLIT_PLAN.md) | Router refactoring plan |
+| [\`docs/security/\`](security/) | Security documentation |
 
 ---
 
 *This document is the entry point for the technical handover. When in doubt,
-`CLAUDE.md` in the repository root is the always-current source of truth for
+\`CLAUDE.md\` in the repository root is the always-current source of truth for
 engineering decisions — keep it updated as the project evolves.*
+`;
