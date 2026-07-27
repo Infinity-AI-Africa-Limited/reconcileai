@@ -26,6 +26,7 @@ import { z } from "zod";
 import {
   slConnectorStores,
   slConnectorWebhookEvents,
+  slConnectorSubscriptions,
 } from "../../drizzle/connector_schema";
 import { channels, transactions, exceptions } from "../../drizzle/schema";
 import { protectedProcedure, publicProcedure, router } from "../_core/trpc";
@@ -43,6 +44,8 @@ import { ENV } from "../_core/env";
 import {
   SHOPLINE_WEBHOOK_TOPICS,
   SHOPLINE_REQUIRED_SCOPES,
+  getShoplineBand,
+  getShoplinePlanLimits,
 } from "../../shared/shoplineConstants";
 
 // ─── Access control helpers ────────────────────────────────────────────────
@@ -288,6 +291,85 @@ export const shoplineConnectorRouter = router({
       const orgId = resolveOrgId(ctx.user, input.organizationId);
       const { getRetailExceptionIntelligence } = await import("../connectors/shopline/retailIntelligence");
       return getRetailExceptionIntelligence(orgId, input.category, input.amount ?? 0);
+    }),
+
+  /**
+   * Plan status for the org's SHOPLINE subscription — the platform's view of
+   * the portal-managed pricing model: current plan + its LIMITS (orders/month,
+   * connected stores), current usage against those limits, and grace-period
+   * state. SHOPLINE runs the billing; this is how OUR side stays plan-aware
+   * (surfaces overage/limit signals; the connector never charges anything).
+   */
+  planStatus: protectedProcedure
+    .input(z.object({ organizationId: z.number().optional() }))
+    .query(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
+      // Subscription (may be null before the first billing webhook).
+      const [sub] = await db
+        .select()
+        .from(slConnectorSubscriptions)
+        .where(eq(slConnectorSubscriptions.organizationId, orgId))
+        .orderBy(desc(slConnectorSubscriptions.id))
+        .limit(1);
+
+      const band = getShoplineBand(sub?.planId);
+      const limits = getShoplinePlanLimits(sub?.planId);
+
+      // Connected (active) stores for this org.
+      const [storeAgg] = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(slConnectorStores)
+        .where(and(eq(slConnectorStores.organizationId, orgId), eq(slConnectorStores.status, "active")));
+      const connectedStores = Number(storeAgg?.n ?? 0);
+
+      // Orders reconciled this calendar month (order-leg channels).
+      const orgChannels = await db
+        .select({ id: channels.id })
+        .from(channels)
+        .where(and(eq(channels.organizationId, orgId), eq(channels.channelType, "ecommerce_gateway")));
+      const channelIds = orgChannels.map((c) => c.id);
+      const monthStart = new Date();
+      monthStart.setUTCDate(1);
+      monthStart.setUTCHours(0, 0, 0, 0);
+      const [orderAgg] = channelIds.length
+        ? await db
+            .select({ n: sql<number>`count(*)` })
+            .from(transactions)
+            .where(
+              and(
+                inArray(transactions.channelId, channelIds),
+                eq(transactions.debitCredit, "credit"),
+                sql`${transactions.transactionDate} >= ${monthStart}`,
+              ),
+            )
+        : [{ n: 0 }];
+      const ordersThisMonth = Number(orderAgg?.n ?? 0);
+
+      const grace =
+        sub && (sub.status === "past_due" || sub.status === "expired")
+          ? {
+              graceEndsAt: sub.graceEndsAt,
+              inGrace: !sub.graceEndsAt || (sub.graceEndsAt as Date).getTime() > Date.now(),
+            }
+          : { graceEndsAt: null, inGrace: false };
+
+      return {
+        planId: sub?.planId ?? null,
+        planLabel: band?.label ?? null,
+        status: sub?.status ?? null,
+        trialEndsAt: sub?.trialEndsAt ?? null,
+        limits: {
+          maxOrders: Number.isFinite(limits.maxOrders) ? limits.maxOrders : null, // null = unlimited
+          maxStores: Number.isFinite(limits.maxStores) ? limits.maxStores : null,
+        },
+        usage: { ordersThisMonth, connectedStores },
+        overOrderLimit: Number.isFinite(limits.maxOrders) && ordersThisMonth > limits.maxOrders,
+        atStoreLimit: Number.isFinite(limits.maxStores) && connectedStores >= limits.maxStores,
+        grace,
+      };
     }),
 
   /**

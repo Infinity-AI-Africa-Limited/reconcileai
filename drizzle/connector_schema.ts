@@ -336,6 +336,13 @@ export const slConnectorSubscriptions = mysqlTable(
     currentPeriodEnd: timestamp("currentPeriodEnd"),
     /** When the subscription was cancelled or expired */
     cancelledAt: timestamp("cancelledAt"),
+    /**
+     * End of the grace period after a failed renewal / expiry (set to
+     * now + TIER_1_GRACE_PERIOD_DAYS when the sub goes past_due/expired,
+     * cleared on recovery). While in the future, the connector keeps syncing
+     * so a merchant resolving payment isn't cut off mid-buffer.
+     */
+    graceEndsAt: timestamp("graceEndsAt"),
     /** Number of consecutive failed billing attempts */
     failedBillingAttempts: int("failedBillingAttempts").default(0).notNull(),
     /** Last billing failure reason */

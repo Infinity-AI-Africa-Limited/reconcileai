@@ -216,19 +216,28 @@ from public docs — treat these as **confirmed ground truth** for review purpos
 | Support URL | `https://www.reconcileaiafrica.com/support` |
 | Production Domain | `https://www.reconcileaiafrica.com` (NOT reconcileai.vip) |
 
-**Pricing Plans (5 bands, 7-day free trial):**
+**Pricing Plans (5 bands, 7-day free trial, 7-day grace period) — portal-populated 2026-07-27:**
 
-| Plan | spuKey | Monthly Price (USD) | Max Orders | Max Stores |
-|---|---|---|---|---|
-| Starter | `starter` | $29 | 500 | 1 |
-| Growth | `growth` | $79 | 2,000 | 3 |
-| Professional | `professional` | $149 | 10,000 | 10 |
-| Scale | `enterprise` | $299 | 50,000 | 50 |
-| Enterprise | `enterprise_plus` | $499 | Unlimited | Unlimited |
+| Plan | spuKey | Monthly | Annual | Max Orders | Max Stores |
+|---|---|---|---|---|---|
+| Starter | `starter` | $29 | $290 | 500 | 1 |
+| Growth | `growth` | $79 | $790 | 2,000 | 3 |
+| Professional | `professional` | $149 | $1,490 | 10,000 | 5 |
+| Scale | `enterprise` | $299 | $2,990 | 50,000 | 10 |
+| Enterprise | `enterprise_plus` | $499 | $4,990 | Unlimited | Unlimited |
 
 > **Note on spuKeys:** The portal plan names (Starter, Growth, Professional, Scale,
 > Enterprise) differ from the spuKeys (`starter`, `growth`, `professional`, `enterprise`,
 > `enterprise_plus`). The spuKeys are what arrive in billing webhook payloads.
+>
+> **The platform does not display prices or charge cards — SHOPLINE runs Tier 1
+> billing.** Our side holds these bands to enforce/report each plan's LIMITS
+> (`getShoplinePlanLimits`) and honour the **7-day grace period** after a failed
+> renewal/expiry (`TIER_1_GRACE_PERIOD_DAYS`; `sl_connector_subscriptions.graceEndsAt`,
+> migration 0074). The sync gate (`isSyncBlockedBySubscription`) keeps a past_due/
+> expired store syncing until `graceEndsAt`, then cuts off; `cancelled` (uninstall)
+> blocks immediately. `shoplineConnector.planStatus` reports plan + usage vs limits +
+> grace for the merchant dashboard. Annual = monthly × 10 (reference only).
 
 **Registered Webhooks (9 topics, latest API version):**
 - `orders/create`, `orders/updated`, `orders/edited`, `orders/paid`, `orders/cancelled`,
@@ -785,8 +794,8 @@ Partner Portal configuration, and PR provenance. Remaining work is App Store sub
 
 `shared/shoplineConstants.ts` defines the commercial and technical contract:
 - **Revenue share:** 15% to SHOPLINE (Tier 1 App Store)
-- **Free trial:** 7 days (confirmed in Partner Portal)
-- **Tier 1 pricing bands:** Starter ($29/mo, ≤500 orders), Growth ($79/mo, ≤2K), Professional ($149/mo, ≤10K), Scale ($299/mo, ≤50K), Enterprise ($499/mo, unlimited)
+- **Free trial:** 7 days; **grace period:** 7 days after a failed renewal/expiry (`TIER_1_GRACE_PERIOD_DAYS`)
+- **Tier 1 pricing bands (limits enforced, prices reference-only — SHOPLINE bills):** Starter ($29/mo·$290/yr, ≤500 orders, 1 store), Growth ($79·$790, ≤2K, 3), Professional ($149·$1490, ≤10K, 5), Scale ($299·$2990, ≤50K, 10), Enterprise ($499·$4990, unlimited, unlimited)
 - **OAuth scopes required:** `read_orders`, `read_payment`, `read_store_information`, `read_returns`, `read_gift_card`
 - **Onboarding channels:** `shopline_app_store` (Tier 1), `shopline_payments_api` (Tier 2), `shopline_enterprise` (Tier 3)
 - **API version:** `v20260601` (stable, 12-month support)

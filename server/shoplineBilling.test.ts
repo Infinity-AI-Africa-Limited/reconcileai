@@ -50,6 +50,31 @@ describe("SHOPLINE Billing Constants (confirmed portal settings)", () => {
       expect(band.maxOrders).toBeGreaterThan(0);
     }
   });
+
+  it("plan limits (orders/stores) match the portal model exactly", () => {
+    const byKey = Object.fromEntries(TIER_1_SUBSCRIPTION_BANDS.map((b) => [b.spuKey, b]));
+    // [maxOrders, maxStores]
+    expect([byKey.starter.maxOrders, byKey.starter.maxStores]).toEqual([500, 1]);
+    expect([byKey.growth.maxOrders, byKey.growth.maxStores]).toEqual([2_000, 3]);
+    expect([byKey.professional.maxOrders, byKey.professional.maxStores]).toEqual([10_000, 5]);
+    expect([byKey.enterprise.maxOrders, byKey.enterprise.maxStores]).toEqual([50_000, 10]);
+    expect(byKey.enterprise_plus.maxOrders).toBe(Infinity);
+    expect(byKey.enterprise_plus.maxStores).toBe(Infinity);
+  });
+
+  it("annual prices are 10× monthly per the portal model", () => {
+    for (const band of TIER_1_SUBSCRIPTION_BANDS) {
+      expect(band.annualPriceUsd).toBe(band.monthlyPriceUsd * 10);
+    }
+  });
+
+  it("getShoplinePlanLimits resolves by spuKey and fails open for unknown plans", async () => {
+    const { getShoplinePlanLimits } = await import("../shared/shoplineConstants");
+    expect(getShoplinePlanLimits("professional")).toEqual({ maxOrders: 10_000, maxStores: 5 });
+    // Unknown/absent plan → most generous, so webhook lag never throttles.
+    expect(getShoplinePlanLimits("mystery")).toEqual({ maxOrders: Infinity, maxStores: Infinity });
+    expect(getShoplinePlanLimits(null)).toEqual({ maxOrders: Infinity, maxStores: Infinity });
+  });
 });
 
 // ─── Billing webhook dispatcher ───────────────────────────────────────────────
@@ -218,33 +243,55 @@ describe("Subscription query helpers", () => {
   });
 });
 
-// ─── Sync gate semantics (isSyncBlockedBySubscription) ───────────────────────
+// ─── Sync gate semantics (isSyncBlockedBySubscription) — grace-aware ─────────
 
-describe("isSyncBlockedBySubscription — lenient gating", () => {
+describe("isSyncBlockedBySubscription — grace-aware gating", () => {
   const mkDb = (rows: unknown[]) => ({
     select: vi.fn().mockReturnThis(),
     from: vi.fn().mockReturnThis(),
     where: vi.fn().mockReturnThis(),
     limit: vi.fn().mockResolvedValue(rows),
   });
+  const future = () => new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+  const past = () => new Date(Date.now() - 1 * 24 * 60 * 60 * 1000);
 
   it("does NOT block when there is no subscription row (fresh/pre-billing store)", async () => {
     const r = await isSyncBlockedBySubscription(mkDb([]) as any, 1);
     expect(r.blocked).toBe(false);
   });
 
-  it.each(["trialing", "active", "past_due"])(
-    "does NOT block a %s subscription",
+  it.each(["trialing", "active"])("does NOT block a %s subscription", async (status) => {
+    const r = await isSyncBlockedBySubscription(mkDb([{ status, graceEndsAt: null }]) as any, 1);
+    expect(r.blocked).toBe(false);
+  });
+
+  it.each(["past_due", "expired"])(
+    "does NOT block a %s subscription while still within the grace window",
     async (status) => {
-      const r = await isSyncBlockedBySubscription(mkDb([{ status }]) as any, 1);
+      const r = await isSyncBlockedBySubscription(mkDb([{ status, graceEndsAt: future() }]) as any, 1);
       expect(r.blocked).toBe(false);
+      expect(r.inGrace).toBe(true);
     },
   );
 
-  it.each(["expired", "cancelled"])("blocks a %s subscription", async (status) => {
-    const r = await isSyncBlockedBySubscription(mkDb([{ status }]) as any, 1);
+  it.each(["past_due", "expired"])(
+    "BLOCKS a %s subscription once the grace window has elapsed",
+    async (status) => {
+      const r = await isSyncBlockedBySubscription(mkDb([{ status, graceEndsAt: past() }]) as any, 1);
+      expect(r.blocked).toBe(true);
+      expect(r.inGrace).toBe(false);
+    },
+  );
+
+  it("treats a missing graceEndsAt as still-in-grace (fail-open, no instant cut-off)", async () => {
+    const r = await isSyncBlockedBySubscription(mkDb([{ status: "past_due", graceEndsAt: null }]) as any, 1);
+    expect(r.blocked).toBe(false);
+  });
+
+  it("blocks a cancelled (uninstalled) subscription immediately, ignoring grace", async () => {
+    const r = await isSyncBlockedBySubscription(mkDb([{ status: "cancelled", graceEndsAt: future() }]) as any, 1);
     expect(r.blocked).toBe(true);
-    expect(r.status).toBe(status);
+    expect(r.status).toBe("cancelled");
   });
 });
 

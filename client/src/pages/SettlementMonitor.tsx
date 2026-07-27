@@ -111,6 +111,9 @@ export default function SettlementMonitor() {
         </Button>
       </div>
 
+      {/* Plan status + grace-period banner (SHOPLINE-managed billing) */}
+      <PlanStatusBanner />
+
       {/* KPI Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
@@ -264,6 +267,49 @@ export default function SettlementMonitor() {
 
       {/* Exception Resolution Intelligence — both learning layers */}
       <ResolutionIntelligenceCard />
+    </div>
+  );
+}
+
+// Plan awareness (SHOPLINE runs the billing; we show plan + usage vs limits and
+// the grace-period buffer after a failed renewal). No prices are rendered.
+function PlanStatusBanner() {
+  const { data } = trpc.shoplineConnector.planStatus.useQuery({}, { staleTime: 60_000 });
+  if (!data || !data.planId) return null;
+
+  const { limits, usage } = data;
+  const orderLimitLabel = limits.maxOrders === null ? "unlimited" : limits.maxOrders.toLocaleString();
+  const storeLimitLabel = limits.maxStores === null ? "unlimited" : String(limits.maxStores);
+  const graceDate = data.grace?.graceEndsAt ? formatDate(data.grace.graceEndsAt) : null;
+
+  return (
+    <div className="space-y-3">
+      {data.grace?.inGrace && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3 flex items-start gap-2">
+          <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+          <p className="text-sm text-amber-800 dark:text-amber-200">
+            Your subscription is <span className="font-medium">{data.status}</span>. Reconciliation continues
+            during the grace period{graceDate ? ` until ${graceDate}` : ""}. Please resolve the payment in the
+            SHOPLINE App Store to avoid interruption.
+          </p>
+        </div>
+      )}
+      <Card>
+        <CardContent className="py-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <span className="font-medium">
+            Plan: {data.planLabel ?? data.planId}
+            {data.status ? <span className="text-muted-foreground"> · {data.status}</span> : null}
+          </span>
+          <span className={data.overOrderLimit ? "text-amber-600 font-medium" : "text-muted-foreground"}>
+            Orders this month: {usage.ordersThisMonth.toLocaleString()} / {orderLimitLabel}
+            {data.overOrderLimit ? " (over plan)" : ""}
+          </span>
+          <span className={data.atStoreLimit ? "text-amber-600 font-medium" : "text-muted-foreground"}>
+            Connected stores: {usage.connectedStores} / {storeLimitLabel}
+            {data.atStoreLimit ? " (at limit)" : ""}
+          </span>
+        </CardContent>
+      </Card>
     </div>
   );
 }

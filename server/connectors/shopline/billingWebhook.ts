@@ -19,9 +19,16 @@ import {
 } from "../../../drizzle/connector_schema";
 import {
   TIER_1_FREE_TRIAL_DAYS,
+  TIER_1_GRACE_PERIOD_DAYS,
   TIER_1_SUBSCRIPTION_BANDS,
   type SubscriptionBandId,
 } from "../../../shared/shoplineConstants";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** now + TIER_1_GRACE_PERIOD_DAYS — the buffer end after a failed renewal/expiry. */
+function graceDeadline(from: Date = new Date()): Date {
+  return new Date(from.getTime() + TIER_1_GRACE_PERIOD_DAYS * DAY_MS);
+}
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -118,6 +125,7 @@ export async function handlePlanActivated(
         trialEndsAt: isTrial ? trialEnd : existing.trialEndsAt,
         activatedAt: isTrial ? null : now,
         cancelledAt: null,
+        graceEndsAt: null, // back in good standing — clear any grace buffer
         failedBillingAttempts: 0,
         lastFailureReason: null,
       })
@@ -153,11 +161,27 @@ export async function handlePlanExpired(
 ): Promise<void> {
   const now = new Date();
 
+  // Expiry starts the grace buffer — the merchant keeps access for
+  // TIER_1_GRACE_PERIOD_DAYS while they resolve, then the sync gate cuts off.
+  // Preserve an already-running grace deadline so a later expiry event can't
+  // extend the buffer.
+  const [existing] = await db
+    .select({ graceEndsAt: slConnectorSubscriptions.graceEndsAt })
+    .from(slConnectorSubscriptions)
+    .where(
+      and(
+        eq(slConnectorSubscriptions.slStoreId, slStoreId),
+        eq(slConnectorSubscriptions.organizationId, organizationId),
+      ),
+    )
+    .limit(1);
+
   await db
     .update(slConnectorSubscriptions)
     .set({
       status: "expired",
       cancelledAt: now,
+      graceEndsAt: existing?.graceEndsAt ?? graceDeadline(now),
     })
     .where(
       and(
@@ -167,7 +191,7 @@ export async function handlePlanExpired(
     );
 
   console.info(
-    `[SHOPLINE Billing] Plan expired: store=${slStoreId}, reason=${payload.reason || "unknown"}`,
+    `[SHOPLINE Billing] Plan expired: store=${slStoreId}, reason=${payload.reason || "unknown"}, grace ends ${(existing?.graceEndsAt ?? graceDeadline(now)).toISOString()}`,
   );
 }
 
@@ -191,6 +215,7 @@ export async function handleBillingSuccess(
       activatedAt: new Date(), // re-confirm activation
       currentPeriodStart: periodStart,
       currentPeriodEnd: periodEnd,
+      graceEndsAt: null, // successful charge clears any grace buffer
       failedBillingAttempts: 0,
       lastFailureReason: null,
     })
@@ -230,12 +255,19 @@ export async function handleBillingFailure(
   const attempts = (existing?.failedBillingAttempts ?? 0) + 1;
   // After 3 failed attempts, mark as past_due (SHOPLINE may cancel after their
   // own threshold); before that, preserve whatever status the row already had.
-  const newStatus = attempts >= 3 ? "past_due" : (existing?.status ?? "active");
+  const goesPastDue = attempts >= 3;
+  const newStatus = goesPastDue ? "past_due" : (existing?.status ?? "active");
+  // Entering past_due starts the grace buffer (once) — keep an existing deadline
+  // so repeated failures don't extend it.
+  const graceEndsAt = goesPastDue
+    ? ((existing?.graceEndsAt as Date | null | undefined) ?? graceDeadline())
+    : (existing?.graceEndsAt as Date | null | undefined) ?? null;
 
   await db
     .update(slConnectorSubscriptions)
     .set({
       status: newStatus,
+      graceEndsAt,
       failedBillingAttempts: attempts,
       lastFailureReason: failureReason,
     })
@@ -346,24 +378,36 @@ export async function hasActiveSubscription(
 /**
  * Whether a store's subscription state should BLOCK data sync.
  *
- * Deliberately lenient: a store with NO subscription row yet (freshly
- * onboarded, before app_plan/activated fires) and one that is still trialing/
- * active/past_due keeps syncing. Only an explicitly lapsed subscription
- * (expired or cancelled) stops sync — so billing-webhook gaps never silently
- * strand a paying merchant, while a churned one stops consuming API quota.
+ * Deliberately lenient + grace-aware:
+ *  - No subscription row yet (freshly onboarded, before app_plan/activated) →
+ *    allowed, so a webhook gap never strands a merchant.
+ *  - trialing / active → allowed.
+ *  - past_due or expired → allowed UNTIL graceEndsAt (the portal's 7-day
+ *    buffer to resolve payment), then blocked. A missing graceEndsAt is
+ *    treated as still-in-grace (fail-open) rather than an instant cut-off.
+ *  - cancelled (explicit uninstall) → blocked immediately.
  */
 export async function isSyncBlockedBySubscription(
   db: Db,
   slStoreId: number,
-): Promise<{ blocked: boolean; status?: string }> {
+): Promise<{ blocked: boolean; status?: string; graceEndsAt?: Date | null; inGrace?: boolean }> {
   const [sub] = await db
-    .select({ status: slConnectorSubscriptions.status })
+    .select({ status: slConnectorSubscriptions.status, graceEndsAt: slConnectorSubscriptions.graceEndsAt })
     .from(slConnectorSubscriptions)
     .where(eq(slConnectorSubscriptions.slStoreId, slStoreId))
     .limit(1);
   if (!sub) return { blocked: false };
-  const blocked = sub.status === "expired" || sub.status === "cancelled";
-  return { blocked, status: sub.status };
+
+  if (sub.status === "cancelled") {
+    return { blocked: true, status: sub.status };
+  }
+  if (sub.status === "past_due" || sub.status === "expired") {
+    const grace = sub.graceEndsAt as Date | null;
+    const inGrace = !grace || grace.getTime() > Date.now();
+    return { blocked: !inGrace, status: sub.status, graceEndsAt: grace, inGrace };
+  }
+  // trialing / active
+  return { blocked: false, status: sub.status };
 }
 
 /**

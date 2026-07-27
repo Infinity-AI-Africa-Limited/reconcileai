@@ -43,19 +43,61 @@ export const SHOPLINE_TIERS = {
 } as const;
 
 // ─── Subscription Bands (Tier 1) ─────────────────────────────────────────────
-// CONFIRMED in SHOPLINE Partner Portal (2026-07-19).
-// Plan names and spuKeys match the portal configuration exactly.
+// CONFIRMED in the SHOPLINE Partner Portal (pricing populated there 2026-07-27).
+// SHOPLINE runs the actual billing (App-Store-managed) — these bands exist so
+// OUR platform can enforce/report each plan's LIMITS (orders/month, connected
+// stores) and honour the grace period. Prices are reference metadata (SHOPLINE
+// collects payment; ReconcileAI never renders a price or charges a card).
+// spuKeys are what arrive in billing-webhook payloads — do not change them
+// without a matching portal change (portal plan "Scale" → spuKey "enterprise",
+// portal "Enterprise" → spuKey "enterprise_plus"; see the label vs id below).
+
+/** Free trial before the first charge (portal-confirmed). */
 export const TIER_1_FREE_TRIAL_DAYS = 7;
 
+/**
+ * Grace period after a FAILED RENEWAL or EXPIRY — the buffer during which a
+ * merchant keeps access while they resolve payment, before the connector cuts
+ * off sync. Portal-confirmed at 7 days.
+ */
+export const TIER_1_GRACE_PERIOD_DAYS = 7;
+
 export const TIER_1_SUBSCRIPTION_BANDS = [
-  { id: "starter", spuKey: "starter", label: "Starter", maxOrders: 500, maxStores: 1, monthlyPriceUsd: 29 },
-  { id: "growth", spuKey: "growth", label: "Growth", maxOrders: 2_000, maxStores: 3, monthlyPriceUsd: 79 },
-  { id: "professional", spuKey: "professional", label: "Professional", maxOrders: 10_000, maxStores: 10, monthlyPriceUsd: 149 },
-  { id: "enterprise", spuKey: "enterprise", label: "Scale", maxOrders: 50_000, maxStores: 50, monthlyPriceUsd: 299 },
-  { id: "enterprise_plus", spuKey: "enterprise_plus", label: "Enterprise", maxOrders: Infinity, maxStores: Infinity, monthlyPriceUsd: 499 },
+  { id: "starter", spuKey: "starter", label: "Starter", maxOrders: 500, maxStores: 1, monthlyPriceUsd: 29, annualPriceUsd: 290,
+    description: "Up to 500 orders/month. 1 connected store. Automated reconciliation, exception alerts, and settlement tracking." },
+  { id: "growth", spuKey: "growth", label: "Growth", maxOrders: 2_000, maxStores: 3, monthlyPriceUsd: 79, annualPriceUsd: 790,
+    description: "Up to 2,000 orders/month. 3 connected stores. Everything in Starter plus multi-store reconciliation and priority exception handling." },
+  { id: "professional", spuKey: "professional", label: "Professional", maxOrders: 10_000, maxStores: 5, monthlyPriceUsd: 149, annualPriceUsd: 1490,
+    description: "Up to 10,000 orders/month. 5 connected stores. Full reconciliation suite with advanced analytics and dedicated exception management." },
+  { id: "enterprise", spuKey: "enterprise", label: "Scale", maxOrders: 50_000, maxStores: 10, monthlyPriceUsd: 299, annualPriceUsd: 2990,
+    description: "10,001–50,000 orders. 10 stores. Full platform access with custom reporting, API access, and SLA-backed support." },
+  { id: "enterprise_plus", spuKey: "enterprise_plus", label: "Enterprise", maxOrders: Infinity, maxStores: Infinity, monthlyPriceUsd: 499, annualPriceUsd: 4990,
+    description: "Unlimited orders. Unlimited stores. Everything in Scale, plus dedicated account management, custom integrations, and white-glove onboarding support." },
 ] as const;
 
 export type SubscriptionBandId = (typeof TIER_1_SUBSCRIPTION_BANDS)[number]["id"];
+export type ShoplinePlanLimits = { maxOrders: number; maxStores: number };
+
+/** Look up a band by its stored planId (== spuKey) or its id. Null if unknown. */
+export function getShoplineBand(planId: string | null | undefined) {
+  if (!planId) return null;
+  return (
+    TIER_1_SUBSCRIPTION_BANDS.find((b) => b.spuKey === planId || b.id === planId) ?? null
+  );
+}
+
+/**
+ * Enforceable limits for a plan. Unknown plan → most-generous (Infinity) so a
+ * webhook lag or a plan we don't recognise never wrongly throttles a merchant;
+ * SHOPLINE remains the source of truth for billing/plan assignment.
+ */
+export function getShoplinePlanLimits(planId: string | null | undefined): ShoplinePlanLimits {
+  const band = getShoplineBand(planId);
+  return {
+    maxOrders: band ? band.maxOrders : Infinity,
+    maxStores: band ? band.maxStores : Infinity,
+  };
+}
 
 // ─── Retail Channel Type Codes ───────────────────────────────────────────────
 // Corresponds to the new channelType enum values added in drizzle/schema.ts
