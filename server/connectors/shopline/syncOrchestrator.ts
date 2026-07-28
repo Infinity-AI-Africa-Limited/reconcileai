@@ -39,6 +39,11 @@ import {
   type IngestContext,
 } from "./ingest";
 import {
+  shoplineOrdersChannelCode,
+  shoplinePaymentsChannelCode,
+} from "./onboarding";
+import { isSyncBlockedBySubscription } from "./billingWebhook";
+import {
   runRetailReconciliation,
   type RetailReconciliationConfig,
 } from "../../retailReconciliationEngine";
@@ -103,6 +108,14 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
 
   const store = stores[0];
   const storeHandle = store.storeHandle;
+
+  // Gate on subscription state — a churned (expired/cancelled) store should not
+  // consume SHOPLINE API quota. Lenient: no-subscription and trialing/active/
+  // past_due all proceed (see isSyncBlockedBySubscription).
+  const gate = await isSyncBlockedBySubscription(db, opts.slStoreId);
+  if (gate.blocked) {
+    return errorReport(opts, `Sync skipped — subscription ${gate.status}`, startedAt, storeHandle);
+  }
 
   // Time window (default: last 24h)
   const to = opts.to ?? new Date();
@@ -244,6 +257,9 @@ async function fetchAllPayments(
     const page = await fetchPaymentTransactions(opts, {
       dateMin: from,
       dateMax: to,
+      // Gateway capture leg only — REFUND/DISPUTE rows are ingested via their
+      // own paths (refunds channel / dispute exceptions), not as captures.
+      transactionType: "PAYMENT",
       limit: 250,
       pageInfo: pageInfo ?? undefined,
     });
@@ -275,40 +291,33 @@ async function fetchAllPayouts(
 
 /**
  * Resolve (or create) the orders and payments channel IDs for a SHOPLINE store.
+ *
+ * Channels are keyed by their deterministic UNIQUE codes (shared with the
+ * onboarding provisioner). Matching by code — not by display name — is what
+ * keeps this idempotent: onboarding already created these channels, so a name
+ * mismatch here would collide on the unique code and throw on the first sync.
  */
 async function resolveChannelIds(
   db: Db,
   organizationId: number,
   storeHandle: string,
 ): Promise<{ ordersChannelId: number; paymentsChannelId: number }> {
-  // Look for existing channels tagged with this store handle
+  const ordersCode = shoplineOrdersChannelCode(storeHandle);
+  const paymentsCode = shoplinePaymentsChannelCode(storeHandle);
+
   const existingChannels = await db
-    .select()
+    .select({ id: channels.id, code: channels.code })
     .from(channels)
-    .where(
-      and(
-        eq(channels.organizationId, organizationId),
-        eq(channels.channelType, "ecommerce_gateway"),
-      ),
-    );
+    .where(eq(channels.organizationId, organizationId));
 
-  // Find channels by name convention: "SHOPLINE Orders ({handle})" / "SHOPLINE Payments ({handle})"
-  const ordersChannel = existingChannels.find(
-    (c) => c.name === `SHOPLINE Orders (${storeHandle})`,
-  );
-  const paymentsChannel = existingChannels.find(
-    (c) => c.name === `SHOPLINE Payments (${storeHandle})`,
-  );
+  let ordersChannelId = existingChannels.find((c) => c.code === ordersCode)?.id ?? 0;
+  let paymentsChannelId = existingChannels.find((c) => c.code === paymentsCode)?.id ?? 0;
 
-  let ordersChannelId = ordersChannel?.id ?? 0;
-  let paymentsChannelId = paymentsChannel?.id ?? 0;
-
-  // Create missing channels (code must be unique, use handle-based slug)
   if (!ordersChannelId) {
     const [result] = await db.insert(channels).values({
       organizationId,
       name: `SHOPLINE Orders (${storeHandle})`,
-      code: `sl_orders_${storeHandle}`.slice(0, 50),
+      code: ordersCode,
       channelType: "ecommerce_gateway",
       description: `SHOPLINE order data for store ${storeHandle}`,
       isActive: true,
@@ -320,7 +329,7 @@ async function resolveChannelIds(
     const [result] = await db.insert(channels).values({
       organizationId,
       name: `SHOPLINE Payments (${storeHandle})`,
-      code: `sl_payments_${storeHandle}`.slice(0, 50),
+      code: paymentsCode,
       channelType: "ecommerce_gateway",
       description: `SHOPLINE payment transaction data for store ${storeHandle}`,
       isActive: true,
@@ -402,26 +411,19 @@ async function runReconciliationOnPersistedData(
   }
 
   // Persist exceptions
-  // The exceptions table requires a jobId — we use batchId=0 as a synthetic job
-  // since SHOPLINE sync doesn't create reconciliation jobs (it runs inline).
-  // The category must map to the exceptions table enum. Retail-specific categories
-  // are stored in the description field; the enum category is the closest match.
+  // The exceptions table requires a jobId — we use 0 as a synthetic job since
+  // SHOPLINE sync runs inline (no reconciliation job). `category` is the coarse
+  // core enum (for list filters/reports); the PRECISE retail category is stored
+  // in `subCategory` so the exception intelligence flywheel learns on it (both
+  // the intra-org agentMemory recall and the cross-org shared pool key on it).
   if (result.retailExceptions.length > 0) {
-    const mapToExceptionCategory = (retailCategory: string) => {
-      // Map retail categories to the exceptions table enum
-      if (retailCategory.includes("chargeback")) return "reversal_unmatched" as const;
-      if (retailCategory.includes("refund")) return "reversal_unmatched" as const;
-      if (retailCategory.includes("duplicate")) return "duplicate_transaction" as const;
-      if (retailCategory.includes("fee") || retailCategory.includes("commission")) return "amount_mismatch" as const;
-      if (retailCategory.includes("settlement")) return "timing_difference" as const;
-      if (retailCategory.includes("fx") || retailCategory.includes("currency")) return "fx_rate_variance" as const;
-      return "unmatched" as const;
-    };
+    const { mapRetailToCoreCategory } = await import("./retailIntelligence");
 
     const exceptionRows = result.retailExceptions.map((ex) => ({
       jobId: 0, // synthetic — no reconciliation job for inline sync
       transactionId: ex.transactionId,
-      category: mapToExceptionCategory(ex.category),
+      category: mapRetailToCoreCategory(ex.category),
+      subCategory: ex.category, // precise retail_* key — feeds the flywheel
       severity: ex.severity,
       description: `[${ex.category}] ${ex.description}`,
       suggestedResolution: ex.suggestedResolution,

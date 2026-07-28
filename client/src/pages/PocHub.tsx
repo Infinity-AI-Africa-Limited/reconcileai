@@ -57,6 +57,24 @@ const POCS: Poc[] = [
     accent: "from-[#0E3622] to-[#00954B]",
     status: "Active",
   },
+  {
+    name: "Technical Handover & Architecture",
+    pocKey: "technical_handover",
+    blurb: "Private, read-only handover for an incoming technical team — plain-English product overview, full system architecture, stack, workflows, and onboarding checklist. Share the invite link; the recipient needs no login.",
+    path: "/technical-handover",
+    icon: FileText,
+    accent: "from-[#1B365D] to-[#F4758C]",
+    status: "Live",
+  },
+  {
+    name: "Local Deployment & Model Training — Runbook",
+    pocKey: "deployment_runbook",
+    blurb: "The on-premise deployment and model-training runbook, shared privately with prospects, partner IT teams and bank security reviewers. Document only — no uploads or reconciliation runs.",
+    path: "/deployment-runbook",
+    icon: FileText,
+    accent: "from-[#1B365D] to-[#F47458]",
+    status: "Live",
+  },
 ];
 
 // Per-POC access link: shows the invite link (with token), copy, and regenerate.
@@ -92,6 +110,79 @@ function PocAccessLink({ pocKey, path }: { pocKey: string; path: string }) {
           <RefreshCw className={`h-3 w-3 ${regen.isPending ? "animate-spin" : ""}`} /> Regenerate
         </Button>
       </div>
+    </div>
+  );
+}
+
+// Per-recipient invite links. One link per party, so a shared document is
+// watermarked with who it went to and any single recipient can be cut off
+// without disturbing the others.
+function RecipientInvites({ pocKey, path }: { pocKey: string; path: string }) {
+  const utils = trpc.useUtils();
+  const list = trpc.poc.listRecipientInvites.useQuery({ pocKey });
+  const [recipient, setRecipient] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
+  const refresh = () => utils.poc.listRecipientInvites.invalidate({ pocKey });
+  const create = trpc.poc.createRecipientInvite.useMutation({
+    onSuccess: () => { setRecipient(""); refresh(); },
+    onError: (e) => alert(e.message),
+  });
+  const revoke = trpc.poc.revokeRecipientInvite.useMutation({ onSuccess: refresh });
+
+  const linkFor = (token: string) => `${window.location.origin}${path}?key=${token}`;
+  const copy = async (token: string, who: string) => {
+    try {
+      await navigator.clipboard.writeText(linkFor(token));
+      setCopied(who);
+      setTimeout(() => setCopied(null), 2000);
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="mt-2 rounded-lg border bg-muted/30 p-2.5">
+      <p className="text-[11px] font-medium text-muted-foreground mb-1.5">
+        Per-recipient links (watermarked &amp; individually revocable)
+      </p>
+
+      <div className="flex items-center gap-2">
+        <input
+          value={recipient}
+          onChange={(e) => setRecipient(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && recipient.trim()) create.mutate({ pocKey, recipient: recipient.trim() });
+          }}
+          placeholder="recipient-name (e.g. acme-bank)"
+          className="flex-1 rounded border px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40"
+        />
+        <Button
+          size="sm" variant="outline" className="h-7 gap-1 text-xs"
+          disabled={!recipient.trim() || create.isPending}
+          onClick={() => create.mutate({ pocKey, recipient: recipient.trim() })}
+        >
+          Issue link
+        </Button>
+      </div>
+
+      {list.data && list.data.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {list.data.map((inv) => (
+            <div key={inv.recipient} className="flex items-center gap-2">
+              <span className="w-32 shrink-0 truncate text-[11px] font-medium text-gray-700">{inv.recipient}</span>
+              <code className="flex-1 truncate text-[11px] text-gray-500">{linkFor(inv.token)}</code>
+              <Button size="sm" variant="ghost" className="h-6 gap-1 px-1.5 text-[11px]" onClick={() => copy(inv.token, inv.recipient)}>
+                {copied === inv.recipient ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
+              </Button>
+              <Button
+                size="sm" variant="ghost" className="h-6 px-1.5 text-[11px] text-red-600 hover:text-red-700"
+                onClick={() => { if (confirm(`Revoke ${inv.recipient}'s link? It stops working immediately.`)) revoke.mutate({ pocKey, recipient: inv.recipient }); }}
+                disabled={revoke.isPending}
+              >
+                Revoke
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -306,7 +397,11 @@ function PocUploads({
 // Generic across every self-service POC. Woodcore is excluded — it keeps its own
 // run store (wc_reconciliation_runs) surfaced on its own page.
 function PocRunsAdmin() {
-  const runnablePocs = POCS.filter((p) => p.pocKey !== "woodcore");
+  // Woodcore keeps its own run store; the Technical Handover and the Deployment
+  // Runbook are documents, not runnable POCs.
+  const runnablePocs = POCS.filter(
+    (p) => p.pocKey !== "woodcore" && p.pocKey !== "technical_handover" && p.pocKey !== "deployment_runbook",
+  );
   const [slug, setSlug] = useState(runnablePocs[0]?.pocKey ?? "salad_africa");
 
   return (
@@ -391,6 +486,7 @@ export default function PocHub() {
                       <code className="text-xs text-muted-foreground">{poc.path}</code>
                     </div>
                     <PocAccessLink pocKey={poc.pocKey} path={poc.path} />
+                    <RecipientInvites pocKey={poc.pocKey} path={poc.path} />
                   </CardContent>
                 </Card>
               );

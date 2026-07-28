@@ -27,6 +27,7 @@ import AgeTracker from "./pages/AgeTracker";
 import PocHub from "./pages/PocHub";
 import PocSharedReport from "./pages/PocSharedReport";
 import PocAccessGate from "./components/PocAccessGate";
+import TechnicalHandover from "./pages/TechnicalHandover";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
@@ -48,6 +49,7 @@ import DocViewer from "./pages/DocViewer";
 import WoodcorePOC from "./pages/WoodcorePOC";
 import LapoPOC from "./pages/LapoPOC";
 import MobileMoneyPOC from "./pages/MobileMoneyPOC";
+import DeploymentRunbook from "./pages/DeploymentRunbook";
 import SharedReport from "./pages/SharedReport";
 import SharedReportPublic from "./pages/SharedReportPublic";
 import ComplianceAssessmentLanding from "./pages/ComplianceAssessmentLanding";
@@ -69,6 +71,8 @@ import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import Support from "./pages/Support";
+import SettlementMonitor from "./pages/SettlementMonitor";
+import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
 
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
@@ -123,6 +127,8 @@ function Router() {
       <Route path="/salad-africa-poc">{() => <PocAccessGate pocKey="salad_africa"><SaladAfricaPOC /></PocAccessGate>}</Route>
       <Route path="/lapo-poc">{() => <PocAccessGate pocKey="lapo_mfb"><LapoPOC /></PocAccessGate>}</Route>
       <Route path="/mobile-money-poc">{() => <PocAccessGate pocKey="lapo_mfb"><MobileMoneyPOC pocSlug="lapo_mfb" /></PocAccessGate>}</Route>
+      <Route path="/technical-handover">{() => <PocAccessGate pocKey="technical_handover" title="Protected document" subtitle="This technical handover is invite-only. Enter the access code from your invitation link to continue."><TechnicalHandover /></PocAccessGate>}</Route>
+      <Route path="/deployment-runbook">{() => <PocAccessGate pocKey="deployment_runbook"><DeploymentRunbook /></PocAccessGate>}</Route>
       <Route path="/poc-report/:token" component={PocSharedReport} />
       <Route path="/admin/poc">{() => <DashboardPage component={PocHub} />}</Route>
       <Route path="/shared-report/:token" component={SharedReport} />
@@ -141,6 +147,9 @@ function Router() {
           <Route path="/admin/super-admin/analytics">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
+      <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
+      <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
+      <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
       <Route path="/shopline/welcome" component={ShoplineWelcome} />
       <Route path="/shopline/error" component={ShoplineError} />
       <Route path="/privacy" component={Privacy} />

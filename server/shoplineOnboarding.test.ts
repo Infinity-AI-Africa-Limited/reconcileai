@@ -523,3 +523,81 @@ describe("SHOPLINE Install Flow — State Parameter Security", () => {
     expect(isExpired).toBe(false);
   });
 });
+
+// ─── 6. Hardening: REAL ingest functions (join-key correctness) ──────────────
+// The inline mirrors above document the *old* design; these import the actual
+// ingest module so the corrected order↔payment join key is enforced.
+
+import {
+  normaliseOrder as realNormaliseOrder,
+  normalisePaymentTransaction as realNormalisePayment,
+} from "./connectors/shopline/ingest";
+import {
+  shoplineOrdersChannelCode,
+  shoplinePaymentsChannelCode,
+} from "./connectors/shopline/onboarding";
+import type { ShoplineOrder, ShoplinePaymentTransaction } from "./connectors/shopline/apiClient";
+
+describe("SHOPLINE ingest (real functions) — pass-1 join key", () => {
+  const ctx = {
+    organizationId: 1,
+    ordersChannelId: 10,
+    paymentsChannelId: 20,
+    batchId: 100,
+    userId: 0,
+    defaultCurrency: "USD",
+  };
+
+  const order = {
+    id: "5001",
+    name: "#1001",
+    financial_status: "paid",
+    currency: "USD",
+    current_total_price_set: { shop_money: { amount: "50.00", currency_code: "USD" } },
+    payment_gateway_names: ["shopline_payments"],
+    created_at: "2026-07-01T00:00:00+00:00",
+    processed_at: "2026-07-01T00:00:00+00:00",
+  } as unknown as ShoplineOrder;
+
+  const payment = {
+    trade_order_id: "T-9",
+    seller_order_id: "5001", // === order.id
+    channel_deal_id: "CH-DEAL-9",
+    amount: "50.00",
+    paid_amount: "50.00",
+    currency: "USD",
+    fee: "-1.50",
+    fee_type: "domestic",
+    status: "SUCCEEDED",
+    payment_method: "CreditCard",
+    create_time: "2026-07-01T00:01:00+00:00",
+    update_time: "2026-07-01T00:01:00+00:00",
+  } as unknown as ShoplinePaymentTransaction;
+
+  it("order and payment share transactionRef = order id (so engine pass-1 matches)", () => {
+    const o = realNormaliseOrder(order, ctx);
+    const p = realNormalisePayment(payment, ctx);
+    expect(o.transactionRef).toBe("5001");
+    expect(p.transactionRef).toBe("5001");
+    expect(o.transactionRef).toBe(p.transactionRef);
+  });
+
+  it("order keeps the human-readable number in externalRef", () => {
+    const o = realNormaliseOrder(order, ctx);
+    expect(o.externalRef).toBe("#1001");
+  });
+
+  it("payment retains the gateway ref in rawData for the settlement leg", () => {
+    const p = realNormalisePayment(payment, ctx);
+    expect((p.rawData as { gatewayRef?: string }).gatewayRef).toBe("CH-DEAL-9");
+  });
+});
+
+describe("SHOPLINE channel codes are deterministic and shared", () => {
+  it("orders/payments codes are stable per handle and ≤50 chars", () => {
+    expect(shoplineOrdersChannelCode("acme")).toBe("sl_orders_acme");
+    expect(shoplinePaymentsChannelCode("acme")).toBe("sl_payments_acme");
+    const long = "x".repeat(80);
+    expect(shoplineOrdersChannelCode(long).length).toBeLessThanOrEqual(50);
+  });
+});

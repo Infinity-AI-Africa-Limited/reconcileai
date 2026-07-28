@@ -18,9 +18,22 @@ import { slConnectorStores, slConnectorTokens } from "../../../drizzle/connector
 import { getDb } from "../../db";
 import { SHOPLINE_ONBOARDING_CHANNELS } from "../../../shared/shoplineConstants";
 import type { ShoplineTokenResponse } from "./auth";
-import { calculateTokenExpiry } from "./auth";
+import { saveToken } from "./tokenStore";
 
 export const SHOPLINE_ONBOARDING_CHANNEL = SHOPLINE_ONBOARDING_CHANNELS.APP_STORE;
+
+/**
+ * Deterministic, unique channel codes for a store's two data legs. Both the
+ * onboarding provisioner and the sync orchestrator resolve channels by these
+ * codes so they never create duplicates (channels.code is UNIQUE, so a name
+ * mismatch between the two would otherwise throw on the first sync).
+ */
+export function shoplineOrdersChannelCode(handle: string): string {
+  return `sl_orders_${handle}`.slice(0, 50);
+}
+export function shoplinePaymentsChannelCode(handle: string): string {
+  return `sl_payments_${handle}`.slice(0, 50);
+}
 
 export interface ShoplineStoreInfo {
   /** Store handle (subdomain, e.g. "mystore") */
@@ -123,40 +136,19 @@ export async function onboardShoplineMerchant(
       })
       .where(eq(slConnectorStores.id, existing.id));
 
-    // Upsert token
-    const expiresAt = calculateTokenExpiry(tokenResponse.expireTime);
-    const existingToken = await db
-      .select()
-      .from(slConnectorTokens)
-      .where(eq(slConnectorTokens.slStoreId, existing.id))
-      .limit(1);
+    // Upsert token (AES-256-GCM encrypted via the token store — never plaintext)
+    await saveToken(db, existing.id, existing.organizationId, tokenResponse);
 
-    if (existingToken.length > 0) {
-      await db
-        .update(slConnectorTokens)
-        .set({
-          encryptedToken: tokenResponse.accessToken, // TODO: encrypt with tenant key
-          expiresAt,
-          refreshedAt: new Date(),
-        })
-        .where(eq(slConnectorTokens.slStoreId, existing.id));
-    } else {
-      await db.insert(slConnectorTokens).values({
-        slStoreId: existing.id,
-        organizationId: existing.organizationId,
-        encryptedToken: tokenResponse.accessToken,
-        expiresAt,
-      });
-    }
-
-    // Find existing channels
+    // Find existing channels by their deterministic codes
     const orgChannels = await db
-      .select({ id: channels.id, name: channels.name })
+      .select({ id: channels.id, code: channels.code })
       .from(channels)
       .where(eq(channels.organizationId, existing.organizationId));
 
-    const ordersChannel = orgChannels.find((c) => c.name.includes("Orders"));
-    const paymentsChannel = orgChannels.find((c) => c.name.includes("Payments"));
+    const ordersCode = shoplineOrdersChannelCode(existing.storeHandle);
+    const paymentsCode = shoplinePaymentsChannelCode(existing.storeHandle);
+    const ordersChannel = orgChannels.find((c) => c.code === ordersCode);
+    const paymentsChannel = orgChannels.find((c) => c.code === paymentsCode);
 
     // Find admin user
     const adminUser = await db
@@ -231,7 +223,7 @@ export async function onboardShoplineMerchant(
   const ordersChannelRes = await db.insert(channels).values({
     organizationId,
     name: `SHOPLINE Orders — ${orgName}`,
-    code: `sl_orders_${store.handle}`.slice(0, 50),
+    code: shoplineOrdersChannelCode(store.handle),
     description: "Order data from SHOPLINE (order leg of reconciliation)",
     channelType: "ecommerce_gateway",
     country: "GLB",
@@ -248,7 +240,7 @@ export async function onboardShoplineMerchant(
   const paymentsChannelRes = await db.insert(channels).values({
     organizationId,
     name: `SHOPLINE Payments — ${orgName}`,
-    code: `sl_payments_${store.handle}`.slice(0, 50),
+    code: shoplinePaymentsChannelCode(store.handle),
     description: "Payment transaction and settlement data from SHOPLINE Payments (gateway leg)",
     channelType: "ecommerce_gateway",
     country: "GLB",
@@ -276,14 +268,8 @@ export async function onboardShoplineMerchant(
   });
   const slStoreId = Number((storeRes as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
 
-  // Store the access token
-  const expiresAt = calculateTokenExpiry(tokenResponse.expireTime);
-  await db.insert(slConnectorTokens).values({
-    slStoreId,
-    organizationId,
-    encryptedToken: tokenResponse.accessToken, // TODO: encrypt with tenant envelope key
-    expiresAt,
-  });
+  // Store the access token (AES-256-GCM encrypted via the token store)
+  await saveToken(db, slStoreId, organizationId, tokenResponse);
 
   // 5) Tenant baseline (encryption key, quotas, modules) — fire-and-forget
   try {

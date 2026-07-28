@@ -1,0 +1,1 @@
+ALTER TABLE `sl_connector_subscriptions` ADD `graceEndsAt` timestamp;

@@ -18,18 +18,31 @@ import { slConnectorTokens } from "../../../drizzle/connector_schema";
 import { refreshAccessToken, tokenNeedsRefresh, calculateTokenExpiry } from "./auth";
 import type { ShoplineTokenResponse } from "./auth";
 
-// ─── Simple AES-256-GCM encrypt/decrypt (reuses the tenant key pattern) ─────
-// In production Claude will replace this with the full tenant KMS envelope.
-import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+// ─── AES-256-GCM encrypt/decrypt (tk1: envelope format) ─────────────────────
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 
 const ALGO = "aes-256-gcm";
-const KEY_SOURCE = process.env.JWT_SECRET ?? "reconcileai-dev-secret-32-chars!!";
-// Derive a 32-byte key from the JWT_SECRET (same pattern as tenant key derivation)
-const ENC_KEY = Buffer.from(KEY_SOURCE.padEnd(32, "0").slice(0, 32), "utf8");
+
+/**
+ * Derive the 32-byte encryption key from JWT_SECRET via SHA-256 (a raw
+ * pad/truncate of the secret would weaken short secrets). Refuses to fall
+ * back to the dev key in production — a silent fallback would encrypt real
+ * merchant tokens under a publicly known key.
+ */
+function encryptionKey(): Buffer {
+  const secret = process.env.JWT_SECRET ?? "";
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("JWT_SECRET must be set to encrypt SHOPLINE tokens");
+    }
+    return createHash("sha256").update("reconcileai-dev-secret").digest();
+  }
+  return createHash("sha256").update(secret).digest();
+}
 
 function encryptToken(plaintext: string): string {
   const iv = randomBytes(12);
-  const cipher = createCipheriv(ALGO, ENC_KEY, iv);
+  const cipher = createCipheriv(ALGO, encryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   // Format: iv(24 hex) + tag(32 hex) + ciphertext(hex)
@@ -42,7 +55,7 @@ function decryptToken(ciphertext: string): string {
   const iv = Buffer.from(ivHex, "hex");
   const tag = Buffer.from(tagHex, "hex");
   const data = Buffer.from(dataHex, "hex");
-  const decipher = createDecipheriv(ALGO, ENC_KEY, iv);
+  const decipher = createDecipheriv(ALGO, encryptionKey(), iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
 }
@@ -104,18 +117,24 @@ export async function saveToken(
   const encryptedToken = encryptToken(tokenResponse.accessToken);
   const expiresAt = calculateTokenExpiry(tokenResponse.expireTime);
 
-  // Upsert: delete existing then insert (MySQL doesn't have ON CONFLICT DO UPDATE for composite keys easily)
+  // Atomic upsert on the unique slStoreId index — no window without a token
   await db
-    .delete(slConnectorTokens)
-    .where(eq(slConnectorTokens.slStoreId, slStoreId));
-
-  await db.insert(slConnectorTokens).values({
-    slStoreId,
-    organizationId,
-    encryptedToken,
-    expiresAt,
-    refreshedAt: new Date(),
-  });
+    .insert(slConnectorTokens)
+    .values({
+      slStoreId,
+      organizationId,
+      encryptedToken,
+      expiresAt,
+      refreshedAt: new Date(),
+    })
+    .onDuplicateKeyUpdate({
+      set: {
+        organizationId,
+        encryptedToken,
+        expiresAt,
+        refreshedAt: new Date(),
+      },
+    });
 }
 
 /**

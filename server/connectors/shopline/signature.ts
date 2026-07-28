@@ -49,11 +49,17 @@ function safeEqual(a: string, b: string): boolean {
   }
 }
 
-/** Check whether a timestamp (in seconds) is within ±10 minutes of now. */
-export function isTimestampValid(timestampSec: number, windowMs = 10 * 60 * 1000): boolean {
-  const nowMs = Date.now();
-  const tsMs = timestampSec * 1000;
-  return Math.abs(nowMs - tsMs) <= windowMs;
+/**
+ * Check whether a timestamp is within ±10 minutes of now.
+ *
+ * SHOPLINE sends `timestamp` in **milliseconds** (spec §A2: "The timestamp,
+ * in milliseconds, indicates when the request was sent"). Values below 1e12
+ * are treated as seconds so a unit change on SHOPLINE's side fails safe.
+ */
+export function isTimestampValid(timestamp: number, windowMs = 10 * 60 * 1000): boolean {
+  if (!Number.isFinite(timestamp)) return false;
+  const tsMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+  return Math.abs(Date.now() - tsMs) <= windowMs;
 }
 
 // ─── Mode 1: OAuth GET request signature ────────────────────────────────────

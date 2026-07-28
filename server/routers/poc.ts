@@ -11,8 +11,15 @@ import { TRPCError } from "@trpc/server";
 import { router, publicProcedure, protectedProcedure } from "../_core/trpc";
 import * as poc from "../poc-engine";
 import {
-  assertPocAccess, checkPocAccess, getOrCreateAccess, regenerateAccess, setAccessEnabled, tokenFromCtx,
+  assertPocAccess, checkPocAccess, createRecipientInvite, getOrCreateAccess, listRecipientInvites,
+  regenerateAccess, resolveAccess, revokeRecipientInvite, setAccessEnabled, tokenFromCtx,
 } from "../pocAccess";
+import {
+  RUNBOOK_MARKDOWN, RUNBOOK_SUBTITLE, RUNBOOK_TITLE, RUNBOOK_UPDATED, RUNBOOK_VERSION,
+} from "../content/deploymentRunbook";
+import {
+  HANDOVER_MARKDOWN, HANDOVER_TITLE, HANDOVER_UPDATED,
+} from "../content/technicalHandover";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
@@ -308,6 +315,36 @@ export const pocRouter = router({
       }
     }),
 
+  // ─── Shared documents ─────────────────────────────────────────────────────
+  // Serves a long-form document (currently the Local Deployment & Model Training
+  // runbook) to holders of a POC-style invite link. The body is returned from the
+  // server rather than bundled into the client on purpose: a document shipped in
+  // a JS chunk is readable without a token, which would make the private link
+  // decorative rather than a boundary.
+  // `viewer` is the recipient label when the link is a per-recipient invite, so
+  // the page can watermark the copy with whoever it was issued to.
+  runbook: pocProcedure
+    .input(z.object({ pocSlug }))
+    .query(async ({ ctx, input }) => ({
+      title: RUNBOOK_TITLE,
+      subtitle: RUNBOOK_SUBTITLE,
+      version: RUNBOOK_VERSION,
+      updated: RUNBOOK_UPDATED,
+      markdown: RUNBOOK_MARKDOWN,
+      viewer: (await resolveAccess(input.pocSlug, tokenFromCtx(ctx))).recipient,
+    })),
+
+  // Technical Handover & Architecture — same access-gated, server-served model as
+  // the runbook above, so the document never ships in the client bundle.
+  handover: pocProcedure
+    .input(z.object({ pocSlug }))
+    .query(async ({ ctx, input }) => ({
+      title: HANDOVER_TITLE,
+      updated: HANDOVER_UPDATED,
+      markdown: HANDOVER_MARKDOWN,
+      viewer: (await resolveAccess(input.pocSlug, tokenFromCtx(ctx))).recipient,
+    })),
+
   // ─── Access control ───────────────────────────────────────────────────────
   // Public: the frontend gate checks whether a presented token unlocks this POC.
   checkAccess: publicProcedure
@@ -322,6 +359,21 @@ export const pocRouter = router({
       const row = await getOrCreateAccess(input.pocKey);
       return { pocKey: row.pocKey, token: row.token, enabled: row.enabled };
     }),
+
+  // ─── Per-recipient invites ────────────────────────────────────────────────
+  // One link per recipient, so a shared document can be watermarked with who it
+  // went to and any single recipient can be cut off without disturbing the rest.
+  listRecipientInvites: superAdminProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64) }))
+    .query(async ({ input }) => listRecipientInvites(input.pocKey)),
+
+  createRecipientInvite: superAdminProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64), recipient: z.string().min(1).max(39) }))
+    .mutation(async ({ input }) => createRecipientInvite(input.pocKey, input.recipient.trim().toLowerCase())),
+
+  revokeRecipientInvite: superAdminProcedure
+    .input(z.object({ pocKey: z.string().min(1).max(64), recipient: z.string().min(1).max(39) }))
+    .mutation(async ({ input }) => revokeRecipientInvite(input.pocKey, input.recipient)),
 
   regenerateAccessToken: superAdminProcedure
     .input(z.object({ pocKey: z.string().min(1).max(64) }))
