@@ -1,42 +1,77 @@
 /**
  * ROI model tests — the numbers shown in every sales meeting must be right.
- * Tier bands come from Business Model v3.0 §2.1; sanity bands from §4.2.
+ * Tiers, bands and volume cut-offs come from the "Anchored to Confirmed
+ * Budgets" pricing model (Starter / Growth / Enterprise, quoted monthly).
  */
 import { describe, expect, it } from "vitest";
 import {
+  annualFeeUsd,
   computeRoi,
+  monthlyFeeUsd,
   tierForVolume,
   DEFAULT_ASSUMPTIONS,
   PRICING_TIERS,
   type RoiInputs,
 } from "@shared/roiModel";
 
-describe("tierForVolume — Business Model v3.0 §2.1 bands", () => {
+describe("tierForVolume — pricing-model volume bands", () => {
   it("volume boundaries land on the contracted tiers", () => {
-    expect(tierForVolume(0).id).toBe("small_mfb");
-    expect(tierForVolume(49_999).id).toBe("small_mfb");
-    expect(tierForVolume(50_000).id).toBe("mid_tier");
-    expect(tierForVolume(500_000).id).toBe("mid_tier");
-    expect(tierForVolume(500_001).id).toBe("large_bank");
-    expect(tierForVolume(5_000_000).id).toBe("large_bank");
+    expect(tierForVolume(0).id).toBe("starter");
+    expect(tierForVolume(500_000).id).toBe("starter");
+    expect(tierForVolume(2_000_000).id).toBe("starter");
+    expect(tierForVolume(2_000_001).id).toBe("growth");
+    expect(tierForVolume(10_000_000).id).toBe("growth");
+    expect(tierForVolume(10_000_001).id).toBe("enterprise");
+    expect(tierForVolume(50_000_000).id).toBe("enterprise");
   });
 
-  it("annual fees match the pricing table", () => {
-    expect(PRICING_TIERS.map((t) => t.annualFeeUsd)).toEqual([12_000, 40_000, 72_000]);
+  it("monthly fee bands match the pricing table", () => {
+    expect(PRICING_TIERS.map((t) => [t.monthlyFeeUsdMin, t.monthlyFeeUsdMax])).toEqual([
+      [1_000, 2_000],
+      [2_500, 5_000],
+      [7_000, 14_000],
+    ]);
+  });
+
+  it("the bands are contiguous — no volume falls between two tiers", () => {
+    for (let i = 1; i < PRICING_TIERS.length; i++) {
+      expect(PRICING_TIERS[i].minMonthlyTxns).toBe(PRICING_TIERS[i - 1].maxMonthlyTxns! + 1);
+    }
+    expect(PRICING_TIERS[0].minMonthlyTxns).toBe(0);
+    expect(PRICING_TIERS[PRICING_TIERS.length - 1].maxMonthlyTxns).toBeNull();
   });
 
   it("negative/garbage volume falls back safely to the smallest tier", () => {
-    expect(tierForVolume(-5).id).toBe("small_mfb");
-    expect(tierForVolume(NaN).id).toBe("small_mfb");
+    expect(tierForVolume(-5).id).toBe("starter");
+    expect(tierForVolume(NaN).id).toBe("starter");
+  });
+});
+
+describe("fee band positions", () => {
+  const growth = PRICING_TIERS[1];
+
+  it("entry / mid / top pick the right point of the band", () => {
+    expect(monthlyFeeUsd(growth, "entry")).toBe(2_500);
+    expect(monthlyFeeUsd(growth, "mid")).toBe(3_750);
+    expect(monthlyFeeUsd(growth, "top")).toBe(5_000);
+  });
+
+  it("defaults to the top of the band — ROI is never overstated", () => {
+    expect(monthlyFeeUsd(growth)).toBe(growth.monthlyFeeUsdMax);
+    expect(DEFAULT_ASSUMPTIONS.feeBandPosition).toBe("top");
+  });
+
+  it("annualises as 12 monthly payments", () => {
+    expect(annualFeeUsd(growth, "top")).toBe(5_000 * 12);
   });
 });
 
 describe("computeRoi — the before/after math", () => {
-  // Representative mid-tier Nigerian bank, in NGN (fx 1600), calibrated to the
-  // business model's §4.2 mid-tier benchmark (~$200K savings vs $40K fee ≈ 5×):
-  // 120k txns/mo, 12 recon staff at ₦450k/mo, ₦1.5bn average unresolved exposure.
+  // Representative mid-tier MFB / FinTech (the Growth tier), in NGN at the
+  // pricing model's ₦1,400/USD: 3m txns/mo, 12 recon staff at ₦450k/mo,
+  // ₦1.5bn average unresolved exposure.
   const inputs: RoiInputs = {
-    monthlyTransactionVolume: 120_000,
+    monthlyTransactionVolume: 3_000_000,
     reconciliationStaffCount: 12,
     averageMonthlyStaffSalary: 450_000,
     monthlyUnresolvedExposure: 1_500_000_000,
@@ -44,7 +79,7 @@ describe("computeRoi — the before/after math", () => {
 
   it("computes the current state correctly", () => {
     const r = computeRoi(inputs);
-    expect(r.tier.id).toBe("mid_tier");
+    expect(r.tier.id).toBe("growth");
     expect(r.currentStaffCost).toBe(12 * 450_000 * 12); // ₦64.8m
     // exposure: 1.5bn × (5% loss + 20% carry) = ₦375m
     expect(r.currentExposureCost).toBe(1_500_000_000 * 0.25);
@@ -53,7 +88,8 @@ describe("computeRoi — the before/after math", () => {
 
   it("computes the with-ReconcileAI state and headline outputs", () => {
     const r = computeRoi(inputs);
-    expect(r.annualFee).toBe(40_000 * 1600); // ₦64m at default fx
+    expect(r.annualFee).toBe(5_000 * 12 * 1400); // ₦84m at top of the Growth band
+    expect(r.monthlyFee).toBe(r.annualFee / 12);
     expect(r.remainingStaffCost).toBeCloseTo(r.currentStaffCost * 0.4, 6);
     expect(r.remainingExposureCost).toBeCloseTo(r.currentExposureCost * 0.2, 6);
     expect(r.newTotal).toBeCloseTo(r.remainingStaffCost + r.remainingExposureCost + r.annualFee, 6);
@@ -66,6 +102,24 @@ describe("computeRoi — the before/after math", () => {
     expect(r.netAnnualSavings).toBeCloseTo(r.grossAnnualBenefit - r.annualFee, 6);
   });
 
+  it("reports the quoted band around the priced fee", () => {
+    const r = computeRoi(inputs);
+    expect(r.annualFeeLow).toBe(2_500 * 12 * 1400);
+    expect(r.annualFeeHigh).toBe(5_000 * 12 * 1400);
+    expect(r.annualFee).toBeGreaterThanOrEqual(r.annualFeeLow);
+    expect(r.annualFee).toBeLessThanOrEqual(r.annualFeeHigh);
+  });
+
+  it("pricing at the entry of the band lowers the fee and lifts ROI", () => {
+    const top = computeRoi(inputs);
+    const entry = computeRoi(inputs, { ...DEFAULT_ASSUMPTIONS, feeBandPosition: "entry" });
+    expect(entry.annualFee).toBe(2_500 * 12 * 1400);
+    expect(entry.annualFee).toBeLessThan(top.annualFee);
+    expect(entry.roiMultiple!).toBeGreaterThan(top.roiMultiple!);
+    // The band itself is unchanged — only where we price inside it.
+    expect(entry.annualFeeHigh).toBe(top.annualFeeHigh);
+  });
+
   it("payback and ROI multiple are consistent", () => {
     const r = computeRoi(inputs);
     expect(r.roiMultiple).not.toBeNull();
@@ -76,11 +130,11 @@ describe("computeRoi — the before/after math", () => {
     expect(r.paybackMonths!).toBeLessThan(12); // this profile pays back within a year
   });
 
-  it("lands inside the business-model sanity band (§4.2: capture 14–27%, ROI ≥3.8×)", () => {
+  it("lands inside the business-model sanity band (capture 14–27%, ROI ≥3.8×)", () => {
     const r = computeRoi(inputs);
-    expect(r.roiMultiple!).toBeGreaterThanOrEqual(3.5);
-    expect(r.valueCaptureRatio!).toBeGreaterThan(0.05);
-    expect(r.valueCaptureRatio!).toBeLessThan(0.35);
+    expect(r.roiMultiple!).toBeGreaterThanOrEqual(3.8);
+    expect(r.valueCaptureRatio!).toBeGreaterThan(0.14);
+    expect(r.valueCaptureRatio!).toBeLessThan(0.27);
   });
 
   it("USD mode: fx of 1 keeps the fee in USD", () => {
@@ -88,7 +142,8 @@ describe("computeRoi — the before/after math", () => {
       { ...inputs, averageMonthlyStaffSalary: 300, monthlyUnresolvedExposure: 500_000 },
       { ...DEFAULT_ASSUMPTIONS, fxPerUsd: 1 },
     );
-    expect(r.annualFee).toBe(40_000);
+    expect(r.annualFee).toBe(60_000); // $5K/mo × 12
+    expect(r.monthlyFee).toBe(5_000);
   });
 
   it("zero-benefit inputs yield null payback/ROI instead of division blowups", () => {
@@ -116,15 +171,15 @@ describe("computeRoi — the before/after math", () => {
     }
   });
 
-  it("a large bank profile clears the §4.2 large-bank shape (fee ₦, ROI healthy)", () => {
+  it("a payment-processor profile clears the Enterprise shape", () => {
     const r = computeRoi({
-      monthlyTransactionVolume: 900_000,
-      reconciliationStaffCount: 20,
+      monthlyTransactionVolume: 12_000_000,
+      reconciliationStaffCount: 30,
       averageMonthlyStaffSalary: 500_000,
-      monthlyUnresolvedExposure: 4_000_000_000,
+      monthlyUnresolvedExposure: 8_000_000_000,
     });
-    expect(r.tier.id).toBe("large_bank");
-    expect(r.annualFee).toBe(72_000 * 1600);
+    expect(r.tier.id).toBe("enterprise");
+    expect(r.annualFee).toBe(14_000 * 12 * 1400); // ₦235.2m at top of band
     expect(r.roiMultiple!).toBeGreaterThan(5);
     expect(r.paybackMonths!).toBeLessThan(6);
   });

@@ -15,6 +15,7 @@ import {
   DEFAULT_ASSUMPTIONS,
   CURRENCY_PRESETS,
   type CurrencyCode,
+  type FeeBandPosition,
   type RoiAssumptions,
   type RoiInputs,
 } from "@shared/roiModel";
@@ -29,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { ArrowRight, Calculator, Link2, Printer, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowRight, Calculator, Check, Link2, Printer, TrendingDown, TrendingUp } from "lucide-react";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function fmtMoney(n: number, symbol: string): string {
@@ -41,6 +42,12 @@ function fmtMoney(n: number, symbol: string): string {
   return `${symbol}${compact}`;
 }
 
+/** "$1K–$2K" — the band exactly as the pricing model quotes it. */
+function fmtUsdBand(min: number, max: number): string {
+  const k = (n: number) => (n % 1000 === 0 ? `$${n / 1000}K` : `$${(n / 1000).toFixed(1)}K`);
+  return `${k(min)}–${k(max)}`;
+}
+
 function numFromQuery(params: URLSearchParams, key: string, fallback: number): number {
   const raw = params.get(key);
   if (raw === null) return fallback;
@@ -50,10 +57,10 @@ function numFromQuery(params: URLSearchParams, key: string, fallback: number): n
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 export default function RoiCalculator() {
-  // Defaults describe a typical mid-tier Nigerian bank so the page never
-  // opens empty in a meeting.
+  // Defaults describe a typical mid-tier MFB / FinTech — the Growth tier the
+  // pricing model leads with — so the page never opens empty in a meeting.
   const [currency, setCurrency] = useState<CurrencyCode>("NGN");
-  const [volume, setVolume] = useState(120_000);
+  const [volume, setVolume] = useState(3_000_000);
   const [staffCount, setStaffCount] = useState(10);
   const [salary, setSalary] = useState(400_000);
   const [exposure, setExposure] = useState(1_200_000_000);
@@ -70,7 +77,11 @@ export default function RoiCalculator() {
       setCurrency(preset.code);
       setAssumptions((a) => ({ ...a, fxPerUsd: numFromQuery(q, "fx", preset.defaultFxPerUsd) }));
     }
-    setVolume(numFromQuery(q, "vol", 120_000));
+    const band = q.get("band");
+    if (band === "entry" || band === "mid" || band === "top") {
+      setAssumptions((a) => ({ ...a, feeBandPosition: band }));
+    }
+    setVolume(numFromQuery(q, "vol", 3_000_000));
     setStaffCount(numFromQuery(q, "staff", 10));
     setSalary(numFromQuery(q, "sal", 400_000));
     setExposure(numFromQuery(q, "exp", 1_200_000_000));
@@ -92,6 +103,7 @@ export default function RoiCalculator() {
     const q = new URLSearchParams({
       ccy: currency,
       fx: String(assumptions.fxPerUsd),
+      band: assumptions.feeBandPosition,
       vol: String(volume),
       staff: String(staffCount),
       sal: String(salary),
@@ -252,6 +264,29 @@ export default function RoiCalculator() {
                       <p className="text-[11px] text-gray-400">{hint}</p>
                     </div>
                   ))}
+                  {/* Each tier is quoted as a band; where in it we price is a
+                      real commercial variable, so let the prospect see it. */}
+                  <div>
+                    <label className="text-xs font-medium text-gray-600 block mb-1">
+                      Fee point in the {result.tier.label} band (
+                      {fmtUsdBand(result.tier.monthlyFeeUsdMin, result.tier.monthlyFeeUsdMax)}/mo)
+                    </label>
+                    <Select
+                      value={assumptions.feeBandPosition}
+                      onValueChange={(v) =>
+                        setAssumptions((a) => ({ ...a, feeBandPosition: v as FeeBandPosition }))
+                      }
+                    >
+                      <SelectTrigger className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="top">Top of band (conservative default)</SelectItem>
+                        <SelectItem value="mid">Midpoint</SelectItem>
+                        <SelectItem value="entry">Entry price</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   {currency !== "USD" && (
                     <div>
                       <label className="text-xs font-medium text-gray-600 block mb-1">
@@ -317,6 +352,9 @@ export default function RoiCalculator() {
                   <div className="flex justify-between">
                     <span className="text-gray-500">
                       ReconcileAI ({result.tier.label})
+                      <span className="block text-xs text-gray-400">
+                        {fmtMoney(result.monthlyFee, symbol)} / month
+                      </span>
                     </span>
                     <span className="font-medium">{fmtMoney(result.annualFee, symbol)}</span>
                   </div>
@@ -356,8 +394,54 @@ export default function RoiCalculator() {
                   </div>
                 </div>
                 <p className="text-xs text-gray-400 text-center mt-4">
-                  Pricing tier: {result.tier.label} ({volume.toLocaleString()} transactions/month) ·
-                  Conservative defaults — adjust every assumption above. Indicative, not a quotation.
+                  Priced at the {result.tier.label} tier ({volume.toLocaleString()} transactions/month),
+                  {assumptions.feeBandPosition === "top"
+                    ? " at the top of the quoted band"
+                    : assumptions.feeBandPosition === "mid"
+                      ? " at the midpoint of the quoted band"
+                      : " at the entry price of the quoted band"}
+                  . Conservative defaults — adjust every assumption. Indicative, not a quotation.
+                </p>
+              </CardContent>
+            </Card>
+
+            {/* ── The matched tier, straight from the pricing model ── */}
+            <Card className="bg-white">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base flex flex-wrap items-center gap-2">
+                  Your tier: {result.tier.label}
+                  {result.tier.recommended && (
+                    <span className="text-[10px] font-semibold uppercase tracking-wide rounded bg-amber-100 text-amber-700 px-1.5 py-0.5">
+                      Recommended
+                    </span>
+                  )}
+                  <span className="text-xs font-normal text-gray-500">
+                    {result.tier.audience} · {result.tier.volumeLabel}
+                  </span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-2xl font-bold text-[#1B365D]">
+                    {fmtMoney(result.annualFeeLow / 12, symbol)}–{fmtMoney(result.annualFeeHigh / 12, symbol)}
+                    <span className="text-sm font-normal text-gray-500"> / month</span>
+                  </span>
+                  <span className="text-sm text-gray-500">
+                    {fmtUsdBand(result.tier.monthlyFeeUsdMin, result.tier.monthlyFeeUsdMax)} / month
+                    {currency !== "USD" && ` at ${assumptions.fxPerUsd.toLocaleString()} ${currency}/USD`}
+                  </span>
+                </div>
+                <ul className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-600">
+                  {result.tier.highlights.map((h) => (
+                    <li key={h} className="flex items-start gap-2">
+                      <Check className="h-4 w-4 text-green-600 shrink-0 mt-0.5" />
+                      <span>{h}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-gray-400">
+                  Contracted in USD. Bands are anchored to confirmed institutional
+                  reconciliation budgets, not list price.
                 </p>
               </CardContent>
             </Card>
