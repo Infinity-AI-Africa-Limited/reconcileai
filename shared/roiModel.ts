@@ -1,12 +1,20 @@
 /**
  * ReconcileAI ROI model — the institution-specific "before and after".
  *
- * Source of truth: ReconcileAI Business Model v3.0 (Execution-Ready, July 2026)
- * — pricing tiers §2.1, customer-ROI benchmarks §4.2 (ROI multiples 3.8×–6.9×,
- * value capture 14–27% of savings). Used by the public /roi-calculator page
- * (sales meetings + website self-service). Pure and dependency-free so the
- * client computes everything locally — the public page needs no API call and
- * captures no data.
+ * Source of truth: the "Anchored to Confirmed Budgets" pricing model — three
+ * tiers quoted as a MONTHLY USD band, with the volume band that selects them:
+ *
+ *   Starter     $1K–$2K/mo    MFBs · 2–3 settlement officers   ≤ 2M txns/mo
+ *   Growth      $2.5K–$5K/mo  Mid-tier MFBs · FinTechs         2M–10M txns/mo
+ *   Enterprise  $7K–$14K/mo   Large MFBs · Payment Processors  10M+ txns/mo
+ *
+ * Each band is anchored to a confirmed customer budget (CBN-licensed MFB
+ * discovery, FinTech discovery, Interswitch operations pre-build), so these
+ * are the numbers the calculator must quote — never an older annual list.
+ *
+ * Used by the public /roi-calculator page (sales meetings + website
+ * self-service). Pure and dependency-free so the client computes everything
+ * locally — the public page needs no API call and captures no data.
  *
  * Inputs (per the sales-process spec):
  *   monthly transaction volume · reconciliation staff count · average staff
@@ -16,25 +24,110 @@
  *   ROI multiple, payback period.
  */
 
-// ─── Pricing tiers (Business Model v3.0 §2.1 — USD, annual) ─────────────────
+// ─── Pricing tiers (USD, quoted monthly) ─────────────────────────────────────
 export interface PricingTier {
-  id: "small_mfb" | "mid_tier" | "large_bank";
+  id: "starter" | "growth" | "enterprise";
   label: string;
-  annualFeeUsd: number;
-  /** Monthly transaction volume band. */
+  /** Who the tier is sold to. */
+  audience: string;
+  /** Contracted monthly fee band, USD. */
+  monthlyFeeUsdMin: number;
+  monthlyFeeUsdMax: number;
+  /** Monthly transaction volume band that selects this tier. */
   minMonthlyTxns: number;
   maxMonthlyTxns: number | null; // null = unbounded
+  /** Human-readable form of the volume band. */
+  volumeLabel: string;
+  /** Headline inclusions, shown on the matched-tier card. */
+  highlights: string[];
+  /** The tier the pricing model leads with. */
+  recommended?: boolean;
 }
 
 export const PRICING_TIERS: PricingTier[] = [
-  { id: "small_mfb", label: "Small MFB", annualFeeUsd: 12_000, minMonthlyTxns: 0, maxMonthlyTxns: 49_999 },
-  { id: "mid_tier", label: "Mid-tier Bank", annualFeeUsd: 40_000, minMonthlyTxns: 50_000, maxMonthlyTxns: 500_000 },
-  { id: "large_bank", label: "Large Bank", annualFeeUsd: 72_000, minMonthlyTxns: 500_001, maxMonthlyTxns: null },
+  {
+    id: "starter",
+    label: "Starter",
+    audience: "MFBs · 2–3 settlement officers",
+    monthlyFeeUsdMin: 1_000,
+    monthlyFeeUsdMax: 2_000,
+    minMonthlyTxns: 0,
+    maxMonthlyTxns: 2_000_000,
+    volumeLabel: "500K–2M txns / month",
+    highlights: [
+      "Up to 2M transactions / month",
+      "3 reconciliation channels (NIBSS, POS, USSD)",
+      "Automated matching + exception dashboard",
+      "WoodCore integration · standard onboarding (5 days)",
+    ],
+  },
+  {
+    id: "growth",
+    label: "Growth",
+    audience: "Mid-tier MFBs · FinTechs",
+    monthlyFeeUsdMin: 2_500,
+    monthlyFeeUsdMax: 5_000,
+    minMonthlyTxns: 2_000_001,
+    maxMonthlyTxns: 10_000_000,
+    volumeLabel: "2M–10M txns / month",
+    recommended: true,
+    highlights: [
+      "Up to 10M transactions / month",
+      "All 8 reconciliation channels",
+      "AI Super Agent — root cause diagnosis",
+      "CBN compliance reports · API access · dedicated CSM",
+    ],
+  },
+  {
+    id: "enterprise",
+    label: "Enterprise",
+    audience: "Large MFBs · Payment Processors",
+    monthlyFeeUsdMin: 7_000,
+    monthlyFeeUsdMax: 14_000,
+    minMonthlyTxns: 10_000_001,
+    maxMonthlyTxns: null,
+    volumeLabel: "10M+ txns / month",
+    highlights: [
+      "Unlimited transaction volume",
+      "All channels + custom channel build",
+      "On-premise deployment · multi-entity support",
+      "99.9% uptime SLA · 4-hr response · custom model training",
+    ],
+  },
 ];
+
+/**
+ * Where in the quoted band to price the deal. Defaults to the TOP of the band
+ * everywhere: an ROI computed against the highest fee we would charge can only
+ * be beaten in the real contract, which is the correct direction to be wrong
+ * in front of a CFO.
+ */
+export type FeeBandPosition = "entry" | "mid" | "top";
+
+function normalizeFeePosition(p: FeeBandPosition): FeeBandPosition {
+  return p === "entry" || p === "mid" ? p : "top";
+}
+
+/** Monthly USD fee at a chosen point in the tier's band. */
+export function monthlyFeeUsd(tier: PricingTier, position: FeeBandPosition = "top"): number {
+  switch (normalizeFeePosition(position)) {
+    case "entry":
+      return tier.monthlyFeeUsdMin;
+    case "mid":
+      return (tier.monthlyFeeUsdMin + tier.monthlyFeeUsdMax) / 2;
+    default:
+      return tier.monthlyFeeUsdMax;
+  }
+}
+
+/** Annual USD fee at a chosen point in the tier's band. */
+export function annualFeeUsd(tier: PricingTier, position: FeeBandPosition = "top"): number {
+  return monthlyFeeUsd(tier, position) * 12;
+}
 
 export function tierForVolume(monthlyTxns: number): PricingTier {
   // Garbage in must fail toward the SMALLEST tier — a NaN volume silently
-  // quoting the Large Bank fee in a sales meeting is the wrong failure mode.
+  // quoting the Enterprise fee in a sales meeting is the wrong failure mode.
   const v = Number.isFinite(monthlyTxns) ? Math.max(0, Math.floor(monthlyTxns)) : 0;
   return (
     PRICING_TIERS.find(
@@ -69,6 +162,11 @@ export interface RoiAssumptions {
    * positions (cost of funds; Nigerian MPR environment). Default 20%.
    */
   costOfFundsRate: number;
+  /**
+   * Which point of the tier's quoted band to price at. "top" by default so the
+   * ROI shown is the worst case for us and the safest for the prospect.
+   */
+  feeBandPosition: FeeBandPosition;
   /** Display-currency units per USD (editable; NGN default). 1 for USD. */
   fxPerUsd: number;
 }
@@ -78,7 +176,8 @@ export const DEFAULT_ASSUMPTIONS: RoiAssumptions = {
   exposureReduction: 0.8,
   exposureAnnualLossRate: 0.05,
   costOfFundsRate: 0.2,
-  fxPerUsd: 1600, // NGN per USD — editable on the page
+  feeBandPosition: "top",
+  fxPerUsd: 1400, // NGN per USD — matches the ₦ equivalents in the pricing model
 };
 
 // ─── Inputs & result ─────────────────────────────────────────────────────────
@@ -97,6 +196,11 @@ export interface RoiResult {
   tier: PricingTier;
   /** All money fields below are in the DISPLAY currency. */
   annualFee: number;
+  /** Monthly equivalent of `annualFee` — the tier is quoted per month. */
+  monthlyFee: number;
+  /** Bottom and top of the tier's quoted band (annual), for showing the range. */
+  annualFeeLow: number;
+  annualFeeHigh: number;
 
   // Current state (annual)
   currentStaffCost: number;
@@ -132,7 +236,9 @@ export function computeRoi(
   const fx = assumptions.fxPerUsd > 0 ? assumptions.fxPerUsd : 1;
 
   const tier = tierForVolume(volume);
-  const annualFee = tier.annualFeeUsd * fx;
+  const annualFee = annualFeeUsd(tier, assumptions.feeBandPosition) * fx;
+  const annualFeeLow = annualFeeUsd(tier, "entry") * fx;
+  const annualFeeHigh = annualFeeUsd(tier, "top") * fx;
 
   // ── Current state ──
   const currentStaffCost = staff * salary * 12;
@@ -159,6 +265,9 @@ export function computeRoi(
   return {
     tier,
     annualFee,
+    monthlyFee: annualFee / 12,
+    annualFeeLow,
+    annualFeeHigh,
     currentStaffCost,
     currentExposureCost,
     currentTotal,
@@ -175,7 +284,7 @@ export function computeRoi(
 
 // ─── Currency presets for the page ───────────────────────────────────────────
 export const CURRENCY_PRESETS = [
-  { code: "NGN", symbol: "₦", label: "Nigerian Naira", defaultFxPerUsd: 1600 },
+  { code: "NGN", symbol: "₦", label: "Nigerian Naira", defaultFxPerUsd: 1400 },
   { code: "UGX", symbol: "USh ", label: "Ugandan Shilling", defaultFxPerUsd: 3800 },
   { code: "USD", symbol: "$", label: "US Dollar", defaultFxPerUsd: 1 },
   { code: "KES", symbol: "KSh", label: "Kenyan Shilling", defaultFxPerUsd: 130 },
