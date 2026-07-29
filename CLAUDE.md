@@ -126,6 +126,7 @@ bands, required OAuth scopes, rev share).
 |---|---|---|
 | **Phase 0** | DONE + CTO-hardened | Retail-vertical foundation (commit `c5976b4`) |
 | **Phase 1** | ✅ MERGED & LIVE on production | Full Tier 1 App Store connector, billing, compliance. PRs #8–#11 merged to `main` (HEAD `e4a8290`), deployed by Railway. Go-live steps (App Store submission) remain — see §2B.12 |
+| **Tier 1.5** | Planned, post-launch | Embedded App Bridge **summary widget** (match rate, exception count, last sync, "Open ReconcileAI" button) — the engagement benefit of Embedded without a full App Bridge rewrite. Does NOT block launch; Tier 1 ships on Redirect. See `docs/shopline-app-store/TIER_1_5_EMBEDDED_ENHANCEMENT.md` |
 | **Phase 2** | Not started | Tier 2/3 — post-signed-agreement only |
 
 ### Phase 0 — DONE + CTO-hardened (commit `c5976b4`)
@@ -421,10 +422,41 @@ Three procedures added in PR #3:
 | `SHOPLINE_APP_KEY` | *(secret — hosting env only)* | From Partner Portal → App credentials |
 | `SHOPLINE_APP_SECRET` | *(secret — hosting env only)* | From Partner Portal; HMAC signing key |
 | `SHOPLINE_WEBHOOK_SECRET` | Same as APP Secret | SHOPLINE does not expose a separate signing key |
+| `SHOPLINE_SIG_DEBUG` | `true` to enable | **Redacted** OAuth signature diagnostics: which encoding matched, the signed message with `code`/`sign`/`customField` masked, signature *prefixes* only, and timestamp skew. Never logs secret material. Off by default |
+| `SHOPLINE_INSTALL_DIAGNOSTIC` | `true` to enable | Lets an **unverified install request** still redirect to SHOPLINE's authorize page while the correct signing variant is identified. Scope is deliberately narrow — see the note below. Off by default; turn back off once confirmed |
 
 Set these only in the hosting platform's secret store (Railway env / `.env`,
 which is gitignored). The code reads them from `ENV.shoplineAppKey` /
 `ENV.shoplineAppSecret`.
+
+### 2B.9b OAuth GET signature — what we accept, and what we must not
+
+`verifyShoplineGetSignature()` in `server/connectors/shopline/routes.ts` tries
+exactly **two** candidate source strings, because SHOPLINE's docs say the params
+are URL-encoded before sorting while Express hands us decoded values:
+
+1. **decoded** params (Express `req.query`)
+2. **url-encoded** params (parsed from the raw query string, values left encoded)
+
+Both go through `verifyOAuthSignature`, which enforces the **±10-minute
+timestamp window** and compares in constant time.
+
+> 🔒 **Two variants were tried and removed as unsafe — do not reintroduce them:**
+> - **App key as the HMAC key.** The app key travels *in the query string of the
+>   very request being verified* (`?appkey=…`), so anyone who sees an install
+>   URL could forge a valid signature. That is a total authenticity bypass.
+> - **Accepting a match while skipping the timestamp check.** That removes replay
+>   protection — a captured install/callback URL would remain valid forever.
+>
+> Likewise, never log secret material (an app-secret prefix is still secret
+> material) or the OAuth `code`, which is a bearer credential for 10 minutes.
+
+**Diagnostic mode scope.** `SHOPLINE_INSTALL_DIAGNOSTIC` applies to the
+`/api/shopline/install` route **only**. That route's sole action is a redirect
+to SHOPLINE's own authorization page — it mints no token, writes no data and
+provisions no tenant. The **OAuth callback stays strict at all times** (it
+exchanges the code for an access token and provisions a tenant), as do the
+webhook receiver and the GDPR endpoints.
 
 > **⚠️ Security note (2026-07-19):** earlier revisions of this file pasted the
 > live APP Key and APP Secret here in plaintext. The APP Secret is the HMAC
