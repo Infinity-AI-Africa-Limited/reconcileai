@@ -185,3 +185,57 @@ describe("SHOPLINE_BACKFILL_DAYS + slice windowing", () => {
     expect(Math.ceil(90 / sliceDays)).toBe(3);
   });
 });
+
+// ─── OAuth GET signature: security invariants ────────────────────────────────
+// These lock in the two variants that were removed as unsafe, so a future
+// "make the signature more tolerant" change can't silently reopen them.
+
+import { verifyOAuthSignature as verifyOAuthSig } from "./connectors/shopline/signature";
+
+describe("OAuth GET signature — unsafe variants must stay rejected", () => {
+  const APP_SECRET = "app-secret-value";
+  const APP_KEY = "6435ec37c7a1165c93d90af2f43ca2809010001d"; // semi-public: rides in the query
+
+  const baseParams = (ts: number) => ({
+    appkey: APP_KEY,
+    handle: "acme",
+    timestamp: String(ts),
+  });
+
+  const signWith = (key: string, params: Record<string, string>) =>
+    crypto
+      .createHmac("sha256", key)
+      .update(
+        Object.keys(params)
+          .sort()
+          .map((k) => `${k}=${params[k]}`)
+          .join("&"),
+      )
+      .digest("hex");
+
+  it("accepts a correctly signed, in-window request", () => {
+    const p = baseParams(Date.now());
+    expect(verifyOAuthSig({ ...p, sign: signWith(APP_SECRET, p) }, APP_SECRET)).toBe(true);
+  });
+
+  it("REJECTS a signature keyed on the app key (it travels in the request — would be a forgery bypass)", () => {
+    const p = baseParams(Date.now());
+    const forged = signWith(APP_KEY, p); // attacker knows appkey from the URL
+    expect(verifyOAuthSig({ ...p, sign: forged }, APP_SECRET)).toBe(false);
+  });
+
+  it("REJECTS a correctly-keyed signature outside the ±10min window (replay protection)", () => {
+    const stale = baseParams(Date.now() - 30 * 60 * 1000);
+    expect(verifyOAuthSig({ ...stale, sign: signWith(APP_SECRET, stale) }, APP_SECRET)).toBe(false);
+  });
+
+  it("REJECTS a tampered param even with an otherwise valid-looking signature", () => {
+    const p = baseParams(Date.now());
+    const sign = signWith(APP_SECRET, p);
+    expect(verifyOAuthSig({ ...p, handle: "evil-store", sign }, APP_SECRET)).toBe(false);
+  });
+
+  it("REJECTS when no signature is present", () => {
+    expect(verifyOAuthSig(baseParams(Date.now()) as Record<string, string>, APP_SECRET)).toBe(false);
+  });
+});

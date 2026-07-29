@@ -98,4 +98,25 @@ export const ENV = {
   // and webhook HMAC verification.
   shoplineAppKey: cleanSecret(process.env.SHOPLINE_APP_KEY),
   shoplineAppSecret: cleanSecret(process.env.SHOPLINE_APP_SECRET),
+  /**
+   * Verbose (but REDACTED) signature diagnostics for the SHOPLINE OAuth GET
+   * routes. Logs which candidate encoding matched, the signed message with
+   * sensitive values masked, and signature PREFIXES only — never secret
+   * material. Off unless explicitly set to "true"/"1".
+   */
+  shoplineSigDebug: /^(1|true)$/i.test(process.env.SHOPLINE_SIG_DEBUG ?? ""),
+  /**
+   * Diagnostic install mode. When enabled, an install request whose signature
+   * cannot be verified is still allowed to REDIRECT to SHOPLINE's own
+   * authorization page (that route changes no state and mints no token), so
+   * the OAuth flow can be exercised end-to-end while the correct signing
+   * variant is identified from the logs.
+   *
+   * Scope is deliberately narrow: it NEVER applies to the OAuth callback
+   * (which exchanges the code for a token and provisions a tenant), to
+   * webhooks, or to the GDPR endpoints — those stay strict at all times.
+   * Off unless explicitly set; intended to be turned back off once the
+   * matching variant is known.
+   */
+  shoplineInstallDiagnostic: /^(1|true)$/i.test(process.env.SHOPLINE_INSTALL_DIAGNOSTIC ?? ""),
 };

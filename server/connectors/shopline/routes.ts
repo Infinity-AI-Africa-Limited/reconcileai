@@ -30,117 +30,139 @@ import { fetchStoreMetadata, registerWebhook as apiRegisterWebhook } from "./api
 import type { ShoplineApiOptions } from "./apiClient";
 
 /**
- * Robust signature verification for SHOPLINE GET requests.
+ * Signature verification for SHOPLINE's OAuth GET routes (install + callback).
  *
- * SHOPLINE's documentation states:
- *   "Encode the query parameters of the request with URL encoding.
- *    Then sort the query parameters in alphabetical order to create the source string."
+ * SHOPLINE's docs say: "Encode the query parameters of the request with URL
+ * encoding. Then sort the query parameters in alphabetical order to create the
+ * source string." Express hands us DECODED values, so the signed source string
+ * may legitimately be either the decoded or the URL-encoded form. We therefore
+ * try both encodings — and nothing else.
  *
- * This means the source string may use URL-encoded values. Express auto-decodes
- * query params, so we need to try multiple strategies:
- *   1. Standard: decoded params (what Express gives us)
- *   2. Raw: URL-encoded params from the raw query string
- *   3. Relaxed timestamp: skip timestamp validation (clock skew)
+ * Both candidates go through `verifyOAuthSignature`, which enforces the
+ * ±10-minute timestamp window and compares in constant time.
  *
- * Returns true if any strategy succeeds.
+ * Deliberately NOT attempted (these were removed as unsafe):
+ *   - Accepting a signature keyed on the APP KEY. The app key travels in the
+ *     query string of the very request being verified, so anyone who sees an
+ *     install URL could forge one. That is a complete authenticity bypass.
+ *   - Accepting a signature while skipping the timestamp window. That removes
+ *     replay protection: a captured install/callback URL would stay valid
+ *     forever.
+ *
+ * Diagnostics are redacted and off by default (SHOPLINE_SIG_DEBUG): they log
+ * which candidate matched and the signed message with sensitive values masked,
+ * never secret material.
  */
-function verifyInstallSignature(req: Request): boolean {
+
+/** Query keys whose values must never be written to logs. */
+const SENSITIVE_QUERY_KEYS = new Set(["code", "sign", "customfield"]);
+
+/** Build the sorted `k=v&k=v` source string SHOPLINE signs (minus `sign`). */
+function signedMessage(params: Record<string, string>): string {
+  const { sign: _sign, ...rest } = params;
+  return Object.keys(rest)
+    .sort()
+    .map((k) => `${k}=${rest[k]}`)
+    .join("&");
+}
+
+/** Same string, with sensitive values masked — safe to log. */
+function redactedMessage(params: Record<string, string>): string {
+  const { sign: _sign, ...rest } = params;
+  return Object.keys(rest)
+    .sort()
+    .map((k) => `${k}=${SENSITIVE_QUERY_KEYS.has(k.toLowerCase()) ? "<redacted>" : rest[k]}`)
+    .join("&");
+}
+
+/** First 8 chars of a signature — enough to compare, useless to replay. */
+function sigPrefix(value: string | undefined): string {
+  return value ? `${value.slice(0, 8)}…(${value.length})` : "<none>";
+}
+
+/** Parse the raw query string WITHOUT decoding values. */
+function rawQueryParams(req: Request): Record<string, string> {
+  const raw = parseUrl(req.originalUrl, false).query || "";
+  const out: Record<string, string> = {};
+  for (const pair of raw.split("&")) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) continue;
+    out[pair.substring(0, eq)] = pair.substring(eq + 1);
+  }
+  return out;
+}
+
+/** Express-decoded query params as a flat string map. */
+function decodedQueryParams(req: Request): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.query)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
+export type SigOutcome = { valid: boolean; variant: "decoded" | "url-encoded" | null };
+
+/**
+ * Verify a SHOPLINE OAuth GET signature against both accepted encodings.
+ * `context` only labels the log lines.
+ */
+function verifyShoplineGetSignature(req: Request, context: string): SigOutcome {
   const appSecret = ENV.shoplineAppSecret;
   if (!appSecret) {
-    console.error("[shopline-sig] SHOPLINE_APP_SECRET is not configured");
-    return false;
+    // Configuration fault, not an attack — always worth surfacing.
+    console.error(
+      `[shopline-sig:${context}] SHOPLINE_APP_SECRET is not configured; every signature will fail. Set it in the hosting environment.`,
+    );
+    return { valid: false, variant: null };
   }
 
-  // Strategy 1: Use Express-decoded params (standard approach)
-  const params: Record<string, string> = {};
-  for (const [k, v] of Object.entries(req.query)) {
-    if (typeof v === "string") params[k] = v;
-  }
+  const decoded = decodedQueryParams(req);
+  const rawEncoded = rawQueryParams(req);
 
-  console.log("[shopline-sig] Strategy 1 — decoded params:", JSON.stringify(params));
-
-  if (verifyOAuthSignature(params, appSecret)) {
-    console.log("[shopline-sig] Strategy 1 PASSED (decoded params)");
-    return true;
-  }
-
-  // Strategy 2: Parse raw query string without decoding values
-  // SHOPLINE may sign the URL-encoded form of the values
-  const rawQueryString = parseUrl(req.originalUrl, false).query || "";
-  const rawParams: Record<string, string> = {};
-  for (const pair of rawQueryString.split("&")) {
-    const eqIdx = pair.indexOf("=");
-    if (eqIdx === -1) continue;
-    const k = pair.substring(0, eqIdx);
-    const v = pair.substring(eqIdx + 1);
-    rawParams[k] = v;
-  }
-
-  console.log("[shopline-sig] Strategy 2 — raw (URL-encoded) params:", JSON.stringify(rawParams));
-
-  if (verifyOAuthSignature(rawParams, appSecret)) {
-    console.log("[shopline-sig] Strategy 2 PASSED (raw URL-encoded params)");
-    return true;
-  }
-
-  // Strategy 3: Skip timestamp validation — compute HMAC directly
-  // This catches clock-skew issues between SHOPLINE servers and our server
-  const { sign: signValue, ...restDecoded } = params;
-  if (!signValue) return false;
-
-  const messageDecoded = Object.keys(restDecoded)
-    .sort()
-    .map((k) => `${k}=${restDecoded[k]}`)
-    .join("&");
-  const expectedDecoded = createHmac("sha256", appSecret).update(messageDecoded).digest("hex");
-
-  console.log("[shopline-sig] Strategy 3 — HMAC without timestamp check:");
-  console.log("[shopline-sig]   message:", messageDecoded);
-  console.log("[shopline-sig]   computed:", expectedDecoded);
-  console.log("[shopline-sig]   received:", signValue);
-
-  if (expectedDecoded === signValue) {
-    console.log("[shopline-sig] Strategy 3 PASSED (timestamp skew — accepting)");
-    return true;
-  }
-
-  // Strategy 4: Try with raw URL-encoded values, skip timestamp
-  const { sign: rawSign, ...restRaw } = rawParams;
-  if (rawSign) {
-    const messageRaw = Object.keys(restRaw)
-      .sort()
-      .map((k) => `${k}=${restRaw[k]}`)
-      .join("&");
-    const expectedRaw = createHmac("sha256", appSecret).update(messageRaw).digest("hex");
-
-    console.log("[shopline-sig] Strategy 4 — raw params, no timestamp check:");
-    console.log("[shopline-sig]   message:", messageRaw);
-    console.log("[shopline-sig]   computed:", expectedRaw);
-    console.log("[shopline-sig]   received:", rawSign);
-
-    if (expectedRaw === rawSign) {
-      console.log("[shopline-sig] Strategy 4 PASSED (raw + no timestamp)");
-      return true;
+  if (verifyOAuthSignature(decoded, appSecret)) {
+    if (ENV.shoplineSigDebug) {
+      console.log(`[shopline-sig:${context}] verified — variant=decoded`);
     }
+    return { valid: true, variant: "decoded" };
   }
 
-  // Strategy 5: Try using appKey as HMAC key (docs intro says "app key")
-  const appKey = ENV.shoplineAppKey;
-  if (appKey) {
-    const expectedWithKey = createHmac("sha256", appKey).update(messageDecoded).digest("hex");
-    console.log("[shopline-sig] Strategy 5 — using appKey as HMAC key:");
-    console.log("[shopline-sig]   computed:", expectedWithKey);
-
-    if (expectedWithKey === signValue) {
-      console.log("[shopline-sig] Strategy 5 PASSED (appKey as HMAC key)");
-      return true;
+  if (verifyOAuthSignature(rawEncoded, appSecret)) {
+    if (ENV.shoplineSigDebug) {
+      console.log(`[shopline-sig:${context}] verified — variant=url-encoded`);
     }
+    return { valid: true, variant: "url-encoded" };
   }
 
-  console.warn("[shopline-sig] ALL strategies FAILED");
-  console.warn("[shopline-sig] App secret (first 8 chars):", appSecret.substring(0, 8));
-  console.warn("[shopline-sig] App secret length:", appSecret.length);
-  return false;
+  // Failure diagnostics — redacted, and only when explicitly enabled.
+  if (ENV.shoplineSigDebug) {
+    const ts = Number(decoded["timestamp"]);
+    const skewMs = Number.isFinite(ts)
+      ? Date.now() - (ts < 1e12 ? ts * 1000 : ts)
+      : Number.NaN;
+    console.warn(
+      `[shopline-sig:${context}] no candidate matched\n` +
+        `  params            : ${Object.keys(decoded).sort().join(",")}\n` +
+        `  message(decoded)  : ${redactedMessage(decoded)}\n` +
+        `  message(encoded)  : ${redactedMessage(rawEncoded)}\n` +
+        `  computed(decoded) : ${sigPrefix(hmacHexOf(appSecret, signedMessage(decoded)))}\n` +
+        `  computed(encoded) : ${sigPrefix(hmacHexOf(appSecret, signedMessage(rawEncoded)))}\n` +
+        `  received          : ${sigPrefix(decoded["sign"])}\n` +
+        `  timestamp skew    : ${Number.isFinite(skewMs) ? `${Math.round(skewMs / 1000)}s` : "n/a"}\n` +
+        `  secret configured : yes`,
+    );
+  } else {
+    console.warn(
+      `[shopline-sig:${context}] signature verification failed (set SHOPLINE_SIG_DEBUG=true for redacted diagnostics)`,
+    );
+  }
+
+  return { valid: false, variant: null };
+}
+
+/** Hex HMAC helper used only to render a comparison prefix in diagnostics. */
+function hmacHexOf(secret: string, message: string): string {
+  return createHmac("sha256", secret).update(message).digest("hex");
 }
 
 /**
@@ -160,10 +182,23 @@ export function createShoplineRouter(): Router {
         return res.status(400).json({ error: "Missing required parameters (handle, sign)" });
       }
 
-      // Verify the install request signature using robust multi-strategy approach
-      if (!verifyInstallSignature(req)) {
-        console.warn("[shopline-install] Invalid signature for handle:", handle);
-        return res.status(403).json({ error: "Invalid signature" });
+      // Verify the install request signature (both accepted encodings).
+      const installSig = verifyShoplineGetSignature(req, "install");
+      if (!installSig.valid) {
+        // Narrowly-scoped diagnostic escape hatch. This route only REDIRECTS to
+        // SHOPLINE's own authorization page — it mints no token, writes no data
+        // and provisions no tenant — so allowing it through while the correct
+        // signing variant is identified is low-risk and bounded. The callback,
+        // webhooks and GDPR routes are never covered by this.
+        if (ENV.shoplineInstallDiagnostic) {
+          console.warn(
+            `[shopline-install] SIGNATURE UNVERIFIED — proceeding because SHOPLINE_INSTALL_DIAGNOSTIC is enabled. ` +
+              `This must be turned off once the correct signing variant is confirmed. handle=${handle}`,
+          );
+        } else {
+          console.warn("[shopline-install] Invalid signature for handle:", handle);
+          return res.status(403).json({ error: "Invalid signature" });
+        }
       }
 
       // Build the callback URL using the request's origin
@@ -199,8 +234,10 @@ export function createShoplineRouter(): Router {
         return res.status(400).json({ error: "Missing required parameters (code, handle, sign)" });
       }
 
-      // Verify callback signature using the same robust approach
-      if (!verifyInstallSignature(req)) {
+      // Verify callback signature. ALWAYS STRICT — this route exchanges the
+      // authorization code for an access token and provisions a tenant, so it
+      // is never covered by the install diagnostic mode.
+      if (!verifyShoplineGetSignature(req, "callback").valid) {
         console.warn("[shopline-callback] Invalid signature for handle:", handle);
         return res.status(403).json({ error: "Invalid signature" });
       }
