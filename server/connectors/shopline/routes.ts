@@ -129,6 +129,24 @@ export function createShoplineRouter(): Router {
         console.error("[shopline-callback] Webhook registration failed:", err);
       });
 
+      // First install → pull 90 days of history in the background so the
+      // merchant's dashboard has real results within minutes rather than
+      // staying empty until the first scheduled sync. Fire-and-forget: the
+      // merchant is redirected immediately, and a reconnection skips it
+      // (the data is already there).
+      if (!result.isReconnection) {
+        void import("./syncOrchestrator")
+          .then(({ runHistoricalBackfill }) =>
+            runHistoricalBackfill({
+              organizationId: result.organizationId,
+              slStoreId: result.slStoreId,
+            }),
+          )
+          .catch((err: unknown) => {
+            console.error("[shopline-callback] Historical backfill failed:", err);
+          });
+      }
+
       // Redirect to the ReconcileAI dashboard with success indicator
       const protocol = req.headers["x-forwarded-proto"] || req.protocol;
       const host = req.headers["x-forwarded-host"] || req.get("host");

@@ -80,8 +80,30 @@ export async function ingestWebhook(
     return { status: "invalid_signature" };
   }
 
-  // 2. Resolve store from shop domain
-  const storeHandle = webhook.shopDomain.replace(".myshopline.com", "");
+  // 2. Parse payload early — billing (appsubscription/*) webhooks are
+  //    app-scoped and identify the store by `handle` IN THE BODY rather than
+  //    the X-Shopline-Shop-Domain header that store webhooks carry.
+  let payloadJson: unknown;
+  try {
+    payloadJson = JSON.parse(webhook.rawBody.toString("utf8"));
+  } catch {
+    payloadJson = null;
+  }
+
+  // 3. Resolve store: prefer the shop-domain header, fall back to payload handle.
+  const headerHandle = webhook.shopDomain
+    ? webhook.shopDomain.replace(/\.myshopline\.com$/i, "")
+    : "";
+  const bodyHandle =
+    payloadJson && typeof payloadJson === "object"
+      ? String((payloadJson as { handle?: unknown }).handle ?? "").replace(/\.myshopline\.com$/i, "")
+      : "";
+  const storeHandle = headerHandle || bodyHandle;
+
+  if (!storeHandle) {
+    return { status: "store_not_found", shopDomain: webhook.shopDomain };
+  }
+
   const stores = await db
     .select()
     .from(slConnectorStores)
@@ -89,11 +111,11 @@ export async function ingestWebhook(
     .limit(1);
 
   if (stores.length === 0) {
-    return { status: "store_not_found", shopDomain: webhook.shopDomain };
+    return { status: "store_not_found", shopDomain: webhook.shopDomain || storeHandle };
   }
   const store = stores[0];
 
-  // 3. Idempotency check (unique on webhookId — spec says webhook-id is globally unique)
+  // 4. Idempotency check (unique on webhookId — spec says webhook-id is globally unique)
   const existing = await db
     .select({ id: slConnectorWebhookEvents.id })
     .from(slConnectorWebhookEvents)
@@ -102,14 +124,6 @@ export async function ingestWebhook(
 
   if (existing.length > 0) {
     return { status: "duplicate", webhookId: webhook.webhookId };
-  }
-
-  // 4. Parse payload
-  let payloadJson: unknown;
-  try {
-    payloadJson = JSON.parse(webhook.rawBody.toString("utf8"));
-  } catch {
-    payloadJson = null;
   }
 
   // 5. Insert event record (pending)

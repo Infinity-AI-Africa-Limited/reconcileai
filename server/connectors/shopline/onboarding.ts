@@ -302,12 +302,20 @@ export async function onboardShoplineMerchant(
 }
 
 /**
- * Handle merchant uninstall: mark store as uninstalled, archive data.
- * Called from the `merchants/redact` GDPR webhook (fires 48h after uninstall).
+ * Handle merchant uninstall: mark store uninstalled and cancel its
+ * subscription. Called from the `shop/redact` GDPR webhook, which SHOPLINE
+ * fires 48h after an uninstall (there is no installation-status topic).
+ * Cancelling here is what stops the connector syncing — a cancelled
+ * subscription blocks immediately, with no grace buffer.
  */
 export async function handleShoplineUninstall(storeHandle: string): Promise<void> {
   const db = await getDb();
   if (!db) return;
+
+  const stores = await db
+    .select({ id: slConnectorStores.id })
+    .from(slConnectorStores)
+    .where(eq(slConnectorStores.storeHandle, storeHandle));
 
   await db
     .update(slConnectorStores)
@@ -316,4 +324,9 @@ export async function handleShoplineUninstall(storeHandle: string): Promise<void
       uninstalledAt: new Date(),
     })
     .where(eq(slConnectorStores.storeHandle, storeHandle));
+
+  const { cancelSubscriptionForStore } = await import("./billingWebhook");
+  for (const s of stores) {
+    await cancelSubscriptionForStore(db, s.id);
+  }
 }

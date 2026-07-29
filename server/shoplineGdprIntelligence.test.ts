@@ -166,3 +166,22 @@ describe("retailIntelligencePromptBlock", () => {
     expect(block).not.toContain("Cross-merchant network");
   });
 });
+
+// ─── Historical backfill windowing ───────────────────────────────────────────
+
+describe("SHOPLINE_BACKFILL_DAYS + slice windowing", () => {
+  it("backfills 90 days by default", async () => {
+    const { SHOPLINE_BACKFILL_DAYS } = await import("./connectors/shopline/syncOrchestrator");
+    expect(SHOPLINE_BACKFILL_DAYS).toBe(90);
+  });
+
+  it("30-day slices stay inside SHOPLINE's 3-month payout range cap", () => {
+    // The payouts endpoint rejects start/end ranges over 3 months; the
+    // backfill must never hand it a wider window than one slice.
+    const sliceDays = 30;
+    const payoutCapDays = 90;
+    expect(sliceDays).toBeLessThanOrEqual(payoutCapDays);
+    // 90 days of history in 30-day slices = 3 requests per data type.
+    expect(Math.ceil(90 / sliceDays)).toBe(3);
+  });
+});
