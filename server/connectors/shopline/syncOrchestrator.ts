@@ -463,3 +463,65 @@ function errorReport(
     error,
   };
 }
+
+// ─── Historical backfill (first install) ────────────────────────────────────
+
+/** How far back the first-install backfill reaches. */
+export const SHOPLINE_BACKFILL_DAYS = 90;
+
+/**
+ * Pull the merchant's recent history on first install so the dashboard has
+ * real reconciliation results within minutes instead of staying empty until
+ * the first scheduled sync.
+ *
+ * Windowing matters: SHOPLINE caps payout queries at a 3-month range and
+ * payment-transaction queries at 6 months, and per-store rate limits apply.
+ * The backfill therefore runs in sequential 30-day slices (oldest first) so
+ * every slice is comfortably inside those caps, and a failure in one slice
+ * doesn't lose the others.
+ *
+ * Designed to be fire-and-forget from the OAuth callback: it never throws,
+ * and returns a per-slice summary for logging.
+ */
+export async function runHistoricalBackfill(opts: {
+  organizationId: number;
+  slStoreId: number;
+  days?: number;
+  triggeredBy?: number;
+}): Promise<{ slices: number; ordersIngested: number; exceptionCount: number; errors: string[] }> {
+  const days = opts.days ?? SHOPLINE_BACKFILL_DAYS;
+  const sliceDays = 30;
+  const now = new Date();
+  const errors: string[] = [];
+  let ordersIngested = 0;
+  let exceptionCount = 0;
+  let slices = 0;
+
+  for (let offset = days; offset > 0; offset -= sliceDays) {
+    const from = new Date(now.getTime() - offset * 24 * 60 * 60 * 1000);
+    const to = new Date(now.getTime() - Math.max(offset - sliceDays, 0) * 24 * 60 * 60 * 1000);
+    slices++;
+    try {
+      const report = await runSyncCycle({
+        organizationId: opts.organizationId,
+        slStoreId: opts.slStoreId,
+        from,
+        to,
+        triggeredBy: opts.triggeredBy ?? 0,
+      });
+      if (report.error) {
+        errors.push(`${from.toISOString().slice(0, 10)}: ${report.error}`);
+      } else {
+        ordersIngested += report.ordersIngested;
+        exceptionCount += report.exceptionCount;
+      }
+    } catch (err) {
+      errors.push(`${from.toISOString().slice(0, 10)}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  console.info(
+    `[SHOPLINE Backfill] store=${opts.slStoreId} ${days}d in ${slices} slices — ${ordersIngested} orders, ${exceptionCount} exceptions, ${errors.length} slice error(s)`,
+  );
+  return { slices, ordersIngested, exceptionCount, errors };
+}

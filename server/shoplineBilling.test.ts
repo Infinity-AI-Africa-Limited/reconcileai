@@ -12,13 +12,21 @@ import { SHOPLINE_BILLING_WEBHOOK_TOPICS, TIER_1_SUBSCRIPTION_BANDS, SHOPLINE_WE
 // ─── Constants validation ─────────────────────────────────────────────────────
 
 describe("SHOPLINE Billing Constants (confirmed portal settings)", () => {
-  it("defines 5 billing/lifecycle webhook topics matching portal", () => {
-    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toHaveLength(5);
-    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("app_plan/activated");
-    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("app_plan/expired");
-    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("billing_attempts/succeed");
-    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("billing_attempts/fail");
-    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("app/installation_status_changed");
+  it("defines the 3 REAL appsubscription topics (not the invented app_plan/* names)", () => {
+    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toHaveLength(3);
+    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("appsubscription/create");
+    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("appsubscription/paid");
+    expect(SHOPLINE_BILLING_WEBHOOK_TOPICS).toContain("appsubscription/expiration");
+    // Regression guard: these never existed on SHOPLINE and matched nothing.
+    for (const bogus of [
+      "app_plan/activated",
+      "app_plan/expired",
+      "billing_attempts/succeed",
+      "billing_attempts/fail",
+      "app/installation_status_changed",
+    ]) {
+      expect(SHOPLINE_BILLING_WEBHOOK_TOPICS as readonly string[]).not.toContain(bogus);
+    }
   });
 
   it("subscription bands match confirmed portal pricing (7-day trial)", () => {
@@ -104,62 +112,56 @@ describe("processBillingWebhook dispatcher", () => {
     mockDb.set.mockReturnThis();
   });
 
-  it("handles app_plan/activated with correct payload shape", async () => {
-    const payload = {
-      plan_key: "starter",
-      plan_name: "Starter",
-      price: "29.00",
-      currency: "USD",
-      billing_cycle: "monthly",
-      activated_at: "2026-07-19T10:00:00Z",
-      trial_ends_at: "2026-07-26T10:00:00Z",
-    };
-
-    // Should not throw
+  it("routes appsubscription/create with the real subPackage payload", async () => {
     await expect(
-      processBillingWebhook(mockDb as any, 1, 1, "app_plan/activated", payload),
-    ).resolves.not.toThrow();
-  });
-
-  it("handles app_plan/expired", async () => {
-    await expect(
-      processBillingWebhook(mockDb as any, 1, 1, "app_plan/expired", {
-        plan_key: "starter",
-        expired_at: "2026-08-19T10:00:00Z",
+      processBillingWebhook(mockDb as any, 1, 1, "appsubscription/create", {
+        appkey: "k",
+        handle: "acme",
+        subId: "6578332207010012345",
+        subPackage: {
+          spuKey: "starter",
+          trial: true,
+          autoRenewStatus: true,
+          startAt: 1756977716000,
+          endAt: 1757239200000,
+          period: 1,
+          periodType: "MONTH",
+          gracePeriod: 2,
+          gracePeriodUnit: "DAY",
+        },
       }),
     ).resolves.not.toThrow();
   });
 
-  it("handles billing_attempts/succeed", async () => {
+  it("routes appsubscription/paid", async () => {
     await expect(
-      processBillingWebhook(mockDb as any, 1, 1, "billing_attempts/succeed", {
-        plan_key: "growth",
-        amount: "79.00",
-        currency: "USD",
-        paid_at: "2026-08-19T10:00:00Z",
+      processBillingWebhook(mockDb as any, 1, 1, "appsubscription/paid", {
+        appkey: "k",
+        bizOrderNo: "PAY20240726123456",
+        handle: "acme",
+        status: 200,
+        subId: "6578332207010012345",
+        subTime: 1722000000000,
       }),
     ).resolves.not.toThrow();
   });
 
-  it("handles billing_attempts/fail", async () => {
+  it("routes appsubscription/expiration", async () => {
     await expect(
-      processBillingWebhook(mockDb as any, 1, 1, "billing_attempts/fail", {
-        plan_key: "growth",
-        amount: "79.00",
-        currency: "USD",
-        failed_at: "2026-08-19T10:00:00Z",
-        reason: "insufficient_funds",
+      processBillingWebhook(mockDb as any, 1, 1, "appsubscription/expiration", {
+        appkey: "k",
+        handle: "acme",
+        subId: "6578332207010012345",
+        expireType: 0,
       }),
     ).resolves.not.toThrow();
   });
 
-  it("handles app/installation_status_changed", async () => {
-    await expect(
-      processBillingWebhook(mockDb as any, 1, 1, "app/installation_status_changed", {
-        status: "uninstalled",
-        uninstalled_at: "2026-08-19T10:00:00Z",
-      }),
-    ).resolves.not.toThrow();
+  it("ignores the retired app_plan/* topics as unknown", async () => {
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await processBillingWebhook(mockDb as any, 1, 1, "app_plan/activated", {});
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown billing topic"));
+    consoleSpy.mockRestore();
   });
 
   it("logs warning for unknown billing topic", async () => {
@@ -310,5 +312,167 @@ describe("Webhook topic routing (billing topics through main dispatcher)", () =>
     for (const billingTopic of SHOPLINE_BILLING_WEBHOOK_TOPICS) {
       expect(SHOPLINE_WEBHOOK_TOPICS).not.toContain(billingTopic);
     }
+  });
+});
+
+// ─── Real appsubscription/* payload handling ─────────────────────────────────
+
+import {
+  handleSubscriptionCreate,
+  handleSubscriptionExpiration,
+  handleSubscriptionPaid,
+} from "./connectors/shopline/billingWebhook";
+import {
+  SHOPLINE_BILLING_EXPIRE_TYPE,
+  SHOPLINE_BILLING_PAID_STATUS,
+  TIER_1_GRACE_PERIOD_DAYS,
+} from "../shared/shoplineConstants";
+
+/** Mock db capturing the last .set() payload from update/insert chains. */
+function mkWriteDb(existingRows: unknown[] = []) {
+  const captured: Record<string, unknown>[] = [];
+  const chain: Record<string, unknown> = {};
+  Object.assign(chain, {
+    select: vi.fn(() => chain),
+    from: vi.fn(() => chain),
+    where: vi.fn(() => chain),
+    limit: vi.fn().mockResolvedValue(existingRows),
+    update: vi.fn(() => chain),
+    set: vi.fn((v: Record<string, unknown>) => {
+      captured.push(v);
+      return chain;
+    }),
+    insert: vi.fn(() => chain),
+    values: vi.fn((v: Record<string, unknown>) => {
+      captured.push(v);
+      return chain;
+    }),
+  });
+  return { db: chain as never, captured };
+}
+
+describe("appsubscription/create — real payload shape", () => {
+  it("reads spuKey/trial out of subPackage (not spu_key at top level)", async () => {
+    const { db, captured } = mkWriteDb([]);
+    await handleSubscriptionCreate(db, 1, 10, {
+      appkey: "k",
+      handle: "acme",
+      subId: "SUB-1",
+      subPackage: {
+        spuKey: "professional",
+        trial: false,
+        startAt: 1756977716000,
+        endAt: 1757239200000,
+        periodType: "MONTH",
+      },
+    });
+    const row = captured.at(-1)!;
+    expect(row.planId).toBe("professional");
+    expect(row.status).toBe("active");
+    expect(row.shoplineSubscriptionId).toBe("SUB-1");
+    // SHOPLINE's own period bounds are used
+    expect((row.currentPeriodStart as Date).getTime()).toBe(1756977716000);
+    expect((row.currentPeriodEnd as Date).getTime()).toBe(1757239200000);
+  });
+
+  it("marks a trial subscription as trialing", async () => {
+    const { db, captured } = mkWriteDb([]);
+    await handleSubscriptionCreate(db, 1, 10, {
+      handle: "acme",
+      subId: "SUB-2",
+      subPackage: { spuKey: "starter", trial: true },
+    });
+    expect(captured.at(-1)!.status).toBe("trialing");
+  });
+});
+
+describe("appsubscription/paid — status drives outcome", () => {
+  it("status 200 activates and clears the grace buffer", async () => {
+    const { db, captured } = mkWriteDb([{ failedBillingAttempts: 2, status: "past_due" }]);
+    await handleSubscriptionPaid(db, 1, 10, {
+      handle: "acme",
+      status: SHOPLINE_BILLING_PAID_STATUS.SUCCESS,
+      subTime: Date.now(),
+    });
+    const row = captured.at(-1)!;
+    expect(row.status).toBe("active");
+    expect(row.graceEndsAt).toBeNull();
+    expect(row.failedBillingAttempts).toBe(0);
+  });
+
+  it("status 300 cancels the subscription", async () => {
+    const { db, captured } = mkWriteDb([{}]);
+    await handleSubscriptionPaid(db, 1, 10, {
+      handle: "acme",
+      status: SHOPLINE_BILLING_PAID_STATUS.CANCELLED,
+    });
+    expect(captured.at(-1)!.status).toBe("cancelled");
+  });
+
+  it("status 400 counts a failure; 3rd failure sets past_due + starts grace", async () => {
+    const { db, captured } = mkWriteDb([{ failedBillingAttempts: 2, status: "active", graceEndsAt: null }]);
+    await handleSubscriptionPaid(db, 1, 10, {
+      handle: "acme",
+      status: SHOPLINE_BILLING_PAID_STATUS.FAILED,
+    });
+    const row = captured.at(-1)!;
+    expect(row.failedBillingAttempts).toBe(3);
+    expect(row.status).toBe("past_due");
+    expect(row.graceEndsAt).toBeInstanceOf(Date);
+  });
+
+  it("an early failure does not yet flip status or start grace", async () => {
+    const { db, captured } = mkWriteDb([{ failedBillingAttempts: 0, status: "active", graceEndsAt: null }]);
+    await handleSubscriptionPaid(db, 1, 10, { handle: "acme", status: 400 });
+    const row = captured.at(-1)!;
+    expect(row.failedBillingAttempts).toBe(1);
+    expect(row.status).toBe("active");
+    expect(row.graceEndsAt).toBeNull();
+  });
+});
+
+describe("appsubscription/expiration — expireType semantics", () => {
+  it.each([
+    ["upgrade", SHOPLINE_BILLING_EXPIRE_TYPE.UPGRADE],
+    ["next cycle activated", SHOPLINE_BILLING_EXPIRE_TYPE.NEXT_CYCLE_ACTIVATED],
+  ])("does NOT expire access on a %s (it's a continuation)", async (_label, expireType) => {
+    const { db, captured } = mkWriteDb([{}]);
+    await handleSubscriptionExpiration(db, 1, 10, { handle: "acme", expireType });
+    expect(captured).toHaveLength(0); // no write at all
+  });
+
+  it("expires and starts the grace buffer on a termination", async () => {
+    const { db, captured } = mkWriteDb([{ graceEndsAt: null }]);
+    await handleSubscriptionExpiration(db, 1, 10, {
+      handle: "acme",
+      expireType: SHOPLINE_BILLING_EXPIRE_TYPE.TERMINATED,
+    });
+    const row = captured.at(-1)!;
+    expect(row.status).toBe("expired");
+    const grace = row.graceEndsAt as Date;
+    const days = Math.round((grace.getTime() - Date.now()) / (24 * 3600 * 1000));
+    expect(days).toBe(TIER_1_GRACE_PERIOD_DAYS);
+  });
+
+  it("honours a platform-provided gracePeriod from subPackage", async () => {
+    const { db, captured } = mkWriteDb([{ graceEndsAt: null }]);
+    await handleSubscriptionExpiration(db, 1, 10, {
+      handle: "acme",
+      expireType: SHOPLINE_BILLING_EXPIRE_TYPE.MANUAL_CANCEL,
+      subPackage: { gracePeriod: 2, gracePeriodUnit: "DAY" },
+    });
+    const grace = captured.at(-1)!.graceEndsAt as Date;
+    const days = Math.round((grace.getTime() - Date.now()) / (24 * 3600 * 1000));
+    expect(days).toBe(2); // platform value wins over our 7-day default
+  });
+
+  it("a grace-period expiry ends the buffer immediately", async () => {
+    const { db, captured } = mkWriteDb([{ graceEndsAt: null }]);
+    await handleSubscriptionExpiration(db, 1, 10, {
+      handle: "acme",
+      expireType: SHOPLINE_BILLING_EXPIRE_TYPE.GRACE_PERIOD,
+    });
+    const grace = captured.at(-1)!.graceEndsAt as Date;
+    expect(grace.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
   });
 });

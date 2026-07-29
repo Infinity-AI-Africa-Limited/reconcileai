@@ -203,6 +203,7 @@ from public docs — treat these as **confirmed ground truth** for review purpos
 | Setting | Value |
 |---|---|
 | App Type | Public App (App Store distribution) |
+| **App loading mode** | **Embedded** currently selected in the portal — see the ⚠️ below |
 | APP Key | set in env `SHOPLINE_APP_KEY` (Partner Portal → App credentials) |
 | APP Secret | set in env `SHOPLINE_APP_SECRET` — **never commit this value** (see security note below) |
 | Webhook Signing Key | Same as APP Secret (SHOPLINE does not expose a separate signing key) |
@@ -215,6 +216,22 @@ from public docs — treat these as **confirmed ground truth** for review purpos
 | Terms of Service URL | `https://www.reconcileaiafrica.com/terms` |
 | Support URL | `https://www.reconcileaiafrica.com/support` |
 | Production Domain | `https://www.reconcileaiafrica.com` (NOT reconcileai.vip) |
+
+> ⚠️ **Open portal items (owner actions, observed 2026-07-27):**
+> 1. **App loading mode is set to "Embedded"**, but the connector is built for
+>    **Redirect** (App Bridge is not integrated). Embedded renders the app in an
+>    iframe inside SHOPLINE Admin and, per SHOPLINE's docs, *requires* App
+>    Bridge. **Switch the portal setting to "Redirected"** unless/until App
+>    Bridge is built — otherwise the in-admin experience will not behave as
+>    intended. (We set no `X-Frame-Options`/CSP, so the page is not *blocked*
+>    from framing — it simply isn't an App-Bridge-aware embedded app.)
+> 2. **GDPR endpoint fields are empty** in App settings — fill them with the two
+>    canonical URLs above. The app is rejected at review without them.
+> 3. **App Contact name/email are empty** — required for the listing.
+> 4. Register the three `appsubscription/*` billing topics (see below).
+> 5. "Turn the App into sales channel" — **do not use**; ReconcileAI is a
+>    financial-operations layer, not a sales channel, and the action is
+>    irreversible.
 
 **Pricing Plans (5 bands, 7-day free trial, 7-day grace period) — portal-populated 2026-07-27:**
 
@@ -243,12 +260,19 @@ from public docs — treat these as **confirmed ground truth** for review purpos
 - `orders/create`, `orders/updated`, `orders/edited`, `orders/paid`, `orders/cancelled`,
   `orders/delete`, `refunds/create`, `refunds/update`, `order_transactions/create`
 
-**Billing Webhooks (5 topics, registered in portal):**
-- `app_plan/activated`, `app_plan/expired`, `billing_attempts/succeed`,
-  `billing_attempts/fail`, `app/installation_status_changed`
+**App-Subscription (Billing) Webhooks — 3 topics, register in portal:**
+- `appsubscription/create`, `appsubscription/paid`, `appsubscription/expiration`
+
+> ⚠️ **Corrected 2026-07-27.** Earlier revisions of this file listed
+> `app_plan/*` + `billing_attempts/*` + `app/installation_status_changed`.
+> **Those topic names do not exist on SHOPLINE** — the handler could never
+> have matched a real delivery, so billing was silently inert. The real
+> contract (and the payload shapes) is in §2B.2 below. There is no
+> installation-status topic: **uninstall reaches us via GDPR `shop/redact`**,
+> which SHOPLINE fires ~48h after the merchant uninstalls.
 
 **GDPR Mandatory Topics (configured in Developer Center):**
-- `customers/redact`, `merchants/redact`
+- `customers/data_request`, `customers/redact`, `shop/redact`
 
 ### 2B.2 Billing Model — SHOPLINE App Store Managed (No Stripe)
 
@@ -263,12 +287,24 @@ App Store platform:
    billing success/failure).
 5. ReconcileAI tracks subscription state in `sl_connector_subscriptions` to gate features.
 
-The `billingWebhook.ts` handler processes these 5 topics:
-- `app_plan/activated` → creates/updates subscription record (trial or active)
-- `app_plan/expired` → marks subscription as expired
-- `billing_attempts/succeed` → confirms active status, resets failure counter
-- `billing_attempts/fail` → increments failure counter, marks `past_due` after 3 failures
-- `app/installation_status_changed` → handles uninstall (cancels subscription + marks store)
+SHOPLINE's native App Store billing works like Shopify's: we define the plans in
+the Partner Portal, SHOPLINE bills the merchant and pays us via PayPal minus the
+rev share, and tells us what happened by webhook. **We never charge a card.**
+
+The `billingWebhook.ts` handler processes the three real topics:
+
+| Topic | Payload | Handling |
+|---|---|---|
+| `appsubscription/create` | `{appkey, handle, subId, subPackage:{spuKey, trial, autoRenewStatus, startAt, endAt, period, periodType, gracePeriod, gracePeriodUnit, featureKeyList, serviceKeyList}}` | Subscribe **or renew** → upsert subscription; `spuKey` is our plan band; `trial` → `trialing`; SHOPLINE's `startAt`/`endAt` become the period bounds |
+| `appsubscription/paid` | `{appkey, bizOrderNo, handle, status, subId, subTime}` | `status` 200 = success (activate, clear grace, reset failures) · 300 = cancelled · 400 = failed (count toward `past_due` at 3, start grace) |
+| `appsubscription/expiration` | `{appkey, handle, subId, expireType, subPackage?}` | `expireType` 0 terminated · 1 upgrade · 2 manual cancel · 3 grace-period · 4 next-cycle-activated. **1 and 4 are continuations — access is retained**; 3 means the buffer is exhausted → block now |
+
+Two important details:
+- **The store is identified by `handle` in the body**, not the shop-domain
+  header (billing webhooks are app-scoped). The webhook receiver falls back to
+  the payload handle when the header is absent.
+- **SHOPLINE sends its own grace period** (`gracePeriod` + `gracePeriodUnit`);
+  we honour it and fall back to our portal-configured 7 days when absent.
 
 ### 2B.3 Verified API Specification (from public docs)
 

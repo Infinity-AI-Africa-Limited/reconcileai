@@ -149,19 +149,43 @@ export const SHOPLINE_WEBHOOK_TOPICS = [
 ] as const;
 
 /**
- * Billing & lifecycle webhook topics registered in the SHOPLINE Partner Portal.
- * These are received at the same /api/webhooks/shopline endpoint.
- * CONFIRMED in portal (2026-07-19).
+ * App-subscription (billing) webhook topics — SHOPLINE's native App Store
+ * billing system. Received at the same /api/webhooks/shopline endpoint.
+ *
+ * CORRECTED 2026-07-27 from the SHOPLINE billing API research: the earlier
+ * `app_plan/*` + `billing_attempts/*` names were never real SHOPLINE topics,
+ * so no billing webhook could ever have matched. The real contract is:
+ *   appsubscription/create     — merchant subscribes OR renews (carries subPackage)
+ *   appsubscription/paid       — payment finalised (status 200 ok / 300 cancelled / 400 failed)
+ *   appsubscription/expiration — plan expired (expireType 0..4, see BillingExpireType)
  */
 export const SHOPLINE_BILLING_WEBHOOK_TOPICS = [
-  "app_plan/activated",
-  "app_plan/expired",
-  "billing_attempts/succeed",
-  "billing_attempts/fail",
-  "app/installation_status_changed",
+  "appsubscription/create",
+  "appsubscription/paid",
+  "appsubscription/expiration",
 ] as const;
 
 export type ShoplineBillingWebhookTopic = (typeof SHOPLINE_BILLING_WEBHOOK_TOPICS)[number];
+
+/** `status` on appsubscription/paid. */
+export const SHOPLINE_BILLING_PAID_STATUS = {
+  SUCCESS: 200,
+  CANCELLED: 300,
+  FAILED: 400,
+} as const;
+
+/**
+ * `expireType` on appsubscription/expiration. Only a genuine termination or
+ * manual cancellation should end access — an upgrade or a next-cycle
+ * activation is a *continuation* and must not cut the merchant off.
+ */
+export const SHOPLINE_BILLING_EXPIRE_TYPE = {
+  TERMINATED: 0,
+  UPGRADE: 1,
+  MANUAL_CANCEL: 2,
+  GRACE_PERIOD: 3,
+  NEXT_CYCLE_ACTIVATED: 4,
+} as const;
 
 /** Mandatory GDPR topics (configured in the SHOPLINE Developer Center, not via API). */
 export const SHOPLINE_GDPR_TOPICS = [

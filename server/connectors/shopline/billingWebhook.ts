@@ -1,15 +1,21 @@
 /**
- * SHOPLINE Billing Webhook Handler
+ * SHOPLINE App-Subscription (Billing) Webhook Handler
  *
- * Processes subscription lifecycle events from the SHOPLINE App Store:
- * - app_plan/activated → merchant subscribed to a plan (or trial started)
- * - app_plan/expired → subscription expired or cancelled
- * - billing_attempts/succeed → monthly billing collected successfully
- * - billing_attempts/fail → billing attempt failed (grace period)
- * - app/installation_status_changed → app installed/uninstalled
+ * SHOPLINE has a NATIVE App Store billing system (like Shopify's): we define
+ * the plans in the Partner Portal, SHOPLINE collects payment from the merchant
+ * and pays us via PayPal minus the rev share, and notifies us by webhook. We
+ * never charge a card. The three real topics:
  *
- * These webhooks are registered in the SHOPLINE Partner Portal (not via API).
- * The APP Secret is used as the HMAC signing key for verification.
+ * - appsubscription/create     → merchant subscribes OR renews (carries subPackage)
+ * - appsubscription/paid       → payment finalised (status 200 ok / 300 cancelled / 400 failed)
+ * - appsubscription/expiration → plan expired (expireType 0..4)
+ *
+ * These are registered in the Partner Portal (not via API). The APP Secret is
+ * the HMAC signing key.
+ *
+ * The store is identified by the payload's `handle` (store subdomain) — billing
+ * webhooks are app-scoped, so they may not carry the shop-domain header the
+ * store webhooks use.
  */
 import { eq, and } from "drizzle-orm";
 import { getDb } from "../../db";
@@ -21,6 +27,8 @@ import {
   TIER_1_FREE_TRIAL_DAYS,
   TIER_1_GRACE_PERIOD_DAYS,
   TIER_1_SUBSCRIPTION_BANDS,
+  SHOPLINE_BILLING_PAID_STATUS,
+  SHOPLINE_BILLING_EXPIRE_TYPE,
   type SubscriptionBandId,
 } from "../../../shared/shoplineConstants";
 
@@ -30,84 +38,131 @@ function graceDeadline(from: Date = new Date()): Date {
   return new Date(from.getTime() + TIER_1_GRACE_PERIOD_DAYS * DAY_MS);
 }
 
+/**
+ * Grace deadline honouring the value SHOPLINE sends on the subscription
+ * (`gracePeriod` + `gracePeriodUnit`), falling back to our portal-configured
+ * 7 days when absent. The platform is the source of truth for its own buffer.
+ */
+function graceDeadlineFrom(
+  pkg: SubPackage | undefined,
+  from: Date = new Date(),
+): Date {
+  const qty = typeof pkg?.gracePeriod === "number" ? pkg.gracePeriod : null;
+  if (qty === null || qty <= 0) return graceDeadline(from);
+  const unit = (pkg?.gracePeriodUnit ?? "DAY").toUpperCase();
+  const ms = unit === "SECOND" ? qty * 1000 : qty * DAY_MS;
+  return new Date(from.getTime() + ms);
+}
+
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
-// ─── Webhook Payload Interfaces ──────────────────────────────────────────────
+// ─── Webhook Payload Interfaces (verified shapes) ────────────────────────────
 
-interface AppPlanActivatedPayload {
-  /** SHOPLINE subscription/charge ID */
-  id?: string;
-  subscription_id?: string;
-  /** Plan spuKey that was activated */
-  plan_key?: string;
-  spu_key?: string;
-  /** Whether this is a trial activation */
-  is_trial?: boolean;
+/** `subPackage` block on appsubscription/create. */
+export interface SubPackage {
+  /** Plan identifier we defined in the Partner Portal (our band spuKey). */
+  spuKey?: string;
   trial?: boolean;
-  /** Store/shop info */
-  shop_id?: string;
-  store_id?: string;
+  autoRenewStatus?: boolean;
+  /** Epoch ms. */
+  startAt?: number;
+  endAt?: number;
+  period?: number;
+  /** DAY | MONTH | YEAR */
+  periodType?: string;
+  /** Platform-provided grace buffer. */
+  gracePeriod?: number;
+  /** SECOND | DAY */
+  gracePeriodUnit?: string;
+  featureKeyList?: string[];
+  serviceKeyList?: Array<{
+    serviceKey?: string;
+    totalQty?: number;
+    availableQty?: number;
+    indefinite?: boolean;
+  }>;
 }
 
-interface AppPlanExpiredPayload {
-  id?: string;
-  subscription_id?: string;
-  plan_key?: string;
-  spu_key?: string;
-  shop_id?: string;
-  store_id?: string;
-  reason?: string;
+export interface AppSubscriptionCreatePayload {
+  appkey?: string;
+  /** Store handle (subdomain) — the store identifier on billing webhooks. */
+  handle?: string;
+  subId?: string;
+  subPackage?: SubPackage;
 }
 
-interface BillingAttemptPayload {
-  id?: string;
-  subscription_id?: string;
-  plan_key?: string;
-  spu_key?: string;
-  shop_id?: string;
-  store_id?: string;
-  /** Billing period */
-  period_start?: string;
-  period_end?: string;
-  /** Failure reason (only for billing_attempts/fail) */
-  failure_reason?: string;
-  error_message?: string;
+export interface AppSubscriptionPaidPayload {
+  appkey?: string;
+  /** Our internal order number from SHOPLINE. */
+  bizOrderNo?: string;
+  handle?: string;
+  /** 200 = success, 300 = cancelled, 400 = failed. */
+  status?: number;
+  subId?: string;
+  /** Epoch ms. */
+  subTime?: number;
 }
 
-interface InstallationStatusPayload {
-  shop_id?: string;
-  store_id?: string;
-  /** "installed" | "uninstalled" */
-  status?: string;
-  action?: string;
+export interface AppSubscriptionExpirationPayload {
+  appkey?: string;
+  handle?: string;
+  subId?: string;
+  /** 0 terminated | 1 upgrade | 2 manual cancel | 3 grace period | 4 next cycle activated */
+  expireType?: number;
+  type?: number;
+  subPackage?: SubPackage;
+}
+
+/**
+ * Resolve the SHOPLINE store row from a billing payload's `handle`.
+ * Billing webhooks are app-scoped, so the store-domain header used by store
+ * webhooks may be absent — this is the reliable identifier.
+ */
+export async function resolveStoreByHandle(
+  db: Db,
+  handle: string | undefined,
+): Promise<{ id: number; organizationId: number } | null> {
+  if (!handle) return null;
+  const clean = handle.replace(/\.myshopline\.com$/i, "");
+  const [store] = await db
+    .select({ id: slConnectorStores.id, organizationId: slConnectorStores.organizationId })
+    .from(slConnectorStores)
+    .where(eq(slConnectorStores.storeHandle, clean))
+    .limit(1);
+  return store ?? null;
 }
 
 // ─── Handler Functions ───────────────────────────────────────────────────────
 
 /**
- * Handle app_plan/activated webhook.
+ * appsubscription/create — merchant subscribed OR renewed.
  * Creates or updates the subscription record for the store.
  */
-export async function handlePlanActivated(
+export async function handleSubscriptionCreate(
   db: Db,
   organizationId: number,
   slStoreId: number,
-  payload: AppPlanActivatedPayload,
+  payload: AppSubscriptionCreatePayload,
 ): Promise<void> {
-  const subscriptionId = payload.subscription_id || payload.id || null;
-  const planKey = (payload.spu_key || payload.plan_key || "starter") as SubscriptionBandId;
-  const isTrial = payload.is_trial ?? payload.trial ?? true; // default to trial on first activation
+  const pkg = payload.subPackage;
+  const subscriptionId = payload.subId ?? null;
+  const planKey = (pkg?.spuKey || "starter") as SubscriptionBandId;
+  const isTrial = pkg?.trial ?? false;
 
-  // Validate planKey exists in our bands
+  // Validate planKey exists in our bands (unknown → keep it, plan limits fail open)
   const band = TIER_1_SUBSCRIPTION_BANDS.find((b) => b.spuKey === planKey);
   if (!band) {
-    console.warn(`[SHOPLINE Billing] Unknown plan key: ${planKey}, defaulting to starter`);
+    console.warn(`[SHOPLINE Billing] Unknown plan key from portal: ${planKey}`);
   }
 
   const now = new Date();
-  const trialEnd = new Date(now.getTime() + TIER_1_FREE_TRIAL_DAYS * 24 * 60 * 60 * 1000);
+  // Prefer SHOPLINE's own period bounds; fall back to our trial constant.
+  const periodStart = pkg?.startAt ? new Date(pkg.startAt) : now;
+  const periodEnd = pkg?.endAt ? new Date(pkg.endAt) : null;
+  const trialEnd = isTrial
+    ? (periodEnd ?? new Date(now.getTime() + TIER_1_FREE_TRIAL_DAYS * DAY_MS))
+    : null;
 
-  // Upsert subscription record
   const [existing] = await db
     .select()
     .from(slConnectorSubscriptions)
@@ -121,11 +176,13 @@ export async function handlePlanActivated(
         shoplineSubscriptionId: subscriptionId,
         planId: planKey,
         status: isTrial ? "trialing" : "active",
-        trialStartedAt: isTrial ? now : existing.trialStartedAt,
+        trialStartedAt: isTrial ? (existing.trialStartedAt ?? now) : existing.trialStartedAt,
         trialEndsAt: isTrial ? trialEnd : existing.trialEndsAt,
-        activatedAt: isTrial ? null : now,
+        activatedAt: isTrial ? existing.activatedAt : now,
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
         cancelledAt: null,
-        graceEndsAt: null, // back in good standing — clear any grace buffer
+        graceEndsAt: null, // subscribing/renewing clears any grace buffer
         failedBillingAttempts: 0,
         lastFailureReason: null,
       })
@@ -138,33 +195,48 @@ export async function handlePlanActivated(
       planId: planKey,
       status: isTrial ? "trialing" : "active",
       trialStartedAt: isTrial ? now : null,
-      trialEndsAt: isTrial ? trialEnd : null,
+      trialEndsAt: trialEnd,
       activatedAt: isTrial ? null : now,
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
       failedBillingAttempts: 0,
     });
   }
 
   console.info(
-    `[SHOPLINE Billing] Plan activated: store=${slStoreId}, plan=${planKey}, trial=${isTrial}`,
+    `[SHOPLINE Billing] Subscription created/renewed: store=${slStoreId}, plan=${planKey}, trial=${isTrial}, period=${pkg?.period ?? "?"}${pkg?.periodType ?? ""}`,
   );
 }
 
 /**
- * Handle app_plan/expired webhook.
- * Marks the subscription as expired/cancelled.
+ * appsubscription/expiration — the plan ended.
+ *
+ * `expireType` matters: an UPGRADE or NEXT_CYCLE_ACTIVATED is a *continuation*
+ * (SHOPLINE follows it with a create for the new package), so it must NOT end
+ * the merchant's access. Only a termination / manual cancel / grace-period
+ * expiry moves the subscription to `expired` and starts the buffer.
  */
-export async function handlePlanExpired(
+export async function handleSubscriptionExpiration(
   db: Db,
   organizationId: number,
   slStoreId: number,
-  payload: AppPlanExpiredPayload,
+  payload: AppSubscriptionExpirationPayload,
 ): Promise<void> {
   const now = new Date();
+  const expireType = payload.expireType ?? payload.type;
 
-  // Expiry starts the grace buffer — the merchant keeps access for
-  // TIER_1_GRACE_PERIOD_DAYS while they resolve, then the sync gate cuts off.
-  // Preserve an already-running grace deadline so a later expiry event can't
-  // extend the buffer.
+  const isContinuation =
+    expireType === SHOPLINE_BILLING_EXPIRE_TYPE.UPGRADE ||
+    expireType === SHOPLINE_BILLING_EXPIRE_TYPE.NEXT_CYCLE_ACTIVATED;
+
+  if (isContinuation) {
+    console.info(
+      `[SHOPLINE Billing] Subscription superseded (expireType=${expireType}) — access retained: store=${slStoreId}`,
+    );
+    return;
+  }
+
+  // Preserve an already-running grace deadline so a repeat event can't extend it.
   const [existing] = await db
     .select({ graceEndsAt: slConnectorSubscriptions.graceEndsAt })
     .from(slConnectorSubscriptions)
@@ -176,12 +248,18 @@ export async function handlePlanExpired(
     )
     .limit(1);
 
+  // A grace-period expiry means the buffer itself has run out → block now.
+  const graceExhausted = expireType === SHOPLINE_BILLING_EXPIRE_TYPE.GRACE_PERIOD;
+  const graceEndsAt = graceExhausted
+    ? now
+    : (existing?.graceEndsAt ?? graceDeadlineFrom(payload.subPackage, now));
+
   await db
     .update(slConnectorSubscriptions)
     .set({
       status: "expired",
       cancelledAt: now,
-      graceEndsAt: existing?.graceEndsAt ?? graceDeadline(now),
+      graceEndsAt,
     })
     .where(
       and(
@@ -191,77 +269,75 @@ export async function handlePlanExpired(
     );
 
   console.info(
-    `[SHOPLINE Billing] Plan expired: store=${slStoreId}, reason=${payload.reason || "unknown"}, grace ends ${(existing?.graceEndsAt ?? graceDeadline(now)).toISOString()}`,
+    `[SHOPLINE Billing] Subscription expired: store=${slStoreId}, expireType=${expireType}, grace ends ${graceEndsAt.toISOString()}`,
   );
 }
 
 /**
- * Handle billing_attempts/succeed webhook.
- * Confirms the subscription is active and resets failure counters.
+ * appsubscription/paid — a payment was finalised.
+ *
+ * `status` drives the outcome: 200 confirms the subscription (clears grace and
+ * failure counters); 400 is a failed charge (counts toward past_due and starts
+ * the grace buffer); 300 is a cancellation.
  */
-export async function handleBillingSuccess(
+export async function handleSubscriptionPaid(
   db: Db,
   organizationId: number,
   slStoreId: number,
-  payload: BillingAttemptPayload,
+  payload: AppSubscriptionPaidPayload,
 ): Promise<void> {
-  const periodStart = payload.period_start ? new Date(payload.period_start) : new Date();
-  const periodEnd = payload.period_end ? new Date(payload.period_end) : null;
+  const status = payload.status;
+  const paidAt = payload.subTime ? new Date(payload.subTime) : new Date();
 
-  await db
-    .update(slConnectorSubscriptions)
-    .set({
-      status: "active",
-      activatedAt: new Date(), // re-confirm activation
-      currentPeriodStart: periodStart,
-      currentPeriodEnd: periodEnd,
-      graceEndsAt: null, // successful charge clears any grace buffer
-      failedBillingAttempts: 0,
-      lastFailureReason: null,
-    })
-    .where(
-      and(
-        eq(slConnectorSubscriptions.slStoreId, slStoreId),
-        eq(slConnectorSubscriptions.organizationId, organizationId),
-      ),
-    );
+  const where = and(
+    eq(slConnectorSubscriptions.slStoreId, slStoreId),
+    eq(slConnectorSubscriptions.organizationId, organizationId),
+  );
 
-  console.info(`[SHOPLINE Billing] Billing succeeded: store=${slStoreId}`);
-}
+  // ── Success ───────────────────────────────────────────────────────────────
+  if (status === SHOPLINE_BILLING_PAID_STATUS.SUCCESS) {
+    await db
+      .update(slConnectorSubscriptions)
+      .set({
+        status: "active",
+        activatedAt: paidAt,
+        currentPeriodStart: paidAt,
+        graceEndsAt: null, // successful charge clears any grace buffer
+        failedBillingAttempts: 0,
+        lastFailureReason: null,
+      })
+      .where(where);
+    console.info(`[SHOPLINE Billing] Payment succeeded: store=${slStoreId}, order=${payload.bizOrderNo ?? "?"}`);
+    return;
+  }
 
-/**
- * Handle billing_attempts/fail webhook.
- * Increments failure counter and marks as past_due after threshold.
- */
-export async function handleBillingFailure(
-  db: Db,
-  organizationId: number,
-  slStoreId: number,
-  payload: BillingAttemptPayload,
-): Promise<void> {
-  const failureReason = payload.failure_reason || payload.error_message || "Unknown billing failure";
+  // ── Cancelled ─────────────────────────────────────────────────────────────
+  if (status === SHOPLINE_BILLING_PAID_STATUS.CANCELLED) {
+    await db
+      .update(slConnectorSubscriptions)
+      .set({ status: "cancelled", cancelledAt: paidAt })
+      .where(where);
+    console.info(`[SHOPLINE Billing] Payment cancelled: store=${slStoreId}, order=${payload.bizOrderNo ?? "?"}`);
+    return;
+  }
 
+  // ── Failed ────────────────────────────────────────────────────────────────
   const [existing] = await db
     .select()
     .from(slConnectorSubscriptions)
-    .where(
-      and(
-        eq(slConnectorSubscriptions.slStoreId, slStoreId),
-        eq(slConnectorSubscriptions.organizationId, organizationId),
-      ),
-    )
+    .where(where)
     .limit(1);
 
   const attempts = (existing?.failedBillingAttempts ?? 0) + 1;
-  // After 3 failed attempts, mark as past_due (SHOPLINE may cancel after their
-  // own threshold); before that, preserve whatever status the row already had.
+  // After 3 failed charges, mark past_due (SHOPLINE applies its own threshold
+  // too); before that, preserve the existing status.
   const goesPastDue = attempts >= 3;
   const newStatus = goesPastDue ? "past_due" : (existing?.status ?? "active");
-  // Entering past_due starts the grace buffer (once) — keep an existing deadline
-  // so repeated failures don't extend it.
+  // Entering past_due starts the grace buffer once — repeated failures must not
+  // extend it.
   const graceEndsAt = goesPastDue
-    ? ((existing?.graceEndsAt as Date | null | undefined) ?? graceDeadline())
-    : (existing?.graceEndsAt as Date | null | undefined) ?? null;
+    ? ((existing?.graceEndsAt as Date | null | undefined) ?? graceDeadline(paidAt))
+    : ((existing?.graceEndsAt as Date | null | undefined) ?? null);
 
   await db
     .update(slConnectorSubscriptions)
@@ -269,55 +345,28 @@ export async function handleBillingFailure(
       status: newStatus,
       graceEndsAt,
       failedBillingAttempts: attempts,
-      lastFailureReason: failureReason,
+      lastFailureReason: `Payment failed (status ${status ?? "unknown"}, order ${payload.bizOrderNo ?? "?"})`,
     })
-    .where(
-      and(
-        eq(slConnectorSubscriptions.slStoreId, slStoreId),
-        eq(slConnectorSubscriptions.organizationId, organizationId),
-      ),
-    );
+    .where(where);
 
   console.warn(
-    `[SHOPLINE Billing] Billing failed: store=${slStoreId}, attempts=${attempts}, reason=${failureReason}`,
+    `[SHOPLINE Billing] Payment failed: store=${slStoreId}, attempts=${attempts}, status=${status}`,
   );
 }
 
 /**
- * Handle app/installation_status_changed webhook.
- * Updates the store status when app is uninstalled.
+ * Cancel a store's subscription — called from the uninstall path
+ * (`shop/redact`, which SHOPLINE fires 48h after an uninstall). There is no
+ * `app/installation_status_changed` topic; uninstall reaches us via GDPR.
  */
-export async function handleInstallationStatusChanged(
+export async function cancelSubscriptionForStore(
   db: Db,
-  organizationId: number,
   slStoreId: number,
-  payload: InstallationStatusPayload,
 ): Promise<void> {
-  const action = payload.status || payload.action || "";
-
-  if (action === "uninstalled") {
-    // Mark store as uninstalled
-    await db
-      .update(slConnectorStores)
-      .set({
-        status: "uninstalled",
-        uninstalledAt: new Date(),
-      })
-      .where(eq(slConnectorStores.id, slStoreId));
-
-    // Cancel subscription
-    await db
-      .update(slConnectorSubscriptions)
-      .set({
-        status: "cancelled",
-        cancelledAt: new Date(),
-      })
-      .where(eq(slConnectorSubscriptions.slStoreId, slStoreId));
-
-    console.info(`[SHOPLINE Billing] App uninstalled: store=${slStoreId}`);
-  } else {
-    console.info(`[SHOPLINE Billing] Installation status changed: store=${slStoreId}, action=${action}`);
-  }
+  await db
+    .update(slConnectorSubscriptions)
+    .set({ status: "cancelled", cancelledAt: new Date() })
+    .where(eq(slConnectorSubscriptions.slStoreId, slStoreId));
 }
 
 // ─── Main Dispatcher ─────────────────────────────────────────────────────────
@@ -334,24 +383,18 @@ export async function processBillingWebhook(
   payload: Record<string, unknown>,
 ): Promise<void> {
   switch (topic) {
-    case "app_plan/activated":
-      await handlePlanActivated(db, organizationId, slStoreId, payload as AppPlanActivatedPayload);
+    case "appsubscription/create":
+      await handleSubscriptionCreate(db, organizationId, slStoreId, payload as AppSubscriptionCreatePayload);
       break;
-    case "app_plan/expired":
-      await handlePlanExpired(db, organizationId, slStoreId, payload as AppPlanExpiredPayload);
+    case "appsubscription/paid":
+      await handleSubscriptionPaid(db, organizationId, slStoreId, payload as AppSubscriptionPaidPayload);
       break;
-    case "billing_attempts/succeed":
-      await handleBillingSuccess(db, organizationId, slStoreId, payload as BillingAttemptPayload);
-      break;
-    case "billing_attempts/fail":
-      await handleBillingFailure(db, organizationId, slStoreId, payload as BillingAttemptPayload);
-      break;
-    case "app/installation_status_changed":
-      await handleInstallationStatusChanged(
+    case "appsubscription/expiration":
+      await handleSubscriptionExpiration(
         db,
         organizationId,
         slStoreId,
-        payload as InstallationStatusPayload,
+        payload as AppSubscriptionExpirationPayload,
       );
       break;
     default:
