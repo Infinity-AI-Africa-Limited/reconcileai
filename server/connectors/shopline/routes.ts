@@ -183,22 +183,14 @@ export function createShoplineRouter(): Router {
       }
 
       // Verify the install request signature (both accepted encodings).
-      const installSig = verifyShoplineGetSignature(req, "install");
-      if (!installSig.valid) {
-        // Narrowly-scoped diagnostic escape hatch. This route only REDIRECTS to
-        // SHOPLINE's own authorization page — it mints no token, writes no data
-        // and provisions no tenant — so allowing it through while the correct
-        // signing variant is identified is low-risk and bounded. The callback,
-        // webhooks and GDPR routes are never covered by this.
-        if (ENV.shoplineInstallDiagnostic) {
-          console.warn(
-            `[shopline-install] SIGNATURE UNVERIFIED — proceeding because SHOPLINE_INSTALL_DIAGNOSTIC is enabled. ` +
-              `This must be turned off once the correct signing variant is confirmed. handle=${handle}`,
-          );
-        } else {
-          console.warn("[shopline-install] Invalid signature for handle:", handle);
-          return res.status(403).json({ error: "Invalid signature" });
-        }
+      // STRICT — no bypass. The temporary SHOPLINE_INSTALL_DIAGNOSTIC escape
+      // hatch was removed once the root cause was found (SHOPLINE_APP_SECRET
+      // was simply missing from the hosting environment) and the flow was
+      // verified end-to-end on two developer stores. Redacted diagnostics
+      // remain available via SHOPLINE_SIG_DEBUG, which bypasses nothing.
+      if (!verifyShoplineGetSignature(req, "install").valid) {
+        console.warn("[shopline-install] Invalid signature for handle:", handle);
+        return res.status(403).json({ error: "Invalid signature" });
       }
 
       // Build the callback URL using the request's origin
