@@ -423,7 +423,6 @@ Three procedures added in PR #3:
 | `SHOPLINE_APP_SECRET` | *(secret — hosting env only)* | From Partner Portal; HMAC signing key |
 | `SHOPLINE_WEBHOOK_SECRET` | Same as APP Secret | SHOPLINE does not expose a separate signing key |
 | `SHOPLINE_SIG_DEBUG` | `true` to enable | **Redacted** OAuth signature diagnostics: which encoding matched, the signed message with `code`/`sign`/`customField` masked, signature *prefixes* only, and timestamp skew. Never logs secret material. Off by default |
-| `SHOPLINE_INSTALL_DIAGNOSTIC` | `true` to enable | Lets an **unverified install request** still redirect to SHOPLINE's authorize page while the correct signing variant is identified. Scope is deliberately narrow — see the note below. Off by default; turn back off once confirmed |
 
 Set these only in the hosting platform's secret store (Railway env / `.env`,
 which is gitignored). The code reads them from `ENV.shoplineAppKey` /
@@ -451,12 +450,22 @@ timestamp window** and compares in constant time.
 > Likewise, never log secret material (an app-secret prefix is still secret
 > material) or the OAuth `code`, which is a bearer credential for 10 minutes.
 
-**Diagnostic mode scope.** `SHOPLINE_INSTALL_DIAGNOSTIC` applies to the
-`/api/shopline/install` route **only**. That route's sole action is a redirect
-to SHOPLINE's own authorization page — it mints no token, writes no data and
-provisions no tenant. The **OAuth callback stays strict at all times** (it
-exchanges the code for an access token and provisions a tenant), as do the
-webhook receiver and the GDPR endpoints.
+**No bypass exists.** Every SHOPLINE route — install, callback, webhooks and
+GDPR — verifies strictly. The temporary `SHOPLINE_INSTALL_DIAGNOSTIC` escape
+hatch was **removed from the code** on 2026-07-30 once the root cause was found
+and the flow verified end-to-end on two developer stores. If a signature ever
+fails again, diagnose with `SHOPLINE_SIG_DEBUG` (redacted, bypasses nothing) —
+do not reintroduce a bypass.
+
+> **Root cause, for the record (2026-07-30):** the persistent `403 Invalid
+> signature` on install was **not** a signing-algorithm problem. `SHOPLINE_APP_SECRET`
+> was simply missing from the Railway environment, so every HMAC was computed
+> with an empty key and could never match. Five verification "strategies" (two
+> of them exploitable) were added chasing the symptom. **On any SHOPLINE auth
+> failure, confirm the credential is actually present in the environment before
+> touching verification code** — the `SHOPLINE_APP_SECRET is not configured`
+> log line exists precisely to make that a one-test question. The same missing
+> secret was also silently 401-ing every webhook and GDPR delivery.
 
 > **⚠️ Security note (2026-07-19):** earlier revisions of this file pasted the
 > live APP Key and APP Secret here in plaintext. The APP Secret is the HMAC
