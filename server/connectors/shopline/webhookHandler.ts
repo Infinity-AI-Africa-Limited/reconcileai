@@ -36,6 +36,7 @@ import { verifyWebhookHmac } from "./signature";
 import { ENV } from "../../_core/env";
 import { deleteToken } from "./tokenStore";
 import { processBillingWebhook } from "./billingWebhook";
+import { scheduleReconciliation } from "./realtimeSync";
 import { SHOPLINE_BILLING_WEBHOOK_TOPICS } from "../../../shared/shoplineConstants";
 
 export interface InboundWebhook {
@@ -170,6 +171,13 @@ export async function ingestWebhook(
  * Each handler is responsible for updating the reconciliation state.
  *
  * Topics aligned with the verified SHOPLINE webhook catalogue (spec §A7).
+ *
+ * Reconciliation is REAL-TIME: any topic that changes reconciliation state
+ * schedules a debounced sync for the store (see realtimeSync.ts), so a
+ * merchant sees results within seconds of a payment rather than waiting for
+ * the 15-minute poll. Bursts are coalesced into a single run per store to stay
+ * inside SHOPLINE's per-store rate limit. The scheduling call is deliberately
+ * non-blocking — the HTTP layer has already acked 200.
  */
 async function processWebhookEvent(
   db: Db,
@@ -178,6 +186,10 @@ async function processWebhookEvent(
   topic: string,
   payload: unknown,
 ): Promise<void> {
+  // Arm the debounced sync first: even if a per-topic handler below throws,
+  // the reconciliation still happens (the event was real and state changed).
+  scheduleReconciliation(organizationId, slStoreId, topic);
+
   switch (topic) {
     // ─── Order lifecycle ──────────────────────────────────────────────────
     case "orders/create":
@@ -257,7 +269,7 @@ async function handleOrderPaid(
   slStoreId: number,
   payload: unknown,
 ): Promise<void> {
-  // TODO (Phase 2): enqueue a reconciliation job for this order
+  // Reconciliation is scheduled centrally in processWebhookEvent (debounced).
   const order = payload as { id?: string; name?: string; current_total_price_set?: unknown };
   console.info(
     `[SHOPLINE] Order paid: org=${organizationId} store=${slStoreId} orderId=${order?.id} name=${order?.name}`,
@@ -298,7 +310,8 @@ async function handleOrderCancelled(
   console.info(
     `[SHOPLINE] Order cancelled: org=${organizationId} store=${slStoreId} orderId=${order?.id} name=${order?.name}`,
   );
-  // TODO (Phase 2): create reversal exception if order was already reconciled
+  // The scheduled sync re-reconciles this order; any resulting mismatch is
+  // classified by the retail taxonomy (e.g. retail_void_not_reversed).
 }
 
 async function handleOrderDeleted(
@@ -325,7 +338,8 @@ async function handleRefundCreated(
   console.info(
     `[SHOPLINE] Refund created: org=${organizationId} store=${slStoreId} refundId=${refund?.id} orderId=${refund?.order_id}`,
   );
-  // TODO (Phase 2): create REFUND_NOT_CREDITED exception if not matched within window
+  // The refund leg is matched by the scheduled sync; an uncredited refund
+  // surfaces as retail_refund_not_settled from the taxonomy.
 }
 
 async function handleRefundUpdated(
@@ -352,7 +366,7 @@ async function handleTransactionCreated(
   console.info(
     `[SHOPLINE] Transaction created: org=${organizationId} store=${slStoreId} txId=${tx?.id} orderId=${tx?.order_id} kind=${tx?.kind} status=${tx?.status}`,
   );
-  // TODO (Phase 2): enqueue for real-time reconciliation matching
+  // Reconciliation is scheduled centrally in processWebhookEvent (debounced).
 }
 
 // ─── GDPR handlers (mandatory for App Store review) ─────────────────────────
