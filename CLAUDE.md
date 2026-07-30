@@ -396,11 +396,41 @@ Three procedures added in PR #3:
 - `shoplineConnector.recentWebhookEvents` — last N webhook events for the store
 - `shoplineConnector.triggerManualSync` — triggers an on-demand sync cycle
 
-### 2B.7 Scheduled Sync Handlers (registered in `server/_core/index.ts`)
+### 2B.7 Sync triggers — real-time first, polling as the safety net
+
+**Reconciliation is event-driven.** A webhook whose topic changes
+reconciliation state schedules a sync for that store via
+`server/connectors/shopline/realtimeSync.ts`, so a merchant normally sees
+results within ~20 seconds of a payment rather than waiting for the next poll.
+
+Events are **coalesced per store**, which is the part that matters: one
+`runSyncCycle` makes several paginated API calls, and SHOPLINE's per-store
+limit is a leaky bucket (burst 40, drain 4 req/s). A store importing 200
+orders emits 200+ webhooks in seconds — reconciling per event would guarantee
+a 429. So:
+
+- `DEBOUNCE_MS` (20s) — quiet period; each further event resets it.
+- `MAX_WAIT_MS` (60s) — hard cap, so a continuous stream can't starve the sync.
+- In-flight guard — never two concurrent cycles for one store; events arriving
+  mid-run earn exactly one follow-up pass.
+- Trigger topics exclude `orders/create` (still unpaid — nothing to match;
+  `orders/paid` follows), `orders/delete`, GDPR and `appsubscription/*`.
+
+Scheduling happens **before** the per-topic handlers and is non-blocking; the
+HTTP layer has already acked 200, so SHOPLINE's 5-second budget is untouched.
+
+> ⚠️ The scheduler is **per-process**. With multiple Railway instances each
+> keeps its own timers, so a store may sync once per instance in a window —
+> wasteful, not incorrect (ingest dedupes; `runSyncCycle` is idempotent over
+> its window). Moving the trigger onto the BullMQ queue once `REDIS_URL` is
+> provisioned makes it cluster-wide. See §10.
+
+The scheduled handlers remain as the **safety net** for missed or dropped
+deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
 
 | Handler | Interval | Purpose |
 |---|---|---|
-| 15-minute polling | Every 15 min | Fetch new orders/payments since last watermark |
+| 15-minute polling | Every 15 min | Catch-up for missed webhooks, since last watermark |
 | Daily batch sync | Once daily | Full reconciliation run across all active stores |
 | Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
 
