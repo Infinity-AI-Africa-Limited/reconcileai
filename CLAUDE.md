@@ -563,6 +563,28 @@ keyed on their precise `retail_*` category rather than a coarse bucket.
 
 8. **7-day free trial** (not 14 days) — confirmed in the Partner Portal pricing config.
 
+### 2B.10B Development Stores (Confirmed 2026-07-31)
+
+There are **two** development stores registered under the InfinityAI Africa Limited partner account.
+**`reconcileai-dev` is the canonical (primary) test store.** All engineering work, webhook tests,
+and OAuth flow verification MUST use this store.
+
+| Field | ReconcileAI Dev Store (PRIMARY ✅) | ReconcileAI (secondary) |
+|---|---|---|
+| Handle | `reconcileai-dev` | `reconcileai` |
+| URL | `https://reconcileai-dev.myshopline.com` | `https://reconcileai.myshopline.com` |
+| Admin | `https://reconcileai-dev.myshopline.com/admin` | `https://reconcileai.myshopline.com/admin` |
+| Store ID | `1785294964809` | `1785167666577` |
+| Created | 2026-07-30 | 2026-07-28 |
+| Region | NA / US | NA / US |
+| App currently installed | No (needs fresh install via Test App) | No |
+
+> **Note:** Both stores are structurally identical blank dev stores with no products, no
+> contact email, and no settings that differ between them. The `reconcileai-dev` store is
+> canonical because it is the one referenced in all prior engineering work and in
+> `tokenStore.ts` (dev fallback key name). The secondary `reconcileai` store can be used
+> as a backup test environment but should not be the primary reference in code or docs.
+
 ### 2B.11 What the App Store Review Will Check
 
 Before submitting for App Store review, these must be verified:
@@ -570,7 +592,7 @@ Before submitting for App Store review, these must be verified:
 - Webhook receiver acks < 5 seconds (queue-first design)
 - Read-only scopes only (no write operations on merchant stores)
 - Privacy policy + Terms of Service pages accessible at public URLs
-- Full OAuth flow works end-to-end on a SHOPLINE developer store
+- Full OAuth flow works end-to-end on `reconcileai-dev.myshopline.com` (canonical dev store)
 - App listing assets: logo 120×120, 3 feature bullets, EN default language
 
 ### 2B.12 Remaining Steps to Go Live (code is merged & deployed)
@@ -580,9 +602,25 @@ deploy via `pnpm db:migrate`). What remains is external go-live, not engineering
 
 1. ✅ Migrations applied on deploy (`0071_shopline_subscriptions`, `0072_shopline_gdpr_requests`)
 2. ✅ Deployed to `https://www.reconcileaiafrica.com`
-3. ⬜ Test the full OAuth flow on a SHOPLINE developer store
-4. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
-5. ⬜ Address any App Store review feedback
+3. ✅ Scheduler DB resilience fix (ECONNRESET/ETIMEDOUT retry) — PR #14 (2026-07-31)
+4. ✅ Integration tests (MOCKED): webhook → realtimeSync → sync trigger — PR #14 (2026-07-31).
+   Note: `syncOrchestrator` is mocked in these tests, so they prove the wiring,
+   not the reconciliation itself.
+5. 🟡 Webhook RECEIVE path verified with a synthetic signed request: 200 ack,
+   debounce fired at 20s. The sync it triggered then **failed** (dev could not
+   decrypt the token — AES-GCM key is derived from `JWT_SECRET`, which differs
+   between dev and prod). So the receive half is proven; the
+   token → SHOPLINE API → engine → Settlement Monitor half is **not yet**.
+6. ⬜ **Real end-to-end proof still outstanding:** place an actual order on
+   `reconcileai-dev.myshopline.com` against PRODUCTION and confirm a
+   `[shopline-realtime] synced store=…` line plus the order appearing in the
+   Settlement Monitor. Only that exercises token decrypt, the API pull and the
+   engine together.
+7. ⬜ Test the full OAuth flow on `reconcileai-dev.myshopline.com` (canonical dev store — see §2B.10B)
+   - In Partner Portal: Test App → select "ReconcileAI Dev Store" → verify redirect to install URL
+   - Confirm welcome screen at `https://www.reconcileaiafrica.com/shopline/welcome`
+8. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
+9. ⬜ Address any App Store review feedback
 
 ---
 
