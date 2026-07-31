@@ -9,6 +9,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("./db", () => ({
   getDueScheduledTasks: vi.fn(),
   resetDb: vi.fn(),
+  // Used by the real executeScheduledTask, so the duplicate-run guard can be
+  // exercised through actual behaviour rather than by spying on an internal
+  // ESM call (which isn't interceptable).
+  getScheduledTaskById: vi.fn(),
+  createScheduleRunHistory: vi.fn(),
+  updateScheduleRunHistory: vi.fn(),
+  createReconciliationJob: vi.fn(),
+  updateScheduledTask: vi.fn(),
 }));
 
 // ─── Mock executeScheduledTask (internal to schedulingEngine) ────────
@@ -166,5 +174,68 @@ describe("schedulerTick — DB connection resilience", () => {
     // 3 attempts total (1 initial + 2 retries), resetDb called before each retry
     expect(dbMock.getDueScheduledTasks).toHaveBeenCalledTimes(3);
     expect(dbMock.resetDb).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── Hardening: a retry must not re-run tasks already attempted this tick ────
+
+describe("schedulerTick — duplicate-run guard", () => {
+  it("executes a task only once even when its failure path throws mid-outage", async () => {
+    // executeScheduledTask handles its own failures, but its FAILURE path also
+    // writes to the DB. During the very outage this retry loop exists for,
+    // that write throws too and the error escapes — restarting the tick with
+    // the task STILL marked due, because neither the success nor the failure
+    // write landed. Without the guard the task would run a second time.
+    let fetches = 0;
+    vi.mocked(dbMock.getDueScheduledTasks).mockImplementation(async () => {
+      fetches++;
+      return [{ id: 42, name: "shopline-sync-cycle" }] as never;
+    });
+    vi.mocked(dbMock.getScheduledTaskById).mockResolvedValue({
+      id: 42,
+      name: "shopline-sync-cycle",
+      isActive: true,
+      frequency: "daily",
+      scheduledTime: "02:00",
+      totalRuns: 0,
+      failedRuns: 0,
+      userId: 1,
+    } as never);
+    vi.mocked(dbMock.createScheduleRunHistory).mockResolvedValue(1 as never);
+    // Job creation fails transiently …
+    vi.mocked(dbMock.createReconciliationJob).mockRejectedValue(makeDbError("ECONNRESET"));
+    // … and the failure-path write fails too, so the error escapes the task.
+    vi.mocked(dbMock.updateScheduledTask).mockRejectedValue(makeDbError("ECONNRESET"));
+
+    const tickPromise = schedulerTick();
+    await vi.runAllTimersAsync();
+    await tickPromise;
+
+    expect(fetches).toBeGreaterThan(1); // the tick did retry …
+    // … but the task itself ran exactly once — no duplicate reconciliation job.
+    expect(dbMock.createReconciliationJob).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── Hardening: transient codes nested deeper than one `cause` level ─────────
+
+describe("isTransientDbError — deep cause chains", () => {
+  it("retries when the transient code is two levels down (Drizzle → mysql2 → socket)", async () => {
+    const inner = makeDbError("ECONNRESET");
+    const middle = new Error("mysql2 query failed");
+    (middle as Error & { cause?: unknown }).cause = inner;
+    const outer = new Error("DrizzleQueryError: Failed query");
+    (outer as Error & { cause?: unknown }).cause = middle;
+
+    vi.mocked(dbMock.getDueScheduledTasks)
+      .mockRejectedValueOnce(outer)
+      .mockResolvedValueOnce([] as never);
+
+    const tickPromise = schedulerTick();
+    await vi.runAllTimersAsync();
+    await tickPromise;
+
+    expect(dbMock.getDueScheduledTasks).toHaveBeenCalledTimes(2);
+    expect(dbMock.resetDb).toHaveBeenCalledTimes(1);
   });
 });

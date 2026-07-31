@@ -168,6 +168,26 @@ vi.mock("./connectors/shopline/syncOrchestrator", () => ({
   runSyncCycle: (...args: unknown[]) => runSyncCycleMock(...args),
 }));
 
+/**
+ * Dummy signing key for the fixtures below — NEVER a real credential.
+ *
+ * The real SHOPLINE app secret cannot be rotated (the Partner Portal exposes
+ * no regenerate control while the app is in Draft), so committing it to a
+ * tracked file would be permanent disclosure. Mocking ENV here also makes
+ * these tests deterministic: they no longer pass or fail depending on what
+ * happens to be set in the ambient environment.
+ */
+const TEST_APP_SECRET = "test-app-secret-not-a-real-credential";
+
+vi.mock("./_core/env", () => ({
+  ENV: {
+    shoplineAppSecret: "test-app-secret-not-a-real-credential",
+    shoplineAppKey: "test-app-key",
+    shoplineSigDebug: false,
+    appUrl: "https://test.invalid",
+  },
+}));
+
 // Import after mocks are set up
 import { ingestWebhook, type InboundWebhook } from "./connectors/shopline/webhookHandler";
 import {
@@ -182,7 +202,7 @@ import {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const APP_SECRET = "e5d30f5aee513ad8762ba20ad04b88eb92ee8d31";
+const APP_SECRET = TEST_APP_SECRET;
 
 function makeSignedWebhook(
   topic: string,

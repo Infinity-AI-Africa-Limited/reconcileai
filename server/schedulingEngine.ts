@@ -263,16 +263,37 @@ let schedulerInterval: ReturnType<typeof setInterval> | null = null;
 /** Transient DB error codes that warrant a reconnect + retry. */
 const DB_TRANSIENT_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "PROTOCOL_CONNECTION_LOST"]);
 
+/**
+ * Walk the full `cause` chain — Drizzle wraps the mysql2 error, and TiDB's
+ * connection drops can arrive nested more than one level deep, so checking
+ * only `err.code` and `err.cause.code` would miss them.
+ */
 function isTransientDbError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as Record<string, unknown>;
-  const code = (e.code ?? (e.cause as Record<string, unknown>)?.code) as string | undefined;
-  return !!code && DB_TRANSIENT_CODES.has(code);
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth++) {
+    const code = (current as Record<string, unknown>).code;
+    if (typeof code === "string" && DB_TRANSIENT_CODES.has(code)) return true;
+    current = (current as Record<string, unknown>).cause;
+  }
+  return false;
 }
 
 export async function schedulerTick(): Promise<void> {
   const MAX_RETRIES = 2;
   const RETRY_DELAY_MS = 3000;
+
+  /**
+   * Tasks already attempted in THIS tick, so a retry never re-runs them.
+   *
+   * `executeScheduledTask` handles its own failures, but its failure path also
+   * writes to the database (to record lastRunStatus/nextRunAt). During the
+   * very outage this retry loop exists for, that write throws too and the
+   * error escapes. Without this guard the retry would restart the whole tick
+   * with the task still marked due — because neither the success nor the
+   * failure write landed — and execute it a second time, creating duplicate
+   * jobs, reports or emails.
+   */
+  const attempted = new Set<number>();
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -280,6 +301,11 @@ export async function schedulerTick(): Promise<void> {
       const dueTasks = await db.getDueScheduledTasks(now);
 
       for (const task of dueTasks) {
+        if (attempted.has(task.id)) {
+          console.warn(`[Scheduler] Task ${task.id} already attempted this tick — skipping to avoid a duplicate run`);
+          continue;
+        }
+        attempted.add(task.id);
         console.log(`[Scheduler] Executing task: ${task.name} (ID: ${task.id})`);
         const result = await executeScheduledTask(task.id);
         if (result.success) {
