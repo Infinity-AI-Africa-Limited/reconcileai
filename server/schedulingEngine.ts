@@ -260,22 +260,45 @@ export async function executeScheduledTask(taskId: number): Promise<{
 
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
 
-export async function schedulerTick(): Promise<void> {
-  try {
-    const now = new Date();
-    const dueTasks = await db.getDueScheduledTasks(now);
+/** Transient DB error codes that warrant a reconnect + retry. */
+const DB_TRANSIENT_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "PROTOCOL_CONNECTION_LOST"]);
 
-    for (const task of dueTasks) {
-      console.log(`[Scheduler] Executing task: ${task.name} (ID: ${task.id})`);
-      const result = await executeScheduledTask(task.id);
-      if (result.success) {
-        console.log(`[Scheduler] Task ${task.id} started job ${result.jobId}`);
+function isTransientDbError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  const code = (e.code ?? (e.cause as Record<string, unknown>)?.code) as string | undefined;
+  return !!code && DB_TRANSIENT_CODES.has(code);
+}
+
+export async function schedulerTick(): Promise<void> {
+  const MAX_RETRIES = 2;
+  const RETRY_DELAY_MS = 3000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const now = new Date();
+      const dueTasks = await db.getDueScheduledTasks(now);
+
+      for (const task of dueTasks) {
+        console.log(`[Scheduler] Executing task: ${task.name} (ID: ${task.id})`);
+        const result = await executeScheduledTask(task.id);
+        if (result.success) {
+          console.log(`[Scheduler] Task ${task.id} started job ${result.jobId}`);
+        } else {
+          console.error(`[Scheduler] Task ${task.id} failed: ${result.error}`);
+        }
+      }
+      return; // success — exit retry loop
+    } catch (error) {
+      if (isTransientDbError(error) && attempt < MAX_RETRIES) {
+        console.warn(`[Scheduler] Transient DB error on attempt ${attempt + 1}/${MAX_RETRIES + 1} — resetting connection and retrying in ${RETRY_DELAY_MS}ms`, (error as Record<string, unknown>).code ?? (error as Record<string, unknown>).message);
+        db.resetDb();
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
       } else {
-        console.error(`[Scheduler] Task ${task.id} failed: ${result.error}`);
+        console.error("[Scheduler] Tick failed:", error);
+        return;
       }
     }
-  } catch (error) {
-    console.error("[Scheduler] Tick failed:", error);
   }
 }
 
