@@ -396,11 +396,41 @@ Three procedures added in PR #3:
 - `shoplineConnector.recentWebhookEvents` — last N webhook events for the store
 - `shoplineConnector.triggerManualSync` — triggers an on-demand sync cycle
 
-### 2B.7 Scheduled Sync Handlers (registered in `server/_core/index.ts`)
+### 2B.7 Sync triggers — real-time first, polling as the safety net
+
+**Reconciliation is event-driven.** A webhook whose topic changes
+reconciliation state schedules a sync for that store via
+`server/connectors/shopline/realtimeSync.ts`, so a merchant normally sees
+results within ~20 seconds of a payment rather than waiting for the next poll.
+
+Events are **coalesced per store**, which is the part that matters: one
+`runSyncCycle` makes several paginated API calls, and SHOPLINE's per-store
+limit is a leaky bucket (burst 40, drain 4 req/s). A store importing 200
+orders emits 200+ webhooks in seconds — reconciling per event would guarantee
+a 429. So:
+
+- `DEBOUNCE_MS` (20s) — quiet period; each further event resets it.
+- `MAX_WAIT_MS` (60s) — hard cap, so a continuous stream can't starve the sync.
+- In-flight guard — never two concurrent cycles for one store; events arriving
+  mid-run earn exactly one follow-up pass.
+- Trigger topics exclude `orders/create` (still unpaid — nothing to match;
+  `orders/paid` follows), `orders/delete`, GDPR and `appsubscription/*`.
+
+Scheduling happens **before** the per-topic handlers and is non-blocking; the
+HTTP layer has already acked 200, so SHOPLINE's 5-second budget is untouched.
+
+> ⚠️ The scheduler is **per-process**. With multiple Railway instances each
+> keeps its own timers, so a store may sync once per instance in a window —
+> wasteful, not incorrect (ingest dedupes; `runSyncCycle` is idempotent over
+> its window). Moving the trigger onto the BullMQ queue once `REDIS_URL` is
+> provisioned makes it cluster-wide. See §10.
+
+The scheduled handlers remain as the **safety net** for missed or dropped
+deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
 
 | Handler | Interval | Purpose |
 |---|---|---|
-| 15-minute polling | Every 15 min | Fetch new orders/payments since last watermark |
+| 15-minute polling | Every 15 min | Catch-up for missed webhooks, since last watermark |
 | Daily batch sync | Once daily | Full reconciliation run across all active stores |
 | Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
 
@@ -423,7 +453,6 @@ Three procedures added in PR #3:
 | `SHOPLINE_APP_SECRET` | *(secret — hosting env only)* | From Partner Portal; HMAC signing key |
 | `SHOPLINE_WEBHOOK_SECRET` | Same as APP Secret | SHOPLINE does not expose a separate signing key |
 | `SHOPLINE_SIG_DEBUG` | `true` to enable | **Redacted** OAuth signature diagnostics: which encoding matched, the signed message with `code`/`sign`/`customField` masked, signature *prefixes* only, and timestamp skew. Never logs secret material. Off by default |
-| `SHOPLINE_INSTALL_DIAGNOSTIC` | `true` to enable | Lets an **unverified install request** still redirect to SHOPLINE's authorize page while the correct signing variant is identified. Scope is deliberately narrow — see the note below. Off by default; turn back off once confirmed |
 
 Set these only in the hosting platform's secret store (Railway env / `.env`,
 which is gitignored). The code reads them from `ENV.shoplineAppKey` /
@@ -451,12 +480,22 @@ timestamp window** and compares in constant time.
 > Likewise, never log secret material (an app-secret prefix is still secret
 > material) or the OAuth `code`, which is a bearer credential for 10 minutes.
 
-**Diagnostic mode scope.** `SHOPLINE_INSTALL_DIAGNOSTIC` applies to the
-`/api/shopline/install` route **only**. That route's sole action is a redirect
-to SHOPLINE's own authorization page — it mints no token, writes no data and
-provisions no tenant. The **OAuth callback stays strict at all times** (it
-exchanges the code for an access token and provisions a tenant), as do the
-webhook receiver and the GDPR endpoints.
+**No bypass exists.** Every SHOPLINE route — install, callback, webhooks and
+GDPR — verifies strictly. The temporary `SHOPLINE_INSTALL_DIAGNOSTIC` escape
+hatch was **removed from the code** on 2026-07-30 once the root cause was found
+and the flow verified end-to-end on two developer stores. If a signature ever
+fails again, diagnose with `SHOPLINE_SIG_DEBUG` (redacted, bypasses nothing) —
+do not reintroduce a bypass.
+
+> **Root cause, for the record (2026-07-30):** the persistent `403 Invalid
+> signature` on install was **not** a signing-algorithm problem. `SHOPLINE_APP_SECRET`
+> was simply missing from the Railway environment, so every HMAC was computed
+> with an empty key and could never match. Five verification "strategies" (two
+> of them exploitable) were added chasing the symptom. **On any SHOPLINE auth
+> failure, confirm the credential is actually present in the environment before
+> touching verification code** — the `SHOPLINE_APP_SECRET is not configured`
+> log line exists precisely to make that a one-test question. The same missing
+> secret was also silently 401-ing every webhook and GDPR delivery.
 
 > **⚠️ Security note (2026-07-19):** earlier revisions of this file pasted the
 > live APP Key and APP Secret here in plaintext. The APP Secret is the HMAC
