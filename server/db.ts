@@ -61,13 +61,6 @@ export async function getDb() {
   return _db;
 }
 
-/** Force-drop the cached Drizzle instance so the next getDb() call re-creates it.
- *  Call this whenever a query throws ECONNRESET / ETIMEDOUT so the next tick
- *  gets a fresh connection instead of retrying on a dead socket. */
-export function resetDb(): void {
-  _db = null;
-}
-
 // Export schema tables for use in routers
 export { resolutionTemplates, moduleConfigurations };
 
