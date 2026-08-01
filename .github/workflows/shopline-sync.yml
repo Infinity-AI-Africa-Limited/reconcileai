@@ -1,0 +1,104 @@
+name: SHOPLINE scheduled sync
+# Triggers the SHOPLINE sync endpoints on the Railway server.
+# Three jobs:
+#   syncCycle    — 15-min incremental sync (can also be run manually)
+#   dailyBatch   — full 24-hour reconciliation window (daily at 02:00 UTC)
+#   webhookCheck — verifies and re-registers webhook subscriptions (daily at 03:00 UTC)
+#
+# Setup:
+#   1. In Railway, ensure CRON_SECRET is set (or JWT_SECRET is used as fallback).
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
+#      SHOPLINE_SYNC_SECRET with the SAME value as Railway's CRON_SECRET (or JWT_SECRET).
+#   3. The secret must be set on BOTH repositories (MistaRichMan/reconcileai and
+#      Infinity-AI Africa Limited org repo).
+#
+# Note: If SHOPLINE_SYNC_SECRET is not configured on a repo, the job skips cleanly.
+on:
+  schedule:
+    - cron: "*/15 * * * *" # every 15 minutes — syncCycle
+    - cron: "0 2 * * *"    # daily at 02:00 UTC — dailyBatch
+    - cron: "0 3 * * *"    # daily at 03:00 UTC — webhookCheck
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which sync job to run"
+        required: true
+        default: "syncCycle"
+        type: choice
+        options:
+          - syncCycle
+          - dailyBatch
+          - webhookCheck
+
+jobs:
+  syncCycle:
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'syncCycle' ||
+      github.event_name == 'schedule' && (github.event.schedule == '*/15 * * * *' || github.event.schedule == null)
+    runs-on: ubuntu-latest
+    env:
+      SYNC_URL: "https://www.reconcileaiafrica.com/api/scheduled/shoplineSyncCycle"
+    steps:
+      - name: Trigger 15-min incremental sync
+        env:
+          SYNC_SECRET: ${{ secrets.SHOPLINE_SYNC_SECRET }}
+        run: |
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "SHOPLINE_SYNC_SECRET is not configured on this repository — skipping sync (expected on the mirror)."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
+            -H "x-sync-secret: $SYNC_SECRET" \
+            "$SYNC_URL")
+          echo "HTTP $code"; cat /tmp/resp; echo
+          if [ "$code" != "200" ] && [ "$code" != "202" ] && [ "$code" != "409" ]; then
+            echo "Unexpected status $code (check that SHOPLINE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"; exit 1
+          fi
+
+  dailyBatch:
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'dailyBatch' ||
+      github.event_name == 'schedule' && github.event.schedule == '0 2 * * *'
+    runs-on: ubuntu-latest
+    env:
+      SYNC_URL: "https://www.reconcileaiafrica.com/api/scheduled/shoplineDailyBatch"
+    steps:
+      - name: Trigger daily 24-hour batch reconciliation
+        env:
+          SYNC_SECRET: ${{ secrets.SHOPLINE_SYNC_SECRET }}
+        run: |
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "SHOPLINE_SYNC_SECRET is not configured on this repository — skipping sync (expected on the mirror)."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
+            -H "x-sync-secret: $SYNC_SECRET" \
+            "$SYNC_URL")
+          echo "HTTP $code"; cat /tmp/resp; echo
+          if [ "$code" != "200" ] && [ "$code" != "202" ] && [ "$code" != "409" ]; then
+            echo "Unexpected status $code (check that SHOPLINE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"; exit 1
+          fi
+
+  webhookCheck:
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'webhookCheck' ||
+      github.event_name == 'schedule' && github.event.schedule == '0 3 * * *'
+    runs-on: ubuntu-latest
+    env:
+      SYNC_URL: "https://www.reconcileaiafrica.com/api/scheduled/shoplineWebhookReconciler"
+    steps:
+      - name: Verify and re-register SHOPLINE webhook subscriptions
+        env:
+          SYNC_SECRET: ${{ secrets.SHOPLINE_SYNC_SECRET }}
+        run: |
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "SHOPLINE_SYNC_SECRET is not configured on this repository — skipping (expected on the mirror)."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
+            -H "x-sync-secret: $SYNC_SECRET" \
+            "$SYNC_URL")
+          echo "HTTP $code"; cat /tmp/resp; echo
+          if [ "$code" != "200" ] && [ "$code" != "202" ] && [ "$code" != "409" ]; then
+            echo "Unexpected status $code (check that SHOPLINE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"; exit 1
+          fi

@@ -81,8 +81,17 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
         reports.push(report);
         if (report.success) {
           await updateLastSyncAt(store.id);
+        } else {
+          console.error(
+            `[shoplineSyncCycle] store=${store.storeHandle} (id=${store.id}) FAILED: ${report.error ?? "unknown error"}`,
+          );
         }
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[shoplineSyncCycle] store=${store.storeHandle} (id=${store.id}) threw: ${errMsg}`,
+          err,
+        );
         reports.push({
           success: false,
           organizationId: store.organizationId,
@@ -95,7 +104,7 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
           matchedCount: 0,
           exceptionCount: 0,
           durationMs: Date.now() - startedAt,
-          error: err instanceof Error ? err.message : String(err),
+          error: errMsg,
         });
       }
     }
@@ -113,6 +122,17 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       totalPayouts: reports.reduce((sum, r) => sum + r.payoutsIngested, 0),
       totalExceptions: reports.reduce((sum, r) => sum + r.exceptionCount, 0),
       durationMs: Date.now() - startedAt,
+      // Per-store results for debugging (errors surface here)
+      reports: reports.map((r) => ({
+        store: r.storeHandle,
+        success: r.success,
+        orders: r.ordersIngested,
+        payments: r.paymentsIngested,
+        matched: r.matchedCount,
+        exceptions: r.exceptionCount,
+        error: r.error ?? null,
+        durationMs: r.durationMs,
+      })),
     });
   } catch (err) {
     console.error("[shoplineSyncCycle] fatal error:", err);
