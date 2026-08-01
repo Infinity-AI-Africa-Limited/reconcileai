@@ -1,0 +1,87 @@
+name: SHOPLINE scheduled sync
+
+# Drives the three SHOPLINE scheduled handlers on the Railway server. These
+# endpoints have existed since Phase 1 and are documented in CLAUDE.md §2B.7 as
+# the "safety net" behind real-time webhook reconciliation — but nothing ever
+# called them, so the safety net did not exist in practice. When the in-process
+# debounce timer for a webhook-triggered sync is lost (the scheduler is
+# per-process and its timers are unref'd, so a restart inside the 20s window
+# drops the pending sync), NOTHING recovered it and the merchant's data simply
+# never arrived. That is what happened to the dev-store order on 2026-07-31.
+#
+# Setup (same shared secret as the Woodcore workflow):
+#   1. In Railway, set CRON_SECRET to a strong random value.
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
+#      SHOPLINE_SYNC_SECRET with the SAME value.
+#
+# Note on cadence: GitHub's scheduler is best-effort and routinely runs late
+# under load, so "*/15" is a floor, not a guarantee. It is adequate as a
+# catch-up net behind real-time webhooks. If the recovery window ever needs to
+# be tight, move these to Railway Cron (same endpoints, same header) or to
+# BullMQ once REDIS_URL is provisioned — see CLAUDE.md §10.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # incremental catch-up sync
+    - cron: "0 3 * * *" # daily full 24h reconciliation
+    - cron: "0 */6 * * *" # webhook subscription health check
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which handler to run"
+        required: true
+        default: syncCycle
+        type: choice
+        options: [syncCycle, dailyBatch, webhookReconciler]
+
+# A long daily batch must not overlap the 15-minute cycle.
+concurrency:
+  group: shopline-sync
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    env:
+      # Use www directly — the bare domain goes through forwarding which strips
+      # the POST method on redirect (301 → GET), causing a 405 on the API.
+      BASE_URL: "https://www.reconcileaiafrica.com/api/scheduled"
+    steps:
+      - name: Select handler
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "0 3 * * *")    handler=shoplineDailyBatch ;;
+            "0 */6 * * *")  handler=shoplineWebhookReconciler ;;
+            "*/15 * * * *") handler=shoplineSyncCycle ;;
+            *)
+              # Manual run (no github.event.schedule) — use the chosen input.
+              case "${{ inputs.target }}" in
+                dailyBatch)         handler=shoplineDailyBatch ;;
+                webhookReconciler)  handler=shoplineWebhookReconciler ;;
+                *)                  handler=shoplineSyncCycle ;;
+              esac
+              ;;
+          esac
+          echo "handler=$handler" >> "$GITHUB_OUTPUT"
+          echo "Selected handler: $handler"
+
+      - name: Trigger handler
+        env:
+          SYNC_SECRET: ${{ secrets.SHOPLINE_SYNC_SECRET }}
+          HANDLER: ${{ steps.pick.outputs.handler }}
+        run: |
+          # Skip cleanly when the secret isn't configured on this repo (e.g. the
+          # MistaRichMan mirror), so the mirror doesn't email "all jobs failed".
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "SHOPLINE_SYNC_SECRET is not configured on this repository — skipping (expected on the mirror)."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" --max-time 600 -X POST \
+            -H "x-sync-secret: $SYNC_SECRET" \
+            "$BASE_URL/$HANDLER")
+          echo "HTTP $code"; cat /tmp/resp; echo
+          if [ "$code" != "200" ]; then
+            echo "Unexpected status $code (check that SHOPLINE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"
+            exit 1
+          fi

@@ -235,7 +235,12 @@ export const slConnectorStores = mysqlTable(
     status: mysqlEnum("status", ["active", "suspended", "uninstalled"]).default("active").notNull(),
     installedAt: timestamp("installedAt").defaultNow().notNull(),
     uninstalledAt: timestamp("uninstalledAt"),
+    /** Last SUCCESSFUL sync cycle. Stays NULL if every attempt has failed. */
     lastSyncAt: timestamp("lastSyncAt"),
+    /** Last sync ATTEMPT, success or failure — distinguishes "never ran" from "ran and failed". */
+    lastSyncAttemptAt: timestamp("lastSyncAttemptAt"),
+    /** Reason the last attempt failed; cleared on success. */
+    lastSyncError: text("lastSyncError"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
