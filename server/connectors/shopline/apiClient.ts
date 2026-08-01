@@ -109,6 +109,38 @@ async function shoplineRequest<T>(
   return { data, nextPageInfo };
 }
 
+// ─── Per-endpoint page-size limits ──────────────────────────────────────────
+//
+// SHOPLINE enforces a different maximum `limit` per endpoint and answers a
+// **500** (not a 4xx) when it is exceeded:
+//
+//   SHOPLINE API 500: invalid OpenApiOrderSearchReqDTO.Limit:
+//   value must be less than or equal to 100
+//
+// That 500 blocked every sync cycle: `fetchAllOrders` is the first call in
+// `runSyncCycle`, so no store ever reached ingestion. Recorded on both stores
+// in `sl_connector_stores.lastSyncError` on 2026-08-01.
+//
+// Each fetch function has two branches — a `page_info` (pagination) branch and
+// a filter branch — and the clamp was previously applied to only one of them,
+// so the limit could still escape on page 2+. Both branches now go through
+// `clampLimit`.
+//
+// ORDERS_MAX_LIMIT is confirmed by the API error above. The payment/payout
+// ceilings are the pre-existing values, kept as-is; they are NOT confirmed
+// against SHOPLINE docs and may need lowering if the same 500 appears for
+// those endpoints.
+const ORDERS_MAX_LIMIT = 100;
+const PAYMENT_TXN_MAX_LIMIT = 1000;
+const PAYOUTS_MAX_LIMIT = 100;
+const BALANCE_TXN_MAX_LIMIT = 100;
+
+/** Clamp a caller-supplied page size to the endpoint ceiling, preserving each
+ *  endpoint's existing default when the caller does not specify one. */
+function clampLimit(requested: number | undefined, max: number, fallback: number = max): number {
+  return Math.min(requested ?? fallback, max);
+}
+
 // ─── Orders (spec §A6) ─────────────────────────────────────────────────────
 
 export interface ShoplineOrder {
@@ -152,7 +184,7 @@ export async function fetchOrders(
   // When page_info is present, all other filters except limit/fields are ignored (spec §A5)
   if (params.pageInfo) {
     qs.set("page_info", params.pageInfo);
-    qs.set("limit", String(params.limit ?? 250));
+    qs.set("limit", String(clampLimit(params.limit, ORDERS_MAX_LIMIT)));
     if (params.fields) qs.set("fields", params.fields);
   } else {
     if (params.financialStatus) qs.set("financial_status", params.financialStatus);
@@ -161,7 +193,7 @@ export async function fetchOrders(
     if (params.updatedAtMin) qs.set("updated_at_min", params.updatedAtMin);
     if (params.updatedAtMax) qs.set("updated_at_max", params.updatedAtMax);
     if (params.sinceId) qs.set("since_id", params.sinceId);
-    qs.set("limit", String(params.limit ?? 250));
+    qs.set("limit", String(clampLimit(params.limit, ORDERS_MAX_LIMIT)));
     if (params.fields) qs.set("fields", params.fields);
   }
 
@@ -220,14 +252,14 @@ export async function fetchPaymentTransactions(
   const qs = new URLSearchParams();
   if (params.pageInfo) {
     qs.set("page_info", params.pageInfo);
-    qs.set("limit", String(params.limit ?? 250));
+    qs.set("limit", String(clampLimit(params.limit, PAYMENT_TXN_MAX_LIMIT, 250)));
   } else {
     qs.set("date_min", params.dateMin);
     qs.set("date_max", params.dateMax);
     if (params.transactionType) qs.set("transaction_type", params.transactionType);
     if (params.status) qs.set("status", params.status);
     if (params.sinceId) qs.set("since_id", params.sinceId);
-    qs.set("limit", String(Math.min(params.limit ?? 250, 1000)));
+    qs.set("limit", String(clampLimit(params.limit, PAYMENT_TXN_MAX_LIMIT, 250)));
   }
 
   const { data, nextPageInfo } = await shoplineRequest<{ transactions: ShoplinePaymentTransaction[] }>(
@@ -262,13 +294,13 @@ export async function fetchPayouts(
   const qs = new URLSearchParams();
   if (params.pageInfo) {
     qs.set("page_info", params.pageInfo);
-    qs.set("limit", String(params.limit ?? 50));
+    qs.set("limit", String(clampLimit(params.limit, PAYOUTS_MAX_LIMIT, 50)));
   } else {
     qs.set("start_time", params.startTime);
     qs.set("end_time", params.endTime);
     if (params.status) qs.set("status", params.status);
     if (params.sinceId) qs.set("since_id", params.sinceId);
-    qs.set("limit", String(Math.min(params.limit ?? 50, 100)));
+    qs.set("limit", String(clampLimit(params.limit, PAYOUTS_MAX_LIMIT, 50)));
   }
 
   const { data, nextPageInfo } = await shoplineRequest<{ payouts: ShoplinePayout[] }>(
@@ -317,13 +349,13 @@ export async function fetchBalanceTransactions(
   const qs = new URLSearchParams();
   if (params.pageInfo) {
     qs.set("page_info", params.pageInfo);
-    qs.set("limit", String(params.limit ?? 100));
+    qs.set("limit", String(clampLimit(params.limit, BALANCE_TXN_MAX_LIMIT, 100)));
   } else {
     if (params.startTime) qs.set("start_time", params.startTime);
     if (params.endTime) qs.set("end_time", params.endTime);
     if (params.payoutId) qs.set("payout_id", params.payoutId);
     if (params.isSettlementDetails !== undefined) qs.set("is_settlement_details", String(params.isSettlementDetails));
-    qs.set("limit", String(params.limit ?? 100));
+    qs.set("limit", String(clampLimit(params.limit, BALANCE_TXN_MAX_LIMIT, 100)));
   }
 
   const { data, nextPageInfo } = await shoplineRequest<{ transactions: ShoplineBalanceTransaction[] }>(

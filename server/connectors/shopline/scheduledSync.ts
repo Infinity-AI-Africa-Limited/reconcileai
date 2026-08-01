@@ -121,6 +121,10 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
     const successCount = reports.filter((r) => r.success).length;
     const failCount = reports.filter((r) => !r.success).length;
 
+    for (const r of reports.filter((x) => !x.success)) {
+      console.error(`[shoplineSyncCycle] store=${r.storeHandle} FAILED: ${r.error ?? "unknown error"}`);
+    }
+
     res.json({
       ok: true,
       storesProcessed: stores.length,
@@ -131,6 +135,20 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       totalPayouts: reports.reduce((sum, r) => sum + r.payoutsIngested, 0),
       totalExceptions: reports.reduce((sum, r) => sum + r.exceptionCount, 0),
       durationMs: Date.now() - startedAt,
+      // Per-store detail so an operator running this by hand sees WHICH store
+      // failed and why, without needing the log stream or a DB query.
+      reports: reports.map((r) => ({
+        store: r.storeHandle,
+        success: r.success,
+        window: { from: r.window.from.toISOString(), to: r.window.to.toISOString() },
+        orders: r.ordersIngested,
+        payments: r.paymentsIngested,
+        payouts: r.payoutsIngested,
+        matched: r.matchedCount,
+        exceptions: r.exceptionCount,
+        error: r.error ?? null,
+        durationMs: r.durationMs,
+      })),
     });
   } catch (err) {
     console.error("[shoplineSyncCycle] fatal error:", err);
