@@ -149,10 +149,12 @@ export async function fetchOrders(
   },
 ): Promise<ShoplinePaginatedResponse<ShoplineOrder>> {
   const qs = new URLSearchParams();
+  // SHOPLINE Orders API max limit is 100 (returns 500 if higher) — cap at 100
+  const ORDERS_MAX_LIMIT = 100;
   // When page_info is present, all other filters except limit/fields are ignored (spec §A5)
   if (params.pageInfo) {
     qs.set("page_info", params.pageInfo);
-    qs.set("limit", String(params.limit ?? 250));
+    qs.set("limit", String(Math.min(params.limit ?? ORDERS_MAX_LIMIT, ORDERS_MAX_LIMIT)));
     if (params.fields) qs.set("fields", params.fields);
   } else {
     if (params.financialStatus) qs.set("financial_status", params.financialStatus);
@@ -161,7 +163,7 @@ export async function fetchOrders(
     if (params.updatedAtMin) qs.set("updated_at_min", params.updatedAtMin);
     if (params.updatedAtMax) qs.set("updated_at_max", params.updatedAtMax);
     if (params.sinceId) qs.set("since_id", params.sinceId);
-    qs.set("limit", String(params.limit ?? 250));
+    qs.set("limit", String(Math.min(params.limit ?? ORDERS_MAX_LIMIT, ORDERS_MAX_LIMIT)));
     if (params.fields) qs.set("fields", params.fields);
   }
 
