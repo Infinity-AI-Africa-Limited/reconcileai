@@ -27,6 +27,7 @@ import {
   fetchOrders,
   fetchPaymentTransactions,
   fetchPayouts,
+  ShoplineApiError,
   type ShoplineOrder,
   type ShoplinePaymentTransaction,
   type ShoplinePayout,
@@ -77,6 +78,12 @@ export interface SyncReport {
   exceptionCount: number;
   durationMs: number;
   error?: string;
+  /**
+   * Optional legs that were skipped because the store does not have them —
+   * e.g. `["payments","payouts"]` for a store not on SHOPLINE Payments. The
+   * sync still succeeds; this records that its coverage was partial.
+   */
+  degradedLegs?: string[];
 }
 
 /**
@@ -113,6 +120,33 @@ async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promis
       .where(eq(slConnectorStores.id, slStoreId));
   } catch (err) {
     console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, err);
+  }
+}
+
+/**
+ * Run one optional SHOPLINE Payments leg, tolerating a store that simply does
+ * not have that product.
+ *
+ * Only 404 is treated as "unavailable" — that is SHOPLINE's answer for a store
+ * with no Payments merchant record. Every other failure (401, 429, 5xx) still
+ * throws, so a genuine outage or a broken request is never silently swallowed
+ * into a green sync.
+ */
+async function bestEffortLeg<T>(
+  leg: "payments" | "payouts",
+  storeHandle: string,
+  fetcher: () => Promise<T[]>,
+): Promise<{ data: T[]; unavailable: boolean }> {
+  try {
+    return { data: await fetcher(), unavailable: false };
+  } catch (err) {
+    if (err instanceof ShoplineApiError && err.status === 404) {
+      console.warn(
+        `[SHOPLINE] ${leg} unavailable for store=${storeHandle} (404 — store is probably not on SHOPLINE Payments); continuing with orders only`,
+      );
+      return { data: [], unavailable: true };
+    }
+    throw err;
   }
 }
 
@@ -167,9 +201,31 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     const toIso = to.toISOString();
 
     // ── Step 1: Fetch from SHOPLINE APIs ────────────────────────────────────
+    //
+    // Orders are mandatory — they are the merchant's own sales data and every
+    // store has them. A failure here is a real failure.
     const orders = await fetchAllOrders(apiOpts, fromIso, toIso);
-    const payments = await fetchAllPayments(apiOpts, fromIso, toIso);
-    const payouts = await fetchAllPayouts(apiOpts, fromIso, toIso);
+
+    // Payments and payouts come from the SHOPLINE **Payments** product
+    // (`/payments/store/*`), which a store only has if it is onboarded onto
+    // SHOPLINE Payments. Stores using an external gateway — and every blank
+    // dev store — answer 404 `Resource not found: merchant`.
+    //
+    // These legs are therefore BEST-EFFORT. Previously a 404 here aborted the
+    // whole cycle before the upload batch was even created, so orders were
+    // never persisted and `lastSyncAt` never advanced: any merchant not on
+    // SHOPLINE Payments got a permanently empty dashboard. Degrade instead,
+    // and report it, so order-level reconciliation still runs.
+    const payments = await bestEffortLeg("payments", storeHandle, () =>
+      fetchAllPayments(apiOpts, fromIso, toIso),
+    );
+    const payouts = await bestEffortLeg("payouts", storeHandle, () =>
+      fetchAllPayouts(apiOpts, fromIso, toIso),
+    );
+    const degraded = [
+      ...(payments.unavailable ? ["payments"] : []),
+      ...(payouts.unavailable ? ["payouts"] : []),
+    ];
 
     // ── Step 2: Resolve channel IDs for this store ──────────────────────────
     const { ordersChannelId, paymentsChannelId } = await resolveChannelIds(
@@ -186,7 +242,7 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       fileName: `shopline_sync_${storeHandle}_${fromIso}`,
       fileHash: `shopline_sync_${store.id}_${from.getTime()}_${to.getTime()}`,
       status: "processing",
-      totalRows: orders.length + payments.length + payouts.length,
+      totalRows: orders.length + payments.data.length + payouts.data.length,
       validRows: 0,
       invalidRows: 0,
     });
@@ -206,8 +262,8 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     };
 
     const orderRows = orders.map((o) => normaliseOrder(o, ctx));
-    const paymentRows = payments.map((p) => normalisePaymentTransaction(p, ctx));
-    const payoutRows = payouts.map((p) => normalisePayout(p, ctx));
+    const paymentRows = payments.data.map((p) => normalisePaymentTransaction(p, ctx));
+    const payoutRows = payouts.data.map((p) => normalisePayout(p, ctx));
 
     const allRows = [...orderRows, ...paymentRows, ...payoutRows];
     if (allRows.length > 0) {
@@ -240,12 +296,13 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       storeHandle,
       window: { from, to },
       ordersIngested: orders.length,
-      paymentsIngested: payments.length,
-      payoutsIngested: payouts.length,
+      paymentsIngested: payments.data.length,
+      payoutsIngested: payouts.data.length,
       totalPersisted: allRows.length,
       matchedCount,
       exceptionCount,
       durationMs: Date.now() - startedAt,
+      ...(degraded.length > 0 ? { degradedLegs: degraded } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
