@@ -93,11 +93,16 @@ async function shoplineRequest<T>(
       const parsed = JSON.parse(body);
       shoplineCode = parsed?.errors ?? parsed?.error_code ?? parsed?.code;
     } catch { /* ignore */ }
+    // Include the endpoint (query string stripped — it carries no diagnostic
+    // value and can be long). Without it, an error like
+    // `404 {"errors":"Resource not found: merchant"}` gives no clue WHICH of
+    // the several calls in a sync cycle failed.
+    const endpoint = path.split("?")[0];
     throw new ShoplineApiError(
       response.status,
       shoplineCode,
       traceId,
-      `SHOPLINE API ${response.status} [trace:${traceId}]: ${body}`,
+      `SHOPLINE API ${response.status} on ${endpoint} [trace:${traceId}]: ${body}`,
     );
   }
 

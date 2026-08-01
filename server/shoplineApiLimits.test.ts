@@ -114,3 +114,47 @@ describe("other paginated endpoints clamp on BOTH branches", () => {
     expect(sentLimit()).toBe(100);
   });
 });
+
+/**
+ * Best-effort SHOPLINE Payments legs.
+ *
+ * `/payments/store/*` only exists for stores onboarded onto SHOPLINE Payments.
+ * Stores on an external gateway — and every blank dev store — answer
+ * `404 {"errors":"Resource not found: merchant"}`. That 404 used to abort the
+ * whole sync cycle *before* the upload batch was created, so orders were never
+ * persisted and `lastSyncAt` never advanced: any merchant not on SHOPLINE
+ * Payments saw a permanently empty dashboard.
+ */
+describe("ShoplineApiError message identifies the endpoint", () => {
+  it("names the failing path so a 404 is attributable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        headers: { get: () => "trace-xyz" },
+        text: async () => '{"errors":"Resource not found: merchant"}',
+        json: async () => ({}),
+      }) as unknown as Response),
+    );
+    await expect(
+      fetchPayouts(opts, { startTime: "2026-07-01T00:00:00Z", endTime: "2026-08-01T00:00:00Z" }),
+    ).rejects.toThrow(/on \/payments\/store\/payouts\.json/);
+  });
+
+  it("strips the query string from the reported endpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        headers: { get: () => null },
+        text: async () => "nope",
+        json: async () => ({}),
+      }) as unknown as Response),
+    );
+    await expect(fetchOrders(opts, { limit: 10 })).rejects.toThrow(
+      /on \/orders\.json \[/,
+    );
+  });
+});
