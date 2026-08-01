@@ -26,12 +26,16 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+// `transactions.amount` is decimal(18,2) in MAJOR units (e.g. "25.00" = $25.00),
+// which is what the SHOPLINE ingest writes and what every sibling page renders.
+// This page previously divided by 100 on the assumption amounts were in cents,
+// understating every settlement figure by 100x.
 function formatCurrency(amount: number, currency = "USD"): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
     minimumFractionDigits: 2,
-  }).format(amount / 100); // amounts stored in cents
+  }).format(amount);
 }
 
 function formatDate(date: string | Date | null): string {
@@ -85,6 +89,10 @@ export default function SettlementMonitor() {
   const totalExceptions = syncStatus?.totalExceptions ?? 0;
   const matchRate = syncStatus?.matchRate ?? 0;
   const recentPayouts = syncStatus?.recentPayouts ?? [];
+  const syncHealth = syncStatus?.syncHealth ?? [];
+  // Surface a store that is failing to sync, or has never synced, rather than
+  // rendering an empty dashboard as if zero were a real result.
+  const unhealthyStores = syncHealth.filter((s) => s.lastSyncError || s.neverSynced);
 
   return (
     <div className="space-y-6">
@@ -113,6 +121,32 @@ export default function SettlementMonitor() {
 
       {/* Plan status + grace-period banner (SHOPLINE-managed billing) */}
       <PlanStatusBanner />
+
+      {/* Sync health — explains an empty dashboard instead of showing bare zeros */}
+      {unhealthyStores.length > 0 && (
+        <Card className="border-amber-500/50 bg-amber-50 dark:bg-amber-950/20">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-1 min-w-0">
+                <p className="font-medium text-sm">
+                  Settlement data may be incomplete
+                </p>
+                {unhealthyStores.map((s) => (
+                  <p key={s.storeHandle} className="text-sm text-muted-foreground break-words">
+                    <span className="font-medium">{s.storeHandle}</span>:{" "}
+                    {s.lastSyncError
+                      ? `last sync failed ${formatTimeAgo(s.lastSyncAttemptAt)} — ${s.lastSyncError}`
+                      : s.lastSyncAttemptAt
+                        ? `has never completed a sync (last attempt ${formatTimeAgo(s.lastSyncAttemptAt)})`
+                        : "has never synced yet"}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* KPI Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

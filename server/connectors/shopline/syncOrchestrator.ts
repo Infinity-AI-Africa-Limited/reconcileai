@@ -80,9 +80,43 @@ export interface SyncReport {
 }
 
 /**
- * Run a full sync cycle for a single SHOPLINE store.
+ * Run a full sync cycle for a single SHOPLINE store, recording the outcome on
+ * the store row.
+ *
+ * The outcome write is what makes a failed sync observable: previously a
+ * failure returned a report that only the caller logged, so `lastSyncAt`
+ * remaining NULL could mean either "the trigger never fired" or "it fired and
+ * threw" — indistinguishable without the host's log stream.
  */
 export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
+  const report = await runSyncCycleInner(opts);
+  await persistSyncOutcome(opts.slStoreId, report);
+  return report;
+}
+
+/**
+ * Record the attempt on the store row. Never throws — callers are on the
+ * webhook/cron path and a bookkeeping failure must not mask the real result.
+ */
+async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const now = new Date();
+    await db
+      .update(slConnectorStores)
+      .set(
+        report.success
+          ? { lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null }
+          : { lastSyncAttemptAt: now, lastSyncError: (report.error ?? "unknown error").slice(0, 2000) },
+      )
+      .where(eq(slConnectorStores.id, slStoreId));
+  } catch (err) {
+    console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, err);
+  }
+}
+
+async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
   const startedAt = Date.now();
   const db = await getDb();
   if (!db) {
@@ -198,12 +232,8 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
       exceptionCount = result.exceptionCount;
     }
 
-    // ── Step 6: Update store lastSyncAt ─────────────────────────────────────
-    await db
-      .update(slConnectorStores)
-      .set({ lastSyncAt: new Date() })
-      .where(eq(slConnectorStores.id, opts.slStoreId));
-
+    // Step 6 (lastSyncAt) is handled by persistSyncOutcome in the runSyncCycle
+    // wrapper, so success and failure are recorded through one path.
     return {
       success: true,
       organizationId: opts.organizationId,

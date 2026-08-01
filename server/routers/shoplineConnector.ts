@@ -21,7 +21,7 @@
  */
 
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, like, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   slConnectorStores,
@@ -545,10 +545,15 @@ export const shoplineConnectorRouter = router({
     // This org's SHOPLINE channels (retail_commerce orgs are SHOPLINE-only, but
     // filter by channel type so a mixed org stays correct).
     const orgChannels = await db
-      .select({ id: channels.id })
+      .select({ id: channels.id, code: channels.code })
       .from(channels)
       .where(and(eq(channels.organizationId, orgId), eq(channels.channelType, "ecommerce_gateway")));
     const channelIds = orgChannels.map((c) => c.id);
+    // Channel codes are `sl_orders_<handle>` / `sl_payments_<handle>` (see
+    // onboarding.ts), so the store handle is recoverable without another join.
+    const handleByChannelId = new Map(
+      orgChannels.map((c) => [c.id, c.code.replace(/^sl_(orders|payments)_/, "")]),
+    );
 
     // Reconciliation state, computed in-DB in a single pass.
     const [agg] = channelIds.length
@@ -576,6 +581,47 @@ export const shoplineConnectorRouter = router({
           .where(and(inArray(transactions.channelId, channelIds), eq(exceptions.status, "open")))
       : [{ open: 0 }];
 
+    // Sync health — so an empty dashboard can explain itself. A store whose
+    // syncs are failing (or has never synced) otherwise renders as a page of
+    // legitimate-looking zeros.
+    const storeHealth = await db
+      .select({
+        storeHandle: slConnectorStores.storeHandle,
+        lastSyncAt: slConnectorStores.lastSyncAt,
+        lastSyncAttemptAt: slConnectorStores.lastSyncAttemptAt,
+        lastSyncError: slConnectorStores.lastSyncError,
+      })
+      .from(slConnectorStores)
+      .where(and(eq(slConnectorStores.organizationId, orgId), eq(slConnectorStores.status, "active")));
+
+    // Recent payouts — the settlement leg. `normalisePayout` writes these with a
+    // `PAYOUT_` transactionRef prefix (unique to payouts; orders/refunds/balance
+    // txns use bare ids, `REFUND_` and `BT_`), and sets `valueDate` only when
+    // SHOPLINE reported the payout as SUCCESS — which is what distinguishes a
+    // paid payout from one still in flight.
+    // NOTE: `_` is a LIKE wildcard in MySQL, so the prefix must be escaped.
+    const payoutRows = channelIds.length
+      ? await db
+          .select({
+            id: transactions.id,
+            channelId: transactions.channelId,
+            amount: transactions.amount,
+            currency: transactions.currency,
+            transactionDate: transactions.transactionDate,
+            valueDate: transactions.valueDate,
+            status: transactions.status,
+          })
+          .from(transactions)
+          .where(
+            and(
+              inArray(transactions.channelId, channelIds),
+              like(transactions.transactionRef, "PAYOUT\\_%"),
+            ),
+          )
+          .orderBy(desc(transactions.transactionDate))
+          .limit(20)
+      : [];
+
     return {
       totalSettled: Number(agg?.settledAmount ?? 0),
       totalPending: Number(agg?.pendingAmount ?? 0),
@@ -583,15 +629,22 @@ export const shoplineConnectorRouter = router({
       matchRate: total > 0 ? (matched / total) * 100 : 0,
       matchedCount: matched,
       pendingCount: Number(agg?.pendingCount ?? 0),
-      recentPayouts: [] as Array<{
-        id: number;
-        date: string;
-        storeHandle: string;
-        amount: number;
-        currency: string;
-        status: string;
-        reconciled: boolean;
-      }>,
+      syncHealth: storeHealth.map((s) => ({
+        storeHandle: s.storeHandle,
+        lastSyncAt: s.lastSyncAt ? s.lastSyncAt.toISOString() : null,
+        lastSyncAttemptAt: s.lastSyncAttemptAt ? s.lastSyncAttemptAt.toISOString() : null,
+        lastSyncError: s.lastSyncError,
+        neverSynced: s.lastSyncAt === null,
+      })),
+      recentPayouts: payoutRows.map((p) => ({
+        id: p.id,
+        date: p.transactionDate.toISOString(),
+        storeHandle: handleByChannelId.get(p.channelId) ?? "unknown",
+        amount: Number(p.amount),
+        currency: p.currency ?? "USD",
+        status: p.valueDate ? "paid" : "pending",
+        reconciled: p.status === "matched" || p.status === "manually_matched",
+      })),
     };
   }),
 
