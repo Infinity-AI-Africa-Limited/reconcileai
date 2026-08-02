@@ -69,6 +69,20 @@ const SEGMENT_LABELS: Record<Segment, string> = {
   retail_commerce: "Retail Commerce",
 };
 
+/**
+ * Single source of the segment option list, derived from SEGMENT_LABELS so the
+ * two can never disagree.
+ *
+ * This page previously hand-maintained the same list in three places, and one
+ * of them drifted: the per-row segment selector was missing `retail_commerce`.
+ * Because a Radix Select renders blank when `value` matches no item, every
+ * retail org showed an EMPTY segment box — and since the control is also the
+ * setter, one stray click would silently reassign that org's segment. Deriving
+ * the options means adding a segment to the `Segment` union now fails the type
+ * check until SEGMENT_LABELS is updated, and every dropdown picks it up.
+ */
+const SEGMENT_OPTIONS = Object.entries(SEGMENT_LABELS) as Array<[Segment, string]>;
+
 const SEGMENT_COLORS: Record<Segment, string> = {
   financial_services: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
   corporate_b2b: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
@@ -362,10 +376,9 @@ function CreateOrgDialog({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="financial_services">Financial Services</SelectItem>
-                        <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                        <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
-                        <SelectItem value="retail_commerce">Retail Commerce</SelectItem>
+                        {SEGMENT_OPTIONS.map(([value, label]) => (
+                          <SelectItem key={value} value={value}>{label}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -546,10 +559,9 @@ function OrganisationsTable() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All segments</SelectItem>
-              <SelectItem value="financial_services">Financial Services</SelectItem>
-              <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-              <SelectItem value="super_admin">Infinity AI</SelectItem>
-              <SelectItem value="retail_commerce">Retail Commerce</SelectItem>
+              {SEGMENT_OPTIONS.map(([value, label]) => (
+                <SelectItem key={value} value={value}>{label}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -647,9 +659,9 @@ function OrganisationsTable() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="financial_services">Financial Services</SelectItem>
-                            <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                            <SelectItem value="super_admin">Infinity AI</SelectItem>
+                            {SEGMENT_OPTIONS.map(([value, label]) => (
+                              <SelectItem key={value} value={value}>{label}</SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                         {/* Sign-in method: email link is every org's default; flip
