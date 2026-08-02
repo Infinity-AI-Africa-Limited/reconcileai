@@ -77,7 +77,15 @@ export async function validateApiKey(apiKey: string): Promise<{
 
 // ─── File Hash Calculation ──────────────────────────────────────────
 
-export function calculateFileHash(content: string): string {
+/**
+ * Content hash used for duplicate-file detection.
+ *
+ * Accepts a Buffer so binary formats (.xlsx) are hashed over their real bytes.
+ * Hashing a `.toString("utf8")` of a workbook is lossy — invalid byte sequences
+ * collapse to U+FFFD — so two different spreadsheets could hash identically and
+ * the second would be silently discarded as a duplicate.
+ */
+export function calculateFileHash(content: string | Buffer): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
@@ -123,24 +131,25 @@ function pickField(row: Record<string, unknown>, aliases: string[]): string | un
   return undefined;
 }
 
-export function parseAndValidateCsv(
-  csvContent: string,
-  channelId: number
-): {
+export interface RowValidationResult {
   valid: ParsedTransaction[];
   invalid: Array<{ row: number; errors: string[] }>;
   totalRows: number;
-} {
-  const parsed = Papa.parse<any>(csvContent, {
-    header: true,
-    skipEmptyLines: true,
-    transformHeader: (header: string) => header.trim(),
-  });
+}
 
+/**
+ * Validate already-parsed rows.
+ *
+ * Split out from `parseAndValidateCsv` so callers that obtained their rows from
+ * a workbook (SFTP/bucket drops, which are frequently .xlsx) share exactly the
+ * same validation as CSV callers, rather than needing the data to be delimited
+ * text first.
+ */
+export function validateParsedRows(rows: Record<string, unknown>[]): RowValidationResult {
   const valid: ParsedTransaction[] = [];
   const invalid: Array<{ row: number; errors: string[] }> = [];
 
-  parsed.data.forEach((row: any, index: number) => {
+  rows.forEach((row: any, index: number) => {
     const errors: string[] = [];
     const rowNum = index + 2; // +2 because index is 0-based and we skip header
 
@@ -174,11 +183,20 @@ export function parseAndValidateCsv(
     }
   });
 
-  return {
-    valid,
-    invalid,
-    totalRows: parsed.data.length,
-  };
+  return { valid, invalid, totalRows: rows.length };
+}
+
+/** Parse delimited text and validate it. Retained for existing CSV callers. */
+export function parseAndValidateCsv(
+  csvContent: string,
+  channelId: number,
+): RowValidationResult {
+  const parsed = Papa.parse<any>(csvContent, {
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: (header: string) => header.trim(),
+  });
+  return validateParsedRows((parsed.data ?? []) as Record<string, unknown>[]);
 }
 
 // ─── Store Transactions ─────────────────────────────────────────────
