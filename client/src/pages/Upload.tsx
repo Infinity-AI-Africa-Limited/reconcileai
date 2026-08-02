@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { trpc } from "@/lib/trpc";
+import { parseMoney } from "@shared/money";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -112,11 +113,14 @@ function parseCSV(
     const row: Record<string, string> = {};
     headers.forEach((h, idx) => { row[h] = values[idx] || ""; });
 
-    // Parse amount
+    // Parse amount via the shared money parser. The previous
+    // `replace(/[,\s]/g,"")` + parseFloat read the European "1.234,56" as
+    // 1.23456 — a 1000x understatement that still looks like a real amount —
+    // and turned the accounting negative "(12.30)" into NaN.
     const amountStr = resolveField(row, format, "amount");
-    const cleanedAmount = amountStr.replace(/[,\s]/g, ""); // Remove commas and spaces
-    const amountNum = parseFloat(cleanedAmount);
-    if (isNaN(amountNum) || !isFinite(amountNum)) {
+    const parsedAmount = parseMoney(amountStr);
+    const amountNum = parsedAmount ?? NaN;
+    if (parsedAmount === null || !isFinite(amountNum)) {
       errors.push({ row: i + 1, field: "amount", message: `Invalid amount: "${amountStr}"` });
       continue;
     }
