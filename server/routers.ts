@@ -444,8 +444,12 @@ export const appRouter = router({
   // ─── Channels ────────────────────────────────────────────────────
 
   channels: router({
-    list: protectedProcedure.query(async () => {
-      return db.getChannels();
+    list: protectedProcedure.query(async ({ ctx }) => {
+      // Super admins (Infinity AI staff) legitimately span tenants — platform
+      // overview and the portal switcher both need the full estate. Everyone
+      // else sees their own org's channels plus the shared platform rails.
+      if (ctx.user.role === "super_admin") return db.getAllChannelsAcrossTenants();
+      return db.getChannels(ctx.user.organizationId ?? null);
     }),
 
     create: adminProcedure
@@ -465,8 +469,11 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        // Check for duplicate code
-        const existing = await db.getChannelByCode(input.code);
+        // Duplicate check must span ALL tenants: channels.code carries a global
+        // UNIQUE constraint, so an org-scoped check would pass here and then
+        // fail on insert with a duplicate-key error. Returns a boolean only, so
+        // it cannot leak another tenant's channel details.
+        const existing = await db.channelCodeExists(input.code);
         if (existing) {
           throw new TRPCError({ code: "CONFLICT", message: `Channel with code '${input.code}' already exists` });
         }
@@ -526,7 +533,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const channel = await db.getChannelByCode(input.channelCode);
+        const channel = await db.getChannelByCode(input.channelCode, ctx.user.organizationId ?? null);
         if (!channel) {
           throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
         }
@@ -617,7 +624,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        const channel = await db.getChannelByCode(input.channelCode);
+        const channel = await db.getChannelByCode(input.channelCode, ctx.user.organizationId ?? null);
         if (!channel) {
           throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
         }
@@ -848,7 +855,7 @@ export const appRouter = router({
         // Resolve the target set.
         let targets: { id: number; name: string; code: string }[] = [];
         if (input.allActiveTargets) {
-          const all = await db.getChannels();
+          const all = await db.getChannels(ctx.user.organizationId ?? null);
           targets = all.filter((c) => c.isActive && c.id !== input.sourceChannelId);
         } else {
           const ids = (input.targetChannelIds ?? []).filter((id) => id !== input.sourceChannelId);
@@ -912,12 +919,12 @@ export const appRouter = router({
     // Aggregate a multi-channel run into one combined view.
     getMultiRun: protectedProcedure
       .input(z.object({ multiRunId: z.string().min(1).max(36) }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const jobs = await db.getReconciliationJobsByMultiRun(input.multiRunId);
         if (jobs.length === 0) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Multi-channel run not found" });
         }
-        const channels = await db.getChannels();
+        const channels = await db.getChannels(ctx.user.organizationId ?? null);
         const nameFor = (id: number) => channels.find((c) => c.id === id)?.name ?? `Channel ${id}`;
 
         const totals = jobs.reduce(
@@ -2587,7 +2594,7 @@ export const appRouter = router({
         channelCodes: z.array(z.string()).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        const channels = await db.getChannels();
+        const channels = await db.getChannels(ctx.user.organizationId ?? null);
         const filteredChannels = input?.channelCodes && input.channelCodes.length > 0
           ? channels.filter((c) => input.channelCodes!.includes(c.code))
           : channels;
@@ -2622,7 +2629,7 @@ export const appRouter = router({
         channelCodes: z.array(z.string()).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        const channels = await db.getChannels();
+        const channels = await db.getChannels(ctx.user.organizationId ?? null);
         const filteredChannels = input?.channelCodes && input.channelCodes.length > 0
           ? channels.filter((c) => input.channelCodes!.includes(c.code))
           : channels;
@@ -6521,9 +6528,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
         period: z.enum(["7d", "30d", "mtd", "all", "quarterly", "last_quarter"]).default("7d"),
         channelCodes: z.array(z.string()).optional(),
       }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const { buildChannelMetrics, buildCsvContent } = await import("./cfoReportService");
-        const rows = await buildChannelMetrics(input.period, input.channelCodes);
+        const rows = await buildChannelMetrics(ctx.user.organizationId ?? null, input.period, input.channelCodes);
         const csv = buildCsvContent(rows, input.period);
         return { csv, rowCount: rows.length };
       }),
@@ -6537,7 +6544,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
         const { buildChannelMetrics } = await import("./cfoReportService");
-        const rows = await buildChannelMetrics(input.period, input.channelCodes);
+        const rows = await buildChannelMetrics(ctx.user.organizationId ?? null, input.period, input.channelCodes);
 
         const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
@@ -6655,9 +6662,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // Channel 30-day drill-down
     channelDrillDown: protectedProcedure
       .input(z.object({ channelCode: z.string() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const { getChannelDrillDown } = await import("./cfoReportService");
-        return getChannelDrillDown(input.channelCode);
+        return getChannelDrillDown(ctx.user.organizationId ?? null, input.channelCode);
       }),
   }),
 });
