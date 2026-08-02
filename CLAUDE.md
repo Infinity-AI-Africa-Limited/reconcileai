@@ -1391,7 +1391,16 @@ is compromised and must be rotated — there is no "it was only internal" except
   OAuth token in `sl_connector_tokens`
 - Fallback for the `x-sync-secret` cron header
 
-**Rotation runbook (order matters):**
+**Owner decision, 2026-08-02 — ACCEPTED RISK (do not re-raise as an open item).**
+The owner has chosen **not** to rotate again following the third incident, on the basis
+that the document was never published and has been destroyed. Recorded, not disputed.
+Residual exposure to weigh if circumstances change: the values also appeared in the
+session transcript that accompanied the document. Rotate if that transcript is ever
+shared, exported, or retained somewhere untrusted — or if any anomalous `super_admin`
+session or SHOPLINE token use is observed. Future sessions should treat this as a logged
+decision and raise it again only on new evidence.
+
+**Rotation runbook (order matters) — for whenever rotation does happen:**
 1. Generate the new value **directly in the Railway dashboard**; never let it transit a chat,
    a document, or a file.
 2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, and
