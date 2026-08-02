@@ -166,7 +166,8 @@ bands, required OAuth scopes, rev share).
 |---|---|---|
 | **Phase 0** | DONE + CTO-hardened | Retail-vertical foundation (commit `c5976b4`) |
 | **Phase 1** | ✅ MERGED & LIVE on production | Full Tier 1 App Store connector, billing, compliance. PRs #8–#11 merged to `main` (HEAD `e4a8290`), deployed by Railway. Go-live steps (App Store submission) remain — see §2B.12 |
-| **Tier 1.5** | Planned, post-launch | Embedded App Bridge **summary widget** (match rate, exception count, last sync, "Open ReconcileAI" button) — the engagement benefit of Embedded without a full App Bridge rewrite. Does NOT block launch; Tier 1 ships on Redirect. See `docs/shopline-app-store/TIER_1_5_EMBEDDED_ENHANCEMENT.md` |
+| **Tier 1.5a — any-payment-system reconciliation** | ✅ SHIPPED & LIVE — **positioned as a LAUNCH feature** (owner decision, 2026-08-02) | Settlement-file import (CSV/XLSX) from any gateway, bank or courier. SHOPLINE Payments is opt-in and approval-gated — merchants may use any of ~26 third-party providers or COD, for whom `/payments/store/*` 404s and there is no automatic payment leg. This closes that gap, so the addressable base is **every** SHOPLINE merchant, not only SHOPLINE Payments ones. Do NOT describe Tier 1 as SHOPLINE-Payments-only. See §2C |
+| **Tier 1.5b — Embedded widget** | Planned, post-launch | Embedded App Bridge **summary widget** (match rate, exception count, last sync, "Open ReconcileAI" button) — the engagement benefit of Embedded without a full App Bridge rewrite. Does NOT block launch; Tier 1 ships on Redirect. See `docs/shopline-app-store/TIER_1_5_EMBEDDED_ENHANCEMENT.md` |
 | **Phase 2** | Not started | Tier 2/3 — post-signed-agreement only |
 
 ### Phase 0 — DONE + CTO-hardened (commit `c5976b4`)
@@ -213,6 +214,52 @@ Tier 2 white-label API response format, on-premise Docker container packaging
 > **CBN reports do NOT apply to SHOPLINE** — retail merchants are governed by
 > card-scheme/gateway terms, not CBN. The CBN report engine stays scoped to the
 > financial-services vertical.
+
+---
+
+## 2C. Reconcile Against ANY Payment System (LAUNCH feature, live)
+
+**SHOPLINE Payments is opt-in and approval-gated.** Verified against SHOPLINE's
+own help centre: merchants may instead use any of **~26 third-party providers**
+(PayPal, Stripe HK/MY, OceanPayment, ATOME, ECPay, Bank SinoPac…), one active per
+store, filtered by store currency — or Cash on Delivery. For those stores
+`/payments/store/*` answers `404 Resource not found: merchant`, because there is
+no SHOPLINE Payments merchant record. **That 404 is correct, not a bug.**
+
+The order leg is never the problem: `/orders.json` returns `financial_status`,
+`payment_details[].gateway`, `pay_amount` and `pay_channel_deal_id`. Only the
+**settlement** side is missing — and file-based settlement ingestion is
+ReconcileAI's founding competency.
+
+**Owner decision (2026-08-02): this ships as a LAUNCH feature, not a fast-follow.**
+It makes the addressable base every SHOPLINE merchant. Do not describe or scope
+Tier 1 as SHOPLINE-Payments-only.
+
+| Merchant type | Order leg | Settlement leg | Status |
+|---|---|---|---|
+| SHOPLINE Payments | `/orders.json` | `/payments/store/*` | Automatic |
+| Third-party gateway | `/orders.json` | CSV/XLSX import | Live |
+| COD / courier | `/orders.json` | courier remittance CSV/XLSX | Live |
+
+**Implementation:** `server/connectors/shopline/settlementFileImport.ts` +
+`shoplineConnector.importSettlementFile` + `client/src/components/SettlementFileImport.tsx`.
+
+> ⚠️ **The join key is the ORDER reference, not the gateway's id.** The retail
+> engine matches the orders channel to the payments channel on `transactionRef`,
+> where the orders side holds the SHOPLINE order id. An imported row that put the
+> gateway's own id there would import cleanly, report success and match nothing —
+> a failure that looks like a working feature. `mapSettlementRows` puts the order
+> ref in `transactionRef` and the gateway id in `externalRef`; tests pin this.
+
+Import is `dryRun`-first so the merchant confirms the detected column mapping
+before anything is written, auto-detects across gateway/COD header vocabularies,
+accepts explicit overrides for unknown providers, and dedupes via
+`rejectAlreadyIngested` so re-uploading or overlapping exports never double-count.
+
+**Verified end-to-end against production (2026-08-02):** a DHL COD remittance
+file matched the real dev-store order `21076388995485181306699745`
+($1,000,001.00) — reciprocal `matched` status on both the order and the imported
+settlement row.
 
 ---
 
