@@ -207,17 +207,81 @@ export async function updateUserRole(userId: number, role: "super_admin" | "admi
 
 // ─── Channels ────────────────────────────────────────────────────────
 
-export async function getChannels() {
+/**
+ * Channel visibility rule for a tenant: its OWN channels, plus the shared
+ * platform rails (`organizationId IS NULL` — nibss/pos/atm/bank_statement/…,
+ * seeded once for every institution). Never another tenant's.
+ *
+ * `organizationId` is REQUIRED, and `null` explicitly means platform-wide.
+ * It is deliberately not optional: this function previously took no argument
+ * and returned every channel on the platform to any authenticated caller, so a
+ * default would let the same cross-tenant enumeration reappear the moment
+ * someone forgot an argument. Making the unsafe case spell itself `null` keeps
+ * it greppable and reviewable.
+ */
+function channelScope(organizationId: number | null) {
+  // A caller with no organization gets the shared rails ONLY. `null` must never
+  // widen to "everything" — an org-less user would then silently receive every
+  // tenant's channels, which is the exact bug this replaces.
+  return organizationId === null
+    ? isNull(channels.organizationId)
+    : or(eq(channels.organizationId, organizationId), isNull(channels.organizationId));
+}
+
+export async function getChannels(organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(channels).where(channelScope(organizationId)).orderBy(asc(channels.name));
+}
+
+/**
+ * Every channel on the platform, across all tenants.
+ *
+ * Deliberately a separate, awkwardly-named function rather than a flag on
+ * `getChannels`: cross-tenant reads should be greppable and should require the
+ * author to type something that reads like what it does. Only legitimate uses
+ * are super-admin platform views and internal jobs that genuinely span tenants.
+ */
+export async function getAllChannelsAcrossTenants() {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(channels).orderBy(asc(channels.name));
 }
 
-export async function getChannelByCode(code: string) {
+/**
+ * Look a channel up by code, honouring the same tenancy rule. Returns undefined
+ * when the code belongs to another tenant — so an attacker-supplied
+ * `channelCode` cannot be used to read or write into someone else's channel.
+ */
+export async function getChannelByCode(code: string, organizationId: number | null) {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(channels).where(eq(channels.code, code)).limit(1);
+  const result = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.code, code), channelScope(organizationId)))
+    .limit(1);
   return result[0];
+}
+
+/**
+ * Platform-wide existence check for a channel code.
+ *
+ * `channels.code` carries a GLOBAL unique constraint, so uniqueness on create
+ * must be validated across all tenants — an org-scoped check would pass and
+ * then hit a duplicate-key error at insert. This is the one place a
+ * cross-tenant read is correct, and it deliberately returns only a boolean so
+ * it cannot leak another tenant's channel details.
+ */
+export async function channelCodeExists(code: string): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const [row] = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(eq(channels.code, code))
+    .limit(1);
+  return Boolean(row);
 }
 
 export async function getChannelById(id: number) {

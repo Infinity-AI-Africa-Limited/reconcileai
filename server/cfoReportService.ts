@@ -121,11 +121,13 @@ export function isBoardPeriod(period: string): boolean {
 // ─── Build channel metrics for a period ─────────────────────────────
 
 export async function buildChannelMetrics(
+  /** Tenant this report covers. `null` = shared platform rails only. */
+  organizationId: number | null,
   period: string,
   channelCodes?: string[]
 ): Promise<ChannelMetricRow[]> {
   const { dateFrom, dateTo } = getDateRange(period);
-  const channels = await db.getChannels();
+  const channels = await db.getChannels(organizationId);
   const filtered = channelCodes && channelCodes.length > 0
     ? channels.filter((c) => channelCodes.includes(c.code))
     : channels;
@@ -152,8 +154,11 @@ export async function buildChannelMetrics(
 
 // ─── Board-level executive summary (quarterly) ───────────────────────
 
-export async function buildBoardSummary(period: string): Promise<BoardSummary> {
-  const rows = await buildChannelMetrics(period);
+export async function buildBoardSummary(
+  organizationId: number | null,
+  period: string,
+): Promise<BoardSummary> {
+  const rows = await buildChannelMetrics(organizationId, period);
   const { dateFrom, dateTo } = getDateRange(period);
 
   const totalVolume = rows.reduce((s, r) => s + r.volume, 0);
@@ -227,14 +232,18 @@ export async function sendWeeklyChannelReport(
   period: string = "7d"
 ): Promise<{ success: boolean; channelsReported: number; xlsxUrl?: string; error?: string }> {
   try {
-    const rows = await buildChannelMetrics(period);
+    // Scope the report to the recipient's own tenant — a weekly CFO report must
+    // never aggregate another institution's channels.
+    const recipient = await db.getUserById(userId);
+    const orgId = recipient?.organizationId ?? null;
+    const rows = await buildChannelMetrics(orgId, period);
     if (rows.length === 0) {
       return { success: true, channelsReported: 0 };
     }
 
     const label = periodLabel(period);
     const boardMode = isBoardPeriod(period);
-    const board = boardMode ? await buildBoardSummary(period) : null;
+    const board = boardMode ? await buildBoardSummary(orgId, period) : null;
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-NG", { day: "numeric", month: "long", year: "numeric" });
 
@@ -472,8 +481,9 @@ export async function checkChannelThresholdBreaches(userId: number): Promise<{
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
 
-    const channels = await db.getChannels();
+    // Load the owner first so alerts are evaluated against their own channels.
     const owner = await db.getUserById(userId);
+    const channels = await db.getChannels(owner?.organizationId ?? null);
     let breachesFound = 0;
     let alertsSent = 0;
 
@@ -534,8 +544,11 @@ export async function checkChannelThresholdBreaches(userId: number): Promise<{
 
 // ─── Channel 30-day drill-down ────────────────────────────────────────
 
-export async function getChannelDrillDown(channelCode: string): Promise<ChannelDrillDown | null> {
-  const channels = await db.getChannels();
+export async function getChannelDrillDown(
+  organizationId: number | null,
+  channelCode: string,
+): Promise<ChannelDrillDown | null> {
+  const channels = await db.getChannels(organizationId);
   const channel = channels.find((c) => c.code === channelCode);
   if (!channel) return null;
 
