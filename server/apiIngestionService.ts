@@ -3,6 +3,7 @@ import { apiIngestionLogs, uploadBatches, transactions, apiKeys } from "../drizz
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "crypto";
 import Papa from "papaparse";
+import { parseAmount, parseDate, normalizeHeader } from "./ingest/fileParser";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -92,6 +93,36 @@ interface ParsedTransaction {
   [key: string]: any;
 }
 
+/**
+ * Header vocabularies for bank/PSP exports. Deliberately broad: "any bank"
+ * means we cannot dictate column names, and the previous code accepted exactly
+ * `transactionDate|date|Date` and `amount|Amount`, so a file headed
+ * "Posting Date"/"Value" was rejected wholesale as malformed.
+ */
+const DATE_HEADERS = [
+  "transactiondate", "transaction_date", "date", "posting_date", "posted_at",
+  "value_date", "valuedate", "settlement_date", "created_at", "created",
+  "datetime", "timestamp", "txn_date", "trans_date",
+];
+const AMOUNT_HEADERS = [
+  "amount", "transaction_amount", "txn_amount", "value", "net_amount", "net",
+  "credit", "debit", "total", "total_amount", "settlement_amount", "gross_amount",
+];
+
+/** Case/spacing-insensitive lookup of the first matching header in a row. */
+function pickField(row: Record<string, unknown>, aliases: string[]): string | undefined {
+  const byNorm = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(row)) {
+    const n = normalizeHeader(k);
+    if (n && !byNorm.has(n)) byNorm.set(n, v);
+  }
+  for (const a of aliases) {
+    const v = byNorm.get(a);
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
+  }
+  return undefined;
+}
+
 export function parseAndValidateCsv(
   csvContent: string,
   channelId: number
@@ -113,43 +144,32 @@ export function parseAndValidateCsv(
     const errors: string[] = [];
     const rowNum = index + 2; // +2 because index is 0-based and we skip header
 
-    // Required fields validation
-    if (!row.transactionDate && !row.date && !row.Date) {
-      errors.push("Missing transaction date");
-    }
-    if (!row.amount && !row.Amount) {
-      errors.push("Missing amount");
-    }
+    // Header resolution and coercion both come from the shared ingestion core,
+    // so the validator and storeTransactions can never disagree about whether a
+    // value is readable. Previously each had its own parser and its own short
+    // list of accepted spellings.
+    const amountStr = pickField(row, AMOUNT_HEADERS);
+    const dateStr = pickField(row, DATE_HEADERS);
 
-    // Amount validation
-    const amountStr = row.amount || row.Amount;
-    if (amountStr) {
-      const amount = parseFloat(String(amountStr).replace(/[^0-9.-]/g, ""));
-      if (isNaN(amount)) {
-        errors.push("Invalid amount format");
-      }
-    }
-
-    // Date validation
-    const dateStr = row.transactionDate || row.date || row.Date;
-    if (dateStr) {
-      const date = new Date(dateStr);
-      if (isNaN(date.getTime())) {
-        errors.push("Invalid date format");
-      }
-    }
+    if (!dateStr) errors.push("Missing transaction date");
+    if (!amountStr) errors.push("Missing amount");
+    if (amountStr && parseAmount(amountStr) === null) errors.push("Invalid amount format");
+    if (dateStr && parseDate(dateStr) === null) errors.push("Invalid date format");
 
     if (errors.length > 0) {
       invalid.push({ row: rowNum, errors });
     } else {
       valid.push({
+        // Raw row first so the original columns are preserved for rawData…
+        ...row,
+        // …but the RESOLVED values win. Spreading last would let a present-but-
+        // empty `amount` column clobber a value correctly resolved from `Value`.
         transactionDate: dateStr,
         amount: amountStr,
         currency: row.currency || row.Currency || "NGN",
         reference: row.reference || row.Reference || row.ref || "",
         description: row.description || row.Description || "",
         counterparty: row.counterparty || row.Counterparty || row.beneficiary || "",
-        ...row,
       });
     }
   });
@@ -174,14 +194,36 @@ export async function storeTransactions(
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const txnRecords = validRows.map((row) => ({
+  // Coercion goes through the shared ingestion core. The previous inline
+  // `parseFloat(String(x).replace(/[^0-9.-]/g, ""))` corrupted money silently:
+  // the accounting negative "(12.30)" became +12.30 (a refund posted as a
+  // credit) and the European "1.234,56" became 1.23456. Both produced numbers
+  // that still looked plausible, which is the dangerous kind of wrong.
+  const coerced = validRows.map((row) => ({
+    row,
+    amount: parseAmount(row.amount as string),
+    date: parseDate(row.transactionDate as string),
+  }));
+
+  // Defensive: parseAndValidateCsv already rejects these using the SAME parser,
+  // so anything landing here is an upstream inconsistency, not user input.
+  const unusable = coerced.filter((c) => c.amount === null || c.date === null);
+  if (unusable.length > 0) {
+    console.warn(
+      `[apiIngestion] Skipped ${unusable.length} row(s) with unparseable amount/date after validation — batch ${uploadBatchId}`,
+    );
+  }
+
+  const txnRecords = coerced
+    .filter((c): c is typeof c & { amount: number; date: Date } => c.amount !== null && c.date !== null)
+    .map(({ row, amount, date }) => ({
     userId: 0, // System user for API uploads
     batchId: uploadBatchId,
     uploadBatchId,
     channelId,
     organizationId: organizationId ?? null,
-    transactionDate: new Date(row.transactionDate),
-    amount: String(parseFloat(String(row.amount).replace(/[^0-9.-]/g, ""))),
+    transactionDate: date,
+    amount: String(amount),
     currency: row.currency || "NGN",
     reference: row.reference || null,
     description: row.description || null,

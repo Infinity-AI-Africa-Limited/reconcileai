@@ -23,9 +23,27 @@
  *
  * Pure functions here (parse / detect / map) are unit-testable without a DB.
  */
-import Papa from "papaparse";
-import { loadExcelJS } from "../../exceljsLoader";
 import type { InsertTransaction } from "../../../drizzle/schema";
+import {
+  parseTabularFile,
+  normalizeHeader,
+  parseAmount,
+  parseDate,
+  resolveColumn,
+  type ParsedTable,
+} from "../../ingest/fileParser";
+
+// Re-exported so the retail import keeps a single, stable surface even though
+// the mechanics now live in the shared ingestion core.
+export { normalizeHeader, parseAmount, parseDate };
+export type ParsedFile = ParsedTable;
+
+/**
+ * Parse a settlement export. Thin alias over the shared tabular parser — the
+ * CSV/XLSX mechanics are identical for every inbound path; only the MAPPING
+ * below is retail-specific.
+ */
+export const parseSettlementFile = parseTabularFile;
 
 /** Fields we try to recover from an arbitrary settlement export. */
 export type SettlementField =
@@ -82,100 +100,6 @@ export const SETTLEMENT_ALIASES: Record<SettlementField, string[]> = {
 /** Required to produce a matchable row. Everything else is enrichment. */
 export const REQUIRED_FIELDS: SettlementField[] = ["orderRef", "amount"];
 
-/** Normalise a header the same way the client-side connectors do. */
-export function normalizeHeader(h: string): string {
-  return String(h ?? "").trim().toLowerCase().replace(/['"]/g, "").replace(/\s+/g, "_");
-}
-
-export interface ParsedFile {
-  headers: string[];
-  rows: Record<string, string>[];
-  parseErrors: string[];
-}
-
-const MAX_ROWS = 200_000;
-
-/**
- * Parse a CSV or Excel settlement export into header-keyed rows.
- *
- * Excel is parsed HERE rather than in the browser on purpose: exceljs is a
- * server-only dependency behind `exceljsLoader` (an ESM/CJS interop shim), and
- * pulling it into the client bundle to read a once-a-month file would cost every
- * page load.
- */
-export async function parseSettlementFile(
-  content: Buffer | string,
-  fileName: string,
-): Promise<ParsedFile> {
-  const isExcel = /\.(xlsx|xlsm|xls)$/i.test(fileName);
-  if (!isExcel) {
-    const text = typeof content === "string" ? content : content.toString("utf8");
-    const parsed = Papa.parse<Record<string, string>>(text, {
-      header: true,
-      skipEmptyLines: true,
-      transformHeader: (h) => h.trim(),
-    });
-    const rows = (parsed.data ?? []) as Record<string, string>[];
-    assertRowCap(rows.length);
-    return {
-      headers: parsed.meta?.fields ?? Object.keys(rows[0] ?? {}),
-      rows,
-      parseErrors: (parsed.errors ?? []).slice(0, 10).map(
-        (e) => `row ${typeof e.row === "number" ? e.row + 2 : "?"}: ${e.message}`,
-      ),
-    };
-  }
-
-  const ExcelJS = await loadExcelJS();
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(
-    (typeof content === "string" ? Buffer.from(content, "base64") : content) as never,
-  );
-  const ws = wb.worksheets[0];
-  if (!ws) return { headers: [], rows: [], parseErrors: ["Workbook contains no worksheets"] };
-
-  const headers: string[] = [];
-  const rows: Record<string, string>[] = [];
-  ws.eachRow((row, rowNumber) => {
-    const values: string[] = [];
-    row.eachCell({ includeEmpty: true }, (cell, col) => {
-      values[col - 1] = cellToString(cell);
-    });
-    if (rowNumber === 1) {
-      for (const v of values) headers.push(String(v ?? "").trim());
-      return;
-    }
-    const rec: Record<string, string> = {};
-    headers.forEach((h, i) => { if (h) rec[h] = values[i] ?? ""; });
-    // Skip fully blank rows — trailing empties are endemic in exported sheets.
-    if (Object.values(rec).some((v) => String(v).trim() !== "")) rows.push(rec);
-  });
-  assertRowCap(rows.length);
-  return { headers, rows, parseErrors: [] };
-}
-
-function assertRowCap(n: number): void {
-  if (n > MAX_ROWS) {
-    throw new Error(`File has ${n.toLocaleString()} rows — split files above ${MAX_ROWS.toLocaleString()}`);
-  }
-}
-
-/** exceljs cells can be richtext/formula/hyperlink/date objects, not just scalars. */
-function cellToString(cell: { value: unknown; text?: string }): string {
-  const v = cell.value;
-  if (v === null || v === undefined) return "";
-  if (v instanceof Date) return v.toISOString();
-  if (typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    if (typeof o.text === "string") return o.text;
-    if (typeof o.result === "number" || typeof o.result === "string") return String(o.result);
-    if (Array.isArray(o.richText)) return o.richText.map((r) => (r as { text: string }).text).join("");
-    if (typeof cell.text === "string") return cell.text;
-    return "";
-  }
-  return String(v);
-}
-
 export type ColumnMap = Partial<Record<SettlementField, string>>;
 
 /**
@@ -189,12 +113,6 @@ export function detectColumns(headers: string[], overrides?: ColumnMap): {
   mapping: ColumnMap;
   missingRequired: SettlementField[];
 } {
-  const byNormalized = new Map<string, string>();
-  for (const h of headers) {
-    const n = normalizeHeader(h);
-    if (n && !byNormalized.has(n)) byNormalized.set(n, h);
-  }
-
   const mapping: ColumnMap = {};
   const claimed = new Set<string>();
   // Apply overrides first so detection cannot steal a column the user assigned.
@@ -206,61 +124,16 @@ export function detectColumns(headers: string[], overrides?: ColumnMap): {
   }
   for (const field of Object.keys(SETTLEMENT_ALIASES) as SettlementField[]) {
     if (mapping[field]) continue;
-    for (const alias of SETTLEMENT_ALIASES[field]) {
-      const actual = byNormalized.get(alias);
-      if (actual && !claimed.has(actual)) {
-        mapping[field] = actual;
-        claimed.add(actual);
-        break;
-      }
+    const actual = resolveColumn(headers, SETTLEMENT_ALIASES[field], claimed);
+    if (actual) {
+      mapping[field] = actual;
+      claimed.add(actual);
     }
   }
   return {
     mapping,
     missingRequired: REQUIRED_FIELDS.filter((f) => !mapping[f]),
   };
-}
-
-/** Money strings in the wild: "1,234.56", "$1,234.56", "(12.30)" for negatives. */
-export function parseAmount(raw: string | undefined): number | null {
-  if (raw === undefined || raw === null) return null;
-  let s = String(raw).trim();
-  if (!s) return null;
-  const parenNegative = /^\(.*\)$/.test(s);
-  s = s.replace(/[()]/g, "").replace(/[^0-9.,\-]/g, "");
-
-  // Separator disambiguation. Getting this wrong is silently catastrophic:
-  // "₦12,000" read as European decimal becomes 12.00 — a 1000x understatement
-  // that still looks like a plausible amount.
-  const hasComma = s.includes(",");
-  const hasDot = s.includes(".");
-  if (hasComma && hasDot) {
-    // Both present: whichever comes last is the decimal separator.
-    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
-    else s = s.replace(/,/g, "");
-  } else if (hasComma) {
-    const parts = s.split(",");
-    // Repeated commas, or a final group of exactly 3 digits, means thousands
-    // ("12,000"). A 1-2 digit tail means a European decimal ("12,30").
-    const thousands = parts.length > 2 || parts[parts.length - 1].length === 3;
-    s = thousands ? s.replace(/,/g, "") : s.replace(",", ".");
-  } else if (hasDot) {
-    // A single dot is a decimal point in virtually every export; only repeated
-    // dots indicate grouping ("1.234.567").
-    if (s.split(".").length > 2) s = s.replace(/\./g, "");
-  }
-  const n = Number.parseFloat(s);
-  if (!Number.isFinite(n)) return null;
-  return parenNegative ? -Math.abs(n) : n;
-}
-
-export function parseDate(raw: string | undefined): Date | null {
-  if (!raw) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-  // Prefer unambiguous ISO; fall back to Date parsing for everything else.
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 export interface MapResult {
