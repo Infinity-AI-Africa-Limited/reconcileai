@@ -729,6 +729,90 @@ export const sftpIngestionLogs = mysqlTable("sftp_ingestion_logs", {
 export type SftpIngestionLog = typeof sftpIngestionLogs.$inferSelect;
 export type InsertSftpIngestionLog = typeof sftpIngestionLogs.$inferInsert;
 
+// ─── Bucket (object-storage) Drop Ingestion ──────────────────────────
+// The S3-compatible sibling of SFTP. Many banks, PSPs and couriers deliver
+// settlement files to a bucket rather than an SFTP host, and several prefer it
+// (IAM-scoped, no long-lived SSH keys, no host to keep patched).
+//
+// Deliberately parallel to sftp_credentials rather than shoehorned into it: the
+// connection model genuinely differs (bucket/prefix/region/endpoint vs
+// host/port/path) and overloading one table would leave half the columns NULL
+// for every row. Both feed the SAME processing core, which is where sharing
+// actually matters. A future `ingestion_sources` generalisation could unify
+// them, but that is a migration of live SFTP config and not worth it yet.
+export const bucketIngestionSources = mysqlTable("bucket_ingestion_sources", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  userId: int("userId").notNull(), // Who created this config
+  name: varchar("name", { length: 255 }).notNull(),
+  /** s3 = AWS; r2/minio/other require an explicit endpoint. */
+  provider: mysqlEnum("provider", ["s3", "r2", "minio", "other"]).default("s3").notNull(),
+  bucket: varchar("bucket", { length: 255 }).notNull(),
+  /** Key prefix to watch, e.g. "settlements/incoming/". Empty = bucket root. */
+  prefix: varchar("prefix", { length: 500 }).default("").notNull(),
+  region: varchar("region", { length: 64 }).default("auto").notNull(),
+  /** Custom S3 endpoint for R2/MinIO. NULL = AWS default for the region. */
+  endpoint: varchar("endpoint", { length: 500 }),
+  /** Credentials encrypted at rest with the same envelope as SFTP secrets. */
+  accessKeyIdEncrypted: text("accessKeyIdEncrypted"),
+  secretAccessKeyEncrypted: text("secretAccessKeyEncrypted"),
+  filePattern: varchar("filePattern", { length: 255 }).default("*.csv").notNull(),
+  /** Move processed objects under this prefix. NULL + deleteAfterProcess=false
+   *  leaves them in place (dedupe is by content hash, so that is safe). */
+  archivePrefix: varchar("archivePrefix", { length: 500 }),
+  deleteAfterProcess: boolean("deleteAfterProcess").default(false).notNull(),
+  channelId: int("channelId").notNull(),
+  pollingEnabled: boolean("pollingEnabled").default(true).notNull(),
+  pollingIntervalMinutes: int("pollingIntervalMinutes").default(15).notNull(),
+  autoReconcile: boolean("autoReconcile").default(false).notNull(),
+  reconcileTargetChannelId: int("reconcileTargetChannelId"),
+  isActive: boolean("isActive").default(true).notNull(),
+  lastPolledAt: timestamp("lastPolledAt"),
+  lastSuccessAt: timestamp("lastSuccessAt"),
+  lastErrorAt: timestamp("lastErrorAt"),
+  lastErrorMessage: text("lastErrorMessage"),
+  totalFilesProcessed: int("totalFilesProcessed").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_bucket_src_org").on(table.organizationId),
+  index("idx_bucket_src_channel").on(table.channelId),
+  index("idx_bucket_src_active").on(table.isActive),
+]);
+
+export type BucketIngestionSource = typeof bucketIngestionSources.$inferSelect;
+export type InsertBucketIngestionSource = typeof bucketIngestionSources.$inferInsert;
+
+export const bucketIngestionLogs = mysqlTable("bucket_ingestion_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  bucketSourceId: int("bucketSourceId").notNull(),
+  organizationId: int("organizationId").notNull(),
+  channelId: int("channelId").notNull(),
+  objectKey: varchar("objectKey", { length: 1000 }).notNull(),
+  fileSize: int("fileSize"),
+  /** SHA-256 over the object's BYTES — the idempotency key for re-polling. */
+  fileHash: varchar("fileHash", { length: 64 }),
+  totalRows: int("totalRows"),
+  validRows: int("validRows"),
+  invalidRows: int("invalidRows"),
+  status: mysqlEnum("status", ["success", "failed", "partial", "skipped"]).notNull(),
+  errorMessage: text("errorMessage"),
+  processingTimeMs: int("processingTimeMs"),
+  uploadBatchId: int("uploadBatchId"),
+  reconciliationJobId: int("reconciliationJobId"),
+  archivedKey: varchar("archivedKey", { length: 1000 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_bucket_log_src").on(table.bucketSourceId),
+  index("idx_bucket_log_org").on(table.organizationId),
+  index("idx_bucket_log_status").on(table.status),
+  index("idx_bucket_log_hash").on(table.fileHash),
+  index("idx_bucket_log_created").on(table.createdAt),
+]);
+
+export type BucketIngestionLog = typeof bucketIngestionLogs.$inferSelect;
+export type InsertBucketIngestionLog = typeof bucketIngestionLogs.$inferInsert;
+
 // ─── User Role Preferences ───────────────────────────────────────────
 export const userRolePreferences = mysqlTable("user_role_preferences", {
   id: int("id").autoincrement().primaryKey(),

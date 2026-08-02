@@ -47,6 +47,7 @@ import {
   downloadAndProcessSftpFile,
   startSftpPolling,
 } from "./sftpService";
+import { startBucketPolling } from "./bucketIngestionService";
 import { startSLAMonitoring } from "./slaMonitoringService";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 import {
@@ -6963,6 +6964,9 @@ async function runReconciliation(
 startScheduler(60000);
 // Start SFTP polling service
 startSftpPolling();
+// Start object-storage (S3/R2/MinIO) drop polling — the same ingestion core,
+// for banks and couriers who deliver to a bucket rather than an SFTP host.
+startBucketPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
 // Pre-warm the shared demo user so the first guest gets instant data
