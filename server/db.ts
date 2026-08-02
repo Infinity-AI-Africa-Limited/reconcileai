@@ -219,7 +219,7 @@ export async function updateUserRole(userId: number, role: "super_admin" | "admi
  * someone forgot an argument. Making the unsafe case spell itself `null` keeps
  * it greppable and reviewable.
  */
-function channelScope(organizationId: number | null) {
+export function channelScope(organizationId: number | null) {
   // A caller with no organization gets the shared rails ONLY. `null` must never
   // widen to "everything" — an org-less user would then silently receive every
   // tenant's channels, which is the exact bug this replaces.
@@ -288,6 +288,27 @@ export async function getChannelById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
   const result = await db.select().from(channels).where(eq(channels.id, id)).limit(1);
+  return result[0];
+}
+
+/**
+ * Look a channel up by id, honouring the tenancy rule — the by-id counterpart
+ * of `getChannelByCode`.
+ *
+ * Required wherever a channel id arrives from OUTSIDE, most importantly the
+ * public upload API: an API key is issued to one organization, so a
+ * caller-supplied `channelId` must be proven to belong to that organization (or
+ * be a shared rail) before anything is written to it. Returns undefined when it
+ * does not, so the caller fails closed.
+ */
+export async function getChannelByIdForOrg(id: number, organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.id, id), channelScope(organizationId)))
+    .limit(1);
   return result[0];
 }
 

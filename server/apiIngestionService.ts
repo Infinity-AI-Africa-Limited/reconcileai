@@ -1,4 +1,4 @@
-import { getDb } from "./db";
+import { getDb, getChannelByIdForOrg } from "./db";
 import { apiIngestionLogs, uploadBatches, transactions, apiKeys } from "../drizzle/schema";
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "crypto";
@@ -358,6 +358,43 @@ export async function processApiUpload(
 
     const db = await getDb();
     if (!db) throw new Error("Database not available");
+
+    // TENANCY GATE — must come before any read or write keyed on channelId.
+    //
+    // `channelId` is supplied by the CALLER over the public, internet-facing
+    // API. An API key belongs to exactly one organization, so without this an
+    // integration key issued to one bank could push transactions straight into
+    // another bank's channel — a cross-tenant write on the most exposed surface
+    // we have. Shared platform rails (organizationId NULL) remain reachable.
+    const targetChannel = await getChannelByIdForOrg(
+      request.channelId,
+      keyValidation.organizationId ?? null,
+    );
+    if (!targetChannel) {
+      await logApiIngestion({
+        organizationId: keyValidation.organizationId,
+        apiKeyId: keyValidation.apiKeyId,
+        endpoint: "/api/v1/transactions/upload",
+        method: "POST",
+        channelId: request.channelId,
+        fileName: request.fileName,
+        status: "failed",
+        statusCode: 403,
+        errorMessage: "Channel does not belong to this API key's organization",
+        ipAddress,
+        userAgent,
+      });
+      return {
+        success: false,
+        totalRows: 0,
+        validRows: 0,
+        invalidRows: 0,
+        // Deliberately does not distinguish "not yours" from "does not exist";
+        // that difference is an enumeration oracle for other tenants' channels.
+        errors: ["Channel not found"],
+        message: "Channel not found",
+      };
+    }
 
     // Check for duplicate upload
     const [existingBatch] = await db
