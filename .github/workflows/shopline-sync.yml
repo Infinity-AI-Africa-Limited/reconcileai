@@ -42,6 +42,13 @@ concurrency:
 jobs:
   trigger:
     runs-on: ubuntu-latest
+    # Canonical repo only. Both repos carry this file (every commit is
+    # dual-pushed), and with the secret set on both they each fired the same
+    # cron at the same minute against ONE production endpoint — two concurrent
+    # sync cycles per tick. Ingest was not idempotent, so on 2026-08-02 that
+    # helped produce four copies of a single order. Ingest is now deduped, but
+    # halving the concurrency removes the race rather than relying on the guard.
+    if: github.repository == 'Infinity-AI-Africa-Limited/reconcileai'
     env:
       # Use www directly — the bare domain goes through forwarding which strips
       # the POST method on redirect (301 → GET), causing a 405 on the API.
