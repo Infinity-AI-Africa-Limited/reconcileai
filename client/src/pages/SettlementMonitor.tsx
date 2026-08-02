@@ -23,8 +23,10 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  FileSpreadsheet,
 } from "lucide-react";
 import { toast } from "sonner";
+import { SettlementFileImport } from "@/components/SettlementFileImport";
 
 // `transactions.amount` is decimal(18,2) in MAJOR units (e.g. "25.00" = $25.00),
 // which is what the SHOPLINE ingest writes and what every sibling page renders.
@@ -60,6 +62,9 @@ function formatTimeAgo(date: string | Date | null): string {
 
 export default function SettlementMonitor() {
   const [refreshing, setRefreshing] = useState(false);
+  // Declared with the other hooks, ABOVE the isLoading early return — a hook
+  // after a conditional return changes hook order between renders and throws.
+  const [showImporter, setShowImporter] = useState(false);
 
   const { data: stores, isLoading: storesLoading } = trpc.shoplineConnector.listStores.useQuery({});
   const { data: syncStatus, isLoading: syncLoading, refetch } = trpc.shoplineConnector.syncStatus.useQuery(undefined, {
@@ -90,6 +95,10 @@ export default function SettlementMonitor() {
   const matchRate = syncStatus?.matchRate ?? 0;
   const recentPayouts = syncStatus?.recentPayouts ?? [];
   const syncHealth = syncStatus?.syncHealth ?? [];
+  // Orders present, no payment leg — the merchant is on a third-party gateway
+  // or COD, so SHOPLINE holds no settlement data for them. Say so, and offer
+  // the fix, rather than rendering a 0% match rate as if it were a result.
+  const paymentFeedMissing = syncStatus?.paymentFeedMissing ?? false;
   // Surface a store that is failing to sync, or has never synced, rather than
   // rendering an empty dashboard as if zero were a real result.
   const unhealthyStores = syncHealth.filter((s) => s.lastSyncError || s.neverSynced);
@@ -104,6 +113,13 @@ export default function SettlementMonitor() {
             Real-time settlement tracking across your SHOPLINE stores
           </p>
         </div>
+        <div className="flex items-center gap-2">
+        {/* Always available: a merchant on SHOPLINE Payments may still want to
+            reconcile the bank leg, or a second gateway, from a file. */}
+        <Button variant="outline" size="sm" onClick={() => setShowImporter((v) => !v)}>
+          <FileSpreadsheet className="h-4 w-4 mr-2" />
+          Import settlement file
+        </Button>
         <Button
           variant="outline"
           size="sm"
@@ -117,10 +133,43 @@ export default function SettlementMonitor() {
           )}
           Refresh
         </Button>
+        </div>
       </div>
 
       {/* Plan status + grace-period banner (SHOPLINE-managed billing) */}
       <PlanStatusBanner />
+
+      {/* No payment leg: explain the 0% match rate and offer the remedy. */}
+      {paymentFeedMissing && (
+        <Card className="border-blue-500/50 bg-blue-50 dark:bg-blue-950/20">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-3">
+              <FileSpreadsheet className="h-5 w-5 text-blue-600 shrink-0 mt-0.5" />
+              <div className="space-y-2 min-w-0 flex-1">
+                <p className="font-medium text-sm">No payment data connected — orders can't be matched yet</p>
+                <p className="text-sm text-muted-foreground">
+                  We have {syncStatus?.orderRowCount ?? 0} order(s) from SHOPLINE but no settlement
+                  records, so the match rate below is 0% by definition rather than by result. This is
+                  normal for stores on a third-party gateway or Cash on Delivery — SHOPLINE only
+                  exposes settlement data for stores enrolled in SHOPLINE Payments.
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Import the payout or settlement export from your provider, bank or courier
+                  (CSV or Excel) and reconciliation will run against it immediately.
+                </p>
+                <Button size="sm" variant="default" onClick={() => setShowImporter((v) => !v)}>
+                  <FileSpreadsheet className="h-4 w-4 mr-2" />
+                  {showImporter ? "Hide importer" : "Import settlement file"}
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {showImporter && (
+        <SettlementFileImport onImported={() => { void refetch(); setShowImporter(false); }} />
+      )}
 
       {/* Sync health — explains an empty dashboard instead of showing bare zeros */}
       {unhealthyStores.length > 0 && (
