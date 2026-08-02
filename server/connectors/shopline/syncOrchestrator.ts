@@ -19,7 +19,7 @@
  */
 import { and, eq, gte, lte } from "drizzle-orm";
 import { getDb } from "../../db";
-import { insertTransactions, createUploadBatch, insertExceptionsBatch } from "../../db";
+import { insertTransactions, createUploadBatch, updateUploadBatch, insertExceptionsBatch } from "../../db";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { transactions, channels } from "../../../drizzle/schema";
 import { getValidToken } from "./tokenStore";
@@ -132,7 +132,7 @@ async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promis
  * throws, so a genuine outage or a broken request is never silently swallowed
  * into a green sync.
  */
-async function bestEffortLeg<T>(
+export async function bestEffortLeg<T>(
   leg: "payments" | "payouts",
   storeHandle: string,
   fetcher: () => Promise<T[]>,
@@ -270,11 +270,37 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       await insertTransactions(allRows);
     }
 
-    // ── Step 5: Run reconciliation (unless ingestOnly) ──────────────────────
+    // Close the batch out. Without this it sat at "processing" forever, so the
+    // upload history showed every SHOPLINE sync as permanently in-flight.
+    await updateUploadBatch(batchId, {
+      status: "completed",
+      validRows: allRows.length,
+      invalidRows: 0,
+      completedAt: new Date(),
+    });
+
+    // ── Step 5: Run reconciliation ──────────────────────────────────────────
+    //
+    // Reconciliation needs BOTH legs. When the payments feed is unavailable
+    // (store not on SHOPLINE Payments — see bestEffortLeg above), the target
+    // side is empty, and the engine's only guard is
+    // `sourceRows.length === 0 && targetRows.length === 0` — an AND — so it
+    // would happily match every order against nothing and raise one
+    // high-severity "No matching transaction found" exception per order.
+    //
+    // That claim is also simply untrue: the payment was never *fetched*, so we
+    // cannot say it was not *found*. For a merchant on an external gateway
+    // that is an alert storm across their entire order book. Ingest the orders
+    // so the merchant still sees their sales data, and skip the match.
     let matchedCount = 0;
     let exceptionCount = 0;
+    const reconciliationSkipped = payments.unavailable;
 
-    if (!opts.ingestOnly && allRows.length > 0) {
+    if (reconciliationSkipped) {
+      console.info(
+        `[SHOPLINE] Reconciliation skipped for store=${storeHandle} — payments feed unavailable; ingested ${allRows.length} row(s) only`,
+      );
+    } else if (!opts.ingestOnly && allRows.length > 0) {
       const result = await runReconciliationOnPersistedData(
         db,
         opts.organizationId,
