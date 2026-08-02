@@ -3,7 +3,8 @@ import crypto from "crypto";
 import { getDb } from "./db";
 import { sftpCredentials, sftpIngestionLogs, uploadBatches, transactions } from "../drizzle/schema";
 import { eq, and, lte } from "drizzle-orm";
-import { parseAndValidateCsv, storeTransactions, calculateFileHash } from "./apiIngestionService";
+import { validateParsedRows, storeTransactions, calculateFileHash } from "./apiIngestionService";
+import { parseTabularFile } from "./ingest/fileParser";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -175,10 +176,17 @@ export async function downloadAndProcessSftpFile(
     });
     
     const remotePath = `${cred.remotePath}/${fileName}`;
-    const fileBuffer = await sftp.get(remotePath);
-    const fileContent = fileBuffer.toString("utf8");
-    const fileSize = Buffer.byteLength(fileContent);
-    const fileHash = calculateFileHash(fileContent);
+    const raw = await sftp.get(remotePath);
+    // Keep the bytes. This used to be `.toString("utf8")` unconditionally, so a
+    // workbook dropped on SFTP — the norm for couriers and enterprise PSPs — was
+    // mangled into replacement characters and then parsed as delimited text,
+    // yielding garbage rows. Hashing that lossy string could also collide two
+    // different spreadsheets and silently discard the second as a duplicate.
+    const fileBuffer: Buffer = Buffer.isBuffer(raw)
+      ? raw
+      : Buffer.from(raw as unknown as string, "utf8");
+    const fileSize = fileBuffer.byteLength;
+    const fileHash = calculateFileHash(fileBuffer);
     
     // Check for duplicate
     const [existingLog] = await db
@@ -201,10 +209,21 @@ export async function downloadAndProcessSftpFile(
       };
     }
     
-    // Parse and validate CSV
-    const { valid, invalid, totalRows } = parseAndValidateCsv(fileContent, cred.channelId);
-    
-    if (valid.length === 0) {
+    // Parse via the shared ingestion core: CSV/TSV or Excel, same validation.
+    let valid: Awaited<ReturnType<typeof validateParsedRows>>["valid"] = [];
+    let invalid: Array<{ row: number; errors: string[] }> = [];
+    let totalRows = 0;
+    let parseFailure: string | null = null;
+    try {
+      const parsed = await parseTabularFile(fileBuffer, fileName);
+      ({ valid, invalid, totalRows } = validateParsedRows(parsed.rows));
+    } catch (parseErr) {
+      // A corrupt or password-protected workbook must fail loudly with a usable
+      // reason, not fall through as "no valid rows".
+      parseFailure = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    }
+
+    if (parseFailure || valid.length === 0) {
       // Log failed ingestion
       await db.insert(sftpIngestionLogs).values({
         sftpCredentialId: credentialId,
@@ -218,12 +237,12 @@ export async function downloadAndProcessSftpFile(
         validRows: 0,
         invalidRows: invalid.length,
         status: "failed",
-        errorMessage: "No valid rows found in CSV",
+        errorMessage: parseFailure ?? "No valid rows found in file",
         processingTimeMs: Date.now() - startTime,
       });
       
       await sftp.end();
-      return { success: false, error: "No valid rows found in CSV" };
+      return { success: false, error: parseFailure ?? "No valid rows found in file" };
     }
     
     // Create upload batch
