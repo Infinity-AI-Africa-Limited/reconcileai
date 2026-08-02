@@ -43,7 +43,14 @@ describe("tenant keys — local master-key provider", () => {
     const provider = tk.getMasterKeyProvider();
     const { wrapped } = await provider.generateDek();
     const parts = wrapped.split(":");
-    const tampered = [parts[0], parts[1], parts[2].slice(0, -2) + "00"].join(":");
+    // Flip the final byte to a GUARANTEED-different value. Overwriting it with
+    // a constant (this was "00") is a no-op whenever the byte already holds
+    // that value — the ciphertext is then untampered, unwrap succeeds, and the
+    // test fails. The wrapped key is random, so that was a real 1-in-256 flake.
+    const lastByte = parseInt(parts[2].slice(-2), 16);
+    const flipped = (lastByte ^ 0xff).toString(16).padStart(2, "0");
+    const tampered = [parts[0], parts[1], parts[2].slice(0, -2) + flipped].join(":");
+    expect(tampered).not.toBe(wrapped);
     await expect(provider.unwrapDek(tampered, null)).rejects.toThrow();
   });
 });

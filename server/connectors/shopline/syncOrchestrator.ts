@@ -189,6 +189,9 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
   const to = opts.to ?? new Date();
   const from = opts.from ?? new Date(to.getTime() - 24 * 60 * 60 * 1000);
 
+  /** Batch opened by this cycle, if any — closed out on success OR failure. */
+  let openBatchId: number | null = null;
+
   try {
     // Get valid access token
     const accessToken = await getValidToken(db, opts.slStoreId, opts.organizationId, storeHandle);
@@ -250,6 +253,9 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     if (!batchId) {
       return errorReport(opts, "Failed to create upload batch", startedAt);
     }
+    // Track the open batch so a throw anywhere below cannot strand it at
+    // "processing" — see the catch block.
+    openBatchId = batchId;
 
     // ── Step 4: Normalise and persist ───────────────────────────────────────
     const ctx: IngestContext = {
@@ -332,6 +338,24 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Close out a batch opened by this cycle. Without this, any throw after
+    // Step 3 leaves it at "processing" forever — the upload history then shows
+    // phantom in-flight syncs that never resolve. Best-effort: a bookkeeping
+    // failure here must not replace the real error with its own.
+    if (openBatchId !== null) {
+      try {
+        await updateUploadBatch(openBatchId, {
+          status: "failed",
+          errorMessage: message.slice(0, 2000),
+          completedAt: new Date(),
+        });
+      } catch (cleanupErr) {
+        console.error(
+          `[SHOPLINE] Failed to close batch ${openBatchId} after sync error:`,
+          cleanupErr,
+        );
+      }
+    }
     return errorReport(opts, message, startedAt, storeHandle);
   }
 }
