@@ -72,6 +72,11 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   api_ingestion_logs: "tenant_nullable",
   sftp_credentials: "tenant_nullable",
   sftp_ingestion_logs: "tenant_nullable",
+  // Object-storage drop ingestion. NOT NULL organizationId — the SFTP pair is
+  // "tenant_nullable" only because it predates the standard; new tables hold
+  // the line.
+  bucket_ingestion_sources: "tenant_required",
+  bucket_ingestion_logs: "tenant_required",
   user_role_preferences: "tenant_nullable",
   anomaly_scores: "tenant_nullable",
   detection_rules: "tenant_nullable",

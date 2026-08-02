@@ -533,6 +533,13 @@
       "when": 1785588420738,
       "tag": "0075_spicy_warbird",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "5",
+      "when": 1785699208478,
+      "tag": "0076_tranquil_firebrand",
+      "breakpoints": true
     }
   ]
 }
