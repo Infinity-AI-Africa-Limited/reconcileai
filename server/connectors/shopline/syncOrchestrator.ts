@@ -17,7 +17,7 @@
  *   - The scheduled polling job (every 15 min)
  *   - Manual "Sync Now" from the merchant dashboard
  */
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { getDb } from "../../db";
 import { insertTransactions, createUploadBatch, updateUploadBatch, insertExceptionsBatch } from "../../db";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
@@ -48,7 +48,7 @@ import {
   runRetailReconciliation,
   type RetailReconciliationConfig,
 } from "../../retailReconciliationEngine";
-import type { Transaction } from "../../../drizzle/schema";
+import type { Transaction, InsertTransaction } from "../../../drizzle/schema";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -148,6 +148,78 @@ export async function bestEffortLeg<T>(
     }
     throw err;
   }
+}
+
+/** Chunk size for the dedupe lookup — keeps the IN(...) list well under MySQL limits. */
+const DEDUPE_LOOKUP_CHUNK = 500;
+
+/**
+ * Drop candidate rows whose (channelId, transactionRef) is already in the
+ * `transactions` table. This is what makes SHOPLINE ingest idempotent.
+ *
+ * It has to exist because re-ingestion is not an edge case here, it is the
+ * normal path. Three independent mechanisms re-present the same order:
+ *
+ *   1. `catchUpWindow` deliberately re-reads WATERMARK_OVERLAP_MS (5 min)
+ *      before the last successful sync so a record landing on the seam is not
+ *      missed — which guarantees it is fetched twice.
+ *   2. A webhook-triggered realtime sync and a scheduled cycle can cover the
+ *      same window seconds apart.
+ *   3. The cron fires from both GitHub repos against the same endpoint.
+ *
+ * On 2026-08-02 that produced FOUR copies of order 21076388995485181306699745
+ * from four separate cycles (batches 810008/810009/810010/810012). In a
+ * reconciliation product duplicate transactions are not cosmetic: they inflate
+ * settled totals and corrupt the match rate, which is the primary output.
+ *
+ * A UNIQUE index on (channelId, transactionRef) would be the airtight fix, but
+ * it is not available: the shared `transactions` table already holds ~6.6M
+ * duplicated pairs across ~35M rows from other verticals (e.g. seeded
+ * AGENT_BANKING data), so the constraint could not be created and would impose
+ * SHOPLINE's semantics on every other channel. Dedupe is therefore scoped to
+ * this connector.
+ *
+ * Residual risk: two cycles running truly concurrently can both pass this check
+ * before either inserts. The observed collisions were 15-25s apart and are
+ * fully covered. Closing the last gap needs cluster-wide serialisation of sync
+ * cycles — the BullMQ/REDIS_URL item in CLAUDE.md §10.
+ */
+export async function rejectAlreadyIngested(
+  db: Db,
+  rows: InsertTransaction[],
+  channelIds: number[],
+): Promise<InsertTransaction[]> {
+  const refs = Array.from(
+    new Set(rows.map((r) => r.transactionRef).filter((r): r is string => Boolean(r))),
+  );
+  if (refs.length === 0) return rows;
+
+  // Existing keys, looked up via idx_txn_ref_channel.
+  const existing = new Set<string>();
+  for (let i = 0; i < refs.length; i += DEDUPE_LOOKUP_CHUNK) {
+    const chunk = refs.slice(i, i + DEDUPE_LOOKUP_CHUNK);
+    const found = await db
+      .select({ channelId: transactions.channelId, transactionRef: transactions.transactionRef })
+      .from(transactions)
+      .where(
+        and(
+          inArray(transactions.channelId, channelIds),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      );
+    for (const f of found) existing.add(`${f.channelId}::${f.transactionRef}`);
+  }
+  // No early return when `existing` is empty: the filter below ALSO collapses
+  // refs repeated within this single batch, which must happen regardless of
+  // what is already persisted.
+  const seen = new Set<string>();
+  return rows.filter((r) => {
+    if (!r.transactionRef) return true;
+    const key = `${r.channelId}::${r.transactionRef}`;
+    if (existing.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
@@ -271,7 +343,17 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     const paymentRows = payments.data.map((p) => normalisePaymentTransaction(p, ctx));
     const payoutRows = payouts.data.map((p) => normalisePayout(p, ctx));
 
-    const allRows = [...orderRows, ...paymentRows, ...payoutRows];
+    const candidateRows = [...orderRows, ...paymentRows, ...payoutRows];
+    const allRows = await rejectAlreadyIngested(db, candidateRows, [
+      ordersChannelId,
+      paymentsChannelId,
+    ]);
+    const skipped = candidateRows.length - allRows.length;
+    if (skipped > 0) {
+      console.info(
+        `[SHOPLINE] store=${storeHandle} skipped ${skipped} already-ingested row(s) of ${candidateRows.length}`,
+      );
+    }
     if (allRows.length > 0) {
       await insertTransactions(allRows);
     }
