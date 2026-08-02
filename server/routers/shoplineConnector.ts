@@ -37,6 +37,17 @@ import {
   verifyCallbackSignature,
 } from "../connectors/shopline/auth";
 import { getValidToken, saveToken, deleteToken } from "../connectors/shopline/tokenStore";
+import {
+  parseSettlementFile,
+  detectColumns,
+  mapSettlementRows,
+} from "../connectors/shopline/settlementFileImport";
+import {
+  rejectAlreadyIngested,
+  resolveChannelIds,
+  runReconciliationOnPersistedData,
+} from "../connectors/shopline/syncOrchestrator";
+import { createUploadBatch, updateUploadBatch, insertTransactions } from "../db";
 import { ingestWebhook } from "../connectors/shopline/webhookHandler";
 import { runSettlementSync } from "../connectors/shopline/settlementSync";
 import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
@@ -581,6 +592,23 @@ export const shoplineConnectorRouter = router({
           .where(and(inArray(transactions.channelId, channelIds), eq(exceptions.status, "open")))
       : [{ open: 0 }];
 
+    // Payment-leg presence. A merchant on a third-party gateway or COD has an
+    // order book and no payment feed, which reconciles to a legitimate-looking
+    // 0% match rate. Reporting the two sides separately lets the UI say WHY
+    // instead of presenting an unexplained zero.
+    const ordersChannelIds = orgChannels.filter((c) => c.code.startsWith("sl_orders_")).map((c) => c.id);
+    const paymentsChannelIds = orgChannels.filter((c) => c.code.startsWith("sl_payments_")).map((c) => c.id);
+    const countIn = async (ids: number[]) => {
+      if (ids.length === 0) return 0;
+      const [r] = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(transactions)
+        .where(inArray(transactions.channelId, ids));
+      return Number(r?.n ?? 0);
+    };
+    const orderRowCount = await countIn(ordersChannelIds);
+    const paymentRowCount = await countIn(paymentsChannelIds);
+
     // Sync health — so an empty dashboard can explain itself. A store whose
     // syncs are failing (or has never synced) otherwise renders as a page of
     // legitimate-looking zeros.
@@ -629,6 +657,10 @@ export const shoplineConnectorRouter = router({
       matchRate: total > 0 ? (matched / total) * 100 : 0,
       matchedCount: matched,
       pendingCount: Number(agg?.pendingCount ?? 0),
+      orderRowCount,
+      paymentRowCount,
+      /** Orders present but no payment leg at all — nothing to reconcile against. */
+      paymentFeedMissing: orderRowCount > 0 && paymentRowCount === 0,
       syncHealth: storeHealth.map((s) => ({
         storeHandle: s.storeHandle,
         lastSyncAt: s.lastSyncAt ? s.lastSyncAt.toISOString() : null,
@@ -753,6 +785,163 @@ export const shoplineConnectorRouter = router({
         exceptionCount: report.exceptionCount,
         durationMs: report.durationMs,
       };
+    }),
+
+  /**
+   * Import a settlement / payout file from ANY payment system.
+   *
+   * SHOPLINE Payments is opt-in; merchants on third-party gateways or Cash on
+   * Delivery have no automatic payment leg (see bestEffortLeg). This lets them
+   * supply the gateway's or courier's own CSV/XLSX export so reconciliation can
+   * complete. Auto-detects the columns and accepts explicit overrides, so an
+   * unfamiliar provider is still importable.
+   *
+   * Tenancy: the target channel is resolved SERVER-SIDE from the caller's own
+   * organization. It is deliberately not a client-supplied channel code —
+   * `channels.list` / `upload.createBatch` are not org-scoped, and a
+   * merchant-facing upload must not be able to name another tenant's channel.
+   *
+   * `dryRun` returns the detected mapping and a preview without writing, so the
+   * UI can have the merchant confirm the column mapping before committing.
+   */
+  importSettlementFile: protectedProcedure
+    .input(
+      z.object({
+        fileName: z.string().min(1).max(255),
+        /** Base64 for spreadsheets, raw text for CSV. */
+        content: z.string().min(1).max(14_000_000), // ~10MB decoded
+        contentEncoding: z.enum(["utf8", "base64"]).default("utf8"),
+        sourceLabel: z.string().min(1).max(80).default("Settlement file"),
+        columnOverrides: z
+          .record(
+            z.enum(["orderRef", "gatewayRef", "amount", "currency", "settledAt", "fee", "description"]),
+            z.string().max(200),
+          )
+          .optional(),
+        dryRun: z.boolean().default(false),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const orgId = requireOrgId(ctx.user);
+
+      const [store] = await db
+        .select()
+        .from(slConnectorStores)
+        .where(and(eq(slConnectorStores.organizationId, orgId), eq(slConnectorStores.status, "active")))
+        .limit(1);
+      if (!store) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No active SHOPLINE store for this organisation" });
+      }
+
+      const raw =
+        input.contentEncoding === "base64" ? Buffer.from(input.content, "base64") : input.content;
+
+      let parsed;
+      try {
+        parsed = await parseSettlementFile(raw, input.fileName);
+      } catch (err) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: err instanceof Error ? err.message : "Could not read the file",
+        });
+      }
+
+      const { mapping, missingRequired } = detectColumns(parsed.headers, input.columnOverrides);
+
+      // Preview, or a file we cannot map — either way, write nothing and tell
+      // the caller exactly what was detected so they can correct it.
+      if (input.dryRun || missingRequired.length > 0) {
+        return {
+          dryRun: true,
+          committed: false,
+          headers: parsed.headers,
+          mapping,
+          missingRequired,
+          totalRows: parsed.rows.length,
+          parseErrors: parsed.parseErrors,
+          sampleRows: parsed.rows.slice(0, 5),
+        };
+      }
+
+      const { ordersChannelId, paymentsChannelId } = await resolveChannelIds(db, orgId, store.storeHandle);
+
+      const batchId = await createUploadBatch({
+        userId: ctx.user.id,
+        organizationId: orgId,
+        channelId: paymentsChannelId,
+        fileName: `settlement_import_${input.fileName}`,
+        fileHash: null,
+        detectedFormat: "settlement_file",
+        totalRows: parsed.rows.length,
+        validRows: 0,
+        invalidRows: 0,
+        status: "processing",
+      });
+      if (!batchId) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create upload batch" });
+
+      try {
+        const { rows, failures } = mapSettlementRows(parsed.rows, mapping, {
+          organizationId: orgId,
+          paymentsChannelId,
+          batchId,
+          userId: ctx.user.id,
+          defaultCurrency: store.currency ?? "USD",
+          sourceLabel: input.sourceLabel,
+        });
+
+        // Same idempotency guard the API path uses: re-uploading a file, or an
+        // overlapping export, must not double-count settlements.
+        const fresh = await rejectAlreadyIngested(db, rows, [paymentsChannelId]);
+        const duplicates = rows.length - fresh.length;
+        if (fresh.length > 0) await insertTransactions(fresh);
+
+        await updateUploadBatch(batchId, {
+          status: "completed",
+          validRows: fresh.length,
+          invalidRows: failures.length,
+          completedAt: new Date(),
+          errorMessage: failures.length > 0 ? failures.slice(0, 10).map((f) => `row ${f.rowIndex}: ${f.reason}`).join("; ") : null,
+        });
+
+        // Now that a payment leg exists, match it against the order book.
+        let matchedCount = 0;
+        let exceptionCount = 0;
+        if (fresh.length > 0) {
+          const dates = fresh.map((r) => (r.transactionDate as Date).getTime());
+          const from = new Date(Math.min(...dates) - 3 * 24 * 60 * 60 * 1000);
+          const to = new Date(Math.max(...dates) + 3 * 24 * 60 * 60 * 1000);
+          const result = await runReconciliationOnPersistedData(
+            db, orgId, ordersChannelId, paymentsChannelId, from, to, store.currency ?? "USD",
+          );
+          matchedCount = result.matchedCount;
+          exceptionCount = result.exceptionCount;
+        }
+
+        return {
+          dryRun: false,
+          committed: true,
+          headers: parsed.headers,
+          mapping,
+          missingRequired: [] as string[],
+          totalRows: parsed.rows.length,
+          imported: fresh.length,
+          duplicates,
+          failed: failures.length,
+          parseErrors: parsed.parseErrors,
+          sampleFailures: failures.slice(0, 5),
+          matchedCount,
+          exceptionCount,
+        };
+      } catch (err) {
+        await updateUploadBatch(batchId, {
+          status: "failed",
+          errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 2000),
+          completedAt: new Date(),
+        });
+        throw err;
+      }
     }),
 
   /**

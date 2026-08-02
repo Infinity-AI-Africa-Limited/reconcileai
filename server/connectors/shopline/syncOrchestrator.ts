@@ -516,7 +516,7 @@ async function fetchAllPayouts(
  * keeps this idempotent: onboarding already created these channels, so a name
  * mismatch here would collide on the unique code and throw on the first sync.
  */
-async function resolveChannelIds(
+export async function resolveChannelIds(
   db: Db,
   organizationId: number,
   storeHandle: string,
@@ -562,7 +562,7 @@ async function resolveChannelIds(
 /**
  * Run the retail reconciliation engine on persisted transactions for the given window.
  */
-async function runReconciliationOnPersistedData(
+export async function runReconciliationOnPersistedData(
   db: Db,
   organizationId: number,
   ordersChannelId: number,
