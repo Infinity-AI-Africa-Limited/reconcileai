@@ -38,58 +38,10 @@ export function normalizeHeader(h: string): string {
   return String(h ?? "").trim().toLowerCase().replace(/['"]/g, "").replace(/\s+/g, "_");
 }
 
-/**
- * Coerce a money string as written by real exports.
- *
- * Handles currency symbols, thousands grouping, European decimals and the
- * accounting negative `(12.30)`. Returns null rather than NaN so callers must
- * decide explicitly what an unreadable amount means.
- */
-export function parseAmount(raw: string | number | undefined | null): number | null {
-  if (raw === undefined || raw === null) return null;
-  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
-  let s = String(raw).trim();
-  if (!s) return null;
-
-  const parenNegative = /^\(.*\)$/.test(s);
-  s = s.replace(/[()]/g, "").replace(/[^0-9.,\-]/g, "");
-  if (!s || s === "-" || s === "." || s === ",") return null;
-
-  // Separator disambiguation. Getting this wrong is silently catastrophic:
-  // "₦12,000" read as a European decimal becomes 12.00 — a 1000x understatement
-  // that still looks like a plausible amount.
-  const hasComma = s.includes(",");
-  const hasDot = s.includes(".");
-  if (hasComma && hasDot) {
-    // Both present: whichever comes last is the decimal separator.
-    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
-    else s = s.replace(/,/g, "");
-  } else if (hasComma) {
-    const parts = s.split(",");
-    // Repeated commas, or a final group of exactly 3 digits, means thousands
-    // ("12,000"). A 1-2 digit tail means a European decimal ("12,30").
-    const thousands = parts.length > 2 || parts[parts.length - 1].length === 3;
-    s = thousands ? s.replace(/,/g, "") : s.replace(",", ".");
-  } else if (hasDot) {
-    // A single dot is a decimal point in virtually every export; only repeated
-    // dots indicate grouping ("1.234.567").
-    if (s.split(".").length > 2) s = s.replace(/\./g, "");
-  }
-
-  const n = Number.parseFloat(s);
-  if (!Number.isFinite(n)) return null;
-  return parenNegative ? -Math.abs(n) : n;
-}
-
-/** Parse a date, returning null (never an Invalid Date) when unreadable. */
-export function parseDate(raw: string | Date | undefined | null): Date | null {
-  if (!raw) return null;
-  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
-  const s = String(raw).trim();
-  if (!s) return null;
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
+// Money and date coercion live in shared/ so the BROWSER upload parser uses the
+// same implementation. The client parses files before posting them, so a
+// server-only fix would leave the highest-volume path still wrong.
+export { parseMoney as parseAmount, parseMoneyDate as parseDate } from "../../shared/money";
 
 /**
  * Resolve a logical field to an actual header using ordered aliases.
