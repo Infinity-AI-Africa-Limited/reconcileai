@@ -214,7 +214,7 @@ export async function executeScheduledTask(taskId: number): Promise<{
     });
 
     // Update task metadata
-    await db.updateScheduledTask(taskId, {
+    await db.updateScheduledTask(taskId, null, {
       lastRunAt: new Date(),
       lastRunJobId: jobId,
       lastRunStatus: "success",
@@ -235,7 +235,7 @@ export async function executeScheduledTask(taskId: number): Promise<{
     });
 
     // Update task with failure
-    await db.updateScheduledTask(taskId, {
+    await db.updateScheduledTask(taskId, null, {
       lastRunAt: new Date(),
       lastRunStatus: "failed",
       nextRunAt: nextRun,

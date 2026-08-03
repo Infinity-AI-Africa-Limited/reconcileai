@@ -318,10 +318,19 @@ export async function createChannel(data: InsertChannel) {
   await db.insert(channels).values(data);
 }
 
-export async function updateChannel(id: number, data: Partial<InsertChannel>) {
+/** Update a channel the caller's org owns. Returns rows affected (0 = not yours). */
+export async function updateChannel(
+  id: number,
+  organizationId: number,
+  data: Partial<InsertChannel>,
+): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(channels).set(data).where(eq(channels.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(channels)
+    .set(data)
+    .where(and(eq(channels.id, id), eq(channels.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Upload Batches ──────────────────────────────────────────────────
@@ -911,10 +920,15 @@ export async function updateWebhook(id: number, data: Partial<InsertWebhook>) {
   await db.update(webhooks).set(data).where(eq(webhooks.id, id));
 }
 
-export async function deleteWebhook(id: number) {
+/** Soft-delete a webhook the caller's org owns. Returns rows affected. */
+export async function deleteWebhook(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(webhooks).set({ isActive: false }).where(eq(webhooks.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(webhooks)
+    .set({ isActive: false })
+    .where(and(eq(webhooks.id, id), eq(webhooks.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── API Keys ────────────────────────────────────────────────────────
@@ -956,10 +970,15 @@ export async function updateApiKeyLastUsed(id: number) {
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, id));
 }
 
-export async function revokeApiKey(id: number) {
+/** Revoke an API key belonging to the caller's org. Returns rows affected. */
+export async function revokeApiKey(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(apiKeys).set({ isActive: false }).where(eq(apiKeys.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(apiKeys)
+    .set({ isActive: false })
+    .where(and(eq(apiKeys.id, id), eq(apiKeys.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Dashboard Stats ─────────────────────────────────────────────────
@@ -1133,10 +1152,30 @@ export async function createScheduledTask(data: InsertScheduledTask) {
   return result[0].insertId;
 }
 
-export async function updateScheduledTask(id: number, data: Partial<InsertScheduledTask>) {
+/**
+ * Update a scheduled task the caller's org owns. Returns rows affected so the
+ * router can fail closed — a bare-id update let any authenticated user retarget
+ * another institution's schedule.
+ *
+ * Pass `null` only for platform-internal callers (the scheduling engine updates
+ * tasks it selected itself).
+ */
+export async function updateScheduledTask(
+  id: number,
+  organizationId: number | null,
+  data: Partial<InsertScheduledTask>,
+): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(scheduledTasks).set(data).where(eq(scheduledTasks.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(scheduledTasks)
+    .set(data)
+    .where(
+      organizationId === null
+        ? eq(scheduledTasks.id, id)
+        : and(eq(scheduledTasks.id, id), eq(scheduledTasks.organizationId, organizationId)),
+    );
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 export async function getScheduledTasks(userId: number, isAdmin: boolean) {
@@ -1177,10 +1216,15 @@ export async function getDueScheduledTasks(now: Date) {
     .orderBy(asc(scheduledTasks.nextRunAt));
 }
 
-export async function deleteScheduledTask(id: number) {
+/** Soft-delete a scheduled task the caller's org owns. Returns rows affected. */
+export async function deleteScheduledTask(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(scheduledTasks).set({ isActive: false }).where(eq(scheduledTasks.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(scheduledTasks)
+    .set({ isActive: false })
+    .where(and(eq(scheduledTasks.id, id), eq(scheduledTasks.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Schedule Run History ───────────────────────────────────────────
@@ -1585,8 +1629,10 @@ export async function getAnomalyScores(filters: {
   return query.limit(limit).offset(offset).orderBy(desc(anomalyScores.anomalyScore));
 }
 
+/** Review an anomaly belonging to the caller's org. Returns rows affected. */
 export async function updateAnomalyReview(
   id: number,
+  organizationId: number,
   reviewData: {
     reviewStatus: string;
     reviewedBy: number;
@@ -1596,12 +1642,11 @@ export async function updateAnomalyReview(
   const db = await getDb();
   if (!db) return null;
   
-  return db.update(anomalyScores)
-    .set({
-      ...reviewData,
-      reviewedAt: new Date(),
-    } as any)
-    .where(eq(anomalyScores.id, id));
+  const result = await db
+    .update(anomalyScores)
+    .set({ ...reviewData, reviewedAt: new Date() } as any)
+    .where(and(eq(anomalyScores.id, id), eq(anomalyScores.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 export async function getDetectionRules(organizationId?: number) {
@@ -1624,20 +1669,29 @@ export async function createDetectionRule(rule: InsertDetectionRule) {
   return db.insert(detectionRules).values(rule);
 }
 
-export async function updateDetectionRule(id: number, updates: Partial<InsertDetectionRule>) {
+/** Update a detection rule the caller's org owns. Returns rows affected. */
+export async function updateDetectionRule(
+  id: number,
+  organizationId: number,
+  updates: Partial<InsertDetectionRule>,
+): Promise<number> {
   const db = await getDb();
-  if (!db) return null;
-  
-  return db.update(detectionRules)
+  if (!db) return 0;
+  const result = await db
+    .update(detectionRules)
     .set(updates as any)
-    .where(eq(detectionRules.id, id));
+    .where(and(eq(detectionRules.id, id), eq(detectionRules.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function deleteDetectionRule(id: number) {
+/** Delete a detection rule the caller's org owns. Returns rows affected. */
+export async function deleteDetectionRule(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return null;
-  
-  return db.delete(detectionRules).where(eq(detectionRules.id, id));
+  if (!db) return 0;
+  const result = await db
+    .delete(detectionRules)
+    .where(and(eq(detectionRules.id, id), eq(detectionRules.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 export async function getFlaggedTransactions(filters: {
