@@ -813,6 +813,86 @@ export const bucketIngestionLogs = mysqlTable("bucket_ingestion_logs", {
 export type BucketIngestionLog = typeof bucketIngestionLogs.$inferSelect;
 export type InsertBucketIngestionLog = typeof bucketIngestionLogs.$inferInsert;
 
+// ─── Email-forward Ingestion (Tier A) ────────────────────────────────
+// The genuinely plug-and-play transport: the merchant sets ONE forwarding rule
+// in their mail client and every provider that emails a payout report works,
+// with no API, no credentials and no per-provider integration.
+//
+// It is also the only surface where an unauthenticated stranger can hand us a
+// file, so it carries two independent controls rather than one:
+//   1. addressToken — unguessable, per source. Knowing the address is required.
+//   2. allowedSenders — knowing the address is NOT sufficient; the sender must
+//      also match. An EMPTY allow-list rejects everything (fail closed), so a
+//      half-configured source can never be an open inbox.
+export const emailIngestionSources = mysqlTable("email_ingestion_sources", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  userId: int("userId").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  /** Random, unguessable local-part suffix: settle-<addressToken>@<domain>. */
+  addressToken: varchar("addressToken", { length: 64 }).notNull(),
+  /**
+   * Newline/comma separated senders permitted to deliver here. Entries are
+   * either a full address ("payouts@stripe.com") or a domain ("@stripe.com").
+   * Empty means NOTHING is accepted — never "accept anything".
+   */
+  allowedSenders: text("allowedSenders"),
+  channelId: int("channelId").notNull(),
+  /** Reject attachments above this size before downloading them. */
+  maxAttachmentBytes: int("maxAttachmentBytes").default(10485760).notNull(),
+  isActive: boolean("isActive").default(true).notNull(),
+  lastReceivedAt: timestamp("lastReceivedAt"),
+  lastErrorAt: timestamp("lastErrorAt"),
+  lastErrorMessage: text("lastErrorMessage"),
+  totalFilesProcessed: int("totalFilesProcessed").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_email_src_token").on(table.addressToken),
+  index("idx_email_src_org").on(table.organizationId),
+  index("idx_email_src_active").on(table.isActive),
+]);
+
+export type EmailIngestionSource = typeof emailIngestionSources.$inferSelect;
+export type InsertEmailIngestionSource = typeof emailIngestionSources.$inferInsert;
+
+// Every inbound delivery is logged, ACCEPTED OR NOT. A rejected message is the
+// more interesting record: it is how a leaked address or a probing sender
+// becomes visible instead of silently disappearing.
+export const emailIngestionLogs = mysqlTable("email_ingestion_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Null when the address matched no source — we still record the attempt. */
+  emailSourceId: int("emailSourceId"),
+  organizationId: int("organizationId"),
+  channelId: int("channelId"),
+  /** Provider message id — the idempotency key against webhook retries. */
+  providerMessageId: varchar("providerMessageId", { length: 255 }),
+  fromAddress: varchar("fromAddress", { length: 320 }),
+  toAddress: varchar("toAddress", { length: 320 }),
+  subject: varchar("subject", { length: 500 }),
+  attachmentName: varchar("attachmentName", { length: 500 }),
+  fileSize: int("fileSize"),
+  fileHash: varchar("fileHash", { length: 64 }),
+  totalRows: int("totalRows"),
+  validRows: int("validRows"),
+  invalidRows: int("invalidRows"),
+  status: mysqlEnum("status", ["success", "partial", "failed", "rejected", "skipped"]).notNull(),
+  /** Why a delivery was refused — unknown_address, sender_not_allowed, … */
+  rejectionReason: varchar("rejectionReason", { length: 64 }),
+  errorMessage: text("errorMessage"),
+  uploadBatchId: int("uploadBatchId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_email_log_src").on(table.emailSourceId),
+  index("idx_email_log_org").on(table.organizationId),
+  index("idx_email_log_status").on(table.status),
+  index("idx_email_log_msg").on(table.providerMessageId),
+  index("idx_email_log_created").on(table.createdAt),
+]);
+
+export type EmailIngestionLog = typeof emailIngestionLogs.$inferSelect;
+export type InsertEmailIngestionLog = typeof emailIngestionLogs.$inferInsert;
+
 // ─── User Role Preferences ───────────────────────────────────────────
 export const userRolePreferences = mysqlTable("user_role_preferences", {
   id: int("id").autoincrement().primaryKey(),
