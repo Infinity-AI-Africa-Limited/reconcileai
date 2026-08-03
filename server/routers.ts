@@ -321,7 +321,7 @@ const magicLinkIpLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10 })
 
 /** The caller's organization, or a hard failure. SFTP config is institutional;
  *  an account with no organization has no business owning a bank feed. */
-function requireSftpOrg(ctx: { user: { organizationId?: number | null } }): number {
+function requireOrg(ctx: { user: { organizationId?: number | null } }): number {
   if (!ctx.user.organizationId) {
     throw new TRPCError({
       code: "PRECONDITION_FAILED",
@@ -337,7 +337,7 @@ async function assertOwnsSftpCredential(
   ctx: { user: { organizationId?: number | null } },
   credentialId: number,
 ): Promise<void> {
-  const cred = await db.getSftpCredentialById(credentialId, requireSftpOrg(ctx));
+  const cred = await db.getSftpCredentialById(credentialId, requireOrg(ctx));
   if (!cred) {
     throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
   }
@@ -528,7 +528,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateChannel(input.id, {
+        await db.updateChannel(input.id, requireOrg(ctx), {
           matchingConfig: input.matchingConfig ? JSON.stringify(input.matchingConfig) : undefined,
           fileFormat: input.fileFormat ? JSON.stringify(input.fileFormat) : undefined,
           isActive: input.isActive,
@@ -2869,7 +2869,8 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.deleteWebhook(input.id);
+        const removedWebhook = await db.deleteWebhook(input.id, requireOrg(ctx));
+        if (removedWebhook === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Webhook not found" });
         await logAudit(ctx.user.id, "delete_webhook", "webhook", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -2938,7 +2939,8 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.revokeApiKey(input.id);
+        const revokedKey = await db.revokeApiKey(input.id, requireOrg(ctx));
+        if (revokedKey === 0) throw new TRPCError({ code: "NOT_FOUND", message: "API key not found" });
         await logAudit(ctx.user.id, "revoke_api_key", "api_key", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -2957,7 +2959,7 @@ export const appRouter = router({
       // Org-scoped: an SFTP feed is institutional config, so a colleague must
       // see it — and the previous userId-only filter left the org boundary
       // entirely unenforced.
-      return db.getSftpCredentials(requireSftpOrg(ctx));
+      return db.getSftpCredentials(requireOrg(ctx));
     }),
 
     create: guestProtectedProcedure
@@ -2984,7 +2986,7 @@ export const appRouter = router({
         
         const id = await db.createSftpCredential({
           userId: ctx.user.id,
-          organizationId: requireSftpOrg(ctx),
+          organizationId: requireOrg(ctx),
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           host: input.host,
           port: input.port,
@@ -3041,7 +3043,7 @@ export const appRouter = router({
         if (input.archivePath !== undefined) updateData.archivePath = input.archivePath || null;
         if (input.isActive !== undefined) updateData.isActive = input.isActive;
         
-        const updated = await db.updateSftpCredential(input.id, requireSftpOrg(ctx), updateData);
+        const updated = await db.updateSftpCredential(input.id, requireOrg(ctx), updateData);
         if (updated === 0) {
           throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
         }
@@ -3056,7 +3058,7 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const removed = await db.deleteSftpCredential(input.id, requireSftpOrg(ctx));
+        const removed = await db.deleteSftpCredential(input.id, requireOrg(ctx));
         if (removed === 0) {
           throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
         }
@@ -3117,7 +3119,7 @@ export const appRouter = router({
         // other institutions' bank feeds.
         return db.getSftpIngestionLogs({
           credentialId: input.credentialId,
-          organizationId: requireSftpOrg(ctx),
+          organizationId: requireOrg(ctx),
           limit: input.limit,
           offset: input.offset,
         });
@@ -3255,7 +3257,8 @@ export const appRouter = router({
           scheduledDayOfMonth: input.scheduledDayOfMonth ?? task.scheduledDayOfMonth,
         });
 
-        await db.updateScheduledTask(input.id, updateData);
+        const updatedTask = await db.updateScheduledTask(input.id, requireOrg(ctx), updateData);
+        if (updatedTask === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         await logAudit(ctx.user.id, "update_schedule", "scheduled_task", input.id, input, ip, ua);
         return { success: true, nextRun: updateData.nextRunAt };
       }),
@@ -3264,7 +3267,8 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.deleteScheduledTask(input.id);
+        const removedTask = await db.deleteScheduledTask(input.id, requireOrg(ctx));
+        if (removedTask === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         await logAudit(ctx.user.id, "delete_schedule", "scheduled_task", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -3482,7 +3486,7 @@ export const appRouter = router({
         reviewNotes: z.string().max(1000).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        await db.updateAnomalyReview(input.id, {
+        await db.updateAnomalyReview(input.id, requireOrg(ctx), {
           reviewStatus: input.reviewStatus,
           reviewedBy: ctx.user.id,
           reviewNotes: input.reviewNotes,
@@ -3542,7 +3546,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { id, ...updates } = input;
-        await db.updateDetectionRule(id, {
+        await db.updateDetectionRule(id, requireOrg(ctx), {
           ...updates,
           threshold: updates.threshold ? String(updates.threshold) : undefined,
           ruleConfig: updates.ruleConfig ? JSON.stringify(updates.ruleConfig) : undefined,
@@ -3557,7 +3561,8 @@ export const appRouter = router({
     delete: guestProtectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
-        await db.deleteDetectionRule(input.id);
+        const removedRule = await db.deleteDetectionRule(input.id, requireOrg(ctx));
+        if (removedRule === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Detection rule not found" });
         
         const { ip, ua } = getClientInfo(ctx);
         await logAudit(ctx.user.id, "delete_detection_rule", "detection_rule", input.id, {}, ip, ua);
