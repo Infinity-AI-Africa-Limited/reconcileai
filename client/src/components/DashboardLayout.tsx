@@ -106,6 +106,9 @@ const adminAdvancedItems: NavItem[] = [
   { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector", roles: ["admin"] },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
   { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
+  // admin-only, like its SFTP sibling: this screen manages bucket credentials
+  // for bank/PSP settlement feeds.
+  { icon: Server, label: "Bucket Drops", path: "/bucket-config", roles: ["admin"] },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
 ];
 
