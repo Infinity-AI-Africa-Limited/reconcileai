@@ -1371,16 +1371,20 @@ export async function createSftpCredential(data: InsertSftpCredential) {
   return result.insertId;
 }
 
-export async function getSftpCredentials(userId: number, organizationId?: number) {
+/**
+ * List SFTP credentials for an organization.
+ *
+ * Scoped by ORG, not by the creating user: an SFTP feed is institutional
+ * configuration, so a colleague must be able to see and manage it. The previous
+ * `userId`-only filter both hid teammates' feeds and — because `organizationId`
+ * was optional and callers omitted it — left the org boundary unenforced.
+ */
+export async function getSftpCredentials(organizationId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  let conditions = [eq(sftpCredentials.userId, userId)];
-  
-  if (organizationId) {
-    conditions.push(eq(sftpCredentials.organizationId, organizationId));
-  }
-  
+
+  const conditions = [eq(sftpCredentials.organizationId, organizationId)];
+
   return db
     .select()
     .from(sftpCredentials)
@@ -1388,34 +1392,62 @@ export async function getSftpCredentials(userId: number, organizationId?: number
     .orderBy(desc(sftpCredentials.createdAt));
 }
 
-export async function getSftpCredentialById(id: number) {
+/**
+ * Fetch an SFTP credential, scoped to its owning organization.
+ *
+ * `organizationId` is REQUIRED. These rows hold BANK CONNECTION SECRETS (host,
+ * username, encrypted password/key, remote path), and every accessor here was
+ * previously keyed on `id` alone — so any caller who could guess an id could
+ * read, repoint or delete another tenant's bank feed. Pass `null` only for
+ * genuine platform-internal use (the poller iterates all sources by design).
+ */
+export async function getSftpCredentialById(id: number, organizationId: number | null) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
+
   const [cred] = await db
     .select()
     .from(sftpCredentials)
-    .where(eq(sftpCredentials.id, id))
+    .where(
+      organizationId === null
+        ? eq(sftpCredentials.id, id)
+        : and(eq(sftpCredentials.id, id), eq(sftpCredentials.organizationId, organizationId)),
+    )
     .limit(1);
   
   return cred;
 }
 
-export async function updateSftpCredential(id: number, data: Partial<InsertSftpCredential>) {
+/**
+ * Update an SFTP credential within its owning organization.
+ * Returns the number of rows affected so callers can fail closed (0 = the row
+ * exists but belongs to someone else, or does not exist — deliberately
+ * indistinguishable, so this is not an enumeration oracle).
+ */
+export async function updateSftpCredential(
+  id: number,
+  organizationId: number,
+  data: Partial<InsertSftpCredential>,
+): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  await db
+
+  const result = await db
     .update(sftpCredentials)
     .set({ ...data, updatedAt: new Date() })
-    .where(eq(sftpCredentials.id, id));
+    .where(and(eq(sftpCredentials.id, id), eq(sftpCredentials.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function deleteSftpCredential(id: number) {
+/** Delete an SFTP credential within its owning organization. Returns rows affected. */
+export async function deleteSftpCredential(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  await db.delete(sftpCredentials).where(eq(sftpCredentials.id, id));
+
+  const result = await db
+    .delete(sftpCredentials)
+    .where(and(eq(sftpCredentials.id, id), eq(sftpCredentials.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── SFTP Ingestion Logs ────────────────────────────────────────────
@@ -1432,16 +1464,17 @@ export async function getSftpIngestionLogs(params: {
   const limit = Math.min(params.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = params.offset || 0;
   
-  let query = db.select().from(sftpIngestionLogs);
-  
-  if (params.credentialId) {
-    query = query.where(eq(sftpIngestionLogs.sftpCredentialId, params.credentialId)) as any;
-  }
-  
-  if (params.organizationId) {
-    query = query.where(eq(sftpIngestionLogs.organizationId, params.organizationId)) as any;
-  }
-  
+  // Conditions are AND-ed into a single .where(). Chaining .where() twice does
+  // NOT combine them in drizzle — the second call REPLACES the first, so the
+  // previous form silently dropped whichever filter was applied earlier.
+  const conditions = [];
+  if (params.credentialId) conditions.push(eq(sftpIngestionLogs.sftpCredentialId, params.credentialId));
+  if (params.organizationId) conditions.push(eq(sftpIngestionLogs.organizationId, params.organizationId));
+
+  const query = conditions.length > 0
+    ? db.select().from(sftpIngestionLogs).where(and(...conditions))
+    : db.select().from(sftpIngestionLogs);
+
   return query
     .orderBy(desc(sftpIngestionLogs.createdAt))
     .limit(limit)
@@ -1531,21 +1564,21 @@ export async function getAnomalyScores(filters: {
   const db = await getDb();
   if (!db) return [];
   
-  let query = db.select().from(anomalyScores);
-  
-  if (filters.transactionId) {
-    query = query.where(eq(anomalyScores.transactionId, filters.transactionId)) as any;
-  }
-  if (filters.organizationId) {
-    query = query.where(eq(anomalyScores.organizationId, filters.organizationId)) as any;
-  }
-  if (filters.reviewStatus) {
-    query = query.where(eq(anomalyScores.reviewStatus, filters.reviewStatus as any)) as any;
-  }
-  if (filters.minScore) {
-    query = query.where(gte(anomalyScores.anomalyScore, String(filters.minScore))) as any;
-  }
-  
+  // AND the conditions into ONE .where(). Chaining .where() does not combine
+  // in drizzle — each call REPLACES the previous predicate, so the old form
+  // applied only the last matching filter. With minScore last, an
+  // organizationId-filtered call silently returned EVERY tenant's anomaly
+  // scores; transactionId and reviewStatus were dropped too.
+  const conditions = [];
+  if (filters.transactionId) conditions.push(eq(anomalyScores.transactionId, filters.transactionId));
+  if (filters.organizationId) conditions.push(eq(anomalyScores.organizationId, filters.organizationId));
+  if (filters.reviewStatus) conditions.push(eq(anomalyScores.reviewStatus, filters.reviewStatus as any));
+  if (filters.minScore) conditions.push(gte(anomalyScores.anomalyScore, String(filters.minScore)));
+
+  const query = conditions.length > 0
+    ? db.select().from(anomalyScores).where(and(...conditions))
+    : db.select().from(anomalyScores);
+
   const limit = Math.min(filters.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = filters.offset || 0;
   

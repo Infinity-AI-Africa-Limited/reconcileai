@@ -317,6 +317,31 @@ const magicLinkIpLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10 })
 
 // ─── Router ──────────────────────────────────────────────────────────────
 
+
+/** The caller's organization, or a hard failure. SFTP config is institutional;
+ *  an account with no organization has no business owning a bank feed. */
+function requireSftpOrg(ctx: { user: { organizationId?: number | null } }): number {
+  if (!ctx.user.organizationId) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Your account is not linked to an organization",
+    });
+  }
+  return ctx.user.organizationId;
+}
+
+/** Prove the caller's org owns this credential before acting on it. Throws
+ *  NOT_FOUND either way, so this cannot be used to enumerate other tenants. */
+async function assertOwnsSftpCredential(
+  ctx: { user: { organizationId?: number | null } },
+  credentialId: number,
+): Promise<void> {
+  const cred = await db.getSftpCredentialById(credentialId, requireSftpOrg(ctx));
+  if (!cred) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
+  }
+}
+
 export const appRouter = router({
   system: systemRouter,
 
@@ -2920,9 +2945,18 @@ export const appRouter = router({
 
   // ─── SFTP Credentials ────────────────────────────────────────────
 
+  // ─── SFTP credential tenancy helpers ──────────────────────────────────────
+  // These rows hold BANK CONNECTION SECRETS (host, username, encrypted
+  // password/key, remote path). Every accessor was previously keyed on `id`
+  // alone, so a caller who could guess a primary key could read, repoint or
+  // delete another institution's bank feed — and `delete` was reachable from a
+  // guest session. Both helpers below fail closed.
   sftp: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getSftpCredentials(ctx.user.id);
+      // Org-scoped: an SFTP feed is institutional config, so a colleague must
+      // see it — and the previous userId-only filter left the org boundary
+      // entirely unenforced.
+      return db.getSftpCredentials(requireSftpOrg(ctx));
     }),
 
     create: guestProtectedProcedure
@@ -2949,7 +2983,7 @@ export const appRouter = router({
         
         const id = await db.createSftpCredential({
           userId: ctx.user.id,
-          organizationId: 0, // Default organization for now
+          organizationId: requireSftpOrg(ctx),
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           host: input.host,
           port: input.port,
@@ -3006,17 +3040,25 @@ export const appRouter = router({
         if (input.archivePath !== undefined) updateData.archivePath = input.archivePath || null;
         if (input.isActive !== undefined) updateData.isActive = input.isActive;
         
-        await db.updateSftpCredential(input.id, updateData);
+        const updated = await db.updateSftpCredential(input.id, requireSftpOrg(ctx), updateData);
+        if (updated === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
+        }
         await logAudit(ctx.user.id, "update_sftp_credential", "sftp_credential", input.id, input, ip, ua);
         
         return { success: true };
       }),
 
-    delete: guestProtectedProcedure
+    // Was guestProtectedProcedure with an unscoped id: a GUEST session could
+    // delete any institution's bank feed by guessing the primary key.
+    delete: adminProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.deleteSftpCredential(input.id);
+        const removed = await db.deleteSftpCredential(input.id, requireSftpOrg(ctx));
+        if (removed === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
+        }
         await logAudit(ctx.user.id, "delete_sftp_credential", "sftp_credential", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -3035,7 +3077,10 @@ export const appRouter = router({
 
     listFiles: protectedProcedure
       .input(z.object({ credentialId: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // Reaches out to the bank's SFTP host and returns its directory
+        // listing — prove ownership first.
+        await assertOwnsSftpCredential(ctx, input.credentialId);
         return listSftpFiles(input.credentialId);
       }),
 
@@ -3046,6 +3091,9 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        // Downloads from the bank's SFTP host and INGESTS into that org's
+        // channel — the most consequential of the three. Prove ownership first.
+        await assertOwnsSftpCredential(ctx, input.credentialId);
         const result = await downloadAndProcessSftpFile(input.credentialId, input.fileName);
         
         await logAudit(ctx.user.id, "process_sftp_file", "sftp_ingestion", input.credentialId, {
@@ -3062,9 +3110,13 @@ export const appRouter = router({
         limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(50),
         offset: z.number().int().min(0).default(0),
       }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // Always org-scoped. Without this the procedure returned EVERY tenant's
+        // ingestion history — filenames, remote paths and error text describing
+        // other institutions' bank feeds.
         return db.getSftpIngestionLogs({
           credentialId: input.credentialId,
+          organizationId: requireSftpOrg(ctx),
           limit: input.limit,
           offset: input.offset,
         });
