@@ -1460,6 +1460,69 @@ decision and raise it again only on new evidence.
 
 ---
 
-*Last updated: 2026-08-02 | Live in production on Railway at https://www.reconcileaiafrica.com/*
+## 19. FIRST-CUSTOMER GO-LIVE GATE — raise these before any real client is onboarded
+
+**Owner instruction (2026-08-03): surface this checklist the moment it looks like
+the first real customer is about to go live.** Three items were consciously
+deferred while the platform had only demo and dev tenants. They are cheap now
+and expensive once real client data is in the system. Do not wait to be asked —
+raise them proactively.
+
+### Trigger signals — if ANY of these appear, work through §19 first and report
+
+- The owner says "go live", "launch", "first customer", "first client", "onboard
+  <name>", "production customer", or similar.
+- A SHOPLINE App Store submission is approved, or a real merchant installs the app.
+- A new `organizations` row appears that is **not** a demo/dev tenant — i.e. the
+  name does not contain "Demo", and it is not `SL_RECONCILEAI`/`SL_RECONCILEAI_DEV`
+  or `INFINITY_AI`. (Cheap check: `SELECT id, name, segment, onboardingChannel,
+  createdAt FROM organizations ORDER BY createdAt DESC LIMIT 10`.)
+- A real bank/PSP/courier SFTP credential or bucket source is configured — those
+  tables were empty as of 2026-08-03, so the first non-empty row is a signal.
+- Anyone asks about pilot readiness, contract signature, or Woodcore/LAPO
+  conversion from POC to paid.
+
+### The three items
+
+**1. Rotate `JWT_SECRET` and `CRON_SECRET` — the only unmitigated security item.**
+Both were printed in plaintext in a Manus session document (§18). The owner
+accepted the risk on 2026-08-02 on the basis that the document was never
+published and has been destroyed — a reasonable call **while the only tenants
+are demo/dev**. That calculus changes the moment a real institution's data is
+behind that key: `JWT_SECRET` forges a session as any user including
+`super_admin`, and decrypts every stored SHOPLINE OAuth token. Generate in the
+Railway dashboard only, never transcribe, then reconnect OAuth on both dev
+stores immediately (rotation makes existing tokens undecryptable — expected, not
+a regression). Runbook: §18.
+
+**2. Decide what happens to the ~57.3M orgless legacy rows.**
+`transactions` holds 57,330,917 rows with `organizationId IS NULL` — prototype
+and seed data, last written 2026-06-06 — sitting in the same table as live
+tenant data. They are invisible to every org-scoped query, so they are harmless
+today. But they inflate table size, skew any unscoped aggregate, and would be
+awkward to explain in a client's security review. Three honest options: archive
+to a separate table, backfill a synthetic "legacy" organization, or knowingly
+leave them with the decision recorded. Any is fine; drifting into launch without
+deciding is not.
+
+**3. Close the `matches` / `exceptions` tenancy gap.**
+Both tables lack an `organizationId` column, so their writes cannot be scoped
+directly and are reached only through a parent job/transaction. They are the two
+entries allow-listed for that reason in `server/tenancyRatchet.test.ts`, and the
+last structural gap of the class that produced four separate cross-tenant
+defects in one session (PRs #25, #31, #32, #34). Remediation — add the column,
+backfill from the parent, then scope the writes and remove the allow-list
+entries — is tracked in `docs/security/RLS_AUDIT.md`.
+
+### Why these three and not a longer list
+
+Everything else found in the 2026-08-02/03 hardening sweep is fixed, deployed
+and covered by tests or a CI ratchet. These are the only items knowingly carried
+forward, and each was deferred on the explicit basis that no real customer data
+existed yet. That premise expires at first customer.
+
+---
+
+*Last updated: 2026-08-03 | Live in production on Railway at https://www.reconcileaiafrica.com/*
 *SHOPLINE Tier 1 (Phase 1) merged & live. Engineering owned by Claude Code; features contributed by Manus via PR.*
 *Owner: Richard Anwanakak, Infinity AI Africa Limited*
