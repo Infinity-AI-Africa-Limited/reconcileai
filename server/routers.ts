@@ -40,6 +40,7 @@ import {
   checkAndSendAlerts,
 } from "./emailReportService";
 import { publicApiRouter } from "./publicApiRouter";
+import { bucketIngestionRouter } from "./routers/bucketIngestion";
 import {
   encryptCredential,
   testSftpConnection,
@@ -6246,6 +6247,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // T24, Mambu, FLEXCUBE and LAPO. Prefer `cbsConnector` in new client code.
   cbsConnector: woodcoreConnectorRouter,
   shoplineConnector: shoplineConnectorRouter,
+  bucketIngestion: bucketIngestionRouter,
   // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
   lapo: lapoRouter,
   uganda: ugandaRouter,

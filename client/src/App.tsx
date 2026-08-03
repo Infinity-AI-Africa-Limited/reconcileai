@@ -31,6 +31,7 @@ import TechnicalHandover from "./pages/TechnicalHandover";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
+import BucketConfig from "./pages/BucketConfig";
 import WoodcoreConnector from "./pages/WoodcoreConnector";
 import AnomalyDetection from "./pages/AnomalyDetection";
 import CfoDashboard from "./pages/CfoDashboard";
@@ -114,6 +115,7 @@ function Router() {
       <Route path="/monitor">{() => <DashboardPage component={Monitor} />}</Route>
       <Route path="/api-ingestion">{() => <DashboardPage component={ApiIngestion} />}</Route>
       <Route path="/sftp-config">{() => <DashboardPage component={SftpConfig} />}</Route>
+      <Route path="/bucket-config">{() => <DashboardPage component={BucketConfig} />}</Route>
       <Route path="/woodcore-connector">{() => <DashboardPage component={WoodcoreConnector} />}</Route>
       <Route path="/anomalies">{() => <DashboardPage component={AnomalyDetection} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
