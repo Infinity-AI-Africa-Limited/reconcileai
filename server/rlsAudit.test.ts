@@ -77,6 +77,12 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // the line.
   bucket_ingestion_sources: "tenant_required",
   bucket_ingestion_logs: "tenant_required",
+  // Email-forward ingestion. The source is org-owned; the LOG is nullable by
+  // design because a delivery to an unrecognised address has no organization
+  // yet must still be recorded — an unattributable rejection is exactly the
+  // signal that an address has leaked.
+  email_ingestion_sources: "tenant_required",
+  email_ingestion_logs: "tenant_nullable",
   user_role_preferences: "tenant_nullable",
   anomaly_scores: "tenant_nullable",
   detection_rules: "tenant_nullable",

@@ -540,6 +540,13 @@
       "when": 1785699208478,
       "tag": "0076_tranquil_firebrand",
       "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "5",
+      "when": 1785771649510,
+      "tag": "0077_chubby_spencer_smythe",
+      "breakpoints": true
     }
   ]
 }
