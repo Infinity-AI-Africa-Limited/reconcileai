@@ -44,6 +44,12 @@ export const ENV = {
   directLlmProvider: cleanSecret(process.env.DIRECT_LLM_PROVIDER).toLowerCase(),
   // Transactional email (Resend). When unset, email sending is a no-op (logs a warning).
   resendApiKey: process.env.RESEND_API_KEY ?? "",
+  // Svix signing secret for Resend INBOUND webhooks (email-forward ingestion).
+  // Unset => inbound verification fails closed and no email is ingested.
+  resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET ?? "",
+  // Subdomain that receives forwarded settlement mail, e.g.
+  // "inbound.reconcileaiafrica.com" -> settle-<token>@inbound.reconcileaiafrica.com
+  emailInboundDomain: process.env.EMAIL_INBOUND_DOMAIN ?? "",
   emailFrom: process.env.EMAIL_FROM ?? "",                 // e.g. noreply@reconcileai.vip
   emailFromName: process.env.EMAIL_FROM_NAME ?? "ReconcileAI",
   ownerEmail: process.env.OWNER_EMAIL ?? "",               // recipient for owner/system notifications

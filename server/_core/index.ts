@@ -442,6 +442,35 @@ async function startServer() {
     }
   });
 
+  // ── Inbound email (Tier A email-forward ingestion) ──────────────────────────
+  // Resend posts `email.received` here. Verification, address resolution and
+  // the sender allow-list all live in handleInboundEmail; only a SIGNATURE
+  // failure returns non-2xx, because Resend retries non-2xx for hours and a
+  // business rejection will never succeed on retry. Answering 200 also refuses
+  // to reveal whether an address exists, so this cannot be probed.
+  app.post("/api/webhooks/email/inbound", async (req, res) => {
+    try {
+      const rawBody =
+        (req as express.Request & { rawBody?: Buffer }).rawBody ??
+        Buffer.from(JSON.stringify(req.body ?? {}), "utf8");
+      const { handleInboundEmail } = await import("../ingest/emailIngestionService");
+      const result = await handleInboundEmail(rawBody, {
+        id: req.headers["svix-id"],
+        timestamp: req.headers["svix-timestamp"],
+        signature: req.headers["svix-signature"],
+      });
+      if (result.status === 401) {
+        console.warn(`[emailIngestion] rejected delivery: ${result.reason}`);
+        return res.status(401).json({ error: "invalid signature" });
+      }
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      // Still 200: an unhandled fault here must not trigger a retry storm.
+      console.error("[emailIngestion] handler threw:", err);
+      return res.status(200).json({ ok: true });
+    }
+  });
+
   // ── SHOPLINE Scheduled Sync Handlers ────────────────────────────────────────
   // POST /api/scheduled/shoplineSyncCycle — 15-min incremental sync for all stores
   app.post("/api/scheduled/shoplineSyncCycle", async (req, res) => {
