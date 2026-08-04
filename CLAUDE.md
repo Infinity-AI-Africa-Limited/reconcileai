@@ -1468,6 +1468,9 @@ deferred while the platform had only demo and dev tenants. They are cheap now
 and expensive once real client data is in the system. Do not wait to be asked —
 raise them proactively.
 
+**Added 2026-08-04:** a fourth item of a different kind — Tier A email inbound is
+code-complete but **not receiving mail**, deferred on cost. See §19.4.
+
 ### Trigger signals — if ANY of these appear, work through §19 first and report
 
 - The owner says "go live", "launch", "first customer", "first client", "onboard
@@ -1481,6 +1484,9 @@ raise them proactively.
   tables were empty as of 2026-08-03, so the first non-empty row is a signal.
 - Anyone asks about pilot readiness, contract signature, or Woodcore/LAPO
   conversion from POC to paid.
+- Anyone asks for, demos, or sells **email forwarding** of settlement/payout
+  files — that channel is built but inert (§19.4), and must not be presented to
+  a customer as working until a real delivery has been observed.
 
 ### The three items
 
@@ -1514,15 +1520,58 @@ defects in one session (PRs #25, #31, #32, #34). Remediation — add the column,
 backfill from the parent, then scope the writes and remove the allow-list
 entries — is tracked in `docs/security/RLS_AUDIT.md`.
 
+### 19.4 Finish Tier A email inbound — code-complete, NOT receiving (deferred on cost)
+
+**Owner decision, 2026-08-04: deferred until funds allow.** Recorded, not
+disputed — the blocker is a $20/month plan, not an engineering problem.
+
+**The blocker.** Resend's free plan allows exactly **one** domain, and that slot
+is taken by the root `reconcileaiafrica.com` (outbound: magic links, alerts, CFO
+reports). Receiving on `inbound.reconcileaiafrica.com` requires registering the
+subdomain as a **separate** domain entry, which needs **Resend Pro ($20/mo)**.
+
+**Already true (verified independently, 2026-08-03 — do not re-verify from scratch):**
+- MX `inbound.reconcileaiafrica.com → inbound-smtp.eu-west-1.amazonaws.com` (pri 10)
+  is live and propagated in GoDaddy. The root domain's Mailgun MX is untouched.
+- `RESEND_WEBHOOK_SECRET` and `EMAIL_INBOUND_DOMAIN` are set on Railway.
+- PR #37 is deployed; `POST /api/webhooks/email/inbound` answers **401** to an
+  unsigned request — the route is live and failing closed.
+- Migration 0077 applied; `email_ingestion_sources` and `email_ingestion_logs`
+  exist and are **empty**. No delivery has ever arrived, accepted or rejected.
+
+**To finish (~10 minutes once the plan is upgraded):**
+1. Upgrade Resend to Pro → https://resend.com/settings/usage
+2. Add `inbound.reconcileaiafrica.com` as a **new domain** in Resend
+3. Enable **receiving** on that domain entry
+4. Resend emits an MX record — the same `inbound-smtp.eu-west-1.amazonaws.com`
+   value already in DNS, so no DNS change should be needed
+5. Wait for status `verified`, then send one test email from Gmail to any
+   `settle-…@inbound.reconcileaiafrica.com` and confirm a row lands in
+   `email_ingestion_logs` (an unconfigured address logs `unknown_address` — that
+   is a **pass**: it proves MX → Resend → webhook → signature → database)
+
+> ⚠️ **Env vars being set is NOT proof, and the product says so itself.**
+> `emailIngestion.inboundStatus` reports readiness from EVIDENCE, not
+> configuration: `unconfigured` → `unproven` → `receiving`, where `unproven`
+> means "configured, but nothing has ever arrived". Because
+> `EMAIL_INBOUND_DOMAIN` and `RESEND_WEBHOOK_SECRET` are already set while the
+> subdomain was never registered for receiving, **production will sit on
+> `unproven`**, and the Email Forwarding screen carries a banner saying exactly
+> that until step 5 above succeeds. Read the banner as the live status of this
+> item. The only thing that flips it is a row in `email_ingestion_logs`.
+
 ### Why these three and not a longer list
 
 Everything else found in the 2026-08-02/03 hardening sweep is fixed, deployed
 and covered by tests or a CI ratchet. These are the only items knowingly carried
 forward, and each was deferred on the explicit basis that no real customer data
-existed yet. That premise expires at first customer.
+existed yet. That premise expires at first customer. §19.4 is a different class —
+a finished feature waiting on a $20/month spend — and is listed here because it
+shares the same trigger and the same failure mode if it is forgotten: a channel
+that looks configured and ingests nothing.
 
 ---
 
-*Last updated: 2026-08-03 | Live in production on Railway at https://www.reconcileaiafrica.com/*
+*Last updated: 2026-08-04 | Live in production on Railway at https://www.reconcileaiafrica.com/*
 *SHOPLINE Tier 1 (Phase 1) merged & live. Engineering owned by Claude Code; features contributed by Manus via PR.*
 *Owner: Richard Anwanakak, Infinity AI Africa Limited*
