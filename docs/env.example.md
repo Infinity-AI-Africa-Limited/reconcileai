@@ -41,7 +41,7 @@ Used to sign and verify JWT session cookies. Must be kept secret and rotated if 
 # Recommended: Anthropic Claude (native Messages API adapter)
 DIRECT_LLM_API_KEY=sk-ant-...
 DIRECT_LLM_API_URL=https://api.anthropic.com
-DIRECT_LLM_MODEL=claude-sonnet-4-5
+DIRECT_LLM_MODEL=claude-sonnet-5
 # Optional explicit selector: "anthropic" | "openai".
 # Auto-detected from the model name ("claude…") or URL when omitted.
 DIRECT_LLM_PROVIDER=anthropic
@@ -54,7 +54,7 @@ trailing `/v1` or the full path are also accepted.
 
 | Provider | `DIRECT_LLM_API_URL` (base) | Model |
 |---|---|---|
-| Anthropic (recommended, cloud) | `https://api.anthropic.com` | `claude-sonnet-4-5` (Super Agent: `claude-opus-4`) |
+| Anthropic (recommended, cloud) | `https://api.anthropic.com` | `claude-sonnet-5` (Super Agent: `claude-opus-4-8`) |
 | OpenAI | `https://api.openai.com` | `gpt-4o-mini` or `gpt-4o` |
 | OpenAI-compatible proxy (LiteLLM) | `https://your-litellm-proxy.com` | provider-prefixed model |
 | **Local Anthropic-compatible** (on-prem) | `http://llm.internal:8080` + `DIRECT_LLM_PROVIDER=anthropic` | self-hosted Claude-compatible gateway |
