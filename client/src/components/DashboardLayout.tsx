@@ -109,6 +109,9 @@ const adminAdvancedItems: NavItem[] = [
   // admin-only, like its SFTP sibling: this screen manages bucket credentials
   // for bank/PSP settlement feeds.
   { icon: Server, label: "Bucket Drops", path: "/bucket-config", roles: ["admin"] },
+  // admin-only for the same reason as its siblings: this screen issues the
+  // forwarding address and edits the sender allow-list guarding it.
+  { icon: Mail, label: "Email Forwarding", path: "/email-forwarding", roles: ["admin"] },
   { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
 ];
 

@@ -69,6 +69,37 @@ export function isSenderAllowed(from: string | null | undefined, allowlistRaw: s
   return false;
 }
 
+/** A domain label sequence: `stripe.com`, `pay.stripe.co.uk`. Requires a dot. */
+const DOMAIN_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+/** Deliberately as strict as normaliseSender: exactly one @, and a dotted domain. */
+const ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Validate an allow-list before it is stored.
+ *
+ * Written against `parseAllowlist` rather than beside it, so what the UI accepts
+ * and what the inbound path enforces can never drift apart. That drift is the
+ * dangerous outcome here: an entry the enforcer will never match produces a
+ * source that looks configured, reports itself healthy and rejects every
+ * delivery — the same silent-nothing failure the bucket "test connection"
+ * button exists to prevent.
+ *
+ * Empty is invalid, not permissive. The enforcer fails closed on an empty list,
+ * so accepting one at configuration time would only defer the surprise.
+ */
+export function validateAllowlist(
+  raw: string | null | undefined,
+): { ok: true; rules: AllowRule[] } | { ok: false; invalid: string[] } {
+  const rules = parseAllowlist(raw);
+  if (rules.length === 0) return { ok: false, invalid: [] };
+
+  const invalid = rules
+    .filter((r) => !(r.kind === "domain" ? DOMAIN_RE : ADDRESS_RE).test(r.value))
+    .map((r) => (r.kind === "domain" ? `@${r.value}` : r.value));
+
+  return invalid.length > 0 ? { ok: false, invalid } : { ok: true, rules };
+}
+
 /** Attachment types we will even consider. Everything else is refused unread. */
 const ALLOWED_EXTENSIONS = /\.(csv|tsv|txt|xlsx|xlsm|xls)$/i;
 

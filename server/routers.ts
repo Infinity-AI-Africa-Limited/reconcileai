@@ -41,6 +41,7 @@ import {
 } from "./emailReportService";
 import { publicApiRouter } from "./publicApiRouter";
 import { bucketIngestionRouter } from "./routers/bucketIngestion";
+import { emailIngestionRouter } from "./routers/emailIngestion";
 import {
   encryptCredential,
   testSftpConnection,
@@ -6253,6 +6254,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   cbsConnector: woodcoreConnectorRouter,
   shoplineConnector: shoplineConnectorRouter,
   bucketIngestion: bucketIngestionRouter,
+  emailIngestion: emailIngestionRouter,
   // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
   lapo: lapoRouter,
   uganda: ugandaRouter,
