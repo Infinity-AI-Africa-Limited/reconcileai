@@ -31,11 +31,10 @@ const ALLOWED: Record<string, string> = {
   updateScheduleRunHistory: "run-history id is created by the scheduling engine itself",
   updateReconciliationJob: "job id originates from the caller's own reconciliation run",
 
-  // Scoped through a parent row rather than an org column of their own. The RLS
-  // audit classifies both as "derived"; adding organizationId to them is tracked
-  // separately in docs/security/RLS_AUDIT.md.
-  updateMatchStatus: "matches has NO organizationId — derived via its job (RLS_AUDIT remediation)",
-  updateException: "exceptions has NO organizationId — derived via job/transaction (RLS_AUDIT remediation)",
+  // updateMatchStatus and updateException were here because `matches` and
+  // `exceptions` had no organizationId to filter on. Migration 0078 added it to
+  // both, and both now take a required organizationId — so the exemptions are
+  // gone rather than merely re-justified. Do not re-add them.
   updateTransactionStatus: "bulk status write driven by the engine over rows it already selected",
 
   // Unused today; retained rather than deleted.

@@ -231,6 +231,14 @@ export type InsertReconciliationJob = typeof reconciliationJobs.$inferInsert;
 // ─── Matches ─────────────────────────────────────────────────────────
 export const matches = mysqlTable("matches", {
   id: int("id").autoincrement().primaryKey(),
+  /**
+   * Owning tenant. Nullable, and deliberately so: 2,000 existing rows point at
+   * a jobId with no surviving job, leaving no parent to inherit an org from.
+   * NULL therefore means "legacy / underivable", exactly as it does on
+   * `transactions` — never "any organization". New rows always carry the
+   * organization of the job that produced them.
+   */
+  organizationId: int("organizationId"),
   jobId: int("jobId").notNull(),
   sourceTransactionId: int("sourceTransactionId").notNull(),
   targetTransactionId: int("targetTransactionId").notNull(),
@@ -247,6 +255,7 @@ export const matches = mysqlTable("matches", {
   reviewedAt: timestamp("reviewedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
+  index("idx_matches_org").on(table.organizationId),
   index("idx_matches_job").on(table.jobId),
   index("idx_matches_source").on(table.sourceTransactionId),
   index("idx_matches_target").on(table.targetTransactionId),
@@ -260,6 +269,8 @@ export type InsertMatch = typeof matches.$inferInsert;
 // ─── Exceptions ──────────────────────────────────────────────────────
 export const exceptions = mysqlTable("exceptions", {
   id: int("id").autoincrement().primaryKey(),
+  /** Owning tenant. Nullable for the same reason as `matches.organizationId`. */
+  organizationId: int("organizationId"),
   jobId: int("jobId").notNull(),
   transactionId: int("transactionId").notNull(),
   category: mysqlEnum("category", [
@@ -306,6 +317,7 @@ export const exceptions = mysqlTable("exceptions", {
   userKeptResolved: boolean("userKeptResolved").default(false),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
+  index("idx_exceptions_org").on(table.organizationId),
   index("idx_exceptions_job").on(table.jobId),
   index("idx_exceptions_txn").on(table.transactionId),
   index("idx_exceptions_status").on(table.status),

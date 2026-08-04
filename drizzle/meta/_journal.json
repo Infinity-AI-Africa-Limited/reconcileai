@@ -547,6 +547,13 @@
       "when": 1785771649510,
       "tag": "0077_chubby_spencer_smythe",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "5",
+      "when": 1785856548294,
+      "tag": "0078_previous_white_queen",
+      "breakpoints": true
     }
   ]
 }

@@ -31,12 +31,11 @@ describe("no read path may build a vanishing WHERE clause", () => {
    * yet. Keep this list SHORT — every entry is a table whose reads are
    * unscoped.
    */
-  const ALLOWED: Record<string, string> = {
-    getExceptions:
-      "the `exceptions` table has NO organizationId column — scoped only via its parent job. " +
-      "Adding the column is tracked as finding F1 in docs/security/RLS_AUDIT.md and CLAUDE.md §19.3; " +
-      "this entry must be removed once that lands.",
-  };
+  // Empty, and it should stay that way. `getExceptions` was the last entry —
+  // exempt only because `exceptions` had no organizationId column. Migration
+  // 0078 added it, so the read is scoped like every other and the exemption is
+  // deleted rather than re-worded.
+  const ALLOWED: Record<string, string> = {};
 
   it("db.ts contains no unaccounted `: undefined` where-clause fallback", () => {
     const VANISHING = /const whereClause = conditions\.length > 0 \? and\(\.\.\.conditions\) : undefined;/g;
@@ -59,10 +58,44 @@ describe("no read path may build a vanishing WHERE clause", () => {
     ).toEqual([]);
   });
 
-  it("still finds the allow-listed function, so the scan cannot silently pass", () => {
-    // If getExceptions is ever renamed or refactored away, this fails and the
-    // stale ALLOWED entry gets cleaned up rather than quietly protecting nothing.
+  it("the allow-list is empty and every entry added later carries a reason", () => {
+    // Empty is the goal state, reached in migration 0078. This is not a
+    // prohibition on ever adding one — it is a requirement that doing so is
+    // deliberate and explained, since each entry is a table whose reads are
+    // unscoped.
+    for (const [fn, reason] of Object.entries(ALLOWED)) {
+      expect(reason.length, `ALLOWED["${fn}"] needs a real reason`).toBeGreaterThan(30);
+    }
+    expect(Object.keys(ALLOWED)).toEqual([]);
+  });
+
+  it("scans a non-empty db.ts, so the sweep cannot pass vacuously", () => {
+    // Guards against the file being moved or the read failing silently.
+    expect(DB_SOURCE.length).toBeGreaterThan(1000);
     expect(DB_SOURCE).toMatch(/export async function getExceptions/);
+  });
+});
+
+describe("exceptions and matches are scoped by their own organizationId", () => {
+  // Migration 0078 gave both tables the column. These assertions are what stop
+  // the pre-0078 shape — "derived via the parent job" — from creeping back.
+  it("getExceptions requires an organizationId", () => {
+    const sig = DB_SOURCE.slice(DB_SOURCE.indexOf("export async function getExceptions(filters: {")).slice(0, 300);
+    expect(sig).toContain("organizationId: number | null;");
+    expect(sig).not.toContain("organizationId?:");
+  });
+
+  it("the id-keyed mutators filter on organizationId, not a bare id", () => {
+    for (const fn of ["updateMatchStatus", "updateException"]) {
+      const body = DB_SOURCE.slice(DB_SOURCE.indexOf(`export async function ${fn}(`)).slice(0, 900);
+      expect(body, `${fn} must take an organizationId`).toContain("organizationId: number | null");
+      expect(body, `${fn} must AND it into the WHERE`).toMatch(/orgFilter\(/);
+    }
+  });
+
+  it("getPendingReviewMatches no longer returns every tenant's review queue", () => {
+    const body = DB_SOURCE.slice(DB_SOURCE.indexOf("export async function getPendingReviewMatches(")).slice(0, 600);
+    expect(body).toMatch(/orgFilter\(matches\.organizationId/);
   });
 });
 

@@ -182,7 +182,7 @@ export async function buildBoardSummary(
   try {
     await Promise.all(
       (["critical", "high", "medium", "low"] as const).map(async (sev) => {
-        const { total } = await db.getExceptions({ severity: sev, dateFrom, dateTo, limit: 1 });
+        const { total } = await db.getExceptions({ organizationId, severity: sev, dateFrom, dateTo, limit: 1 });
         exceptionsBySeverity[sev] = total;
       }),
     );
@@ -588,6 +588,7 @@ export async function getChannelDrillDown(
 
   // Top exception types from last 30 days
   const { data: exceptions } = await db.getExceptions({
+    organizationId,
     limit: 500,
   });
   const channelExceptions = exceptions.filter((e) => {

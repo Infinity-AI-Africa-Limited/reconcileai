@@ -1006,7 +1006,10 @@ export const appRouter = router({
         const job = await db.getReconciliationJob(input.id);
         if (!job) throw new TRPCError({ code: "NOT_FOUND" });
         const jobMatches = await db.getMatchesByJob(input.id);
-        const { data: jobExceptions } = await db.getExceptions({ jobId: input.id });
+        const { data: jobExceptions } = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
+          jobId: input.id,
+        });
         // Audit: log data access event
         const { ip, ua } = getClientInfo(ctx);
         await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua);
@@ -1069,7 +1072,7 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive(), note: z.string().max(2000).optional() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: "escalated",
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
@@ -1102,7 +1105,7 @@ export const appRouter = router({
       const overAged = rows.filter(
         (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
       );
-      await Promise.all(overAged.map((r) => db.updateException(r.id, { status: "escalated" })));
+      await Promise.all(overAged.map((r) => db.updateException(r.id, ctx.user.organizationId ?? null, { status: "escalated" })));
       const { ip, ua } = getClientInfo(ctx);
       await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
       // Flywheel write-path (audit fix): each bulk escalation is a learnable
@@ -1162,8 +1165,8 @@ export const appRouter = router({
           offset: z.number().int().min(0).default(0),
         })
       )
-      .query(async ({ input }) => {
-        return db.getExceptions(input);
+      .query(async ({ ctx, input }) => {
+        return db.getExceptions({ ...input, organizationId: ctx.user.organizationId ?? null });
       }),
 
     resolve: operationsProcedure
@@ -1176,7 +1179,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: input.status,
           resolvedBy: ctx.user.id,
           resolvedAt: new Date(),
@@ -1287,7 +1290,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           assignedTo: input.assignedTo,
           assignedAt: new Date(),
           assignedBy: ctx.user.id,
@@ -1308,7 +1311,7 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
         const updatePromises = input.exceptionIds.map(id =>
-          db.updateException(id, {
+          db.updateException(id, ctx.user.organizationId ?? null, {
             assignedTo: input.assignedTo,
             assignedAt: new Date(),
             assignedBy: ctx.user.id,
@@ -1333,10 +1336,13 @@ export const appRouter = router({
       }),
 
     getTeamWorkload: protectedProcedure
-      .query(async () => {
+      .query(async ({ ctx }) => {
         const allUsers = await db.getAllUsers();
         const activeUsers = allUsers.filter(u => u.isActive && !u.isGuest);
-        const exceptionsResult = await db.getExceptions({ limit: 10000 });
+        const exceptionsResult = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
+          limit: 10000,
+        });
         const allExceptions = exceptionsResult.data;
         
         const workloadData = await Promise.all(activeUsers.map(async (user) => {
@@ -1388,7 +1394,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: "escalated",
           resolutionNotes: input.notes ? sanitizeInput(input.notes, 2000) : null,
         });
@@ -1422,7 +1428,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: "in_review",
           assignedTo: ctx.user.id,
           assignedAt: new Date(),
@@ -1447,6 +1453,7 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
         const exceptions = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
           jobId: input.jobId,
           status: input.status,
           severity: input.severity,
@@ -1877,15 +1884,19 @@ export const appRouter = router({
 
   review: router({
     pending: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
-      return db.getPendingReviewMatches(ctx.user.id, isAdmin);
+      // The userId/isAdmin pair this used to pass was accepted and ignored —
+      // the query filtered on status alone, so every caller saw every tenant's
+      // review queue. Scoped by organization now that `matches` carries one,
+      // which supersedes the narrowed isAdmin flag from #45: the function no
+      // longer takes either argument.
+      return db.getPendingReviewMatches(ctx.user.organizationId ?? null);
     }),
 
     approve: guestProtectedProcedure
       .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateMatchStatus(input.matchId, "confirmed", ctx.user.id);
+        await db.updateMatchStatus(input.matchId, ctx.user.organizationId ?? null, "confirmed", ctx.user.id);
         await logAudit(ctx.user.id, "approve_match", "match", input.matchId, {}, ip, ua);
         return { success: true };
       }),
@@ -1894,7 +1905,7 @@ export const appRouter = router({
       .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateMatchStatus(input.matchId, "rejected", ctx.user.id);
+        await db.updateMatchStatus(input.matchId, ctx.user.organizationId ?? null, "rejected", ctx.user.id);
         await logAudit(ctx.user.id, "reject_match", "match", input.matchId, {}, ip, ua);
         return { success: true };
       }),
@@ -2064,7 +2075,10 @@ export const appRouter = router({
         if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
         const jobMatches = await db.getMatchesByJob(input.jobId);
-        const { data: jobExceptions } = await db.getExceptions({ jobId: input.jobId });
+        const { data: jobExceptions } = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
+          jobId: input.jobId,
+        });
 
         const summary = {
           jobName: job.name,
@@ -2715,6 +2729,7 @@ export const appRouter = router({
       }))
       .query(async ({ ctx, input }) => {
         let { data: exceptions } = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
           status: "open",
           severity: input.priority !== "all" ? input.priority : undefined,
           limit: input.limit,
@@ -2757,7 +2772,10 @@ export const appRouter = router({
       }),
 
     operationsSla: protectedProcedure.query(async ({ ctx }) => {
-      const { data: allExceptions } = await db.getExceptions({ limit: 1000 });
+      const { data: allExceptions } = await db.getExceptions({
+        organizationId: ctx.user.organizationId ?? null,
+        limit: 1000,
+      });
       const resolved = allExceptions.filter((e) => e.status === "resolved");
       const resolvedWithin24h = resolved.filter((e) => {
         if (!e.resolvedAt) return false;
@@ -4284,7 +4302,7 @@ export const appRouter = router({
         // Fetch recent exceptions and stats for context
         const isAdmin = ctx.user.role === 'admin';
         const [recentExceptions, recentJobsRaw] = await Promise.all([
-          db.getExceptions({ status: 'open', limit: 20, offset: 0 }),
+          db.getExceptions({ organizationId: ctx.user.organizationId ?? null, status: 'open', limit: 20, offset: 0 }),
           db.getReconciliationJobs(userId, isAdmin),
         ]);
 
@@ -6865,7 +6883,8 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
         txn as any,
         networkGuidance ? { networkGuidance } : undefined
       );
-      await db.updateException(exc.id, { aiAnalysis: analysis });
+      // Background pass — no request context. The tenant is the job's own.
+      await db.updateException(exc.id, orgId, { aiAnalysis: analysis });
     } catch (err) {
       console.error(`[AI pass] exception ${exc.id} failed:`, err);
     }
@@ -6885,6 +6904,11 @@ async function runReconciliation(
   try {
     await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
     await trackProgress(jobId, "queued", { message: "Job queued for processing" });
+
+    // The owning tenant for every match and exception this run produces. Read
+    // once from the job rather than threaded through the signature, so the
+    // rows can never disagree with their parent. Null for legacy/orgless jobs.
+    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId ?? null;
 
     await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
     const sourceTxns = await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo);
@@ -6927,6 +6951,7 @@ async function runReconciliation(
     // per match (the old per-row path was O(n) DB calls and unusable at 500k).
     const matchRows = result.matches.map((m) => ({
       jobId,
+      organizationId: runOrganizationId,
       sourceTransactionId: m.sourceId,
       targetTransactionId: m.targetId,
       matchType: m.matchType,
@@ -6971,6 +6996,7 @@ async function runReconciliation(
       const info = categorizeException(txn, targetTxns, config);
       return {
         jobId,
+        organizationId: runOrganizationId,
         transactionId: txn.id,
         category: info.category,
         severity: info.severity,
@@ -6993,6 +7019,7 @@ async function runReconciliation(
     const duplicateRows = result.duplicates.flatMap((dupGroup) =>
       dupGroup.transactionIds.map((txnId) => ({
         jobId,
+        organizationId: runOrganizationId,
         transactionId: txnId,
         category: "duplicate_transaction" as const,
         severity: "medium" as const,

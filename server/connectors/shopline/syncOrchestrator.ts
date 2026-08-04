@@ -640,6 +640,10 @@ export async function runReconciliationOnPersistedData(
 
     const exceptionRows = result.retailExceptions.map((ex) => ({
       jobId: 0, // synthetic — no reconciliation job for inline sync
+      // With jobId 0 there is no parent to derive the tenant from, so these
+      // rows were previously unattributable to any organization. This is the
+      // path the new column matters most for.
+      organizationId,
       transactionId: ex.transactionId,
       category: mapRetailToCoreCategory(ex.category),
       subCategory: ex.category, // precise retail_* key — feeds the flywheel

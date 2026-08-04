@@ -33,14 +33,28 @@ enforced at three layers:
 
 ## 3. Findings & remediation plan
 
-**F1 — `exceptions` has no `organizationId` column (MEDIUM).**
-Exceptions are scoped only through `reconciliation_jobs`/`transactions`. Any
-query that filters exceptions without joining through the parent risks
-cross-tenant reads. *Remediation:* add nullable `organizationId`, backfill from
-parent jobs, flip new writes, then tighten queries — scheduled as its own
-migration (backfill on a hot table; do it in a quiet window). *Until then:*
-the ratchet test documents the constraint; all exception queries must join
-through their parent.
+**F1 — `exceptions` (and `matches`) had no `organizationId` column — ✅ CLOSED (migration 0078).**
+Both tables now carry a nullable `organizationId`, backfilled from the parent
+reconciliation job. New writes set it directly: the reconciliation runner reads
+the job's org once per run, and the SHOPLINE sync path — which uses a synthetic
+`jobId: 0` and so had no parent to derive from at all — sets it from the store's
+organization.
+
+The backfill ran in the migration rather than a quiet window: `matches` holds
+~16k rows and `exceptions` ~742, so it is milliseconds, not an online schema
+change. It is idempotent (`WHERE organizationId IS NULL`).
+
+Nullable, not `NOT NULL`: ~2,000 matches and ~42 exceptions reference a `jobId`
+with no surviving job, so no owner can be derived. NULL there means
+"legacy / underivable" — the same meaning it carries on `transactions` — and is
+matched by `orgFilter()` rather than being silently invisible.
+
+What this unlocked: `getExceptions` is now scoped like every other reader (its
+exemption in `readScopeRatchet.test.ts` is deleted), `updateMatchStatus` and
+`updateException` take a required `organizationId` and their two entries in
+`tenancyRatchet.test.ts` are gone, and `getPendingReviewMatches` — which
+accepted `userId`/`isAdmin` and ignored both, returning every tenant's review
+queue — is scoped. Classification moved `derived` → `tenant_nullable`.
 
 **F2 — `wc_*` mirror tables are single-tenant (LOW today, HIGH at 2+ Woodcore DB-mirror tenants).**
 The Fineract mirror serves the Woodcore POC only and carries no org column.
@@ -52,8 +66,10 @@ add `organizationId` to all `wc_*` tables if mirror-mode is ever sold.
 **F3 — 39 legacy tables have nullable `organizationId` (LOW, chronic).**
 Prototype-era rows carry `organizationId = NULL` and are effectively scoped by
 `userId`. *Remediation:* opportunistic backfill + `NOT NULL` tightening,
-table-by-table, starting with `transactions` and `reconciliation_jobs` once
-the exceptions backfill (F1) proves the pattern.
+table-by-table, starting with `transactions` and `reconciliation_jobs`. The F1
+backfill has now proven the pattern (parent-derived, idempotent, nullable where
+no parent survives) — though note `transactions` carries ~35M orgless rows, so
+that one needs the online schema-change treatment F1 did not.
 
 **F4 — S3 object keys are not org-partitioned (LOW; pre-existing tech-debt item).**
 File keys are access-controlled by signed URLs but not prefixed per tenant.
