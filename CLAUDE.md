@@ -1450,9 +1450,18 @@ decision and raise it again only on new evidence.
 **Rotation runbook (order matters) — for whenever rotation does happen:**
 1. Generate the new value **directly in the Railway dashboard**; never let it transit a chat,
    a document, or a file.
-2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, and
-   point `SHOPLINE_SYNC_SECRET` (GitHub Actions) at *that* — the master key should never sit
-   in GitHub's secret store.
+2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, then
+   update **every** GitHub Actions secret that carries it — the master key should never sit
+   in GitHub's secret store. There are **two**, and they must be changed together:
+   - `SHOPLINE_SYNC_SECRET` → `.github/workflows/shopline-sync.yml`
+   - `WOODCORE_SYNC_SECRET` → `.github/workflows/woodcore-sync.yml`
+
+   > ⚠️ **This step is why the Woodcore mirror broke.** Earlier revisions of this runbook
+   > named only `SHOPLINE_SYNC_SECRET`. The 2026-08-02 rotation followed it exactly, so
+   > SHOPLINE kept working while the Woodcore sync began returning 403 and the mirror sat
+   > stale for three days — surfaced only by a GitHub failure email, not by any alert.
+   > Before rotating, re-derive this list rather than trusting it:
+   > `grep -rn "secrets\." .github/workflows/`
 3. Rotating invalidates all sessions (everyone re-authenticates by magic link) **and makes
    existing SHOPLINE tokens undecryptable** — they were encrypted under the old key.
 4. Immediately reconnect OAuth on both dev stores, or syncs fail with token-decrypt errors

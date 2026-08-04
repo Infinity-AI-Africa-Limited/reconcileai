@@ -40,6 +40,21 @@ jobs:
             "$SYNC_URL")
           echo "HTTP $code"; cat /tmp/resp; echo
           # 202 = started, 409 = a sync is already running — both are fine.
-          if [ "$code" != "202" ] && [ "$code" != "409" ]; then
-            echo "Unexpected status $code (check that WOODCORE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"; exit 1
+          if [ "$code" = "202" ] || [ "$code" = "409" ]; then
+            exit 0
           fi
+          echo
+          if [ "$code" = "403" ]; then
+            echo "::error::403 forbidden — WOODCORE_SYNC_SECRET no longer matches the server's CRON_SECRET."
+            echo "This is the expected symptom after a secret rotation: CRON_SECRET (or JWT_SECRET,"
+            echo "which it falls back to) was changed on Railway without updating this repository secret."
+            echo "It happened on 2026-08-02 and the mirror went stale for three days before anyone noticed."
+            echo
+            echo "Fix: copy the CURRENT CRON_SECRET from Railway into"
+            echo "  GitHub → Settings → Secrets and variables → Actions → WOODCORE_SYNC_SECRET"
+            echo "then re-run this workflow. The server logs the same diagnosis under [syncAuth]."
+            echo "Rotation runbook: CLAUDE.md §18 — it lists every consumer that must be updated together."
+          else
+            echo "::error::Unexpected status $code from $SYNC_URL"
+          fi
+          exit 1

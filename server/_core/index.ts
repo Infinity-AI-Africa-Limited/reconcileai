@@ -10,6 +10,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { assertResidencyStartupConfig, describeResidencyPosture } from "./egress";
 import { getLlmProviderInfo } from "./llm";
+import { checkSyncSecret, describeSyncAuthFailure } from "./syncAuth";
 import { getDb } from "../db";
 import { seedDefaultResolutionTemplates, seedNigerianExceptionDefaults } from "../seedResolutionTemplates";
 import { sql } from "drizzle-orm";
@@ -359,11 +360,19 @@ async function startServer() {
   // Guarded by a shared secret (header x-sync-secret == CRON_SECRET, falling back
   // to JWT_SECRET). Lets a scheduler (Railway Cron) or an operator trigger it
   // without an authenticated session.
-  const syncSecret = () => ENV.cronSecret || ENV.cookieSecret;
+  // Constant-time, and it LOGS why it refused. A bare 403 cannot distinguish a
+  // drifted caller secret from a server with no secret configured at all — that
+  // ambiguity is what left the Woodcore mirror sync failing silently for three
+  // days after the 2026-08-02 rotation. The response stays a uniform 403; only
+  // the log says which. See _core/syncAuth.ts.
   const syncAuthorized = (req: import("express").Request) => {
-    const secret = syncSecret();
-    const provided = (req.headers["x-sync-secret"] as string) || "";
-    return Boolean(secret) && provided === secret;
+    const result = checkSyncSecret(req.headers["x-sync-secret"] as string | undefined);
+    if (!result.ok) {
+      console.warn(
+        `[syncAuth] refused ${req.method} ${req.path}: ${describeSyncAuthFailure(result.reason)}`,
+      );
+    }
+    return result.ok;
   };
   app.post("/api/woodcore/sync", async (req, res) => {
     if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
