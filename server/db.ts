@@ -1,4 +1,4 @@
-import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne } from "drizzle-orm";
+import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import * as schema from "../drizzle/schema";
 import {
@@ -407,7 +407,29 @@ export async function insertTransactions(txns: InsertTransaction[]) {
   }
 }
 
+/**
+ * Transactions for ONE organization.
+ *
+ * `organizationId` is required and has no default. It was previously absent
+ * entirely: the predicate was built from `userId` (and only when `!isAdmin`)
+ * plus optional filters, so an admin calling with no filters produced an empty
+ * conditions array, a `whereClause` of `undefined`, and therefore
+ * `.where(undefined)` — every row of every tenant on the core financial table.
+ * `channelScope` in this same file carries a comment warning about exactly that
+ * "null must never widen to everything" mistake; this function was the place it
+ * had already happened.
+ *
+ * Required rather than optional-with-a-default so the compiler forces every
+ * call site to state its tenant, instead of inheriting a silent one. `null`
+ * means the legacy rows that carry no organization (see CLAUDE.md §19) — it is
+ * NOT "any organization".
+ *
+ * Cross-tenant reads must not go through here. Follow the precedent of
+ * `getAllChannelsAcrossTenants` and add a separate, awkwardly-named function so
+ * the intent is visible at the call site.
+ */
 export async function getTransactions(filters: {
+  organizationId: number | null;
   userId?: number;
   isAdmin?: boolean;
   channelId?: number;
@@ -423,7 +445,15 @@ export async function getTransactions(filters: {
   const db = await getDb();
   if (!db) return { data: [], total: 0 };
 
-  const conditions = [];
+  // Tenancy predicate first, and unconditionally — it is never optional, so it
+  // also guarantees `conditions` is non-empty and the WHERE can never vanish.
+  // Typed to allow undefined entries because drizzle's `or()` may return one;
+  // `and()` ignores them, and the definite predicate below keeps the result SQL.
+  const conditions: (SQL<unknown> | undefined)[] = [
+    filters.organizationId === null
+      ? isNull(transactions.organizationId)
+      : eq(transactions.organizationId, filters.organizationId),
+  ];
   if (!filters.isAdmin && filters.userId) {
     conditions.push(eq(transactions.userId, filters.userId));
   }
@@ -445,7 +475,10 @@ export async function getTransactions(filters: {
     );
   }
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  // No `: undefined` fallback. The tenancy predicate is unconditional, so an
+  // empty conditions array is impossible — and any path yielding `undefined`
+  // here would restore the unscoped, all-tenant query.
+  const whereClause = and(...conditions);
   const limit = clampLimit(filters.limit);
   const offset = clampOffset(filters.offset);
 
@@ -492,10 +525,62 @@ export async function getChannelTxnAggregate(channelId: number, dateFrom: Date, 
   };
 }
 
-export async function getTransactionsByIds(ids: number[]) {
+/**
+ * Transactions by id, for ONE organization.
+ *
+ * Use this wherever the ids came from the caller. Previously there was only an
+ * unscoped version, so a tRPC input of arbitrary transaction ids read rows from
+ * any tenant — the same class already fixed in `getTransactions` and
+ * `getAuditLogs`.
+ *
+ * The org predicate is AND-ed into each batch's WHERE rather than applied to
+ * the assembled results: filtering after the fact would still have fetched
+ * every foreign row, and one forgotten `.filter()` would restore the leak.
+ */
+export async function getTransactionsByIds(ids: number[], organizationId: number | null) {
   const db = await getDb();
   if (!db || ids.length === 0) return [];
+  const orgPredicate = organizationId === null
+    ? isNull(transactions.organizationId)
+    : eq(transactions.organizationId, organizationId);
   // Batch large ID arrays to prevent query size limits
+  const results = [];
+  for (let i = 0; i < ids.length; i += 500) {
+    const batch = ids.slice(i, i + 500);
+    const batchResult = await db
+      .select()
+      .from(transactions)
+      .where(and(inArray(transactions.id, batch), orgPredicate));
+    results.push(...batchResult);
+  }
+  return results;
+}
+
+/**
+ * Transactions by id with NO tenancy filter. Internal engine use only.
+ *
+ * Deliberately named so the absence of scoping is visible at every call site,
+ * following the precedent of `getAllChannelsAcrossTenants`.
+ *
+ * ONLY legitimate when the ids were derived server-side, in the same cycle,
+ * from a parent row the process already owns — never from request input. Two
+ * such call sites exist, both inside the reconciliation runner:
+ *   - `runDeferredAiAnalysis`, whose ids come from that job's own exceptions
+ *   - `runReconciliation`, whose ids come from the matching engine's result
+ *     over transactions loaded from the job's own channels
+ *
+ * Why these are NOT simply scoped to the job's organizationId: a transaction's
+ * `organizationId` is not guaranteed to equal its job's. The legacy rows carry
+ * NULL (CLAUDE.md §19.2), so an org predicate here could silently return fewer
+ * rows than were just matched — and at the `runReconciliation` call site that
+ * means exceptions never get persisted for the dropped rows. Losing exceptions
+ * is a financial-correctness failure, and a worse outcome than the theoretical
+ * exposure of an id the engine itself produced. Revisit once §19.2 is settled
+ * and transaction/job organizationId are known to agree.
+ */
+export async function getTransactionsByIdsUnscoped(ids: number[]) {
+  const db = await getDb();
+  if (!db || ids.length === 0) return [];
   const results = [];
   for (let i = 0; i < ids.length; i += 500) {
     const batch = ids.slice(i, i + 500);
@@ -839,7 +924,20 @@ export async function getAuditChain(organizationId: number | null) {
     .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id));
 }
 
+/**
+ * Audit log entries for ONE organization.
+ *
+ * Same defect and same fix as `getTransactions` above: `organizationId` was
+ * absent, so `getAuditLogs({ limit: 1000 })` — a real call site — built no
+ * predicate at all and returned every tenant's audit trail. On a compliance
+ * product that trail is among the most sensitive tables there is: who did what,
+ * to which entity, from which address.
+ *
+ * Required, not optional. `null` means the global/unscoped chain, matching
+ * `getAuditChain` directly below.
+ */
 export async function getAuditLogs(filters: {
+  organizationId: number | null;
   entityType?: string;
   entityId?: number;
   userId?: number;
@@ -849,12 +947,16 @@ export async function getAuditLogs(filters: {
   const db = await getDb();
   if (!db) return { data: [], total: 0 };
 
-  const conditions = [];
+  const conditions = [
+    filters.organizationId === null
+      ? isNull(auditLogs.organizationId)
+      : eq(auditLogs.organizationId, filters.organizationId),
+  ];
   if (filters.entityType) conditions.push(eq(auditLogs.entityType, filters.entityType));
   if (filters.entityId) conditions.push(eq(auditLogs.entityId, filters.entityId));
   if (filters.userId) conditions.push(eq(auditLogs.userId, filters.userId));
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const whereClause = and(...conditions);
   const limit = clampLimit(filters.limit);
   const offset = clampOffset(filters.offset);
 

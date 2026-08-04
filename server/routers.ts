@@ -754,6 +754,7 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
         return db.getTransactions({
+          organizationId: ctx.user.organizationId ?? null,
           userId: ctx.user.id,
           isAdmin,
           channelId: input.channelId,
@@ -1915,6 +1916,7 @@ export const appRouter = router({
         const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
         return db.getAuditLogs({
           ...input,
+          organizationId: ctx.user.organizationId ?? null,
           userId: isAdmin ? undefined : ctx.user.id,
         });
       }),
@@ -1951,6 +1953,7 @@ export const appRouter = router({
 
         // Fetch up to 10K rows for export
         const { data } = await db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
           entityType: input.entityType,
           limit: input.limit,
           userId: isAdmin ? undefined : ctx.user.id,
@@ -2630,6 +2633,7 @@ export const appRouter = router({
         const channelStats = await Promise.all(
           filteredChannels.map(async (channel) => {
             const { data: transactions } = await db.getTransactions({
+              organizationId: ctx.user.organizationId ?? null,
               channelId: channel.id,
               limit: 10000,
               dateFrom: input?.dateFrom,
@@ -2682,6 +2686,7 @@ export const appRouter = router({
               const to = new Date(from);
               to.setHours(23, 59, 59, 999);
               const { data: txns } = await db.getTransactions({
+                organizationId: ctx.user.organizationId ?? null,
                 channelId: channel.id,
                 dateFrom: from,
                 dateTo: to,
@@ -2778,7 +2783,10 @@ export const appRouter = router({
     // Auditor Dashboard Endpoints
     auditorCompliance: protectedProcedure.query(async ({ ctx }) => {
       const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
-      const { data: auditLogs } = await db.getAuditLogs({ limit: 1000 });
+      const { data: auditLogs } = await db.getAuditLogs({
+        organizationId: ctx.user.organizationId ?? null,
+        limit: 1000,
+      });
 
       return {
         totalReconciliations: stats?.jobs.total || 0,
@@ -2796,6 +2804,7 @@ export const appRouter = router({
       }))
       .query(async ({ ctx, input }) => {
         return db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
           entityType: input.entityType,
           limit: input.limit,
         });
@@ -3438,13 +3447,27 @@ export const appRouter = router({
         }).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        const transactions = await db.getTransactionsByIds(input.transactionIds);
+        // Ids arrive from the caller, so the lookup is org-scoped.
+        const requestedIds = Array.from(new Set(input.transactionIds));
+        const transactions = await db.getTransactionsByIds(requestedIds, ctx.user.organizationId ?? null);
         if (transactions.length === 0) {
           throw new TRPCError({ code: "NOT_FOUND", message: "No transactions found" });
+        }
+        // A bulk action must not quietly analyse a subset. If any requested id
+        // resolved to nothing — because it does not exist, or belongs to
+        // another tenant — say so rather than returning anomalies computed over
+        // whatever happened to match. NOT_FOUND for both cases, so this cannot
+        // be used to probe which ids exist elsewhere.
+        if (transactions.length !== requestedIds.length) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: `${requestedIds.length - transactions.length} of ${requestedIds.length} transactions were not found`,
+          });
         }
         
         // Get historical transactions from the same channel
         const historicalResult = await db.getTransactions({
+          organizationId: ctx.user.organizationId ?? null,
           channelId: transactions[0].channelId,
           limit: 1000,
         });
@@ -3841,7 +3864,11 @@ export const appRouter = router({
       }))
       .query(async ({ ctx, input }) => {
         await assertCanManageUsers(ctx, [input.userId]);
-        const { data } = await db.getAuditLogs({ userId: input.userId, limit: input.limit });
+        const { data } = await db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
+          userId: input.userId,
+          limit: input.limit,
+        });
         return data;
       }),
 
@@ -3852,7 +3879,11 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         await assertCanManageUsers(ctx, [input.userId]);
-        const { data } = await db.getAuditLogs({ userId: input.userId, limit: 500 });
+        const { data } = await db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
+          userId: input.userId,
+          limit: 500,
+        });
         // Build CSV
         const header = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details", "IP Address", "User Agent"];
         const rows = data.map((entry: any) => [
@@ -4494,7 +4525,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
 
         // Fetch the transaction
-        const txnRowsArr = await db.getTransactionsByIds([input.transactionId]);
+        // Caller-supplied id: scoped, so another tenant's transaction is simply
+        // "not found" via the existing guard below.
+        const txnRowsArr = await db.getTransactionsByIds([input.transactionId], ctx.user.organizationId ?? null);
         const txnRows = txnRowsArr[0];
         if (!txnRows) throw new TRPCError({ code: 'NOT_FOUND', message: 'Transaction not found' });
 
@@ -6755,7 +6788,10 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
   const txnIds = pending
     .map((e) => e.transactionId)
     .filter((id): id is number => id != null);
-  const txns = await db.getTransactionsByIds(txnIds);
+  // Unscoped by design: these ids come from this job's OWN exceptions, derived
+  // server-side moments ago — never from request input. See the function's
+  // comment for why an org predicate here would risk dropping rows.
+  const txns = await db.getTransactionsByIdsUnscoped(txnIds);
   const txnById = new Map(txns.map((t) => [t.id, t]));
 
   // Cross-institution intelligence read-path (gap-closure plan WS-5): fold
@@ -6887,7 +6923,11 @@ async function runReconciliation(
     });
     let exceptionCount = 0;
     const allUnmatched = [...result.unmatchedSource, ...result.unmatchedTarget];
-    const unmatchedTxns = await db.getTransactionsByIds(allUnmatched);
+    // Unscoped by design: these ids are the matching engine's own output over
+    // transactions loaded from this job's channels. Scoping to the job's org
+    // could drop rows whose organizationId is NULL (legacy), and every dropped
+    // row is an exception that never gets persisted.
+    const unmatchedTxns = await db.getTransactionsByIdsUnscoped(allUnmatched);
 
     // AI narrative is deferred to a background pass (runDeferredAiAnalysis) that runs
     // AFTER the job completes — keeps LLM latency out of the hot path.
