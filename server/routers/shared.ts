@@ -10,7 +10,7 @@
 import { TRPCError } from "@trpc/server";
 import { inArray } from "drizzle-orm";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg } from "../db";
 import { users } from "../../drizzle/schema";
 
 // ─── Super Admin Procedure ───────────────────────────────────────────
@@ -130,6 +130,37 @@ export function getClientInfo(ctx: any): { ip: string; ua: string } {
     || "unknown";
   const ua = ctx.req?.headers?.["user-agent"] || "unknown";
   return { ip, ua };
+}
+
+/**
+ * Prove an organization may bind a data feed to this channel.
+ *
+ * Every ingestion source — SFTP, bucket drop, email forward, public upload API —
+ * stores a caller-supplied `channelId` that decides what its transactions get
+ * reconciled against. Left unchecked, an admin can bind a feed to a channel
+ * their organization does not own. Ingested rows still carry the SOURCE's
+ * organizationId, so this is not a cross-tenant read; the damage is that one
+ * institution's settlements are matched against another's channel, and that a
+ * foreign channel id becomes bindable and therefore enumerable.
+ *
+ * The same class as #25 / #31 / #32 / #34 — an id from the caller used without
+ * proof of ownership. Note the tenancy ratchet in tenancyRatchet.test.ts cannot
+ * catch this one: it guards id-keyed WRITES in db.ts, and this is a foreign key
+ * accepted on the way in.
+ *
+ * Delegates to `getChannelByIdForOrg`, which applies `channelScope` — the org's
+ * own channels plus the shared platform rails (organizationId NULL), never
+ * widening to everything. NOT_FOUND rather than FORBIDDEN, so a probe cannot
+ * distinguish "not yours" from "does not exist".
+ */
+export async function assertChannelBindable(
+  organizationId: number,
+  channelId: number,
+): Promise<void> {
+  const channel = await getChannelByIdForOrg(channelId, organizationId);
+  if (!channel) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Channel not found" });
+  }
 }
 
 export function sanitizeInput(input: string, maxLength: number = 255): string {

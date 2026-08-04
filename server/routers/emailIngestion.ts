@@ -29,10 +29,11 @@ import { randomBytes } from "crypto";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { channels, emailIngestionSources, emailIngestionLogs } from "../../drizzle/schema";
+import { emailIngestionSources, emailIngestionLogs } from "../../drizzle/schema";
 import { adminProcedure, protectedProcedure, router } from "../_core/trpc";
-import { getDb, channelScope } from "../db";
+import { getDb } from "../db";
 import { ENV } from "../_core/env";
+import { assertChannelBindable } from "./shared";
 import { validateAllowlist } from "../ingest/senderAllowlist";
 
 /** Bounds for the pre-download size cap. A cap of "1 byte" is a footgun. */
@@ -110,27 +111,6 @@ async function ownedSource(user: { organizationId?: number | null }, id: number)
     .limit(1);
   if (!src) throw new TRPCError({ code: "NOT_FOUND", message: "Email source not found" });
   return { db, src };
-}
-
-/**
- * Prove the caller's org may bind to this channel.
- *
- * `channelScope` allows the org's own channels plus the shared rails, and never
- * widens to everything. Without this an admin could point a feed at another
- * tenant's channel: the transactions would still be written under the source's
- * own organizationId, so it is a data-integrity fault rather than a leak, but
- * it would reconcile one institution's settlements against a channel it does
- * not own — and the SFTP and bucket siblings currently allow exactly that.
- */
-async function assertChannelBindable(organizationId: number, channelId: number): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-  const [ch] = await db
-    .select({ id: channels.id })
-    .from(channels)
-    .where(and(eq(channels.id, channelId), channelScope(organizationId)))
-    .limit(1);
-  if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: "Channel not found" });
 }
 
 /** Validate an allow-list, or fail with something the user can act on. */

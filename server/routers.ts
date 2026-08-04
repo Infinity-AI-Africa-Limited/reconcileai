@@ -207,6 +207,7 @@ import {
   logAudit,
   getClientInfo,
   sanitizeInput,
+  assertChannelBindable,
 } from "./routers/shared";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
@@ -2980,14 +2981,21 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        
+
         if (!input.password && !input.privateKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Either password or private key is required" });
         }
-        
+
+        const organizationId = requireOrg(ctx);
+        // The channel decides what this feed's transactions reconcile against,
+        // and it arrives from the caller — so ownership is proven before it is
+        // stored. Guests never reach here (guestProtectedProcedure rejects
+        // them), so requireOrg has already guaranteed a real organization.
+        await assertChannelBindable(organizationId, input.channelId);
+
         const id = await db.createSftpCredential({
           userId: ctx.user.id,
-          organizationId: requireOrg(ctx),
+          organizationId,
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           host: input.host,
           port: input.port,
