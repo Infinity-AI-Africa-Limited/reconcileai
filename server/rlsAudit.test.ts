@@ -51,12 +51,13 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   upload_batches: "tenant_nullable",
   transactions: "tenant_nullable",
   reconciliation_jobs: "tenant_nullable",
-  matches: "derived",
-  // AUDIT FINDING: exceptions has NO organizationId — scoped only through its
-  // parent job/transaction. Remediation (add + backfill org column) is tracked
-  // in docs/security/RLS_AUDIT.md; until then all exception queries MUST join
-  // through reconciliation_jobs/transactions for org scoping.
-  exceptions: "derived",
+  // Both carried their own organizationId as of migration 0078, backfilled from
+  // the parent reconciliation job. Nullable rather than required because ~2,000
+  // matches and ~42 exceptions point at a jobId with no surviving job, leaving
+  // nothing to inherit — NULL there means "legacy / underivable", as it does on
+  // transactions. This closes RLS finding F1.
+  matches: "tenant_nullable",
+  exceptions: "tenant_nullable",
   audit_logs: "tenant_nullable",
   exception_aging_settings: "tenant_nullable",
   reconciliation_reports: "tenant_nullable",

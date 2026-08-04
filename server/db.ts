@@ -1,5 +1,6 @@
 import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import type { MySqlColumn } from "drizzle-orm/mysql-core";
 import * as schema from "../drizzle/schema";
 import {
   InsertUser, users,
@@ -219,6 +220,21 @@ export async function updateUserRole(userId: number, role: "super_admin" | "admi
  * someone forgot an argument. Making the unsafe case spell itself `null` keeps
  * it greppable and reviewable.
  */
+/**
+ * The tenancy predicate for any table carrying a nullable `organizationId`.
+ *
+ * `null` means the legacy/unattributed rows — NEVER "any organization". Kept as
+ * one helper so the two spellings can't drift: writing `eq(col, orgId)` without
+ * the null branch silently returns nothing for legacy tenants, and omitting the
+ * predicate entirely returns everyone's.
+ */
+export function orgFilter(
+  column: MySqlColumn,
+  organizationId: number | null,
+) {
+  return organizationId === null ? isNull(column) : eq(column, organizationId);
+}
+
 export function channelScope(organizationId: number | null) {
   // A caller with no organization gets the shared rails ONLY. `null` must never
   // widen to "everything" — an org-less user would then silently receive every
@@ -710,18 +726,43 @@ export async function getMatchesByJob(jobId: number) {
   return db.select().from(matches).where(eq(matches.jobId, jobId)).orderBy(desc(matches.confidenceScore));
 }
 
-export async function updateMatchStatus(id: number, status: string, reviewedBy?: number) {
+/**
+ * Confirm or reject a match, within ONE organization.
+ *
+ * Previously keyed on a bare id, and allow-listed in tenancyRatchet.test.ts
+ * only because `matches` had no organizationId to filter on. It has one now, so
+ * the exemption is gone: an id belonging to another tenant matches no row and
+ * the update is a no-op rather than a cross-tenant write.
+ */
+export async function updateMatchStatus(
+  id: number,
+  organizationId: number | null,
+  status: string,
+  reviewedBy?: number,
+) {
   const db = await getDb();
   if (!db) return;
   const updateData: any = { status };
   if (reviewedBy) { updateData.reviewedBy = reviewedBy; updateData.reviewedAt = new Date(); }
-  await db.update(matches).set(updateData).where(eq(matches.id, id));
+  await db.update(matches).set(updateData).where(and(eq(matches.id, id), orgFilter(matches.organizationId, organizationId)));
 }
 
-export async function getPendingReviewMatches(userId: number, isAdmin: boolean) {
+/**
+ * Matches awaiting human review, for ONE organization.
+ *
+ * The `userId`/`isAdmin` arguments were accepted and never used — the query
+ * filtered on status alone, so every caller received every tenant's review
+ * queue regardless of who asked.
+ */
+export async function getPendingReviewMatches(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(matches).where(eq(matches.status, "pending_review")).orderBy(desc(matches.createdAt)).limit(100);
+  return db
+    .select()
+    .from(matches)
+    .where(and(eq(matches.status, "pending_review"), orgFilter(matches.organizationId, organizationId)))
+    .orderBy(desc(matches.createdAt))
+    .limit(100);
 }
 
 // ─── Exceptions ──────────────────────────────────────────────────────
@@ -745,7 +786,17 @@ export async function insertExceptionsBatch(dataArray: InsertException[]) {
   return ids;
 }
 
+/**
+ * Exceptions for ONE organization.
+ *
+ * This was the last read still allow-listed in readScopeRatchet.test.ts, and
+ * the only reason was that `exceptions` had no organizationId column: with all
+ * filters optional the predicate could vanish and return every tenant's
+ * exceptions. The column now exists (migration 0078), so the exemption is gone
+ * and the tenancy predicate is unconditional like every other scoped reader.
+ */
 export async function getExceptions(filters: {
+  organizationId: number | null;
   jobId?: number;
   status?: string;
   category?: string;
@@ -758,7 +809,9 @@ export async function getExceptions(filters: {
   const db = await getDb();
   if (!db) return { data: [], total: 0 };
 
-  const conditions = [];
+  const conditions: (SQL<unknown> | undefined)[] = [
+    orgFilter(exceptions.organizationId, filters.organizationId),
+  ];
   if (filters.jobId) conditions.push(eq(exceptions.jobId, filters.jobId));
   if (filters.status) conditions.push(eq(exceptions.status, filters.status as any));
   if (filters.category) conditions.push(eq(exceptions.category, filters.category as any));
@@ -766,7 +819,8 @@ export async function getExceptions(filters: {
   if (filters.dateFrom) conditions.push(gte(exceptions.createdAt, filters.dateFrom));
   if (filters.dateTo) conditions.push(lte(exceptions.createdAt, filters.dateTo));
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  // Unconditional tenancy predicate above, so no `: undefined` fallback.
+  const whereClause = and(...conditions);
   const limit = clampLimit(filters.limit);
   const offset = clampOffset(filters.offset);
 
@@ -782,10 +836,21 @@ export async function getExceptions(filters: {
   return { data, total };
 }
 
-export async function updateException(id: number, data: Partial<InsertException>) {
+/**
+ * Update one exception, within ONE organization.
+ *
+ * Allow-listed in tenancyRatchet.test.ts only because `exceptions` had no
+ * organizationId to filter on. It has one now, so the exemption is removed and
+ * an id from another tenant updates nothing.
+ */
+export async function updateException(
+  id: number,
+  organizationId: number | null,
+  data: Partial<InsertException>,
+) {
   const db = await getDb();
   if (!db) return;
-  await db.update(exceptions).set(data).where(eq(exceptions.id, id));
+  await db.update(exceptions).set(data).where(and(eq(exceptions.id, id), orgFilter(exceptions.organizationId, organizationId)));
 }
 
 // ─── Exception Age / Escalation Tracker ──────────────────────────────
@@ -1240,7 +1305,11 @@ export async function getFullReconciliationReport(jobId: number) {
   const job = await getReconciliationJob(jobId);
   if (!job) return null;
   const jobMatches = await getMatchesByJob(jobId);
-  const { data: jobExceptions } = await getExceptions({ jobId, limit: MAX_QUERY_LIMIT });
+  const { data: jobExceptions } = await getExceptions({
+    organizationId: job.organizationId ?? null,
+    jobId,
+    limit: MAX_QUERY_LIMIT,
+  });
   const allTxns = await getTransactionsForExport(jobId);
   return { job, matches: jobMatches, exceptions: jobExceptions, transactions: allTxns };
 }

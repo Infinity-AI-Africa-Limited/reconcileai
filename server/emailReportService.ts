@@ -47,7 +47,11 @@ export async function collectReportData(jobId: number): Promise<ReportData | nul
   if (!job) return null;
 
   const jobMatches = await db.getMatchesByJob(jobId);
-  const { data: jobExceptions } = await db.getExceptions({ jobId, limit: 500 });
+  const { data: jobExceptions } = await db.getExceptions({
+    organizationId: job.organizationId ?? null,
+    jobId,
+    limit: 500,
+  });
 
   const sourceChannel = await db.getChannelById(job.sourceChannelId);
   const targetChannel = await db.getChannelById(job.targetChannelId);
