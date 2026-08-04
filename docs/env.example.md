@@ -42,10 +42,20 @@ Used to sign and verify JWT session cookies. Must be kept secret and rotated if 
 DIRECT_LLM_API_KEY=sk-ant-...
 DIRECT_LLM_API_URL=https://api.anthropic.com
 DIRECT_LLM_MODEL=claude-sonnet-5
+# OPTIONAL second model, used ONLY for genuinely agentic work — the Super
+# Agent's diagnosis, action drafting and conversational query. Everything else
+# (exception classification, anomaly narratives, reports, compliance
+# assessment) stays on DIRECT_LLM_MODEL, per the table in CLAUDE.md §4.
+# Unset => agentic calls use DIRECT_LLM_MODEL, so leaving it out changes nothing.
+DIRECT_LLM_MODEL_AGENT=claude-opus-4-8
 # Optional explicit selector: "anthropic" | "openai".
 # Auto-detected from the model name ("claude…") or URL when omitted.
 DIRECT_LLM_PROVIDER=anthropic
 ```
+
+`/api/health` reports both under `checks.llm`: `model`, `agentModel`, and
+`agentModelConfigured`. The last distinguishes "deliberately set to the same
+model" from "never set" — `agentModel` alone cannot.
 
 When `DIRECT_LLM_API_KEY` is set, the Manus Forge gateway is bypassed automatically.
 `DIRECT_LLM_API_URL` is a **base URL** — the correct path (`/v1/messages` for Anthropic,
