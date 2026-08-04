@@ -492,6 +492,7 @@ export async function checkChannelThresholdBreaches(userId: number): Promise<{
       if (!channel) continue;
 
       const { data: txns } = await db.getTransactions({
+        organizationId: owner?.organizationId ?? null,
         channelId: channel.id,
         dateFrom: yesterday,
         dateTo: now,
@@ -569,6 +570,7 @@ export async function getChannelDrillDown(
     const dayEnd = new Date(day);
     dayEnd.setHours(23, 59, 59, 999);
     const { data: txns } = await db.getTransactions({
+      organizationId,
       channelId: channel.id,
       dateFrom: day,
       dateTo: dayEnd,
