@@ -729,7 +729,7 @@ export const appRouter = router({
       }),
 
     history: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      const isAdmin = ctx.user.role === "admin";
       return db.getUploadBatches(ctx.user.id, isAdmin);
     }),
   }),
@@ -752,7 +752,7 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         return db.getTransactions({
           organizationId: ctx.user.organizationId ?? null,
           userId: ctx.user.id,
@@ -996,7 +996,7 @@ export const appRouter = router({
       }),
 
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      const isAdmin = ctx.user.role === "admin";
       return db.getReconciliationJobs(ctx.user.id, isAdmin);
     }),
 
@@ -1877,7 +1877,7 @@ export const appRouter = router({
 
   review: router({
     pending: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      const isAdmin = ctx.user.role === "admin";
       return db.getPendingReviewMatches(ctx.user.id, isAdmin);
     }),
 
@@ -1913,7 +1913,7 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         return db.getAuditLogs({
           ...input,
           organizationId: ctx.user.organizationId ?? null,
@@ -1949,7 +1949,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
 
         // Fetch up to 10K rows for export
         const { data } = await db.getAuditLogs({
@@ -2039,14 +2039,14 @@ export const appRouter = router({
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         const reports = await db.getReports(ctx.user.id, isAdmin);
         const report = reports.find((r) => r.id === input.id);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         return report;
       }),
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      const isAdmin = ctx.user.role === "admin";
       return db.getReports(ctx.user.id, isAdmin);
     }),
 
@@ -2124,7 +2124,7 @@ export const appRouter = router({
         note: z.string().max(1000).optional(),
         expiresInDays: z.number().int().min(1).max(365).optional(), // null = never
       }))
-      .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin";
         const reports = await db.getReports(ctx.user.id, isAdmin);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
@@ -2152,7 +2152,7 @@ export const appRouter = router({
     listShareTokens: protectedProcedure
       .input(z.object({ reportId: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         const reports = await db.getReports(ctx.user.id, isAdmin);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
@@ -2449,7 +2449,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         const allJobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
 
         // Filter by date range and status
@@ -2576,7 +2576,7 @@ export const appRouter = router({
       .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
       .query(async ({ ctx, input }) => {
         // Guest users in demo mode should see all data (no userId filter)
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         // Super admin portal switching: if viewAsOrgId provided, scope to that org
         if (input?.viewAsOrgId && ctx.user.role === "super_admin") {
           const drizzle = await getDb();
@@ -2600,7 +2600,7 @@ export const appRouter = router({
 
     // CFO Dashboard Endpoints
     cfoKpis: protectedProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin" || ctx.user.isGuest === true);
+      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
       if (!stats) {
         return {
           totalTransactions: 0,
@@ -3148,7 +3148,7 @@ export const appRouter = router({
 
   schedules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      const isAdmin = ctx.user.role === "admin";
       const tasks = await db.getScheduledTasks(ctx.user.id, isAdmin);
       return tasks.map((t) => ({
         ...t,
@@ -3383,7 +3383,7 @@ export const appRouter = router({
 
   monitoring: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+      const isAdmin = ctx.user.role === "admin";
       return db.getMonitoringStats(ctx.user.id, isAdmin);
     }),
 
@@ -3402,7 +3402,7 @@ export const appRouter = router({
     recentActivity: protectedProcedure
       .input(z.object({ limit: z.number().int().min(1).max(100).default(20) }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         const jobCondition = !isAdmin ? ctx.user.id : undefined;
         // Get recent completed/failed jobs
         const jobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
@@ -4282,7 +4282,7 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId;
 
         // Fetch recent exceptions and stats for context
-        const isAdmin = ctx.user.role === 'admin' || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === 'admin';
         const [recentExceptions, recentJobsRaw] = await Promise.all([
           db.getExceptions({ status: 'open', limit: 20, offset: 0 }),
           db.getReconciliationJobs(userId, isAdmin),
