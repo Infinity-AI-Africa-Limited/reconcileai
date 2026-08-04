@@ -29,12 +29,39 @@ jobs:
       - name: Build
         run: pnpm build
 
-  # Best-effort until DB/secret-dependent tests are fully wired (see
-  # docs/DEPLOYMENT_RAILWAY.md). Runs against a throwaway MySQL service.
+  # BLOCKING. Runs the full suite against a throwaway MySQL service.
+  #
+  # This was `continue-on-error: true` ("best-effort until DB/secret-dependent
+  # tests are fully wired"). That premise expired, and the flag was actively
+  # dangerous while it lasted: a job failure did NOT fail the workflow, so the
+  # run-level conclusion read `success` even if every test failed. Anything
+  # judging a PR by the run conclusion — a human glancing at the checks, or
+  # automation calling /actions/runs — saw green regardless. Establishing that
+  # tests had actually passed meant querying /actions/runs/<id>/jobs separately.
+  #
+  # It also made the tenancy ratchets decorative. tenancyRatchet, rlsAudit,
+  # readScopeRatchet, channelBinding and guestPrivilege exist for the sole
+  # purpose of failing when a cross-tenant regression is introduced; a ratchet
+  # that cannot block a merge does not ratchet anything.
+  #
+  # Removed only after checking the history rather than assuming: 196 CI runs
+  # back to 2026-06-02 showed 123 Tests failures, so the suite genuinely was
+  # unstable for most of that window. Both causes are now fixed and the last 30
+  # runs are green —
+  #   * June–July: documentation.test.ts / docs-s3.test.ts failed persistently
+  #     (deterministic, not flaky) — the era this comment described;
+  #   * 2026-08-02: a real 1-in-256 flake in tenantHardening.test.ts, where
+  #     tampering a byte to the constant "00" was a no-op whenever the random
+  #     byte already held that value. Fixed in c11d3bc, nine minutes after its
+  #     last failure.
+  #
+  # Known residual risk: the "Push schema to test DB" step has failed once on
+  # its own (run 30700238964). That now blocks a merge. If it proves flaky,
+  # make that step retry — do not restore continue-on-error, which would hide
+  # real test failures to paper over an infrastructure one.
   test:
     name: Tests
     runs-on: ubuntu-latest
-    continue-on-error: true
     services:
       mysql:
         image: mysql:8.0
