@@ -39,6 +39,12 @@ export const ENV = {
   directLlmApiKey: cleanSecret(process.env.DIRECT_LLM_API_KEY),
   directLlmApiUrl: cleanSecret(process.env.DIRECT_LLM_API_URL),   // base URL, e.g. https://api.anthropic.com or https://api.openai.com
   directLlmModel: cleanSecret(process.env.DIRECT_LLM_MODEL),       // e.g. claude-sonnet-5, gpt-4o
+  // Optional SECOND model, used only for genuinely agentic work — the Super
+  // Agent's diagnosis, action drafting and conversational query. CLAUDE.md §4
+  // specifies a stronger model there (claude-opus-4-8) than for classification
+  // and narrative generation. Unset => agentic calls use directLlmModel, so
+  // this changes nothing until it is deliberately set.
+  directLlmModelAgent: cleanSecret(process.env.DIRECT_LLM_MODEL_AGENT),
   // Optional explicit provider selector: "anthropic" | "openai". When empty, auto-detected
   // from the model name ("claude…" → anthropic) or the URL (contains "anthropic").
   directLlmProvider: cleanSecret(process.env.DIRECT_LLM_PROVIDER).toLowerCase(),

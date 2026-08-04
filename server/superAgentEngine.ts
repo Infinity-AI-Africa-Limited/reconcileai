@@ -702,6 +702,9 @@ async function getLLMDiagnosis(
 
   try {
     const response = await invokeLLM({
+      // Agentic: multi-step diagnosis of a case, the work CLAUDE.md §4 reserves
+      // the stronger model for.
+      modelTier: "agent",
       messages: [
         {
           role: "system",
@@ -812,6 +815,9 @@ async function generateVendorEmail(txn: SATransaction, diagnosis: ExceptionDiagn
 
   try {
     const response = await invokeLLM({
+      // Agentic: drafts an action the user will send on their own letterhead,
+      // reasoning from the diagnosis rather than summarising it.
+      modelTier: "agent",
       messages: [
         {
           role: "system",

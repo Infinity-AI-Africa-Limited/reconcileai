@@ -94,6 +94,12 @@ export type ToolChoice =
   | ToolChoiceExplicit;
 
 export type InvokeParams = {
+  /**
+   * Which model class this call needs. Omit for everything except genuinely
+   * agentic work — see ModelTier. Ignored in Manus Forge mode, which serves a
+   * single managed model.
+   */
+  modelTier?: ModelTier;
   messages: Message[];
   tools?: Tool[];
   toolChoice?: ToolChoice;
@@ -195,25 +201,55 @@ function resolveDirectEndpoint(rawUrl: string, kind: "openai" | "anthropic"): st
   return base + path;
 }
 
-function resolveProvider(): ProviderConfig {
+/**
+ * Which class of work a call represents.
+ *
+ * `"agent"` is reserved for genuinely agentic work — multi-step reasoning over
+ * a case, drafting an action, holding a conversation. CLAUDE.md §4 specifies a
+ * stronger model for that than for classification or narrative generation, and
+ * it is a real cost/latency trade: the strong model is worth it per Super Agent
+ * invocation and wasteful on a 100-word anomaly summary.
+ *
+ * Everything else is `"default"` and must stay that way unless the work
+ * genuinely gains from deeper reasoning.
+ */
+export type ModelTier = "default" | "agent";
+
+/**
+ * The model for a tier.
+ *
+ * The agent tier falls back to the general model when DIRECT_LLM_MODEL_AGENT is
+ * unset, so merging the split changes nothing until the variable is set
+ * deliberately. That matters: silently promoting every Super Agent call to a
+ * pricier model because a deploy landed is not a decision the code should make
+ * on the operator's behalf. `system.llmStatus` reports both models, so an
+ * unset agent tier is visible rather than assumed.
+ */
+function modelForTier(tier: ModelTier, kind: "openai" | "anthropic"): string {
+  if (tier === "agent") {
+    const agent = ENV.directLlmModelAgent?.trim();
+    if (agent) return agent;
+  }
+  // Fallback only — production sets DIRECT_LLM_MODEL explicitly. It still
+  // matters: an unset variable silently pins every LLM call to whatever is
+  // written here, and this previously read "claude-3-5-sonnet-latest", two
+  // generations behind the model CLAUDE.md §4 specifies. A stale default is
+  // invisible precisely because it works.
+  return ENV.directLlmModel && ENV.directLlmModel.trim().length > 0
+    ? ENV.directLlmModel.trim()
+    : kind === "anthropic"
+      ? "claude-sonnet-5"
+      : "gpt-4o";
+}
+
+function resolveProvider(tier: ModelTier = "default"): ProviderConfig {
   const directKey = ENV.directLlmApiKey;
 
   if (directKey && directKey.trim().length > 0) {
     // Mode 2: Direct provider (Anthropic native, or OpenAI-compatible API)
     const kind = detectDirectKind();
     const apiUrl = resolveDirectEndpoint(ENV.directLlmApiUrl, kind);
-
-    // Fallback only — production sets DIRECT_LLM_MODEL explicitly. It still
-    // matters: an unset variable silently pins every LLM call to whatever is
-    // written here, and this previously read "claude-3-5-sonnet-latest", two
-    // generations behind the model CLAUDE.md §4 specifies. A stale default is
-    // invisible precisely because it works.
-    const model =
-      ENV.directLlmModel && ENV.directLlmModel.trim().length > 0
-        ? ENV.directLlmModel.trim()
-        : kind === "anthropic"
-          ? "claude-sonnet-5"
-          : "gpt-4o";
+    const model = modelForTier(tier, kind);
 
     return { mode: "direct", kind, apiUrl, apiKey: directKey, model };
   }
@@ -391,7 +427,7 @@ async function fetchLLM(url: string, init: RequestInit, retries = 3): Promise<Re
  * based on environment variables — no code changes needed between environments.
  */
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
-  const provider = resolveProvider();
+  const provider = resolveProvider(params.modelTier);
 
   // Anthropic speaks the Messages API, not OpenAI Chat Completions — translate.
   if (provider.kind === "anthropic") {
@@ -473,10 +509,24 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
 export function getLlmProviderInfo(): {
   mode: "forge" | "direct";
   model: string;
+  agentModel: string;
+  agentModelConfigured: boolean;
   apiUrl: string;
 } {
   const { mode, model, apiUrl } = resolveProvider();
-  return { mode, model, apiUrl };
+  // Report the agent tier too. Without this the split is invisible: an unset
+  // DIRECT_LLM_MODEL_AGENT silently routes Super Agent work to the general
+  // model, which is the intended default but must be observable rather than
+  // assumed. `agentModelConfigured` distinguishes "deliberately the same" from
+  // "never set" — the two look identical from `agentModel` alone.
+  const agentModel = resolveProvider("agent").model;
+  return {
+    mode,
+    model,
+    agentModel,
+    agentModelConfigured: Boolean(ENV.directLlmModelAgent?.trim()),
+    apiUrl,
+  };
 }
 
 // ─── Anthropic Messages API adapter ────────────────────────────────────────────

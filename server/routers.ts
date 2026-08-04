@@ -4451,6 +4451,9 @@ If no action draft is needed, respond as JSON:
 Always be specific, reference actual exception IDs and amounts where available, and explain your reasoning in plain language suitable for a finance team member.`;
 
         const response = await invokeLLM({
+          // Agentic: the Super Agent's conversational surface — reasons across
+          // the org's exceptions, jobs and history to answer a free-form question.
+          modelTier: 'agent',
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: input.query },
