@@ -1,12 +1,84 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { and, eq } from "drizzle-orm";
 import { appRouter } from "./routers";
 import * as db from "./db";
+
+/**
+ * These tests call the real `modules.*` procedures, so they WRITE whenever a
+ * database is reachable. CI points DATABASE_URL at a disposable MySQL container,
+ * but a developer running with the project's .env is pointed at the shared TiDB
+ * instance — where organizationId 1 is a live demo tenant ("Globus Bank Nigeria
+ * (Demo)"). Without the snapshot/restore below, a local run left settlement
+ * DISABLED on that tenant and silently changed its account_level configuration.
+ *
+ * The toggle procedure UPSERTS, so restoring means putting modified rows back
+ * AND deleting rows the run created. Restore is best-effort and never throws:
+ * a cleanup failure must not turn into a confusing test failure that hides the
+ * real result.
+ */
+const TEST_ORG_ID = 1;
+const TOUCHED_MODULES = ["settlement", "account_level"] as const;
+
+type ModuleSnapshot = {
+  moduleType: (typeof TOUCHED_MODULES)[number];
+  existed: boolean;
+  isEnabled?: boolean;
+  configuration?: unknown;
+};
 
 describe("Module Configuration", () => {
   let adminContext: any;
   let userContext: any;
+  let snapshots: ModuleSnapshot[] = [];
+
+  afterAll(async () => {
+    const dbConn = await db.getDb();
+    if (!dbConn || snapshots.length === 0) return;
+    for (const snap of snapshots) {
+      try {
+        const where = and(
+          eq(db.moduleConfigurations.organizationId, TEST_ORG_ID),
+          eq(db.moduleConfigurations.moduleType, snap.moduleType),
+        );
+        if (snap.existed) {
+          await dbConn
+            .update(db.moduleConfigurations)
+            .set({ isEnabled: snap.isEnabled!, configuration: snap.configuration ?? null })
+            .where(where);
+        } else {
+          // The run created this row; leaving it behind would silently enable a
+          // module on a tenant that never had it configured.
+          await dbConn.delete(db.moduleConfigurations).where(where);
+        }
+      } catch (err) {
+        console.error(`[modules.test] could not restore ${snap.moduleType}:`, err);
+      }
+    }
+  });
 
   beforeAll(async () => {
+    // Snapshot BEFORE anything runs, so restore has a truthful baseline.
+    const dbConn = await db.getDb();
+    if (dbConn) {
+      for (const moduleType of TOUCHED_MODULES) {
+        const [row] = await dbConn
+          .select()
+          .from(db.moduleConfigurations)
+          .where(
+            and(
+              eq(db.moduleConfigurations.organizationId, TEST_ORG_ID),
+              eq(db.moduleConfigurations.moduleType, moduleType),
+            ),
+          )
+          .limit(1);
+        snapshots.push(
+          row
+            ? { moduleType, existed: true, isEnabled: row.isEnabled, configuration: row.configuration }
+            : { moduleType, existed: false },
+        );
+      }
+    }
+
     // Create test users
     const adminUser = {
       id: 9001,
