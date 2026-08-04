@@ -38,7 +38,7 @@ export const ENV = {
   // pasted with surrounding quotes or a trailing newline in the hosting dashboard.
   directLlmApiKey: cleanSecret(process.env.DIRECT_LLM_API_KEY),
   directLlmApiUrl: cleanSecret(process.env.DIRECT_LLM_API_URL),   // base URL, e.g. https://api.anthropic.com or https://api.openai.com
-  directLlmModel: cleanSecret(process.env.DIRECT_LLM_MODEL),       // e.g. claude-sonnet-4-5, gpt-4o
+  directLlmModel: cleanSecret(process.env.DIRECT_LLM_MODEL),       // e.g. claude-sonnet-5, gpt-4o
   // Optional explicit provider selector: "anthropic" | "openai". When empty, auto-detected
   // from the model name ("claude…" → anthropic) or the URL (contains "anthropic").
   directLlmProvider: cleanSecret(process.env.DIRECT_LLM_PROVIDER).toLowerCase(),

@@ -203,11 +203,16 @@ function resolveProvider(): ProviderConfig {
     const kind = detectDirectKind();
     const apiUrl = resolveDirectEndpoint(ENV.directLlmApiUrl, kind);
 
+    // Fallback only — production sets DIRECT_LLM_MODEL explicitly. It still
+    // matters: an unset variable silently pins every LLM call to whatever is
+    // written here, and this previously read "claude-3-5-sonnet-latest", two
+    // generations behind the model CLAUDE.md §4 specifies. A stale default is
+    // invisible precisely because it works.
     const model =
       ENV.directLlmModel && ENV.directLlmModel.trim().length > 0
         ? ENV.directLlmModel.trim()
         : kind === "anthropic"
-          ? "claude-3-5-sonnet-latest"
+          ? "claude-sonnet-5"
           : "gpt-4o";
 
     return { mode: "direct", kind, apiUrl, apiKey: directKey, model };
