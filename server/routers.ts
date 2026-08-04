@@ -5591,11 +5591,29 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Request data deletion (Clause 7)
+    //
+    // This procedure issues a CERTIFICATE asserting NDPA-compliant destruction,
+    // so its output is a legal artefact, not a status message. Three defects
+    // made that assertion untrue and are fixed here:
+    //
+    //  1. `specific_channel` and `specific_job` were accepted by the input enum
+    //     and implemented NOWHERE — no branch matched them. A request for either
+    //     deleted nothing, was marked "completed", and still returned a
+    //     certificate. They are removed rather than implemented: nothing in the
+    //     client ever sent them, and per-scope destruction is deliberate work
+    //     deserving its own design rather than a branch bolted on beside a
+    //     certificate generator. (The DB column keeps its wider enum; migrations
+    //     are append-only and no existing row needs rewriting.)
+    //  2. `recordsDeleted` counted the org's transactions BEFORE deleting and
+    //     ignored every other table, so the figure on the certificate bore no
+    //     necessary relation to what was removed. It is now the sum of rows
+    //     actually affected.
+    //  3. Every delete was wrapped in `.catch(() => {})`, so a total failure
+    //     still produced "completed" plus a certificate. A failure now marks the
+    //     request `failed` and issues NO certificate.
     requestDeletion: protectedProcedure
       .input(z.object({
-        scope: z.enum(["all_transactions", "specific_channel", "specific_job", "all_data"]),
-        channelId: z.number().optional(),
-        jobId: z.number().optional(),
+        scope: z.enum(["all_transactions", "all_data"]),
         notes: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -5603,52 +5621,70 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { dataDeletionRequests, transactions, uploadBatches, reconciliationJobs, matches, exceptions } = await import("../drizzle/schema");
-        // Count records to be deleted
-        let recordsDeleted = 0;
-        try {
-          const txCount = await drizzle.select({ count: sql<number>`count(*)` }).from(transactions)
-            .where(orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId));
-          recordsDeleted = Number(txCount[0]?.count ?? 0);
-        } catch {}
-        // Create deletion request record
+
         const [req] = await drizzle.insert(dataDeletionRequests).values({
           organizationId: orgId,
           requestedByUserId: ctx.user.id,
           scope: input.scope,
-          channelId: input.channelId,
-          jobId: input.jobId,
           status: "in_progress",
           notes: input.notes,
         }).$returningId();
-        // Perform deletion based on scope
-        if (input.scope === "all_data" || input.scope === "all_transactions") {
-          const txWhereClause = orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId);
-          const jobWhereClause = orgId ? eq(reconciliationJobs.organizationId, orgId) : isNull(reconciliationJobs.organizationId);
-          // Get job IDs for this org to delete matches and exceptions
+
+        const txWhereClause = orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId);
+        const jobWhereClause = orgId ? eq(reconciliationJobs.organizationId, orgId) : isNull(reconciliationJobs.organizationId);
+
+        // Counted per table so the certificate can itemise what went, rather
+        // than quote a single number nobody can reconcile against anything.
+        const deleted = { matches: 0, exceptions: 0, transactions: 0, uploadBatches: 0, reconciliationJobs: 0 };
+
+        try {
           const orgJobIds = await drizzle.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(jobWhereClause);
-          if (orgJobIds.length > 0) {
-            const jobIdList = orgJobIds.map(j => j.id);
-            // Delete matches and exceptions linked to these jobs
-            for (const jid of jobIdList) {
-              await drizzle.delete(matches).where(eq(matches.jobId, jid)).catch(() => {});
-              await drizzle.delete(exceptions).where(eq(exceptions.jobId, jid)).catch(() => {});
-            }
+          for (const { id: jid } of orgJobIds) {
+            const [m] = await drizzle.delete(matches).where(eq(matches.jobId, jid));
+            deleted.matches += m.affectedRows ?? 0;
+            const [e] = await drizzle.delete(exceptions).where(eq(exceptions.jobId, jid));
+            deleted.exceptions += e.affectedRows ?? 0;
           }
-          await drizzle.delete(transactions).where(txWhereClause).catch(() => {});
+
+          const [t] = await drizzle.delete(transactions).where(txWhereClause);
+          deleted.transactions += t.affectedRows ?? 0;
+
           if (input.scope === "all_data") {
-            await drizzle.delete(uploadBatches).where(orgId ? eq(uploadBatches.organizationId, orgId) : isNull(uploadBatches.organizationId)).catch(() => {});
-            await drizzle.delete(reconciliationJobs).where(jobWhereClause).catch(() => {});
+            const [b] = await drizzle.delete(uploadBatches)
+              .where(orgId ? eq(uploadBatches.organizationId, orgId) : isNull(uploadBatches.organizationId));
+            deleted.uploadBatches += b.affectedRows ?? 0;
+            const [j] = await drizzle.delete(reconciliationJobs).where(jobWhereClause);
+            deleted.reconciliationJobs += j.affectedRows ?? 0;
           }
+        } catch (err) {
+          // No certificate on a failed or partial run. A document asserting
+          // destruction that did not complete is worse than an error, because
+          // it is the artefact a regulator or counterparty relies on.
+          const message = err instanceof Error ? err.message : String(err);
+          await drizzle.update(dataDeletionRequests).set({
+            status: "failed",
+            notes: [input.notes, `Deletion failed: ${message}`].filter(Boolean).join(" | ").slice(0, 2000),
+          }).where(eq(dataDeletionRequests.id, req.id)).catch(() => {});
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Deletion did not complete; no certificate was issued. The request is recorded as failed.',
+          });
         }
-        // Generate deletion certificate
-        const certText = `DATA DELETION CERTIFICATE\n\nIssued by: ReconcileAI (Infinity AI Africa Limited)\nDate: ${new Date().toISOString()}\nOrganisation ID: ${orgId ?? "N/A"}\nScope: ${input.scope}\nRecords deleted: ${recordsDeleted}\nRequested by user ID: ${ctx.user.id}\n\nThis certifies that all data within the specified scope has been permanently deleted from the ReconcileAI platform in accordance with the data return/destruction obligations under the applicable Non-Disclosure Agreement and the Nigeria Data Protection Act 2023 (NDPA).\n\nCertificate ID: CERT-${req.id}-${Date.now()}`;
+
+        const recordsDeleted = Object.values(deleted).reduce((a, b) => a + b, 0);
+        const scopeDescription = input.scope === "all_data"
+          ? "all reconciliation data (transactions, upload batches, reconciliation jobs, matches and exceptions)"
+          : "all transactions, together with their matches and exceptions";
+
+        const certText = `DATA DELETION CERTIFICATE\n\nIssued by: ReconcileAI (Infinity AI Africa Limited)\nDate: ${new Date().toISOString()}\nOrganisation ID: ${orgId ?? "N/A"}\nScope: ${input.scope} — ${scopeDescription}\nRequested by user ID: ${ctx.user.id}\n\nRecords deleted: ${recordsDeleted}\n  Transactions: ${deleted.transactions}\n  Matches: ${deleted.matches}\n  Exceptions: ${deleted.exceptions}\n  Upload batches: ${deleted.uploadBatches}\n  Reconciliation jobs: ${deleted.reconciliationJobs}\n\nThis certifies that the data described above has been permanently deleted from the ReconcileAI platform in accordance with the data return/destruction obligations under the applicable Non-Disclosure Agreement and the Nigeria Data Protection Act 2023 (NDPA). The counts above are the rows actually removed by this request.\n\nCertificate ID: CERT-${req.id}-${Date.now()}`;
+
         await drizzle.update(dataDeletionRequests).set({
           status: "completed",
           completedAt: new Date(),
           recordsDeleted,
           certificateText: certText,
         }).where(eq(dataDeletionRequests.id, req.id));
-        return { success: true, certificateText: certText, recordsDeleted, requestId: req.id };
+        return { success: true, certificateText: certText, recordsDeleted, breakdown: deleted, requestId: req.id };
       }),
 
     // List deletion requests
