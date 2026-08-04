@@ -14,6 +14,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { bucketIngestionSources, bucketIngestionLogs } from "../../drizzle/schema";
 import { adminProcedure, protectedProcedure, router } from "../_core/trpc";
+import { assertChannelBindable } from "./shared";
 import { getDb } from "../db";
 import {
   encryptCredential,
@@ -118,6 +119,10 @@ export const bucketIngestionRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const organizationId = requireOrg(ctx.user);
+
+      // The channel decides what this feed's transactions reconcile against, and
+      // it arrives from the caller — so ownership is proven before it is stored.
+      await assertChannelBindable(organizationId, input.channelId);
 
       // A custom endpoint is mandatory for non-AWS providers; without it the
       // SDK silently talks to AWS and the source would never find a file.
