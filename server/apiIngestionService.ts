@@ -13,14 +13,20 @@ export interface ApiUploadRequest {
   fileName: string;
   fileContent: string; // Base64 or raw CSV
   encoding?: "base64" | "utf8";
-  autoReconcile?: boolean;
-  reconcileTargetChannelId?: number;
+  // NOTE: `autoReconcile` and `reconcileTargetChannelId` used to live here and
+  // in the public zod schema, and appeared in the documented example payload,
+  // but nothing ever read them — the upload returned 200 and no reconciliation
+  // ran. Removed rather than left as a promise the platform does not keep. If
+  // auto-reconciliation is built, `reconcileTargetChannelId` arrives over the
+  // internet-facing API and MUST be tenancy-gated exactly like `channelId` is
+  // below (see the TENANCY GATE in processApiUpload).
 }
 
 export interface ApiUploadResponse {
   success: boolean;
   uploadBatchId?: number;
-  reconciliationJobId?: number;
+  // `reconciliationJobId` was declared here and never assigned — the other half
+  // of the same unimplemented feature.
   totalRows: number;
   validRows: number;
   invalidRows: number;
