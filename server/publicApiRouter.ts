@@ -45,9 +45,14 @@ export const publicApiRouter = router({
         channelId: z.number().int().positive(),
         fileName: z.string().max(500),
         fileContent: z.string().min(1, "File content cannot be empty"),
+        // `autoReconcile` and `reconcileTargetChannelId` were accepted here —
+        // and shown in the documented example payload — but read nowhere, so an
+        // integrator setting them got a 200 and no reconciliation, with nothing
+        // in the response saying so. Removed rather than implemented: zod strips
+        // unknown keys, so callers still sending them are unaffected, and
+        // auto-reconciliation is a real feature (target selection, sync vs
+        // queued, rate limits) rather than a flag to wire in passing.
         encoding: z.enum(["base64", "utf8"]).optional().default("utf8"),
-        autoReconcile: z.boolean().optional().default(false),
-        reconcileTargetChannelId: z.number().int().positive().optional(),
       })
     )
     .mutation(async ({ input, ctx }) => {

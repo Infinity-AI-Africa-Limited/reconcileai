@@ -131,9 +131,7 @@ export default function ApiIngestion() {
   "channelId": 1,
   "fileName": "transactions.csv",
   "fileContent": "transactionDate,amount,currency,...",
-  "encoding": "utf8",
-  "autoReconcile": false,
-  "reconcileTargetChannelId": 2
+  "encoding": "utf8"
 }`}
                   </pre>
                   <Button
