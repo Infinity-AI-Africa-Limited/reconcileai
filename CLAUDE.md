@@ -1424,13 +1424,14 @@ document.** Reference secrets by variable name only. They belong in the Railway 
 and GitHub Actions secrets, nowhere else. A secret that has been written down anywhere else
 is compromised and must be rotated — there is no "it was only internal" exception.
 
-**Incident log (three occurrences, all avoidable):**
+**Incident log (four occurrences, all avoidable):**
 
 | Date | Secret | How |
 |---|---|---|
 | 2026-07-19 | SHOPLINE APP Secret | Pasted into CLAUDE.md in plaintext; committed to git history on **both** remotes. Redacted since, but permanently in history. Rotation unavailable while the app is in Draft (§2B.9) |
 | ~2026-08-01 | Prod `JWT_SECRET` | Pasted in plaintext by Manus in a session summary; commit `ec01519` was "remove leaked secret" |
 | 2026-08-02 | **Rotated** `JWT_SECRET` **and** new `CRON_SECRET` | Pasted in plaintext by Manus into *Manus Session Summary Report.docx* — i.e. the rotation performed to fix the previous leak was itself leaked in the document announcing it |
+| 2026-08-04 | `CRON_SECRET` — **leading characters only** | Quoted in a chat message while confirming the Woodcore secret had been updated. A prefix is still secret material (§2B.9b makes the same point about app-secret prefixes), so it is logged. **Materially smaller than the three above** — a short prefix of a long random value does not meaningfully narrow a search. Assessed as low severity; rotation judged disproportionate to the exposure, and the §19 pre-customer rotation supersedes it. Recorded so the pattern stays visible: a status update never needs to carry any part of the value — "updated to match Railway" says everything |
 
 **Why `JWT_SECRET` specifically is a full compromise, not just a signing key:**
 - HS256 key for the `app_session_id` cookie → forges a session as **any user, including `super_admin`**
