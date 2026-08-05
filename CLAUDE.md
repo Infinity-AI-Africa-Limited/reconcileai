@@ -1452,16 +1452,25 @@ decision and raise it again only on new evidence.
 1. Generate the new value **directly in the Railway dashboard**; never let it transit a chat,
    a document, or a file.
 2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, then
-   update **every** GitHub Actions secret that carries it — the master key should never sit
-   in GitHub's secret store. There are **two**, and they must be changed together:
-   - `SHOPLINE_SYNC_SECRET` → `.github/workflows/shopline-sync.yml`
-   - `WOODCORE_SYNC_SECRET` → `.github/workflows/woodcore-sync.yml`
+   mirror it into **one** GitHub Actions secret also named `CRON_SECRET` — the master key
+   should never sit in GitHub's secret store.
 
-   > ⚠️ **This step is why the Woodcore mirror broke.** Earlier revisions of this runbook
-   > named only `SHOPLINE_SYNC_SECRET`. The 2026-08-02 rotation followed it exactly, so
-   > SHOPLINE kept working while the Woodcore sync began returning 403 and the mirror sat
-   > stale for three days — surfaced only by a GitHub failure email, not by any alert.
-   > Before rotating, re-derive this list rather than trusting it:
+   Both scheduler workflows now read `secrets.CRON_SECRET` first, falling back to their
+   legacy per-workflow secret (`SHOPLINE_SYNC_SECRET`, `WOODCORE_SYNC_SECRET`). Once
+   `CRON_SECRET` exists in GitHub, delete the two legacy secrets — **a rotation then
+   touches exactly one value in each system, which is the point.**
+
+   > ⚠️ **Two secrets holding one value IS the drift surface, and it is why the Woodcore
+   > mirror broke.** Earlier revisions of this runbook named only `SHOPLINE_SYNC_SECRET`.
+   > The 2026-08-02 rotation followed it exactly, so SHOPLINE kept working while the
+   > Woodcore sync began returning 403 and the mirror sat stale for three days — surfaced
+   > only by a GitHub failure email, not by any alert.
+   >
+   > Consolidation narrows the surface; it does not eliminate manual copying. The real fix
+   > is a managed secret store (Doppler / Vault / GitHub OIDC) where a rotation propagates
+   > without anyone re-typing a value anywhere. Tracked as a follow-up.
+   >
+   > Before rotating, re-derive the consumer list rather than trusting this one:
    > `grep -rn "secrets\." .github/workflows/`
 3. Rotating invalidates all sessions (everyone re-authenticates by magic link) **and makes
    existing SHOPLINE tokens undecryptable** — they were encrypted under the old key.

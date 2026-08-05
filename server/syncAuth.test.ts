@@ -3,72 +3,96 @@
  *
  * These routes are internet-facing and unauthenticated apart from one header,
  * and they trigger real work: the Woodcore mirror refresh, the SHOPLINE sync
- * cycle, the webhook reconciler. The behaviours pinned here are the ones whose
- * failure is silent — a comparison that leaks timing, and a refusal nobody can
- * diagnose.
+ * cycle, the webhook reconciler.
  *
- * ENV is a frozen snapshot taken at import, so the secret must be set via
- * vi.hoisted; setting process.env in beforeEach is too late and every case
- * would pass for the wrong reason.
+ * Note there is NO environment manipulation here. `checkSyncSecret` takes the
+ * expected secret as an argument, so these tests are a pure function of their
+ * inputs. Mutating process.env before import (the earlier approach) leaks into
+ * every other test in the run, and `vi.stubEnv` would not have worked either —
+ * ENV is a frozen snapshot taken at import time, so stubbing afterwards changes
+ * nothing. Injecting the value removes the problem rather than scoping it.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
+import { checkSyncSecret, describeSyncAuthFailure } from "./_core/syncAuth";
 
-const SECRET = vi.hoisted(() => {
-  const s = "cron-secret-value-used-by-the-schedulers";
-  process.env.CRON_SECRET = s;
-  return s;
-});
-
-import { checkSyncSecret, expectedSyncSecret, describeSyncAuthFailure } from "./_core/syncAuth";
+const SECRET = "cron-secret-value-used-by-the-schedulers";
 
 describe("checkSyncSecret", () => {
-  it("accepts the exact secret", () => {
-    expect(checkSyncSecret(SECRET)).toEqual({ ok: true });
+  describe("when the caller presents the exact secret", () => {
+    it("should authorise the request", () => {
+      expect(checkSyncSecret(SECRET, SECRET)).toEqual({ ok: true });
+    });
   });
 
-  it("rejects a wrong secret of the same length", () => {
-    // Same length so the length check cannot be what rejects it — this is the
-    // case that actually exercises the constant-time comparison.
-    const wrong = "X".repeat(SECRET.length);
-    expect(wrong).toHaveLength(SECRET.length);
-    expect(checkSyncSecret(wrong)).toEqual({ ok: false, reason: "mismatch" });
+  describe("when the caller presents a wrong secret of the same length", () => {
+    it("should refuse it as a mismatch", () => {
+      // Same length so the length guard cannot be what rejects it — this is the
+      // case that actually exercises the constant-time comparison.
+      const wrong = "X".repeat(SECRET.length);
+      expect(wrong).toHaveLength(SECRET.length);
+      expect(checkSyncSecret(wrong, SECRET)).toEqual({ ok: false, reason: "mismatch" });
+    });
   });
 
-  it("rejects a wrong secret of a different length without throwing", () => {
-    // timingSafeEqual throws on differing lengths; the guard must come first or
-    // a short header would 500 instead of 403.
-    expect(() => checkSyncSecret("short")).not.toThrow();
-    expect(checkSyncSecret("short")).toEqual({ ok: false, reason: "mismatch" });
+  describe("when the caller presents a secret of a different length", () => {
+    it("should refuse it without throwing", () => {
+      // timingSafeEqual throws on differing lengths, so the length guard must
+      // come first — otherwise a short header would 500 instead of 403.
+      expect(() => checkSyncSecret("short", SECRET)).not.toThrow();
+      expect(checkSyncSecret("short", SECRET)).toEqual({ ok: false, reason: "mismatch" });
+    });
   });
 
-  it("rejects a prefix of the real secret", () => {
-    expect(checkSyncSecret(SECRET.slice(0, -1))).toEqual({ ok: false, reason: "mismatch" });
+  describe("when the caller presents a prefix of the real secret", () => {
+    it("should refuse it", () => {
+      expect(checkSyncSecret(SECRET.slice(0, -1), SECRET)).toEqual({
+        ok: false,
+        reason: "mismatch",
+      });
+    });
   });
 
-  it("distinguishes a missing header from a wrong one", () => {
-    // Same 403 to the caller, different line in the log — that distinction is
-    // what makes a 5am failure diagnosable.
-    expect(checkSyncSecret(undefined)).toEqual({ ok: false, reason: "missing_header" });
-    expect(checkSyncSecret("")).toEqual({ ok: false, reason: "missing_header" });
-    expect(checkSyncSecret(null)).toEqual({ ok: false, reason: "missing_header" });
+  describe("when the request carries no secret header", () => {
+    it("should distinguish a missing header from a wrong one", () => {
+      // Same 403 to the caller either way; different line in the log. That
+      // distinction is what makes a 5am failure diagnosable.
+      for (const missing of [undefined, "", null]) {
+        expect(checkSyncSecret(missing, SECRET)).toEqual({
+          ok: false,
+          reason: "missing_header",
+        });
+      }
+    });
   });
 
-  it("resolves the secret from CRON_SECRET", () => {
-    expect(expectedSyncSecret()).toBe(SECRET);
+  describe("when the server has no secret configured at all", () => {
+    it("should fail closed rather than accepting anything", () => {
+      expect(checkSyncSecret("anything", "")).toEqual({
+        ok: false,
+        reason: "no_secret_configured",
+      });
+      // Including when the caller also sends nothing — an unset secret must
+      // never make an empty header "match".
+      expect(checkSyncSecret("", "")).toEqual({ ok: false, reason: "no_secret_configured" });
+    });
   });
 });
 
-describe("failure descriptions", () => {
-  it("name a remedy and never echo the secret", () => {
-    for (const reason of ["no_secret_configured", "missing_header", "mismatch"] as const) {
-      const text = describeSyncAuthFailure(reason);
-      expect(text.length).toBeGreaterThan(20);
-      // The whole point of logging the reason is to avoid ever logging the value.
-      expect(text).not.toContain(SECRET);
-    }
+describe("describeSyncAuthFailure", () => {
+  describe("for every failure reason", () => {
+    it("should name a remedy without echoing the secret", () => {
+      for (const reason of ["no_secret_configured", "missing_header", "mismatch"] as const) {
+        const text = describeSyncAuthFailure(reason);
+        expect(text.length).toBeGreaterThan(20);
+        // The point of logging a reason is to avoid ever logging the value.
+        expect(text).not.toContain(SECRET);
+      }
+    });
   });
 
-  it("points a mismatch at secret drift, the actual historical cause", () => {
-    expect(describeSyncAuthFailure("mismatch")).toMatch(/drift|CRON_SECRET/i);
+  describe("for a mismatch", () => {
+    it("should point at secret drift, the actual historical cause", () => {
+      expect(describeSyncAuthFailure("mismatch")).toMatch(/drift|CRON_SECRET/i);
+    });
   });
 });

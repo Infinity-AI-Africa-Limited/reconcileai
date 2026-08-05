@@ -25,7 +25,12 @@ jobs:
     steps:
       - name: Trigger mirror sync
         env:
-          SYNC_SECRET: ${{ secrets.WOODCORE_SYNC_SECRET }}
+          # Prefer a single CRON_SECRET mirroring Railway's variable name, so a
+          # rotation updates ONE GitHub secret instead of one per workflow. Two
+          # secrets holding the same value IS the drift surface — it is exactly
+          # what broke this job on 2026-08-02. Falls back to the legacy
+          # per-workflow secret so nothing breaks before CRON_SECRET is created.
+          SYNC_SECRET: ${{ secrets.CRON_SECRET || secrets.WOODCORE_SYNC_SECRET }}
         run: |
           # Skip cleanly when the secret isn't configured on this repo (e.g. the
           # MistaRichMan mirror). This prevents spurious "all jobs failed" emails;

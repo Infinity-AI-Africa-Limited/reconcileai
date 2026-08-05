@@ -10,7 +10,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { assertResidencyStartupConfig, describeResidencyPosture } from "./egress";
 import { getLlmProviderInfo } from "./llm";
-import { checkSyncSecret, describeSyncAuthFailure } from "./syncAuth";
+import { checkSyncSecret, describeSyncAuthFailure, expectedSyncSecret } from "./syncAuth";
 import { getDb } from "../db";
 import { seedDefaultResolutionTemplates, seedNigerianExceptionDefaults } from "../seedResolutionTemplates";
 import { sql } from "drizzle-orm";
@@ -366,7 +366,10 @@ async function startServer() {
   // days after the 2026-08-02 rotation. The response stays a uniform 403; only
   // the log says which. See _core/syncAuth.ts.
   const syncAuthorized = (req: import("express").Request) => {
-    const result = checkSyncSecret(req.headers["x-sync-secret"] as string | undefined);
+    const result = checkSyncSecret(
+      req.headers["x-sync-secret"] as string | undefined,
+      expectedSyncSecret(),
+    );
     if (!result.ok) {
       console.warn(
         `[syncAuth] refused ${req.method} ${req.path}: ${describeSyncAuthFailure(result.reason)}`,

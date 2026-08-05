@@ -42,14 +42,23 @@ export type SyncAuthResult =
 /**
  * Constant-time comparison of the supplied header against the expected secret.
  *
+ * `expected` is a PARAMETER rather than read from ENV inside, so this is a pure
+ * function of its inputs. That is what lets it be tested without touching
+ * process.env — and `vi.stubEnv` would not have helped here anyway, since ENV is
+ * a frozen snapshot taken at import: stubbing after the fact changes nothing,
+ * while mutating process.env before import leaks into every other test in the
+ * run. Injection removes the problem instead of scoping it.
+ *
  * The three failure reasons are distinguished for the LOG, not the response —
  * the HTTP layer answers a uniform 403 either way. That distinction is the
  * difference between "the GitHub secret drifted" and "the server has no secret
  * configured at all", which from a bare 403 are indistinguishable, and which
  * cost three days of silent failure to tell apart by hand.
  */
-export function checkSyncSecret(provided: string | undefined | null): SyncAuthResult {
-  const expected = expectedSyncSecret();
+export function checkSyncSecret(
+  provided: string | undefined | null,
+  expected: string,
+): SyncAuthResult {
   if (!expected) return { ok: false, reason: "no_secret_configured" };
   if (!provided) return { ok: false, reason: "missing_header" };
 
