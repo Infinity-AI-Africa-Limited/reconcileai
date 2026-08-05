@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { trpc } from "@/lib/trpc";
-import { usePortalContext } from "@/contexts/PortalContext";
+import { useOrgSegment } from "@/hooks/useOrgSegment";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -73,12 +72,10 @@ export default function ExceptionGlossary({ defaultOpen = false }: { defaultOpen
   // Effective segment: a super admin viewing-as an org uses that org's segment;
   // otherwise the caller's own org segment. Card-settlement terms are hidden for
   // Corporate B2B; any other / unknown segment shows the full glossary.
-  const { viewAsOrg, isViewingAs } = usePortalContext();
-  const { data: mine } = trpc.auth.mySegment.useQuery(undefined, {
-    retry: false,
-    staleTime: 5 * 60 * 1000,
-  });
-  const segment = isViewingAs ? viewAsOrg?.segment : mine?.segment;
+  // Shared derivation — see hooks/useOrgSegment. Previously inlined here; the
+  // dashboard and its view switcher now need the same answer, and three copies
+  // is how one of them silently drifts.
+  const segment = useOrgSegment();
   const groups = GLOSSARY.filter((g) => !(g.hideForCorporateB2b && segment === "corporate_b2b"));
 
   return (

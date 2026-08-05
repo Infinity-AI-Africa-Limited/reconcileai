@@ -6,9 +6,11 @@ import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardChe
 import { Link } from "wouter";
 import { toast } from "sonner";
 import { usePortalContext } from "@/contexts/PortalContext";
+import { useOrgSegment, showsCbnCompliance, showsPilotReadiness } from "@/hooks/useOrgSegment";
 
 export default function Dashboard() {
   const { viewAsOrg, isViewingAs } = usePortalContext();
+  const segment = useOrgSegment();
   const { data: stats, isLoading } = trpc.dashboard.stats.useQuery(
     isViewingAs && viewAsOrg ? { viewAsOrgId: viewAsOrg.id } : undefined
   );
@@ -38,7 +40,12 @@ export default function Dashboard() {
     matchRateNum >= 95 &&
     exceptionRatio <= 5 &&
     openExceptions <= 50;
-  const cbnHasData = (stats?.transactions.total ?? 0) > 0;
+  // Financial services only. A SHOPLINE merchant is governed by card-scheme and
+  // gateway agreements, not the CBN (CLAUDE.md §2A), so a "CBN At Risk" badge on
+  // a retail dashboard is not merely noise — it asserts a regulatory status that
+  // does not apply to them, and links to a report engine scoped to another
+  // vertical.
+  const cbnHasData = (stats?.transactions.total ?? 0) > 0 && showsCbnCompliance(segment);
 
   return (
     <div className="space-y-6">
@@ -219,8 +226,14 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* Pilot Readiness Scorecard */}
-      <PilotReadinessScorecard stats={stats} channels={channels} />
+      {/* Pilot Readiness Scorecard — Corporate B2B (FMCG) only.
+          It scores distributor name consistency, payment-reference completeness
+          and ERP coverage, reading `distributor.stats`. A retail merchant has no
+          distributor registry, so this rendered a permanently-zero score and a
+          distributor CSV import button on every SHOPLINE dashboard. */}
+      {showsPilotReadiness(segment) && (
+        <PilotReadinessScorecard stats={stats} channels={channels} />
+      )}
     </div>
   );
 }

@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
+import { useOrgSegment, showsAuditorView } from "@/hooks/useOrgSegment";
 import {
   LayoutDashboard,
   LogOut,
@@ -275,11 +276,24 @@ type DashboardLayoutContentProps = {
 };
 
 function RoleSwitcher({ location, setLocation }: { location: string; setLocation: (path: string) => void }) {
+  const segment = useOrgSegment();
+
+  // The Auditor view is examination-facing: it reports audit-trail volume and a
+  // "compliance rate" framed for a regulated institution's examiner, and its
+  // sibling procedure feeds the CBN pack. Retail merchants answer to card
+  // schemes and gateway agreements, not an examiner, so the view has no
+  // counterpart for them (CLAUDE.md §2A). CFO and Operations do carry over —
+  // "did the money arrive" and "what is unresolved" are universal.
+  //
+  // `null` means the segment has not resolved yet. Gate on an explicit match so
+  // a loading state never hides a view from the segments entitled to it.
   const dashboardRoutes = [
     { label: "Main", path: "/dashboard", icon: LayoutDashboard },
     { label: "CFO", path: "/dashboard/cfo", icon: TrendingUp },
     { label: "Operations", path: "/dashboard/operations", icon: ClipboardList },
-    { label: "Auditor", path: "/dashboard/auditor", icon: Shield },
+    ...(showsAuditorView(segment)
+      ? [{ label: "Auditor", path: "/dashboard/auditor", icon: Shield }]
+      : []),
   ];
 
   const currentRoute = dashboardRoutes.find(r => location === r.path) || dashboardRoutes[0];
