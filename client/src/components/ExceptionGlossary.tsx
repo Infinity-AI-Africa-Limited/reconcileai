@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useOrgSegment } from "@/hooks/useOrgSegment";
+import { isCorporateB2B } from "@/lib/segments";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -76,7 +77,8 @@ export default function ExceptionGlossary({ defaultOpen = false }: { defaultOpen
   // dashboard and its view switcher now need the same answer, and three copies
   // is how one of them silently drifts.
   const segment = useOrgSegment();
-  const groups = GLOSSARY.filter((g) => !(g.hideForCorporateB2b && segment === "corporate_b2b"));
+  const hidesCardSettlementTerms = isCorporateB2B(segment);
+  const groups = GLOSSARY.filter((g) => !(g.hideForCorporateB2b && hidesCardSettlementTerms));
 
   return (
     <Card>

@@ -1,33 +1,26 @@
 /**
- * The segment whose UI should be rendered right now.
+ * Which vertical's UI to render.
  *
- * Two sources, and the order matters: a super admin who has entered a tenant's
- * portal must see THAT tenant's segment, not their own. Otherwise Infinity AI
- * staff reviewing a SHOPLINE merchant would be shown the financial-services
- * dashboard for a retail org.
+ * One rule: a super admin who has entered a tenant's portal sees THAT tenant's
+ * segment; everyone else sees their own. Without it, Infinity AI staff reviewing
+ * a SHOPLINE merchant would be shown financial-services chrome.
  *
- * Extracted because the same derivation was already inlined in
- * ExceptionGlossary and is now needed by the dashboard and its view switcher.
- * Three copies of "which segment am I?" is how one of them ends up disagreeing —
- * and the failure is silent, since a wrong segment renders a plausible-looking
- * screen rather than an error.
- *
- * Returns `null` when the caller has no organization or the lookup has not
- * resolved yet. The visibility rules in lib/segmentVisibility treat `null` as
- * "unknown" and gate on explicit matches, so a pending lookup never flashes a
- * surface the tenant should not see.
+ * Returns null while the lookup is in flight, or when the caller has no
+ * organization. See lib/segments for what null means to callers.
  */
 import { trpc } from "@/lib/trpc";
-import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
+import { usePortalContext } from "@/contexts/PortalContext";
+import { toSegment, type Segment } from "@/lib/segments";
 
-export { showsCbnCompliance, showsPilotReadiness, showsAuditorView, dashboardViewsFor } from "@/lib/segmentVisibility";
-
-export function useOrgSegment(): OrgSegment | null {
-  const { viewAsOrg, isViewingAs } = usePortalContext();
+export function useOrgSegment(): Segment | null {
+  const { viewAsOrg } = usePortalContext();
   const { data } = trpc.auth.mySegment.useQuery(undefined, {
     retry: false,
     staleTime: 5 * 60 * 1000,
   });
-  const segment = isViewingAs ? viewAsOrg?.segment : (data?.segment as OrgSegment | undefined);
-  return segment ?? null;
+
+  // viewAsOrg is non-null exactly when a super admin is inside a portal, so it
+  // is the whole condition — the separate isViewingAs flag this used to also
+  // check is defined as `viewAsOrg !== null`.
+  return viewAsOrg ? toSegment(viewAsOrg.segment) : toSegment(data?.segment);
 }
