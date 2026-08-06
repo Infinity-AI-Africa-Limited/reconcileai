@@ -5951,10 +5951,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: send a personalised demo invitation email to a specific respondent
-    sendDemoInvite: protectedProcedure
+    sendDemoInvite: superAdminProcedure
       .input(z.object({ token: z.string().length(48) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6049,7 +6048,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: list all assessments (protected, admin only)
-    listAll: protectedProcedure
+    listAll: superAdminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         pageSize: z.number().min(1).max(100).default(20),
@@ -6061,7 +6060,6 @@ Always be specific, reference actual exception IDs and amounts where available, 
         hasNotes: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6114,7 +6112,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
 
-    exportCsv: protectedProcedure
+    exportCsv: superAdminProcedure
       .input(z.object({
         riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
         emailOptedOut: z.boolean().optional(),
@@ -6122,7 +6120,6 @@ Always be specific, reference actual exception IDs and amounts where available, 
         search: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6187,9 +6184,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { csv, count: rows.length };
       }),
     // Admin: bulk send demo invites to all consented + not yet invited respondents
-    bulkSendDemoInvites: protectedProcedure
+    bulkSendDemoInvites: superAdminProcedure
       .mutation(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6244,10 +6240,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: toggle markedContacted flag on a single assessment
-    markContacted: protectedProcedure
+    markContacted: superAdminProcedure
       .input(z.object({ token: z.string().length(48), contacted: z.boolean() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6262,10 +6257,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: update free-text notes/memo for a single assessment
-    updateNotes: protectedProcedure
+    updateNotes: superAdminProcedure
       .input(z.object({ token: z.string().length(48), notes: z.string().max(2000) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6276,10 +6270,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: set or clear the follow-up due date for a single assessment
-    setFollowUpDue: protectedProcedure
+    setFollowUpDue: superAdminProcedure
       .input(z.object({ token: z.string().length(48), dueAt: z.date().nullable() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6290,13 +6283,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: update the pipeline stage for a single assessment
-    setPipelineStage: protectedProcedure
+    setPipelineStage: superAdminProcedure
       .input(z.object({
         token: z.string().length(48),
         stage: z.enum(["new", "contacted", "demo_booked", "proposal_sent", "closed_won", "closed_lost"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6307,9 +6299,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: count eligible for bulk demo invite (consented, has email, not yet invited, not opted out)
-    countBulkEligible: protectedProcedure
+    countBulkEligible: superAdminProcedure
       .query(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
