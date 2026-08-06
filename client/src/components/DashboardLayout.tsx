@@ -23,7 +23,8 @@ import {
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
 import { useOrgSegment } from "@/hooks/useOrgSegment";
-import { isRetailCommerce } from "@/lib/segments";
+import { isRetailCommerce, type Segment } from "@/lib/segments";
+import { canAccessNav } from "@/lib/navAccess";
 import {
   LayoutDashboard,
   LogOut,
@@ -64,18 +65,24 @@ import { toast } from "sonner";
 import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock, Map } from "lucide-react";
 import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } from "@/contexts/PortalContext";
 
-type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: string[] };
+type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: Segment[] };
 
 // roles: admin | cfo | operations | compliance | user | super_admin
-// segments: financial_services | corporate_b2b | super_admin (org segment gate)
+// segments: financial_services | corporate_b2b | retail_commerce | super_admin
 // If roles is omitted, item is visible to ALL roles.
 // If segments is omitted, item is visible across ALL segments.
+//
+// `segments` was declared here when the four-portal architecture landed and was
+// then never read — canAccessNav filtered on roles alone. Because the curated
+// per-segment navs below only apply when a super admin ENTERS a tenant portal,
+// a merchant logging in normally got this default list, and saw entries built
+// for other verticals. It is now enforced; see lib/navAccess.
 const menuItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
   { icon: Network, label: "Exception Intelligence", path: "/exception-intelligence" },
   { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
-  { icon: Building2, label: "Distributor Registry", path: "/distributors" },
+  { icon: Building2, label: "Distributor Registry", path: "/distributors", segments: ["corporate_b2b"] },
   // Upload & Reconciliation: admin + operations only
   { icon: Upload, label: "Upload Data", path: "/upload", roles: ["admin", "operations"] },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation", roles: ["admin", "operations"] },
@@ -94,7 +101,7 @@ const adminMenuItems: NavItem[] = [
   // Audit Trail: admin + compliance + cfo
   { icon: Shield, label: "Audit Trail", path: "/audit", roles: ["admin", "compliance", "cfo"] },
   { icon: ShieldCheck, label: "Data Protection", path: "/compliance", roles: ["admin", "compliance"] },
-  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance", roles: ["admin", "compliance", "cfo"] },
+  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance", roles: ["admin", "compliance", "cfo"], segments: ["financial_services"] },
   // User Management: admin only
   { icon: Users, label: "User Management", path: "/admin/users", roles: ["admin"] },
   { icon: ClipboardCheck, label: "Assessments", path: "/admin/assessments", roles: ["admin"] },
@@ -105,7 +112,7 @@ const adminMenuItems: NavItem[] = [
 const adminAdvancedItems: NavItem[] = [
   { icon: Beaker, label: "Sample Data", path: "/sample-data", roles: ["admin"] },
   { icon: Plug, label: "Integrations", path: "/integrations", roles: ["admin"] },
-  { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector", roles: ["admin"] },
+  { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector", roles: ["admin"], segments: ["financial_services"] },
   { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
   { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
   // admin-only, like its SFTP sibling: this screen manages bucket credentials
@@ -153,7 +160,7 @@ const financialServicesAdvancedItems: NavItem[] = [
 // Corporate B2B portal nav (shown when super_admin enters a corporate_b2b org)
 const corporateB2BMenuItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
-  { icon: Building2, label: "Distributor Registry", path: "/distributors" },
+  { icon: Building2, label: "Distributor Registry", path: "/distributors", segments: ["corporate_b2b"] },
   { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
   { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
   { icon: Clock, label: "Age Tracker", path: "/age-tracker" },
@@ -192,13 +199,8 @@ const superAdminItems: NavItem[] = [
   { icon: Map, label: "Roadmap Access", path: "/admin/roadmap-access", roles: ["super_admin"] },
 ];
 
-function canAccessNav(item: NavItem, userRole: string | undefined): boolean {
-  if (!item.roles) return true;
-  if (!userRole) return false;
-  // super_admin can see everything (except super_admin-only items are still gated)
-  if (userRole === "super_admin" && !item.roles.includes("super_admin")) return true;
-  return item.roles.includes(userRole);
-}
+// Moved to lib/navAccess so the rule is pure and testable, and so the segment
+// gate is applied consistently rather than re-derived at each call site.
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 260;
@@ -348,6 +350,10 @@ function DashboardLayoutContent({
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const { viewAsOrg, isViewingAs, exitPortal } = usePortalContext();
+  // The caller's own vertical, used to filter the DEFAULT nav below. The curated
+  // per-segment lists only apply inside a portal, so without this a merchant
+  // logging in normally saw entries built for other verticals.
+  const segment = useOrgSegment();
 
   // When viewing as another org, show that org's segment-specific nav instead of the default nav
   const portalMenuItems = isViewingAs && viewAsOrg
@@ -365,10 +371,10 @@ function DashboardLayoutContent({
     ? financialServicesAdvancedItems
     : null;
 
-  const visibleMenuItems = portalMenuItems ?? menuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdminItems = portalMenuItems ? [] : adminMenuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdvancedItems = portalAdvancedItems ?? (portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role)));
-  const visibleSuperAdminItems = portalMenuItems ? [] : superAdminItems.filter(item => canAccessNav(item, user?.role));
+  const visibleMenuItems = portalMenuItems ?? menuItems.filter(item => canAccessNav(item, user?.role, segment));
+  const visibleAdminItems = portalMenuItems ? [] : adminMenuItems.filter(item => canAccessNav(item, user?.role, segment));
+  const visibleAdvancedItems = portalAdvancedItems ?? (portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role, segment)));
+  const visibleSuperAdminItems = portalMenuItems ? [] : superAdminItems.filter(item => canAccessNav(item, user?.role, segment));
   const allItems = [...visibleMenuItems, ...visibleAdminItems, ...visibleSuperAdminItems];
   // Match the current path segment-aware and prefer the most specific (longest) match,
   // so nested routes like /admin/super-admin/orgs resolve to "All Organisations" rather

@@ -4,10 +4,24 @@ import { Shield, FileText, CheckCircle2, TrendingUp, Calendar, Download } from "
 import { Button } from "@/components/ui/button";
 import jsPDF from "jspdf";
 import { useState } from "react";
+import { Redirect } from "wouter";
+import { useOrgSegment } from "@/hooks/useOrgSegment";
+import { isRetailCommerce } from "@/lib/segments";
 
 export default function AuditorDashboard() {
   const [isExporting, setIsExporting] = useState(false);
   const [entityFilter, setEntityFilter] = useState<string | undefined>(undefined);
+  const segment = useOrgSegment();
+
+  // Removing this from the view switcher hid the link, not the page: the route
+  // stayed reachable by URL, bookmark or a shared link. This view is built for
+  // an examiner of a regulated institution — audit-trail volume, a "compliance
+  // rate" — and a merchant has no examiner, so send them back to their own
+  // dashboard rather than render a screen that means nothing to them.
+  //
+  // Presentation only. It is not authorisation: the underlying audit procedures
+  // are org-scoped server-side, which is what actually protects the data.
+  if (isRetailCommerce(segment)) return <Redirect to="/dashboard" />;
 
   const exportToPDF = async () => {
     setIsExporting(true);
