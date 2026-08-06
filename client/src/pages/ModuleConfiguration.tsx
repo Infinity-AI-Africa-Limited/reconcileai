@@ -25,6 +25,8 @@ import {
 import { Loader2, CheckCircle2, AlertCircle, Info, Building2, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { modulesForSegment } from "@shared/moduleScope";
+import { useOrgSegment } from "@/hooks/useOrgSegment";
 
 type ModuleType = "settlement" | "account_level";
 
@@ -296,6 +298,7 @@ export default function ModuleConfiguration() {
   const utils = trpc.useUtils();
   const { user } = useAuth();
   const isSuperAdmin = user?.role === "super_admin";
+  const segment = useOrgSegment();
 
   const [overrideDialog, setOverrideDialog] = useState<{
     open: boolean;
@@ -352,7 +355,13 @@ export default function ModuleConfiguration() {
       </Alert>
 
       <div className="grid gap-6">
-        {(Object.keys(MODULE_INFO) as ModuleType[]).map((moduleType) => {
+        {/* Only the modules this vertical can use. Account-Level reconciles a
+            general ledger against a core banking system; a retail merchant
+            operates neither, and the copy below promises "CBN compliance" and
+            "zero licence revocations" to a reader who answers to no regulator
+            and holds no licence. The server refuses it too — see
+            assertModuleAvailable — so this is presentation, not the gate. */}
+        {modulesForSegment(segment).map((moduleType) => {
           const info = MODULE_INFO[moduleType];
           const isEnabled = getModuleStatus(moduleType);
           const isToggling = toggleModule.isPending;
