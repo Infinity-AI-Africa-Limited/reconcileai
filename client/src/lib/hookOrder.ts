@@ -33,7 +33,17 @@ export type HookOrderFinding = {
 };
 
 /** A top-level declaration — resets the component we are tracking. */
-const DECLARATION = /^(export\s+default\s+)?(async\s+)?function\s+\w+|^(export\s+)?const\s+\w+\s*[:=]/;
+const DECLARATION =
+  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+\w+|^(?:export\s+)?(?:default\s+)?const\s+\w+\s*[:=]/;
+/**
+ * A closing brace in column 0 — the end of a top-level declaration.
+ *
+ * Belt to DECLARATION's braces. Tracking must not survive the function it
+ * started in, whatever the next thing is called or how it is written. Without
+ * this, a helper's legitimate early return leaked into the component declared
+ * after it and condemned that component's first hook.
+ */
+const END_OF_DECLARATION = /^\}/;
 /**
  * A hook call at component top level, by NAME, at any member depth.
  *
@@ -49,6 +59,40 @@ const HOOK_CALL = /^ {2}\S.*\buse[A-Z]\w*\s*[(<]/;
 const IF_AT_TOP = /^ {2}(?:\}\s*else\s+)?if\s*\(/;
 /** A comment line — never a hook call, whatever it mentions. */
 const COMMENT = /^\s*(\/\/|\/\*|\*)/;
+
+/**
+ * Does the guard starting at `start` actually return?
+ *
+ * Ownership, not proximity. This used to ask whether the word `return` appeared
+ * anywhere in the next seven lines, which is a different question and answers
+ * yes far too often: a guard that merely calls something, followed by
+ * `items.map((i) => { return i.name; })`, looked like an early return, and the
+ * next legitimate top-level hook was reported as an offender. The worst version
+ * flagged `const cb = useCallback(() => {` for the `return` inside its own body
+ * — a hook rejected because of code it contains. In a blocking gate that fails
+ * CI on correct components, which is exactly how a check like this gets turned
+ * off.
+ *
+ * A return counts only when it belongs to this `if`: on the same line, or at the
+ * guard body's own indent (four spaces) inside its block. Anything nested deeper
+ * belongs to a callback, not to the guard.
+ */
+function guardReturns(lines: string[], start: number): boolean {
+  // `  if (cond) return X;` — body on the same line.
+  if (/\breturn\b/.test(lines[start])) return true;
+
+  // `  if (cond)` with a single unbraced statement on the next line.
+  if (!/\{\s*$/.test(lines[start])) return /^ {4}return\b/.test(lines[start + 1] ?? "");
+
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    // A closing brace at the guard's own indent ends the chain — unless it
+    // hands off to `else`, whose branch returning is equally an early return.
+    if (/^ {2}\}(?!\s*else)/.test(line)) return false;
+    if (/^ {4}return\b/.test(line)) return true;
+  }
+  return false;
+}
 
 export function hooksCalledAfterConditionalReturn(source: string): HookOrderFinding[] {
   const lines = source.split(/\r?\n/);
@@ -66,14 +110,16 @@ export function hooksCalledAfterConditionalReturn(source: string): HookOrderFind
       earlyReturn = -1;
       continue;
     }
+    // ...and the end of one stops all reasoning about it.
+    if (END_OF_DECLARATION.test(line)) {
+      tracking = false;
+      earlyReturn = -1;
+      continue;
+    }
     if (!tracking) continue;
 
     if (IF_AT_TOP.test(line)) {
-      // Does this guard return? Either on the same line, or inside a short
-      // block before it closes. Six lines is generous for a guard clause and
-      // keeps this from reaching across unrelated code.
-      const guard = lines.slice(i, i + 7).join("\n");
-      if (/\breturn\b/.test(guard) && earlyReturn < 0) earlyReturn = i;
+      if (earlyReturn < 0 && guardReturns(lines, i)) earlyReturn = i;
       continue;
     }
 

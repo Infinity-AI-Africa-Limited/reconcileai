@@ -33,6 +33,37 @@ describe("when a hook sits below a conditional return", () => {
     expect(found[0].hookLine).toBe(4);
   });
 
+  it("should catch a guard whose else branch is the one that returns", () => {
+    // Still an early return on one path, so the hook below runs on some renders
+    // and not others — the same defect, wearing a different shape.
+    const source = [
+      "export default function Branching() {",
+      "  if (ready) {",
+      "    warmUp();",
+      "  } else {",
+      "    return <Spinner />;",
+      "  }",
+      "  const { data } = trpc.dashboard.stats.useQuery();",
+      "  return <div>{data}</div>;",
+      "}",
+    ].join("\n");
+    const found = hooksCalledAfterConditionalReturn(source);
+    expect(found).toHaveLength(1);
+    expect(found[0].hookLine).toBe(7);
+  });
+
+  it("should catch a hook below an unbraced single-statement guard", () => {
+    const source = [
+      "export default function Unbraced() {",
+      "  if (!id)",
+      "    return null;",
+      "  const { data } = trpc.dashboard.stats.useQuery();",
+      "  return <div>{data}</div>;",
+      "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toHaveLength(1);
+  });
+
   it("should catch a plain useState below a block-form guard", () => {
     // The ComplianceAssessmentResult defect, reduced.
     const source = [
@@ -86,6 +117,80 @@ describe("when the code is fine", () => {
       "  // was: const { data } = trpc.dashboard.stats.useQuery();",
       "  return <div />;",
       "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
+  });
+
+  it("should not treat a callback's return as the guard's", () => {
+    // The guard only calls something. The `return` two lines later belongs to
+    // the map callback, not to the `if` — so the tRPC hook below it is legal.
+    // Asking whether "return" appeared within a few lines answered a different
+    // question and failed CI on correct components.
+    const source = [
+      "export default function Valid() {",
+      "  const [a] = useState(0);",
+      "  if (!a) {",
+      "    doSomething();",
+      "  }",
+      "  const rows = items.map((i) => {",
+      "    return i.name;",
+      "  });",
+      "  const { data } = trpc.dashboard.stats.useQuery();",
+      "  return <div>{rows}{data}</div>;",
+      "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
+  });
+
+  it("should not flag a hook because its own body returns", () => {
+    // The sharpest version of the same bug: the offender reported was
+    // `useCallback` itself, for the `return` inside the callback it declares.
+    const source = [
+      "export default function AlsoValid() {",
+      "  if (!a) {",
+      "    track();",
+      "  }",
+      "  const cb = useCallback(() => {",
+      "    return 1;",
+      "  }, []);",
+      "  return <div onClick={cb} />;",
+      "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
+  });
+
+  it("should not let a helper's early return reach the component after it", () => {
+    // Found by the sweep, in SettlementFileImport. `readFile` legitimately
+    // returns early; the component below it was then condemned for its first
+    // useState. The boundary was missed because `export function Foo()` — no
+    // `default` — was not recognised as a declaration at all.
+    const source = [
+      "async function readFile(file: File) {",
+      "  if (isSpreadsheet(file.name)) {",
+      "    return { content: encode(file), encoding: 'base64' };",
+      "  }",
+      "  return { content: file.text(), encoding: 'utf8' };",
+      "}",
+      "",
+      "export function SettlementFileImport({ onImported }: Props) {",
+      "  const [file, setFile] = useState<File | null>(null);",
+      "  return <div>{file?.name}</div>;",
+      "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
+  });
+
+  it("should stop tracking at the end of a declaration", () => {
+    // The same protection without relying on recognising what comes next.
+    const source = [
+      "function helper() {",
+      "  if (x) return 1;",
+      "}",
+      "",
+      "const Component = () => {",
+      "  const [a] = useState(0);",
+      "  return <div>{a}</div>;",
+      "};",
     ].join("\n");
     expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
   });
