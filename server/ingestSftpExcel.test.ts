@@ -12,26 +12,59 @@ import { describe, it, expect } from "vitest";
 import { calculateFileHash, validateParsedRows } from "./apiIngestionService";
 import { parseTabularFile } from "./ingest/fileParser";
 
+/**
+ * ExcelJS is a heavy dynamic import. Memoised at module scope so it is paid
+ * ONCE for the file rather than on every `workbook()` call — the hashing test
+ * below builds two workbooks, so it was paying it twice inside a single timed
+ * test body.
+ */
+let excelJs: Promise<typeof import("exceljs")> | null = null;
+function getExcelJS(): Promise<typeof import("exceljs")> {
+  excelJs ??= import("./exceljsLoader").then((m) => m.loadExcelJS());
+  return excelJs;
+}
+
 async function workbook(rows: unknown[][]): Promise<Buffer> {
-  const { loadExcelJS } = await import("./exceljsLoader");
-  const ExcelJS = await loadExcelJS();
+  const ExcelJS = await getExcelJS();
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Sheet1");
   rows.forEach((r) => ws.addRow(r));
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
+/**
+ * The two tests here do real spreadsheet I/O and carry an explicit timeout, as
+ * every other ExcelJS test in this repo does (see line ~46 below,
+ * ingestFileParser.test.ts and shoplineSettlementImport.test.ts). They were the
+ * only ones missing it, so they ran under vitest's 5s default while doing the
+ * same work — and one of them failed once in a full-suite run on 2026-08-05,
+ * passed in isolation, and did not recur in 15 further full runs.
+ *
+ * The cause was never captured, so this does not claim to be the fix. It closes
+ * the one difference between these tests and their passing siblings, and it
+ * CANNOT hide the alternative: a longer timeout does not make a false assertion
+ * pass. The byte-level assertions below exist so that if it ever does recur,
+ * the failure names its own cause instead of surfacing as a baffling hash
+ * collision.
+ */
 describe("calculateFileHash", () => {
-  it("hashes binary content over its real bytes", async () => {
+  it("hashes binary content over its real bytes", { timeout: 90_000 }, async () => {
     const a = await workbook([["Date", "Amount"], ["2026-08-02", 1]]);
     const b = await workbook([["Date", "Amount"], ["2026-08-02", 2]]);
+    // Pin the inputs before hashing them. If ExcelJS ever returns an empty or
+    // degenerate buffer, that is what failed — not the hash function, which is
+    // a bare sha256 and cannot map distinct bytes onto one digest.
+    expect(a.byteLength, "workbook A came back empty").toBeGreaterThan(0);
+    expect(b.byteLength, "workbook B came back empty").toBeGreaterThan(0);
+    expect(a.equals(b), "the two workbooks serialised to identical bytes").toBe(false);
     expect(calculateFileHash(a)).not.toBe(calculateFileHash(b));
   });
 
-  it("collapses distinct workbooks when hashed as utf8 — the old bug", async () => {
+  it("collapses distinct workbooks when hashed as utf8 — the old bug", { timeout: 90_000 }, async () => {
     // Demonstrates why the Buffer overload matters: lossy utf8 decoding of
     // binary can map different inputs onto the same string.
     const a = await workbook([["Date", "Amount"], ["2026-08-02", 1]]);
+    expect(a.byteLength, "workbook came back empty").toBeGreaterThan(0);
     const utf8Lossy = Buffer.from(a.toString("utf8"), "utf8");
     expect(utf8Lossy.byteLength).not.toBe(a.byteLength);
   });
