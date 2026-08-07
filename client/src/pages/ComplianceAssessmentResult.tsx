@@ -250,6 +250,19 @@ export default function ComplianceAssessmentResult() {
     { enabled: !!token, retry: 1 }
   );
 
+  // These two belong up here, above the guards, not beside the handlers that
+  // use them. The first render of this page is always the loading one, so it
+  // returned after two hooks; the render that follows fell through to the body
+  // and called four. React answers that with "Rendered more hooks than
+  // expected", so every visitor holding a VALID token got the error instead of
+  // their report.
+  //
+  // It hid well: an expired or bogus token returns at the guard below on both
+  // renders, the count never changes, and the "Report not found" screen behaves
+  // perfectly — so the page looks healthy to anyone testing with a made-up link.
+  const [copied, setCopied] = useState(false);
+  const [pdfDownloading, setPdfDownloading] = useState(false);
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-[#F8F9FA] flex items-center justify-center">
@@ -313,9 +326,6 @@ export default function ComplianceAssessmentResult() {
     },
   };
   const rc = riskConfig[riskLevel] ?? riskConfig.medium;
-
-  const [copied, setCopied] = useState(false);
-  const [pdfDownloading, setPdfDownloading] = useState(false);
 
   const handleDownloadPdf = () => {
     setPdfDownloading(true);
