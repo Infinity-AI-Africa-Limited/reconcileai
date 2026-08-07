@@ -9,6 +9,13 @@
  *
  * The fixtures below pin the detector's behaviour directly. The sweep at the end
  * is what actually fails the build.
+ *
+ * Several fixtures exist because the detector got this WRONG, twice, in ways
+ * review caught: a callback's return read as the guard's, and a helper's return
+ * leaking into the component declared after it. Both are ownership questions,
+ * both now answered by the parser rather than inferred from indentation. They
+ * are kept as tests because "unrepresentable" is a claim, and a claim about a
+ * blocking gate should be checked.
  */
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -211,8 +218,64 @@ describe("when the code is fine", () => {
   });
 });
 
+describe("when the formatting is not what a line scanner assumed", () => {
+  // Everything here was invisible to the previous implementation, which keyed
+  // off exactly two spaces of indent and one line of lookahead. None of it is
+  // exotic; it is just code that happens not to be laid out the expected way.
+  // A gate people trust has to be about the code, not about its whitespace.
+  const CASES: ReadonlyArray<readonly [string, string]> = [
+    [
+      "a component indented four spaces",
+      [
+        "export default function Wide() {",
+        "    if (!a) return null;",
+        "    const { data } = trpc.dashboard.stats.useQuery();",
+        "    return <div>{data}</div>;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "a component declared inside another function",
+      [
+        "export function Outer() {",
+        "  const Inner = () => {",
+        "    if (!a) return null;",
+        "    const [v] = useState(0);",
+        "    return <div>{v}</div>;",
+        "  };",
+        "  return <Inner />;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "a guard whose return sits one block deeper",
+      [
+        "export default function Deep() {",
+        "  if (a) {",
+        "    if (b) {",
+        "      return null;",
+        "    }",
+        "  }",
+        "  const [v] = useState(0);",
+        "  return <div>{v}</div>;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "a whole component on one line",
+      "export default function Compact() { if (!a) return null; const [v] = useState(0); return <div>{v}</div>; }",
+    ],
+  ] as const;
+
+  for (const [label, source] of CASES) {
+    it(`should still catch the defect in ${label}`, () => {
+      expect(hooksCalledAfterConditionalReturn(source)).toHaveLength(1);
+    });
+  }
+});
+
 describe("the client tree", () => {
-  const CLIENT = join(__dirname, "..");
+  const CLIENT = join(__dirname, "..", "client", "src");
 
   function tsxFiles(dir: string, out: string[] = []): string[] {
     for (const entry of readdirSync(dir)) {

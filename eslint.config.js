@@ -33,10 +33,10 @@
  * is not a hook as far as this rule is concerned. Fed the real pre-fix
  * AuditorDashboard, it reported nothing.
  *
- * `client/src/lib/hookOrder.ts` covers that half, matching on the hook NAME at
- * any member depth, and its test fails the build the same way. Keep both: this
- * rule is the more rigorous of the two wherever it can see, and the scanner
- * reaches where it cannot.
+ * `tools/hookOrder.ts` covers that half, parsing with this same parser and
+ * matching on the hook NAME at any member depth, and its test fails the build
+ * the same way. Keep both: this rule is the more rigorous of the two wherever
+ * it can see, and the companion reaches where it cannot.
  *
  * `exhaustive-deps` is deliberately OFF. It is advisory, it fires heavily on an
  * existing codebase, and mixing it in would bury the rule that always matters.
