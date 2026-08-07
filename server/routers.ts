@@ -209,6 +209,7 @@ import {
   sanitizeInput,
   assertChannelBindable,
 } from "./routers/shared";
+import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -331,6 +332,31 @@ function requireOrg(ctx: { user: { organizationId?: number | null } }): number {
     });
   }
   return ctx.user.organizationId;
+}
+
+/**
+ * Refuse a module the caller's vertical cannot use.
+ *
+ * Hiding it on the module page is presentation; this is the rule. A retail
+ * merchant has no general ledger wired to a core banking system, so
+ * account_level is meaningless for them — and it was switched ON at
+ * provisioning for every SHOPLINE tenant. See shared/moduleScope.
+ */
+async function assertModuleAvailable(
+  ctx: { user: { organizationId?: number | null } },
+  moduleType: "settlement" | "account_level",
+): Promise<void> {
+  if (!ctx.user.organizationId) return;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [org] = await drizzle
+    .select({ segment: organizations.segment })
+    .from(organizations)
+    .where(eq(organizations.id, ctx.user.organizationId))
+    .limit(1);
+  if (!moduleAppliesTo(moduleType, org?.segment)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: moduleUnavailableReason(moduleType, org?.segment) });
+  }
 }
 
 /** Prove the caller's org owns this credential before acting on it. Throws
@@ -1735,7 +1761,9 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         const dbConn = await db.getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        
+
+        await assertModuleAvailable(ctx, input.moduleType);
+
         const existing = await dbConn.select()
           .from(db.moduleConfigurations)
           .where(
@@ -1745,7 +1773,7 @@ export const appRouter = router({
             )
           )
           .limit(1);
-        
+
         if (existing.length > 0) {
           await dbConn.update(db.moduleConfigurations)
             .set({ isEnabled: input.isEnabled, updatedAt: new Date() })
@@ -1774,7 +1802,9 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         const dbConn = await db.getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        
+
+        await assertModuleAvailable(ctx, input.moduleType);
+
         await dbConn.update(db.moduleConfigurations)
           .set({ configuration: input.configuration, updatedAt: new Date() })
           .where(
