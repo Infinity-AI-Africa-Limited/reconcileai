@@ -111,6 +111,39 @@ describe("when the entry is an Infinity AI staff tool", () => {
     expect(staff).toContain("/demo-dashboard");
     expect(staff).toContain("/admin/assessments");
   });
+
+  it("should follow the staff role, not whichever org the staff member sits in", () => {
+    // These were first gated with `segments: ["super_admin"]`, which reads the
+    // ORGANISATION rather than the viewer. The two move independently:
+    // admin.updateRole promotes a tenant user to super_admin and leaves them in
+    // their tenant org, and superAdmin.updateOrganizationSegment can retype any
+    // org including Infinity AI's own. Either one emptied the staff tools out of
+    // a real staff member's sidebar — while /admin/super-admin, gated on the
+    // role, sat right below them and stayed.
+    for (const s of [
+      "financial_services",
+      "corporate_b2b",
+      "retail_commerce",
+      "super_admin",
+      null,
+    ] as (Segment | null)[]) {
+      const staff = paths(navFor(s, "super_admin"));
+      expect(staff, `staff in a ${s} org lost the demo tool`).toContain("/demo-dashboard");
+      expect(staff, `staff in a ${s} org lost the lead pipeline`).toContain("/admin/assessments");
+      // The invariant behind the bug: whoever gets the operator's own group gets
+      // the operator's own tools. One list must never answer without the other.
+      expect(staff, `staff in a ${s} org lost the platform group`).toContain("/admin/super-admin");
+    }
+  });
+
+  it("should hide staff tools from a non-staff colleague inside Infinity AI's own org", () => {
+    // The mirror of the case above, and the reason the gate is not simply
+    // "role OR segment": an operations user sitting in the super_admin-segment
+    // org is still not staff, and demo.activate seeds fabricated data.
+    const colleague = paths(navFor("super_admin", "operations"));
+    expect(colleague).not.toContain("/demo-dashboard");
+    expect(colleague).not.toContain("/admin/assessments");
+  });
 });
 
 describe("when the segment has not resolved yet", () => {

@@ -41,17 +41,36 @@ export type NavEntry = {
   roles?: string[];
   /** Omitted = every vertical. */
   segments?: Segment[];
+  /**
+   * An Infinity AI staff tool, keyed on the super_admin ROLE.
+   *
+   * This is deliberately NOT `segments: ["super_admin"]`, which is how it was
+   * first written. A segment describes the ORGANISATION a viewer belongs to,
+   * and the two are independently mutable: `admin.updateRole` promotes a tenant
+   * user to super_admin without moving them out of their tenant org, and
+   * `superAdmin.updateOrganizationSegment` can retype any org — including
+   * Infinity AI's own. Either one silently emptied the staff tools out of a real
+   * staff member's sidebar, while the Infinity AI group beside them (gated on
+   * the role) stayed put. A super_admin with no organizationId at all lost them
+   * for a third reason: no org means no segment, and `inSegment` reads null as
+   * "no match".
+   *
+   * The role is also what the SERVER trusts — `superAdminProcedure` checks
+   * `ctx.user.role === "super_admin"` and never looks at a segment — so keying
+   * on it is what keeps the link and the guard agreeing.
+   */
+  staffOnly?: boolean;
 };
 
 /**
- * `segments: ["super_admin"]` means Infinity AI staff only — the entry is a
- * platform-operator tool, not a tenant feature. Two entries earn it:
+ * `staffOnly` means platform-operator tool, not a tenant feature. Two entries
+ * earn it:
  *
  *   /demo-dashboard    — the "BrightGoods FMCG Demo" sales tool. It exposes
  *                        demo.activate/deactivate, which seed fabricated data.
  *                        No paying tenant should be offered that.
  *   /admin/assessments — Infinity AI's own lead pipeline from the public CBN
- *                        readiness tool. PR #51 locked the procedures behind it
+ *                        readiness tool. PR #51 locks the procedures behind it
  *                        to super_admin; this stops the link contradicting them.
  */
 export const NAV_ITEMS: NavEntry[] = [
@@ -59,7 +78,7 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Dashboard", path: "/dashboard", group: "main" },
   { label: "Super Agent", path: "/super-agent", group: "main" },
   { label: "Exception Intelligence", path: "/exception-intelligence", group: "main" },
-  { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", segments: ["super_admin"] },
+  { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", staffOnly: true },
   { label: "Distributor Registry", path: "/distributors", group: "main", segments: ["corporate_b2b"] },
   // Retail-only surfaces. These existed ONLY in the portal list before, so a
   // real merchant could not reach the screen the vertical is built around.
@@ -84,7 +103,9 @@ export const NAV_ITEMS: NavEntry[] = [
   // Nigerian banking-regulator pack — financial services only (CLAUDE.md §2A).
   { label: "CBN Reports", path: "/cbn-compliance", group: "admin", roles: ["admin", "compliance", "cfo"], segments: ["financial_services"] },
   { label: "User Management", path: "/admin/users", group: "admin", roles: ["admin"] },
-  { label: "Assessments", path: "/admin/assessments", group: "admin", roles: ["admin"], segments: ["super_admin"] },
+  // No `roles` alongside `staffOnly`: staffOnly is already the narrower gate, and
+  // a second list only invites the two to disagree.
+  { label: "Assessments", path: "/admin/assessments", group: "admin", staffOnly: true },
   { label: "Module Configuration", path: "/modules", group: "admin", roles: ["admin"] },
   { label: "Email Settings", path: "/email-settings", group: "admin", roles: ["admin"] },
 
@@ -123,13 +144,28 @@ export function inRole(entry: NavEntry, role: string | undefined): boolean {
 }
 
 /**
+ * Is this viewer Infinity AI staff?
+ *
+ * Compares the role, and nothing else — the same question, asked the same way,
+ * as the server's `superAdminProcedure`.
+ */
+export function isStaff(role: string | undefined): boolean {
+  return role === "super_admin";
+}
+
+/** Does this viewer clear the entry's staff gate? Ungated entries always do. */
+export function passesStaffGate(entry: NavEntry, role: string | undefined): boolean {
+  return !entry.staffOnly || isStaff(role);
+}
+
+/**
  * The sidebar for one viewer.
  *
  * `portal` is the super-admin-inside-a-tenant case. There, role gating is
  * dropped — staff are looking at the tenant's surface, not their own
  * permissions — but SEGMENT gating still applies, because the point of the
- * portal is to see what that vertical has. Super-admin-only entries are
- * excluded so the portal shows the tenant's sidebar, not the operator's.
+ * portal is to see what that vertical has. Staff tools and the operator's own
+ * group are excluded so the portal shows the tenant's sidebar, not ours.
  */
 export function navFor(
   segment: Segment | null,
@@ -138,10 +174,12 @@ export function navFor(
 ): NavEntry[] {
   if (opts.portal) {
     return NAV_ITEMS.filter(
-      (e) => e.group !== "superAdmin" && !e.segments?.includes("super_admin") && inSegment(e, segment),
+      (e) => e.group !== "superAdmin" && !e.staffOnly && inSegment(e, segment),
     );
   }
-  return NAV_ITEMS.filter((e) => inRole(e, role) && inSegment(e, segment));
+  return NAV_ITEMS.filter(
+    (e) => passesStaffGate(e, role) && inRole(e, role) && inSegment(e, segment),
+  );
 }
 
 /** Entries in one group, for a viewer. */

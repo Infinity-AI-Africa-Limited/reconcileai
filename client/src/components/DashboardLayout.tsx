@@ -67,16 +67,6 @@ import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } fro
 
 type NavItem = NavEntry & { icon: React.ElementType };
 
-// roles: admin | cfo | operations | compliance | user | super_admin
-// segments: financial_services | corporate_b2b | retail_commerce | super_admin
-// If roles is omitted, item is visible to ALL roles.
-// If segments is omitted, item is visible across ALL segments.
-//
-// `segments` was declared here when the four-portal architecture landed and was
-// then never read — canAccessNav filtered on roles alone. Because the curated
-// per-segment navs below only apply when a super admin ENTERS a tenant portal,
-// a merchant logging in normally got this default list, and saw entries built
-// for other verticals. Both sidebars now derive from lib/navItems.
 // Path -> icon. The entries themselves live in lib/navItems (one list, shared
 // by the normal sidebar and the portal sidebar). Icons stay here because they
 // are React components and would make that module untestable under the
