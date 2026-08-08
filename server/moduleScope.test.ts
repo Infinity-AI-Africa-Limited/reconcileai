@@ -71,19 +71,31 @@ describe("when the segment is unknown", () => {
 });
 
 describe("when the guard is enforced server-side", () => {
-  const ROUTERS = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
+  const read = (rel: string) => fs.readFileSync(path.join(__dirname, rel), "utf8");
+  // The two guarded domains live in different files: the module toggle stayed in
+  // the root router, the run procedures moved to their own domain router, and the
+  // rule itself sits in shared.ts so neither can hold a private copy.
+  const ROUTERS = read("routers.ts");
+  const RECONCILIATION = read("routers/reconciliation.ts");
+  const SHARED = read("routers/shared.ts");
   const GUARD = "await assertModuleAvailable(ctx, input.moduleType)";
 
   /**
    * Source between two anchors, so "the guard runs BEFORE the write" is
    * checkable rather than just "the guard appears somewhere in the file".
+   *
+   * A missing anchor FAILS rather than returning an empty slice. That matters
+   * more than it looks: these assertions read source as text, so if a procedure
+   * is moved to another file and the anchors are not repointed, a laxer version
+   * of this helper would keep passing against a file that no longer contains the
+   * procedure — a green ratchet guarding nothing.
    */
-  function between(startAnchor: string, endAnchor: string): string {
-    const start = ROUTERS.indexOf(startAnchor);
+  function between(source: string, startAnchor: string, endAnchor: string): string {
+    const start = source.indexOf(startAnchor);
     expect(start, `anchor missing: ${startAnchor}`).toBeGreaterThan(-1);
-    const end = ROUTERS.indexOf(endAnchor, start);
+    const end = source.indexOf(endAnchor, start);
     expect(end, `anchor missing after ${startAnchor}: ${endAnchor}`).toBeGreaterThan(start);
-    return ROUTERS.slice(start, end);
+    return source.slice(start, end);
   }
 
   it("should refuse an inapplicable module before the config row is written", () => {
@@ -91,8 +103,8 @@ describe("when the guard is enforced server-side", () => {
     // enable account_level by calling the procedure directly — the same trap as
     // the assessment lead pipeline, where a hidden nav entry fronted an open
     // procedure.
-    expect(between("toggle: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
-    expect(between("updateConfig: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+    expect(between(ROUTERS, "toggle: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+    expect(between(ROUTERS, "updateConfig: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
   });
 
   it("should refuse an inapplicable module before a reconciliation job is persisted", () => {
@@ -101,13 +113,17 @@ describe("when the guard is enforced server-side", () => {
     // so guarding only the toggle left the actual engine reachable. The public
     // API (POST /api/v1/reconciliation/runs) calls reconciliation.create too, so
     // the guard has to sit on the procedure, not on the UI that fronts it.
-    expect(between("create: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
-    expect(between("createMultiChannel: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
+    expect(between(RECONCILIATION, "create: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
+    expect(between(RECONCILIATION, "createMultiChannel: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
   });
 
   it("should decide using the shared rule, not a second inline copy", () => {
-    expect(ROUTERS).toMatch(/from "@shared\/moduleScope"/);
-    expect(ROUTERS).toMatch(/moduleAppliesTo\(moduleType, org\?\.segment\)/);
+    expect(SHARED).toMatch(/from "@shared\/moduleScope"/);
+    expect(SHARED).toMatch(/moduleAppliesTo\(moduleType, org\?\.segment\)/);
+    // One definition, imported by both callers. Two would be free to drift, and
+    // the drift would show up as a vertical quietly regaining a module.
+    expect(ROUTERS).not.toMatch(/function assertModuleAvailable/);
+    expect(RECONCILIATION).not.toMatch(/function assertModuleAvailable/);
   });
 });
 
