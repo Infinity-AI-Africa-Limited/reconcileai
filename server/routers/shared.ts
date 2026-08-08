@@ -8,10 +8,16 @@
  * imports from here instead of re-declaring.
  */
 import { TRPCError } from "@trpc/server";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
+import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb, createAuditLog, getChannelByIdForOrg } from "../db";
-import { users } from "../../drizzle/schema";
+import { organizations, users } from "../../drizzle/schema";
+
+// ─── Constants ───────────────────────────────────────────────────────
+
+/** Max length for user-supplied names (jobs, reports, channels). */
+export const MAX_NAME_LENGTH = 255;
 
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.
@@ -160,6 +166,39 @@ export async function assertChannelBindable(
   const channel = await getChannelByIdForOrg(channelId, organizationId);
   if (!channel) {
     throw new TRPCError({ code: "NOT_FOUND", message: "Channel not found" });
+  }
+}
+
+/**
+ * Refuse a module the caller's vertical cannot use.
+ *
+ * Hiding it on the module page is presentation; this is the rule. A retail
+ * merchant has no general ledger wired to a core banking system, so
+ * account_level is meaningless for them — and it was switched ON at
+ * provisioning for every SHOPLINE tenant. See shared/moduleScope.
+ *
+ * Lives here rather than in one router because two domains need it and they
+ * must not be able to disagree: `modules.toggle` / `modules.updateConfig` in
+ * server/routers.ts decide whether the module can be ENABLED, and
+ * ./reconciliation.ts decides whether a run may be CREATED. Guarding only the
+ * first left the engine reachable — the toggle is not the gate, because the
+ * job procedures take moduleType from the caller and never read
+ * moduleConfigurations at all.
+ */
+export async function assertModuleAvailable(
+  ctx: { user: { organizationId?: number | null } },
+  moduleType: "settlement" | "account_level",
+): Promise<void> {
+  if (!ctx.user.organizationId) return;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [org] = await drizzle
+    .select({ segment: organizations.segment })
+    .from(organizations)
+    .where(eq(organizations.id, ctx.user.organizationId))
+    .limit(1);
+  if (!moduleAppliesTo(moduleType, org?.segment)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: moduleUnavailableReason(moduleType, org?.segment) });
   }
 }
 
