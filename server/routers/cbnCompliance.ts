@@ -23,7 +23,8 @@
 import { z } from "zod";
 import { eq, and, desc } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router } from "../_core/trpc";
+import { cbnProcedure } from "./shared";
 import { getDb } from "../db";
 import { signReport, publicKeyFingerprint, publicKeyPem } from "../signing";
 import { cbnAuditLog, cbnDeadlineSubmissions, cbnReportSettings, cbnReportRuns } from "../../drizzle/schema";
@@ -151,7 +152,7 @@ async function writeAuditLog(
 
 export const cbnComplianceRouter = router({
   // ── Public signing key (PEM) for third-party verification ─────────────────
-  signingPublicKey: protectedProcedure.query(() => ({
+  signingPublicKey: cbnProcedure.query(() => ({
     fingerprint: publicKeyFingerprint(),
     publicKeyPem: publicKeyPem(),
     algorithm: "Ed25519",
@@ -160,7 +161,7 @@ export const cbnComplianceRouter = router({
   // ── Sign a standalone compliance attestation document ─────────────────────
   // Returns a real Ed25519 signature block to embed in the printed attestation,
   // so the "timestamped, digitally signed" statement is true for that artifact.
-  signAttestation: protectedProcedure
+  signAttestation: cbnProcedure
     .input(z.object({
       institution: z.string(),
       reportingPeriod: z.string(),
@@ -187,7 +188,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── Mark a regulatory deadline as submitted ───────────────────────────────
-  markDeadlineSubmitted: protectedProcedure
+  markDeadlineSubmitted: cbnProcedure
     .input(z.object({
       frameworkCode: z.string().max(64),
       frameworkName: z.string().max(255),
@@ -252,7 +253,7 @@ export const cbnComplianceRouter = router({
   // ── List THIS ORGANISATION's deadline submission records ──────────────────
   // Was unscoped, which handed every authenticated user every institution's
   // submission history — framework, period, submitter name and free-text notes.
-  listDeadlineSubmissions: protectedProcedure.query(async ({ ctx }) => {
+  listDeadlineSubmissions: cbnProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     // No organisation means no institution whose filings these could be. Empty
@@ -267,12 +268,12 @@ export const cbnComplianceRouter = router({
   // ═══ CBN Report Module (standalone, configurable, all customers) ═══════════
 
   // ── Institution profile (report header identity) ──────────────────────────
-  getReportSettings: protectedProcedure.query(async ({ ctx }) => {
+  getReportSettings: cbnProcedure.query(async ({ ctx }) => {
     const orgId = ctx.user.organizationId ?? 0;
     return cbnReports.getReportSettings(orgId);
   }),
 
-  saveReportSettings: protectedProcedure
+  saveReportSettings: cbnProcedure
     .input(z.object({
       institutionName: z.string().max(255).optional(),
       institutionType: z.enum([
@@ -300,7 +301,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── Generate a report (preview data) ──────────────────────────────────────
-  generateReport: protectedProcedure
+  generateReport: cbnProcedure
     .input(reportParams)
     .query(async ({ ctx, input }) => {
       const orgId = ctx.user.organizationId ?? 0;
@@ -308,7 +309,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── One-click CBN-format CSV export (logs the run) ────────────────────────
-  exportReportCsv: protectedProcedure
+  exportReportCsv: cbnProcedure
     .input(reportParams)
     .mutation(async ({ ctx, input }) => {
       const orgId = ctx.user.organizationId ?? 0;
@@ -335,7 +336,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── Monthly compliance attestation (build → Ed25519 sign → persist) ───────
-  generateMonthlyAttestation: protectedProcedure
+  generateMonthlyAttestation: cbnProcedure
     .input(z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }))
     .mutation(async ({ ctx, input }) => {
       const orgId = ctx.user.organizationId ?? 0;
@@ -380,7 +381,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── Report / attestation generation history ───────────────────────────────
-  listReportRuns: protectedProcedure
+  listReportRuns: cbnProcedure
     .input(z.object({ reportType: z.string().max(48).optional() }).optional())
     .query(async ({ ctx, input }) => {
       const orgId = ctx.user.organizationId ?? 0;

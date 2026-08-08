@@ -212,6 +212,8 @@ import {
   sanitizeInput,
   assertChannelBindable,
   assertModuleAvailable,
+  cbnProcedure,
+  distributorProcedure,
   MAX_NAME_LENGTH,
 } from "./routers/shared";
 
@@ -227,7 +229,7 @@ async function dispatchWebhook(event: string, payload: any) {
 
 // ─── Distributor Identity Registry Router ───────────────────────────
 const distributorRouter = router({
-  list: protectedProcedure
+  list: distributorProcedure
     .input(z.object({
       status: z.string().optional(),
       search: z.string().optional(),
@@ -240,14 +242,14 @@ const distributorRouter = router({
       return db.getDistributors({ organizationId: user.organizationId, ...input });
     }),
 
-  stats: protectedProcedure
+  stats: distributorProcedure
     .query(async ({ ctx }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
       if (!user?.organizationId) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
       return db.getDistributorStats(user.organizationId);
     }),
 
-  create: protectedProcedure
+  create: distributorProcedure
     .input(z.object({
       canonicalName: z.string().min(1),
       registeredBusinessName: z.string().optional(),
@@ -267,7 +269,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  update: protectedProcedure
+  update: distributorProcedure
     .input(z.object({
       id: z.number(),
       canonicalName: z.string().optional(),
@@ -290,7 +292,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  confirm: protectedProcedure
+  confirm: distributorProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
@@ -303,7 +305,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  addVariant: protectedProcedure
+  addVariant: distributorProcedure
     .input(z.object({ id: z.number(), variant: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
@@ -2565,7 +2567,11 @@ export const appRouter = router({
     }),
 
     // Auditor Dashboard Endpoints
-    auditorCompliance: protectedProcedure.query(async ({ ctx }) => {
+    // Examination-facing: reports audit-trail volume and a "compliance rate"
+    // framed for a supervisor's examiner, and feeds the CBN pack. Retail
+    // merchants answer to card schemes, not an examiner (CLAUDE.md §2A) — the
+    // client already hides the Auditor role, this is the rule behind it.
+    auditorCompliance: cbnProcedure.query(async ({ ctx }) => {
       const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
       const { data: auditLogs } = await db.getAuditLogs({
         organizationId: ctx.user.organizationId ?? null,
@@ -2581,7 +2587,7 @@ export const appRouter = router({
       };
     }),
 
-    auditorTrail: protectedProcedure
+    auditorTrail: cbnProcedure
       .input(z.object({
         entityType: z.string().max(50).optional(),
         limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(100),
