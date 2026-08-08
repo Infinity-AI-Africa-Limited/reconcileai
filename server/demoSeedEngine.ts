@@ -355,9 +355,18 @@ export async function seedFmcgDemoData(userId: number, orgId: number | null): Pr
   //
   // The rest of the FMCG seed (channels, transactions, reconciliation) still runs
   // for any tenant, so demos elsewhere are unaffected.
+  //
+  // The organisation must EXIST, not merely have a permitted segment. This write
+  // path is deliberately stricter than the read path: `featureAppliesTo` keeps a
+  // feature when the SEGMENT is unknown, because withdrawing capability on missing
+  // data is the wrong direction for a read. Creating rows is the opposite case —
+  // a missing organisation is exactly how 14 distributors came to sit under
+  // `orgId ?? 0`, a tenant that does not exist and whose rows no org-scoped query
+  // can ever return. Checking only the segment here would have left that path
+  // open, because a null organisation yields a null segment, which fails open.
   const distributorIds: number[] = [];
   const seedSegment = orgId ? await segmentOfOrg(db, orgId) : null;
-  const seedDistributors = featureAppliesTo("distributor_registry", seedSegment);
+  const seedDistributors = orgId != null && featureAppliesTo("distributor_registry", seedSegment);
   if (!seedDistributors) {
     console.log(
       `[DemoSeed] Skipping distributor seed for org ${orgId ?? "(none)"} (segment ${seedSegment ?? "unset"}) — distributors are corporate B2B only.`,

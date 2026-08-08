@@ -189,4 +189,13 @@ describe("when demo data is seeded", () => {
     // recreates the contradiction this PR is fixing.
     expect(SEED).toMatch(/featureAppliesTo\("distributor_registry"/);
   });
+
+  it("should require the organisation to EXIST, not merely to have a allowed segment", () => {
+    // The subtle one, and the third time this exact conflation has been caught:
+    // "no organisation" is not "unknown segment". A null orgId produces a null
+    // segment, and featureAppliesTo fails OPEN on an unknown segment by design —
+    // so a segment-only check still seeds rows at `orgId ?? 0`, the tenant that
+    // does not exist. That is the origin of the 14 unreachable rows.
+    expect(SEED).toMatch(/orgId != null && featureAppliesTo\("distributor_registry"/);
+  });
 });
