@@ -21,7 +21,7 @@
  */
 
 import { z } from "zod";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, isNull } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
@@ -29,6 +29,36 @@ import { signReport, publicKeyFingerprint, publicKeyPem } from "../signing";
 import { cbnAuditLog, cbnDeadlineSubmissions, cbnReportSettings, cbnReportRuns } from "../../drizzle/schema";
 import * as cbnReports from "../cbnReports";
 import * as bouReports from "../bouReports";
+
+/**
+ * Tenant predicate for `cbnDeadlineSubmissions`. Every read and every delete of
+ * that table must apply it.
+ *
+ * It exists as a named export rather than an inline `eq(...)` for two reasons.
+ * First, the read and the upsert's delete have to agree — they did not, and the
+ * disagreement was the bug: `listDeadlineSubmissions` selected the whole table,
+ * and `markDeadlineSubmitted` deleted by frameworkCode + periodLabel alone, so
+ * one bank recording "AML_CFT / May 2026" destroyed every other bank's record
+ * for the same framework and period. CBN framework codes and period labels are
+ * shared vocabulary across every institution on the platform, so that collided
+ * during ordinary use, not just under attack, and what it destroyed was a
+ * regulatory-submission record.
+ *
+ * Second, it is testable without a database. Tenancy cannot be tested by mocking
+ * `getDb` — a mock cannot intercept a module's own internal call, so such a test
+ * passes whether or not the filter is present (see publicApiTenancy.test.ts).
+ * The predicate is asserted directly instead.
+ *
+ * `organizationId` is nullable on this table, and rows are inserted with the
+ * caller's value verbatim. So null must map to `IS NULL`, never to `= NULL`
+ * (which matches nothing) and never to a missing WHERE clause (which matches
+ * everything — the failure this fix removes).
+ */
+export function deadlineSubmissionScope(organizationId: number | null | undefined) {
+  return organizationId == null
+    ? isNull(cbnDeadlineSubmissions.organizationId)
+    : eq(cbnDeadlineSubmissions.organizationId, organizationId);
+}
 
 // ─── CBN report builders: dispatch + shared input ─────────────────────────────
 const reportTypeEnum = z.enum([
@@ -162,9 +192,12 @@ export const cbnComplianceRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      // Upsert: delete existing record for this framework+period then insert fresh
+      // Upsert: replace THIS ORGANISATION's record for this framework+period.
+      // The org predicate is not optional — without it this deletes every other
+      // institution's record for the same framework and period.
       await db.delete(cbnDeadlineSubmissions).where(
         and(
+          deadlineSubmissionScope(ctx.user.organizationId),
           eq(cbnDeadlineSubmissions.frameworkCode, input.frameworkCode),
           eq(cbnDeadlineSubmissions.periodLabel, input.periodLabel),
         )
@@ -201,11 +234,14 @@ export const cbnComplianceRouter = router({
       return { success: true };
     }),
 
-  // ── List all deadline submission records ──────────────────────────────────
-  listDeadlineSubmissions: protectedProcedure.query(async () => {
+  // ── List THIS ORGANISATION's deadline submission records ──────────────────
+  // Was unscoped, which handed every authenticated user every institution's
+  // submission history — framework, period, submitter name and free-text notes.
+  listDeadlineSubmissions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
     return db.select().from(cbnDeadlineSubmissions)
+      .where(deadlineSubmissionScope(ctx.user.organizationId))
       .orderBy(desc(cbnDeadlineSubmissions.submittedAt));
   }),
 
