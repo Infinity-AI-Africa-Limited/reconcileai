@@ -30,6 +30,41 @@ import { cbnAuditLog, cbnDeadlineSubmissions, cbnReportSettings, cbnReportRuns }
 import * as cbnReports from "../cbnReports";
 import * as bouReports from "../bouReports";
 
+/**
+ * Tenant predicate for `cbnDeadlineSubmissions`. Every read and every delete of
+ * that table must apply it.
+ *
+ * It exists as a named export rather than an inline `eq(...)` for two reasons.
+ * First, the read and the upsert's delete have to agree — they did not, and the
+ * disagreement was the bug: `listDeadlineSubmissions` selected the whole table,
+ * and `markDeadlineSubmitted` deleted by frameworkCode + periodLabel alone, so
+ * one bank recording "AML_CFT / May 2026" destroyed every other bank's record
+ * for the same framework and period. CBN framework codes and period labels are
+ * shared vocabulary across every institution on the platform, so that collided
+ * during ordinary use, not just under attack, and what it destroyed was a
+ * regulatory-submission record.
+ *
+ * Second, it is testable without a database. Tenancy cannot be tested by mocking
+ * `getDb` — a mock cannot intercept a module's own internal call, so such a test
+ * passes whether or not the filter is present (see publicApiTenancy.test.ts).
+ * The predicate is asserted directly instead.
+ *
+ * The parameter is a REQUIRED number, which is the point rather than an
+ * inconvenience. An earlier revision accepted null and mapped it to `IS NULL`;
+ * that is safe against the original bug but still groups every account without
+ * an organisation into one shared pseudo-tenant, where each could read and
+ * overwrite the others' submissions. That is not hypothetical — 21 non-guest
+ * accounts currently have a null organizationId.
+ *
+ * A regulatory submission belongs to an institution, so an account with no
+ * organisation has nothing legitimate to record or read here. The callers refuse
+ * it outright and this signature makes a null unrepresentable, so the failure
+ * cannot be reintroduced by a caller forgetting to check.
+ */
+export function deadlineSubmissionScope(organizationId: number) {
+  return eq(cbnDeadlineSubmissions.organizationId, organizationId);
+}
+
 // ─── CBN report builders: dispatch + shared input ─────────────────────────────
 const reportTypeEnum = z.enum([
   // CBN (Nigeria)
@@ -162,15 +197,28 @@ export const cbnComplianceRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      // Upsert: delete existing record for this framework+period then insert fresh
+      // A regulatory filing is made BY an institution. An account with no
+      // organisation has none, and letting it write would put every such account
+      // in one shared pseudo-tenant able to overwrite the others' records.
+      const organizationId = ctx.user.organizationId;
+      if (organizationId == null) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Your account is not linked to an organisation, so it cannot record a regulatory submission.",
+        });
+      }
+      // Upsert: replace THIS ORGANISATION's record for this framework+period.
+      // The org predicate is not optional — without it this deletes every other
+      // institution's record for the same framework and period.
       await db.delete(cbnDeadlineSubmissions).where(
         and(
+          deadlineSubmissionScope(organizationId),
           eq(cbnDeadlineSubmissions.frameworkCode, input.frameworkCode),
           eq(cbnDeadlineSubmissions.periodLabel, input.periodLabel),
         )
       );
       await db.insert(cbnDeadlineSubmissions).values({
-        organizationId: ctx.user.organizationId ?? null,
+        organizationId,
         frameworkCode: input.frameworkCode,
         frameworkName: input.frameworkName,
         periodLabel: input.periodLabel,
@@ -201,11 +249,18 @@ export const cbnComplianceRouter = router({
       return { success: true };
     }),
 
-  // ── List all deadline submission records ──────────────────────────────────
-  listDeadlineSubmissions: protectedProcedure.query(async () => {
+  // ── List THIS ORGANISATION's deadline submission records ──────────────────
+  // Was unscoped, which handed every authenticated user every institution's
+  // submission history — framework, period, submitter name and free-text notes.
+  listDeadlineSubmissions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
+    // No organisation means no institution whose filings these could be. Empty
+    // rather than IS NULL, which would pool every org-less account together.
+    const organizationId = ctx.user.organizationId;
+    if (organizationId == null) return [];
     return db.select().from(cbnDeadlineSubmissions)
+      .where(deadlineSubmissionScope(organizationId))
       .orderBy(desc(cbnDeadlineSubmissions.submittedAt));
   }),
 
