@@ -48,24 +48,37 @@ describe("when the tenant is a retail merchant", () => {
   });
 });
 
-describe("when the tenant is any other vertical", () => {
-  // The rule is "not retail", NOT "financial services only", and the difference
-  // is load-bearing: the distributor registry's 30 live rows are owned by a
-  // FINANCIAL SERVICES organisation. A financial-services-only reading of the
-  // docs would have orphaned them.
-  it("should keep both features for financial services", () => {
-    for (const feature of ALL_VERTICAL_FEATURES) {
-      expect(featureAppliesTo(feature, "financial_services")).toBe(true);
-    }
+describe("when the tenant is a bank", () => {
+  it("should keep CBN regulatory reporting", () => {
+    expect(featureAppliesTo("cbn_regulatory_reporting", "financial_services")).toBe(true);
   });
 
-  it("should keep both features for corporate B2B", () => {
+  it("should refuse the distributor registry", () => {
+    // Distributors are the corporate B2B sector's concept: the registry records
+    // who an FMCG supplier sells through, and a bank does not sell through
+    // distributors.
+    //
+    // An earlier revision allowed this, reasoning from production data — 30
+    // distributor rows sit on the financial-services demo tenant. Those rows are
+    // misfiled, not evidence: the corporate-B2B tenant that owns the concept has
+    // none, and 14 more sit under organizationId 0, which is no tenant at all.
+    // The client never made this mistake (navItems scopes the registry to
+    // ["corporate_b2b"]).
+    expect(featureAppliesTo("distributor_registry", "financial_services")).toBe(false);
+  });
+});
+
+describe("when the tenant is a corporate B2B supplier", () => {
+  it("should keep both features", () => {
     for (const feature of ALL_VERTICAL_FEATURES) {
       expect(featureAppliesTo(feature, "corporate_b2b")).toBe(true);
     }
   });
+});
 
-  it("should keep both features for the platform operator", () => {
+describe("when the tenant is the platform operator", () => {
+  it("should keep both features", () => {
+    // super_admin supports every tenant, matching shared/moduleScope.
     for (const feature of ALL_VERTICAL_FEATURES) {
       expect(featureAppliesTo(feature, "super_admin")).toBe(true);
     }
@@ -151,5 +164,29 @@ describe("when the guard is enforced server-side", () => {
     expect(SHARED).toMatch(/featureAppliesTo\(feature, segment\)/);
     expect(ROUTERS).not.toMatch(/function featureAppliesTo/);
     expect(CBN).not.toMatch(/function featureAppliesTo/);
+  });
+
+  it("should agree with the client about who the registry is for", () => {
+    // The whole reason this rule lives in shared/ is that the client's hiding and
+    // the server's refusal must not disagree. The client scopes the registry nav
+    // to corporate_b2b; if someone widens one side, this fails.
+    const NAV = fs.readFileSync(path.join(__dirname, "..", "client", "src", "lib", "navItems.ts"), "utf8");
+    expect(NAV).toMatch(/Distributor Registry.*segments: \["corporate_b2b"\]/);
+    expect(featureAppliesTo("distributor_registry", "corporate_b2b")).toBe(true);
+    for (const other of ["financial_services", "retail_commerce"]) {
+      expect(featureAppliesTo("distributor_registry", other)).toBe(false);
+    }
+  });
+});
+
+describe("when demo data is seeded", () => {
+  const SEED = fs.readFileSync(path.join(__dirname, "demoSeedEngine.ts"), "utf8");
+
+  it("should not file distributors against a non-B2B tenant", () => {
+    // The seeder ran with whatever organisation the caller had, which is how 30
+    // distributor rows came to sit on a bank and 14 under organizationId 0. The
+    // guard has to be here as well as on the read path, or the next demo seed
+    // recreates the contradiction this PR is fixing.
+    expect(SEED).toMatch(/featureAppliesTo\("distributor_registry"/);
   });
 });
