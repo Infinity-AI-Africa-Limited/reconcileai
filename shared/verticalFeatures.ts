@@ -86,6 +86,28 @@ export function featureAppliesTo(
   return FEATURE_SEGMENTS[feature].includes(segment as FeatureSegment);
 }
 
+/**
+ * The same rule for code that CREATES rows, where the default must be inverted.
+ *
+ * `featureAppliesTo` fails OPEN on an unknown segment, deliberately: withdrawing
+ * a capability because data is missing is the wrong direction for a read. Applied
+ * to a write, that same default manufactures rows — an absent organisation yields
+ * an absent segment, the check passes, and the row is filed against a tenant that
+ * does not exist. That is how 14 distributor rows came to sit under
+ * organizationId 0, reachable by nobody, and re-deriving the check inline is how
+ * the same mistake kept coming back in three different files.
+ *
+ * So this one demands a positive match: an organisation that exists, whose
+ * segment is known, and whose segment carries the feature. Unknown means NO.
+ */
+export function featureStrictlyAppliesTo(
+  feature: VerticalFeature,
+  segment: FeatureSegment | string | null | undefined,
+): boolean {
+  if (!segment || !ALL_FEATURE_SEGMENTS.includes(segment as FeatureSegment)) return false;
+  return FEATURE_SEGMENTS[feature].includes(segment as FeatureSegment);
+}
+
 /** Why a feature was refused, phrased so the reader can act on it. */
 export function featureUnavailableReason(
   feature: VerticalFeature,

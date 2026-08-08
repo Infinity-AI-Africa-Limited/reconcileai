@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   featureAppliesTo,
+  featureStrictlyAppliesTo,
   featureUnavailableReason,
   ALL_VERTICAL_FEATURES,
 } from "../shared/verticalFeatures";
@@ -82,6 +83,39 @@ describe("when the tenant is the platform operator", () => {
     for (const feature of ALL_VERTICAL_FEATURES) {
       expect(featureAppliesTo(feature, "super_admin")).toBe(true);
     }
+  });
+});
+
+describe("when code CREATES rows rather than reads them", () => {
+  // The read/write asymmetry, given its own name because collapsing the two
+  // produced the same defect in three separate files during one session:
+  // "no organisation" kept being treated as "unknown segment", and the
+  // fail-open default then manufactured rows nobody can reach.
+  it("should refuse an unknown segment instead of allowing it", () => {
+    for (const unknown of [null, undefined, "", "something_new"]) {
+      for (const feature of ALL_VERTICAL_FEATURES) {
+        // The permissive form says yes...
+        expect(featureAppliesTo(feature, unknown as string | null)).toBe(true);
+        // ...and the strict form, used by write paths, says no.
+        expect(featureStrictlyAppliesTo(feature, unknown as string | null)).toBe(false);
+      }
+    }
+  });
+
+  it("should still agree with the permissive rule on a known segment", () => {
+    // The asymmetry is only about missing data. Where the segment IS known, the
+    // two must never disagree, or there would be two rules again.
+    for (const segment of ["financial_services", "corporate_b2b", "retail_commerce", "super_admin"]) {
+      for (const feature of ALL_VERTICAL_FEATURES) {
+        expect(featureStrictlyAppliesTo(feature, segment)).toBe(featureAppliesTo(feature, segment));
+      }
+    }
+  });
+
+  it("should permit seeding only for the sector that owns the feature", () => {
+    expect(featureStrictlyAppliesTo("distributor_registry", "corporate_b2b")).toBe(true);
+    expect(featureStrictlyAppliesTo("distributor_registry", "financial_services")).toBe(false);
+    expect(featureStrictlyAppliesTo("distributor_registry", "retail_commerce")).toBe(false);
   });
 });
 
@@ -182,20 +216,12 @@ describe("when the guard is enforced server-side", () => {
 describe("when demo data is seeded", () => {
   const SEED = fs.readFileSync(path.join(__dirname, "demoSeedEngine.ts"), "utf8");
 
-  it("should not file distributors against a non-B2B tenant", () => {
-    // The seeder ran with whatever organisation the caller had, which is how 30
-    // distributor rows came to sit on a bank and 14 under organizationId 0. The
-    // guard has to be here as well as on the read path, or the next demo seed
-    // recreates the contradiction this PR is fixing.
-    expect(SEED).toMatch(/featureAppliesTo\("distributor_registry"/);
-  });
-
-  it("should require the organisation to EXIST, not merely to have a allowed segment", () => {
-    // The subtle one, and the third time this exact conflation has been caught:
-    // "no organisation" is not "unknown segment". A null orgId produces a null
-    // segment, and featureAppliesTo fails OPEN on an unknown segment by design —
-    // so a segment-only check still seeds rows at `orgId ?? 0`, the tenant that
-    // does not exist. That is the origin of the 14 unreachable rows.
-    expect(SEED).toMatch(/orgId != null && featureAppliesTo\("distributor_registry"/);
+  it("should use the STRICT rule, because seeding creates rows", () => {
+    // The permissive helper fails open on an unknown segment, which is right for
+    // a read and wrong for a write: an absent or non-existent organisation yields
+    // an absent segment, the check passes, and the row is filed against a tenant
+    // that does not exist. That is the origin of the 14 unreachable rows.
+    expect(SEED).toMatch(/featureStrictlyAppliesTo\("distributor_registry"/);
+    expect(SEED).not.toMatch(/[^y]featureAppliesTo\("distributor_registry"/);
   });
 });

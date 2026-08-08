@@ -8,7 +8,7 @@
  */
 
 import { getDb } from "./db";
-import { featureAppliesTo } from "@shared/verticalFeatures";
+import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 import {
   transactions,
   uploadBatches,
@@ -356,17 +356,16 @@ export async function seedFmcgDemoData(userId: number, orgId: number | null): Pr
   // The rest of the FMCG seed (channels, transactions, reconciliation) still runs
   // for any tenant, so demos elsewhere are unaffected.
   //
-  // The organisation must EXIST, not merely have a permitted segment. This write
-  // path is deliberately stricter than the read path: `featureAppliesTo` keeps a
-  // feature when the SEGMENT is unknown, because withdrawing capability on missing
-  // data is the wrong direction for a read. Creating rows is the opposite case —
-  // a missing organisation is exactly how 14 distributors came to sit under
-  // `orgId ?? 0`, a tenant that does not exist and whose rows no org-scoped query
-  // can ever return. Checking only the segment here would have left that path
-  // open, because a null organisation yields a null segment, which fails open.
+  // Uses the STRICT form of the rule, because this creates rows. featureAppliesTo
+  // fails open on an unknown segment by design (right for a read, wrong for a
+  // write): an absent — or simply non-existent — organisation yields an absent
+  // segment, so the permissive check passes and the row is filed against a tenant
+  // that does not exist. That is how 14 distributors came to sit under
+  // `orgId ?? 0`, reachable by nobody. featureStrictlyAppliesTo demands a positive
+  // match, so a missing org, a missing org row, and an unset segment all mean no.
   const distributorIds: number[] = [];
   const seedSegment = orgId ? await segmentOfOrg(db, orgId) : null;
-  const seedDistributors = orgId != null && featureAppliesTo("distributor_registry", seedSegment);
+  const seedDistributors = featureStrictlyAppliesTo("distributor_registry", seedSegment);
   if (!seedDistributors) {
     console.log(
       `[DemoSeed] Skipping distributor seed for org ${orgId ?? "(none)"} (segment ${seedSegment ?? "unset"}) — distributors are corporate B2B only.`,
