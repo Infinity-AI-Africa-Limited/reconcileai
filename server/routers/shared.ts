@@ -96,6 +96,21 @@ async function segmentOf(ctx: { user: { organizationId?: number | null } }): Pro
  */
 export function verticalFeatureProcedure(feature: VerticalFeature) {
   return protectedProcedure.use(async ({ ctx, next }) => {
+    // "No organisation at all" is NOT the same as "segment not yet known", and
+    // the two must not share a branch. An unknown segment keeps the feature by
+    // design (see featureAppliesTo). An account with no organisation has no
+    // institution whose feature this could be — and several CBN handlers fall
+    // back to `ctx.user.organizationId ?? 0`, so allowing it through would pool
+    // every such account into one shared pseudo-tenant able to read and
+    // overwrite each other's report settings and regulatory runs. Refuse before
+    // that fallback is reachable. 22 accounts currently have no organisation;
+    // none of them is a super admin, so this locks out no operator.
+    if (!ctx.user.organizationId) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Your account is not linked to an organisation, so this feature is unavailable.",
+      });
+    }
     const segment = await segmentOf(ctx);
     if (!featureAppliesTo(feature, segment)) {
       throw new TRPCError({ code: "FORBIDDEN", message: featureUnavailableReason(feature, segment) });

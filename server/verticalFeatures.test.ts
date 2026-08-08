@@ -18,6 +18,16 @@ import {
   featureUnavailableReason,
   ALL_VERTICAL_FEATURES,
 } from "../shared/verticalFeatures";
+import { appRouter } from "./routers";
+
+/** A caller with no organisation — the case the guard has to refuse. */
+function orgLessCaller() {
+  return appRouter.createCaller({
+    user: { id: 9001, openId: "orgless_test", name: "T", email: "t@t.com", role: "user", organizationId: null, isGuest: false },
+    req: { headers: {}, ip: "127.0.0.1", get: () => "localhost", protocol: "http" },
+    res: { cookie: () => {}, clearCookie: () => {} },
+  } as any);
+}
 
 describe("when the tenant is a retail merchant", () => {
   it("should refuse every vertical-scoped feature", () => {
@@ -75,6 +85,21 @@ describe("when the segment is unknown", () => {
   });
 });
 
+describe("when the caller has no organisation", () => {
+  // Behavioural rather than structural: the refusal happens before any database
+  // access, so this runs with no DB and proves the procedure actually rejects
+  // rather than merely that the source contains a check.
+  it("should refuse the CBN surfaces", async () => {
+    const caller = orgLessCaller();
+    await expect(caller.cbnCompliance.listDeadlineSubmissions()).rejects.toThrow(/not linked to an organisation/i);
+    await expect(caller.dashboard.auditorCompliance()).rejects.toThrow(/not linked to an organisation/i);
+  });
+
+  it("should refuse the distributor registry", async () => {
+    await expect(orgLessCaller().distributor.stats()).rejects.toThrow(/not linked to an organisation/i);
+  });
+});
+
 describe("when the guard is enforced server-side", () => {
   const read = (rel: string) => fs.readFileSync(path.join(__dirname, rel), "utf8");
   const CBN = read("routers/cbnCompliance.ts");
@@ -107,6 +132,18 @@ describe("when the guard is enforced server-side", () => {
     // These feed the CBN pack, so they carry the same rule as the pack itself.
     expect(ROUTERS).toMatch(/auditorCompliance:\s*cbnProcedure/);
     expect(ROUTERS).toMatch(/auditorTrail:\s*cbnProcedure/);
+  });
+
+  it("should refuse an org-less caller before the segment is even looked up", () => {
+    // Distinct from the unknown-segment case below, which deliberately ALLOWS.
+    // An account with no organisation is not "segment not yet resolved" — it has
+    // no institution at all, and several CBN handlers fall back to
+    // `organizationId ?? 0`, which would pool every such account into one shared
+    // pseudo-tenant. The check must sit ahead of segmentOf so that fallback is
+    // never reached.
+    const guard = between(SHARED, "export function verticalFeatureProcedure", "const segment = await segmentOf");
+    expect(guard).toContain("ctx.user.organizationId");
+    expect(guard).toContain("PRECONDITION_FAILED");
   });
 
   it("should decide using the shared rule, not a second inline copy", () => {
