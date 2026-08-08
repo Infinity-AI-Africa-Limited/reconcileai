@@ -10,6 +10,7 @@
 import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
+import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb, createAuditLog, getChannelByIdForOrg } from "../db";
 import { organizations, users } from "../../drizzle/schema";
@@ -64,6 +65,65 @@ export async function assertCanManageUsers(
     }
   }
 }
+
+// ─── Vertical Feature Middleware ─────────────────────────────────────
+
+/** The caller's organisation segment, or null when they have no organisation. */
+async function segmentOf(ctx: { user: { organizationId?: number | null } }): Promise<string | null> {
+  if (!ctx.user.organizationId) return null;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [org] = await drizzle
+    .select({ segment: organizations.segment })
+    .from(organizations)
+    .where(eq(organizations.id, ctx.user.organizationId))
+    .limit(1);
+  return org?.segment ?? null;
+}
+
+/**
+ * A procedure only some verticals may call at all.
+ *
+ * Applied as a procedure BUILDER rather than a line inside each handler on
+ * purpose: a router built from it cannot gain an unguarded procedure by someone
+ * adding one and forgetting the check. That is precisely how the module-scope
+ * gap happened — the guard was on the two module mutations, and the procedures
+ * that actually ran the engine were added without it.
+ *
+ * The segment lookup costs one indexed read on a hot-ish path. Acceptable here
+ * because these routers are low-traffic (regulatory reporting, a distributor
+ * registry), and correctness at the boundary is worth more than the round trip.
+ */
+export function verticalFeatureProcedure(feature: VerticalFeature) {
+  return protectedProcedure.use(async ({ ctx, next }) => {
+    // "No organisation at all" is NOT the same as "segment not yet known", and
+    // the two must not share a branch. An unknown segment keeps the feature by
+    // design (see featureAppliesTo). An account with no organisation has no
+    // institution whose feature this could be — and several CBN handlers fall
+    // back to `ctx.user.organizationId ?? 0`, so allowing it through would pool
+    // every such account into one shared pseudo-tenant able to read and
+    // overwrite each other's report settings and regulatory runs. Refuse before
+    // that fallback is reachable. 22 accounts currently have no organisation;
+    // none of them is a super admin, so this locks out no operator.
+    if (!ctx.user.organizationId) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Your account is not linked to an organisation, so this feature is unavailable.",
+      });
+    }
+    const segment = await segmentOf(ctx);
+    if (!featureAppliesTo(feature, segment)) {
+      throw new TRPCError({ code: "FORBIDDEN", message: featureUnavailableReason(feature, segment) });
+    }
+    return next({ ctx });
+  });
+}
+
+/** CBN/BoU regulatory reporting, attestation, deadlines, Auditor dashboard. */
+export const cbnProcedure = verticalFeatureProcedure("cbn_regulatory_reporting");
+
+/** Distributor identity registry and the Pilot Readiness scorecard over it. */
+export const distributorProcedure = verticalFeatureProcedure("distributor_registry");
 
 // ─── Guest Protection Middleware ─────────────────────────────────────
 
