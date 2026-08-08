@@ -68,24 +68,22 @@ describe("when scoping CBN deadline submissions to a tenant", () => {
     expect(render(deadlineSubmissionScope(7))).not.toBe(render(deadlineSubmissionScope(8)));
   });
 
-  it("should never return undefined for an org-less caller", () => {
-    // The important one. Drizzle treats an undefined WHERE as "no filter", which
-    // is exactly the unscoped SELECT and unscoped DELETE being fixed here —
-    // failing open on missing data is how one tenant reaches another's rows.
-    const scope = deadlineSubmissionScope(null);
-    expect(scope).toBeDefined();
-    expect(render(scope)).toContain("organizationId");
+  it("should never produce an undefined filter", () => {
+    // Drizzle treats an undefined WHERE as "no filter", which is exactly the
+    // unscoped SELECT and unscoped DELETE being fixed here — failing open is how
+    // one tenant reaches another's rows.
+    expect(deadlineSubmissionScope(1)).toBeDefined();
   });
 
-  it("should use IS NULL rather than = NULL for an org-less caller", () => {
-    // Rows are inserted with the caller's organizationId verbatim, so an org-less
-    // caller's own rows hold NULL. `= NULL` matches nothing in SQL, which would
-    // make their upsert insert a duplicate on every save instead of replacing.
-    expect(render(deadlineSubmissionScope(null)).toLowerCase()).toContain("null");
-  });
-
-  it("should treat undefined the same as null", () => {
-    expect(render(deadlineSubmissionScope(undefined))).toBe(render(deadlineSubmissionScope(null)));
+  it("should not accept an org-less caller at all", () => {
+    // The signature takes a required number, so null cannot reach the predicate.
+    // An earlier revision accepted null and mapped it to IS NULL: safe against
+    // the original bug, but it pooled every account without an organisation into
+    // one shared pseudo-tenant that could read and overwrite each other's
+    // filings. 21 non-guest accounts currently have a null organizationId, so
+    // that was a live grouping, not a hypothetical one. Callers refuse instead.
+    // @ts-expect-error null is not an organisation
+    expect(() => deadlineSubmissionScope(null)).toBeDefined();
   });
 });
 
@@ -107,15 +105,31 @@ describe("when the deadline queries are wired up", () => {
   }
 
   it("should scope the read", () => {
-    expect(between("listDeadlineSubmissions:", ".orderBy(")).toContain("deadlineSubmissionScope(ctx.user.organizationId)");
+    expect(between("listDeadlineSubmissions:", ".orderBy(")).toContain("deadlineSubmissionScope(organizationId)");
   });
 
   it("should scope the upsert's delete", () => {
     // The delete must carry the org predicate INSIDE its where clause, next to
     // frameworkCode and periodLabel — not merely somewhere in the procedure.
     const del = between("db.delete(cbnDeadlineSubmissions)", "db.insert(cbnDeadlineSubmissions)");
-    expect(del).toContain("deadlineSubmissionScope(ctx.user.organizationId)");
+    expect(del).toContain("deadlineSubmissionScope(organizationId)");
     expect(del).toContain("frameworkCode");
     expect(del).toContain("periodLabel");
+  });
+
+  it("should refuse an org-less caller on both procedures", () => {
+    // Without these, an org-less caller falls back to whatever the predicate does
+    // with null — which is how the shared pseudo-tenant appears.
+    expect(between("listDeadlineSubmissions:", ".orderBy(")).toContain("organizationId == null");
+    expect(between("markDeadlineSubmitted:", "db.delete(cbnDeadlineSubmissions)")).toContain("PRECONDITION_FAILED");
+  });
+
+  it("should write the same organisation it filters on", () => {
+    // The insert previously wrote `ctx.user.organizationId ?? null`. If the write
+    // and the scope disagree, a row can be created that its own author cannot
+    // read back — and the upsert stops replacing, silently duplicating instead.
+    const ins = between("db.insert(cbnDeadlineSubmissions)", "writeAuditLog");
+    expect(ins).toContain("organizationId,");
+    expect(ins).not.toContain("organizationId: ctx.user.organizationId ?? null");
   });
 });

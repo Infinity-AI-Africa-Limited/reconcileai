@@ -21,7 +21,7 @@
  */
 
 import { z } from "zod";
-import { eq, and, desc, isNull } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
@@ -49,15 +49,20 @@ import * as bouReports from "../bouReports";
  * passes whether or not the filter is present (see publicApiTenancy.test.ts).
  * The predicate is asserted directly instead.
  *
- * `organizationId` is nullable on this table, and rows are inserted with the
- * caller's value verbatim. So null must map to `IS NULL`, never to `= NULL`
- * (which matches nothing) and never to a missing WHERE clause (which matches
- * everything — the failure this fix removes).
+ * The parameter is a REQUIRED number, which is the point rather than an
+ * inconvenience. An earlier revision accepted null and mapped it to `IS NULL`;
+ * that is safe against the original bug but still groups every account without
+ * an organisation into one shared pseudo-tenant, where each could read and
+ * overwrite the others' submissions. That is not hypothetical — 21 non-guest
+ * accounts currently have a null organizationId.
+ *
+ * A regulatory submission belongs to an institution, so an account with no
+ * organisation has nothing legitimate to record or read here. The callers refuse
+ * it outright and this signature makes a null unrepresentable, so the failure
+ * cannot be reintroduced by a caller forgetting to check.
  */
-export function deadlineSubmissionScope(organizationId: number | null | undefined) {
-  return organizationId == null
-    ? isNull(cbnDeadlineSubmissions.organizationId)
-    : eq(cbnDeadlineSubmissions.organizationId, organizationId);
+export function deadlineSubmissionScope(organizationId: number) {
+  return eq(cbnDeadlineSubmissions.organizationId, organizationId);
 }
 
 // ─── CBN report builders: dispatch + shared input ─────────────────────────────
@@ -192,18 +197,28 @@ export const cbnComplianceRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      // A regulatory filing is made BY an institution. An account with no
+      // organisation has none, and letting it write would put every such account
+      // in one shared pseudo-tenant able to overwrite the others' records.
+      const organizationId = ctx.user.organizationId;
+      if (organizationId == null) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Your account is not linked to an organisation, so it cannot record a regulatory submission.",
+        });
+      }
       // Upsert: replace THIS ORGANISATION's record for this framework+period.
       // The org predicate is not optional — without it this deletes every other
       // institution's record for the same framework and period.
       await db.delete(cbnDeadlineSubmissions).where(
         and(
-          deadlineSubmissionScope(ctx.user.organizationId),
+          deadlineSubmissionScope(organizationId),
           eq(cbnDeadlineSubmissions.frameworkCode, input.frameworkCode),
           eq(cbnDeadlineSubmissions.periodLabel, input.periodLabel),
         )
       );
       await db.insert(cbnDeadlineSubmissions).values({
-        organizationId: ctx.user.organizationId ?? null,
+        organizationId,
         frameworkCode: input.frameworkCode,
         frameworkName: input.frameworkName,
         periodLabel: input.periodLabel,
@@ -240,8 +255,12 @@ export const cbnComplianceRouter = router({
   listDeadlineSubmissions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) return [];
+    // No organisation means no institution whose filings these could be. Empty
+    // rather than IS NULL, which would pool every org-less account together.
+    const organizationId = ctx.user.organizationId;
+    if (organizationId == null) return [];
     return db.select().from(cbnDeadlineSubmissions)
-      .where(deadlineSubmissionScope(ctx.user.organizationId))
+      .where(deadlineSubmissionScope(organizationId))
       .orderBy(desc(cbnDeadlineSubmissions.submittedAt));
   }),
 
