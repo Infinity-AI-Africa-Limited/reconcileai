@@ -815,6 +815,12 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
 
+        // The module page is not the gate. moduleType arrives straight from the
+        // caller here — and from the public API, which funnels into this same
+        // procedure — so a retail tenant could run account_level without ever
+        // having it enabled. Refuse before anything is persisted or enqueued.
+        await assertModuleAvailable(ctx, input.moduleType);
+
         // Validate channels exist
         const sourceChannel = await db.getChannelById(input.sourceChannelId);
         const targetChannel = await db.getChannelById(input.targetChannelId);
@@ -895,6 +901,10 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+
+        // Same gate as the single-channel run — fanning out to N targets must
+        // not become a way around it.
+        await assertModuleAvailable(ctx, input.moduleType);
 
         const sourceChannel = await db.getChannelById(input.sourceChannelId);
         if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });

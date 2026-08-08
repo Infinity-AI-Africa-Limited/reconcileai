@@ -72,13 +72,37 @@ describe("when the segment is unknown", () => {
 
 describe("when the guard is enforced server-side", () => {
   const ROUTERS = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
+  const GUARD = "await assertModuleAvailable(ctx, input.moduleType)";
 
-  it("should refuse an inapplicable module on both module mutations", () => {
+  /**
+   * Source between two anchors, so "the guard runs BEFORE the write" is
+   * checkable rather than just "the guard appears somewhere in the file".
+   */
+  function between(startAnchor: string, endAnchor: string): string {
+    const start = ROUTERS.indexOf(startAnchor);
+    expect(start, `anchor missing: ${startAnchor}`).toBeGreaterThan(-1);
+    const end = ROUTERS.indexOf(endAnchor, start);
+    expect(end, `anchor missing after ${startAnchor}: ${endAnchor}`).toBeGreaterThan(start);
+    return ROUTERS.slice(start, end);
+  }
+
+  it("should refuse an inapplicable module before the config row is written", () => {
     // Hiding the card is presentation. Without these, a retail admin could still
     // enable account_level by calling the procedure directly — the same trap as
     // the assessment lead pipeline, where a hidden nav entry fronted an open
     // procedure.
-    expect((ROUTERS.match(/await assertModuleAvailable\(ctx, input\.moduleType\)/g) ?? []).length).toBe(2);
+    expect(between("toggle: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+    expect(between("updateConfig: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+  });
+
+  it("should refuse an inapplicable module before a reconciliation job is persisted", () => {
+    // The module toggle is NOT the gate for a run: these procedures take
+    // moduleType straight from the caller and never consult moduleConfigurations,
+    // so guarding only the toggle left the actual engine reachable. The public
+    // API (POST /api/v1/reconciliation/runs) calls reconciliation.create too, so
+    // the guard has to sit on the procedure, not on the UI that fronts it.
+    expect(between("create: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
+    expect(between("createMultiChannel: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
   });
 
   it("should decide using the shared rule, not a second inline copy", () => {
