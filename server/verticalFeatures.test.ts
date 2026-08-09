@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   featureAppliesTo,
+  featureStrictlyAppliesTo,
   featureUnavailableReason,
   ALL_VERTICAL_FEATURES,
 } from "../shared/verticalFeatures";
@@ -48,27 +49,73 @@ describe("when the tenant is a retail merchant", () => {
   });
 });
 
-describe("when the tenant is any other vertical", () => {
-  // The rule is "not retail", NOT "financial services only", and the difference
-  // is load-bearing: the distributor registry's 30 live rows are owned by a
-  // FINANCIAL SERVICES organisation. A financial-services-only reading of the
-  // docs would have orphaned them.
-  it("should keep both features for financial services", () => {
-    for (const feature of ALL_VERTICAL_FEATURES) {
-      expect(featureAppliesTo(feature, "financial_services")).toBe(true);
-    }
+describe("when the tenant is a bank", () => {
+  it("should keep CBN regulatory reporting", () => {
+    expect(featureAppliesTo("cbn_regulatory_reporting", "financial_services")).toBe(true);
   });
 
-  it("should keep both features for corporate B2B", () => {
+  it("should refuse the distributor registry", () => {
+    // Distributors are the corporate B2B sector's concept: the registry records
+    // who an FMCG supplier sells through, and a bank does not sell through
+    // distributors.
+    //
+    // An earlier revision allowed this, reasoning from production data — 30
+    // distributor rows sit on the financial-services demo tenant. Those rows are
+    // misfiled, not evidence: the corporate-B2B tenant that owns the concept has
+    // none, and 14 more sit under organizationId 0, which is no tenant at all.
+    // The client never made this mistake (navItems scopes the registry to
+    // ["corporate_b2b"]).
+    expect(featureAppliesTo("distributor_registry", "financial_services")).toBe(false);
+  });
+});
+
+describe("when the tenant is a corporate B2B supplier", () => {
+  it("should keep both features", () => {
     for (const feature of ALL_VERTICAL_FEATURES) {
       expect(featureAppliesTo(feature, "corporate_b2b")).toBe(true);
     }
   });
+});
 
-  it("should keep both features for the platform operator", () => {
+describe("when the tenant is the platform operator", () => {
+  it("should keep both features", () => {
+    // super_admin supports every tenant, matching shared/moduleScope.
     for (const feature of ALL_VERTICAL_FEATURES) {
       expect(featureAppliesTo(feature, "super_admin")).toBe(true);
     }
+  });
+});
+
+describe("when code CREATES rows rather than reads them", () => {
+  // The read/write asymmetry, given its own name because collapsing the two
+  // produced the same defect in three separate files during one session:
+  // "no organisation" kept being treated as "unknown segment", and the
+  // fail-open default then manufactured rows nobody can reach.
+  it("should refuse an unknown segment instead of allowing it", () => {
+    for (const unknown of [null, undefined, "", "something_new"]) {
+      for (const feature of ALL_VERTICAL_FEATURES) {
+        // The permissive form says yes...
+        expect(featureAppliesTo(feature, unknown as string | null)).toBe(true);
+        // ...and the strict form, used by write paths, says no.
+        expect(featureStrictlyAppliesTo(feature, unknown as string | null)).toBe(false);
+      }
+    }
+  });
+
+  it("should still agree with the permissive rule on a known segment", () => {
+    // The asymmetry is only about missing data. Where the segment IS known, the
+    // two must never disagree, or there would be two rules again.
+    for (const segment of ["financial_services", "corporate_b2b", "retail_commerce", "super_admin"]) {
+      for (const feature of ALL_VERTICAL_FEATURES) {
+        expect(featureStrictlyAppliesTo(feature, segment)).toBe(featureAppliesTo(feature, segment));
+      }
+    }
+  });
+
+  it("should permit seeding only for the sector that owns the feature", () => {
+    expect(featureStrictlyAppliesTo("distributor_registry", "corporate_b2b")).toBe(true);
+    expect(featureStrictlyAppliesTo("distributor_registry", "financial_services")).toBe(false);
+    expect(featureStrictlyAppliesTo("distributor_registry", "retail_commerce")).toBe(false);
   });
 });
 
@@ -151,5 +198,30 @@ describe("when the guard is enforced server-side", () => {
     expect(SHARED).toMatch(/featureAppliesTo\(feature, segment\)/);
     expect(ROUTERS).not.toMatch(/function featureAppliesTo/);
     expect(CBN).not.toMatch(/function featureAppliesTo/);
+  });
+
+  it("should agree with the client about who the registry is for", () => {
+    // The whole reason this rule lives in shared/ is that the client's hiding and
+    // the server's refusal must not disagree. The client scopes the registry nav
+    // to corporate_b2b; if someone widens one side, this fails.
+    const NAV = fs.readFileSync(path.join(__dirname, "..", "client", "src", "lib", "navItems.ts"), "utf8");
+    expect(NAV).toMatch(/Distributor Registry.*segments: \["corporate_b2b"\]/);
+    expect(featureAppliesTo("distributor_registry", "corporate_b2b")).toBe(true);
+    for (const other of ["financial_services", "retail_commerce"]) {
+      expect(featureAppliesTo("distributor_registry", other)).toBe(false);
+    }
+  });
+});
+
+describe("when demo data is seeded", () => {
+  const SEED = fs.readFileSync(path.join(__dirname, "demoSeedEngine.ts"), "utf8");
+
+  it("should use the STRICT rule, because seeding creates rows", () => {
+    // The permissive helper fails open on an unknown segment, which is right for
+    // a read and wrong for a write: an absent or non-existent organisation yields
+    // an absent segment, the check passes, and the row is filed against a tenant
+    // that does not exist. That is the origin of the 14 unreachable rows.
+    expect(SEED).toMatch(/featureStrictlyAppliesTo\("distributor_registry"/);
+    expect(SEED).not.toMatch(/[^y]featureAppliesTo\("distributor_registry"/);
   });
 });
