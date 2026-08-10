@@ -19,6 +19,10 @@ export default defineConfig({
       "server/**/*.spec.ts",
       // Pure (non-DOM) client libraries — e.g. settlement-file connectors.
       "client/src/lib/**/*.test.ts",
+      // Build-time code-quality checks that read the source tree. They live
+      // outside client/src precisely because they import Node-only tooling —
+      // a parser in client source is one careless import away from the bundle.
+      "tools/**/*.test.ts",
     ],
   },
 });

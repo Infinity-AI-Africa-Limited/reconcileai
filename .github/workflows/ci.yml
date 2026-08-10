@@ -47,7 +47,7 @@ jobs:
       # defects it exists for were both invisible to tsc — a hook below an early
       # return is perfectly well-typed. See eslint.config.js for why the config
       # is one rule wide, and for the tRPC-shaped half it cannot see (covered by
-      # client/src/lib/hookOrder.test.ts in the Tests job).
+      # tools/hookOrder.test.ts in the Tests job).
       - name: Lint
         run: pnpm lint
       - name: Build
