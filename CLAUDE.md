@@ -1495,13 +1495,14 @@ document.** Reference secrets by variable name only. They belong in the Railway 
 and GitHub Actions secrets, nowhere else. A secret that has been written down anywhere else
 is compromised and must be rotated — there is no "it was only internal" exception.
 
-**Incident log (three occurrences, all avoidable):**
+**Incident log (four occurrences, all avoidable):**
 
 | Date | Secret | How |
 |---|---|---|
 | 2026-07-19 | SHOPLINE APP Secret | Pasted into CLAUDE.md in plaintext; committed to git history on **both** remotes. Redacted since, but permanently in history. Rotation unavailable while the app is in Draft (§2B.9) |
 | ~2026-08-01 | Prod `JWT_SECRET` | Pasted in plaintext by Manus in a session summary; commit `ec01519` was "remove leaked secret" |
 | 2026-08-02 | **Rotated** `JWT_SECRET` **and** new `CRON_SECRET` | Pasted in plaintext by Manus into *Manus Session Summary Report.docx* — i.e. the rotation performed to fix the previous leak was itself leaked in the document announcing it |
+| 2026-08-04 | `CRON_SECRET` — **leading characters only** | Quoted in a chat message while confirming the Woodcore secret had been updated. A prefix is still secret material (§2B.9b makes the same point about app-secret prefixes), so it is logged. **Materially smaller than the three above** — a short prefix of a long random value does not meaningfully narrow a search. Assessed as low severity; rotation judged disproportionate to the exposure, and the §19 pre-customer rotation supersedes it. Recorded so the pattern stays visible: a status update never needs to carry any part of the value — "updated to match Railway" says everything |
 
 **Why `JWT_SECRET` specifically is a full compromise, not just a signing key:**
 - HS256 key for the `app_session_id` cookie → forges a session as **any user, including `super_admin`**
@@ -1521,9 +1522,27 @@ decision and raise it again only on new evidence.
 **Rotation runbook (order matters) — for whenever rotation does happen:**
 1. Generate the new value **directly in the Railway dashboard**; never let it transit a chat,
    a document, or a file.
-2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, and
-   point `SHOPLINE_SYNC_SECRET` (GitHub Actions) at *that* — the master key should never sit
-   in GitHub's secret store.
+2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, then
+   mirror it into **one** GitHub Actions secret also named `CRON_SECRET` — the master key
+   should never sit in GitHub's secret store.
+
+   Both scheduler workflows now read `secrets.CRON_SECRET` first, falling back to their
+   legacy per-workflow secret (`SHOPLINE_SYNC_SECRET`, `WOODCORE_SYNC_SECRET`). Once
+   `CRON_SECRET` exists in GitHub, delete the two legacy secrets — **a rotation then
+   touches exactly one value in each system, which is the point.**
+
+   > ⚠️ **Two secrets holding one value IS the drift surface, and it is why the Woodcore
+   > mirror broke.** Earlier revisions of this runbook named only `SHOPLINE_SYNC_SECRET`.
+   > The 2026-08-02 rotation followed it exactly, so SHOPLINE kept working while the
+   > Woodcore sync began returning 403 and the mirror sat stale for three days — surfaced
+   > only by a GitHub failure email, not by any alert.
+   >
+   > Consolidation narrows the surface; it does not eliminate manual copying. The real fix
+   > is a managed secret store (Doppler / Vault / GitHub OIDC) where a rotation propagates
+   > without anyone re-typing a value anywhere. Tracked as a follow-up.
+   >
+   > Before rotating, re-derive the consumer list rather than trusting this one:
+   > `grep -rn "secrets\." .github/workflows/`
 3. Rotating invalidates all sessions (everyone re-authenticates by magic link) **and makes
    existing SHOPLINE tokens undecryptable** — they were encrypted under the old key.
 4. Immediately reconnect OAuth on both dev stores, or syncs fail with token-decrypt errors
