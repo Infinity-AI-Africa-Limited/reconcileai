@@ -212,7 +212,6 @@ import {
   getClientInfo,
   sanitizeInput,
   assertChannelBindable,
-  assertModuleAvailable,
   cbnProcedure,
   distributorProcedure,
   MAX_NAME_LENGTH,
