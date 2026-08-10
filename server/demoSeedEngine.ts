@@ -8,6 +8,7 @@
  */
 
 import { getDb } from "./db";
+import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 import {
   transactions,
   uploadBatches,
@@ -17,6 +18,7 @@ import {
   distributors,
   agentMemory,
   channels,
+  organizations,
 } from "../drizzle/schema";
 import { eq, sql } from "drizzle-orm";
 
@@ -331,13 +333,45 @@ async function insertTxnBatch(
 
 // ── FMCG Seed ─────────────────────────────────────────────────────────
 
+/** An organisation's segment, or null when it has none / cannot be read. */
+async function segmentOfOrg(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId: number): Promise<string | null> {
+  const [org] = await db.select({ segment: organizations.segment }).from(organizations).where(eq(organizations.id, orgId)).limit(1);
+  return org?.segment ?? null;
+}
+
 export async function seedFmcgDemoData(userId: number, orgId: number | null): Promise<DemoSeedResult> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  // 1. Seed distributors
+  // 1. Seed distributors — corporate B2B tenants only.
+  //
+  // This seeder ran with whatever organisation the caller happened to have, which
+  // is how distributors ended up filed against a BANK: 30 rows on the financial-
+  // services demo tenant, plus 14 under `orgId ?? 0`, which is no tenant at all.
+  // Meanwhile the corporate-B2B demo tenant that legitimately owns the concept
+  // held none. Distributors belong to the corporate B2B sector and to no other
+  // (shared/verticalFeatures), so seeding them anywhere else manufactures rows
+  // that no one can reach and that misrepresent which sector uses the feature.
+  //
+  // The rest of the FMCG seed (channels, transactions, reconciliation) still runs
+  // for any tenant, so demos elsewhere are unaffected.
+  //
+  // Uses the STRICT form of the rule, because this creates rows. featureAppliesTo
+  // fails open on an unknown segment by design (right for a read, wrong for a
+  // write): an absent — or simply non-existent — organisation yields an absent
+  // segment, so the permissive check passes and the row is filed against a tenant
+  // that does not exist. That is how 14 distributors came to sit under
+  // `orgId ?? 0`, reachable by nobody. featureStrictlyAppliesTo demands a positive
+  // match, so a missing org, a missing org row, and an unset segment all mean no.
   const distributorIds: number[] = [];
-  for (const d of FMCG_DISTRIBUTORS) {
+  const seedSegment = orgId ? await segmentOfOrg(db, orgId) : null;
+  const seedDistributors = featureStrictlyAppliesTo("distributor_registry", seedSegment);
+  if (!seedDistributors) {
+    console.log(
+      `[DemoSeed] Skipping distributor seed for org ${orgId ?? "(none)"} (segment ${seedSegment ?? "unset"}) — distributors are corporate B2B only.`,
+    );
+  }
+  for (const d of seedDistributors ? FMCG_DISTRIBUTORS : []) {
     const existing = await db.select().from(distributors).where(eq(distributors.canonicalName, d.canonicalName)).limit(1);
     if (existing[0]) { distributorIds.push(existing[0].id); continue; }
     await db.insert(distributors).values({
