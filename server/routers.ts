@@ -7,7 +7,8 @@ import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
 import { mobileMoneyRouter } from "./routers/mobileMoney";
 import { erpExportRouter } from "./routers/erpExport";
-import { enqueueReconciliationRun, registerReconciliationRunner } from "./reconciliationQueue";
+import { registerReconciliationRunner } from "./reconciliationQueue";
+import { reconciliationRouter } from "./routers/reconciliation";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { shoplineConnectorRouter } from "./routers/shoplineConnector";
 import { lapoRouter } from "./routers/lapo";
@@ -94,8 +95,10 @@ import { getDb } from "./db";
 // 50 MB Express body limit (~25k rows ≈ 4 MB of JSON).
 const MAX_UPLOAD_TRANSACTIONS = 25000;
 const MAX_SEARCH_LENGTH = 100;
-const MAX_NAME_LENGTH = 255;
 const MAX_QUERY_LIMIT = 500;
+// MAX_NAME_LENGTH now lives in ./routers/shared (imported below) — the
+// extracted reconciliation router needs the same bound, and two copies of a
+// column limit is how they drift apart.
 
 // Canonical public origin for links embedded in outbound emails and exports sent to
 // external recipients (compliance-assessment results, unsubscribe links, CSV report URLs).
@@ -208,8 +211,11 @@ import {
   getClientInfo,
   sanitizeInput,
   assertChannelBindable,
+  assertModuleAvailable,
+  cbnProcedure,
+  distributorProcedure,
+  MAX_NAME_LENGTH,
 } from "./routers/shared";
-import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -223,7 +229,7 @@ async function dispatchWebhook(event: string, payload: any) {
 
 // ─── Distributor Identity Registry Router ───────────────────────────
 const distributorRouter = router({
-  list: protectedProcedure
+  list: distributorProcedure
     .input(z.object({
       status: z.string().optional(),
       search: z.string().optional(),
@@ -236,14 +242,14 @@ const distributorRouter = router({
       return db.getDistributors({ organizationId: user.organizationId, ...input });
     }),
 
-  stats: protectedProcedure
+  stats: distributorProcedure
     .query(async ({ ctx }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
       if (!user?.organizationId) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
       return db.getDistributorStats(user.organizationId);
     }),
 
-  create: protectedProcedure
+  create: distributorProcedure
     .input(z.object({
       canonicalName: z.string().min(1),
       registeredBusinessName: z.string().optional(),
@@ -263,7 +269,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  update: protectedProcedure
+  update: distributorProcedure
     .input(z.object({
       id: z.number(),
       canonicalName: z.string().optional(),
@@ -286,7 +292,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  confirm: protectedProcedure
+  confirm: distributorProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
@@ -299,7 +305,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  addVariant: protectedProcedure
+  addVariant: distributorProcedure
     .input(z.object({ id: z.number(), variant: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
@@ -332,31 +338,6 @@ function requireOrg(ctx: { user: { organizationId?: number | null } }): number {
     });
   }
   return ctx.user.organizationId;
-}
-
-/**
- * Refuse a module the caller's vertical cannot use.
- *
- * Hiding it on the module page is presentation; this is the rule. A retail
- * merchant has no general ledger wired to a core banking system, so
- * account_level is meaningless for them — and it was switched ON at
- * provisioning for every SHOPLINE tenant. See shared/moduleScope.
- */
-async function assertModuleAvailable(
-  ctx: { user: { organizationId?: number | null } },
-  moduleType: "settlement" | "account_level",
-): Promise<void> {
-  if (!ctx.user.organizationId) return;
-  const drizzle = await getDb();
-  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-  const [org] = await drizzle
-    .select({ segment: organizations.segment })
-    .from(organizations)
-    .where(eq(organizations.id, ctx.user.organizationId))
-    .limit(1);
-  if (!moduleAppliesTo(moduleType, org?.segment)) {
-    throw new TRPCError({ code: "FORBIDDEN", message: moduleUnavailableReason(moduleType, org?.segment) });
-  }
 }
 
 /** Prove the caller's org owns this credential before acting on it. Throws
@@ -798,250 +779,7 @@ export const appRouter = router({
 
   // ─── Reconciliation ─────────────────────────────────────────────
 
-  reconciliation: router({
-    create: operationsProcedure
-      .input(
-        z.object({
-          name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["settlement", "account_level"]).default("settlement"),
-          sourceChannelId: z.number().int().positive(),
-          targetChannelId: z.number().int().positive(),
-          dateFrom: z.string().min(1),
-          dateTo: z.string().min(1),
-          amountTolerance: z.number().min(0).max(0.1).default(0.005),
-          dateWindowDays: z.number().int().min(0).max(30).default(3),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-
-        // Validate channels exist
-        const sourceChannel = await db.getChannelById(input.sourceChannelId);
-        const targetChannel = await db.getChannelById(input.targetChannelId);
-        if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-        if (!targetChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
-
-        // Validate date range
-        const dateFrom = new Date(input.dateFrom);
-        const dateTo = new Date(input.dateTo);
-        if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid date range" });
-        }
-        if (dateFrom > dateTo) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
-        }
-
-        const jobId = await db.createReconciliationJob({
-          userId: ctx.user.id,
-          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
-          moduleType: input.moduleType,
-          sourceChannelId: input.sourceChannelId,
-          targetChannelId: input.targetChannelId,
-          dateFrom,
-          dateTo,
-          amountTolerance: String(input.amountTolerance),
-          dateWindowDays: input.dateWindowDays,
-          engineConfig: JSON.stringify({
-            amountTolerance: input.amountTolerance,
-            dateWindowDays: input.dateWindowDays,
-            sourceChannel: sourceChannel.code,
-            targetChannel: targetChannel.code,
-          }),
-          status: "pending",
-        });
-
-        if (!jobId) {
-          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create reconciliation job" });
-        }
-
-        await logAudit(ctx.user.id, "create_reconciliation_job", "reconciliation_job", jobId, input, ip, ua);
-
-        // Run asynchronously through the durable queue (BullMQ when REDIS_URL
-        // is set, in-process otherwise) — retried with a clean artifact reset
-        // per attempt; never lost silently on restart under BullMQ.
-        enqueueReconciliationRun({
-          jobId,
-          sourceChannelId: input.sourceChannelId,
-          targetChannelId: input.targetChannelId,
-          dateFromIso: dateFrom.toISOString(),
-          dateToIso: dateTo.toISOString(),
-          config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-          userId: ctx.user.id,
-        }).catch(err => console.error("[Reconciliation] enqueue failed:", err));
-
-        return { jobId };
-      }),
-
-    // ── Multi-channel single run ──────────────────────────────────────────
-    // Reconcile one source against MANY target channels in a single action.
-    // Fans out to one child job per target (sharing a multiRunId) so results
-    // aggregate into a single combined report — "reconcile across all of the
-    // institution's channels in one run".
-    createMultiChannel: operationsProcedure
-      .input(
-        z.object({
-          name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["settlement", "account_level"]).default("settlement"),
-          sourceChannelId: z.number().int().positive(),
-          // Explicit target channels, or omit + set allActiveTargets to use every
-          // other active channel.
-          targetChannelIds: z.array(z.number().int().positive()).max(50).optional(),
-          allActiveTargets: z.boolean().default(false),
-          dateFrom: z.string().min(1),
-          dateTo: z.string().min(1),
-          amountTolerance: z.number().min(0).max(0.1).default(0.005),
-          dateWindowDays: z.number().int().min(0).max(30).default(3),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-
-        const sourceChannel = await db.getChannelById(input.sourceChannelId);
-        if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-
-        const dateFrom = new Date(input.dateFrom);
-        const dateTo = new Date(input.dateTo);
-        if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid date range" });
-        }
-        if (dateFrom > dateTo) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
-        }
-
-        // Resolve the target set.
-        let targets: { id: number; name: string; code: string }[] = [];
-        if (input.allActiveTargets) {
-          const all = await db.getChannels(ctx.user.organizationId ?? null);
-          targets = all.filter((c) => c.isActive && c.id !== input.sourceChannelId);
-        } else {
-          const ids = (input.targetChannelIds ?? []).filter((id) => id !== input.sourceChannelId);
-          if (ids.length === 0) {
-            throw new TRPCError({ code: "BAD_REQUEST", message: "Provide at least one target channel (or set allActiveTargets)" });
-          }
-          for (const id of ids) {
-            const ch = await db.getChannelById(id);
-            if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: `Target channel ${id} not found` });
-            targets.push(ch);
-          }
-        }
-        if (targets.length === 0) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "No eligible target channels for this run" });
-        }
-
-        const multiRunId = crypto.randomUUID();
-        const jobIds: number[] = [];
-
-        for (const target of targets) {
-          const jobId = await db.createReconciliationJob({
-            userId: ctx.user.id,
-            name: sanitizeInput(`${input.name} — ${target.name}`, MAX_NAME_LENGTH),
-            moduleType: input.moduleType,
-            sourceChannelId: input.sourceChannelId,
-            targetChannelId: target.id,
-            dateFrom,
-            dateTo,
-            amountTolerance: String(input.amountTolerance),
-            dateWindowDays: input.dateWindowDays,
-            multiRunId,
-            engineConfig: JSON.stringify({
-              amountTolerance: input.amountTolerance,
-              dateWindowDays: input.dateWindowDays,
-              sourceChannel: sourceChannel.code,
-              targetChannel: target.code,
-              multiRunId,
-            }),
-            status: "pending",
-          });
-          if (jobId) {
-            jobIds.push(jobId);
-            enqueueReconciliationRun({
-              jobId,
-              sourceChannelId: input.sourceChannelId,
-              targetChannelId: target.id,
-              dateFromIso: dateFrom.toISOString(),
-              dateToIso: dateTo.toISOString(),
-              config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-              userId: ctx.user.id,
-            }).catch((err) => console.error("[Reconciliation] Multi-channel child enqueue failed:", err));
-          }
-        }
-
-        await logAudit(ctx.user.id, "create_multichannel_reconciliation", "reconciliation_job", jobIds[0] ?? 0,
-          { multiRunId, source: sourceChannel.code, targetCount: targets.length }, ip, ua);
-
-        return { multiRunId, jobIds, targetCount: targets.length };
-      }),
-
-    // Aggregate a multi-channel run into one combined view.
-    getMultiRun: protectedProcedure
-      .input(z.object({ multiRunId: z.string().min(1).max(36) }))
-      .query(async ({ ctx, input }) => {
-        const jobs = await db.getReconciliationJobsByMultiRun(input.multiRunId);
-        if (jobs.length === 0) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Multi-channel run not found" });
-        }
-        const channels = await db.getChannels(ctx.user.organizationId ?? null);
-        const nameFor = (id: number) => channels.find((c) => c.id === id)?.name ?? `Channel ${id}`;
-
-        const totals = jobs.reduce(
-          (acc, j) => {
-            acc.totalSourceTxns += j.totalSourceTxns;
-            acc.totalTargetTxns += j.totalTargetTxns;
-            acc.matchedCount += j.matchedCount;
-            acc.exceptionCount += j.exceptionCount;
-            acc.unmatchedCount += j.unmatchedCount;
-            return acc;
-          },
-          { totalSourceTxns: 0, totalTargetTxns: 0, matchedCount: 0, exceptionCount: 0, unmatchedCount: 0 },
-        );
-        const denom = totals.matchedCount + totals.exceptionCount + totals.unmatchedCount;
-        const overallMatchRate = denom > 0 ? parseFloat(((totals.matchedCount / denom) * 100).toFixed(2)) : 0;
-
-        const allDone = jobs.every((j) => j.status === "completed");
-        const anyFailed = jobs.some((j) => j.status === "failed");
-        const anyRunning = jobs.some((j) => j.status === "pending" || j.status === "running");
-        const status = anyRunning ? "running" : allDone ? "completed" : anyFailed ? "completed_with_failures" : "completed";
-
-        return {
-          multiRunId: input.multiRunId,
-          status,
-          jobCount: jobs.length,
-          completedCount: jobs.filter((j) => j.status === "completed").length,
-          ...totals,
-          overallMatchRate,
-          channels: jobs.map((j) => ({
-            jobId: j.id,
-            channel: nameFor(j.targetChannelId),
-            status: j.status,
-            matchedCount: j.matchedCount,
-            exceptionCount: j.exceptionCount,
-            unmatchedCount: j.unmatchedCount,
-            matchRate: j.matchRate,
-          })),
-        };
-      }),
-
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
-      return db.getReconciliationJobs(ctx.user.id, isAdmin);
-    }),
-
-    get: protectedProcedure
-      .input(z.object({ id: z.number().int().positive() }))
-      .query(async ({ ctx, input }) => {
-        const job = await db.getReconciliationJob(input.id);
-        if (!job) throw new TRPCError({ code: "NOT_FOUND" });
-        const jobMatches = await db.getMatchesByJob(input.id);
-        const { data: jobExceptions } = await db.getExceptions({
-          organizationId: ctx.user.organizationId ?? null,
-          jobId: input.id,
-        });
-        // Audit: log data access event
-        const { ip, ua } = getClientInfo(ctx);
-        await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua);
-        return { job, matches: jobMatches, exceptions: jobExceptions };
-      }),
-  }),
+  reconciliation: reconciliationRouter,
 
   // ─── Exception Age / Escalation Tracker ──────────────────────────
   ageTracker: router({
@@ -2829,7 +2567,11 @@ export const appRouter = router({
     }),
 
     // Auditor Dashboard Endpoints
-    auditorCompliance: protectedProcedure.query(async ({ ctx }) => {
+    // Examination-facing: reports audit-trail volume and a "compliance rate"
+    // framed for a supervisor's examiner, and feeds the CBN pack. Retail
+    // merchants answer to card schemes, not an examiner (CLAUDE.md §2A) — the
+    // client already hides the Auditor role, this is the rule behind it.
+    auditorCompliance: cbnProcedure.query(async ({ ctx }) => {
       const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
       const { data: auditLogs } = await db.getAuditLogs({
         organizationId: ctx.user.organizationId ?? null,
@@ -2845,7 +2587,7 @@ export const appRouter = router({
       };
     }),
 
-    auditorTrail: protectedProcedure
+    auditorTrail: cbnProcedure
       .input(z.object({
         entityType: z.string().max(50).optional(),
         limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(100),
@@ -5981,10 +5723,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: send a personalised demo invitation email to a specific respondent
-    sendDemoInvite: protectedProcedure
+    sendDemoInvite: superAdminProcedure
       .input(z.object({ token: z.string().length(48) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6079,7 +5820,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: list all assessments (protected, admin only)
-    listAll: protectedProcedure
+    listAll: superAdminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         pageSize: z.number().min(1).max(100).default(20),
@@ -6091,7 +5832,6 @@ Always be specific, reference actual exception IDs and amounts where available, 
         hasNotes: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6144,7 +5884,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
 
-    exportCsv: protectedProcedure
+    exportCsv: superAdminProcedure
       .input(z.object({
         riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
         emailOptedOut: z.boolean().optional(),
@@ -6152,7 +5892,6 @@ Always be specific, reference actual exception IDs and amounts where available, 
         search: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6217,9 +5956,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { csv, count: rows.length };
       }),
     // Admin: bulk send demo invites to all consented + not yet invited respondents
-    bulkSendDemoInvites: protectedProcedure
+    bulkSendDemoInvites: superAdminProcedure
       .mutation(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6274,10 +6012,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: toggle markedContacted flag on a single assessment
-    markContacted: protectedProcedure
+    markContacted: superAdminProcedure
       .input(z.object({ token: z.string().length(48), contacted: z.boolean() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6292,10 +6029,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: update free-text notes/memo for a single assessment
-    updateNotes: protectedProcedure
+    updateNotes: superAdminProcedure
       .input(z.object({ token: z.string().length(48), notes: z.string().max(2000) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6306,10 +6042,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: set or clear the follow-up due date for a single assessment
-    setFollowUpDue: protectedProcedure
+    setFollowUpDue: superAdminProcedure
       .input(z.object({ token: z.string().length(48), dueAt: z.date().nullable() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6320,13 +6055,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: update the pipeline stage for a single assessment
-    setPipelineStage: protectedProcedure
+    setPipelineStage: superAdminProcedure
       .input(z.object({
         token: z.string().length(48),
         stage: z.enum(["new", "contacted", "demo_booked", "proposal_sent", "closed_won", "closed_lost"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6337,9 +6071,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: count eligible for bulk demo invite (consented, has email, not yet invited, not opted out)
-    countBulkEligible: protectedProcedure
+    countBulkEligible: superAdminProcedure
       .query(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
