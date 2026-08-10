@@ -21,8 +21,10 @@ import {
   modulesForSegment,
   moduleAppliesTo,
   moduleUnavailableReason,
+  scopeModuleRows,
   ALL_MODULE_TYPES,
 } from "../shared/moduleScope";
+import { modulesToProvision } from "./provisioning";
 
 describe("when the tenant is a retail merchant", () => {
   it("should offer settlement only", () => {
@@ -67,6 +69,94 @@ describe("when the segment is unknown", () => {
     for (const unknown of [null, undefined, "", "something_new"]) {
       expect(modulesForSegment(unknown as string | null)).toEqual([...ALL_MODULE_TYPES]);
     }
+  });
+});
+
+describe("when a tenant provisioned before the rule is listed", () => {
+  // Provisioning runs once, so it cannot reach a tenant that already exists.
+  // Both SHOPLINE merchants in production still carry an enabled account_level
+  // row from before the scope rule landed, and superAdmin.updateOrganizationSegment
+  // can retype any org to retail tomorrow without re-provisioning it. The read
+  // has to be scoped or those rows keep reporting as available.
+  const rows = [
+    { moduleType: "settlement", isEnabled: true },
+    { moduleType: "account_level", isEnabled: true },
+  ];
+
+  it("should not list a stale account_level row to a retail merchant", () => {
+    expect(scopeModuleRows(rows, "retail_commerce")).toEqual([
+      { moduleType: "settlement", isEnabled: true },
+    ]);
+  });
+
+  it("should agree with the guard that refuses the same module", () => {
+    // The list and assertModuleAvailable must never disagree: a module shown as
+    // available and then refused on toggle is worse than one never shown.
+    for (const segment of ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"]) {
+      const listed = scopeModuleRows(rows, segment).map((r) => r.moduleType);
+      const allowed = ALL_MODULE_TYPES.filter((m) => moduleAppliesTo(m, segment));
+      expect(listed, `list and guard disagree for ${segment}`).toEqual([...allowed]);
+    }
+  });
+
+  it("should leave every other vertical's rows alone", () => {
+    for (const segment of ["financial_services", "corporate_b2b", "super_admin"]) {
+      expect(scopeModuleRows(rows, segment), `${segment} lost a row`).toEqual(rows);
+    }
+  });
+
+  it("should keep everything when the segment is unknown", () => {
+    // Same direction as modulesForSegment: this rule REMOVES a module, so
+    // missing data must not strip a tenant of one it actually uses.
+    for (const unknown of [null, undefined, "", "something_new"]) {
+      expect(scopeModuleRows(rows, unknown as string | null)).toEqual(rows);
+    }
+  });
+
+  it("should preserve row fields, not just the module name", () => {
+    // The caller renders isEnabled off these rows; filtering must not reshape them.
+    const withExtras = [{ moduleType: "settlement", isEnabled: false, organizationId: 7 }];
+    expect(scopeModuleRows(withExtras, "retail_commerce")).toEqual(withExtras);
+  });
+});
+
+describe("when provisioning decides which modules to seed", () => {
+  it("should report a failed segment lookup instead of throwing it", async () => {
+    // provisionTenantBaseline promises a checklist and never a rejection — the
+    // encryption-key and quota steps have already run by this point, and letting
+    // this escape discards their results and leaves a half-provisioned tenant
+    // behind a generic error.
+    const outcome = await modulesToProvision(async () => {
+      throw new Error("ECONNRESET");
+    });
+    expect(outcome).toEqual({ failed: "ECONNRESET" });
+  });
+
+  it("should NOT fall back to enabling everything", async () => {
+    // The dangerous default. modulesForSegment answers an unknown segment with
+    // BOTH modules — correct when the segment is genuinely unset, but on a
+    // transient DB blip it would switch account_level back on for exactly the
+    // retail tenants this step exists to keep it away from.
+    const outcome = await modulesToProvision(async () => {
+      throw new Error("connection lost");
+    });
+    expect(outcome).not.toHaveProperty("modules");
+  });
+
+  it("should provision the vertical's modules when the lookup succeeds", async () => {
+    expect(await modulesToProvision(async () => "retail_commerce")).toEqual({
+      modules: ["settlement"],
+    });
+    expect(await modulesToProvision(async () => "financial_services")).toEqual({
+      modules: [...ALL_MODULE_TYPES],
+    });
+  });
+
+  it("should keep both when the org genuinely has no segment", async () => {
+    // A resolved null is an answer, not a failure — legacy orgs keep everything.
+    expect(await modulesToProvision(async () => null)).toEqual({
+      modules: [...ALL_MODULE_TYPES],
+    });
   });
 });
 
@@ -127,17 +217,9 @@ describe("when the guard is enforced server-side", () => {
   });
 });
 
-describe("when a tenant is provisioned", () => {
-  const PROVISIONING = fs.readFileSync(path.join(__dirname, "provisioning.ts"), "utf8");
-
-  it("should seed only the modules the vertical can use", () => {
-    // Was: `for (const moduleType of ["settlement", "account_level"] as const)`,
-    // which enabled GL-to-CBS reconciliation for every SHOPLINE merchant.
-    expect(PROVISIONING).toMatch(/modulesForSegment\(org\?\.segment\)/);
-    expect(PROVISIONING).not.toMatch(/\["settlement", "account_level"\] as const/);
-  });
-
-  it("should look the segment up rather than assume one", () => {
-    expect(PROVISIONING).toMatch(/segment: organizations\.segment/);
-  });
-});
+// The provisioning behaviour these used to assert as source text now lives in
+// "when provisioning decides which modules to seed" above, which calls the real
+// function. Those greps pinned an expression (`modulesForSegment(org?.segment)`)
+// rather than an outcome, so they broke on a refactor that changed nothing a
+// tenant can observe — and would have kept passing had the call been rewired to
+// the wrong argument.

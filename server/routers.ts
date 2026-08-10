@@ -1,4 +1,5 @@
 import { COOKIE_NAME } from "@shared/const";
+import { scopeModuleRows } from "@shared/moduleScope";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
@@ -1480,14 +1481,26 @@ export const appRouter = router({
   // ─── Module Configurations ───────────────────────────────────────
 
   modules: router({    
+    // Scoped to the vertical, not just the tenant. Provisioning runs once, so a
+    // tenant created before the scope rule kept its account_level row — both
+    // SHOPLINE merchants in production still have one, enabled — and an org
+    // retyped to retail afterwards was never re-provisioned at all. Listing it
+    // as available contradicts the toggle and both job-creation paths, which
+    // already refuse it. The rule itself lives in shared/moduleScope.
     list: protectedProcedure.query(async ({ ctx }) => {
       const dbConn = await db.getDb();
       if (!dbConn) return [];
-      
+
       const configs = await dbConn.select()
         .from(db.moduleConfigurations)
         .where(eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0));
-      return configs;
+      if (!ctx.user.organizationId) return configs;
+      const [org] = await dbConn
+        .select({ segment: organizations.segment })
+        .from(organizations)
+        .where(eq(organizations.id, ctx.user.organizationId))
+        .limit(1);
+      return scopeModuleRows(configs, org?.segment);
     }),
 
     toggle: adminProcedure
