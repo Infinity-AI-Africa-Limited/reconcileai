@@ -162,10 +162,13 @@ describe("when provisioning decides which modules to seed", () => {
 
 describe("when the guard is enforced server-side", () => {
   const read = (rel: string) => fs.readFileSync(path.join(__dirname, rel), "utf8");
-  // The two guarded domains live in different files: the module toggle stayed in
-  // the root router, the run procedures moved to their own domain router, and the
-  // rule itself sits in shared.ts so neither can hold a private copy.
+  // The two guarded domains each have their own file now — module config and
+  // reconciliation runs — and the rule itself sits in shared.ts so neither can
+  // hold a private copy. These anchors moved with the modules domain; the
+  // helper below fails loudly rather than quietly when that happens, which is
+  // what made repointing them a build failure and not a silent hole.
   const ROUTERS = read("routers.ts");
+  const MODULES = read("routers/modules.ts");
   const RECONCILIATION = read("routers/reconciliation.ts");
   const SHARED = read("routers/shared.ts");
   const GUARD = "await assertModuleAvailable(ctx, input.moduleType)";
@@ -193,8 +196,8 @@ describe("when the guard is enforced server-side", () => {
     // enable account_level by calling the procedure directly — the same trap as
     // the assessment lead pipeline, where a hidden nav entry fronted an open
     // procedure.
-    expect(between(ROUTERS, "toggle: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
-    expect(between(ROUTERS, "updateConfig: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+    expect(between(MODULES, "toggle: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+    expect(between(MODULES, "updateConfig: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
   });
 
   it("should refuse an inapplicable module before a reconciliation job is persisted", () => {
@@ -213,6 +216,7 @@ describe("when the guard is enforced server-side", () => {
     // One definition, imported by both callers. Two would be free to drift, and
     // the drift would show up as a vertical quietly regaining a module.
     expect(ROUTERS).not.toMatch(/function assertModuleAvailable/);
+    expect(MODULES).not.toMatch(/function assertModuleAvailable/);
     expect(RECONCILIATION).not.toMatch(/function assertModuleAvailable/);
   });
 });
