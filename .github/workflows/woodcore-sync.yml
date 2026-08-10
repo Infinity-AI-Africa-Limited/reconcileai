@@ -6,8 +6,12 @@ name: Woodcore mirror sync
 #
 # Setup:
 #   1. In Railway, set CRON_SECRET to a strong random value.
-#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
-#      WOODCORE_SYNC_SECRET with the SAME value.
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret named
+#      CRON_SECRET with the SAME value. Same name on both sides, so a rotation is
+#      one edit in each system and there is no second copy to forget.
+#      WOODCORE_SYNC_SECRET is the legacy name. It is still read as a fallback,
+#      but it is IGNORED whenever CRON_SECRET exists — delete it once CRON_SECRET
+#      is confirmed working, so only one value is left to rotate.
 #   3. After DNS cutover, update SYNC_URL below to https://reconcileaiafrica.com/...
 
 on:
@@ -31,15 +35,24 @@ jobs:
           # what broke this job on 2026-08-02. Falls back to the legacy
           # per-workflow secret so nothing breaks before CRON_SECRET is created.
           SYNC_SECRET: ${{ secrets.CRON_SECRET || secrets.WOODCORE_SYNC_SECRET }}
+          # WHICH secret the line above actually resolved to. `||` yields the
+          # first truthy operand, so a configured CRON_SECRET wins outright and
+          # WOODCORE_SYNC_SECRET is never read. Without carrying that through,
+          # the 403 diagnostic below named the legacy secret unconditionally and
+          # sent the operator to update a value the workflow was ignoring — they
+          # would edit it, re-run, get 403 again, and have no reason to doubt the
+          # instruction. A misleading remedy costs more than no remedy.
+          SECRET_SOURCE: ${{ secrets.CRON_SECRET && 'CRON_SECRET' || (secrets.WOODCORE_SYNC_SECRET && 'WOODCORE_SYNC_SECRET' || 'none') }}
         run: |
-          # Skip cleanly when the secret isn't configured on this repo (e.g. the
+          # Skip cleanly when neither secret is configured on this repo (e.g. the
           # MistaRichMan mirror). This prevents spurious "all jobs failed" emails;
-          # the sync only runs where WOODCORE_SYNC_SECRET is set to match the
-          # server's CRON_SECRET (or JWT_SECRET fallback).
+          # the sync only runs where CRON_SECRET (or the legacy
+          # WOODCORE_SYNC_SECRET) matches the server's CRON_SECRET.
           if [ -z "$SYNC_SECRET" ]; then
-            echo "WOODCORE_SYNC_SECRET is not configured on this repository — skipping sync (expected on the mirror)."
+            echo "Neither CRON_SECRET nor WOODCORE_SYNC_SECRET is configured on this repository — skipping sync (expected on the mirror)."
             exit 0
           fi
+          echo "Authenticating with: $SECRET_SOURCE"
           code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
             -H "x-sync-secret: $SYNC_SECRET" \
             "$SYNC_URL")
@@ -50,14 +63,21 @@ jobs:
           fi
           echo
           if [ "$code" = "403" ]; then
-            echo "::error::403 forbidden — WOODCORE_SYNC_SECRET no longer matches the server's CRON_SECRET."
+            echo "::error::403 forbidden — the secret this workflow sent ($SECRET_SOURCE) no longer matches the server's CRON_SECRET."
             echo "This is the expected symptom after a secret rotation: CRON_SECRET (or JWT_SECRET,"
             echo "which it falls back to) was changed on Railway without updating this repository secret."
             echo "It happened on 2026-08-02 and the mirror went stale for three days before anyone noticed."
             echo
             echo "Fix: copy the CURRENT CRON_SECRET from Railway into"
-            echo "  GitHub → Settings → Secrets and variables → Actions → WOODCORE_SYNC_SECRET"
-            echo "then re-run this workflow. The server logs the same diagnosis under [syncAuth]."
+            echo "  GitHub → Settings → Secrets and variables → Actions → $SECRET_SOURCE"
+            if [ "$SECRET_SOURCE" = "CRON_SECRET" ]; then
+              echo
+              echo "Note: WOODCORE_SYNC_SECRET is IGNORED while CRON_SECRET exists — editing it"
+              echo "will not clear this error. Once CRON_SECRET is confirmed working, delete the"
+              echo "legacy secret so there is only one value left to rotate."
+            fi
+            echo
+            echo "Then re-run this workflow. The server logs the same diagnosis under [syncAuth]."
             echo "Rotation runbook: CLAUDE.md §18 — it lists every consumer that must be updated together."
           else
             echo "::error::Unexpected status $code from $SYNC_URL"

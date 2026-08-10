@@ -11,8 +11,10 @@ name: SHOPLINE scheduled sync
 #
 # Setup (same shared secret as the Woodcore workflow):
 #   1. In Railway, set CRON_SECRET to a strong random value.
-#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
-#      SHOPLINE_SYNC_SECRET with the SAME value.
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret named
+#      CRON_SECRET with the SAME value — one name in both systems.
+#      SHOPLINE_SYNC_SECRET is the legacy name, still read as a fallback but
+#      IGNORED whenever CRON_SECRET exists. Delete it once CRON_SECRET works.
 #
 # Note on cadence: GitHub's scheduler is best-effort and routinely runs late
 # under load, so "*/15" is a floor, not a guarantee. It is adequate as a
@@ -81,19 +83,37 @@ jobs:
           # broke the Woodcore sync on 2026-08-02. Falls back to the legacy
           # per-workflow secret so nothing breaks before CRON_SECRET is created.
           SYNC_SECRET: ${{ secrets.CRON_SECRET || secrets.SHOPLINE_SYNC_SECRET }}
+          # WHICH secret the line above resolved to. `||` yields the first truthy
+          # operand, so a configured CRON_SECRET wins and SHOPLINE_SYNC_SECRET is
+          # never read — naming the legacy secret in the failure message would
+          # send the operator to edit a value this workflow ignores.
+          SECRET_SOURCE: ${{ secrets.CRON_SECRET && 'CRON_SECRET' || (secrets.SHOPLINE_SYNC_SECRET && 'SHOPLINE_SYNC_SECRET' || 'none') }}
           HANDLER: ${{ steps.pick.outputs.handler }}
         run: |
-          # Skip cleanly when the secret isn't configured on this repo (e.g. the
+          # Skip cleanly when neither secret is configured on this repo (e.g. the
           # MistaRichMan mirror), so the mirror doesn't email "all jobs failed".
           if [ -z "$SYNC_SECRET" ]; then
-            echo "SHOPLINE_SYNC_SECRET is not configured on this repository — skipping (expected on the mirror)."
+            echo "Neither CRON_SECRET nor SHOPLINE_SYNC_SECRET is configured on this repository — skipping (expected on the mirror)."
             exit 0
           fi
+          echo "Authenticating with: $SECRET_SOURCE"
           code=$(curl -sS -o /tmp/resp -w "%{http_code}" --max-time 600 -X POST \
             -H "x-sync-secret: $SYNC_SECRET" \
             "$BASE_URL/$HANDLER")
           echo "HTTP $code"; cat /tmp/resp; echo
+          if [ "$code" = "403" ]; then
+            echo "::error::403 forbidden — the secret this workflow sent ($SECRET_SOURCE) no longer matches the server's CRON_SECRET."
+            echo "Fix: copy the CURRENT CRON_SECRET from Railway into"
+            echo "  GitHub → Settings → Secrets and variables → Actions → $SECRET_SOURCE"
+            if [ "$SECRET_SOURCE" = "CRON_SECRET" ]; then
+              echo
+              echo "Note: SHOPLINE_SYNC_SECRET is IGNORED while CRON_SECRET exists — editing it"
+              echo "will not clear this error. Delete it once CRON_SECRET is confirmed working."
+            fi
+            echo "Rotation runbook: CLAUDE.md §18."
+            exit 1
+          fi
           if [ "$code" != "200" ]; then
-            echo "Unexpected status $code (check that SHOPLINE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"
+            echo "::error::Unexpected status $code from $BASE_URL/$HANDLER"
             exit 1
           fi
