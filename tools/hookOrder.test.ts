@@ -59,6 +59,45 @@ describe("when a hook sits below a conditional return", () => {
     expect(found[0].hookLine).toBe(7);
   });
 
+  it("should catch a hook on the OTHER branch of the guard that returns", () => {
+    // The guard and the hook it skips are one statement. The scan checks a
+    // statement for hooks before that statement is allowed to establish the
+    // return, and never revisits it — so this escaped entirely, and ESLint
+    // cannot follow `trpc.x.y.useQuery` either. Nothing was watching it.
+    const source = [
+      "export default function Merchant() {",
+      "  const [a] = useState(0);",
+      "  if (a) {",
+      "    return null;",
+      "  } else {",
+      "    const { data } = trpc.dashboard.stats.useQuery();",
+      "    console.log(data);",
+      "  }",
+      "  return <div />;",
+      "}",
+    ].join("\n");
+    const found = hooksCalledAfterConditionalReturn(source);
+    expect(found).toHaveLength(1);
+    expect(found[0].hookLine).toBe(6);
+  });
+
+  it("should catch a hook inside the branch that returns", () => {
+    // The same defect wearing the other face: the hook runs only when this
+    // branch is taken, so the render that skips the branch calls one fewer.
+    const source = [
+      "export default function Other() {",
+      "  if (a) {",
+      "    const { data } = trpc.dashboard.stats.useQuery();",
+      "    return data ? null : <div />;",
+      "  }",
+      "  return <div />;",
+      "}",
+    ].join("\n");
+    const found = hooksCalledAfterConditionalReturn(source);
+    expect(found).toHaveLength(1);
+    expect(found[0].hookLine).toBe(3);
+  });
+
   it("should catch a hook below an unbraced single-statement guard", () => {
     const source = [
       "export default function Unbraced() {",
@@ -97,6 +136,21 @@ describe("when the code is fine", () => {
       "  const { data } = trpc.dashboard.stats.useQuery();",
       "  if (!data) return null;",
       "  return <div>{a}</div>;",
+      "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
+  });
+
+  it("should not flag a hook in the guard's CONDITION", () => {
+    // The trap in scanning a guard's own statement for hooks. A hook in the
+    // test position runs on EVERY render — only the return is conditional — so
+    // flagging it would fail the build on correct code. Only the branches are
+    // conditional, which is why the scan looks at consequent/alternate and
+    // never at the test.
+    const source = [
+      "export default function Legal() {",
+      "  if (trpc.dashboard.stats.useQuery().data) return null;",
+      "  return <div />;",
       "}",
     ].join("\n");
     expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);

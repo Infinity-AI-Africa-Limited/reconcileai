@@ -112,6 +112,66 @@ function returnsFromOwner(statement: Node): boolean {
   return found;
 }
 
+/**
+ * The parts of a statement that run only on SOME paths.
+ *
+ * Deliberately excludes the parts that always run — an `if`'s test, a switch's
+ * discriminant, a try's block. A hook there is called on every render and is
+ * perfectly legal: `if (trpc.a.b.useQuery().data) return null;` calls useQuery
+ * unconditionally and only the RETURN is conditional. Scanning the whole
+ * statement would report that as a violation and fail the build on correct code.
+ */
+function conditionalPartsOf(statement: Node): unknown[] {
+  switch (statement.type) {
+    case "IfStatement":
+      return [statement.consequent, statement.alternate];
+    case "SwitchStatement":
+      return [statement.cases];
+    case "TryStatement":
+      return [statement.handler, statement.finalizer];
+    case "ForStatement":
+    case "ForInStatement":
+    case "ForOfStatement":
+    case "WhileStatement":
+    case "DoWhileStatement":
+      return [statement.body];
+    default:
+      return [];
+  }
+}
+
+/**
+ * The first hook call on a branch of this statement that runs conditionally.
+ *
+ * This is the half the statement-by-statement scan cannot see. A guard and the
+ * hook it skips are frequently the SAME statement:
+ *
+ *     if (a) { return null; } else { const { data } = trpc.x.y.useQuery(); }
+ *
+ * The loop below checks a statement for hooks BEFORE that statement is allowed
+ * to establish the return, and never revisits it — so the hook above was missed
+ * entirely, by this detector and by the ESLint rule that cannot follow
+ * `trpc.x.y.useQuery` in the first place. Nothing was left watching it.
+ *
+ * A hook inside the returning branch is the same defect wearing the other face:
+ * it runs only when that branch is taken.
+ */
+function hookCallInBranches(statement: Node): Node | null {
+  let hit: Node | null = null;
+  for (const part of conditionalPartsOf(statement)) {
+    if (hit) break;
+    visit(part, (node) => {
+      if (hit) return true;
+      if (FUNCTIONS.has(node.type)) return true;
+      if (hookNameOf(node)) {
+        hit = node;
+        return true;
+      }
+    });
+  }
+  return hit;
+}
+
 /** The first hook call belonging to this statement, not to a callback in it. */
 function hookCallIn(statement: Node): Node | null {
   let hit: Node | null = null;
@@ -180,7 +240,23 @@ export function hooksCalledAfterConditionalReturn(source: string): HookOrderFind
       // code and cannot affect how many hooks a render calls.
       if (statement.type === "ReturnStatement") break;
 
-      if (returnLine === null && returnsFromOwner(statement)) returnLine = lineOf(statement);
+      if (returnLine === null && returnsFromOwner(statement)) {
+        returnLine = lineOf(statement);
+
+        // The guard and the hook it skips are often the SAME statement, and the
+        // check above cannot see that: it runs before this line establishes the
+        // return, and the statement is never revisited. So a hook on any branch
+        // of this statement has to be caught here or not at all.
+        const branchHook = hookCallInBranches(statement);
+        if (branchHook) {
+          findings.push({
+            returnLine,
+            hookLine: lineOf(branchHook),
+            hook: (lines[lineOf(branchHook) - 1] ?? "").trim(),
+          });
+          break;
+        }
+      }
     }
   }
 
