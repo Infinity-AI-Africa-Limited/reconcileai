@@ -981,6 +981,59 @@ Module state is stored in `moduleConfigurations` (per-org toggle) and `moduleOve
 
 ---
 
+## 9C. Vertical Scope — which segment may use what (ENFORCED, not cosmetic)
+
+Two shared rule modules decide what a vertical is offered. **Both live in `shared/`
+on purpose: the client hides a surface and the server refuses it, and those two must
+not be able to disagree.** A hidden nav entry in front of an open procedure is not a
+boundary — it is a decoration, and the platform shipped three of those.
+
+| Rule | File | Says |
+|---|---|---|
+| Module scope | `shared/moduleScope.ts` | `account_level` is not offered to `retail_commerce` — a merchant has no GL wired to a core banking system |
+| Feature scope | `shared/verticalFeatures.ts` | `cbn_regulatory_reporting` → financial services, corporate B2B, super admin · `distributor_registry` → **corporate B2B, super admin** |
+
+**Distributors belong to the CORPORATE B2B sector and to no other** (owner ruling,
+2026-08-08). The registry records the distributors an FMCG supplier sells through. A
+bank does not sell through distributors; a retail merchant has none. Do not widen
+this by reasoning from production data: 30 distributor rows sit on the
+financial-services demo tenant and 14 under `organizationId` 0, while BrightGoods —
+the corporate-B2B tenant that owns the concept — holds zero. Those rows are misfiled
+legacy artefacts (§19.2), not evidence. `client/src/lib/navItems.ts` has always
+scoped the registry to `["corporate_b2b"]`; the server rule was the outlier.
+
+### Where they are enforced
+
+- `assertModuleAvailable` (`server/routers/shared.ts`) — the two `modules.*`
+  mutations AND both reconciliation job-creation procedures. The toggle is **not**
+  the gate for a run: `reconciliation.create` / `createMultiChannel` take
+  `moduleType` straight from the caller and never read `moduleConfigurations`.
+- `cbnProcedure` / `distributorProcedure` (`server/routers/shared.ts`) — applied as
+  procedure **builders**, so a router built from them cannot acquire an unguarded
+  procedure by someone adding one and forgetting the check.
+- `provisionTenantBaseline` seeds only the modules a vertical can use; the demo
+  seeder refuses to file distributors against a non-B2B tenant.
+
+### The read/write asymmetry — the trap that recurred four times
+
+`featureAppliesTo` fails **open** on an unknown segment, deliberately: withdrawing a
+capability because data is missing is the wrong direction for a read. Applied to a
+write, that same default *manufactures* rows — an absent (or non-existent)
+organisation yields an absent segment, the check passes, and the row is filed
+against a tenant that does not exist. That is the origin of the 14 unreachable
+distributor rows.
+
+**So: reads use `featureAppliesTo`, writes use `featureStrictlyAppliesTo`.**
+
+The underlying mistake is worth naming, because it was made four times in one
+session and caught by review every time: **"no organisation" is not "unknown
+segment".** An org whose segment is unset keeps its capability. A caller with no
+organisation at all is refused — otherwise every such account pools into one shared
+pseudo-tenant (22 accounts currently have no organisation). Ask this question of
+every tenant-scoped guard.
+
+---
+
 ## 9A. Feature Evaluation Rubric — The Intelligence Moat Test
 
 **Every feature — whether proposed by the founder, Manus, or Claude — is evaluated against this rubric before it is built, and every Manus PR is reviewed against it before merging:**
@@ -1442,13 +1495,14 @@ document.** Reference secrets by variable name only. They belong in the Railway 
 and GitHub Actions secrets, nowhere else. A secret that has been written down anywhere else
 is compromised and must be rotated — there is no "it was only internal" exception.
 
-**Incident log (three occurrences, all avoidable):**
+**Incident log (four occurrences, all avoidable):**
 
 | Date | Secret | How |
 |---|---|---|
 | 2026-07-19 | SHOPLINE APP Secret | Pasted into CLAUDE.md in plaintext; committed to git history on **both** remotes. Redacted since, but permanently in history. Rotation unavailable while the app is in Draft (§2B.9) |
 | ~2026-08-01 | Prod `JWT_SECRET` | Pasted in plaintext by Manus in a session summary; commit `ec01519` was "remove leaked secret" |
 | 2026-08-02 | **Rotated** `JWT_SECRET` **and** new `CRON_SECRET` | Pasted in plaintext by Manus into *Manus Session Summary Report.docx* — i.e. the rotation performed to fix the previous leak was itself leaked in the document announcing it |
+| 2026-08-04 | `CRON_SECRET` — **leading characters only** | Quoted in a chat message while confirming the Woodcore secret had been updated. A prefix is still secret material (§2B.9b makes the same point about app-secret prefixes), so it is logged. **Materially smaller than the three above** — a short prefix of a long random value does not meaningfully narrow a search. Assessed as low severity; rotation judged disproportionate to the exposure, and the §19 pre-customer rotation supersedes it. Recorded so the pattern stays visible: a status update never needs to carry any part of the value — "updated to match Railway" says everything |
 
 **Why `JWT_SECRET` specifically is a full compromise, not just a signing key:**
 - HS256 key for the `app_session_id` cookie → forges a session as **any user, including `super_admin`**
@@ -1468,9 +1522,27 @@ decision and raise it again only on new evidence.
 **Rotation runbook (order matters) — for whenever rotation does happen:**
 1. Generate the new value **directly in the Railway dashboard**; never let it transit a chat,
    a document, or a file.
-2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, and
-   point `SHOPLINE_SYNC_SECRET` (GitHub Actions) at *that* — the master key should never sit
-   in GitHub's secret store.
+2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, then
+   mirror it into **one** GitHub Actions secret also named `CRON_SECRET` — the master key
+   should never sit in GitHub's secret store.
+
+   Both scheduler workflows now read `secrets.CRON_SECRET` first, falling back to their
+   legacy per-workflow secret (`SHOPLINE_SYNC_SECRET`, `WOODCORE_SYNC_SECRET`). Once
+   `CRON_SECRET` exists in GitHub, delete the two legacy secrets — **a rotation then
+   touches exactly one value in each system, which is the point.**
+
+   > ⚠️ **Two secrets holding one value IS the drift surface, and it is why the Woodcore
+   > mirror broke.** Earlier revisions of this runbook named only `SHOPLINE_SYNC_SECRET`.
+   > The 2026-08-02 rotation followed it exactly, so SHOPLINE kept working while the
+   > Woodcore sync began returning 403 and the mirror sat stale for three days — surfaced
+   > only by a GitHub failure email, not by any alert.
+   >
+   > Consolidation narrows the surface; it does not eliminate manual copying. The real fix
+   > is a managed secret store (Doppler / Vault / GitHub OIDC) where a rotation propagates
+   > without anyone re-typing a value anywhere. Tracked as a follow-up.
+   >
+   > Before rotating, re-derive the consumer list rather than trusting this one:
+   > `grep -rn "secrets\." .github/workflows/`
 3. Rotating invalidates all sessions (everyone re-authenticates by magic link) **and makes
    existing SHOPLINE tokens undecryptable** — they were encrypted under the old key.
 4. Immediately reconnect OAuth on both dev stores, or syncs fail with token-decrypt errors
@@ -1528,6 +1600,21 @@ awkward to explain in a client's security review. Three honest options: archive
 to a separate table, backfill a synthetic "legacy" organization, or knowingly
 leave them with the decision recorded. Any is fine; drifting into launch without
 deciding is not.
+
+> **Same family, measured 2026-08-08 — 44 misfiled `distributors` rows.** 30 sit on
+> the financial-services demo tenant (org 1, created 2026-04-12) and 14 under
+> `organizationId` 0, which is no tenant at all (demo-marked, created 2026-05-18).
+> Since PR #64 the registry is corporate-B2B-only, so **none of them is reachable
+> through the UI** and none leaks: org 0 is not a tenant, and a bank can no longer
+> open the registry.
+>
+> **Recommendation: fold these into the decision above rather than relocating
+> them.** Moving them to BrightGoods was considered and rejected on the evidence:
+> every transaction naming them (29,892 rows) is itself `organizationId IS NULL`,
+> i.e. part of the same legacy pool. Relocating would hand the corporate-B2B demo a
+> 44-name registry whose transactions are invisible to it — a demo that looks
+> populated and reconciles nothing, which is worse than an empty one. Whatever is
+> decided for the 57.3M rows should cover these 44.
 
 **3. Close the `matches` / `exceptions` tenancy gap.**
 Both tables lack an `organizationId` column, so their writes cannot be scoped

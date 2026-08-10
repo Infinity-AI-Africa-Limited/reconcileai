@@ -19,8 +19,11 @@ export default function AuditorDashboard() {
   // rate" — and a merchant has no examiner, so send them back to their own
   // dashboard rather than render a screen that means nothing to them.
   //
-  // Presentation only. It is not authorisation: the underlying audit procedures
-  // are org-scoped server-side, which is what actually protects the data.
+  // Presentation. The authorisation is server-side and independent: the audit
+  // procedures are org-scoped, and they now also refuse the retail vertical
+  // outright (shared/verticalFeatures, enforced by `cbnProcedure`). So a
+  // merchant who types the URL is refused by the server whether or not this
+  // redirect fires — which is the point, since a redirect protects nothing.
   const redirectToOwnDashboard = isRetailCommerce(segment);
 
   // Every hook runs above the redirect, and the redirect sits below all of them.
