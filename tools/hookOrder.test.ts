@@ -9,6 +9,13 @@
  *
  * The fixtures below pin the detector's behaviour directly. The sweep at the end
  * is what actually fails the build.
+ *
+ * Several fixtures exist because the detector got this WRONG, twice, in ways
+ * review caught: a callback's return read as the guard's, and a helper's return
+ * leaking into the component declared after it. Both are ownership questions,
+ * both now answered by the parser rather than inferred from indentation. They
+ * are kept as tests because "unrepresentable" is a claim, and a claim about a
+ * blocking gate should be checked.
  */
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -52,6 +59,45 @@ describe("when a hook sits below a conditional return", () => {
     expect(found[0].hookLine).toBe(7);
   });
 
+  it("should catch a hook on the OTHER branch of the guard that returns", () => {
+    // The guard and the hook it skips are one statement. The scan checks a
+    // statement for hooks before that statement is allowed to establish the
+    // return, and never revisits it — so this escaped entirely, and ESLint
+    // cannot follow `trpc.x.y.useQuery` either. Nothing was watching it.
+    const source = [
+      "export default function Merchant() {",
+      "  const [a] = useState(0);",
+      "  if (a) {",
+      "    return null;",
+      "  } else {",
+      "    const { data } = trpc.dashboard.stats.useQuery();",
+      "    console.log(data);",
+      "  }",
+      "  return <div />;",
+      "}",
+    ].join("\n");
+    const found = hooksCalledAfterConditionalReturn(source);
+    expect(found).toHaveLength(1);
+    expect(found[0].hookLine).toBe(6);
+  });
+
+  it("should catch a hook inside the branch that returns", () => {
+    // The same defect wearing the other face: the hook runs only when this
+    // branch is taken, so the render that skips the branch calls one fewer.
+    const source = [
+      "export default function Other() {",
+      "  if (a) {",
+      "    const { data } = trpc.dashboard.stats.useQuery();",
+      "    return data ? null : <div />;",
+      "  }",
+      "  return <div />;",
+      "}",
+    ].join("\n");
+    const found = hooksCalledAfterConditionalReturn(source);
+    expect(found).toHaveLength(1);
+    expect(found[0].hookLine).toBe(3);
+  });
+
   it("should catch a hook below an unbraced single-statement guard", () => {
     const source = [
       "export default function Unbraced() {",
@@ -90,6 +136,21 @@ describe("when the code is fine", () => {
       "  const { data } = trpc.dashboard.stats.useQuery();",
       "  if (!data) return null;",
       "  return <div>{a}</div>;",
+      "}",
+    ].join("\n");
+    expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
+  });
+
+  it("should not flag a hook in the guard's CONDITION", () => {
+    // The trap in scanning a guard's own statement for hooks. A hook in the
+    // test position runs on EVERY render — only the return is conditional — so
+    // flagging it would fail the build on correct code. Only the branches are
+    // conditional, which is why the scan looks at consequent/alternate and
+    // never at the test.
+    const source = [
+      "export default function Legal() {",
+      "  if (trpc.dashboard.stats.useQuery().data) return null;",
+      "  return <div />;",
       "}",
     ].join("\n");
     expect(hooksCalledAfterConditionalReturn(source)).toEqual([]);
@@ -211,8 +272,64 @@ describe("when the code is fine", () => {
   });
 });
 
+describe("when the formatting is not what a line scanner assumed", () => {
+  // Everything here was invisible to the previous implementation, which keyed
+  // off exactly two spaces of indent and one line of lookahead. None of it is
+  // exotic; it is just code that happens not to be laid out the expected way.
+  // A gate people trust has to be about the code, not about its whitespace.
+  const CASES: ReadonlyArray<readonly [string, string]> = [
+    [
+      "a component indented four spaces",
+      [
+        "export default function Wide() {",
+        "    if (!a) return null;",
+        "    const { data } = trpc.dashboard.stats.useQuery();",
+        "    return <div>{data}</div>;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "a component declared inside another function",
+      [
+        "export function Outer() {",
+        "  const Inner = () => {",
+        "    if (!a) return null;",
+        "    const [v] = useState(0);",
+        "    return <div>{v}</div>;",
+        "  };",
+        "  return <Inner />;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "a guard whose return sits one block deeper",
+      [
+        "export default function Deep() {",
+        "  if (a) {",
+        "    if (b) {",
+        "      return null;",
+        "    }",
+        "  }",
+        "  const [v] = useState(0);",
+        "  return <div>{v}</div>;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "a whole component on one line",
+      "export default function Compact() { if (!a) return null; const [v] = useState(0); return <div>{v}</div>; }",
+    ],
+  ] as const;
+
+  for (const [label, source] of CASES) {
+    it(`should still catch the defect in ${label}`, () => {
+      expect(hooksCalledAfterConditionalReturn(source)).toHaveLength(1);
+    });
+  }
+});
+
 describe("the client tree", () => {
-  const CLIENT = join(__dirname, "..");
+  const CLIENT = join(__dirname, "..", "client", "src");
 
   function tsxFiles(dir: string, out: string[] = []): string[] {
     for (const entry of readdirSync(dir)) {
