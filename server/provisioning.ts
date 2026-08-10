@@ -15,7 +15,9 @@
  * contract-to-live SLA (the human half: credentials + DNS/email are ready).
  */
 import { tenantQuotas } from "../drizzle/tenant_schema";
-import { moduleConfigurations } from "../drizzle/schema";
+import { moduleConfigurations, organizations } from "../drizzle/schema";
+import { eq } from "drizzle-orm";
+import { modulesForSegment } from "@shared/moduleScope";
 import { getDb } from "./db";
 import { provisionTenantKey } from "./_core/tenantKeys";
 
@@ -64,8 +66,17 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
     else steps.push({ step: "quotas", status: "failed", detail: err instanceof Error ? err.message : String(err) });
   }
 
-  // 3) Both reconciliation modules on by default (two-module architecture).
-  for (const moduleType of ["settlement", "account_level"] as const) {
+  // 3) Reconciliation modules on by default — but only the ones the tenant's
+  //    vertical can actually use. This previously enabled BOTH for everyone, so
+  //    every SHOPLINE merchant was provisioned with Account-Level (GL-to-CBS)
+  //    reconciliation switched on, a module presupposing a general ledger wired
+  //    to a core banking system. See shared/moduleScope.
+  const [org] = await db
+    .select({ segment: organizations.segment })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  for (const moduleType of modulesForSegment(org?.segment)) {
     try {
       await db.insert(moduleConfigurations).values({ organizationId, moduleType, isEnabled: true });
     } catch (err) {

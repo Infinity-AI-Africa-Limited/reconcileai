@@ -1399,6 +1399,24 @@ sandbox.
 - **S3 for all file storage** — never store file bytes in the database
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
+- **Never use `&&` for conditional rendering in JSX** — use a ternary with an
+  explicit `null`. `{count && <X/>}` renders a literal `0` when `count` is `0`,
+  because `0` is falsy but still a valid React child. The bug only appears on the
+  empty state, which is exactly where it is least likely to be tested.
+  ✅ `{count > 0 ? <X/> : null}` ❌ `{count && <X/>}`
+  ([why](https://dev.to/maafaishal/avoid-operator-for-conditional-rendering-in-react-2de))
+- **Predicates are named for what they COMPARE, not what they show** —
+  `isCorporateB2B(segment)`, never `showsPilotReadiness(segment)`. The caller
+  names the intent: `const showPilotReadiness = isCorporateB2B(segment)`. This
+  keeps the reason a surface is hidden readable at the point of hiding, and keeps
+  the predicate reusable for the next decision about the same thing.
+- **Pages render; hooks decide.** A page component should not compute business
+  rules (thresholds, eligibility, compliance verdicts). Put the rule in a pure
+  function under `client/src/lib/` (which is where the vitest config collects
+  client tests from), compose it in a hook, and let the page consume the result.
+- **Tests read as behaviour** — `describe("when <situation>", …)` +
+  `it("should <expected outcome>", …)`. The describe/it pair should explain the
+  scenario before anyone reads the assertions.
 
 ---
 

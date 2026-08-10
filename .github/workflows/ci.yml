@@ -5,6 +5,22 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual re-run, from Actions -> CI -> "Run workflow" (pick the branch).
+  #
+  # Needed because GitHub occasionally DROPS a pull_request event and never
+  # creates a run at all. PR #54 sat with zero CI runs while a PR opened after
+  # it ran normally — Actions was enabled, the workflow was active, and the
+  # branch simply had no run. Recovering it meant pushing a commit purely to
+  # emit a `synchronize` event.
+  #
+  # That is a poor tool now that #47 made this suite BLOCKING: with required
+  # checks and no manual trigger, a dropped event freezes a PR and the only
+  # remedies are a junk commit or close/reopen.
+  #
+  # For a same-repo branch the head SHA is the PR's head SHA, so the checks a
+  # dispatched run publishes satisfy branch protection exactly as an
+  # event-triggered run would.
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -26,6 +42,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm check
+      # One rule: react-hooks/rules-of-hooks. It runs here rather than in Tests
+      # because it needs no database and answers in seconds, and because the two
+      # defects it exists for were both invisible to tsc — a hook below an early
+      # return is perfectly well-typed. See eslint.config.js for why the config
+      # is one rule wide, and for the tRPC-shaped half it cannot see (covered by
+      # client/src/lib/hookOrder.test.ts in the Tests job).
+      - name: Lint
+        run: pnpm lint
       - name: Build
         run: pnpm build
 

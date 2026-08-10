@@ -1,0 +1,143 @@
+/**
+ * Which reconciliation modules a vertical is offered.
+ *
+ * `account_level` reconciles a general ledger against a core banking system —
+ * the Woodcore POC's core. A SHOPLINE merchant operates neither: their money
+ * moves order -> gateway -> payout, with no GL to tie back to.
+ *
+ * They were offered it anyway, described as delivering "100% audit trail
+ * completeness for CBN compliance" and "zero licence revocations" — a promise
+ * about a regulator they do not answer to and a licence they do not hold. And
+ * `provisionTenantBaseline` switched it ON for every new tenant, so every
+ * SHOPLINE merchant was provisioned with it enabled.
+ *
+ * The rule lives in shared/ because the client hides the card and the server
+ * refuses the mutation, and those two must not be able to disagree.
+ */
+import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import {
+  modulesForSegment,
+  moduleAppliesTo,
+  moduleUnavailableReason,
+  ALL_MODULE_TYPES,
+} from "../shared/moduleScope";
+
+describe("when the tenant is a retail merchant", () => {
+  it("should offer settlement only", () => {
+    expect(modulesForSegment("retail_commerce")).toEqual(["settlement"]);
+  });
+
+  it("should refuse account_level, which needs a GL and a core banking system", () => {
+    expect(moduleAppliesTo("account_level", "retail_commerce")).toBe(false);
+  });
+
+  it("should explain the refusal in terms the merchant can act on", () => {
+    const reason = moduleUnavailableReason("account_level", "retail_commerce");
+    expect(reason).toMatch(/general ledger/i);
+    expect(reason).toMatch(/core banking/i);
+    // Never quote CBN or licences at someone subject to neither.
+    expect(reason).not.toMatch(/CBN|licence/i);
+  });
+});
+
+describe("when the tenant is any other vertical", () => {
+  it("should keep both modules for financial services", () => {
+    expect(modulesForSegment("financial_services")).toEqual([...ALL_MODULE_TYPES]);
+  });
+
+  it("should keep both for corporate B2B, which does run a general ledger", () => {
+    // An FMCG distributor reconciles bank accounts against a GL. Only retail is
+    // narrowed — this is not a general "hide the complicated module" rule.
+    expect(modulesForSegment("corporate_b2b")).toEqual([...ALL_MODULE_TYPES]);
+    expect(moduleAppliesTo("account_level", "corporate_b2b")).toBe(true);
+  });
+
+  it("should keep both for the platform operator", () => {
+    expect(modulesForSegment("super_admin")).toEqual([...ALL_MODULE_TYPES]);
+  });
+});
+
+describe("when the segment is unknown", () => {
+  it("should keep both rather than silently disabling one", () => {
+    // This rule REMOVES a capability from one vertical. Defaulting to the narrow
+    // set would disable account_level for every legacy org with no segment set,
+    // which is the wrong direction to fail on missing data.
+    for (const unknown of [null, undefined, "", "something_new"]) {
+      expect(modulesForSegment(unknown as string | null)).toEqual([...ALL_MODULE_TYPES]);
+    }
+  });
+});
+
+describe("when the guard is enforced server-side", () => {
+  const read = (rel: string) => fs.readFileSync(path.join(__dirname, rel), "utf8");
+  // The two guarded domains live in different files: the module toggle stayed in
+  // the root router, the run procedures moved to their own domain router, and the
+  // rule itself sits in shared.ts so neither can hold a private copy.
+  const ROUTERS = read("routers.ts");
+  const RECONCILIATION = read("routers/reconciliation.ts");
+  const SHARED = read("routers/shared.ts");
+  const GUARD = "await assertModuleAvailable(ctx, input.moduleType)";
+
+  /**
+   * Source between two anchors, so "the guard runs BEFORE the write" is
+   * checkable rather than just "the guard appears somewhere in the file".
+   *
+   * A missing anchor FAILS rather than returning an empty slice. That matters
+   * more than it looks: these assertions read source as text, so if a procedure
+   * is moved to another file and the anchors are not repointed, a laxer version
+   * of this helper would keep passing against a file that no longer contains the
+   * procedure — a green ratchet guarding nothing.
+   */
+  function between(source: string, startAnchor: string, endAnchor: string): string {
+    const start = source.indexOf(startAnchor);
+    expect(start, `anchor missing: ${startAnchor}`).toBeGreaterThan(-1);
+    const end = source.indexOf(endAnchor, start);
+    expect(end, `anchor missing after ${startAnchor}: ${endAnchor}`).toBeGreaterThan(start);
+    return source.slice(start, end);
+  }
+
+  it("should refuse an inapplicable module before the config row is written", () => {
+    // Hiding the card is presentation. Without these, a retail admin could still
+    // enable account_level by calling the procedure directly — the same trap as
+    // the assessment lead pipeline, where a hidden nav entry fronted an open
+    // procedure.
+    expect(between(ROUTERS, "toggle: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+    expect(between(ROUTERS, "updateConfig: adminProcedure", "dbConn.update(db.moduleConfigurations)")).toContain(GUARD);
+  });
+
+  it("should refuse an inapplicable module before a reconciliation job is persisted", () => {
+    // The module toggle is NOT the gate for a run: these procedures take
+    // moduleType straight from the caller and never consult moduleConfigurations,
+    // so guarding only the toggle left the actual engine reachable. The public
+    // API (POST /api/v1/reconciliation/runs) calls reconciliation.create too, so
+    // the guard has to sit on the procedure, not on the UI that fronts it.
+    expect(between(RECONCILIATION, "create: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
+    expect(between(RECONCILIATION, "createMultiChannel: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
+  });
+
+  it("should decide using the shared rule, not a second inline copy", () => {
+    expect(SHARED).toMatch(/from "@shared\/moduleScope"/);
+    expect(SHARED).toMatch(/moduleAppliesTo\(moduleType, org\?\.segment\)/);
+    // One definition, imported by both callers. Two would be free to drift, and
+    // the drift would show up as a vertical quietly regaining a module.
+    expect(ROUTERS).not.toMatch(/function assertModuleAvailable/);
+    expect(RECONCILIATION).not.toMatch(/function assertModuleAvailable/);
+  });
+});
+
+describe("when a tenant is provisioned", () => {
+  const PROVISIONING = fs.readFileSync(path.join(__dirname, "provisioning.ts"), "utf8");
+
+  it("should seed only the modules the vertical can use", () => {
+    // Was: `for (const moduleType of ["settlement", "account_level"] as const)`,
+    // which enabled GL-to-CBS reconciliation for every SHOPLINE merchant.
+    expect(PROVISIONING).toMatch(/modulesForSegment\(org\?\.segment\)/);
+    expect(PROVISIONING).not.toMatch(/\["settlement", "account_level"\] as const/);
+  });
+
+  it("should look the segment up rather than assume one", () => {
+    expect(PROVISIONING).toMatch(/segment: organizations\.segment/);
+  });
+});
