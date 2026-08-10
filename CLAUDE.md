@@ -981,6 +981,59 @@ Module state is stored in `moduleConfigurations` (per-org toggle) and `moduleOve
 
 ---
 
+## 9C. Vertical Scope — which segment may use what (ENFORCED, not cosmetic)
+
+Two shared rule modules decide what a vertical is offered. **Both live in `shared/`
+on purpose: the client hides a surface and the server refuses it, and those two must
+not be able to disagree.** A hidden nav entry in front of an open procedure is not a
+boundary — it is a decoration, and the platform shipped three of those.
+
+| Rule | File | Says |
+|---|---|---|
+| Module scope | `shared/moduleScope.ts` | `account_level` is not offered to `retail_commerce` — a merchant has no GL wired to a core banking system |
+| Feature scope | `shared/verticalFeatures.ts` | `cbn_regulatory_reporting` → financial services, corporate B2B, super admin · `distributor_registry` → **corporate B2B, super admin** |
+
+**Distributors belong to the CORPORATE B2B sector and to no other** (owner ruling,
+2026-08-08). The registry records the distributors an FMCG supplier sells through. A
+bank does not sell through distributors; a retail merchant has none. Do not widen
+this by reasoning from production data: 30 distributor rows sit on the
+financial-services demo tenant and 14 under `organizationId` 0, while BrightGoods —
+the corporate-B2B tenant that owns the concept — holds zero. Those rows are misfiled
+legacy artefacts (§19.2), not evidence. `client/src/lib/navItems.ts` has always
+scoped the registry to `["corporate_b2b"]`; the server rule was the outlier.
+
+### Where they are enforced
+
+- `assertModuleAvailable` (`server/routers/shared.ts`) — the two `modules.*`
+  mutations AND both reconciliation job-creation procedures. The toggle is **not**
+  the gate for a run: `reconciliation.create` / `createMultiChannel` take
+  `moduleType` straight from the caller and never read `moduleConfigurations`.
+- `cbnProcedure` / `distributorProcedure` (`server/routers/shared.ts`) — applied as
+  procedure **builders**, so a router built from them cannot acquire an unguarded
+  procedure by someone adding one and forgetting the check.
+- `provisionTenantBaseline` seeds only the modules a vertical can use; the demo
+  seeder refuses to file distributors against a non-B2B tenant.
+
+### The read/write asymmetry — the trap that recurred four times
+
+`featureAppliesTo` fails **open** on an unknown segment, deliberately: withdrawing a
+capability because data is missing is the wrong direction for a read. Applied to a
+write, that same default *manufactures* rows — an absent (or non-existent)
+organisation yields an absent segment, the check passes, and the row is filed
+against a tenant that does not exist. That is the origin of the 14 unreachable
+distributor rows.
+
+**So: reads use `featureAppliesTo`, writes use `featureStrictlyAppliesTo`.**
+
+The underlying mistake is worth naming, because it was made four times in one
+session and caught by review every time: **"no organisation" is not "unknown
+segment".** An org whose segment is unset keeps its capability. A caller with no
+organisation at all is refused — otherwise every such account pools into one shared
+pseudo-tenant (22 accounts currently have no organisation). Ask this question of
+every tenant-scoped guard.
+
+---
+
 ## 9A. Feature Evaluation Rubric — The Intelligence Moat Test
 
 **Every feature — whether proposed by the founder, Manus, or Claude — is evaluated against this rubric before it is built, and every Manus PR is reviewed against it before merging:**
@@ -1547,6 +1600,21 @@ awkward to explain in a client's security review. Three honest options: archive
 to a separate table, backfill a synthetic "legacy" organization, or knowingly
 leave them with the decision recorded. Any is fine; drifting into launch without
 deciding is not.
+
+> **Same family, measured 2026-08-08 — 44 misfiled `distributors` rows.** 30 sit on
+> the financial-services demo tenant (org 1, created 2026-04-12) and 14 under
+> `organizationId` 0, which is no tenant at all (demo-marked, created 2026-05-18).
+> Since PR #64 the registry is corporate-B2B-only, so **none of them is reachable
+> through the UI** and none leaks: org 0 is not a tenant, and a bank can no longer
+> open the registry.
+>
+> **Recommendation: fold these into the decision above rather than relocating
+> them.** Moving them to BrightGoods was considered and rejected on the evidence:
+> every transaction naming them (29,892 rows) is itself `organizationId IS NULL`,
+> i.e. part of the same legacy pool. Relocating would hand the corporate-B2B demo a
+> 44-name registry whose transactions are invisible to it — a demo that looks
+> populated and reconciles nothing, which is worse than an empty one. Whatever is
+> decided for the 57.3M rows should cover these 44.
 
 **3. Close the `matches` / `exceptions` tenancy gap.**
 Both tables lack an `organizationId` column, so their writes cannot be scoped
