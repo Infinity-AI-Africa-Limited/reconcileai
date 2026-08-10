@@ -54,6 +54,33 @@ export function moduleAppliesTo(
   return modulesForSegment(segment).includes(moduleType);
 }
 
+/**
+ * Drop rows for modules this vertical cannot use.
+ *
+ * Provisioning decides what a tenant is BORN with, and it only runs once. Two
+ * things escape it. A tenant provisioned before the scope rule existed still
+ * carries its `account_level` row — both SHOPLINE merchants in production do,
+ * still flagged enabled — and an organisation retyped to `retail_commerce`
+ * afterwards (superAdmin.updateOrganizationSegment) was never re-provisioned at
+ * all. Neither is reachable by a one-off backfill: the second case can happen
+ * again tomorrow.
+ *
+ * So the read is scoped instead, which makes the stored row inert rather than
+ * merely tidy — the toggle and both job-creation paths already refuse it via
+ * `assertModuleAvailable`, and this stops it being listed as available in the
+ * first place. Scoping the read also self-heals whenever a segment changes.
+ *
+ * Fails OPEN on an unknown segment, because `moduleAppliesTo` does: this rule
+ * REMOVES a module from one vertical, so an unrecognised segment must keep
+ * everything rather than silently strip a tenant of a module it uses.
+ */
+export function scopeModuleRows<T extends { moduleType: string }>(
+  rows: readonly T[],
+  segment: ModuleSegment | string | null | undefined,
+): T[] {
+  return rows.filter((row) => moduleAppliesTo(row.moduleType as ModuleType, segment));
+}
+
 /** Why a module was refused, for an error a user can act on. */
 export function moduleUnavailableReason(moduleType: ModuleType, segment: string | null | undefined): string {
   return `The ${moduleType === "account_level" ? "Account-Level" : "Settlement"} Reconciliation module is not available for ${
