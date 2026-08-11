@@ -1619,11 +1619,23 @@ doing it immediately.
 
 *The right time:* on or after **2026-09-10** (30 days of confirmed normal
 operation), or sooner if storage cost bites — and in any case revisit it at the
-first-customer gate above. Until then the archive is also the rollback path:
-`transactions_legacy_archive` is a FULL snapshot of the pre-change table
-(35,121,788 rows, including the 85,499 live ones), so a rename restores the old
-state exactly. The other three archives hold legacy rows only. Dropping is
-irreversible and there is deliberately no script for it — confirm a backup first.
+first-customer gate above. Dropping is irreversible and there is deliberately no
+script for it — confirm a backup first.
+
+**How to recover archived rows, if it ever comes to that.**
+`transactions_legacy_archive` is a full copy of the table *as it stood at
+02:05 on 2026-08-11* — 35,121,788 rows, including the 85,499 that are also live.
+The other three archives hold legacy rows only.
+
+> ⚠️ **It is a snapshot, not a mirror, and the difference grows every day.**
+> Renaming it back over `transactions` is a true rollback only in the minutes
+> after the run. Do it later and it silently discards every row written since —
+> which is real tenant data, and exactly the failure this whole exercise was
+> meant to avoid.
+>
+> Recover by **INSERT, not by rename**: copy the wanted rows out of the archive
+> into the live table. Their ids cannot collide — archived ids are all
+> ≤ 36,379,947 and live inserts continue above that — so the two merge cleanly.
 
 > **Same family, measured 2026-08-08 — 44 misfiled `distributors` rows.** 30 sit on
 > the financial-services demo tenant (org 1, created 2026-04-12) and 14 under
