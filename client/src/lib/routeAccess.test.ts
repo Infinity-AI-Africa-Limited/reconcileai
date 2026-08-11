@@ -74,6 +74,28 @@ describe("when a vertical opens a route built for another one", () => {
     }
   });
 
+  it("should refuse the spellings the ROUTER also accepts", () => {
+    // wouter compiles "/distributors" through regexparam into
+    // /^\/distributors\/?$/i — optional trailing slash, case-insensitive. Both
+    // spellings load the page, so both have to be refused. An exact-string
+    // lookup found no entry, called the route unscoped, and let the merchant in
+    // through the front door with a slash on the end.
+    for (const spelling of ["/distributors/", "/Distributors", "/DISTRIBUTORS/", "/distributors//"]) {
+      expect(canReachPath(spelling, "retail_commerce", "admin"), spelling).toBe(false);
+      expect(canReachPath(spelling, "corporate_b2b", "admin"), spelling).toBe(true);
+    }
+  });
+
+  it("should normalise the auditor route the same way", () => {
+    expect(canReachPath("/dashboard/auditor/", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/Dashboard/Auditor", "retail_commerce", "admin")).toBe(false);
+  });
+
+  it("should still treat the root path as the root", () => {
+    // Guard against a normaliser that strips "/" down to "".
+    expect(canReachPath("/", "retail_commerce", "admin")).toBe(true);
+  });
+
   it("should not block a path it has never heard of", () => {
     // This decides what the client OFFERS, not what is permitted. Failing closed
     // on an unknown path would break routes simply for not being nav entries.

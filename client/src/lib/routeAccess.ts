@@ -44,11 +44,30 @@ const NON_NAV_ROUTE_SEGMENTS: Record<string, Segment[]> = {
   "/dashboard/auditor": ["financial_services", "corporate_b2b", "super_admin"],
 };
 
+/**
+ * Match the router's own tolerance, or the guard is trivially bypassed.
+ *
+ * wouter compiles `/distributors` through regexparam into
+ * `/^\/distributors\/?$/i` — a trailing slash is optional and the match is
+ * case-INSENSITIVE. So `/distributors/` and `/Distributors` both load the page
+ * while an exact-string lookup here finds no entry, reports the route as
+ * unscoped, and lets a merchant straight into the screen this guard exists to
+ * keep them out of.
+ *
+ * Anything comparing a path against a route table has to normalise the same way
+ * the router does. Verified against regexparam 3.0.0 rather than assumed.
+ */
+function normalizePath(path: string): string {
+  const trimmed = path.toLowerCase().replace(/\/+$/, "");
+  return trimmed === "" ? "/" : trimmed;
+}
+
 /** The segments a path is built for, or null when it is for everyone. */
 export function segmentsForPath(path: string): Segment[] | null {
-  const extra = NON_NAV_ROUTE_SEGMENTS[path];
+  const key = normalizePath(path);
+  const extra = NON_NAV_ROUTE_SEGMENTS[key];
   if (extra) return extra;
-  return NAV_ITEMS.find((e) => e.path === path)?.segments ?? null;
+  return NAV_ITEMS.find((e) => normalizePath(e.path) === key)?.segments ?? null;
 }
 
 /**
