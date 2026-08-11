@@ -41,6 +41,7 @@ export function pullRequestBranchFilter(source: string): string | null {
 
     // Flow style, all on one line: `pull_request: {branches: [main]}`
     if (inline.startsWith("{")) {
+      if (/branches-ignore:/.test(inline)) return "branches-ignore";
       const flow = /branches:\s*(\[[^\]]*\]|[^,}]+)/.exec(inline);
       return flow ? flow[1].trim() : null;
     }
@@ -50,8 +51,38 @@ export function pullRequestBranchFilter(source: string): string | null {
       const line = lines[j];
       if (line.trim() === "" || /^[ ]*#/.test(line)) continue;
       if (indentOf(line) <= indent) break; // the block ended
-      const branches = /^[ ]*branches:[ ]*(.+)$/.exec(line);
-      if (branches) return branches[1].trim();
+
+      // `branches-ignore` restricts which bases fire just as `branches` does,
+      // so it counts. Matched first: "branches:" would not match this line, and
+      // reading it as unfiltered is the same false negative in another costume.
+      if (/^[ ]*branches-ignore:/.test(line)) return "branches-ignore";
+
+      const branches = /^([ ]*)branches:[ ]*(.*)$/.exec(line);
+      if (!branches) continue;
+
+      const inlineValue = branches[2].trim();
+      if (inlineValue !== "") return inlineValue; // flow: branches: [main]
+
+      // Block sequence, the most ordinary style of all and the one this missed:
+      //
+      //   branches:
+      //     - main
+      //
+      // Nothing follows the colon, so a pattern demanding a value on the same
+      // line finds no filter and reports the workflow as unrestricted — while it
+      // is restricted to main. Gather the items instead.
+      const branchesIndent = branches[1].length;
+      const items: string[] = [];
+      for (let k = j + 1; k < lines.length; k++) {
+        const item = lines[k];
+        if (item.trim() === "" || /^[ ]*#/.test(item)) continue;
+        if (indentOf(item) <= branchesIndent) break;
+        const entry = /^[ ]*-[ ]*(.+)$/.exec(item);
+        if (!entry) break;
+        items.push(entry[1].trim());
+      }
+      // Rendered as a list so callers read one shape whichever style was used.
+      return items.length > 0 ? `[${items.join(", ")}]` : null;
     }
     return null; // a pull_request trigger with no branches filter
   }

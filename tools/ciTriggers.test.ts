@@ -45,6 +45,43 @@ describe("when reading a workflow's pull_request filter", () => {
     expect(pullRequestBranchFilter("on:\n  pull_request: {branches: [main]}\n")).toBe("[main]");
   });
 
+  it("should read the BLOCK SEQUENCE form", () => {
+    // The most ordinary style there is, and the second thing this helper missed:
+    //
+    //   branches:
+    //     - main
+    //
+    // Nothing follows the colon, so a pattern demanding a value on the same line
+    // finds no filter and calls the workflow unrestricted — while it is
+    // restricted to main.
+    const yaml = "on:\n  pull_request:\n    branches:\n      - main\n      - release/*\n";
+    expect(pullRequestBranchFilter(yaml)).toBe("[main, release/*]");
+    expect(restrictsBaseBranches(pullRequestBranchFilter(yaml))).toBe(true);
+  });
+
+  it("should read a block sequence that allows every base", () => {
+    const yaml = "on:\n  pull_request:\n    branches:\n      - '**'\n";
+    expect(restrictsBaseBranches(pullRequestBranchFilter(yaml))).toBe(false);
+  });
+
+  it("should treat branches-ignore as a restriction too", () => {
+    // It narrows which bases fire just as `branches` does. Reading it as
+    // unfiltered is the same false negative wearing a different name.
+    for (const yaml of [
+      "on:\n  pull_request:\n    branches-ignore: [docs/*]\n",
+      "on:\n  pull_request:\n    branches-ignore:\n      - docs/*\n",
+      "on:\n  pull_request: {branches-ignore: [docs/*]}\n",
+    ]) {
+      expect(restrictsBaseBranches(pullRequestBranchFilter(yaml)), yaml).toBe(true);
+    }
+  });
+
+  it("should not run past the branches block into unrelated keys", () => {
+    // A `types:` list after the branches sequence must not be swallowed into it.
+    const yaml = "on:\n  pull_request:\n    branches:\n      - main\n    types:\n      - opened\n";
+    expect(pullRequestBranchFilter(yaml)).toBe("[main]");
+  });
+
   it("should report no restriction when there is no branches key", () => {
     expect(pullRequestBranchFilter("on:\n  pull_request:\n    types: [opened]\n")).toBeNull();
   });
