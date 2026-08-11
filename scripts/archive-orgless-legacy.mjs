@@ -92,6 +92,15 @@ const PLAN = [
 const archiveName = (t) => `${t}_legacy_archive`;
 
 async function main() {
+  // Refuse anything the script does not fully understand, rather than silently
+  // reinterpreting it. `--only transactions` (no `=`) and `--onlt=…` both parse
+  // as "no filter", which under --execute archives every table instead of the
+  // one that was asked for — widening scope on a flag meant to narrow it.
+  const unknown = process.argv.slice(2).filter((a) => a !== "--execute" && !a.startsWith("--only="));
+  if (unknown.length > 0) {
+    throw new Error(`unrecognised argument(s): ${unknown.join(" ")}. Usage: [--execute] [--only=<table>]`);
+  }
+
   // A target that matches nothing would skip every step and still reach "Done." —
   // the operator reads success and believes a 35M-row archive ran when it did not.
   // Refuse before opening a connection rather than reporting a move that never happened.
