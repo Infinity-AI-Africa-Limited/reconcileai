@@ -69,12 +69,42 @@ function pullRequestBlock(source: string): string | null {
   return null;
 }
 
+/**
+ * Does this block allow EVERY base branch?
+ *
+ * Only a bare `**` does. `release/**` contains the same two characters and is a
+ * narrowing pattern — testing for the substring accepted it and called the
+ * workflow unrestricted, which is the false negative this module exists to
+ * prevent, reintroduced by the fix for the previous one.
+ *
+ * Quotes, brackets and commas become spaces so `['**']`, `[ "**" ]` and a
+ * `- '**'` list item all reduce to a standalone token, while `release/**` keeps
+ * the slash that disqualifies it.
+ */
+function allowsEveryBase(block: string): boolean {
+  const normalized = block.replace(/["'[\],]/g, " ");
+  return /(?:^|\s)\*\*(?:\s|$)/.test(normalized);
+}
+
 export function readPullRequestTrigger(source: string): PullRequestTrigger {
   const block = pullRequestBlock(source);
   if (block === null) return { kind: "absent" };
+
+  const restricted = (): PullRequestTrigger => ({
+    kind: "restricted",
+    block: block.trim().replace(/\s+/g, " ").slice(0, 120),
+  });
+
+  // No filter of any kind: every base fires.
   if (!/branches/.test(block)) return { kind: "unrestricted" };
-  if (/\*\*/.test(block)) return { kind: "unrestricted" };
-  return { kind: "restricted", block: block.trim().replace(/\s+/g, " ").slice(0, 120) };
+
+  // `branches-ignore` only ever subtracts, so it always narrows — including
+  // `branches-ignore: ['**']`, which excludes every pull request there is. A
+  // match-all glob inside an ignore list is the opposite of permissive, and
+  // reading it as `**` = "allows everything" inverts its meaning entirely.
+  if (/branches-ignore/.test(block)) return restricted();
+
+  return allowsEveryBase(block) ? { kind: "unrestricted" } : restricted();
 }
 
 /** Does this workflow skip pull requests based on some branches? */

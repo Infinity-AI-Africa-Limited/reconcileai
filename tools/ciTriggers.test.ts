@@ -38,12 +38,25 @@ const RESTRICTED_SHAPES: Record<string, string> = {
   "branches-ignore": "on:\n  pull_request:\n    branches-ignore: [docs/*]\n",
   "branches-ignore, block": "on:\n  pull_request:\n    branches-ignore:\n      - docs/*\n",
   "space before the pull_request colon": "on:\n  pull_request :\n    branches: [main]\n",
+  // A narrowing glob that happens to CONTAIN `**`. Testing for the substring
+  // accepted these and called the workflow unrestricted — the same false
+  // negative, reintroduced by the fix for the previous one.
+  "a scoped glob": "on:\n  pull_request:\n    branches: ['release/**']\n",
+  "a scoped glob, block": "on:\n  pull_request:\n    branches:\n      - 'release/**'\n",
+  "a single-level star": "on:\n  pull_request:\n    branches: ['*']\n",
+  "branches-ignore with a scoped glob": "on:\n  pull_request:\n    branches-ignore: ['release/**']\n",
+  // The worst of them: this excludes EVERY pull request, so the workflow runs on
+  // none of them. Reading `**` as "allows everything" inverts its meaning.
+  "branches-ignore matching everything": "on:\n  pull_request:\n    branches-ignore: ['**']\n",
+  "branches plus an ignore list": "on:\n  pull_request:\n    branches: ['**']\n    branches-ignore: [docs/*]\n",
 };
 
 /** Shapes that genuinely place no restriction on the base branch. */
 const UNRESTRICTED_SHAPES: Record<string, string> = {
   "match-all glob": "on:\n  pull_request:\n    branches: ['**']\n",
   "match-all, block sequence": "on:\n  pull_request:\n    branches:\n      - '**'\n",
+  "match-all, double-quoted": 'on:\n  pull_request:\n    branches: ["**"]\n',
+  "match-all beside a narrower pattern": "on:\n  pull_request:\n    branches: ['**', 'release/*']\n",
   "no branches key at all": "on:\n  pull_request:\n    types: [opened]\n",
   "bare trigger": "on:\n  pull_request:\n",
   "a comment mentioning branches": "on:\n  pull_request:\n    # runs for all branches\n    types: [opened]\n",
