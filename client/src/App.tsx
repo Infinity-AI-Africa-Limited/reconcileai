@@ -152,11 +152,18 @@ function DashboardPage({ component: Component }: { component: React.ComponentTyp
  * Not DashboardPage, because SHOPLINE's redirect carries no session and the
  * dashboard requires one. `canReachCallback` refuses only a resolved other
  * vertical, so the signed-out merchant this page exists for still arrives.
+ *
+ * The segment lookup is gated on being signed in, and that gate is load-bearing
+ * rather than an optimisation. `auth.mySegment` is a protectedProcedure, and
+ * main.tsx redirects the browser to /login on ANY unauthorized query error — so
+ * simply asking for the segment without a session would throw the merchant onto
+ * a login page for an account they do not have yet. Guarding the route must not
+ * cost more than the thing it guards against.
  */
 function CallbackGuard({ component: Component }: { component: React.ComponentType }) {
   const [location] = useLocation();
-  const { segment, isPending } = useOrgSegmentStatus();
-  const { user } = useAuth();
+  const { user, isAuthenticated } = useAuth();
+  const { segment, isPending } = useOrgSegmentStatus({ enabled: isAuthenticated });
   const { viewAsOrg } = usePortalContext();
 
   const opts = { portal: viewAsOrg !== null };

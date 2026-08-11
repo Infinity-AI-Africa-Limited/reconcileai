@@ -220,6 +220,25 @@ describe("when the viewer lands on a SHOPLINE install callback", () => {
     expect(canReachPath("/shopline/welcome", null, undefined)).toBe(false);
   });
 
+  it("should not ASK for the segment when there is no session", () => {
+    // The trap that made the first version of this guard worse than the bug.
+    // `auth.mySegment` is a protectedProcedure, and main.tsx subscribes to the
+    // query cache and sets window.location to /login on ANY unauthorized error.
+    // So merely running the segment query on a signed-out callback navigates the
+    // merchant to a login page for an account they do not have — the install
+    // flow this guard exists to preserve, broken by the guard itself.
+    const APP = fs.readFileSync(path.join(__dirname, "..", "App.tsx"), "utf8");
+    const guard = APP.slice(APP.indexOf("function CallbackGuard"), APP.indexOf("function Router"));
+    expect(guard).toContain("useOrgSegmentStatus({ enabled: isAuthenticated })");
+
+    // And the hook must honour it by reporting a RESOLVED null rather than a
+    // pending one, or the guard waits forever on a query that never runs.
+    const HOOK = fs.readFileSync(path.join(__dirname, "..", "hooks", "useOrgSegment.ts"), "utf8");
+    expect(HOOK).toMatch(/opts: \{ enabled\?: boolean \}/);
+    expect(HOOK).toMatch(/if \(!enabled && !viewAsOrg\)/);
+    expect(HOOK).toMatch(/isPending: false/);
+  });
+
   it("should send a blocked bank somewhere that makes sense", () => {
     const destination = landingPathFor("financial_services");
     expect(destination).toBe("/dashboard");
