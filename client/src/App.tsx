@@ -5,7 +5,7 @@ import { Redirect, Route, Switch, useLocation } from "wouter";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useOrgSegmentStatus } from "@/hooks/useOrgSegment";
 import { usePortalContext } from "@/contexts/PortalContext";
-import { canReachPath, landingPathFor } from "@/lib/routeAccess";
+import { canReachCallback, canReachPath, landingPathFor } from "@/lib/routeAccess";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
@@ -141,6 +141,30 @@ function DashboardPage({ component: Component }: { component: React.ComponentTyp
   );
 }
 
+/**
+ * A standalone OAuth landing, kept out of the dashboard chrome on purpose.
+ *
+ * The same ShoplineWelcome component is ALSO mounted at /shopline/connect through
+ * DashboardPage, so it was guarded by one path and wide open on the other: a bank
+ * could open /shopline/welcome — or wouter's aliases /SHOPLINE/WELCOME/ — and be
+ * congratulated on connecting a store it does not have.
+ *
+ * Not DashboardPage, because SHOPLINE's redirect carries no session and the
+ * dashboard requires one. `canReachCallback` refuses only a resolved other
+ * vertical, so the signed-out merchant this page exists for still arrives.
+ */
+function CallbackGuard({ component: Component }: { component: React.ComponentType }) {
+  const [location] = useLocation();
+  const { segment, isPending } = useOrgSegmentStatus();
+  const { user } = useAuth();
+  const { viewAsOrg } = usePortalContext();
+
+  const opts = { portal: viewAsOrg !== null };
+  const blocked = !isPending && !canReachCallback(location, segment, user?.role, opts);
+  if (blocked) return <Redirect to={landingPathFor(segment)} />;
+  return <Component />;
+}
+
 function Router() {
   return (
     <Switch>
@@ -215,8 +239,12 @@ function Router() {
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
       <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
       <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
-      <Route path="/shopline/welcome" component={ShoplineWelcome} />
-      <Route path="/shopline/error" component={ShoplineError} />
+      {/* Install callbacks: standalone pages, deliberately NOT wrapped in
+          DashboardPage. SHOPLINE redirects here without a session, so the
+          dashboard's authentication would lock out the merchant this exists
+          for. CallbackGuard turns away a signed-in OTHER vertical instead. */}
+      <Route path="/shopline/welcome">{() => <CallbackGuard component={ShoplineWelcome} />}</Route>
+      <Route path="/shopline/error">{() => <CallbackGuard component={ShoplineError} />}</Route>
       <Route path="/privacy" component={Privacy} />
       <Route path="/terms" component={Terms} />
       <Route path="/support" component={Support} />

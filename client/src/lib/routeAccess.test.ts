@@ -11,7 +11,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { landingPathFor, canReachPath, segmentsForPath } from "./routeAccess";
+import { landingPathFor, canReachPath, canReachCallback, segmentsForPath } from "./routeAccess";
 import { NAV_ITEMS, inSegment } from "./navItems";
 
 describe("when a merchant signs in", () => {
@@ -188,6 +188,52 @@ describe("when a blocked route redirects somewhere", () => {
   });
 });
 
+describe("when the viewer lands on a SHOPLINE install callback", () => {
+  // /shopline/welcome mounts the SAME component as /shopline/connect. The latter
+  // went through SegmentGuard and the former did not, so one path was guarded and
+  // the other congratulated a bank on connecting a store it does not have.
+  it("should refuse a signed-in tenant of another vertical", () => {
+    for (const p of ["/shopline/welcome", "/shopline/error"]) {
+      expect(canReachCallback(p, "financial_services", "admin"), p).toBe(false);
+      expect(canReachCallback(p, "corporate_b2b", "admin"), p).toBe(false);
+    }
+  });
+
+  it("should refuse the router's aliases too", () => {
+    // The reported spelling: /SHOPLINE/WELCOME/?org=bank-org. wouter matches it,
+    // so the guard has to as well.
+    for (const p of ["/shopline/welcome/", "/SHOPLINE/WELCOME", "/SHOPLINE/WELCOME/"]) {
+      expect(canReachCallback(p, "financial_services", "admin"), p).toBe(false);
+    }
+  });
+
+  it("should let the merchant through", () => {
+    expect(canReachCallback("/shopline/welcome", "retail_commerce", "admin")).toBe(true);
+  });
+
+  it("should let a SIGNED-OUT visitor through — the actual install case", () => {
+    // The whole reason this is not canReachPath. SHOPLINE's OAuth redirect sets
+    // no session cookie, so the merchant arrives with no segment at all. Refusing
+    // on a null segment, as the sidebar rule does, would bounce the one person
+    // the page exists for and break the install flow.
+    expect(canReachCallback("/shopline/welcome", null, undefined)).toBe(true);
+    expect(canReachPath("/shopline/welcome", null, undefined)).toBe(false);
+  });
+
+  it("should send a blocked bank somewhere that makes sense", () => {
+    const destination = landingPathFor("financial_services");
+    expect(destination).toBe("/dashboard");
+    expect(canReachCallback(destination, "financial_services", "admin")).toBe(true);
+  });
+
+  it("should keep the guarded twin behaving identically for a signed-in viewer", () => {
+    // /shopline/connect renders the same component through SegmentGuard. A bank is
+    // refused both ways now; before, only one of them turned it away.
+    expect(canReachPath("/shopline/connect", "financial_services", "admin")).toBe(false);
+    expect(canReachCallback("/shopline/welcome", "financial_services", "admin")).toBe(false);
+  });
+});
+
 describe("when the rule is derived rather than restated", () => {
   it("should take every scoped nav path's rule from NAV_ITEMS itself", () => {
     // The point of deriving: an entry hidden from a vertical is unreachable by it
@@ -206,6 +252,11 @@ describe("when the rule is derived rather than restated", () => {
     // The portal flag has to actually be passed, or staff inside a tenant portal
     // bypass the tenant's own rules — which is how /distributors stayed reachable.
     expect(APP).toMatch(/const opts = \{ portal: viewAsOrg !== null \}/);
+    // The install callbacks must go through the callback guard, not straight to
+    // the component — that direct mount is what left /shopline/welcome open.
+    expect(APP).toMatch(/path="\/shopline\/welcome">\{\(\) => <CallbackGuard component=\{ShoplineWelcome\} \/>\}/);
+    expect(APP).toMatch(/path="\/shopline\/error">\{\(\) => <CallbackGuard component=\{ShoplineError\} \/>\}/);
+    expect(APP).toMatch(/canReachCallback\(location, segment, user\?\.role, opts\)/);
     expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
     expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
   });

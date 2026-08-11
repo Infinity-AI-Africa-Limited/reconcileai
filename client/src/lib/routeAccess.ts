@@ -42,6 +42,11 @@ export function landingPathFor(segment: Segment | null): string {
  */
 const NON_NAV_ROUTE_SEGMENTS: Record<string, Segment[]> = {
   "/dashboard/auditor": ["financial_services", "corporate_b2b", "super_admin"],
+  // SHOPLINE install callbacks. Reached from the OAuth redirect rather than any
+  // link, and retail through and through — "Store Connected Successfully!", sync
+  // schedules, payouts. See canReachCallback for why they need their own gate.
+  "/shopline/welcome": ["retail_commerce"],
+  "/shopline/error": ["retail_commerce"],
 };
 
 /**
@@ -106,4 +111,35 @@ export function canReachPath(
   const segments = segmentsForPath(path);
   if (!segments) return true;
   return inSegment({ label: "", path, group: "main", segments }, segment);
+}
+
+/**
+ * The same rule for an OAuth callback landing, where "no segment" is the NORMAL
+ * case rather than a suspicious one.
+ *
+ * `/shopline/welcome` is where SHOPLINE sends a merchant after they authorise the
+ * install (server/connectors/shopline/routes.ts). No session cookie is set on
+ * that redirect, so the merchant arrives signed OUT — and `canReachPath` refuses
+ * a scoped path on a null segment, matching how the sidebar hides it. Applying it
+ * unchanged would therefore bounce the very merchant the page exists for, and
+ * mounting the route through DashboardPage would put it behind the dashboard's
+ * authentication, which breaks the same flow more thoroughly.
+ *
+ * So this refuses only a POSITIVELY identified other vertical: a signed-in bank
+ * gets sent to its own landing page instead of a retail completion screen, while
+ * anyone without a resolved segment — the merchant mid-install, or any signed-out
+ * visitor — passes through.
+ *
+ * That leaves the page reachable by a signed-out stranger, which is deliberate
+ * and costs nothing: it renders static copy, calls no procedure, and reads only
+ * an `org` code from the query string that it never looks up.
+ */
+export function canReachCallback(
+  path: string,
+  segment: Segment | null,
+  role: string | undefined,
+  opts: { portal?: boolean } = {},
+): boolean {
+  if (segment === null) return true;
+  return canReachPath(path, segment, role, opts);
 }
