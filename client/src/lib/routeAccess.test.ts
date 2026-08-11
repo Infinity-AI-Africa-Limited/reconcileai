@@ -11,7 +11,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { landingPathFor, canReachPath, segmentsForPath } from "./routeAccess";
+import { landingPathFor, canReachPath, canReachCallback, segmentsForPath } from "./routeAccess";
 import { NAV_ITEMS, inSegment } from "./navItems";
 
 describe("when a merchant signs in", () => {
@@ -103,14 +103,53 @@ describe("when a vertical opens a route built for another one", () => {
   });
 });
 
-describe("when the viewer is Infinity AI staff", () => {
+describe("when the viewer is Infinity AI staff on their own account", () => {
   it("should reach every vertical's routes", () => {
-    // The operator supports every tenant, their sidebar already reflects whichever
-    // portal they are in, and the server checks their own org on every procedure.
-    // Redirecting them off a URL they typed would be obstruction, not safety.
+    // The operator supports every tenant, and redirecting them off a URL they
+    // typed would be obstruction, not safety.
     for (const p of ["/distributors", "/settlement-monitor", "/cbn-compliance", "/dashboard/auditor"]) {
       expect(canReachPath(p, "super_admin", "super_admin"), p).toBe(true);
     }
+  });
+});
+
+describe("when staff have entered a tenant's portal", () => {
+  // Found in production on the SHOPLINE dev store: the retail portal's sidebar
+  // correctly omitted Distributor Registry, and /distributors loaded anyway.
+  // Bypassing on role alone contradicts navFor, which drops ROLE gating inside a
+  // portal but keeps SEGMENT gating — seeing what that vertical has is the entire
+  // point of the portal.
+  const portal = { portal: true };
+
+  it("should refuse routes the viewed tenant could never reach", () => {
+    expect(canReachPath("/distributors", "retail_commerce", "super_admin", portal)).toBe(false);
+    expect(canReachPath("/cbn-compliance", "retail_commerce", "super_admin", portal)).toBe(false);
+    expect(canReachPath("/dashboard/auditor", "retail_commerce", "super_admin", portal)).toBe(false);
+  });
+
+  it("should refuse the trailing-slash spellings too", () => {
+    expect(canReachPath("/distributors/", "retail_commerce", "super_admin", portal)).toBe(false);
+    expect(canReachPath("/Distributors", "retail_commerce", "super_admin", portal)).toBe(false);
+  });
+
+  it("should allow what the viewed tenant DOES have", () => {
+    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/dashboard", "/reports"]) {
+      expect(canReachPath(p, "retail_commerce", "super_admin", portal), p).toBe(true);
+    }
+  });
+
+  it("should apply the viewed tenant's rules, not the operator's", () => {
+    // Inside a corporate-B2B portal the registry is the tenant's own screen.
+    expect(canReachPath("/distributors", "corporate_b2b", "super_admin", portal)).toBe(true);
+    expect(canReachPath("/settlement-monitor", "corporate_b2b", "super_admin", portal)).toBe(false);
+  });
+
+  it("should send a blocked portal viewer to the TENANT's landing page", () => {
+    // Not the operator's dashboard: the redirect has to stay inside the portal's
+    // own surface, or leaving a blocked page silently changes what is being viewed.
+    const destination = landingPathFor("retail_commerce");
+    expect(destination).toBe("/settlement-monitor");
+    expect(canReachPath(destination, "retail_commerce", "super_admin", portal)).toBe(true);
   });
 });
 
@@ -149,6 +188,88 @@ describe("when a blocked route redirects somewhere", () => {
   });
 });
 
+describe("when the viewer lands on a SHOPLINE install callback", () => {
+  // /shopline/welcome mounts the SAME component as /shopline/connect. The latter
+  // went through SegmentGuard and the former did not, so one path was guarded and
+  // the other congratulated a bank on connecting a store it does not have.
+  const signedIn = { signedIn: true };
+
+  it("should refuse a signed-in tenant of another vertical", () => {
+    for (const p of ["/shopline/welcome", "/shopline/error"]) {
+      expect(canReachCallback(p, "financial_services", "admin", signedIn), p).toBe(false);
+      expect(canReachCallback(p, "corporate_b2b", "admin", signedIn), p).toBe(false);
+    }
+  });
+
+  it("should refuse the router's aliases too", () => {
+    // The reported spelling: /SHOPLINE/WELCOME/?org=bank-org. wouter matches it,
+    // so the guard has to as well.
+    for (const p of ["/shopline/welcome/", "/SHOPLINE/WELCOME", "/SHOPLINE/WELCOME/"]) {
+      expect(canReachCallback(p, "financial_services", "admin", signedIn), p).toBe(false);
+    }
+  });
+
+  it("should let the merchant through", () => {
+    expect(canReachCallback("/shopline/welcome", "retail_commerce", "admin", signedIn)).toBe(true);
+  });
+
+  it("should let a SIGNED-OUT visitor through — the actual install case", () => {
+    // The whole reason this is not canReachPath. SHOPLINE's OAuth redirect sets
+    // no session cookie, so the merchant arrives with no session at all. Refusing
+    // them, as the sidebar rule would, bounces the one person the page exists for
+    // and breaks the install flow.
+    expect(canReachCallback("/shopline/welcome", null, undefined)).toBe(true);
+    expect(canReachPath("/shopline/welcome", null, undefined)).toBe(false);
+  });
+
+  it("should refuse a SIGNED-IN viewer whose segment could not be determined", () => {
+    // The exception is keyed on having no session, not on a null segment — three
+    // different situations produce null. `useOrgSegmentStatus` uses retry: false,
+    // so a single failed request keeps the answer null for the life of the page,
+    // and a bank in that state would otherwise be handed the retail screen.
+    // Absence of an answer is not evidence of who is asking.
+    expect(canReachCallback("/shopline/welcome", null, "admin", signedIn)).toBe(false);
+    expect(canReachCallback("/shopline/error", null, "cfo", signedIn)).toBe(false);
+  });
+
+  it("should still let a signed-in merchant through once the answer arrives", () => {
+    // Failing closed on an unknown segment must not also punish the resolved case.
+    expect(canReachCallback("/shopline/welcome", "retail_commerce", "admin", signedIn)).toBe(true);
+  });
+
+  it("should not ASK for the segment when there is no session", () => {
+    // The trap that made the first version of this guard worse than the bug.
+    // `auth.mySegment` is a protectedProcedure, and main.tsx subscribes to the
+    // query cache and sets window.location to /login on ANY unauthorized error.
+    // So merely running the segment query on a signed-out callback navigates the
+    // merchant to a login page for an account they do not have — the install
+    // flow this guard exists to preserve, broken by the guard itself.
+    const APP = fs.readFileSync(path.join(__dirname, "..", "App.tsx"), "utf8");
+    const guard = APP.slice(APP.indexOf("function CallbackGuard"), APP.indexOf("function Router"));
+    expect(guard).toContain("useOrgSegmentStatus({ enabled: isAuthenticated })");
+
+    // And the hook must honour it by reporting a RESOLVED null rather than a
+    // pending one, or the guard waits forever on a query that never runs.
+    const HOOK = fs.readFileSync(path.join(__dirname, "..", "hooks", "useOrgSegment.ts"), "utf8");
+    expect(HOOK).toMatch(/opts: \{ enabled\?: boolean \}/);
+    expect(HOOK).toMatch(/if \(!enabled && !viewAsOrg\)/);
+    expect(HOOK).toMatch(/isPending: false/);
+  });
+
+  it("should send a blocked bank somewhere that makes sense", () => {
+    const destination = landingPathFor("financial_services");
+    expect(destination).toBe("/dashboard");
+    expect(canReachCallback(destination, "financial_services", "admin", signedIn)).toBe(true);
+  });
+
+  it("should keep the guarded twin behaving identically for a signed-in viewer", () => {
+    // /shopline/connect renders the same component through SegmentGuard. A bank is
+    // refused both ways now; before, only one of them turned it away.
+    expect(canReachPath("/shopline/connect", "financial_services", "admin")).toBe(false);
+    expect(canReachCallback("/shopline/welcome", "financial_services", "admin", signedIn)).toBe(false);
+  });
+});
+
 describe("when the rule is derived rather than restated", () => {
   it("should take every scoped nav path's rule from NAV_ITEMS itself", () => {
     // The point of deriving: an entry hidden from a vertical is unreachable by it
@@ -163,7 +284,21 @@ describe("when the rule is derived rather than restated", () => {
     // the guard cannot be quietly dropped from App.tsx.
     const APP = fs.readFileSync(path.join(__dirname, "..", "App.tsx"), "utf8");
     expect(APP).toMatch(/function SegmentGuard/);
-    expect(APP).toMatch(/canReachPath\(location, segment, user\?\.role\)/);
+    expect(APP).toMatch(/canReachPath\(location, segment, user\?\.role, opts\)/);
+    // The portal flag has to actually be passed, or staff inside a tenant portal
+    // bypass the tenant's own rules — which is how /distributors stayed reachable.
+    expect(APP).toMatch(/const opts = \{ portal: viewAsOrg !== null \}/);
+    // The install callbacks must go through the callback guard, not straight to
+    // the component — that direct mount is what left /shopline/welcome open.
+    expect(APP).toMatch(/path="\/shopline\/welcome">\{\(\) => <CallbackGuard component=\{ShoplineWelcome\} \/>\}/);
+    expect(APP).toMatch(/path="\/shopline\/error">\{\(\) => <CallbackGuard component=\{ShoplineError\} \/>\}/);
+    expect(APP).toMatch(/canReachCallback\(location, segment, user\?\.role, opts\)/);
+    // Scoped to CallbackGuard on purpose. A file-wide match for the opts object
+    // is satisfied by SegmentGuard's own line, so it would pass while the
+    // callback guard quietly stopped passing `signedIn` — which is the flag the
+    // whole signed-out exception now turns on.
+    const callbackGuard = APP.slice(APP.indexOf("function CallbackGuard"), APP.indexOf("function Router"));
+    expect(callbackGuard).toMatch(/signedIn: isAuthenticated/);
     expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
     expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
   });

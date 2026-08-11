@@ -36,16 +36,34 @@ export function useOrgSegment(): Segment | null {
  * `retry: false` is what makes that more than a flicker: one failed request and
  * the answer stays null for the life of the page.
  */
-export function useOrgSegmentStatus(): {
+export function useOrgSegmentStatus(opts: { enabled?: boolean } = {}): {
   segment: Segment | null;
   isPending: boolean;
   isFailed: boolean;
 } {
   const { viewAsOrg } = usePortalContext();
+  // `enabled` exists for pages a SIGNED-OUT visitor may legitimately open.
+  //
+  // `auth.mySegment` is a protectedProcedure, and main.tsx subscribes to the
+  // query cache and sends the browser to /login on any UNAUTHORIZED error. So
+  // merely ASKING for the segment without a session navigates the user away.
+  // On the SHOPLINE install callback that is fatal: SHOPLINE redirects the
+  // merchant to /shopline/welcome with no cookie set, and the page they were
+  // sent to would bounce them to a login screen they have no account for yet.
+  //
+  // Callers on such a page pass `enabled: isAuthenticated`. With the query
+  // switched off there is no request, so no 401 and no redirect — and the
+  // answer is reported as a RESOLVED null rather than a pending one, so guards
+  // decide instead of waiting forever on a query that will never run.
+  const enabled = opts.enabled ?? true;
   const { data, isPending, isError } = trpc.auth.mySegment.useQuery(undefined, {
     retry: false,
     staleTime: 5 * 60 * 1000,
+    enabled,
   });
+  if (!enabled && !viewAsOrg) {
+    return { segment: null, isPending: false, isFailed: false };
+  }
 
   // viewAsOrg is non-null exactly when a super admin is inside a portal, so it
   // is the whole condition — the separate isViewingAs flag this used to also

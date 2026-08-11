@@ -42,6 +42,11 @@ export function landingPathFor(segment: Segment | null): string {
  */
 const NON_NAV_ROUTE_SEGMENTS: Record<string, Segment[]> = {
   "/dashboard/auditor": ["financial_services", "corporate_b2b", "super_admin"],
+  // SHOPLINE install callbacks. Reached from the OAuth redirect rather than any
+  // link, and retail through and through — "Store Connected Successfully!", sync
+  // schedules, payouts. See canReachCallback for why they need their own gate.
+  "/shopline/welcome": ["retail_commerce"],
+  "/shopline/error": ["retail_commerce"],
 };
 
 /**
@@ -77,10 +82,20 @@ export function segmentsForPath(path: string): Segment[] | null {
  * drift: an entry hidden from a vertical is also unreachable by it, by
  * construction rather than by two lists agreeing.
  *
- * Staff pass everything. A super admin is the platform operator, their sidebar
- * already reflects whichever portal they are in, and the server checks their own
- * organisation's segment on every procedure regardless. Redirecting them away
- * from a URL they typed deliberately would be obstruction, not safety.
+ * Staff pass everything — EXCEPT inside a portal. That exception is the whole
+ * subtlety, and leaving it out made the guard wrong in the one place a super
+ * admin actually looks at a tenant's surface. `navFor` has always drawn the same
+ * line: entering a portal drops ROLE gating, because staff are looking at the
+ * tenant's screens rather than exercising their own permissions, but keeps
+ * SEGMENT gating, because seeing what that vertical has IS the point of the
+ * portal. A route guard that bypasses on role alone contradicts it: the sidebar
+ * correctly omits Distributor Registry from a retail portal, and /distributors
+ * loads anyway — a page the tenant could never reach, inside the view that is
+ * supposed to represent them. Observed in production on the SHOPLINE dev store.
+ *
+ * Outside a portal the bypass is right: a super admin on their own account is
+ * the platform operator, and redirecting them off a URL they typed deliberately
+ * would be obstruction rather than safety.
  *
  * A null segment refuses a scoped path, matching `inSegment` exactly. Callers
  * must therefore not consult this while the segment is still resolving — see
@@ -90,9 +105,52 @@ export function canReachPath(
   path: string,
   segment: Segment | null,
   role: string | undefined,
+  opts: { portal?: boolean } = {},
 ): boolean {
-  if (isStaff(role)) return true;
+  if (isStaff(role) && !opts.portal) return true;
   const segments = segmentsForPath(path);
   if (!segments) return true;
   return inSegment({ label: "", path, group: "main", segments }, segment);
+}
+
+/**
+ * The same rule for an OAuth callback landing, where "no segment" is the NORMAL
+ * case rather than a suspicious one.
+ *
+ * `/shopline/welcome` is where SHOPLINE sends a merchant after they authorise the
+ * install (server/connectors/shopline/routes.ts). No session cookie is set on
+ * that redirect, so the merchant arrives signed OUT — and `canReachPath` refuses
+ * a scoped path on a null segment, matching how the sidebar hides it. Applying it
+ * unchanged would therefore bounce the very merchant the page exists for, and
+ * mounting the route through DashboardPage would put it behind the dashboard's
+ * authentication, which breaks the same flow more thoroughly.
+ *
+ * So the exception is granted to viewers with NO SESSION, and to nobody else.
+ *
+ * It is keyed on `signedIn` rather than on `segment === null`, and that
+ * distinction is the whole correctness of this function. A null segment has three
+ * causes: no session, a signed-in org with no segment set, and a segment query
+ * that FAILED — and `useOrgSegmentStatus` uses `retry: false`, so one failed
+ * request keeps the answer null for the life of the page. Treating null as "must
+ * be the install flow" hands the retail completion screen to a signed-in bank
+ * whose lookup happened to fail. Absence of an answer is not evidence of who is
+ * asking.
+ *
+ * A signed-in viewer whose segment cannot be determined is therefore refused and
+ * sent to their own landing page. They have somewhere to go, so failing closed
+ * costs them nothing; the signed-out merchant has nowhere, which is why they get
+ * the exception.
+ *
+ * That leaves the page reachable by a signed-out stranger, which is deliberate
+ * and costs nothing: it renders static copy, calls no procedure, and reads only
+ * an `org` code from the query string that it never looks up.
+ */
+export function canReachCallback(
+  path: string,
+  segment: Segment | null,
+  role: string | undefined,
+  opts: { portal?: boolean; signedIn?: boolean } = {},
+): boolean {
+  if (!opts.signedIn) return true;
+  return canReachPath(path, segment, role, opts);
 }
