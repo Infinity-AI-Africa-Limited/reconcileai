@@ -348,7 +348,11 @@ async function startServer() {
       const { getSessionCookieOptions } = await import("./cookies");
       const cookieOptions = getSessionCookieOptions(req);
       res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      return res.redirect(302, "/dashboard");
+      // /home, not /dashboard: the client resolves the vertical's own starting
+      // page there (a merchant lands on Settlement Monitor). Keeping the choice
+      // client-side means this route does not need to load the organisation just
+      // to pick a redirect.
+      return res.redirect(302, "/home");
     } catch (err) {
       console.error("[magic-login] error:", err);
       return res.redirect(302, "/?error=login_failed");

@@ -1,0 +1,179 @@
+/**
+ * Landing pages and route reachability per vertical.
+ *
+ * Two rules that used to be one-sided. The sidebar hid entries built for other
+ * verticals (PR #52), but the routes behind them stayed open: typing
+ * /distributors as a retail merchant loaded the page and filled it with
+ * permission errors. And every vertical landed on /dashboard, which answers an
+ * operator's question ("how is reconciliation performing") rather than a
+ * merchant's ("did my payout land").
+ */
+import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { landingPathFor, canReachPath, segmentsForPath } from "./routeAccess";
+import { NAV_ITEMS, inSegment } from "./navItems";
+
+describe("when a merchant signs in", () => {
+  it("should land on Settlement Monitor, not the dashboard", () => {
+    expect(landingPathFor("retail_commerce")).toBe("/settlement-monitor");
+  });
+
+  it("should still be able to reach the dashboard deliberately", () => {
+    // Demoted to a secondary overview, not removed: it is unscoped in NAV_ITEMS,
+    // so every vertical keeps it in the sidebar and can open it.
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
+    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).toBeUndefined();
+  });
+});
+
+describe("when any other vertical signs in", () => {
+  it("should land on the dashboard", () => {
+    for (const segment of ["financial_services", "corporate_b2b", "super_admin"] as const) {
+      expect(landingPathFor(segment)).toBe("/dashboard");
+    }
+  });
+
+  it("should land on the dashboard when the segment is unknown", () => {
+    // A legacy org with no segment set still needs somewhere to go, and the
+    // dashboard is the surface every vertical has.
+    expect(landingPathFor(null)).toBe("/dashboard");
+  });
+});
+
+describe("when a vertical opens a route built for another one", () => {
+  it("should refuse the distributor registry to a merchant and to a bank", () => {
+    expect(canReachPath("/distributors", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/distributors", "financial_services", "admin")).toBe(false);
+    expect(canReachPath("/distributors", "corporate_b2b", "admin")).toBe(true);
+  });
+
+  it("should refuse the CBN pack to a merchant", () => {
+    expect(canReachPath("/cbn-compliance", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/cbn-compliance", "financial_services", "admin")).toBe(true);
+  });
+
+  it("should refuse retail surfaces to a bank", () => {
+    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/shopline/connect"]) {
+      expect(canReachPath(p, "financial_services", "admin"), p).toBe(false);
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(true);
+    }
+  });
+
+  it("should refuse the examination-facing auditor view to a merchant", () => {
+    // Reached from the RoleSwitcher rather than the sidebar, so NAV_ITEMS cannot
+    // supply its rule and routeAccess declares it explicitly.
+    expect(canReachPath("/dashboard/auditor", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/dashboard/auditor", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/dashboard/auditor", "corporate_b2b", "admin")).toBe(true);
+  });
+
+  it("should leave unscoped routes alone", () => {
+    for (const p of ["/reports", "/monitor", "/documentation", "/upload"]) {
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(true);
+    }
+  });
+
+  it("should refuse the spellings the ROUTER also accepts", () => {
+    // wouter compiles "/distributors" through regexparam into
+    // /^\/distributors\/?$/i — optional trailing slash, case-insensitive. Both
+    // spellings load the page, so both have to be refused. An exact-string
+    // lookup found no entry, called the route unscoped, and let the merchant in
+    // through the front door with a slash on the end.
+    for (const spelling of ["/distributors/", "/Distributors", "/DISTRIBUTORS/", "/distributors//"]) {
+      expect(canReachPath(spelling, "retail_commerce", "admin"), spelling).toBe(false);
+      expect(canReachPath(spelling, "corporate_b2b", "admin"), spelling).toBe(true);
+    }
+  });
+
+  it("should normalise the auditor route the same way", () => {
+    expect(canReachPath("/dashboard/auditor/", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/Dashboard/Auditor", "retail_commerce", "admin")).toBe(false);
+  });
+
+  it("should still treat the root path as the root", () => {
+    // Guard against a normaliser that strips "/" down to "".
+    expect(canReachPath("/", "retail_commerce", "admin")).toBe(true);
+  });
+
+  it("should not block a path it has never heard of", () => {
+    // This decides what the client OFFERS, not what is permitted. Failing closed
+    // on an unknown path would break routes simply for not being nav entries.
+    expect(canReachPath("/some/future/page", "retail_commerce", "admin")).toBe(true);
+  });
+});
+
+describe("when the viewer is Infinity AI staff", () => {
+  it("should reach every vertical's routes", () => {
+    // The operator supports every tenant, their sidebar already reflects whichever
+    // portal they are in, and the server checks their own org on every procedure.
+    // Redirecting them off a URL they typed would be obstruction, not safety.
+    for (const p of ["/distributors", "/settlement-monitor", "/cbn-compliance", "/dashboard/auditor"]) {
+      expect(canReachPath(p, "super_admin", "super_admin"), p).toBe(true);
+    }
+  });
+});
+
+describe("when the segment has not resolved", () => {
+  it("should refuse scoped routes, exactly as the sidebar hides them", () => {
+    // Callers must not consult this while the query is in flight — SegmentGuard
+    // waits on isPending. What matters here is that the answer MATCHES inSegment,
+    // so a hidden link and a blocked route always agree.
+    expect(canReachPath("/distributors", null, "admin")).toBe(false);
+    expect(inSegment(NAV_ITEMS.find((e) => e.path === "/distributors")!, null)).toBe(false);
+  });
+});
+
+describe("when a blocked route redirects somewhere", () => {
+  // The one failure here that would be catastrophic rather than annoying: the
+  // guard sends a blocked viewer to a landing page that is ALSO blocked for
+  // them, and the browser bounces between the two forever. Cheap to prove
+  // impossible, and impossible to notice in review.
+  it("should send every vertical somewhere it can actually go", () => {
+    for (const segment of ["financial_services", "corporate_b2b", "retail_commerce", "super_admin", null] as const) {
+      const destination = landingPathFor(segment);
+      expect(canReachPath(destination, segment, "admin"), `${segment} → ${destination}`).toBe(true);
+    }
+  });
+
+  it("should terminate from any scoped route, for any vertical", () => {
+    const scoped = [...NAV_ITEMS.filter((e) => e.segments).map((e) => e.path), "/dashboard/auditor"];
+    for (const segment of ["financial_services", "corporate_b2b", "retail_commerce", null] as const) {
+      for (const from of scoped) {
+        if (canReachPath(from, segment, "admin")) continue;
+        // One hop must land somewhere permitted — never back onto a blocked path.
+        const to = landingPathFor(segment);
+        expect(canReachPath(to, segment, "admin"), `${segment}: ${from} → ${to} loops`).toBe(true);
+      }
+    }
+  });
+});
+
+describe("when the rule is derived rather than restated", () => {
+  it("should take every scoped nav path's rule from NAV_ITEMS itself", () => {
+    // The point of deriving: an entry hidden from a vertical is unreachable by it
+    // by construction, not because two lists happen to agree.
+    for (const entry of NAV_ITEMS.filter((e) => e.segments)) {
+      expect(segmentsForPath(entry.path), entry.path).toEqual(entry.segments);
+    }
+  });
+
+  it("should be applied by the router, not just exported", () => {
+    // A rule module nothing calls is decoration. These assertions are the reason
+    // the guard cannot be quietly dropped from App.tsx.
+    const APP = fs.readFileSync(path.join(__dirname, "..", "App.tsx"), "utf8");
+    expect(APP).toMatch(/function SegmentGuard/);
+    expect(APP).toMatch(/canReachPath\(location, segment, user\?\.role\)/);
+    expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
+    expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
+  });
+
+  it("should send both post-login flows to the resolver", () => {
+    // Magic link and SSO both used to hardcode /dashboard, which put a merchant on
+    // the operator's page every time they signed in.
+    const INDEX = fs.readFileSync(path.join(__dirname, "..", "..", "..", "server", "_core", "index.ts"), "utf8");
+    const SSO = fs.readFileSync(path.join(__dirname, "..", "..", "..", "server", "_core", "sso.ts"), "utf8");
+    expect(INDEX).toMatch(/redirect\(302, "\/home"\)/);
+    expect(SSO).toMatch(/redirect\(302, "\/home"\)/);
+  });
+});
