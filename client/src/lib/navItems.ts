@@ -75,14 +75,25 @@ export type NavEntry = {
  */
 export const NAV_ITEMS: NavEntry[] = [
   // ── Main ──────────────────────────────────────────────────────────────────
+  //
+  // Settlement Monitor is deliberately FIRST, above Dashboard.
+  //
+  // Array order is sidebar order, and only retail sees this entry — so a
+  // merchant opens on the screen that answers their question ("did my payout
+  // land, and what is missing") while every other vertical is unaffected and
+  // still leads with Dashboard, which answers an operator's question ("how is
+  // reconciliation performing"). The same reasoning puts /settlement-monitor at
+  // the end of the retail login redirect; see landingPathFor in lib/routeAccess,
+  // which must agree with this ordering.
+  { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
   { label: "Dashboard", path: "/dashboard", group: "main" },
   { label: "Super Agent", path: "/super-agent", group: "main" },
   { label: "Exception Intelligence", path: "/exception-intelligence", group: "main" },
   { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", staffOnly: true },
   { label: "Distributor Registry", path: "/distributors", group: "main", segments: ["corporate_b2b"] },
-  // Retail-only surfaces. These existed ONLY in the portal list before, so a
-  // real merchant could not reach the screen the vertical is built around.
-  { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
+  // The remaining retail-only surfaces. These existed ONLY in the portal list
+  // before, so a real merchant could not reach the screens the vertical is built
+  // around. Secondary to Settlement Monitor, so they stay below the shared entries.
   { label: "Sync Status", path: "/shopline/sync-status", group: "main", segments: ["retail_commerce"] },
   { label: "SHOPLINE Connection", path: "/shopline/connect", group: "main", segments: ["retail_commerce"] },
   { label: "Upload Data", path: "/upload", group: "main", roles: ["admin", "operations"] },

@@ -15,6 +15,7 @@ import { useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, XCircle, ArrowRight, RefreshCw, Shield, Zap } from "lucide-react";
+import { landingPathFor } from "@/lib/routeAccess";
 
 export function ShoplineWelcome() {
   const searchString = useSearch();
@@ -86,11 +87,16 @@ export function ShoplineWelcome() {
 
           {/* CTA */}
           <div className="flex flex-col gap-2">
+            {/* Straight to Settlement Monitor, not the dashboard. This screen is
+                only ever shown to a SHOPLINE merchant, and their next question is
+                "did my payout land" — which is the monitor, not the operator's
+                reconciliation overview. Derived from landingPathFor rather than
+                hardcoded so it follows if retail's landing page ever moves. */}
             <Button
               className="w-full"
-              onClick={() => navigate("/dashboard")}
+              onClick={() => navigate(landingPathFor("retail_commerce"))}
             >
-              Go to Dashboard
+              Go to Settlement Monitor
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
             <Button

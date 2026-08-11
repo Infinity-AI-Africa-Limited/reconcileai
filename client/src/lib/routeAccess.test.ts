@@ -12,7 +12,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { landingPathFor, canReachPath, canReachCallback, segmentsForPath } from "./routeAccess";
-import { NAV_ITEMS, inSegment } from "./navItems";
+import { NAV_ITEMS, inSegment, navGroup } from "./navItems";
 
 describe("when a merchant signs in", () => {
   it("should land on Settlement Monitor, not the dashboard", () => {
@@ -24,6 +24,56 @@ describe("when a merchant signs in", () => {
     // so every vertical keeps it in the sidebar and can open it.
     expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
     expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).toBeUndefined();
+  });
+});
+
+describe("when a merchant opens the sidebar", () => {
+  // Array order IS sidebar order, so this is the ordering rule, not a detail of
+  // how the list happens to be written.
+  const merchantMain = navGroup("main", "retail_commerce", "admin").map((e) => e.path);
+
+  it("should show Settlement Monitor above the Dashboard", () => {
+    expect(merchantMain.indexOf("/settlement-monitor")).toBeLessThan(merchantMain.indexOf("/dashboard"));
+  });
+
+  it("should open on Settlement Monitor as the very first entry", () => {
+    expect(merchantMain[0]).toBe("/settlement-monitor");
+  });
+
+  it("should agree with where login sends them", () => {
+    // The sidebar's first entry and the post-login landing are two expressions of
+    // the same decision. If they disagree, a merchant lands somewhere that is not
+    // the top of their own menu.
+    expect(merchantMain[0]).toBe(landingPathFor("retail_commerce"));
+  });
+});
+
+describe("when any other vertical opens the sidebar", () => {
+  it("should still lead with the Dashboard", () => {
+    // Settlement Monitor is retail-scoped, so promoting it must not reorder
+    // anyone else's menu.
+    for (const segment of ["financial_services", "corporate_b2b"] as const) {
+      const paths = navGroup("main", segment, "admin").map((e) => e.path);
+      expect(paths[0], segment).toBe("/dashboard");
+      expect(paths).not.toContain("/settlement-monitor");
+    }
+  });
+});
+
+describe("when the install completes", () => {
+  const PAGE = fs.readFileSync(path.join(__dirname, "..", "pages", "ShoplineConnect.tsx"), "utf8");
+
+  it("should send the merchant to Settlement Monitor, not the dashboard", () => {
+    // The screen says "Store Connected Successfully!" and its primary button used
+    // to open the operator's dashboard. A merchant's next question is whether
+    // their payout landed.
+    expect(PAGE).toMatch(/navigate\(landingPathFor\("retail_commerce"\)\)/);
+    expect(PAGE).not.toMatch(/navigate\("\/dashboard"\)/);
+  });
+
+  it("should label the button for where it actually goes", () => {
+    expect(PAGE).toContain("Go to Settlement Monitor");
+    expect(PAGE).not.toContain("Go to Dashboard");
   });
 });
 
