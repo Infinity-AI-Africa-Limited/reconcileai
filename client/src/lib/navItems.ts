@@ -110,7 +110,12 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Transactions", path: "/transactions", group: "admin", roles: ["admin", "operations"] },
   { label: "Review Queue", path: "/review", group: "admin", roles: ["admin", "operations"] },
   { label: "Audit Trail", path: "/audit", group: "admin", roles: ["admin", "compliance", "cfo"] },
-  { label: "Data Protection", path: "/compliance", group: "admin", roles: ["admin", "compliance"] },
+  // Nigerian data protection: the frameworks on this page are NDPA 2023 and
+  // NDPR 2019, and its retention guidance is "aligned with CBN records retention
+  // guidelines for financial institutions". A SHOPLINE merchant is governed by
+  // none of those. Corporate B2B keeps it — an FMCG supplier in Nigeria is
+  // squarely within NDPA.
+  { label: "Data Protection", path: "/compliance", group: "admin", roles: ["admin", "compliance"], segments: ["financial_services", "corporate_b2b"] },
   // Nigerian banking-regulator pack — financial services only (CLAUDE.md §2A).
   { label: "CBN Reports", path: "/cbn-compliance", group: "admin", roles: ["admin", "compliance", "cfo"], segments: ["financial_services"] },
   { label: "User Management", path: "/admin/users", group: "admin", roles: ["admin"] },
@@ -121,7 +126,11 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Email Settings", path: "/email-settings", group: "admin", roles: ["admin"] },
 
   // ── Advanced tools ────────────────────────────────────────────────────────
-  { label: "Sample Data", path: "/sample-data", group: "advanced", roles: ["admin"] },
+  // Seeds a Nigerian banking / FMCG demo: its channels are core_banking (CBS),
+  // nibss (NIP) and bank_statement. Offering that to a SHOPLINE merchant invites
+  // them to fill their own tenant with transactions from a vertical they are not
+  // in, and none of it would reconcile against their orders.
+  { label: "Sample Data", path: "/sample-data", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b"] },
   { label: "Integrations", path: "/integrations", group: "advanced", roles: ["admin"] },
   // CBS connectors onboard bank / MFB clients.
   { label: "Core Banking Connector", path: "/woodcore-connector", group: "advanced", roles: ["admin"], segments: ["financial_services"] },
