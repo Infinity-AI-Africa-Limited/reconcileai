@@ -44,7 +44,10 @@ import "dotenv/config";
 import mysql from "mysql2/promise";
 
 const EXECUTE = process.argv.includes("--execute");
-const ONLY = (process.argv.find((a) => a.startsWith("--only=")) || "").split("=")[1] || null;
+// Distinguish "--only was not given" (null) from "--only was given empty" ("").
+// The latter must be an error, not a silent full run across every table.
+const ONLY_ARG = process.argv.find((a) => a.startsWith("--only="));
+const ONLY = ONLY_ARG === undefined ? null : ONLY_ARG.slice("--only=".length);
 
 /**
  * Tables to archive, and how.
@@ -89,6 +92,15 @@ const PLAN = [
 const archiveName = (t) => `${t}_legacy_archive`;
 
 async function main() {
+  // A target that matches nothing would skip every step and still reach "Done." —
+  // the operator reads success and believes a 35M-row archive ran when it did not.
+  // Refuse before opening a connection rather than reporting a move that never happened.
+  if (ONLY !== null && !PLAN.some((s) => s.table === ONLY)) {
+    throw new Error(
+      `--only=${ONLY || "(empty)"} matches no table in the plan. Valid tables: ${PLAN.map((s) => s.table).join(", ")}`,
+    );
+  }
+
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set");
   const conn = await mysql.createConnection({
     uri: process.env.DATABASE_URL,
