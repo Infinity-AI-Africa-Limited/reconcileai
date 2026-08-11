@@ -98,12 +98,6 @@ jobs:
           SECRET_SOURCE: ${{ secrets.CRON_SECRET && 'CRON_SECRET' || (secrets.SHOPLINE_SYNC_SECRET && 'SHOPLINE_SYNC_SECRET' || 'none') }}
           HANDLER: ${{ steps.pick.outputs.handler }}
         run: |
-          # Skip cleanly when neither secret is configured on this repo (e.g. the
-          # MistaRichMan mirror), so the mirror doesn't email "all jobs failed".
-          if [ -z "$SYNC_SECRET" ]; then
-            echo "Neither CRON_SECRET nor SHOPLINE_SYNC_SECRET is configured on this repository — skipping (expected on the mirror)."
-            exit 0
-          fi
           # Short-lived token identifying this run; the server checks its
           # signature and `repository` claim. Best-effort — the secret header is
           # still sent, so a deployment without GITHUB_OIDC_* keeps working. See
@@ -114,14 +108,28 @@ jobs:
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OIDC_AUDIENCE" \
               | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
           fi
-          if [ -n "$OIDC_TOKEN" ]; then
-            echo "Authenticating with: GitHub OIDC (secret header sent as fallback: $SECRET_SOURCE)"
+          # Loud, not silent. The check this replaces ran before the token
+          # request and exited 0, so deleting the repo secrets — the last step of
+          # the documented rollout — would have reported every run GREEN while
+          # syncing nothing. The mirror is already excluded by the job-level
+          # `if:` above, so reaching here without a credential is a real fault.
+          if [ -z "$OIDC_TOKEN" ] && [ -z "$SYNC_SECRET" ]; then
+            echo "::error::No credential available — neither a GitHub OIDC token nor CRON_SECRET/SHOPLINE_SYNC_SECRET."
+            echo "OIDC needs 'permissions: id-token: write' (set on this job). If that is present and this"
+            echo "still fires, the token request itself failed — check the step log above."
+            exit 1
+          fi
+
+          if [ -n "$OIDC_TOKEN" ] && [ -n "$SYNC_SECRET" ]; then
+            echo "Authenticating with: GitHub OIDC (secret header also sent, as fallback: $SECRET_SOURCE)"
+          elif [ -n "$OIDC_TOKEN" ]; then
+            echo "Authenticating with: GitHub OIDC only (no shared secret configured — the end state)"
           else
             echo "Authenticating with: $SECRET_SOURCE (no OIDC token available)"
           fi
 
           code=$(curl -sS -o /tmp/resp -w "%{http_code}" --max-time 600 -X POST \
-            -H "x-sync-secret: $SYNC_SECRET" \
+            ${SYNC_SECRET:+-H "x-sync-secret: $SYNC_SECRET"} \
             ${OIDC_TOKEN:+-H "Authorization: Bearer $OIDC_TOKEN"} \
             "$BASE_URL/$HANDLER")
           echo "HTTP $code"; cat /tmp/resp; echo
