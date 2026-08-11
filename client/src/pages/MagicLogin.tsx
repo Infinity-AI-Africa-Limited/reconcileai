@@ -40,7 +40,7 @@ export default function MagicLogin() {
     // ── Already authenticated: skip the magic-link flow ──────────────────
     if (meQuery.data) {
       toast.success("You are already signed in.", { id: "already-signed-in" });
-      setLocation("/dashboard");
+      setLocation("/home");
       return;
     }
 

@@ -1,7 +1,10 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Redirect, Route, Switch, useLocation } from "wouter";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { useOrgSegmentStatus } from "@/hooks/useOrgSegment";
+import { canReachPath, landingPathFor } from "@/lib/routeAccess";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
@@ -76,10 +79,56 @@ import Support from "./pages/Support";
 import SettlementMonitor from "./pages/SettlementMonitor";
 import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
 
+/**
+ * Send a viewer to the page their vertical actually starts from.
+ *
+ * Waits for the segment before deciding. Redirecting on the pending value would
+ * put every merchant on /dashboard for a frame and then move them, which reads
+ * as a glitch — and on a slow connection, as the wrong landing page.
+ */
+function LandingRedirect() {
+  const { segment, isPending } = useOrgSegmentStatus();
+  if (isPending) {
+    return (
+      <div className="flex h-screen items-center justify-center text-muted-foreground">
+        Loading your workspace…
+      </div>
+    );
+  }
+  return <Redirect to={landingPathFor(segment)} />;
+}
+
+/**
+ * Keep a vertical out of routes built for another one.
+ *
+ * The sidebar already hides them; this stops the URL working anyway. Before it,
+ * a merchant typing /distributors got the page shell and then a screenful of
+ * permission errors from the server — technically guarded, practically broken.
+ *
+ * Every hook runs before the redirect, never after: `segment` arrives from a
+ * query, so an early return placed between hooks changes how many run between
+ * the first and second render — "Rendered fewer hooks than expected", which is
+ * exactly how the auditor page once crashed on a cold load.
+ *
+ * Pending means undecided, not denied. Redirecting while the segment is still
+ * in flight would bounce people out of pages they are entitled to.
+ */
+function SegmentGuard({ children }: { children: React.ReactNode }) {
+  const [location] = useLocation();
+  const { segment, isPending } = useOrgSegmentStatus();
+  const { user } = useAuth();
+
+  const blocked = !isPending && !canReachPath(location, segment, user?.role);
+  if (blocked) return <Redirect to={landingPathFor(segment)} />;
+  return <>{children}</>;
+}
+
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
     <DashboardLayout>
-      <Component />
+      <SegmentGuard>
+        <Component />
+      </SegmentGuard>
     </DashboardLayout>
   );
 }
@@ -94,6 +143,10 @@ function Router() {
       <Route path="/payment-processors" component={PaymentProcessorsLanding} />
       <Route path="/docs/:docName" component={DocViewer} />
       <Route path="/documentation">{() => <DashboardPage component={Documentation} />}</Route>
+      {/* Post-login target. Resolves to the vertical's own starting page, so the
+          server does not need to know about segments to send someone somewhere
+          sensible — and /dashboard stays directly reachable for everyone. */}
+      <Route path="/home" component={LandingRedirect} />
       <Route path="/dashboard">{() => <DashboardPage component={Dashboard} />}</Route>
       <Route path="/dashboard/cfo">{() => <DashboardPage component={CfoDashboard} />}</Route>
       <Route path="/dashboard/operations">{() => <DashboardPage component={OperationsDashboard} />}</Route>
