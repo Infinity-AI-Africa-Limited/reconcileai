@@ -13,7 +13,7 @@
  * nothing. Injecting the value removes the problem rather than scoping it.
  */
 import { describe, it, expect } from "vitest";
-import { checkSyncSecret, describeSyncAuthFailure } from "./_core/syncAuth";
+import { checkSyncSecret, describeSyncAuthFailure, authorizeSyncRequest } from "./_core/syncAuth";
 
 const SECRET = "cron-secret-value-used-by-the-schedulers";
 
@@ -93,6 +93,92 @@ describe("describeSyncAuthFailure", () => {
   describe("for a mismatch", () => {
     it("should point at secret drift, the actual historical cause", () => {
       expect(describeSyncAuthFailure("mismatch")).toMatch(/drift|CRON_SECRET/i);
+    });
+  });
+});
+
+describe("authorizeSyncRequest", () => {
+  const oidcOk = async () => ({ ok: true as const, repository: "Infinity-AI-Africa-Limited/reconcileai" });
+  const oidcNo = async () => ({ ok: false as const, reason: "untrusted_repository", detail: "someone/else" });
+
+  describe("when a valid OIDC token is presented", () => {
+    it("should authorise via github_oidc without needing a secret at all", async () => {
+      // The point of the change: no long-lived value is involved, so there is
+      // nothing to copy between dashboards and nothing to drift.
+      const result = await authorizeSyncRequest(
+        { bearerToken: "jwt", secretHeader: null },
+        { expectedSecret: SECRET, verifyOidc: oidcOk },
+      );
+      expect(result).toMatchObject({ ok: true, via: "github_oidc" });
+    });
+
+    it("should prefer OIDC even when a valid secret is also sent", async () => {
+      // True during the transition, when workflows send both. The log line is
+      // what tells us OIDC is actually carrying the traffic and the GitHub
+      // secrets can safely be deleted.
+      const result = await authorizeSyncRequest(
+        { bearerToken: "jwt", secretHeader: SECRET },
+        { expectedSecret: SECRET, verifyOidc: oidcOk },
+      );
+      expect(result).toMatchObject({ ok: true, via: "github_oidc" });
+    });
+  });
+
+  describe("when OIDC cannot be used", () => {
+    it("should fall back to the shared secret", async () => {
+      // On-premise blocks the egress OIDC verification needs, and Railway Cron
+      // cannot mint a token at all. Removing this path would strand both.
+      const result = await authorizeSyncRequest(
+        { bearerToken: null, secretHeader: SECRET },
+        { expectedSecret: SECRET, verifyOidc: oidcNo },
+      );
+      expect(result).toMatchObject({ ok: true, via: "shared_secret" });
+    });
+
+    it("should not attempt OIDC when no bearer token was sent", async () => {
+      // A secret-only caller should not pay for a JWKS lookup, nor log an OIDC
+      // failure that means nothing.
+      let called = false;
+      await authorizeSyncRequest(
+        { bearerToken: null, secretHeader: SECRET },
+        {
+          expectedSecret: SECRET,
+          verifyOidc: async () => {
+            called = true;
+            return { ok: false as const, reason: "malformed" };
+          },
+        },
+      );
+      expect(called).toBe(false);
+    });
+
+    it("should still accept a valid secret when the OIDC token is rejected", async () => {
+      const result = await authorizeSyncRequest(
+        { bearerToken: "forged", secretHeader: SECRET },
+        { expectedSecret: SECRET, verifyOidc: oidcNo },
+      );
+      expect(result).toMatchObject({ ok: true, via: "shared_secret" });
+    });
+  });
+
+  describe("when neither path holds up", () => {
+    it("should refuse, and carry why OIDC declined into the log", async () => {
+      const result = await authorizeSyncRequest(
+        { bearerToken: "forged", secretHeader: "wrong-secret-value-here" },
+        { expectedSecret: SECRET, verifyOidc: oidcNo },
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected refusal");
+      expect(result.reason).toBe("mismatch");
+      expect(result.oidcDetail).toContain("untrusted_repository");
+    });
+
+    it("should refuse a forged OIDC token presented with no secret", async () => {
+      const result = await authorizeSyncRequest(
+        { bearerToken: "forged", secretHeader: null },
+        { expectedSecret: SECRET, verifyOidc: oidcNo },
+      );
+      expect(result.ok).toBe(false);
     });
   });
 });

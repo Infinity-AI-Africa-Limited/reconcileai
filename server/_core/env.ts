@@ -63,6 +63,19 @@ export const ENV = {
   // Shared secret guarding maintenance/cron endpoints (e.g. Woodcore mirror sync).
   // Falls back to JWT_SECRET when unset, so no extra var is strictly required.
   cronSecret: process.env.CRON_SECRET ?? "",
+  // ── GitHub Actions OIDC for the same endpoints (preferred over the secret) ──
+  // A short-lived token GitHub mints per run and signs itself, so there is no
+  // long-lived value copied between two dashboards and therefore nothing to
+  // drift. See server/_core/githubOidc.ts.
+  //
+  // GITHUB_OIDC_REPOSITORIES is the security boundary, not a convenience: a
+  // valid OIDC token proves only that SOME repository issued it, so without an
+  // allow-list any GitHub user could trigger a production sync. Unset leaves
+  // OIDC DISABLED and the shared secret in charge — never "allow everyone".
+  githubOidcAudience: cleanSecret(process.env.GITHUB_OIDC_AUDIENCE),
+  githubOidcRepositories: process.env.GITHUB_OIDC_REPOSITORIES ?? "",
+  // Optional extra pin, e.g. "refs/heads/main". Empty = any ref on an allowed repo.
+  githubOidcRefs: process.env.GITHUB_OIDC_REFS ?? "",
   // Ed25519 PKCS#8 PEM private key used to digitally sign CBN examination reports.
   // When unset, an ephemeral key is generated per-process (dev/demo only).
   cbnSigningPrivateKey: process.env.CBN_SIGNING_PRIVATE_KEY ?? "",
