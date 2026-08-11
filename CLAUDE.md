@@ -1539,7 +1539,22 @@ decision and raise it again only on new evidence.
    >
    > Consolidation narrows the surface; it does not eliminate manual copying. The real fix
    > is a managed secret store (Doppler / Vault / GitHub OIDC) where a rotation propagates
-   > without anyone re-typing a value anywhere. Tracked as a follow-up.
+   > without anyone re-typing a value anywhere.
+   >
+   > ✅ **DONE for the schedulers (owner picked option B, 2026-08-11).** Both workflows now
+   > authenticate with a **GitHub Actions OIDC token** — minted per run, signed by GitHub,
+   > verified server-side against its JWKS *and its `repository` claim*
+   > (`server/_core/githubOidc.ts`). There is no long-lived value to copy, so this class of
+   > drift cannot recur on these endpoints. `CRON_SECRET` is kept as a second path for
+   > callers that cannot mint a token: Railway Cron, and on-premise deployments where
+   > `DEPLOYMENT_MODE=on_premise` blocks the egress verification needs.
+   >
+   > ⚠️ `GITHUB_OIDC_REPOSITORIES` is the security boundary. A valid OIDC token proves only
+   > that *some* repository issued it; without the allow-list any GitHub user could trigger
+   > a production sync. Unset **disables** OIDC — it never means "allow everyone".
+   >
+   > Still open: Doppler/Vault for the wider estate (~40 env vars). OIDC solves the
+   > schedulers, not `DATABASE_URL`, the Anthropic key, or the SHOPLINE app secret.
    >
    > Before rotating, re-derive the consumer list rather than trusting this one:
    > `grep -rn "secrets\." .github/workflows/`

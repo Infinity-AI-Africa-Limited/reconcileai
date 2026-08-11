@@ -10,7 +10,8 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { assertResidencyStartupConfig, describeResidencyPosture } from "./egress";
 import { getLlmProviderInfo } from "./llm";
-import { checkSyncSecret, describeSyncAuthFailure, expectedSyncSecret } from "./syncAuth";
+import { authorizeSyncRequest, describeSyncAuthFailure, expectedSyncSecret } from "./syncAuth";
+import { verifyGitHubOidcToken, describeOidcFailure } from "./githubOidc";
 import { getDb } from "../db";
 import { seedDefaultResolutionTemplates, seedNigerianExceptionDefaults } from "../seedResolutionTemplates";
 import { sql } from "drizzle-orm";
@@ -365,27 +366,55 @@ async function startServer() {
   // ambiguity is what left the Woodcore mirror sync failing silently for three
   // days after the 2026-08-02 rotation. The response stays a uniform 403; only
   // the log says which. See _core/syncAuth.ts.
-  const syncAuthorized = (req: import("express").Request) => {
-    const result = checkSyncSecret(
-      req.headers["x-sync-secret"] as string | undefined,
-      expectedSyncSecret(),
+  //
+  // Two accepted paths, OIDC preferred: a `Authorization: Bearer <github oidc
+  // jwt>` minted per workflow run, or the legacy `x-sync-secret`. The secret
+  // stays because on-premise mode blocks the egress OIDC verification needs and
+  // Railway Cron cannot mint a token at all. See _core/githubOidc.ts.
+  const syncAuthorized = async (req: import("express").Request) => {
+    const bearer = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || null;
+    const result = await authorizeSyncRequest(
+      {
+        bearerToken: bearer,
+        secretHeader: req.headers["x-sync-secret"] as string | undefined,
+      },
+      {
+        expectedSecret: expectedSyncSecret(),
+        verifyOidc: async (token) => {
+          const outcome = await verifyGitHubOidcToken(token, {
+            audience: ENV.githubOidcAudience,
+            allowedRepositories: ENV.githubOidcRepositories.split(",").map((s) => s.trim()).filter(Boolean),
+            allowedRefs: ENV.githubOidcRefs.split(",").map((s) => s.trim()).filter(Boolean),
+          });
+          return outcome.ok
+            ? { ok: true as const, repository: outcome.repository }
+            : { ok: false as const, reason: outcome.reason, detail: describeOidcFailure(outcome.reason, outcome.detail) };
+        },
+      },
     );
-    if (!result.ok) {
+    if (result.ok) {
+      // The rollout signal. Until this says github_oidc for the scheduled runs,
+      // OIDC is not carrying anything and the GitHub secrets cannot be deleted.
+      console.log(
+        `[syncAuth] authorized ${req.method} ${req.path} via ${result.via}${result.detail ? ` (${result.detail})` : ""}`,
+      );
+    } else {
       console.warn(
-        `[syncAuth] refused ${req.method} ${req.path}: ${describeSyncAuthFailure(result.reason)}`,
+        `[syncAuth] refused ${req.method} ${req.path}: ${describeSyncAuthFailure(result.reason)}` +
+          (result.oidcDetail ? ` | oidc: ${result.oidcDetail}` : ""),
       );
     }
     return result.ok;
   };
   app.post("/api/woodcore/sync", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncWoodcoreMirror, syncState } = await import("../woodcoreSync");
     if (syncState.running) return res.status(409).json({ error: "already running", state: syncState });
     syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", e));
     res.status(202).json({ started: true });
   });
   app.get("/api/woodcore/sync", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncState } = await import("../woodcoreSync");
     res.json(syncState);
   });
@@ -443,7 +472,7 @@ async function startServer() {
   // scheme as /api/woodcore/sync. Point a Railway/host cron at this hourly;
   // each connector's own batchSyncHourUtc decides when it actually pulls.
   app.post("/api/scheduled/woodcoreConnectorSync", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     try {
       const { runConnectorTick } = await import("../connectors/woodcore");
       const result = await runConnectorTick();
@@ -486,19 +515,19 @@ async function startServer() {
   // ── SHOPLINE Scheduled Sync Handlers ────────────────────────────────────────
   // POST /api/scheduled/shoplineSyncCycle — 15-min incremental sync for all stores
   app.post("/api/scheduled/shoplineSyncCycle", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineSyncCycle } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineSyncCycle(req, res);
   });
   // POST /api/scheduled/shoplineDailyBatch — daily full 24h reconciliation
   app.post("/api/scheduled/shoplineDailyBatch", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineDailyBatch } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineDailyBatch(req, res);
   });
   // POST /api/scheduled/shoplineWebhookReconciler — daily webhook health check
   app.post("/api/scheduled/shoplineWebhookReconciler", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineWebhookReconciler } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineWebhookReconciler(req, res);
   });

@@ -22,10 +22,19 @@ on:
 jobs:
   trigger-sync:
     runs-on: ubuntu-latest
+    # Lets this job ask GitHub for a signed OIDC token identifying the workflow
+    # run. `contents: read` is restated because naming any permission drops the
+    # rest to none.
+    permissions:
+      id-token: write
+      contents: read
     env:
       # Use www directly — the bare domain goes through GoDaddy forwarding which
       # strips the POST method on redirect (301 → GET), causing a 405 on the API.
       SYNC_URL: "https://www.reconcileaiafrica.com/api/woodcore/sync"
+      # Must match GITHUB_OIDC_AUDIENCE on the server. Any fixed string works;
+      # the origin is used because it is unambiguous and self-documenting.
+      OIDC_AUDIENCE: "https://www.reconcileaiafrica.com"
     steps:
       - name: Trigger mirror sync
         env:
@@ -52,9 +61,31 @@ jobs:
             echo "Neither CRON_SECRET nor WOODCORE_SYNC_SECRET is configured on this repository — skipping sync (expected on the mirror)."
             exit 0
           fi
-          echo "Authenticating with: $SECRET_SOURCE"
+          # Ask GitHub for a short-lived token identifying this run. The server
+          # verifies its signature and, critically, the `repository` claim — so
+          # nothing long-lived is copied between two dashboards and there is
+          # nothing to rotate out of step. That copying is what broke this job on
+          # 2026-08-02 and left the mirror stale for three days.
+          #
+          # Best-effort on purpose: the secret header is still sent alongside, so
+          # a deployment that has not yet set GITHUB_OIDC_* keeps working
+          # unchanged. Once the server logs `[syncAuth] authorized ... via
+          # github_oidc`, the secret header and the repo secrets can both go.
+          OIDC_TOKEN=""
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OIDC_AUDIENCE" \
+              | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+          fi
+          if [ -n "$OIDC_TOKEN" ]; then
+            echo "Authenticating with: GitHub OIDC (secret header sent as fallback: $SECRET_SOURCE)"
+          else
+            echo "Authenticating with: $SECRET_SOURCE (no OIDC token available)"
+          fi
+
           code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
             -H "x-sync-secret: $SYNC_SECRET" \
+            ${OIDC_TOKEN:+-H "Authorization: Bearer $OIDC_TOKEN"} \
             "$SYNC_URL")
           echo "HTTP $code"; cat /tmp/resp; echo
           # 202 = started, 409 = a sync is already running — both are fine.

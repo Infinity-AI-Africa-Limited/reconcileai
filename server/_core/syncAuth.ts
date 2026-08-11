@@ -70,6 +70,59 @@ export function checkSyncSecret(
   return timingSafeEqual(a, b) ? { ok: true } : { ok: false, reason: "mismatch" };
 }
 
+/**
+ * Authorize a scheduler request by EITHER path: GitHub OIDC, or the shared secret.
+ *
+ * OIDC is tried first and the secret is the fallback, deliberately in that
+ * order and deliberately both:
+ *
+ *   - OIDC removes the thing that broke. The token is minted per run and signed
+ *     by GitHub, so no long-lived value is copied between two dashboards and
+ *     there is nothing to rotate out of step.
+ *   - The secret cannot be removed yet. Verifying OIDC needs egress to
+ *     token.actions.githubusercontent.com, which on-premise mode blocks by
+ *     design, and Railway Cron cannot mint an OIDC token at all. Both still
+ *     have to be able to trigger a sync.
+ *
+ * `verifyOidc` is injected rather than imported so this stays testable without
+ * a network call — the same reason `expectedSecret` is a parameter.
+ *
+ * Returns which path succeeded. That goes in the log and is the whole rollout
+ * signal: until a line says `via=github_oidc`, OIDC is not actually carrying
+ * anything and deleting the GitHub secrets would take the schedulers down.
+ */
+export type SyncAuthVia = "github_oidc" | "shared_secret";
+
+export type SyncAuthOutcome =
+  | { ok: true; via: SyncAuthVia; detail?: string }
+  | { ok: false; reason: SyncAuthFailure; oidcDetail?: string };
+
+export async function authorizeSyncRequest(
+  input: { bearerToken?: string | null; secretHeader?: string | null },
+  deps: {
+    expectedSecret: string;
+    verifyOidc: (token: string | undefined | null) => Promise<
+      { ok: true; repository: string } | { ok: false; reason: string; detail?: string }
+    >;
+  },
+): Promise<SyncAuthOutcome> {
+  // Only attempt OIDC when a bearer token was actually presented, so a
+  // secret-only caller never pays for a JWKS lookup and never logs an OIDC
+  // failure that means nothing.
+  let oidcDetail: string | undefined;
+  if (input.bearerToken) {
+    const oidc = await deps.verifyOidc(input.bearerToken);
+    if (oidc.ok) return { ok: true, via: "github_oidc", detail: oidc.repository };
+    // Not fatal on its own — the caller may still hold a valid secret. Carried
+    // through so the log can say why the preferred path did not take.
+    oidcDetail = `${oidc.reason}${oidc.detail ? `: ${oidc.detail}` : ""}`;
+  }
+
+  const secret = checkSyncSecret(input.secretHeader, deps.expectedSecret);
+  if (secret.ok) return { ok: true, via: "shared_secret" };
+  return { ok: false, reason: secret.reason, oidcDetail };
+}
+
 /** Human-readable remedy for a refusal, for the server log. Never includes the secret. */
 export function describeSyncAuthFailure(reason: SyncAuthFailure): string {
   switch (reason) {

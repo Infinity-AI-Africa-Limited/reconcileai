@@ -158,6 +158,38 @@ PORT=3000
 APP_URL=https://reconcileai.vip
 ```
 
+## Scheduler authentication (Woodcore mirror sync, SHOPLINE sync)
+
+Two accepted paths. **GitHub OIDC is preferred**; the shared secret remains for
+callers that cannot use it.
+
+```bash
+# Preferred — GitHub Actions OIDC. Nothing long-lived, so nothing to rotate.
+GITHUB_OIDC_AUDIENCE=https://www.reconcileaiafrica.com
+GITHUB_OIDC_REPOSITORIES=Infinity-AI-Africa-Limited/reconcileai
+GITHUB_OIDC_REFS=refs/heads/main      # optional extra pin; empty = any ref
+
+# Fallback — shared secret (Railway Cron, on-premise, manual operator calls).
+CRON_SECRET=<32+ character random string>
+```
+
+`GITHUB_OIDC_AUDIENCE` must match `OIDC_AUDIENCE` in the two workflow files.
+
+⚠️ **`GITHUB_OIDC_REPOSITORIES` is the security boundary, not a convenience.** A
+valid GitHub OIDC token proves only that *some* repository issued it — anyone
+with a public repo can mint one for any audience. The `repository` claim is what
+makes it authentication. Leaving this unset **disables OIDC** and leaves the
+shared secret in charge; it never means "allow any repository".
+
+The shared secret is deliberately kept because verifying OIDC requires egress to
+`token.actions.githubusercontent.com`, which `DEPLOYMENT_MODE=on_premise` blocks
+by design, and Railway Cron cannot mint an OIDC token at all.
+
+**Rollout:** the workflows send both headers. Watch the server log for
+`[syncAuth] authorized ... via github_oidc` — until that appears, OIDC is not
+carrying anything and deleting the GitHub repo secrets would break the
+schedulers.
+
 ## SFTP Credential Encryption
 
 ```bash
