@@ -4,6 +4,7 @@ import NotFound from "@/pages/NotFound";
 import { Redirect, Route, Switch, useLocation } from "wouter";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useOrgSegmentStatus } from "@/hooks/useOrgSegment";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { canReachPath, landingPathFor } from "@/lib/routeAccess";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
@@ -112,13 +113,20 @@ function LandingRedirect() {
  *
  * Pending means undecided, not denied. Redirecting while the segment is still
  * in flight would bounce people out of pages they are entitled to.
+ *
+ * `portal` is passed for the same reason DashboardLayout passes it to navGroup:
+ * inside a tenant portal a super admin is looking at the TENANT's surface, so
+ * the tenant's segment rules apply. Without it the sidebar hid Distributor
+ * Registry from a retail portal while /distributors still loaded.
  */
 function SegmentGuard({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const { segment, isPending } = useOrgSegmentStatus();
   const { user } = useAuth();
+  const { viewAsOrg } = usePortalContext();
 
-  const blocked = !isPending && !canReachPath(location, segment, user?.role);
+  const opts = { portal: viewAsOrg !== null };
+  const blocked = !isPending && !canReachPath(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
   return <>{children}</>;
 }

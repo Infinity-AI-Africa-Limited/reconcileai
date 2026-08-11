@@ -77,10 +77,20 @@ export function segmentsForPath(path: string): Segment[] | null {
  * drift: an entry hidden from a vertical is also unreachable by it, by
  * construction rather than by two lists agreeing.
  *
- * Staff pass everything. A super admin is the platform operator, their sidebar
- * already reflects whichever portal they are in, and the server checks their own
- * organisation's segment on every procedure regardless. Redirecting them away
- * from a URL they typed deliberately would be obstruction, not safety.
+ * Staff pass everything — EXCEPT inside a portal. That exception is the whole
+ * subtlety, and leaving it out made the guard wrong in the one place a super
+ * admin actually looks at a tenant's surface. `navFor` has always drawn the same
+ * line: entering a portal drops ROLE gating, because staff are looking at the
+ * tenant's screens rather than exercising their own permissions, but keeps
+ * SEGMENT gating, because seeing what that vertical has IS the point of the
+ * portal. A route guard that bypasses on role alone contradicts it: the sidebar
+ * correctly omits Distributor Registry from a retail portal, and /distributors
+ * loads anyway — a page the tenant could never reach, inside the view that is
+ * supposed to represent them. Observed in production on the SHOPLINE dev store.
+ *
+ * Outside a portal the bypass is right: a super admin on their own account is
+ * the platform operator, and redirecting them off a URL they typed deliberately
+ * would be obstruction rather than safety.
  *
  * A null segment refuses a scoped path, matching `inSegment` exactly. Callers
  * must therefore not consult this while the segment is still resolving — see
@@ -90,8 +100,9 @@ export function canReachPath(
   path: string,
   segment: Segment | null,
   role: string | undefined,
+  opts: { portal?: boolean } = {},
 ): boolean {
-  if (isStaff(role)) return true;
+  if (isStaff(role) && !opts.portal) return true;
   const segments = segmentsForPath(path);
   if (!segments) return true;
   return inSegment({ label: "", path, group: "main", segments }, segment);

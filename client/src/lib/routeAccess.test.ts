@@ -103,14 +103,53 @@ describe("when a vertical opens a route built for another one", () => {
   });
 });
 
-describe("when the viewer is Infinity AI staff", () => {
+describe("when the viewer is Infinity AI staff on their own account", () => {
   it("should reach every vertical's routes", () => {
-    // The operator supports every tenant, their sidebar already reflects whichever
-    // portal they are in, and the server checks their own org on every procedure.
-    // Redirecting them off a URL they typed would be obstruction, not safety.
+    // The operator supports every tenant, and redirecting them off a URL they
+    // typed would be obstruction, not safety.
     for (const p of ["/distributors", "/settlement-monitor", "/cbn-compliance", "/dashboard/auditor"]) {
       expect(canReachPath(p, "super_admin", "super_admin"), p).toBe(true);
     }
+  });
+});
+
+describe("when staff have entered a tenant's portal", () => {
+  // Found in production on the SHOPLINE dev store: the retail portal's sidebar
+  // correctly omitted Distributor Registry, and /distributors loaded anyway.
+  // Bypassing on role alone contradicts navFor, which drops ROLE gating inside a
+  // portal but keeps SEGMENT gating — seeing what that vertical has is the entire
+  // point of the portal.
+  const portal = { portal: true };
+
+  it("should refuse routes the viewed tenant could never reach", () => {
+    expect(canReachPath("/distributors", "retail_commerce", "super_admin", portal)).toBe(false);
+    expect(canReachPath("/cbn-compliance", "retail_commerce", "super_admin", portal)).toBe(false);
+    expect(canReachPath("/dashboard/auditor", "retail_commerce", "super_admin", portal)).toBe(false);
+  });
+
+  it("should refuse the trailing-slash spellings too", () => {
+    expect(canReachPath("/distributors/", "retail_commerce", "super_admin", portal)).toBe(false);
+    expect(canReachPath("/Distributors", "retail_commerce", "super_admin", portal)).toBe(false);
+  });
+
+  it("should allow what the viewed tenant DOES have", () => {
+    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/dashboard", "/reports"]) {
+      expect(canReachPath(p, "retail_commerce", "super_admin", portal), p).toBe(true);
+    }
+  });
+
+  it("should apply the viewed tenant's rules, not the operator's", () => {
+    // Inside a corporate-B2B portal the registry is the tenant's own screen.
+    expect(canReachPath("/distributors", "corporate_b2b", "super_admin", portal)).toBe(true);
+    expect(canReachPath("/settlement-monitor", "corporate_b2b", "super_admin", portal)).toBe(false);
+  });
+
+  it("should send a blocked portal viewer to the TENANT's landing page", () => {
+    // Not the operator's dashboard: the redirect has to stay inside the portal's
+    // own surface, or leaving a blocked page silently changes what is being viewed.
+    const destination = landingPathFor("retail_commerce");
+    expect(destination).toBe("/settlement-monitor");
+    expect(canReachPath(destination, "retail_commerce", "super_admin", portal)).toBe(true);
   });
 });
 
@@ -163,7 +202,10 @@ describe("when the rule is derived rather than restated", () => {
     // the guard cannot be quietly dropped from App.tsx.
     const APP = fs.readFileSync(path.join(__dirname, "..", "App.tsx"), "utf8");
     expect(APP).toMatch(/function SegmentGuard/);
-    expect(APP).toMatch(/canReachPath\(location, segment, user\?\.role\)/);
+    expect(APP).toMatch(/canReachPath\(location, segment, user\?\.role, opts\)/);
+    // The portal flag has to actually be passed, or staff inside a tenant portal
+    // bypass the tenant's own rules — which is how /distributors stayed reachable.
+    expect(APP).toMatch(/const opts = \{ portal: viewAsOrg !== null \}/);
     expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
     expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
   });
