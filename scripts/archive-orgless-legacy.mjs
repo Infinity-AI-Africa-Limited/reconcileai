@@ -44,10 +44,11 @@ import "dotenv/config";
 import mysql from "mysql2/promise";
 
 const EXECUTE = process.argv.includes("--execute");
-// Distinguish "--only was not given" (null) from "--only was given empty" ("").
-// The latter must be an error, not a silent full run across every table.
-const ONLY_ARG = process.argv.find((a) => a.startsWith("--only="));
-const ONLY = ONLY_ARG === undefined ? null : ONLY_ARG.slice("--only=".length);
+// Every `--only=` given, not just the first. Distinguish "--only was not given"
+// (null) from "--only was given empty" (""). The latter must be an error, not a
+// silent full run across every table.
+const ONLY_ARGS = process.argv.slice(2).filter((a) => a.startsWith("--only="));
+const ONLY = ONLY_ARGS.length === 0 ? null : ONLY_ARGS[0].slice("--only=".length);
 
 /**
  * Tables to archive, and how.
@@ -99,6 +100,20 @@ async function main() {
   const unknown = process.argv.slice(2).filter((a) => a !== "--execute" && !a.startsWith("--only="));
   if (unknown.length > 0) {
     throw new Error(`unrecognised argument(s): ${unknown.join(" ")}. Usage: [--execute] [--only=<table>]`);
+  }
+
+  // Repeating the flag asks for two tables and silently gets one: only the first
+  // is honoured, the second is skipped without a word, and the run still ends in
+  // "Done." Every other narrowing mistake here is refused rather than reinterpreted,
+  // and this one is worse than most — the operator believes a table was archived
+  // when it was untouched. Supporting a list is a feature; this script only ever
+  // promised one table, so say so instead of guessing which was meant.
+  if (ONLY_ARGS.length > 1) {
+    throw new Error(
+      `--only was given ${ONLY_ARGS.length} times (${ONLY_ARGS.join(" ")}). Pass it once — ` +
+        `only "${ONLY}" would have run and the rest would have been skipped silently. ` +
+        `Run the script once per table instead.`,
+    );
   }
 
   // A target that matches nothing would skip every step and still reach "Done." —
