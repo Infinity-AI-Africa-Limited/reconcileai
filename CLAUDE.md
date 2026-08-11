@@ -1591,15 +1591,51 @@ Railway dashboard only, never transcribe, then reconnect OAuth on both dev
 stores immediately (rotation makes existing tokens undecryptable — expected, not
 a regression). Runbook: §18.
 
-**2. Decide what happens to the ~57.3M orgless legacy rows.**
-`transactions` holds 57,330,917 rows with `organizationId IS NULL` — prototype
-and seed data, last written 2026-06-06 — sitting in the same table as live
-tenant data. They are invisible to every org-scoped query, so they are harmless
-today. But they inflate table size, skew any unscoped aggregate, and would be
-awkward to explain in a client's security review. Three honest options: archive
-to a separate table, backfill a synthetic "legacy" organization, or knowingly
-leave them with the decision recorded. Any is fine; drifting into launch without
-deciding is not.
+**2. ~~Decide what happens to the orgless legacy rows.~~ DONE — ARCHIVED 2026-08-11.**
+Owner chose *archive*. `scripts/archive-orgless-legacy.mjs` moved every row with
+no owning tenant out of the live tables in 59 seconds:
+
+| Table | Archived | Live after |
+|---|---|---|
+| `transactions` | 35,036,289 | 85,499 |
+| `matches` | 15,300 | 1,093 |
+| `exceptions` | 701 | 41 |
+| `distributors` | 44 | 0 |
+
+Verified after: zero org-less rows remain in any live table, every tenant kept its
+data (org 1 → 85,496, org 60001 → 3), all twelve indexes survived the swap, and
+`AUTO_INCREMENT` continues above the archived ids so none can be reused. Health
+checks green.
+
+> ⚠️ **The measured count was 35.0M, not the 57.3M this section claimed.** The
+> older figure came from a 2026-08-03 note and was never re-measured. Prefer a
+> fresh `COUNT(*)` over any number written down here.
+
+**⏭ FOLLOW-UP OWED TO THE OWNER — raise this proactively.** Archiving preserved
+the rows; it did **not** reclaim the ~11 GB. They now sit in `*_legacy_archive`
+tables the application never reads. **The permanent fix the owner asked for is to
+DROP those tables**, and they asked to be reminded at the right time rather than
+doing it immediately.
+
+*The right time:* on or after **2026-09-10** (30 days of confirmed normal
+operation), or sooner if storage cost bites — and in any case revisit it at the
+first-customer gate above. Dropping is irreversible and there is deliberately no
+script for it — confirm a backup first.
+
+**How to recover archived rows, if it ever comes to that.**
+`transactions_legacy_archive` is a full copy of the table *as it stood at
+02:05 on 2026-08-11* — 35,121,788 rows, including the 85,499 that are also live.
+The other three archives hold legacy rows only.
+
+> ⚠️ **It is a snapshot, not a mirror, and the difference grows every day.**
+> Renaming it back over `transactions` is a true rollback only in the minutes
+> after the run. Do it later and it silently discards every row written since —
+> which is real tenant data, and exactly the failure this whole exercise was
+> meant to avoid.
+>
+> Recover by **INSERT, not by rename**: copy the wanted rows out of the archive
+> into the live table. Their ids cannot collide — archived ids are all
+> ≤ 36,379,947 and live inserts continue above that — so the two merge cleanly.
 
 > **Same family, measured 2026-08-08 — 44 misfiled `distributors` rows.** 30 sit on
 > the financial-services demo tenant (org 1, created 2026-04-12) and 14 under
