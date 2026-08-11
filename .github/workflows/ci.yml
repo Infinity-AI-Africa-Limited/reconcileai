@@ -3,8 +3,25 @@ name: CI
 on:
   push:
     branches: [main]
+  # EVERY pull request, not only those targeting main.
+  #
+  # `branches:` filters on the pull request's BASE, so `[main]` meant a PR opened
+  # against any other branch got no CI at all — no typecheck, no build, no tests,
+  # no tenancy ratchets. Not a rare shape either: this repo stacks PRs (#8–#11
+  # were a four-deep stack, and #73 was based on #72), and a stacked PR merges
+  # into its parent branch and then reaches main inside the parent's merge, so
+  # the code lands on production having never been checked.
+  #
+  # It fails silently, which is what makes it worth widening rather than
+  # remembering. Greptile still reviews — it is a GitHub App and does not read
+  # this file — so a stacked PR shows a green "Greptile Review" tick and looks
+  # reviewed while the suite never ran. #73 was caught only by counting the
+  # checks (1, not 3) rather than reading their results.
+  #
+  # `workflow_dispatch` below is the manual escape hatch, and it is not a
+  # substitute: it only helps when someone already suspects the runs are missing.
   pull_request:
-    branches: [main]
+    branches: ['**']
   # Manual re-run, from Actions -> CI -> "Run workflow" (pick the branch).
   #
   # Needed because GitHub occasionally DROPS a pull_request event and never
