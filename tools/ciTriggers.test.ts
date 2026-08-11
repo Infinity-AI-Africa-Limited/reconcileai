@@ -49,6 +49,12 @@ const RESTRICTED_SHAPES: Record<string, string> = {
   // none of them. Reading `**` as "allows everything" inverts its meaning.
   "branches-ignore matching everything": "on:\n  pull_request:\n    branches-ignore: ['**']\n",
   "branches plus an ignore list": "on:\n  pull_request:\n    branches: ['**']\n    branches-ignore: [docs/*]\n",
+  // A match-all belonging to a DIFFERENT key. paths-ignore filters files and
+  // says nothing about base branches, but a check scanning the whole block for
+  // `**` read it as "allows every base" and cleared a workflow pinned to main.
+  "a sibling key's match-all":
+    "on:\n  pull_request:\n    branches: [main]\n    paths-ignore: ['**']\n",
+  "a sibling paths filter": "on:\n  pull_request:\n    branches: [main]\n    paths: ['**/*.ts']\n",
 };
 
 /** Shapes that genuinely place no restriction on the base branch. */
@@ -60,6 +66,9 @@ const UNRESTRICTED_SHAPES: Record<string, string> = {
   "no branches key at all": "on:\n  pull_request:\n    types: [opened]\n",
   "bare trigger": "on:\n  pull_request:\n",
   "a comment mentioning branches": "on:\n  pull_request:\n    # runs for all branches\n    types: [opened]\n",
+  "paths filters with no branches key": "on:\n  pull_request:\n    paths-ignore: ['docs/**']\n",
+  "the short form": "on: pull_request\n",
+  "the list form": "on: [push, pull_request]\n",
 };
 
 describe("when a workflow restricts which bases trigger it", () => {
