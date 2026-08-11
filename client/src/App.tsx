@@ -166,7 +166,11 @@ function CallbackGuard({ component: Component }: { component: React.ComponentTyp
   const { segment, isPending } = useOrgSegmentStatus({ enabled: isAuthenticated });
   const { viewAsOrg } = usePortalContext();
 
-  const opts = { portal: viewAsOrg !== null };
+  // `signedIn` is what earns the exception, NOT a null segment. A signed-in
+  // viewer whose segment lookup failed also has a null segment, and handing them
+  // the retail screen because the answer is missing would be reading absence as
+  // evidence.
+  const opts = { portal: viewAsOrg !== null, signedIn: isAuthenticated };
   const blocked = !isPending && !canReachCallback(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
   return <Component />;

@@ -192,10 +192,12 @@ describe("when the viewer lands on a SHOPLINE install callback", () => {
   // /shopline/welcome mounts the SAME component as /shopline/connect. The latter
   // went through SegmentGuard and the former did not, so one path was guarded and
   // the other congratulated a bank on connecting a store it does not have.
+  const signedIn = { signedIn: true };
+
   it("should refuse a signed-in tenant of another vertical", () => {
     for (const p of ["/shopline/welcome", "/shopline/error"]) {
-      expect(canReachCallback(p, "financial_services", "admin"), p).toBe(false);
-      expect(canReachCallback(p, "corporate_b2b", "admin"), p).toBe(false);
+      expect(canReachCallback(p, "financial_services", "admin", signedIn), p).toBe(false);
+      expect(canReachCallback(p, "corporate_b2b", "admin", signedIn), p).toBe(false);
     }
   });
 
@@ -203,21 +205,36 @@ describe("when the viewer lands on a SHOPLINE install callback", () => {
     // The reported spelling: /SHOPLINE/WELCOME/?org=bank-org. wouter matches it,
     // so the guard has to as well.
     for (const p of ["/shopline/welcome/", "/SHOPLINE/WELCOME", "/SHOPLINE/WELCOME/"]) {
-      expect(canReachCallback(p, "financial_services", "admin"), p).toBe(false);
+      expect(canReachCallback(p, "financial_services", "admin", signedIn), p).toBe(false);
     }
   });
 
   it("should let the merchant through", () => {
-    expect(canReachCallback("/shopline/welcome", "retail_commerce", "admin")).toBe(true);
+    expect(canReachCallback("/shopline/welcome", "retail_commerce", "admin", signedIn)).toBe(true);
   });
 
   it("should let a SIGNED-OUT visitor through — the actual install case", () => {
     // The whole reason this is not canReachPath. SHOPLINE's OAuth redirect sets
-    // no session cookie, so the merchant arrives with no segment at all. Refusing
-    // on a null segment, as the sidebar rule does, would bounce the one person
-    // the page exists for and break the install flow.
+    // no session cookie, so the merchant arrives with no session at all. Refusing
+    // them, as the sidebar rule would, bounces the one person the page exists for
+    // and breaks the install flow.
     expect(canReachCallback("/shopline/welcome", null, undefined)).toBe(true);
     expect(canReachPath("/shopline/welcome", null, undefined)).toBe(false);
+  });
+
+  it("should refuse a SIGNED-IN viewer whose segment could not be determined", () => {
+    // The exception is keyed on having no session, not on a null segment — three
+    // different situations produce null. `useOrgSegmentStatus` uses retry: false,
+    // so a single failed request keeps the answer null for the life of the page,
+    // and a bank in that state would otherwise be handed the retail screen.
+    // Absence of an answer is not evidence of who is asking.
+    expect(canReachCallback("/shopline/welcome", null, "admin", signedIn)).toBe(false);
+    expect(canReachCallback("/shopline/error", null, "cfo", signedIn)).toBe(false);
+  });
+
+  it("should still let a signed-in merchant through once the answer arrives", () => {
+    // Failing closed on an unknown segment must not also punish the resolved case.
+    expect(canReachCallback("/shopline/welcome", "retail_commerce", "admin", signedIn)).toBe(true);
   });
 
   it("should not ASK for the segment when there is no session", () => {
@@ -242,14 +259,14 @@ describe("when the viewer lands on a SHOPLINE install callback", () => {
   it("should send a blocked bank somewhere that makes sense", () => {
     const destination = landingPathFor("financial_services");
     expect(destination).toBe("/dashboard");
-    expect(canReachCallback(destination, "financial_services", "admin")).toBe(true);
+    expect(canReachCallback(destination, "financial_services", "admin", signedIn)).toBe(true);
   });
 
   it("should keep the guarded twin behaving identically for a signed-in viewer", () => {
     // /shopline/connect renders the same component through SegmentGuard. A bank is
     // refused both ways now; before, only one of them turned it away.
     expect(canReachPath("/shopline/connect", "financial_services", "admin")).toBe(false);
-    expect(canReachCallback("/shopline/welcome", "financial_services", "admin")).toBe(false);
+    expect(canReachCallback("/shopline/welcome", "financial_services", "admin", signedIn)).toBe(false);
   });
 });
 
@@ -276,6 +293,12 @@ describe("when the rule is derived rather than restated", () => {
     expect(APP).toMatch(/path="\/shopline\/welcome">\{\(\) => <CallbackGuard component=\{ShoplineWelcome\} \/>\}/);
     expect(APP).toMatch(/path="\/shopline\/error">\{\(\) => <CallbackGuard component=\{ShoplineError\} \/>\}/);
     expect(APP).toMatch(/canReachCallback\(location, segment, user\?\.role, opts\)/);
+    // Scoped to CallbackGuard on purpose. A file-wide match for the opts object
+    // is satisfied by SegmentGuard's own line, so it would pass while the
+    // callback guard quietly stopped passing `signedIn` — which is the flag the
+    // whole signed-out exception now turns on.
+    const callbackGuard = APP.slice(APP.indexOf("function CallbackGuard"), APP.indexOf("function Router"));
+    expect(callbackGuard).toMatch(/signedIn: isAuthenticated/);
     expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
     expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
   });

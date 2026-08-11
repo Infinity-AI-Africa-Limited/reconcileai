@@ -125,10 +125,21 @@ export function canReachPath(
  * mounting the route through DashboardPage would put it behind the dashboard's
  * authentication, which breaks the same flow more thoroughly.
  *
- * So this refuses only a POSITIVELY identified other vertical: a signed-in bank
- * gets sent to its own landing page instead of a retail completion screen, while
- * anyone without a resolved segment — the merchant mid-install, or any signed-out
- * visitor — passes through.
+ * So the exception is granted to viewers with NO SESSION, and to nobody else.
+ *
+ * It is keyed on `signedIn` rather than on `segment === null`, and that
+ * distinction is the whole correctness of this function. A null segment has three
+ * causes: no session, a signed-in org with no segment set, and a segment query
+ * that FAILED — and `useOrgSegmentStatus` uses `retry: false`, so one failed
+ * request keeps the answer null for the life of the page. Treating null as "must
+ * be the install flow" hands the retail completion screen to a signed-in bank
+ * whose lookup happened to fail. Absence of an answer is not evidence of who is
+ * asking.
+ *
+ * A signed-in viewer whose segment cannot be determined is therefore refused and
+ * sent to their own landing page. They have somewhere to go, so failing closed
+ * costs them nothing; the signed-out merchant has nowhere, which is why they get
+ * the exception.
  *
  * That leaves the page reachable by a signed-out stranger, which is deliberate
  * and costs nothing: it renders static copy, calls no procedure, and reads only
@@ -138,8 +149,8 @@ export function canReachCallback(
   path: string,
   segment: Segment | null,
   role: string | undefined,
-  opts: { portal?: boolean } = {},
+  opts: { portal?: boolean; signedIn?: boolean } = {},
 ): boolean {
-  if (segment === null) return true;
+  if (!opts.signedIn) return true;
   return canReachPath(path, segment, role, opts);
 }
