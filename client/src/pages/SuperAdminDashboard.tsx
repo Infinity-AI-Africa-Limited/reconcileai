@@ -498,6 +498,14 @@ function OrganisationsTable() {
     onError: (err) => toast.error("Failed to update sign-in method", { description: err.message }),
   });
 
+  const updateBankingModel = trpc.superAdmin.setOrganizationBankingModel.useMutation({
+    onSuccess: () => {
+      toast.success("Banking model updated — the Super Agent applies the NIFI taxonomy from the next diagnosis");
+      utils.superAdmin.allOrganizations.invalidate();
+    },
+    onError: (err) => toast.error("Failed to update banking model", { description: err.message }),
+  });
+
   const filtered = (orgs ?? []).filter((org: any) => {
     const matchSearch = !search || org.name.toLowerCase().includes(search.toLowerCase()) || org.code?.toLowerCase().includes(search.toLowerCase());
     const matchSeg = segmentFilter === "all" || org.segment === segmentFilter;
@@ -688,6 +696,31 @@ function OrganisationsTable() {
                             </SelectContent>
                           </Select>
                         )}
+                        {/* Banking model — financial services only. Orthogonal to
+                            segment: a non-interest bank runs the same rails, but
+                            the Super Agent applies the NIFI taxonomy across all of
+                            them (income only from a real sale, lease or
+                            partnership; IAH funds segregated from shareholders'). */}
+                        {org.segment === "financial_services" ? (
+                          <Select
+                            value={org.bankingModel ?? "conventional"}
+                            onValueChange={(v) =>
+                              updateBankingModel.mutate({
+                                organizationId: org.id,
+                                bankingModel: v as "conventional" | "non_interest",
+                              })
+                            }
+                            disabled={updateBankingModel.isPending}
+                          >
+                            <SelectTrigger className="h-7 text-xs w-44" title="Banking model">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="conventional">Conventional</SelectItem>
+                              <SelectItem value="non_interest">Non-interest (NIFI)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>

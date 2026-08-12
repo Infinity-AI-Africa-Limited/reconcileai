@@ -14,7 +14,7 @@
  */
 
 import { invokeLLM } from "./_core/llm";
-import { nigerianExceptionsTaxonomyPromptBlock } from "./exceptions/seed";
+import { nigerianExceptionsTaxonomyPromptBlock, nonInterestTaxonomyPromptBlock } from "./exceptions/seed";
 import { relevantNigerianChannels } from "./exceptions/channelMapping";
 
 // ─── Shared Transaction type (mirrors drizzle schema) ────────────────
@@ -513,7 +513,13 @@ export async function diagnoseException(
   txn: SATransaction,
   allTargets: SATransaction[],
   config: { amountTolerance: number; dateWindowDays: number },
-  memoryContext: string = ""
+  memoryContext: string = "",
+  /**
+   * `organizations.bankingModel` for the owning tenant. Omitted means
+   * conventional — see isNonInterestInstitution for why an unknown value must
+   * NOT be read as non-interest.
+   */
+  bankingModel?: string | null,
 ): Promise<ExceptionDiagnosis> {
   const txnAmt = parseFloat(String(txn.amount));
   const parsedRef = parseReference(txn.transactionRef, txn.description);
@@ -522,7 +528,7 @@ export async function diagnoseException(
   const ruleResult = ruleBasedClassify(txn, txnAmt, allTargets, config, parsedRef);
 
   // LLM diagnosis (enriches the rule result with natural language)
-  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext);
+  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext, bankingModel);
 
   return {
     ...ruleResult,
@@ -698,7 +704,8 @@ async function getLLMDiagnosis(
   txn: SATransaction,
   ruleResult: ExceptionDiagnosis,
   parsedRef: ParsedReference,
-  memoryContext: string
+  memoryContext: string,
+  bankingModel?: string | null,
 ): Promise<{ headline: string; rootCause: string; recommendedAction: string }> {
   // Inject only the taxonomy channels relevant to this transaction — the
   // catalogued failure modes, regulatory context and diagnosis guidance for the
@@ -713,6 +720,12 @@ async function getLLMDiagnosis(
     .join(" ");
   const channels = relevantNigerianChannels({ channelType: txn.channelType, text: channelText });
   const taxonomyBlock = channels.length > 0 ? nigerianExceptionsTaxonomyPromptBlock(channels) : "";
+
+  // Non-interest (NIFI) institutions additionally get the profit-and-sharing
+  // taxonomy, which is keyed on the ORGANISATION rather than the channel: it
+  // applies across every rail the institution runs. Empty string for a
+  // conventional bank, so nothing is injected and no tokens are spent.
+  const nonInterestBlock = nonInterestTaxonomyPromptBlock(bankingModel);
 
   try {
     const response = await invokeLLM({
@@ -730,7 +743,7 @@ Your job is to diagnose payment exceptions with the precision of a Big 4 forensi
 3. Recommend a single, specific next action
 4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable
 
-${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
+${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${nonInterestBlock ? `THIS INSTITUTION IS LICENSED ON NON-INTEREST (NIFI) PRINCIPLES.\nIt runs the same payment rails as any other bank, but income may only arise from a real sale, lease or partnership — never from the passage of time — and investment account holders' funds must stay segregated from shareholders' funds. Treat an entry that accrues purely with time, or a return credited to the wrong pool, as a compliance finding rather than a posting error: it reaches the institution's licence basis and its Advisory Committee of Experts' attestation, so it can be material at an amount that would be immaterial at a conventional bank.\n\nNON-INTEREST EXCEPTION PATTERNS:\n${nonInterestBlock}\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
         },
         {
           role: "user",

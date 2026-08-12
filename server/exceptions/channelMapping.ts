@@ -67,6 +67,9 @@ const CHANNEL_TYPE_TAXONOMY: Record<string, readonly NigerianChannelKey[]> = {
   // ── Third-party origination ──────────────────────────────────────────
   fintech_api: ["fintech_gateway"],
 
+  // ── Paper clearing ───────────────────────────────────────────────────
+  cheque_clearing: ["cheque"],
+
   // ── The core banking ledger is the COUNTER-side of every reconciliation,
   //    not a channel with failure modes of its own. `cbs_ledger` appears in
   //    almost every exception's `sources` for that reason. Mapping it to a

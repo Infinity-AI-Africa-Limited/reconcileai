@@ -3634,6 +3634,45 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    /**
+     * Mark an institution as operating on non-interest (NIFI) principles.
+     *
+     * Orthogonal to `segment`: a non-interest bank is still `financial_services`
+     * and still runs NIP, POS and cheque clearing. What changes is that the
+     * Super Agent applies the NIFI taxonomy across every one of those rails —
+     * income may only arise from a real sale, lease or partnership, and
+     * investment account holders' funds must stay segregated from shareholders'.
+     *
+     * Super-admin only, like the SSO opt-in it mirrors, because it changes how
+     * the platform characterises the institution to a regulator-facing audience.
+     * A tenant should not be able to assert its own licence basis.
+     */
+    setOrganizationBankingModel: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        bankingModel: z.enum(["conventional", "non_interest"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await drizzle.update(organizations)
+          .set({ bankingModel: input.bankingModel })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_banking_model", "organization", input.organizationId, {
+          bankingModel: input.bankingModel,
+        });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_banking_model_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          newValue: input.bankingModel,
+        });
+        return { success: true };
+      }),
+
     // Create a new organisation (for onboarding a new client instance)
     createOrganization: superAdminProcedure
       .input(z.object({
@@ -4207,12 +4246,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const similar = retrieveSimilarMemories(txn, dummyDiagnosis, memories, 3);
         const memoryContext = formatMemoryContext(similar);
 
+        // A non-interest institution gets the NIFI taxonomy on top of the
+        // channel one — it applies across every rail, so it is read from the
+        // organisation rather than from the transaction's channel.
+        const diagnosingOrg = ctx.user.organizationId
+          ? await db.getOrganizationById(ctx.user.organizationId)
+          : null;
+
         // Run deep diagnosis
         const diagnosis = await diagnoseException(
           txn,
           [], // no target txns needed for standalone diagnosis
           { amountTolerance: 0.015, dateWindowDays: 7 },
-          memoryContext
+          memoryContext,
+          diagnosingOrg?.bankingModel ?? null,
         );
 
         // Generate action draft
