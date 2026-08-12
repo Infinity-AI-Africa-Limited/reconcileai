@@ -76,6 +76,117 @@ describe("no read path may build a vanishing WHERE clause", () => {
   });
 });
 
+/**
+ * The second way a WHERE clause vanishes, which the sweep above does not model.
+ *
+ * `getDashboardStats` leaked every tenant's totals on the main dashboard for as
+ * long as it existed, and passed both existing ratchets, because it used neither
+ * guarded shape. It did two other things instead:
+ *
+ *     const jobCondition = !isAdmin ? eq(jobs.userId, userId) : undefined;
+ *     db.select({...}).from(reconciliationJobs).where(jobCondition)   // admin => no WHERE
+ *     db.select({...}).from(exceptions)                               // no .where() at all
+ *
+ * The first is the `: undefined` fallback wearing a ternary instead of a
+ * `conditions.length` check; the second omits the predicate outright. Both are
+ * asserted here against the tenant-scoped tables, so the next one is a test
+ * failure rather than a production incident.
+ */
+describe("no SELECT on a tenant-scoped table may omit its predicate", () => {
+  /** Tables whose rows belong to exactly one tenant. */
+  const TENANT_TABLES = [
+    "transactions",
+    "exceptions",
+    "matches",
+    "reconciliationJobs",
+    "reconciliationReports",
+    "dashboardStatsCache",
+    "auditLogs",
+    "uploadBatches",
+    "apiKeys",
+    "sftpCredentials",
+  ];
+
+  /** Every `db.select(...)....;` statement in db.ts, with its enclosing function. */
+  function selectStatements(): Array<{ fn: string; stmt: string }> {
+    const out: Array<{ fn: string; stmt: string }> = [];
+    for (const m of DB_SOURCE.matchAll(/\bdb\s*\.\s*select(?:Distinct)?\s*\(/g)) {
+      const end = DB_SOURCE.indexOf(";", m.index);
+      if (end === -1) continue;
+      const before = DB_SOURCE.slice(0, m.index);
+      const fns = [...before.matchAll(/export async function (\w+)/g)];
+      out.push({
+        fn: fns.length > 0 ? fns[fns.length - 1][1] : "<module scope>",
+        stmt: DB_SOURCE.slice(m.index, end),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Reads that legitimately span tenants. Each is named so adding one is a
+   * decision, and each function name already says it crosses tenants.
+   */
+  const CROSS_TENANT_READS = new Set([
+    "getAllChannelsAcrossTenants",
+    "getTransactionsByIdsUnscoped",
+  ]);
+
+  it("every select from a tenant-scoped table has a .where()", () => {
+    const offenders = selectStatements()
+      .filter(({ fn }) => !CROSS_TENANT_READS.has(fn))
+      .filter(({ stmt }) => TENANT_TABLES.some((t) => new RegExp(`\\.from\\(\\s*${t}\\s*\\)`).test(stmt)))
+      .filter(({ stmt }) => !/\.where\s*\(/.test(stmt))
+      .map(({ fn }) => fn);
+
+    expect(
+      [...new Set(offenders)],
+      "These read a tenant-scoped table with no WHERE at all, so they return every " +
+        "tenant's rows. Add an orgFilter(<table>.organizationId, organizationId) predicate.",
+    ).toEqual([]);
+  });
+
+  it("no condition passed to .where() is a ternary that can be undefined", () => {
+    // `const x = cond ? eq(...) : undefined;` then `.where(x)` — drizzle treats
+    // an undefined predicate as no predicate.
+    const offenders: string[] = [];
+    for (const m of DB_SOURCE.matchAll(/const (\w+) = [^;]*\?[^;]*:\s*undefined;/g)) {
+      const name = m[1];
+      const before = DB_SOURCE.slice(0, m.index);
+      const fns = [...before.matchAll(/export async function (\w+)/g)];
+      const fn = fns.length > 0 ? fns[fns.length - 1][1] : "<module scope>";
+      if (new RegExp(`\\.where\\(\\s*${name}\\s*\\)`).test(DB_SOURCE)) offenders.push(`${fn} (${name})`);
+    }
+    expect(
+      offenders,
+      "A `cond ? predicate : undefined` variable is passed to .where(). When the " +
+        "ternary takes the undefined branch the query loses its WHERE entirely.",
+    ).toEqual([]);
+  });
+
+  it("getDashboardStats is scoped by organization, not by user+isAdmin", () => {
+    // Pinned by name: this is the function the rule was written for. Its old
+    // signature made `isAdmin` suppress the only predicate it had, so every bank
+    // administrator counted every tenant's rows.
+    expect(DB_SOURCE).toContain("export async function getDashboardStats(organizationId: number | null)");
+    const body = DB_SOURCE.slice(
+      DB_SOURCE.indexOf("export async function getDashboardStats("),
+      DB_SOURCE.indexOf("export async function invalidateDashboardStatsCache("),
+    );
+    expect(body).toMatch(/orgFilter\(transactions\.organizationId/);
+    expect(body).toMatch(/orgFilter\(exceptions\.organizationId/);
+    expect(body).toMatch(/orgFilter\(reconciliationJobs\.organizationId/);
+    expect(body).toMatch(/orgFilter\(dashboardStatsCache\.organizationId/);
+    expect(body, "isAdmin must not gate tenancy").not.toContain("isAdmin");
+  });
+
+  it("invalidateDashboardStatsCache deletes only the caller's tenant row", () => {
+    const body = DB_SOURCE.slice(DB_SOURCE.indexOf("export async function invalidateDashboardStatsCache(")).slice(0, 600);
+    expect(body).toContain("organizationId: number | null");
+    expect(body).toMatch(/\.delete\(dashboardStatsCache\)\.where\(/);
+  });
+});
+
 describe("exceptions and matches are scoped by their own organizationId", () => {
   // Migration 0078 gave both tables the column. These assertions are what stop
   // the pre-0078 shape — "derived via the parent job" — from creeping back.

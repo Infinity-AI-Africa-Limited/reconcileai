@@ -64,7 +64,16 @@ function findUnscopedIdWrites(source: string): string[] {
   for (const l of lines) {
     const m = l.match(/^export async function (\w+)\(/);
     if (m) { flush(); name = m[1]; }
-    if (name) buf.push(l);
+    if (name) {
+      buf.push(l);
+      // End the body at its closing brace rather than at the next function.
+      // Without this, everything between one function and the next — blank
+      // lines, and crucially the NEXT function's doc comment — is attributed to
+      // the previous one. A comment that happens to mention `userId` or
+      // `organizationId` then makes an unscoped mutator read as scoped, which is
+      // a false NEGATIVE in a test whose whole job is catching those.
+      if (l === "}") flush();
+    }
   }
   flush();
   return out;

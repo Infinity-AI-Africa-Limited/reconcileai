@@ -261,8 +261,7 @@ export const reconciliationRouter = router({
     }),
 
   list: protectedProcedure.query(async ({ ctx }) => {
-    const isAdmin = ctx.user.role === "admin";
-    return db.getReconciliationJobs(ctx.user.id, isAdmin);
+    return db.getReconciliationJobs(ctx.user.organizationId ?? null);
   }),
 
   get: protectedProcedure

@@ -393,13 +393,20 @@ export async function incrementUploadBatchCounts(id: number, addValid: number, a
     .where(eq(uploadBatches.id, id));
 }
 
-export async function getUploadBatches(userId: number, isAdmin: boolean) {
+/**
+ * Upload batches for ONE organization.
+ *
+ * Was `(userId, isAdmin)`, where `isAdmin` took the branch with no WHERE at all —
+ * so every bank administrator saw every other tenant's uploads on /upload. Same
+ * defect and same fix as getTransactions, getReconciliationJobs and getReports.
+ */
+export async function getUploadBatches(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(uploadBatches).orderBy(desc(uploadBatches.createdAt)).limit(100);
-  }
-  return db.select().from(uploadBatches).where(eq(uploadBatches.userId, userId)).orderBy(desc(uploadBatches.createdAt)).limit(100);
+  return db.select().from(uploadBatches)
+    .where(orgFilter(uploadBatches.organizationId, organizationId))
+    .orderBy(desc(uploadBatches.createdAt))
+    .limit(100);
 }
 
 // ─── Transactions ────────────────────────────────────────────────────
@@ -672,13 +679,14 @@ export async function updateReconciliationJob(id: number, data: Partial<InsertRe
   await db.update(reconciliationJobs).set(data).where(eq(reconciliationJobs.id, id));
 }
 
-export async function getReconciliationJobs(userId: number, isAdmin: boolean) {
+/** Reconciliation runs for ONE organization. See getUploadBatches for the history. */
+export async function getReconciliationJobs(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(reconciliationJobs).orderBy(desc(reconciliationJobs.createdAt)).limit(100);
-  }
-  return db.select().from(reconciliationJobs).where(eq(reconciliationJobs.userId, userId)).orderBy(desc(reconciliationJobs.createdAt)).limit(100);
+  return db.select().from(reconciliationJobs)
+    .where(orgFilter(reconciliationJobs.organizationId, organizationId))
+    .orderBy(desc(reconciliationJobs.createdAt))
+    .limit(100);
 }
 
 export async function getReconciliationJob(id: number) {
@@ -1046,13 +1054,14 @@ export async function createReport(data: InsertReconciliationReport) {
   return result[0].insertId;
 }
 
-export async function getReports(userId: number, isAdmin: boolean) {
+/** Saved reports for ONE organization. See getUploadBatches for the history. */
+export async function getReports(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(reconciliationReports).orderBy(desc(reconciliationReports.createdAt)).limit(100);
-  }
-  return db.select().from(reconciliationReports).where(eq(reconciliationReports.userId, userId)).orderBy(desc(reconciliationReports.createdAt)).limit(100);
+  return db.select().from(reconciliationReports)
+    .where(orgFilter(reconciliationReports.organizationId, organizationId))
+    .orderBy(desc(reconciliationReports.createdAt))
+    .limit(100);
 }
 
 // ─── Webhooks ────────────────────────────────────────────────────────
@@ -1150,31 +1159,99 @@ export async function revokeApiKey(id: number, organizationId: number): Promise<
 
 // ─── Dashboard Stats ─────────────────────────────────────────────────
 
-export async function getDashboardStats(userId: number, isAdmin: boolean) {
+export type ChannelStat = { channelId: number | null; total: number; matched: number; unmatched: number; exceptions: number };
+
+/**
+ * How long a cached row may be served before it is recomputed.
+ *
+ * The cache previously had exactly ONE invalidation call site (the reconciliation
+ * runner) and no expiry, which is not a cache so much as a write-once snapshot.
+ * Anything that changes transaction counts by another route — ingestion, the
+ * SHOPLINE connector, an archival script — left it silently wrong forever. In
+ * production it was serving a row written 2026-08-02 claiming 5,852,363
+ * transactions while the platform held 85,499, because the org-less archival ran
+ * on 2026-08-11 and never touched it.
+ *
+ * A TTL bounds that failure to five minutes without giving up the full-scan
+ * protection the cache exists for.
+ */
+const DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Dashboard totals for ONE tenant.
+ *
+ * Takes an organizationId, not a `(userId, isAdmin)` pair. The previous signature
+ * was the whole defect: `isAdmin` suppressed the only predicate there was, so any
+ * user with role `admin` — every bank administrator — counted every tenant's
+ * transactions and jobs, and the exceptions query carried no predicate at all for
+ * anybody. `dashboard_stats_cache` has had an `organizationId` column and an index
+ * on it since it was created; nothing ever wrote or read it, so a single global row
+ * was served to whoever asked. Tenancy here now works exactly as it does in
+ * `getTransactions` / `getExceptions`: an unconditional `orgFilter` per table.
+ */
+export async function getDashboardStats(organizationId: number | null) {
   const db = await getDb();
   if (!db) return null;
 
-  // ── Cache-first: read pre-computed stats (avoids full scan of 26M+ rows) ──
-  const cacheRows = await db.select().from(dashboardStatsCache).limit(1);
-  const cached = cacheRows[0];
+  const cacheScope = orgFilter(dashboardStatsCache.organizationId, organizationId);
+  const txnScope = orgFilter(transactions.organizationId, organizationId);
+  const jobScope = orgFilter(reconciliationJobs.organizationId, organizationId);
+  const excScope = orgFilter(exceptions.organizationId, organizationId);
 
-  if (cached) {
-    // Cache hit — return instantly
-    const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
-    const [jobStats] = await db.select({
-      total: sql<number>`count(*)`,
-      completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
-      running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
-      avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
-    }).from(reconciliationJobs).where(jobCondition);
+  // Jobs and exceptions are small and are never cached — only the transaction
+  // counts justify a cache, and only they were ever actually read from one.
+  const [jobStats] = await db.select({
+    total: sql<number>`count(*)`,
+    completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
+    running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
+    avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
+  }).from(reconciliationJobs).where(jobScope);
 
-    const [exceptionStats] = await db.select({
-      total: sql<number>`count(*)`,
-      open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
-      inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
-      resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
-    }).from(exceptions);
+  const [exceptionStats] = await db.select({
+    total: sql<number>`count(*)`,
+    open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
+    inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
+    resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
+  }).from(exceptions).where(excScope);
 
+  // Per-channel breakdown. This returned a hardcoded `[]` before, which is why
+  // the Multi-Channel View reported "No transactions uploaded" against every
+  // channel and the Dashboard's Channel Performance card never rendered at all.
+  const channelRows = await db.select({
+    channelId: transactions.channelId,
+    total: sql<number>`count(*)`,
+    matched: sql<number>`sum(case when ${transactions.status} in ('matched','manually_matched') then 1 else 0 end)`,
+    unmatched: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
+    exceptions: sql<number>`sum(case when ${transactions.status} = 'exception' then 1 else 0 end)`,
+  }).from(transactions).where(txnScope).groupBy(transactions.channelId);
+
+  const channelStats: ChannelStat[] = channelRows.map((r) => ({
+    channelId: r.channelId ?? null,
+    total: Number(r.total || 0),
+    matched: Number(r.matched || 0),
+    unmatched: Number(r.unmatched || 0),
+    exceptions: Number(r.exceptions || 0),
+  }));
+
+  const jobs = {
+    total: Number(jobStats?.total || 0),
+    completed: Number(jobStats?.completed || 0),
+    running: Number(jobStats?.running || 0),
+    avgMatchRate: Number(jobStats?.avgMatchRate || 0),
+  };
+  const exceptionTotals = {
+    total: Number(exceptionStats?.total || 0),
+    open: Number(exceptionStats?.open || 0),
+    inReview: Number(exceptionStats?.inReview || 0),
+    resolved: Number(exceptionStats?.resolved || 0),
+  };
+
+  // ── Cache-first for the transaction totals only (the one full-scan query) ──
+  const [cached] = await db.select().from(dashboardStatsCache).where(cacheScope).limit(1);
+  const fresh =
+    cached && Date.now() - new Date(cached.lastUpdatedAt).getTime() < DASHBOARD_CACHE_TTL_MS;
+
+  if (cached && fresh) {
     return {
       transactions: {
         total: Number(cached.totalTransactions || 0),
@@ -1182,99 +1259,61 @@ export async function getDashboardStats(userId: number, isAdmin: boolean) {
         unmatched: Number(cached.unmatchedTransactions || 0),
         exceptions: Number(cached.exceptionTransactions || 0),
       },
-      jobs: {
-        total: Number(jobStats?.total || 0),
-        completed: Number(jobStats?.completed || 0),
-        running: Number(jobStats?.running || 0),
-        avgMatchRate: Number(jobStats?.avgMatchRate || 0),
-      },
-      exceptions: {
-        total: Number(exceptionStats?.total || 0),
-        open: Number(exceptionStats?.open || 0),
-        inReview: Number(exceptionStats?.inReview || 0),
-        resolved: Number(exceptionStats?.resolved || 0),
-      },
-      channelStats: [] as Array<{ channelId: number | null; total: number; matched: number; unmatched: number }>,
+      jobs,
+      exceptions: exceptionTotals,
+      channelStats,
     };
   }
 
-  // ── Cache miss: run full query and seed the cache ──
-  const userCondition = !isAdmin ? eq(transactions.userId, userId) : undefined;
-  const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
+  // The per-channel aggregate above already visited every in-scope row, so the
+  // totals are summed from it rather than re-scanning the table.
+  const txnTotals = channelStats.reduce(
+    (acc, c) => ({
+      total: acc.total + c.total,
+      matched: acc.matched + c.matched,
+      unmatched: acc.unmatched + c.unmatched,
+      exceptions: acc.exceptions + c.exceptions,
+    }),
+    { total: 0, matched: 0, unmatched: 0, exceptions: 0 },
+  );
 
-  const [txnStats] = await db.select({
-    total: sql<number>`count(*)`,
-    matched: sql<number>`sum(case when ${transactions.status} = 'matched' or ${transactions.status} = 'manually_matched' then 1 else 0 end)`,
-    unmatched: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
-    exceptions: sql<number>`sum(case when ${transactions.status} = 'exception' then 1 else 0 end)`,
-  }).from(transactions).where(userCondition);
-
-  const [jobStats] = await db.select({
-    total: sql<number>`count(*)`,
-    completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
-    running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
-    avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
-  }).from(reconciliationJobs).where(jobCondition);
-
-  const [exceptionStats] = await db.select({
-    total: sql<number>`count(*)`,
-    open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
-    inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
-    resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
-  }).from(exceptions);
-
-  // Seed the cache so future requests are instant
   try {
+    await db.delete(dashboardStatsCache).where(cacheScope);
     await db.insert(dashboardStatsCache).values({
-      totalTransactions: Number(txnStats?.total || 0),
-      matchedTransactions: Number(txnStats?.matched || 0),
-      unmatchedTransactions: Number(txnStats?.unmatched || 0),
-      exceptionTransactions: Number(txnStats?.exceptions || 0),
-      totalJobs: Number(jobStats?.total || 0),
-      completedJobs: Number(jobStats?.completed || 0),
-      runningJobs: Number(jobStats?.running || 0),
-      avgMatchRate: String(Number(jobStats?.avgMatchRate || 0).toFixed(2)),
-      totalExceptions: Number(exceptionStats?.total || 0),
-      openExceptions: Number(exceptionStats?.open || 0),
-      inReviewExceptions: Number(exceptionStats?.inReview || 0),
-      resolvedExceptions: Number(exceptionStats?.resolved || 0),
+      organizationId,
+      totalTransactions: txnTotals.total,
+      matchedTransactions: txnTotals.matched,
+      unmatchedTransactions: txnTotals.unmatched,
+      exceptionTransactions: txnTotals.exceptions,
+      totalJobs: jobs.total,
+      completedJobs: jobs.completed,
+      runningJobs: jobs.running,
+      avgMatchRate: String(jobs.avgMatchRate.toFixed(2)),
+      totalExceptions: exceptionTotals.total,
+      openExceptions: exceptionTotals.open,
+      inReviewExceptions: exceptionTotals.inReview,
+      resolvedExceptions: exceptionTotals.resolved,
     });
   } catch (_e) {
     // Non-fatal: cache seeding failure should not break the dashboard
   }
 
-  return {
-    transactions: {
-      total: Number(txnStats?.total || 0),
-      matched: Number(txnStats?.matched || 0),
-      unmatched: Number(txnStats?.unmatched || 0),
-      exceptions: Number(txnStats?.exceptions || 0),
-    },
-    jobs: {
-      total: Number(jobStats?.total || 0),
-      completed: Number(jobStats?.completed || 0),
-      running: Number(jobStats?.running || 0),
-      avgMatchRate: Number(jobStats?.avgMatchRate || 0),
-    },
-    exceptions: {
-      total: Number(exceptionStats?.total || 0),
-      open: Number(exceptionStats?.open || 0),
-      inReview: Number(exceptionStats?.inReview || 0),
-      resolved: Number(exceptionStats?.resolved || 0),
-    },
-    channelStats: [] as Array<{ channelId: number | null; total: number; matched: number; unmatched: number }>,
-  };
+  return { transactions: txnTotals, jobs, exceptions: exceptionTotals, channelStats };
 }
 
 /**
- * Invalidate the dashboard stats cache after a reconciliation job completes.
- * Call this from the reconciliation runner after each job finishes.
+ * Drop one tenant's cached dashboard totals after their reconciliation job runs.
+ *
+ * Scoped, because the unscoped `delete(dashboardStatsCache)` it replaces threw
+ * away every other tenant's row on any job completion — harmless while a single
+ * global row existed, and a cache-stampede across all tenants once the rows are
+ * per-organization.
  */
-export async function invalidateDashboardStatsCache() {
+export async function invalidateDashboardStatsCache(organizationId: number | null) {
   const db = await getDb();
   if (!db) return;
   try {
-    await db.delete(dashboardStatsCache);
+    await db.delete(dashboardStatsCache).where(orgFilter(dashboardStatsCache.organizationId, organizationId));
   } catch (_e) {
     // Non-fatal
   }
@@ -1506,11 +1545,12 @@ export async function getActiveJobsProgress() {
 
 // ─── Dashboard Stats (Extended) ─────────────────────────────────────
 
-export async function getMonitoringStats(userId: number, isAdmin: boolean) {
+/** Monitor-page stats for ONE organization. See getUploadBatches for the history. */
+export async function getMonitoringStats(organizationId: number | null) {
   const db = await getDb();
   if (!db) return null;
 
-  const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
+  const jobCondition = orgFilter(reconciliationJobs.organizationId, organizationId);
 
   // Active jobs count
   const [activeJobs] = await db.select({
@@ -1547,7 +1587,7 @@ export async function getMonitoringStats(userId: number, isAdmin: boolean) {
     total: sql<number>`count(*)`,
     active: sql<number>`sum(case when ${scheduledTasks.isActive} = true then 1 else 0 end)`,
   }).from(scheduledTasks)
-    .where(!isAdmin ? eq(scheduledTasks.userId, userId) : undefined);
+    .where(orgFilter(scheduledTasks.organizationId, organizationId));
 
   return {
     activeJobs: {

@@ -737,7 +737,7 @@ export const appRouter = router({
 
     history: protectedProcedure.query(async ({ ctx }) => {
       const isAdmin = ctx.user.role === "admin";
-      return db.getUploadBatches(ctx.user.id, isAdmin);
+      return db.getUploadBatches(ctx.user.organizationId ?? null);
     }),
   }),
 
@@ -1652,14 +1652,13 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
         const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.id);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         return report;
       }),
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
-      return db.getReports(ctx.user.id, isAdmin);
+      return db.getReports(ctx.user.organizationId ?? null);
     }),
 
     generate: guestProtectedProcedure
@@ -1740,7 +1739,7 @@ export const appRouter = router({
         expiresInDays: z.number().int().min(1).max(365).optional(), // null = never
       }))
       .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         const crypto = await import("crypto");
@@ -1767,8 +1766,7 @@ export const appRouter = router({
     listShareTokens: protectedProcedure
       .input(z.object({ reportId: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         const dbConn = await getDb();
@@ -2064,8 +2062,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const isAdmin = ctx.user.role === "admin";
-        const allJobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        const allJobs = await db.getReconciliationJobs(ctx.user.organizationId ?? null);
 
         // Filter by date range and status
         let filtered = allJobs.filter((j: any) => j.status === "completed");
@@ -2190,32 +2187,21 @@ export const appRouter = router({
     stats: protectedProcedure
       .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        // Guest users in demo mode should see all data (no userId filter)
-        const isAdmin = ctx.user.role === "admin";
-        // Super admin portal switching: if viewAsOrgId provided, scope to that org
-        if (input?.viewAsOrgId && ctx.user.role === "super_admin") {
-          const drizzle = await getDb();
-          if (drizzle) {
-            const { reconciliationJobs, transactions } = await import("../drizzle/schema");
-            const { eq, count } = await import("drizzle-orm");
-            const orgId = input.viewAsOrgId;
-            const [jobCount] = await drizzle.select({ count: count() }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, orgId));
-            const [txCount] = await drizzle.select({ count: count() }).from(transactions).where(eq(transactions.organizationId, orgId));
-            // Return shape compatible with getDashboardStats return type
-            return {
-              jobs: { total: Number(jobCount.count), completed: 0, running: 0, avgMatchRate: 0 },
-              transactions: { total: Number(txCount.count), matched: 0, unmatched: 0, exceptions: 0 },
-              exceptions: { total: 0, open: 0, inReview: 0, resolved: 0 },
-              channelStats: [] as any[],
-            };
-          }
-        }
-        return db.getDashboardStats(ctx.user.id, isAdmin);
+        // Super admin portal switching: if viewAsOrgId provided, scope to that org.
+        // This used to run its own cut-down query that returned two counts and
+        // hardcoded every other field to zero, so entering a tenant's portal showed
+        // a 0% match rate and no exceptions no matter what that tenant's data said.
+        // The scoped stats function answers it properly.
+        const orgId =
+          input?.viewAsOrgId && ctx.user.role === "super_admin"
+            ? input.viewAsOrgId
+            : ctx.user.organizationId ?? null;
+        return db.getDashboardStats(orgId);
       }),
 
     // CFO Dashboard Endpoints
     cfoKpis: protectedProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      const stats = await db.getDashboardStats(ctx.user.organizationId ?? null);
       if (!stats) {
         return {
           totalTransactions: 0,
@@ -2405,7 +2391,7 @@ export const appRouter = router({
     // merchants answer to card schemes, not an examiner (CLAUDE.md §2A) — the
     // client already hides the Auditor role, this is the rule behind it.
     auditorCompliance: cbnProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      const stats = await db.getDashboardStats(ctx.user.organizationId ?? null);
       const { data: auditLogs } = await db.getAuditLogs({
         organizationId: ctx.user.organizationId ?? null,
         limit: 1000,
@@ -3007,7 +2993,7 @@ export const appRouter = router({
   monitoring: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
       const isAdmin = ctx.user.role === "admin";
-      return db.getMonitoringStats(ctx.user.id, isAdmin);
+      return db.getMonitoringStats(ctx.user.organizationId ?? null);
     }),
 
     activeJobs: protectedProcedure.query(async () => {
@@ -3028,7 +3014,7 @@ export const appRouter = router({
         const isAdmin = ctx.user.role === "admin";
         const jobCondition = !isAdmin ? ctx.user.id : undefined;
         // Get recent completed/failed jobs
-        const jobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        const jobs = await db.getReconciliationJobs(ctx.user.organizationId ?? null);
         return jobs.slice(0, input.limit).map((j) => ({
           id: j.id,
           name: j.name,
@@ -3905,10 +3891,9 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId;
 
         // Fetch recent exceptions and stats for context
-        const isAdmin = ctx.user.role === 'admin';
         const [recentExceptions, recentJobsRaw] = await Promise.all([
           db.getExceptions({ organizationId: ctx.user.organizationId ?? null, status: 'open', limit: 20, offset: 0 }),
-          db.getReconciliationJobs(userId, isAdmin),
+          db.getReconciliationJobs(ctx.user.organizationId ?? null),
         ]);
 
         const exceptionSummary = recentExceptions.data.slice(0, 5).map((e: any) => ({
@@ -6674,8 +6659,10 @@ async function runReconciliation(
       totalCount: totalTxns,
     });
 
-    // Invalidate dashboard stats cache so next load reflects fresh data
-    db.invalidateDashboardStatsCache().catch(() => {});
+    // Invalidate this tenant's dashboard stats cache so their next load is fresh.
+    // Scoped to the run's own organization — the unscoped version dropped every
+    // other tenant's row too.
+    db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {});
 
     // Dispatch webhooks (WS-4 event set)
     dispatchWebhook("reconciliation.completed", {
