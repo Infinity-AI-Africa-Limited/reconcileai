@@ -14,7 +14,7 @@
  * sends someone to a page that means something to them instead of one that
  * errors. Never the only thing standing between a caller and data.
  */
-import { NAV_ITEMS, inSegment, isStaff } from "./navItems";
+import { NAV_ITEMS, inSegment, isStaff, passesStaffGate } from "./navItems";
 import type { Segment } from "./segments";
 
 /**
@@ -76,6 +76,30 @@ export function segmentsForPath(path: string): Segment[] | null {
 }
 
 /**
+ * Is this path an Infinity AI staff tool?
+ *
+ * `staffOnly` was honoured by the sidebar and by nothing else, so both entries
+ * carrying it were reachable by typing the URL:
+ *
+ *   /demo-dashboard    — the BrightGoods FMCG sales tool, whose buttons seed
+ *                        fabricated transactions, distributors and agent-memory
+ *                        records into the CALLER'S OWN tenant. A bank reaching
+ *                        this is a data-integrity problem, not a cosmetic one.
+ *   /admin/assessments — Infinity AI's own lead pipeline. Its procedures are
+ *                        super_admin, so a tenant admin who typed the URL got the
+ *                        page and then a screenful of permission errors — the
+ *                        "guarded, technically, and a broken screen in practice"
+ *                        failure this module was written to end.
+ *
+ * Derived from NAV_ITEMS like everything else here, so marking a new entry
+ * `staffOnly` gates its route in the same edit that hides its link.
+ */
+export function isStaffPath(path: string): boolean {
+  const key = normalizePath(path);
+  return NAV_ITEMS.some((e) => normalizePath(e.path) === key && e.staffOnly === true);
+}
+
+/**
  * May this viewer open this path?
  *
  * Delegates the comparison to `inSegment`, so the link and the route cannot
@@ -108,6 +132,10 @@ export function canReachPath(
   opts: { portal?: boolean } = {},
 ): boolean {
   if (isStaff(role) && !opts.portal) return true;
+  // Past this line the viewer is not staff (or is inside a portal, where the
+  // point is to see the TENANT's surface). Either way a staff tool is refused —
+  // `navFor` excludes staffOnly entries from a portal for the same reason.
+  if (isStaffPath(path)) return false;
   const segments = segmentsForPath(path);
   if (!segments) return true;
   return inSegment({ label: "", path, group: "main", segments }, segment);

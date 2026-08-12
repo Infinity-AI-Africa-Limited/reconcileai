@@ -36,6 +36,17 @@ export const organizations = mysqlTable("organizations", {
   // for every org; a client's users can only use Google / Microsoft Entra ID
   // sign-in once the org is switched on here ("when the client requests it").
   // Values: "none" (default) | "google" | "microsoft" | "both".
+  // Which banking model this institution operates on. Orthogonal to `segment`:
+  // a non-interest bank is still `financial_services` and still runs NIP, POS
+  // and cheque clearing — what differs is how income may be earned and shared.
+  //   "conventional" (default) | "non_interest"
+  // Varchar rather than an enum for the same reason as onboardingChannel: the
+  // CBN recognises institutions offering Islamic financial services AND other
+  // non-interest principles, and a window or subsidiary of a conventional bank
+  // is a third shape. Adding one should not need a migration.
+  // Drives the NIFI exception taxonomy (server/exceptions/non-interest.ts),
+  // which applies across every rail rather than to a channel.
+  bankingModel: varchar("bankingModel", { length: 30 }).default("conventional").notNull(),
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
@@ -80,6 +91,10 @@ export const channels = mysqlTable("channels", {
     "bank_core", "nibss", "pos", "atm", "mobile_money", "bank_transfer",
     "agent_banking", "fintech_api", "card_payments", "rtgs", "swift",
     "mobile_banking", "ussd", "qr_payment",
+    // Cheque clearing (NIBSS NACS / Cheque Truncation). Its own type rather than
+    // folded into bank_transfer, so the Super Agent can select the cheque
+    // taxonomy from the channel — see server/exceptions/channelMapping.ts.
+    "cheque_clearing",
     // Retail / e-commerce channel types (SHOPLINE vertical)
     "ecommerce_gateway", "marketplace_payout", "buy_now_pay_later", "digital_wallet",
   ]).default("bank_transfer").notNull(),
@@ -1254,6 +1269,28 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "chargeback_won_credit_not_posted",
   "chargeback_right_expired",
   "dispute_good_faith_recovery",
+  // Cheque clearing — NIBSS NACS / Cheque Truncation (server/exceptions/cheque.ts)
+  "cheque_returned_credit_not_reversed",
+  "cheque_duplicate_presentment",
+  "cheque_dud_not_reported",
+  "cheque_clearing_settlement_variance",
+  "cheque_micr_ledger_mismatch",
+  "cheque_value_limit_breach",
+  "cheque_stale_or_postdated_paid",
+  "cheque_outward_not_cleared",
+  "cheque_unpresented_aged",
+  // Non-interest (NIFI) banking — selected by organizations.bankingModel rather
+  // than by channel, since it spans every rail (server/exceptions/non-interest.ts)
+  "nifi_interest_bearing_entry",
+  "nifi_commingling_breach",
+  "nifi_non_permissible_income_unsegregated",
+  "nifi_late_payment_charge_to_income",
+  "nifi_profit_distribution_variance",
+  "nifi_per_irr_movement_unapproved",
+  "nifi_murabaha_profit_accrual_mismatch",
+  "nifi_ijara_rental_unmatched",
+  "nifi_salam_istisna_milestone_mismatch",
+  "nifi_wakala_fee_variance",
 ] as const;
 export type ResolutionTemplateCategory = (typeof RESOLUTION_TEMPLATE_CATEGORIES)[number];
 
@@ -2094,6 +2131,10 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
     "org_created",
     "org_segment_updated",
     "org_sso_updated",
+    // Conventional vs non-interest (NIFI). Worth its own event: it changes how
+    // the platform characterises an institution's licence basis, and the
+    // resulting findings are regulator-facing.
+    "org_banking_model_updated",
     "user_role_updated",
     "user_promoted_super_admin",
   ]).notNull(),

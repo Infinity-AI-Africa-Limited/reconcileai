@@ -47,10 +47,11 @@ export default function MultiChannelPage() {
           {/* Channel Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {channels?.map((ch) => {
-              const chStat = channelStats.find((s: any) => s.channelId === ch.id);
+              const chStat = channelStats.find((s) => s.channelId === ch.id);
               const total = chStat?.total || 0;
               const matched = chStat?.matched || 0;
               const unmatched = chStat?.unmatched || 0;
+              const exceptions = chStat?.exceptions || 0;
               const matchRate = total > 0 ? ((matched / total) * 100) : 0;
 
               return (
@@ -103,8 +104,8 @@ export default function MultiChannelPage() {
                           </div>
                           <div className="p-2 bg-amber-50 rounded">
                             <AlertTriangle className="h-3 w-3 text-amber-600 mx-auto mb-1" />
-                            <p className="text-xs text-muted-foreground">Unmatched</p>
-                            <p className="font-bold text-sm text-amber-700">{unmatched.toLocaleString()}</p>
+                            <p className="text-xs text-muted-foreground">Exceptions</p>
+                            <p className="font-bold text-sm text-amber-700">{exceptions.toLocaleString()}</p>
                           </div>
                           <div className="p-2 bg-gray-50 rounded">
                             <XCircle className="h-3 w-3 text-gray-500 mx-auto mb-1" />
@@ -150,10 +151,11 @@ export default function MultiChannelPage() {
                   </thead>
                   <tbody>
                     {channels?.map((ch) => {
-                      const chStat = channelStats.find((s: any) => s.channelId === ch.id);
+                      const chStat = channelStats.find((s) => s.channelId === ch.id);
                       const total = chStat?.total || 0;
                       const matched = chStat?.matched || 0;
                       const unmatched = chStat?.unmatched || 0;
+                      const exceptions = chStat?.exceptions || 0;
                       const matchRate = total > 0 ? ((matched / total) * 100) : 0;
 
                       return (
@@ -163,7 +165,7 @@ export default function MultiChannelPage() {
                           </td>
                           <td className="py-3 px-3 text-right font-mono">{total.toLocaleString()}</td>
                           <td className="py-3 px-3 text-right font-mono text-green-600">{matched.toLocaleString()}</td>
-                          <td className="py-3 px-3 text-right font-mono text-amber-500">{unmatched.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right font-mono text-amber-500">{exceptions.toLocaleString()}</td>
                           <td className="py-3 px-3 text-right font-mono text-red-500">{unmatched.toLocaleString()}</td>
                           <td className="py-3 px-3 text-right">
                             <span className={`font-bold ${matchRate >= 80 ? "text-green-600" : matchRate >= 50 ? "text-amber-500" : "text-red-500"}`}>

@@ -20,7 +20,7 @@ import {
   channels,
   organizations,
 } from "../drizzle/schema";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 // ─── Shared Utilities ────────────────────────────────────────────────
 
@@ -269,11 +269,39 @@ export interface DemoSeedResult {
   segment: "fmcg" | "finserv";
 }
 
-async function ensureChannel(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, code: string, name: string, channelType: string): Promise<number> {
-  const existing = await db.select().from(channels).where(eq(channels.code, code)).limit(1);
+/**
+ * Create (or reuse) a demo channel OWNED BY the activating organisation.
+ *
+ * It previously inserted with no `organizationId`, which on this schema means a
+ * SHARED rail: `channelScope` returns org-owned rows OR org-less ones, so every
+ * demo activation permanently added a channel to every tenant on the platform.
+ * Production shows the result — "Bank Statement (BrightGoods)", "ERP Orders
+ * (BrightGoods)" and "ERP Orders (Demo)" sit among the shared rails, so a bank's
+ * Multi-Channel View lists FMCG demo channels it has nothing to do with.
+ *
+ * `channels.code` is globally unique, so the code is suffixed per organisation.
+ * Without that, the second tenant to activate a demo would collide with the
+ * first and silently adopt its channel.
+ */
+async function ensureChannel(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  code: string,
+  name: string,
+  channelType: string,
+  organizationId: number | null,
+): Promise<number> {
+  const scopedCode = organizationId === null ? code : `${code}_ORG${organizationId}`;
+  const existing = await db.select().from(channels).where(eq(channels.code, scopedCode)).limit(1);
   if (existing[0]) return existing[0].id;
-  await db.insert(channels).values({ name, code, channelType: channelType as "bank_core", description: `${name} — demo channel`, isActive: true });
-  const created = await db.select().from(channels).where(eq(channels.code, code)).limit(1);
+  await db.insert(channels).values({
+    name,
+    code: scopedCode,
+    organizationId,
+    channelType: channelType as "bank_core",
+    description: `${name} — demo channel`,
+    isActive: true,
+  });
+  const created = await db.select().from(channels).where(eq(channels.code, scopedCode)).limit(1);
   return created[0].id;
 }
 
@@ -394,8 +422,8 @@ export async function seedFmcgDemoData(userId: number, orgId: number | null): Pr
   }
 
   // 2. Channels
-  const sourceChannelId = await ensureChannel(db, "BANK_STATEMENT_FMCG", "Bank Statement (BrightGoods)", "bank_core");
-  const targetChannelId = await ensureChannel(db, "ERP_ORDERS_FMCG", "ERP Orders (BrightGoods)", "fintech_api");
+  const sourceChannelId = await ensureChannel(db, "BANK_STATEMENT_FMCG", "Bank Statement (BrightGoods)", "bank_core", orgId);
+  const targetChannelId = await ensureChannel(db, "ERP_ORDERS_FMCG", "ERP Orders (BrightGoods)", "fintech_api", orgId);
 
   // 3. Upload batches
   const batchTs = Date.now();
@@ -496,7 +524,7 @@ export async function seedFinservDemoData(userId: number, orgId: number | null):
   // 1. Channels — all Nigerian payment rails
   const channelIds: Record<string, number> = {};
   for (const rail of FINSERV_PAYMENT_RAILS) {
-    channelIds[rail.code] = await ensureChannel(db, `FINSERV_${rail.code}`, `${rail.label} (Demo)`, rail.channelType);
+    channelIds[rail.code] = await ensureChannel(db, `FINSERV_${rail.code}`, `${rail.label} (Demo)`, rail.channelType, orgId);
   }
   const sourceChannelId = channelIds["NIP_INWARD"];
   const targetChannelId = channelIds["CORE_BANKING"];
@@ -694,9 +722,19 @@ export async function wipeDemoData(userId: number, orgId: number | null): Promis
     if (d.notes?.includes("DEMO DATA")) await db.delete(distributors).where(eq(distributors.id, d.id));
   }
 
-  // Delete demo channels
+  // Delete demo channels.
+  //
+  // Both spellings of the code: the org-suffixed one this seeder writes now, and
+  // the bare one it wrote before channels were org-scoped. Without the bare form
+  // the pre-existing shared rails would be undeletable, and "Deactivate" would
+  // leave the very channels this change exists to stop leaking across tenants.
+  // The bare form is only removed when it is genuinely org-less, so one tenant
+  // deactivating can never delete another's.
   const demoCodes = ["BANK_STATEMENT_FMCG", "ERP_ORDERS_FMCG", ...FINSERV_PAYMENT_RAILS.map(r => `FINSERV_${r.code}`)];
   for (const code of demoCodes) {
-    await db.delete(channels).where(eq(channels.code, code));
+    if (orgId !== null) {
+      await db.delete(channels).where(eq(channels.code, `${code}_ORG${orgId}`));
+    }
+    await db.delete(channels).where(and(eq(channels.code, code), isNull(channels.organizationId)));
   }
 }

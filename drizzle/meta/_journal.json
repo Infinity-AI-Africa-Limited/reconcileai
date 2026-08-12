@@ -554,6 +554,20 @@
       "when": 1785856548294,
       "tag": "0078_previous_white_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "5",
+      "when": 1786515422406,
+      "tag": "0079_shiny_odin",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "5",
+      "when": 1786517693142,
+      "tag": "0080_complete_moonstone",
+      "breakpoints": true
     }
   ]
 }
