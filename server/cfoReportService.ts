@@ -609,8 +609,11 @@ export async function getChannelDrillDown(
     .sort((a, b) => b.count - a.count)
     .slice(0, 8);
 
-  // Recent jobs that used this channel
-  const allJobs = await db.getReconciliationJobs(-1, true);
+  // Recent jobs that used this channel. Was `getReconciliationJobs(-1, true)` —
+  // a sentinel userId with isAdmin forced on, which read EVERY tenant's runs into
+  // this one tenant's CFO drill-down. The organizationId is right there in the
+  // signature and every other read in this function already uses it.
+  const allJobs = await db.getReconciliationJobs(organizationId);
   const recentJobs = allJobs
     .filter((j) => j.sourceChannelId === channel.id || j.targetChannelId === channel.id)
     .slice(0, 5)

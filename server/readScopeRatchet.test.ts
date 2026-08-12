@@ -76,6 +76,203 @@ describe("no read path may build a vanishing WHERE clause", () => {
   });
 });
 
+/**
+ * The second way a WHERE clause vanishes, which the sweep above does not model.
+ *
+ * `getDashboardStats` leaked every tenant's totals on the main dashboard for as
+ * long as it existed, and passed both existing ratchets, because it used neither
+ * guarded shape. It did two other things instead:
+ *
+ *     const jobCondition = !isAdmin ? eq(jobs.userId, userId) : undefined;
+ *     db.select({...}).from(reconciliationJobs).where(jobCondition)   // admin => no WHERE
+ *     db.select({...}).from(exceptions)                               // no .where() at all
+ *
+ * The first is the `: undefined` fallback wearing a ternary instead of a
+ * `conditions.length` check; the second omits the predicate outright. Both are
+ * asserted here against the tenant-scoped tables, so the next one is a test
+ * failure rather than a production incident.
+ */
+describe("no SELECT on a tenant-scoped table may omit its predicate", () => {
+  /**
+   * Tables whose rows belong to exactly one tenant.
+   *
+   * Keep this list WIDE. It was originally ten tables and missed
+   * `getScheduledTasks`, which returned every tenant's schedules to any admin —
+   * the sixth instance of the same defect, found only when `scheduledTasks` was
+   * added here. Every name added is a chance to find another.
+   */
+  const TENANT_TABLES = [
+    "transactions",
+    "exceptions",
+    "matches",
+    "reconciliationJobs",
+    "reconciliationReports",
+    "dashboardStatsCache",
+    "auditLogs",
+    "uploadBatches",
+    "apiKeys",
+    "sftpCredentials",
+    "scheduledTasks",
+    "channels",
+    "distributors",
+    "resolutionTemplates",
+    "anomalyScores",
+    "detectionRules",
+    "moduleConfigurations",
+    "cfoReportSchedules",
+    "channelAlertSettings",
+    "emailPreferences",
+    "webhooks",
+  ];
+
+  /** Every `db.select(...)....;` statement in db.ts, with its enclosing function. */
+  function selectStatements(): Array<{ fn: string; stmt: string }> {
+    const out: Array<{ fn: string; stmt: string }> = [];
+    for (const m of DB_SOURCE.matchAll(/\bdb\s*\.\s*select(?:Distinct)?\s*\(/g)) {
+      const end = DB_SOURCE.indexOf(";", m.index);
+      if (end === -1) continue;
+      const before = DB_SOURCE.slice(0, m.index);
+      const fns = [...before.matchAll(/export async function (\w+)/g)];
+      out.push({
+        fn: fns.length > 0 ? fns[fns.length - 1][1] : "<module scope>",
+        stmt: DB_SOURCE.slice(m.index, end),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Reads that legitimately span tenants. Each is named so adding one is a
+   * decision, and each function name already says it crosses tenants.
+   */
+  const CROSS_TENANT_READS = new Set([
+    "getAllChannelsAcrossTenants",
+    "getTransactionsByIdsUnscoped",
+  ]);
+
+  it("every select from a tenant-scoped table has a .where()", () => {
+    const offenders = selectStatements()
+      .filter(({ fn }) => !CROSS_TENANT_READS.has(fn))
+      .filter(({ stmt }) => TENANT_TABLES.some((t) => new RegExp(`\\.from\\(\\s*${t}\\s*\\)`).test(stmt)))
+      .filter(({ stmt }) => !/\.where\s*\(/.test(stmt))
+      .map(({ fn }) => fn);
+
+    expect(
+      [...new Set(offenders)],
+      "These read a tenant-scoped table with no WHERE at all, so they return every " +
+        "tenant's rows. Add an orgFilter(<table>.organizationId, organizationId) predicate.",
+    ).toEqual([]);
+  });
+
+  it("no condition passed to .where() is a ternary that can be undefined", () => {
+    // `const x = cond ? eq(...) : undefined;` then `.where(x)` — drizzle treats
+    // an undefined predicate as no predicate.
+    const offenders: string[] = [];
+    for (const m of DB_SOURCE.matchAll(/const (\w+) = [^;]*\?[^;]*:\s*undefined;/g)) {
+      const name = m[1];
+      const before = DB_SOURCE.slice(0, m.index);
+      const fns = [...before.matchAll(/export async function (\w+)/g)];
+      const fn = fns.length > 0 ? fns[fns.length - 1][1] : "<module scope>";
+      if (new RegExp(`\\.where\\(\\s*${name}\\s*\\)`).test(DB_SOURCE)) offenders.push(`${fn} (${name})`);
+    }
+    expect(
+      offenders,
+      "A `cond ? predicate : undefined` variable is passed to .where(). When the " +
+        "ternary takes the undefined branch the query loses its WHERE entirely.",
+    ).toEqual([]);
+  });
+
+  it("getDashboardStats is scoped by organization, not by user+isAdmin", () => {
+    // Pinned by name: this is the function the rule was written for. Its old
+    // signature made `isAdmin` suppress the only predicate it had, so every bank
+    // administrator counted every tenant's rows.
+    expect(DB_SOURCE).toContain("export async function getDashboardStats(organizationId: number | null)");
+    const body = DB_SOURCE.slice(
+      DB_SOURCE.indexOf("export async function getDashboardStats("),
+      DB_SOURCE.indexOf("export async function invalidateDashboardStatsCache("),
+    );
+    expect(body).toMatch(/orgFilter\(transactions\.organizationId/);
+    expect(body).toMatch(/orgFilter\(exceptions\.organizationId/);
+    expect(body).toMatch(/orgFilter\(reconciliationJobs\.organizationId/);
+    expect(body).toMatch(/orgFilter\(dashboardStatsCache\.organizationId/);
+    expect(body, "isAdmin must not gate tenancy").not.toContain("isAdmin");
+  });
+
+  it("invalidateDashboardStatsCache deletes only the caller's tenant row", () => {
+    const body = DB_SOURCE.slice(DB_SOURCE.indexOf("export async function invalidateDashboardStatsCache(")).slice(0, 600);
+    expect(body).toContain("organizationId: number | null");
+    expect(body).toMatch(/\.delete\(dashboardStatsCache\)\.where\(/);
+  });
+});
+
+/**
+ * The third place tenancy goes missing: an inline drizzle write in a tRPC
+ * procedure, bypassing the scoped db.ts helper that exists for it.
+ *
+ * Both ratchets scan db.ts, so neither could see these:
+ *
+ *   exceptions.keepResolvedDespiteStaleness
+ *     drizzle.update(exceptions).set(...).where(eq(exceptions.id, input.exceptionId))
+ *     — a caller-supplied id, no organization. Any signed-in user could mark ANY
+ *       tenant's exception kept-resolved, while db.updateException right there
+ *       takes an organizationId and applies it.
+ *
+ *   schedules.runNow
+ *     executeScheduledTask(input.id) → getScheduledTaskById, also unscoped, so
+ *     any user could start any tenant's scheduled reconciliation run.
+ *
+ * A procedure that writes should call the db.ts helper. Where it writes inline,
+ * the predicate must name organizationId.
+ */
+describe("no tRPC procedure writes to a tenant table without naming the org", () => {
+  const ROUTERS = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
+
+  const TENANT_WRITE_TABLES = [
+    "exceptionsTable",
+    "exceptions",
+    "transactions",
+    "matches",
+    "reconciliationJobs",
+    "scheduledTasks",
+    "channels",
+    "anomalyScores",
+    "detectionRules",
+  ];
+
+  it("has no inline drizzle write keyed on a bare request id", () => {
+    const offenders: string[] = [];
+    for (const m of ROUTERS.matchAll(/\bdrizzle\s*\.\s*(update|delete)\s*\(\s*(\w+)\s*\)/g)) {
+      const table = m[2];
+      if (!TENANT_WRITE_TABLES.includes(table)) continue;
+      const end = ROUTERS.indexOf(";", m.index);
+      const stmt = ROUTERS.slice(m.index, end === -1 ? m.index + 600 : end);
+      // `.where(eq(<table>.id, input.<something>))` and nothing else.
+      const bareRequestId = /\.where\(\s*eq\(\s*\w+\.id,\s*input\.\w+\s*\)\s*\)/.test(stmt);
+      if (bareRequestId && !/organizationId/.test(stmt)) offenders.push(`${table}: ${stmt.slice(0, 90)}`);
+    }
+    expect(
+      offenders,
+      "An inline drizzle write in a procedure is keyed on a request-supplied id with " +
+        "no organization in its predicate, so it can reach another tenant's row. Call the " +
+        "org-scoped helper in db.ts (e.g. db.updateException(id, organizationId, ...)) instead.",
+    ).toEqual([]);
+  });
+
+  it("keeps runNow's ownership check, since executeScheduledTask has none", () => {
+    const body = ROUTERS.slice(ROUTERS.indexOf("runNow:"), ROUTERS.indexOf("history:", ROUTERS.indexOf("runNow:")));
+    expect(body).toMatch(/db\.getScheduledTask\(input\.id, ctx\.user\.organizationId/);
+    expect(body).toMatch(/NOT_FOUND/);
+  });
+
+  it("keeps every exception mutation on operationsProcedure", () => {
+    // CFO and Compliance are read-only by policy, and operationsProcedure is what
+    // enforces it. keepResolvedDespiteStaleness was the one on protectedProcedure.
+    for (const p of ["resolve", "reopen", "assign", "escalate", "moveToReview", "keepResolvedDespiteStaleness"]) {
+      expect(ROUTERS, `exceptions.${p}`).toMatch(new RegExp(`\\n\\s*${p}: operationsProcedure`));
+    }
+  });
+});
+
 describe("exceptions and matches are scoped by their own organizationId", () => {
   // Migration 0078 gave both tables the column. These assertions are what stop
   // the pre-0078 shape — "derived via the parent job" — from creeping back.

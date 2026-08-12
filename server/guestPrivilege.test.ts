@@ -50,8 +50,24 @@ describe("guest sessions do not inherit admin breadth", () => {
 
   it("still computes an admin breadth flag, so the sweep is not vacuous", () => {
     // If these disappear entirely the assertions above would pass trivially.
-    const adminChecks = [...ROUTERS.matchAll(/const isAdmin = ctx\.user\.role === "admin"/g)];
-    expect(adminChecks.length).toBeGreaterThan(10);
+    //
+    // Anchored at "more than zero", NOT at a snapshot count. It was previously
+    // `> 10`, which quietly made this test push the wrong way: every `isAdmin`
+    // flag removed by scoping a reader to its organization brought the count
+    // closer to failing, so correcting a tenancy leak looked like breaking a
+    // security test. Four such readers were fixed at once — getUploadBatches,
+    // getReconciliationJobs, getReports and getMonitoringStats, each of which
+    // used `isAdmin` to mean "drop the tenancy filter" — and the count fell to
+    // exactly 10.
+    //
+    // The right invariant is that the pattern the offender regexes above are
+    // built around still exists in the file at all. The goal state for the count
+    // itself is zero, and when it gets there this guard should be replaced
+    // rather than propped up.
+    const adminChecks = [...ROUTERS.matchAll(/ctx\.user\.role === "admin"/g)];
+    expect(adminChecks.length).toBeGreaterThan(0);
+    // Guards against the file being moved or the read silently returning "".
+    expect(ROUTERS.length).toBeGreaterThan(1000);
   });
 
   it("keeps guests blocked from write procedures", () => {

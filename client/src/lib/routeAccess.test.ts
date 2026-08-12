@@ -11,8 +11,51 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { landingPathFor, canReachPath, canReachCallback, segmentsForPath } from "./routeAccess";
+import { landingPathFor, canReachPath, canReachCallback, segmentsForPath, isStaffPath } from "./routeAccess";
 import { NAV_ITEMS, inSegment, navGroup } from "./navItems";
+
+describe("when a tenant user types the URL of an Infinity AI staff tool", () => {
+  // `staffOnly` was honoured by the sidebar and by nothing else, so both entries
+  // carrying it loaded for anyone who typed the path. /demo-dashboard is the
+  // serious one: its buttons seed fabricated transactions, distributors and
+  // agent-memory records into the CALLER'S OWN tenant.
+  const STAFF_PATHS = NAV_ITEMS.filter((e) => e.staffOnly).map((e) => e.path);
+
+  it("should have staff tools to guard, so the sweep is not vacuous", () => {
+    expect(STAFF_PATHS).toContain("/demo-dashboard");
+    expect(STAFF_PATHS).toContain("/admin/assessments");
+  });
+
+  it("should refuse every staffOnly path for a bank admin", () => {
+    for (const p of STAFF_PATHS) {
+      expect(canReachPath(p, "financial_services", "admin"), p).toBe(false);
+      expect(canReachPath(p, "financial_services", "compliance"), p).toBe(false);
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(false);
+      expect(canReachPath(p, null, "user"), p).toBe(false);
+    }
+  });
+
+  it("should match the router's tolerance for slashes and case", () => {
+    // wouter matches case-insensitively with an optional trailing slash, so an
+    // exact-string gate is bypassed by /Demo-Dashboard.
+    expect(canReachPath("/Demo-Dashboard/", "financial_services", "admin")).toBe(false);
+    expect(isStaffPath("/DEMO-DASHBOARD")).toBe(true);
+  });
+
+  it("should still admit Infinity AI staff on their own account", () => {
+    for (const p of STAFF_PATHS) {
+      expect(canReachPath(p, "super_admin", "super_admin"), p).toBe(true);
+    }
+  });
+
+  it("should refuse staff tools inside a tenant portal", () => {
+    // navFor already excludes staffOnly from a portal — the portal shows the
+    // tenant's sidebar, not ours. The route has to agree.
+    for (const p of STAFF_PATHS) {
+      expect(canReachPath(p, "financial_services", "super_admin", { portal: true }), p).toBe(false);
+    }
+  });
+});
 
 describe("when a merchant signs in", () => {
   it("should land on Settlement Monitor, not the dashboard", () => {

@@ -737,7 +737,7 @@ export const appRouter = router({
 
     history: protectedProcedure.query(async ({ ctx }) => {
       const isAdmin = ctx.user.role === "admin";
-      return db.getUploadBatches(ctx.user.id, isAdmin);
+      return db.getUploadBatches(ctx.user.organizationId ?? null);
     }),
   }),
 
@@ -1018,19 +1018,18 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const drizzle = await getDb();
-        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
-        await drizzle.update(exceptionsTable)
-          .set({
-            status: "open",
-            resolvedBy: null,
-            resolvedAt: null,
-            resolutionNotes: input.notes ?? null,
-            cbsStillAnomalous: false,
-            userKeptResolved: false,
-          })
-          .where(eq(exceptionsTable.id, input.id));
+        // Through the org-scoped helper, not an inline drizzle write. The inline
+        // form keyed on `input.id` alone, so a caller could reopen another
+        // tenant's resolved exception — and reopening also retracts the
+        // flywheel record below, meaning it reached into their learning data too.
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+          status: "open",
+          resolvedBy: null,
+          resolvedAt: null,
+          resolutionNotes: input.notes ?? null,
+          cbsStillAnomalous: false,
+          userKeptResolved: false,
+        });
         await logAudit(ctx.user.id, "reopen_exception", "exception", input.id, { notes: input.notes }, ip, ua);
 
         // Flywheel retraction (audit fix): a reopened resolution was WRONG —
@@ -1372,15 +1371,24 @@ export const appRouter = router({
       }),
 
     // User explicitly keeps the exception RESOLVED despite the CBS re-occurrence.
-    keepResolvedDespiteStaleness: protectedProcedure
+    //
+    // operationsProcedure, matching resolve/reopen/assign/escalate/moveToReview
+    // beside it: this overrides a re-detected anomaly and is the same kind of
+    // write. It was the one exception mutation on protectedProcedure, so CFO and
+    // Compliance — read-only by policy — could suppress a live finding.
+    //
+    // It also wrote `.where(eq(exceptions.id, input.exceptionId))` on a
+    // caller-supplied id with no tenancy predicate, so ANY signed-in user could
+    // mark ANY tenant's exception as kept-resolved. db.updateException carries
+    // the org filter; the inline drizzle write bypassed it. `checkStaleness`
+    // directly above already scoped its own query, which is what made this an
+    // outlier rather than a pattern.
+    keepResolvedDespiteStaleness: operationsProcedure
       .input(z.object({ exceptionId: z.number().int().positive() }))
-      .mutation(async ({ input }) => {
-        const drizzle = await getDb();
-        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
-        await drizzle.update(exceptionsTable)
-          .set({ userKeptResolved: true })
-          .where(eq(exceptionsTable.id, input.exceptionId));
+      .mutation(async ({ ctx, input }) => {
+        await db.updateException(input.exceptionId, ctx.user.organizationId ?? null, {
+          userKeptResolved: true,
+        });
         return { success: true, exceptionId: input.exceptionId };
       }),
   }),
@@ -1652,14 +1660,13 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
         const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.id);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         return report;
       }),
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
-      return db.getReports(ctx.user.id, isAdmin);
+      return db.getReports(ctx.user.organizationId ?? null);
     }),
 
     generate: guestProtectedProcedure
@@ -1740,7 +1747,7 @@ export const appRouter = router({
         expiresInDays: z.number().int().min(1).max(365).optional(), // null = never
       }))
       .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         const crypto = await import("crypto");
@@ -1767,8 +1774,7 @@ export const appRouter = router({
     listShareTokens: protectedProcedure
       .input(z.object({ reportId: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         const dbConn = await getDb();
@@ -2064,8 +2070,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const isAdmin = ctx.user.role === "admin";
-        const allJobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        const allJobs = await db.getReconciliationJobs(ctx.user.organizationId ?? null);
 
         // Filter by date range and status
         let filtered = allJobs.filter((j: any) => j.status === "completed");
@@ -2190,32 +2195,21 @@ export const appRouter = router({
     stats: protectedProcedure
       .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        // Guest users in demo mode should see all data (no userId filter)
-        const isAdmin = ctx.user.role === "admin";
-        // Super admin portal switching: if viewAsOrgId provided, scope to that org
-        if (input?.viewAsOrgId && ctx.user.role === "super_admin") {
-          const drizzle = await getDb();
-          if (drizzle) {
-            const { reconciliationJobs, transactions } = await import("../drizzle/schema");
-            const { eq, count } = await import("drizzle-orm");
-            const orgId = input.viewAsOrgId;
-            const [jobCount] = await drizzle.select({ count: count() }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, orgId));
-            const [txCount] = await drizzle.select({ count: count() }).from(transactions).where(eq(transactions.organizationId, orgId));
-            // Return shape compatible with getDashboardStats return type
-            return {
-              jobs: { total: Number(jobCount.count), completed: 0, running: 0, avgMatchRate: 0 },
-              transactions: { total: Number(txCount.count), matched: 0, unmatched: 0, exceptions: 0 },
-              exceptions: { total: 0, open: 0, inReview: 0, resolved: 0 },
-              channelStats: [] as any[],
-            };
-          }
-        }
-        return db.getDashboardStats(ctx.user.id, isAdmin);
+        // Super admin portal switching: if viewAsOrgId provided, scope to that org.
+        // This used to run its own cut-down query that returned two counts and
+        // hardcoded every other field to zero, so entering a tenant's portal showed
+        // a 0% match rate and no exceptions no matter what that tenant's data said.
+        // The scoped stats function answers it properly.
+        const orgId =
+          input?.viewAsOrgId && ctx.user.role === "super_admin"
+            ? input.viewAsOrgId
+            : ctx.user.organizationId ?? null;
+        return db.getDashboardStats(orgId);
       }),
 
     // CFO Dashboard Endpoints
     cfoKpis: protectedProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      const stats = await db.getDashboardStats(ctx.user.organizationId ?? null);
       if (!stats) {
         return {
           totalTransactions: 0,
@@ -2405,7 +2399,7 @@ export const appRouter = router({
     // merchants answer to card schemes, not an examiner (CLAUDE.md §2A) — the
     // client already hides the Auditor role, this is the rule behind it.
     auditorCompliance: cbnProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
+      const stats = await db.getDashboardStats(ctx.user.organizationId ?? null);
       const { data: auditLogs } = await db.getAuditLogs({
         organizationId: ctx.user.organizationId ?? null,
         limit: 1000,
@@ -2569,7 +2563,7 @@ export const appRouter = router({
         return { id, key: rawKey, prefix: keyPrefix }; // Return raw key only on creation
       }),
 
-    revoke: protectedProcedure
+    revoke: adminProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -2707,7 +2701,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    testConnection: protectedProcedure
+    testConnection: adminProcedure
       .input(z.object({
         host: z.string().min(1).max(255),
         port: z.number().int().min(1).max(65535).default(22),
@@ -2728,7 +2722,7 @@ export const appRouter = router({
         return listSftpFiles(input.credentialId);
       }),
 
-    processFile: protectedProcedure
+    processFile: adminProcedure
       .input(z.object({
         credentialId: z.number().int().positive(),
         fileName: z.string().min(1).max(255),
@@ -2771,8 +2765,7 @@ export const appRouter = router({
 
   schedules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
-      const tasks = await db.getScheduledTasks(ctx.user.id, isAdmin);
+      const tasks = await db.getScheduledTasks(ctx.user.organizationId ?? null);
       return tasks.map((t) => ({
         ...t,
         frequencyDescription: getFrequencyDescription(
@@ -2855,7 +2848,9 @@ export const appRouter = router({
         return { id, nextRun };
       }),
 
-    update: protectedProcedure
+    // A schedule drives reconciliation runs, which is exactly what
+    // operationsProcedure governs — and `runNow` beside it is on the same guard.
+    update: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         name: z.string().min(1).max(MAX_NAME_LENGTH).optional(),
@@ -2914,10 +2909,18 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    runNow: protectedProcedure
+    // operationsProcedure and ownership-checked: this STARTS a reconciliation
+    // run. It took a caller-supplied task id straight into executeScheduledTask,
+    // which resolves it via getScheduledTaskById — no tenancy predicate — so any
+    // signed-in user could trigger any other tenant's scheduled run. `delete`
+    // directly above already passes requireOrg(ctx); this is the same id, and it
+    // needs the same proof of ownership.
+    runNow: operationsProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        const owned = await db.getScheduledTask(input.id, ctx.user.organizationId ?? null);
+        if (!owned) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         const result = await executeScheduledTask(input.id);
         await logAudit(ctx.user.id, "manual_run_schedule", "scheduled_task", input.id, result, ip, ua);
         if (!result.success) {
@@ -3007,7 +3010,7 @@ export const appRouter = router({
   monitoring: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
       const isAdmin = ctx.user.role === "admin";
-      return db.getMonitoringStats(ctx.user.id, isAdmin);
+      return db.getMonitoringStats(ctx.user.organizationId ?? null);
     }),
 
     activeJobs: protectedProcedure.query(async () => {
@@ -3028,7 +3031,7 @@ export const appRouter = router({
         const isAdmin = ctx.user.role === "admin";
         const jobCondition = !isAdmin ? ctx.user.id : undefined;
         // Get recent completed/failed jobs
-        const jobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        const jobs = await db.getReconciliationJobs(ctx.user.organizationId ?? null);
         return jobs.slice(0, input.limit).map((j) => ({
           id: j.id,
           name: j.name,
@@ -3134,7 +3137,7 @@ export const appRouter = router({
         });
       }),
 
-    updateReview: protectedProcedure
+    updateReview: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         reviewStatus: z.enum(["pending", "false_positive", "confirmed", "escalated", "resolved"]),
@@ -3156,7 +3159,7 @@ export const appRouter = router({
 
   detectionRules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getDetectionRules(ctx.user.organizationId || undefined);
+      return db.getDetectionRules(ctx.user.organizationId ?? null);
     }),
 
     create: guestProtectedProcedure
@@ -3631,6 +3634,45 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    /**
+     * Mark an institution as operating on non-interest (NIFI) principles.
+     *
+     * Orthogonal to `segment`: a non-interest bank is still `financial_services`
+     * and still runs NIP, POS and cheque clearing. What changes is that the
+     * Super Agent applies the NIFI taxonomy across every one of those rails —
+     * income may only arise from a real sale, lease or partnership, and
+     * investment account holders' funds must stay segregated from shareholders'.
+     *
+     * Super-admin only, like the SSO opt-in it mirrors, because it changes how
+     * the platform characterises the institution to a regulator-facing audience.
+     * A tenant should not be able to assert its own licence basis.
+     */
+    setOrganizationBankingModel: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        bankingModel: z.enum(["conventional", "non_interest"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await drizzle.update(organizations)
+          .set({ bankingModel: input.bankingModel })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_banking_model", "organization", input.organizationId, {
+          bankingModel: input.bankingModel,
+        });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_banking_model_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          newValue: input.bankingModel,
+        });
+        return { success: true };
+      }),
+
     // Create a new organisation (for onboarding a new client instance)
     createOrganization: superAdminProcedure
       .input(z.object({
@@ -3905,10 +3947,9 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId;
 
         // Fetch recent exceptions and stats for context
-        const isAdmin = ctx.user.role === 'admin';
         const [recentExceptions, recentJobsRaw] = await Promise.all([
           db.getExceptions({ organizationId: ctx.user.organizationId ?? null, status: 'open', limit: 20, offset: 0 }),
-          db.getReconciliationJobs(userId, isAdmin),
+          db.getReconciliationJobs(ctx.user.organizationId ?? null),
         ]);
 
         const exceptionSummary = recentExceptions.data.slice(0, 5).map((e: any) => ({
@@ -4113,7 +4154,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-    approveAction: protectedProcedure
+    approveAction: operationsProcedure
       .input(z.object({
         actionType: z.enum(['journal_entry', 'vendor_email', 'credit_note_request', 'payment_allocation', 'escalation']),
         details: z.record(z.string(), z.string()),
@@ -4157,6 +4198,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const txnRows = txnRowsArr[0];
         if (!txnRows) throw new TRPCError({ code: 'NOT_FOUND', message: 'Transaction not found' });
 
+        // The channel this transaction arrived on decides which slice of the
+        // Nigerian exception catalogue the agent reasons with. Without it the
+        // taxonomy is guessed from the description, which matches nothing on a
+        // typical settlement file — see server/exceptions/channelMapping.ts.
+        const txnChannel = await db.getChannelById(txnRows.channelId);
+
         const txn: SATransaction = {
           id: txnRows.id,
           transactionRef: txnRows.transactionRef,
@@ -4166,6 +4213,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           currency: txnRows.currency,
           transactionDate: txnRows.transactionDate,
           channelId: txnRows.channelId,
+          channelType: txnChannel?.channelType ?? null,
           debitCredit: txnRows.debitCredit,
           isReversal: txnRows.isReversal,
           originalTransactionRef: txnRows.originalTransactionRef,
@@ -4198,12 +4246,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const similar = retrieveSimilarMemories(txn, dummyDiagnosis, memories, 3);
         const memoryContext = formatMemoryContext(similar);
 
+        // A non-interest institution gets the NIFI taxonomy on top of the
+        // channel one — it applies across every rail, so it is read from the
+        // organisation rather than from the transaction's channel.
+        const diagnosingOrg = ctx.user.organizationId
+          ? await db.getOrganizationById(ctx.user.organizationId)
+          : null;
+
         // Run deep diagnosis
         const diagnosis = await diagnoseException(
           txn,
           [], // no target txns needed for standalone diagnosis
           { amountTolerance: 0.015, dateWindowDays: 7 },
-          memoryContext
+          memoryContext,
+          diagnosingOrg?.bankingModel ?? null,
         );
 
         // Generate action draft
@@ -4261,7 +4317,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ── Layer 4: Approve or reject a draft ────────────────────────────
-    resolveDraft: protectedProcedure
+    resolveDraft: operationsProcedure
       .input(z.object({
         draftId: z.number().int().positive(),
         decision: z.enum(['approved', 'rejected', 'modified']),
@@ -4303,7 +4359,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ── Layer 5: Add a resolved case to semantic memory ───────────────
-    addMemory: protectedProcedure
+    addMemory: operationsProcedure
       .input(z.object({
         exceptionId: z.number().int().positive().optional(),
         exceptionCategory: z.string(),
@@ -4515,7 +4571,19 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-     activate: protectedProcedure
+    // Seeding and wiping fabricated data is an Infinity AI SALES action, and it
+    // writes into the CALLER'S OWN organization. As protectedProcedure, any
+    // signed-in user at any tenant could seed 60 fabricated transactions, 6
+    // exceptions, 15 distributors and 12 agent-memory records into their live
+    // tenant — and the sidebar rendered a "Demo Mode: OFF" button that did it in
+    // one click, for everyone. On a reconciliation platform that is data
+    // corruption, not a cosmetic issue.
+    //
+    // The guest demo flow is unaffected: guests are seeded server-side by
+    // prewarmDemoUser at deploy time and by the guest-login path in auth, never
+    // by this procedure. `status` below stays open because guests poll it and it
+    // only reads.
+     activate: superAdminProcedure
       .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
       .mutation(async ({ ctx, input }) => {
         if (input.segment === "finserv") {
@@ -4526,12 +4594,14 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true, ...result };
       }),
-    deactivate: protectedProcedure
+    deactivate: superAdminProcedure
       .mutation(async ({ ctx }) => {
         await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true };
       }),
-    createGuestLink: protectedProcedure
+    // Mints a 7-day token granting access to the creating org's data. Part of the
+    // same sales tool, and staff-only for the same reason.
+    createGuestLink: superAdminProcedure
       .input(z.object({ label: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
@@ -6084,7 +6154,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       };
     }),
 
-    updateSettings: protectedProcedure
+    updateSettings: adminProcedure
       .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
         const orgId = ctx.user.organizationId ?? 0;
@@ -6674,8 +6744,10 @@ async function runReconciliation(
       totalCount: totalTxns,
     });
 
-    // Invalidate dashboard stats cache so next load reflects fresh data
-    db.invalidateDashboardStatsCache().catch(() => {});
+    // Invalidate this tenant's dashboard stats cache so their next load is fresh.
+    // Scoped to the run's own organization — the unscoped version dropped every
+    // other tenant's row too.
+    db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {});
 
     // Dispatch webhooks (WS-4 event set)
     dispatchWebhook("reconciliation.completed", {

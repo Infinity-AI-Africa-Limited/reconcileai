@@ -166,3 +166,68 @@ describe("admin.users (adminProcedure)", () => {
     }
   });
 });
+
+// ─── superAdmin.setOrganizationBankingModel ───────────────────────────────────
+//
+// Marks an institution as operating on non-interest (NIFI) principles, which
+// makes the Super Agent apply the NIFI taxonomy across every rail that tenant
+// runs. It is a claim about the institution's LICENCE BASIS and the resulting
+// findings are regulator-facing, so a tenant must not be able to assert it about
+// itself — hence super_admin only, like the SSO opt-in it mirrors.
+describe("superAdmin.setOrganizationBankingModel", () => {
+  const NON_STAFF_ROLES = ["admin", "operations", "compliance", "cfo", "user"] as const;
+
+  for (const role of NON_STAFF_ROLES) {
+    it(`throws FORBIDDEN for ${role} role`, async () => {
+      const ctx = createCtxWithRole(role);
+      const caller = appRouter.createCaller(ctx);
+      await expect(
+        caller.superAdmin.setOrganizationBankingModel({
+          organizationId: 1,
+          bankingModel: "non_interest",
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    });
+  }
+
+  it("rejects a banking model outside the two known values", async () => {
+    // The column is varchar so the database will accept anything; the zod enum
+    // is the only thing stopping an arbitrary string being written and then
+    // silently read as "not non_interest" forever.
+    const ctx = createCtxWithRole("super_admin");
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.superAdmin.setOrganizationBankingModel({
+        organizationId: 1,
+        bankingModel: "islamic" as unknown as "non_interest",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("rejects a non-positive organizationId", async () => {
+    const ctx = createCtxWithRole("super_admin");
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.superAdmin.setOrganizationBankingModel({
+        organizationId: 0,
+        bankingModel: "conventional",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("does not refuse super_admin on authorization grounds", async () => {
+    // Mirrors the admin.users assertions above: without a database the call may
+    // still fail, but never with FORBIDDEN.
+    const ctx = createCtxWithRole("super_admin");
+    const caller = appRouter.createCaller(ctx);
+    try {
+      await caller.superAdmin.setOrganizationBankingModel({
+        organizationId: 1,
+        bankingModel: "conventional",
+      });
+    } catch (err: any) {
+      expect(err.code).not.toBe("FORBIDDEN");
+      expect(err.code).not.toBe("BAD_REQUEST");
+    }
+  });
+});

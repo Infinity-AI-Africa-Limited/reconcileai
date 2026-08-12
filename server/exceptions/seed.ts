@@ -9,7 +9,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { resolutionTemplates, type ResolutionTemplateCategory } from "../../drizzle/schema";
 import { getDb } from "../db";
-import { ALL_NIGERIAN_EXCEPTIONS, CHANNEL_EXCEPTION_GROUPS, type NigerianChannelKey } from "./index";
+import { ALL_NIGERIAN_EXCEPTIONS, CHANNEL_EXCEPTION_GROUPS, NON_INTEREST_EXCEPTIONS, type NigerianChannelKey } from "./index";
 import type { NigerianChannelException } from "./types";
 
 /**
@@ -36,10 +36,13 @@ const CHANNEL_TEXT_PATTERNS: Array<{ channel: NigerianChannelKey; pattern: RegEx
   { channel: "card_switching", pattern: /interswitch|etranzact|unified payments?|\brrn\b|\bstan\b|force.?post|\bcard\b/i },
   { channel: "card_schemes", pattern: /verve|afrigo|\bvisa\b|mastercard|interchange|scheme fee|\bvss\b|\bcard\b/i },
   { channel: "card_disputes", pattern: /charge.?back|representment|re.?presentment|arbitration|pre.?arb|\bdispute\b|\bcard\b/i },
+  // MICR and "clearing" are the high-signal terms on real clearing files; the
+  // instrument words catch narrations written by hand.
+  { channel: "cheque", pattern: /\bcheque\b|\bcheck\b|\bmicr\b|clearing (?:house|session|cycle)|\bnacs\b|truncat|dud cheque|unpresented|dishonou?red/i },
 ];
 
 /** Max channels injected per prompt — bounds token cost on keyword-dense text. */
-const MAX_PROMPT_CHANNELS = 4;
+export const MAX_PROMPT_CHANNELS = 4;
 
 /**
  * Infer which taxonomy channels are relevant to a piece of transaction text.
@@ -74,6 +77,37 @@ export function nigerianExceptionsTaxonomyPromptBlock(channels?: NigerianChannel
  */
 export function nigerianExceptionFor(key: string): NigerianChannelException | null {
   return ALL_NIGERIAN_EXCEPTIONS.find((c) => c.key === key) ?? null;
+}
+
+/**
+ * Is this organisation licensed to operate on non-interest principles?
+ *
+ * Reads `organizations.bankingModel`. Anything other than an explicit
+ * non-interest value is conventional, INCLUDING an unknown or missing value —
+ * the opposite default to the vertical-feature rules in shared/verticalFeatures,
+ * and deliberately so. Those rules decide whether to WITHDRAW a capability, so
+ * failing open is the safe direction. This one decides whether to assert a
+ * Sharīʿah-compliance finding, and telling a conventional bank its ledger
+ * breaches non-interest principles because a column was unset would be a false
+ * finding on a compliance report. Absence of an answer is not evidence.
+ */
+export function isNonInterestInstitution(bankingModel: string | null | undefined): boolean {
+  return bankingModel === "non_interest";
+}
+
+/**
+ * AI prompt block for an institution operating on non-interest principles.
+ *
+ * Selected by the ORGANISATION rather than by channel — see the note on
+ * ALL_EXCEPTIONS in ./index. Returns "" for a conventional institution so the
+ * caller can omit the block entirely rather than paying tokens for a taxonomy
+ * that does not apply to it.
+ */
+export function nonInterestTaxonomyPromptBlock(bankingModel: string | null | undefined): string {
+  if (!isNonInterestInstitution(bankingModel)) return "";
+  return NON_INTEREST_EXCEPTIONS.map(
+    (c) => `- ${c.key} (${c.severity}, SLA ${c.slaHours}h): ${c.label}. ${c.aiDiagnosisHint}`,
+  ).join("\n");
 }
 
 /**
