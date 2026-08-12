@@ -59,6 +59,13 @@ import {
   ResponsiveContainer, AreaChart, Area,
 } from "recharts";
 import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
+import { toSegment } from "@/lib/segments";
+import {
+  BANKING_MODELS,
+  bankingModelAppliesTo,
+  bankingModelLabel,
+  toBankingModel,
+} from "@/lib/bankingModel";
 
 type Segment = "financial_services" | "corporate_b2b" | "super_admin" | "retail_commerce";
 
@@ -696,18 +703,20 @@ function OrganisationsTable() {
                             </SelectContent>
                           </Select>
                         )}
-                        {/* Banking model — financial services only. Orthogonal to
-                            segment: a non-interest bank runs the same rails, but
-                            the Super Agent applies the NIFI taxonomy across all of
-                            them (income only from a real sale, lease or
-                            partnership; IAH funds segregated from shareholders'). */}
-                        {org.segment === "financial_services" ? (
+                        {/* Banking model. Orthogonal to segment: a non-interest
+                            bank runs the same rails, but the Super Agent applies
+                            the NIFI taxonomy across all of them (income only from
+                            a real sale, lease or partnership; IAH funds segregated
+                            from shareholders'). The eligibility rule lives in
+                            lib/bankingModel so the next consumer cannot re-derive
+                            it differently. */}
+                        {bankingModelAppliesTo(toSegment(org.segment)) ? (
                           <Select
-                            value={org.bankingModel ?? "conventional"}
+                            value={toBankingModel(org.bankingModel)}
                             onValueChange={(v) =>
                               updateBankingModel.mutate({
                                 organizationId: org.id,
-                                bankingModel: v as "conventional" | "non_interest",
+                                bankingModel: toBankingModel(v),
                               })
                             }
                             disabled={updateBankingModel.isPending}
@@ -716,8 +725,9 @@ function OrganisationsTable() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="conventional">Conventional</SelectItem>
-                              <SelectItem value="non_interest">Non-interest (NIFI)</SelectItem>
+                              {BANKING_MODELS.map((m) => (
+                                <SelectItem key={m} value={m}>{bankingModelLabel(m)}</SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
                         ) : null}
