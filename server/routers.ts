@@ -1018,19 +1018,18 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const drizzle = await getDb();
-        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
-        await drizzle.update(exceptionsTable)
-          .set({
-            status: "open",
-            resolvedBy: null,
-            resolvedAt: null,
-            resolutionNotes: input.notes ?? null,
-            cbsStillAnomalous: false,
-            userKeptResolved: false,
-          })
-          .where(eq(exceptionsTable.id, input.id));
+        // Through the org-scoped helper, not an inline drizzle write. The inline
+        // form keyed on `input.id` alone, so a caller could reopen another
+        // tenant's resolved exception — and reopening also retracts the
+        // flywheel record below, meaning it reached into their learning data too.
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+          status: "open",
+          resolvedBy: null,
+          resolvedAt: null,
+          resolutionNotes: input.notes ?? null,
+          cbsStillAnomalous: false,
+          userKeptResolved: false,
+        });
         await logAudit(ctx.user.id, "reopen_exception", "exception", input.id, { notes: input.notes }, ip, ua);
 
         // Flywheel retraction (audit fix): a reopened resolution was WRONG —
@@ -1372,15 +1371,24 @@ export const appRouter = router({
       }),
 
     // User explicitly keeps the exception RESOLVED despite the CBS re-occurrence.
-    keepResolvedDespiteStaleness: protectedProcedure
+    //
+    // operationsProcedure, matching resolve/reopen/assign/escalate/moveToReview
+    // beside it: this overrides a re-detected anomaly and is the same kind of
+    // write. It was the one exception mutation on protectedProcedure, so CFO and
+    // Compliance — read-only by policy — could suppress a live finding.
+    //
+    // It also wrote `.where(eq(exceptions.id, input.exceptionId))` on a
+    // caller-supplied id with no tenancy predicate, so ANY signed-in user could
+    // mark ANY tenant's exception as kept-resolved. db.updateException carries
+    // the org filter; the inline drizzle write bypassed it. `checkStaleness`
+    // directly above already scoped its own query, which is what made this an
+    // outlier rather than a pattern.
+    keepResolvedDespiteStaleness: operationsProcedure
       .input(z.object({ exceptionId: z.number().int().positive() }))
-      .mutation(async ({ input }) => {
-        const drizzle = await getDb();
-        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
-        await drizzle.update(exceptionsTable)
-          .set({ userKeptResolved: true })
-          .where(eq(exceptionsTable.id, input.exceptionId));
+      .mutation(async ({ ctx, input }) => {
+        await db.updateException(input.exceptionId, ctx.user.organizationId ?? null, {
+          userKeptResolved: true,
+        });
         return { success: true, exceptionId: input.exceptionId };
       }),
   }),
@@ -2555,7 +2563,7 @@ export const appRouter = router({
         return { id, key: rawKey, prefix: keyPrefix }; // Return raw key only on creation
       }),
 
-    revoke: protectedProcedure
+    revoke: adminProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
@@ -2693,7 +2701,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    testConnection: protectedProcedure
+    testConnection: adminProcedure
       .input(z.object({
         host: z.string().min(1).max(255),
         port: z.number().int().min(1).max(65535).default(22),
@@ -2714,7 +2722,7 @@ export const appRouter = router({
         return listSftpFiles(input.credentialId);
       }),
 
-    processFile: protectedProcedure
+    processFile: adminProcedure
       .input(z.object({
         credentialId: z.number().int().positive(),
         fileName: z.string().min(1).max(255),
@@ -2757,8 +2765,7 @@ export const appRouter = router({
 
   schedules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin";
-      const tasks = await db.getScheduledTasks(ctx.user.id, isAdmin);
+      const tasks = await db.getScheduledTasks(ctx.user.organizationId ?? null);
       return tasks.map((t) => ({
         ...t,
         frequencyDescription: getFrequencyDescription(
@@ -2841,7 +2848,9 @@ export const appRouter = router({
         return { id, nextRun };
       }),
 
-    update: protectedProcedure
+    // A schedule drives reconciliation runs, which is exactly what
+    // operationsProcedure governs — and `runNow` beside it is on the same guard.
+    update: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         name: z.string().min(1).max(MAX_NAME_LENGTH).optional(),
@@ -2900,10 +2909,18 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    runNow: protectedProcedure
+    // operationsProcedure and ownership-checked: this STARTS a reconciliation
+    // run. It took a caller-supplied task id straight into executeScheduledTask,
+    // which resolves it via getScheduledTaskById — no tenancy predicate — so any
+    // signed-in user could trigger any other tenant's scheduled run. `delete`
+    // directly above already passes requireOrg(ctx); this is the same id, and it
+    // needs the same proof of ownership.
+    runNow: operationsProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        const owned = await db.getScheduledTask(input.id, ctx.user.organizationId ?? null);
+        if (!owned) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         const result = await executeScheduledTask(input.id);
         await logAudit(ctx.user.id, "manual_run_schedule", "scheduled_task", input.id, result, ip, ua);
         if (!result.success) {
@@ -3120,7 +3137,7 @@ export const appRouter = router({
         });
       }),
 
-    updateReview: protectedProcedure
+    updateReview: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         reviewStatus: z.enum(["pending", "false_positive", "confirmed", "escalated", "resolved"]),
@@ -3142,7 +3159,7 @@ export const appRouter = router({
 
   detectionRules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getDetectionRules(ctx.user.organizationId || undefined);
+      return db.getDetectionRules(ctx.user.organizationId ?? null);
     }),
 
     create: guestProtectedProcedure
@@ -4098,7 +4115,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-    approveAction: protectedProcedure
+    approveAction: operationsProcedure
       .input(z.object({
         actionType: z.enum(['journal_entry', 'vendor_email', 'credit_note_request', 'payment_allocation', 'escalation']),
         details: z.record(z.string(), z.string()),
@@ -4253,7 +4270,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ── Layer 4: Approve or reject a draft ────────────────────────────
-    resolveDraft: protectedProcedure
+    resolveDraft: operationsProcedure
       .input(z.object({
         draftId: z.number().int().positive(),
         decision: z.enum(['approved', 'rejected', 'modified']),
@@ -4295,7 +4312,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ── Layer 5: Add a resolved case to semantic memory ───────────────
-    addMemory: protectedProcedure
+    addMemory: operationsProcedure
       .input(z.object({
         exceptionId: z.number().int().positive().optional(),
         exceptionCategory: z.string(),
@@ -6090,7 +6107,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       };
     }),
 
-    updateSettings: protectedProcedure
+    updateSettings: adminProcedure
       .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
         const orgId = ctx.user.organizationId ?? 0;

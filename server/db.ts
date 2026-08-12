@@ -1388,18 +1388,38 @@ export async function updateScheduledTask(
   return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function getScheduledTasks(userId: number, isAdmin: boolean) {
+/** Scheduled tasks for ONE organization. See getUploadBatches for the history. */
+export async function getScheduledTasks(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(scheduledTasks).orderBy(desc(scheduledTasks.createdAt)).limit(100);
-  }
   return db.select().from(scheduledTasks)
-    .where(eq(scheduledTasks.userId, userId))
+    .where(orgFilter(scheduledTasks.organizationId, organizationId))
     .orderBy(desc(scheduledTasks.createdAt))
     .limit(100);
 }
 
+/**
+ * One scheduled task, but only if it belongs to this organization.
+ *
+ * The ownership check `schedules.runNow` needs. `getScheduledTaskById` below is
+ * unscoped by design — the scheduler resolves tasks it selected itself — so a
+ * request-supplied id must come through here instead.
+ */
+export async function getScheduledTask(id: number, organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(scheduledTasks)
+    .where(and(eq(scheduledTasks.id, id), orgFilter(scheduledTasks.organizationId, organizationId)))
+    .limit(1);
+  return result[0];
+}
+
+/**
+ * One scheduled task by id, with NO tenancy filter.
+ *
+ * Valid only for the scheduling engine, which iterates tasks it selected itself.
+ * Never call this with an id that came from a request — use `getScheduledTask`.
+ */
 export async function getScheduledTaskById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
@@ -1808,9 +1828,19 @@ export async function storeAnomalyScores(scores: InsertAnomalyScore[]) {
   return results;
 }
 
+/**
+ * Anomaly scores for ONE organization.
+ *
+ * `organizationId` is required and unconditional. It was optional, and the
+ * predicate was assembled from optional filters — so a call with no filters
+ * produced `db.select().from(anomalyScores)` with no WHERE and returned every
+ * tenant's scores. The comment below records an EARLIER bug in this same
+ * function (chained `.where()` replacing rather than combining); this is the
+ * same hazard one layer out, and it is why the parameter is no longer optional.
+ */
 export async function getAnomalyScores(filters: {
+  organizationId: number | null;
   transactionId?: number;
-  organizationId?: number;
   reviewStatus?: string;
   minScore?: number;
   limit?: number;
@@ -1824,20 +1854,21 @@ export async function getAnomalyScores(filters: {
   // applied only the last matching filter. With minScore last, an
   // organizationId-filtered call silently returned EVERY tenant's anomaly
   // scores; transactionId and reviewStatus were dropped too.
-  const conditions = [];
+  // Tenancy first and unconditionally, so there is no filter combination that
+  // produces a query without it.
+  const conditions: (SQL<unknown> | undefined)[] = [
+    orgFilter(anomalyScores.organizationId, filters.organizationId),
+  ];
   if (filters.transactionId) conditions.push(eq(anomalyScores.transactionId, filters.transactionId));
-  if (filters.organizationId) conditions.push(eq(anomalyScores.organizationId, filters.organizationId));
   if (filters.reviewStatus) conditions.push(eq(anomalyScores.reviewStatus, filters.reviewStatus as any));
   if (filters.minScore) conditions.push(gte(anomalyScores.anomalyScore, String(filters.minScore)));
 
-  const query = conditions.length > 0
-    ? db.select().from(anomalyScores).where(and(...conditions))
-    : db.select().from(anomalyScores);
-
   const limit = Math.min(filters.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = filters.offset || 0;
-  
-  return query.limit(limit).offset(offset).orderBy(desc(anomalyScores.anomalyScore));
+
+  return db.select().from(anomalyScores)
+    .where(and(...conditions))
+    .limit(limit).offset(offset).orderBy(desc(anomalyScores.anomalyScore));
 }
 
 /** Review an anomaly belonging to the caller's org. Returns rows affected. */
@@ -1860,17 +1891,19 @@ export async function updateAnomalyReview(
   return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function getDetectionRules(organizationId?: number) {
+/**
+ * Detection rules for ONE organization.
+ *
+ * Required, not optional-with-a-skip: `if (organizationId)` meant a call that
+ * omitted it — or passed 0 — read every tenant's rules. Detection rules encode
+ * how a bank flags anomalies, so leaking them leaks its control posture.
+ */
+export async function getDetectionRules(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  
-  let query = db.select().from(detectionRules);
-  
-  if (organizationId) {
-    query = query.where(eq(detectionRules.organizationId, organizationId)) as any;
-  }
-  
-  return query.orderBy(desc(detectionRules.createdAt));
+  return db.select().from(detectionRules)
+    .where(orgFilter(detectionRules.organizationId, organizationId))
+    .orderBy(desc(detectionRules.createdAt));
 }
 
 export async function createDetectionRule(rule: InsertDetectionRule) {

@@ -93,7 +93,14 @@ describe("no read path may build a vanishing WHERE clause", () => {
  * failure rather than a production incident.
  */
 describe("no SELECT on a tenant-scoped table may omit its predicate", () => {
-  /** Tables whose rows belong to exactly one tenant. */
+  /**
+   * Tables whose rows belong to exactly one tenant.
+   *
+   * Keep this list WIDE. It was originally ten tables and missed
+   * `getScheduledTasks`, which returned every tenant's schedules to any admin —
+   * the sixth instance of the same defect, found only when `scheduledTasks` was
+   * added here. Every name added is a chance to find another.
+   */
   const TENANT_TABLES = [
     "transactions",
     "exceptions",
@@ -105,6 +112,17 @@ describe("no SELECT on a tenant-scoped table may omit its predicate", () => {
     "uploadBatches",
     "apiKeys",
     "sftpCredentials",
+    "scheduledTasks",
+    "channels",
+    "distributors",
+    "resolutionTemplates",
+    "anomalyScores",
+    "detectionRules",
+    "moduleConfigurations",
+    "cfoReportSchedules",
+    "channelAlertSettings",
+    "emailPreferences",
+    "webhooks",
   ];
 
   /** Every `db.select(...)....;` statement in db.ts, with its enclosing function. */
@@ -184,6 +202,74 @@ describe("no SELECT on a tenant-scoped table may omit its predicate", () => {
     const body = DB_SOURCE.slice(DB_SOURCE.indexOf("export async function invalidateDashboardStatsCache(")).slice(0, 600);
     expect(body).toContain("organizationId: number | null");
     expect(body).toMatch(/\.delete\(dashboardStatsCache\)\.where\(/);
+  });
+});
+
+/**
+ * The third place tenancy goes missing: an inline drizzle write in a tRPC
+ * procedure, bypassing the scoped db.ts helper that exists for it.
+ *
+ * Both ratchets scan db.ts, so neither could see these:
+ *
+ *   exceptions.keepResolvedDespiteStaleness
+ *     drizzle.update(exceptions).set(...).where(eq(exceptions.id, input.exceptionId))
+ *     — a caller-supplied id, no organization. Any signed-in user could mark ANY
+ *       tenant's exception kept-resolved, while db.updateException right there
+ *       takes an organizationId and applies it.
+ *
+ *   schedules.runNow
+ *     executeScheduledTask(input.id) → getScheduledTaskById, also unscoped, so
+ *     any user could start any tenant's scheduled reconciliation run.
+ *
+ * A procedure that writes should call the db.ts helper. Where it writes inline,
+ * the predicate must name organizationId.
+ */
+describe("no tRPC procedure writes to a tenant table without naming the org", () => {
+  const ROUTERS = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
+
+  const TENANT_WRITE_TABLES = [
+    "exceptionsTable",
+    "exceptions",
+    "transactions",
+    "matches",
+    "reconciliationJobs",
+    "scheduledTasks",
+    "channels",
+    "anomalyScores",
+    "detectionRules",
+  ];
+
+  it("has no inline drizzle write keyed on a bare request id", () => {
+    const offenders: string[] = [];
+    for (const m of ROUTERS.matchAll(/\bdrizzle\s*\.\s*(update|delete)\s*\(\s*(\w+)\s*\)/g)) {
+      const table = m[2];
+      if (!TENANT_WRITE_TABLES.includes(table)) continue;
+      const end = ROUTERS.indexOf(";", m.index);
+      const stmt = ROUTERS.slice(m.index, end === -1 ? m.index + 600 : end);
+      // `.where(eq(<table>.id, input.<something>))` and nothing else.
+      const bareRequestId = /\.where\(\s*eq\(\s*\w+\.id,\s*input\.\w+\s*\)\s*\)/.test(stmt);
+      if (bareRequestId && !/organizationId/.test(stmt)) offenders.push(`${table}: ${stmt.slice(0, 90)}`);
+    }
+    expect(
+      offenders,
+      "An inline drizzle write in a procedure is keyed on a request-supplied id with " +
+        "no organization in its predicate, so it can reach another tenant's row. Call the " +
+        "org-scoped helper in db.ts (e.g. db.updateException(id, organizationId, ...)) instead.",
+    ).toEqual([]);
+  });
+
+  it("keeps runNow's ownership check, since executeScheduledTask has none", () => {
+    const body = ROUTERS.slice(ROUTERS.indexOf("runNow:"), ROUTERS.indexOf("history:", ROUTERS.indexOf("runNow:")));
+    expect(body).toMatch(/db\.getScheduledTask\(input\.id, ctx\.user\.organizationId/);
+    expect(body).toMatch(/NOT_FOUND/);
+  });
+
+  it("keeps every exception mutation on operationsProcedure", () => {
+    // CFO and Compliance are read-only by policy, and operationsProcedure is what
+    // enforces it. keepResolvedDespiteStaleness was the one on protectedProcedure.
+    for (const p of ["resolve", "reopen", "assign", "escalate", "moveToReview", "keepResolvedDespiteStaleness"]) {
+      expect(ROUTERS, `exceptions.${p}`).toMatch(new RegExp(`\\n\\s*${p}: operationsProcedure`));
+    }
   });
 });
 
