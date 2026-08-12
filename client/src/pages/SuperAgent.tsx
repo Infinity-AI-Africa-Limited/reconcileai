@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { isStaff } from "@/lib/navItems";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -650,6 +652,7 @@ function MemoryLayerPanel() {
     { embeddingText: searchText || "exception unmatched distributor payment", topK: 10 },
     { enabled: true }
   );
+  const { user } = useAuth();
   const { data: demoStatus } = trpc.demo.status.useQuery();
   const activateDemo = trpc.demo.activate.useMutation({
     onSuccess: () => {
@@ -673,7 +676,13 @@ function MemoryLayerPanel() {
           <p className="text-xs text-muted-foreground mt-0.5">The agent's institutional knowledge — past exception resolutions stored as searchable reasoning records.</p>
         </div>
         <div className="flex gap-2">
-          {!demoStatus?.active && (
+          {/* Infinity AI staff only. This seeds 12 fabricated FMCG resolution
+              records into the caller's OWN agent memory — so it offered a bank
+              a one-click way to poison the institutional-learning layer its
+              recommendations are drawn from, with data from another vertical.
+              demo.activate is superAdminProcedure now; this stops the button
+              contradicting it. */}
+          {isStaff(user?.role) && !demoStatus?.active ? (
             <Button
               size="sm"
               variant="outline"
@@ -684,7 +693,7 @@ function MemoryLayerPanel() {
               {activateDemo.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Database className="h-3 w-3" />}
               Load Demo Memory
             </Button>
-          )}
+          ) : null}
           <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={() => refetch()}>
             <RefreshCw className="h-3 w-3" /> Refresh
           </Button>

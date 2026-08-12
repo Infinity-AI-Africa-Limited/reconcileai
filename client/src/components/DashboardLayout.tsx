@@ -24,7 +24,7 @@ import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
 import { useOrgSegment } from "@/hooks/useOrgSegment";
 import { isRetailCommerce, type Segment } from "@/lib/segments";
-import { navGroup, type NavEntry } from "@/lib/navItems";
+import { navGroup, isStaff, type NavEntry } from "@/lib/navItems";
 import {
   LayoutDashboard,
   LogOut,
@@ -602,7 +602,13 @@ function DashboardLayoutContent({
           </SidebarContent>
 
           <SidebarFooter className="p-3 shrink-0 border-t border-sidebar-border">
-            {/* Demo Mode Toggle */}
+            {/* Demo Mode Toggle — Infinity AI staff only.
+                This rendered for every signed-in user, so a bank administrator
+                saw "Demo Mode: OFF" in their sidebar and one click seeded
+                fabricated BrightGoods FMCG data into their live tenant. Keyed on
+                the super_admin ROLE, matching navItems' `staffOnly` and the
+                server's superAdminProcedure, which now guards the mutations. */}
+            {isStaff(user?.role) ? (
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
               <button
                 onClick={() => isDemoActive ? deactivateDemo.mutate() : activateDemo.mutate({ segment: "fmcg" })}
@@ -665,6 +671,7 @@ function DashboardLayoutContent({
                 </div>
               )}
             </div>
+            ) : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-3 rounded-lg px-1 py-1 hover:bg-sidebar-accent/50 transition-colors w-full text-left group-data-[collapsible=icon]:justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">

@@ -14,10 +14,8 @@
  */
 
 import { invokeLLM } from "./_core/llm";
-import {
-  nigerianExceptionsTaxonomyPromptBlock,
-  relevantNigerianChannelsForText,
-} from "./exceptions/seed";
+import { nigerianExceptionsTaxonomyPromptBlock } from "./exceptions/seed";
+import { relevantNigerianChannels } from "./exceptions/channelMapping";
 
 // ─── Shared Transaction type (mirrors drizzle schema) ────────────────
 
@@ -30,6 +28,17 @@ export interface SATransaction {
   currency: string;
   transactionDate: string | Date;
   channelId: number;
+  /**
+   * `channels.channelType` for `channelId`, when the caller has it.
+   *
+   * Optional so existing callers keep working, but supplying it is what lets the
+   * Super Agent pick its exception-taxonomy slice from the channel a transaction
+   * actually arrived on instead of guessing from the description. Bank
+   * settlement files rarely say "POS" or "NIP" in prose, so the text heuristic
+   * alone matched nothing and the catalogue silently went uninjected. See
+   * server/exceptions/channelMapping.ts.
+   */
+  channelType?: string | null;
   debitCredit: string;
   isReversal?: boolean | null;
   originalTransactionRef?: string | null;
@@ -691,13 +700,18 @@ async function getLLMDiagnosis(
   parsedRef: ParsedReference,
   memoryContext: string
 ): Promise<{ headline: string; rootCause: string; recommendedAction: string }> {
-  // Inject only the taxonomy channels relevant to this transaction's text —
-  // an FMCG deduction gets no channel block; a card/NIP/POS exception gets the
-  // catalogued failure modes, regulatory context, and diagnosis guidance.
+  // Inject only the taxonomy channels relevant to this transaction — the
+  // catalogued failure modes, regulatory context and diagnosis guidance for the
+  // rails it actually touches. An FMCG deduction still gets no channel block.
+  //
+  // The transaction's OWN channel decides first; its text only adds specificity.
+  // Text alone was the whole rule before, which meant a POS settlement row
+  // reading "SETTLEMENT 20260812 BATCH 4471" matched no pattern and was
+  // diagnosed with no knowledge of MSC netting or T+1 windows.
   const channelText = [txn.description, txn.transactionRef, txn.counterparty]
     .filter(Boolean)
     .join(" ");
-  const channels = relevantNigerianChannelsForText(channelText);
+  const channels = relevantNigerianChannels({ channelType: txn.channelType, text: channelText });
   const taxonomyBlock = channels.length > 0 ? nigerianExceptionsTaxonomyPromptBlock(channels) : "";
 
   try {

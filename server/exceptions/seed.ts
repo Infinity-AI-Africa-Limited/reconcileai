@@ -39,7 +39,7 @@ const CHANNEL_TEXT_PATTERNS: Array<{ channel: NigerianChannelKey; pattern: RegEx
 ];
 
 /** Max channels injected per prompt — bounds token cost on keyword-dense text. */
-const MAX_PROMPT_CHANNELS = 4;
+export const MAX_PROMPT_CHANNELS = 4;
 
 /**
  * Infer which taxonomy channels are relevant to a piece of transaction text.

@@ -4142,6 +4142,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const txnRows = txnRowsArr[0];
         if (!txnRows) throw new TRPCError({ code: 'NOT_FOUND', message: 'Transaction not found' });
 
+        // The channel this transaction arrived on decides which slice of the
+        // Nigerian exception catalogue the agent reasons with. Without it the
+        // taxonomy is guessed from the description, which matches nothing on a
+        // typical settlement file — see server/exceptions/channelMapping.ts.
+        const txnChannel = await db.getChannelById(txnRows.channelId);
+
         const txn: SATransaction = {
           id: txnRows.id,
           transactionRef: txnRows.transactionRef,
@@ -4151,6 +4157,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           currency: txnRows.currency,
           transactionDate: txnRows.transactionDate,
           channelId: txnRows.channelId,
+          channelType: txnChannel?.channelType ?? null,
           debitCredit: txnRows.debitCredit,
           isReversal: txnRows.isReversal,
           originalTransactionRef: txnRows.originalTransactionRef,
@@ -4500,7 +4507,19 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-     activate: protectedProcedure
+    // Seeding and wiping fabricated data is an Infinity AI SALES action, and it
+    // writes into the CALLER'S OWN organization. As protectedProcedure, any
+    // signed-in user at any tenant could seed 60 fabricated transactions, 6
+    // exceptions, 15 distributors and 12 agent-memory records into their live
+    // tenant — and the sidebar rendered a "Demo Mode: OFF" button that did it in
+    // one click, for everyone. On a reconciliation platform that is data
+    // corruption, not a cosmetic issue.
+    //
+    // The guest demo flow is unaffected: guests are seeded server-side by
+    // prewarmDemoUser at deploy time and by the guest-login path in auth, never
+    // by this procedure. `status` below stays open because guests poll it and it
+    // only reads.
+     activate: superAdminProcedure
       .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
       .mutation(async ({ ctx, input }) => {
         if (input.segment === "finserv") {
@@ -4511,12 +4530,14 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true, ...result };
       }),
-    deactivate: protectedProcedure
+    deactivate: superAdminProcedure
       .mutation(async ({ ctx }) => {
         await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true };
       }),
-    createGuestLink: protectedProcedure
+    // Mints a 7-day token granting access to the creating org's data. Part of the
+    // same sales tool, and staff-only for the same reason.
+    createGuestLink: superAdminProcedure
       .input(z.object({ label: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
