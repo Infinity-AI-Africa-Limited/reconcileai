@@ -1457,9 +1457,26 @@ against the latest commit and a fixed issue can look live indefinitely.
 when it has nothing to say — including a trial-credit-limit notice, which is what
 PR #68 received twice while appearing to have been reviewed. A review body
 matching `/credit limit|upgrade your plan/i` means **no review happened**; report
-that rather than treating the PR as reviewed. Note also that `COMMENTED` never
-satisfies `required_approving_review_count` — see §18 and the branch-protection
-notes for why approval is a separate question from review.
+that rather than treating the PR as reviewed.
+
+**Review is not approval, and a green review does not unblock a merge.** Greptile
+submits `COMMENTED`; GitHub counts only `APPROVED` toward branch protection. As
+of 2026-08-11 `origin/main` requires **1 approving review** plus the **`Tests`**
+check, with **`enforce_admins: true`** and no bypass allowances — so there is no
+break-glass path, for anyone. PRs opened with the owner's credential are authored
+by `MistaRichMan`, and GitHub forbids approving your own PR.
+
+The practical consequence: **prepare the PR, drive CI and the review to green,
+then hand off.** Do not plan on merging. `PUT /pulls/{n}/merge` returns 405
+*"At least 1 approving review is required"*.
+
+Re-derive these settings rather than trusting the numbers above, which change
+without notice. There is no `gh` CLI here, so borrow the credential Git already
+holds:
+
+```bash
+tok=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -n 's/^password=//p'); curl -s -H "Authorization: token $tok" https://api.github.com/repos/Infinity-AI-Africa-Limited/reconcileai/branches/main/protection
+```
 
 ### GitHub Remotes
 
