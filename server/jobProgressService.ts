@@ -88,12 +88,42 @@ export async function trackProgress(
   // Push to the live SSE stream for real-time dashboard updates.
   emitJobProgress({
     jobId,
+    organizationId: await organizationForJob(jobId),
     phase,
     progress,
     message,
     processedCount: options.processedCount || 0,
     totalCount: options.totalCount || 0,
   });
+}
+
+/**
+ * The tenant that owns a job, memoised for the life of the process.
+ *
+ * Resolved HERE rather than threaded through `trackProgress`'s signature, which
+ * is the whole point: there are progress calls scattered across the
+ * reconciliation runner, and any one of them that forgot to pass the tenant
+ * would silently restore the broadcast. Looking it up from the jobId means no
+ * call site can get it wrong.
+ *
+ * A job's owner never changes, so caching is safe and one lookup per job
+ * replaces one per progress event — a run emits a dozen or more.
+ */
+const jobOrgCache = new Map<number, number | null>();
+
+async function organizationForJob(jobId: number): Promise<number | null> {
+  const cached = jobOrgCache.get(jobId);
+  if (cached !== undefined) return cached;
+  // Fails CLOSED: an unresolvable job yields null, which only an org-less
+  // viewer matches. Broadcasting on a failed lookup is what this replaces.
+  const org = (await db.getReconciliationJob(jobId))?.organizationId ?? null;
+  jobOrgCache.set(jobId, org);
+  // Bound the map so a long-lived process cannot accumulate every job id.
+  // Insertion-ordered, so Array.from(...).slice takes the OLDEST half.
+  if (jobOrgCache.size > 5000) {
+    for (const k of Array.from(jobOrgCache.keys()).slice(0, 2500)) jobOrgCache.delete(k);
+  }
+  return org;
 }
 
 function getNextPhaseProgress(currentPhase: JobPhase): number {
