@@ -168,6 +168,31 @@ try {
   const [usr] = await q("SELECT id FROM users WHERE organizationId = ? ORDER BY id LIMIT 1", [TARGET_ORG]);
   if (!usr) throw new Error(`Organisation ${TARGET_ORG} has no user to own the seeded rows`);
 
+  // ── Pre-flight: every channel code must be free or already ours ───────────
+  //
+  // Runs HERE, before any wipe, and that ordering is the whole point. This check
+  // originally sat in the channel-creation loop — which is after --replace-all
+  // has already deleted the tenant's data, so a collision aborted the run having
+  // destroyed everything and rebuilt nothing. Verified the hard way: a test of
+  // the collision guard emptied the tenant and left it empty.
+  //
+  // `channels.code` is globally UNIQUE, so a lookup by code reaches across
+  // tenants. Adopting whatever it finds would TRANSFER another tenant's channel,
+  // or a shared platform rail, into this one — leaving the previous owner's
+  // transactions pointing at a channel they can no longer see.
+  const collisions = [];
+  for (const c of [...CHANNELS, GL]) {
+    const [row] = await q("SELECT id, organizationId FROM channels WHERE code=?", [c.code]);
+    if (row && row.organizationId !== TARGET_ORG) {
+      collisions.push(`  "${c.code}" belongs to ${row.organizationId === null ? "the SHARED platform rails (organizationId IS NULL)" : `organisation ${row.organizationId}`}`);
+    }
+  }
+  if (collisions.length) {
+    throw new Error(
+      `REFUSING before touching anything — ${collisions.length} channel code(s) would be taken from another owner:\n` +
+      `${collisions.join("\n")}\nRename them in CHANNELS and re-run.`);
+  }
+
   console.log(`\nTarget: [${org.id}] ${org.name} — segment=${org.segment}, ownerUser=${usr.id}`);
   console.log(`Mode:   ${COMMIT ? (WIPE_ONLY ? "COMMIT (wipe only)" : "COMMIT (wipe + seed)") : "DRY RUN — nothing will be written"}\n`);
 
@@ -230,10 +255,13 @@ try {
   // ── Channels ──────────────────────────────────────────────────────────────
   const chanId = {};
   for (const c of [...CHANNELS, GL]) {
-    const [existing] = await q("SELECT id FROM channels WHERE code=?", [c.code]);
+    // Ownership was proven in the pre-flight check above, before anything was
+    // deleted. The UPDATE still names organizationId in its WHERE so this cannot
+    // write across tenants even if the pre-flight is ever moved or removed.
+    const [existing] = await q("SELECT id FROM channels WHERE code=? AND organizationId=?", [c.code, TARGET_ORG]);
     if (existing) {
-      await q("UPDATE channels SET name=?, channelType=?, isActive=1, organizationId=? WHERE id=?",
-        [c.name, c.type, TARGET_ORG, existing.id]);
+      await q("UPDATE channels SET name=?, channelType=?, isActive=1 WHERE id=? AND organizationId=?",
+        [c.name, c.type, existing.id, TARGET_ORG]);
       chanId[c.code] = existing.id;
     } else {
       const r = await q(
