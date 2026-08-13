@@ -186,6 +186,28 @@ export function passesStaffGate(entry: NavEntry, role: string | undefined): bool
  * permissions — but SEGMENT gating still applies, because the point of the
  * portal is to see what that vertical has. Staff tools and the operator's own
  * group are excluded so the portal shows the tenant's sidebar, not ours.
+ *
+ * OUTSIDE a portal, staff bypass the segment gate too, and that is the case this
+ * function got wrong. Infinity AI's own organisation has segment `super_admin`,
+ * so `inSegment` matched none of the vertical-scoped entries and a signed-in
+ * super admin lost CBN Reports, Data Protection, Sample Data, Core Banking
+ * Connector, Distributor Registry and the retail entries from their sidebar.
+ *
+ * Every other layer already granted it, which is what made this a disagreement
+ * rather than a policy:
+ *
+ *   shared/verticalFeatures  cbn_regulatory_reporting: [..., "super_admin"]
+ *   lib/routeAccess          if (isStaff(role) && !opts.portal) return true
+ *   THIS FILE                link hidden
+ *
+ * So /cbn-compliance loaded perfectly if you typed the URL, and the only thing
+ * missing was the way in. A hidden link in front of an open route and an open
+ * procedure is the same class of defect as an open route behind a hidden link —
+ * this module's own docstring says the two must not be able to disagree.
+ *
+ * Keyed on the ROLE, like `passesStaffGate` and `canReachPath`, never on the
+ * organisation's segment: the two are independently mutable, and reading the
+ * segment is precisely how this broke.
  */
 export function navFor(
   segment: Segment | null,
@@ -197,8 +219,9 @@ export function navFor(
       (e) => e.group !== "superAdmin" && !e.staffOnly && inSegment(e, segment),
     );
   }
+  const staff = isStaff(role);
   return NAV_ITEMS.filter(
-    (e) => passesStaffGate(e, role) && inRole(e, role) && inSegment(e, segment),
+    (e) => passesStaffGate(e, role) && inRole(e, role) && (staff || inSegment(e, segment)),
   );
 }
 
