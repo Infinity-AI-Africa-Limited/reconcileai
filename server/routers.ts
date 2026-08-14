@@ -352,6 +352,39 @@ async function assertOwnsSftpCredential(
   }
 }
 
+/**
+ * Refuse a super-admin organisation mutation that would match no row.
+ *
+ * All four org-level setters (`updateOrganizationSegment`, `setOrganizationSso`,
+ * `setOrganizationBankingModel`, `setOrganizationIsDemo`) ran
+ * `UPDATE … WHERE id = ?` and returned `{ success: true }` unconditionally, so a
+ * stale, deleted or mistyped id reported success, wrote a misleading audit
+ * entry, and changed nothing.
+ *
+ * That is worst for `setOrganizationIsDemo`, which decides whether a tenant's
+ * SLA alerts are suppressed: believing you have silenced or restored alerting
+ * when you have not is exactly the failure the isDemo work exists to prevent.
+ *
+ * Checks EXISTENCE rather than affectedRows deliberately. MySQL reports
+ * affected_rows as rows CHANGED, not matched, so setting a field to the value it
+ * already holds returns 0 — and rejecting that no-op as "not found" would be a
+ * worse bug than the one being fixed.
+ */
+async function assertOrganizationExists(
+  drizzle: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  organizationId: number,
+): Promise<void> {
+  const { organizations } = await import("../drizzle/schema");
+  const [org] = await drizzle
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  if (!org) {
+    throw new TRPCError({ code: "NOT_FOUND", message: `Organisation ${organizationId} not found` });
+  }
+}
+
 export const appRouter = router({
   system: systemRouter,
 
@@ -3585,6 +3618,7 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
         const { eq } = await import("drizzle-orm");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ segment: input.segment })
           .where(eq(organizations.id, input.organizationId));
@@ -3617,6 +3651,7 @@ export const appRouter = router({
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ ssoProvider: input.ssoProvider })
           .where(eq(organizations.id, input.organizationId));
@@ -3656,6 +3691,7 @@ export const appRouter = router({
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ bankingModel: input.bankingModel })
           .where(eq(organizations.id, input.organizationId));
@@ -3669,6 +3705,35 @@ export const appRouter = router({
           targetType: "organization",
           targetId: input.organizationId,
           newValue: input.bankingModel,
+        });
+        return { success: true };
+      }),
+
+    /**
+     * Mark an organisation as a demo/sales tenant rather than a real client.
+     *
+     * Read by anything that must not treat fabricated data as real — today the
+     * SLA breach alert, which previously guessed from reconciliation job names
+     * and emailed the owner 374 seeded exceptions as genuine breaches.
+     *
+     * Super-admin only: a tenant must not be able to declare itself a demo and
+     * silence its own SLA alerting.
+     */
+    setOrganizationIsDemo: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        isDemo: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
+        await drizzle.update(organizations)
+          .set({ isDemo: input.isDemo })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_is_demo", "organization", input.organizationId, {
+          isDemo: input.isDemo,
         });
         return { success: true };
       }),

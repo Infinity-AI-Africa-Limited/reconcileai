@@ -47,6 +47,20 @@ export const organizations = mysqlTable("organizations", {
   // Drives the NIFI exception taxonomy (server/exceptions/non-interest.ts),
   // which applies across every rail rather than to a channel.
   bankingModel: varchar("bankingModel", { length: 30 }).default("conventional").notNull(),
+  /**
+   * This organisation exists for demos and sales, not for a real client.
+   *
+   * A FACT about the tenant, held where the fact belongs. Demo-ness was
+   * previously inferred by substring-matching free-text reconciliation job names
+   * for "Demo" / "vs CBS GL" / "BrightGoods" — a case-sensitive match against
+   * names each seeder invents independently. A seeder that named its jobs
+   * "… — FSDEMO-v2" matched none of them (uppercase DEMO ≠ Demo), so 374 seeded
+   * exceptions were reported to the owner as real SLA breaches, under an email
+   * footer stating that demo data was excluded.
+   *
+   * Anything that must not treat fabricated data as real reads this column.
+   */
+  isDemo: boolean("isDemo").default(false).notNull(),
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
