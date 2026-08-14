@@ -539,9 +539,18 @@ async function startServer() {
   // ── Live monitoring stream (SSE) ───────────────────────────────────────────
   // GET /api/monitoring/stream — relays reconciliation job-progress events to the
   // dashboard in real time (replaces timer polling). Auth via session cookie.
+  //
+  // Scoped to the viewer's organisation. This endpoint authenticated the caller
+  // and then subscribed them to the PROCESS-WIDE emitter, so every connected
+  // dashboard received every tenant's job progress — phase messages included,
+  // which carry match counts, exception counts and match rates. Authentication
+  // is not authorisation, and a stream needs the tenant check as much as a query
+  // does.
   app.get("/api/monitoring/stream", async (req, res) => {
+    let viewerOrganizationId: number | null;
     try {
-      await sdk.authenticateRequest(req);
+      const user = await sdk.authenticateRequest(req);
+      viewerOrganizationId = user.organizationId ?? null;
     } catch {
       res.status(401).end();
       return;
@@ -555,9 +564,11 @@ async function startServer() {
     res.write("retry: 5000\n\n");
     res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
-    const { jobEvents } = await import("../jobEvents");
+    const { jobEvents, mayReceiveJobEvent } = await import("../jobEvents");
     const onProgress = (payload: unknown) => {
-      res.write(`data: ${JSON.stringify({ type: "progress", ...(payload as object) })}\n\n`);
+      const event = payload as import("../jobEvents").JobProgressEvent;
+      if (!mayReceiveJobEvent(event, viewerOrganizationId)) return;
+      res.write(`data: ${JSON.stringify({ type: "progress", ...event })}\n\n`);
     };
     jobEvents.on("progress", onProgress);
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25000);
