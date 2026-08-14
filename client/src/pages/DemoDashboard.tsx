@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   CheckCircle2, AlertTriangle, TrendingUp, Zap, Building2, Landmark,
   FlaskConical, RefreshCw, Loader2, BarChart3, Clock, Shield,
-  DollarSign, Users, Activity, ArrowUpRight, ArrowDownRight, Printer,
+  DollarSign, Users, Activity, ArrowUpRight, ArrowDownRight, Printer, ClipboardList,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -62,8 +62,8 @@ interface ExceptionCardProps {
   description: string;
   plainLanguage: string;
   recommendation: string;
-  severity: "low" | "medium" | "high";
-  status: "resolved";
+  severity: "low" | "medium" | "high" | "critical";
+  status: "open" | "in_review" | "resolved" | "escalated";
 }
 
 function ExceptionCard({ type, category, description, plainLanguage, recommendation, severity }: ExceptionCardProps) {
@@ -72,6 +72,7 @@ function ExceptionCard({ type, category, description, plainLanguage, recommendat
     low: "bg-green-100 text-green-700",
     medium: "bg-amber-100 text-amber-700",
     high: "bg-red-100 text-red-700",
+    critical: "bg-red-100 text-red-700",
   };
   return (
     <div className="border rounded-xl p-4 bg-card hover:shadow-sm transition-shadow">
@@ -81,7 +82,7 @@ function ExceptionCard({ type, category, description, plainLanguage, recommendat
             <span className="text-xs font-mono text-muted-foreground">{type}</span>
             <Badge variant="outline" className="text-xs">{category}</Badge>
             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${severityMap[severity]}`}>{severity}</span>
-            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-green-100 text-green-700">resolved</span>
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-green-100 text-green-700">{status.replace("_", " ")}</span>
           </div>
           <p className="text-sm font-medium text-foreground">{description}</p>
         </div>
@@ -266,64 +267,64 @@ function FmcgDemoPanel() {
 
 const FINSERV_EXCEPTIONS: ExceptionCardProps[] = [
   {
-    type: "failed_direct_debit",
-    category: "Unmatched",
-    description: "NIBSS Direct Debit mandate returned — insufficient funds in borrower account",
-    plainLanguage: "The borrower's bank rejected the automatic loan repayment because there wasn't enough money in their account. The system tried to collect ₦45,000 on the due date but the bank sent it back. We need to try again in 3 days or call the borrower.",
-    recommendation: "Retry direct debit in 3 business days. If second attempt fails, escalate to collections team and send SMS notification to borrower.",
-    severity: "high",
-    status: "resolved",
-  },
-  {
-    type: "ussd_timeout",
-    category: "Timing Difference",
-    description: "USSD session timed out — payment credited but not reflected in loan ledger",
-    plainLanguage: "The borrower paid via USSD but their phone lost connection before the app confirmed it. The money arrived in our account but the loan system didn't know about it. We can see the payment — it just needs to be matched to the right loan account.",
-    recommendation: "Match the USSD credit to the open loan repayment schedule. Update loan ledger manually and mark as resolved. Escalate USSD callback failure to IT for investigation.",
-    severity: "medium",
-    status: "resolved",
-  },
-  {
-    type: "duplicate_nip_credit",
+    type: "FS-DEMO-001",
     category: "Duplicate Transaction",
-    description: "Duplicate NIP credit — same session ID credited twice by sending bank",
-    plainLanguage: "The borrower's bank accidentally sent the same payment twice. We received ₦30,000 twice from the same transaction. We should keep one as the loan repayment and send the other one back to the borrower immediately.",
-    recommendation: "Retain the first credit as the valid loan repayment. Flag the second credit as a duplicate and initiate a refund to the borrower's account via NIP within 24 hours. Document the session ID for NIBSS dispute resolution.",
+    description: "NIP repayment retry after a gateway timeout created a duplicate settlement message",
+    plainLanguage: "The same repayment arrived twice after a retry. One settlement is valid; the other needs a controlled reversal.",
+    recommendation: "Confirm the original posting, reverse the duplicate credit and retain the operational evidence.",
     severity: "high",
-    status: "resolved",
+    status: "open",
   },
   {
-    type: "partial_loan_repayment",
-    category: "Amount Mismatch",
-    description: "Borrower paid ₦18,500 against scheduled instalment of ₦25,000 — shortfall ₦6,500",
-    plainLanguage: "The borrower paid ₦18,500 but their monthly repayment is ₦25,000. They're ₦6,500 short. We should apply what they paid and send them a reminder for the remaining amount before charging any late fees.",
-    recommendation: "Apply ₦18,500 to the loan account as a partial payment. Record ₦6,500 as outstanding arrears. Generate a payment reminder for the shortfall with a 7-day grace period before penalty interest accrues.",
-    severity: "medium",
-    status: "resolved",
+    type: "FS-DEMO-002",
+    category: "Unmatched",
+    description: "Direct-debit mandate returned unpaid while the core ledger still carries the scheduled repayment",
+    plainLanguage: "The scheduled repayment did not clear. Collections needs a controlled work item rather than an automatic assumption of payment.",
+    recommendation: "Create a collections work item and route the account for credit-policy review.",
+    severity: "critical",
+    status: "open",
   },
   {
-    type: "agent_banking_float_shortfall",
+    type: "FS-DEMO-004",
+    category: "Unmatched Reversal",
+    description: "POS acquirer reversal received, but the compensating core-banking credit has not posted",
+    plainLanguage: "The external reversal is present but the customer’s internal balance is not yet restored.",
+    recommendation: "Validate the acquirer file and post the customer reversal under dual control.",
+    severity: "high",
+    status: "in_review",
+  },
+  {
+    type: "FS-DEMO-005",
+    category: "Duplicate Transaction",
+    description: "A core-banking recovery batch reposted a completed debit during a restart window",
+    plainLanguage: "One withdrawal was posted twice. The duplicate has been escalated because customer remediation and incident evidence are both required.",
+    recommendation: "Reverse the duplicate posting, preserve the incident evidence and complete the customer-redress control.",
+    severity: "critical",
+    status: "escalated",
+  },
+  {
+    type: "FS-DEMO-007",
     category: "Amount Mismatch",
-    description: "Agent banking collection short by ₦150 — agent float fee deducted before remittance",
-    plainLanguage: "The agent who collected the borrower's payment kept ₦150 as their fee before sending us the rest. This is normal for agent banking. We should treat the ₦14,850 as the full repayment and record the ₦150 as an agent fee.",
-    recommendation: "Accept ₦14,850 as full repayment. Write off ₦150 to Agent Banking Charges cost centre. Update the agent fee schedule to reflect this deduction pattern.",
+    description: "Mobile-app loan disbursement is net of a documented processing fee",
+    plainLanguage: "The net customer receipt is lower than the gross approval because the documented processing fee was deducted.",
+    recommendation: "Confirm the fee against the loan agreement and post it to the approved fee-income GL.",
     severity: "low",
     status: "resolved",
   },
 ];
 
 const PAYMENT_RAILS = [
-  { name: "NIBSS NIP (Interbank)", code: "NIBSS_NIP", txns: "1,200,000", pct: 40 },
-  { name: "Direct Debit (NIBSS)", code: "DIRECT_DEBIT", txns: "750,000", pct: 25 },
-  { name: "USSD Collections", code: "USSD", txns: "450,000", pct: 15 },
-  { name: "POS Terminal", code: "POS", txns: "300,000", pct: 10 },
-  { name: "Mobile Banking App", code: "MOBILE_APP", txns: "150,000", pct: 5 },
-  { name: "Agent Banking", code: "AGENT_BANKING", txns: "90,000", pct: 3 },
-  { name: "Card Payments", code: "CARD", txns: "60,000", pct: 2 },
+  { name: "NIBSS NIP Settlement", code: "NIBSS_NIP" },
+  { name: "NIBSS Direct Debit", code: "DIRECT_DEBIT" },
+  { name: "USSD Banking", code: "USSD_BANKING" },
+  { name: "Mobile Banking App", code: "MOBILE_APP" },
+  { name: "Core Banking Ledger", code: "CORE_BANKING" },
+  { name: "POS Acquirer Settlement", code: "POS_TERMINAL" },
+  { name: "Card Scheme Settlement", code: "CARD_PAYMENT" },
+  { name: "Agent Banking Collection", code: "AGENT_BANKING" },
 ];
 
 function FinServDemoPanel() {
-  const [entity, setEntity] = useState<"both" | "lapo" | "renmoney">("both");
   const demoStatus = trpc.demo.status.useQuery();
   const activateDemo = trpc.demo.activate.useMutation({
     onSuccess: () => demoStatus.refetch(),
@@ -338,22 +339,10 @@ function FinServDemoPanel() {
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h2 className="text-lg font-bold text-foreground">Financial Services Demo</h2>
-          <p className="text-sm text-muted-foreground">Simulated reconciliation for LapoMFB and Renmoney MFB — 3,000,000 transactions across 7 payment rails</p>
+          <h2 className="text-lg font-bold text-foreground">Financial Services Operational Control Demo</h2>
+          <p className="text-sm text-muted-foreground">Fictional, tenant-scoped data: 320 settlement items, 640 transaction legs and 16 reviewable control cases across eight feeds</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Entity selector */}
-          <div className="flex rounded-lg border overflow-hidden text-xs">
-            {(["both", "lapo", "renmoney"] as const).map(e => (
-              <button
-                key={e}
-                onClick={() => setEntity(e)}
-                className={`px-3 py-1.5 font-medium transition-colors ${entity === e ? "bg-blue-600 text-white" : "bg-background text-muted-foreground hover:bg-muted"}`}
-              >
-                {e === "both" ? "Both" : e === "lapo" ? "LapoMFB" : "Renmoney"}
-              </button>
-            ))}
-          </div>
           {isActive ? (
             <Button size="sm" variant="outline" onClick={() => deactivateDemo.mutate()} disabled={deactivateDemo.isPending} className="text-xs gap-1.5">
               {deactivateDemo.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <FlaskConical className="h-3 w-3" />}
@@ -362,81 +351,65 @@ function FinServDemoPanel() {
           ) : (
             <Button size="sm" onClick={() => activateDemo.mutate({ segment: "finserv" })} disabled={activateDemo.isPending} className="text-xs gap-1.5 bg-blue-600 hover:bg-blue-700 text-white">
               {activateDemo.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <FlaskConical className="h-3 w-3" />}
-              {activateDemo.isPending ? "Loading 3M transactions..." : "Load FinServ Demo Data"}
+              {activateDemo.isPending ? "Loading operational control data..." : "Load FinServ Demo Data"}
             </Button>
           )}
         </div>
       </div>
 
-      {/* Entity Profiles */}
+      {/* Control profiles */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {(entity === "both" || entity === "lapo") && (
-          <Card className="border-0 shadow-sm">
-            <CardContent className="p-4">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="h-9 w-9 rounded-lg bg-green-100 flex items-center justify-center">
-                  <Landmark className="h-5 w-5 text-green-700" />
-                </div>
-                <div>
-                  <p className="text-sm font-bold">LapoMFB</p>
-                  <p className="text-xs text-muted-foreground">Microfinance Bank — 1.8M active loan accounts</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div><p className="text-muted-foreground">Monthly collections</p><p className="font-semibold">₦18.4B</p></div>
-                <div><p className="text-muted-foreground">Match rate</p><p className="font-semibold text-green-600">95.2%</p></div>
-                <div><p className="text-muted-foreground">Transactions/month</p><p className="font-semibold">1,800,000</p></div>
-                <div><p className="text-muted-foreground">Exceptions</p><p className="font-semibold text-amber-600">88,200</p></div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-        {(entity === "both" || entity === "renmoney") && (
-          <Card className="border-0 shadow-sm">
-            <CardContent className="p-4">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="h-9 w-9 rounded-lg bg-blue-100 flex items-center justify-center">
-                  <Landmark className="h-5 w-5 text-blue-700" />
-                </div>
-                <div>
-                  <p className="text-sm font-bold">Renmoney MFB</p>
-                  <p className="text-xs text-muted-foreground">Digital Microfinance Bank — 620K active borrowers</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div><p className="text-muted-foreground">Monthly collections</p><p className="font-semibold">₦6.2B</p></div>
-                <div><p className="text-muted-foreground">Match rate</p><p className="font-semibold text-green-600">94.8%</p></div>
-                <div><p className="text-muted-foreground">Transactions/month</p><p className="font-semibold">1,200,000</p></div>
-                <div><p className="text-muted-foreground">Exceptions</p><p className="font-semibold text-amber-600">62,400</p></div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+        <Card className="border-0 shadow-sm">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="h-9 w-9 rounded-lg bg-green-100 flex items-center justify-center"><Landmark className="h-5 w-5 text-green-700" /></div>
+              <div><p className="text-sm font-bold">Settlement & Collection Controls</p><p className="text-xs text-muted-foreground">NIP, direct debit, USSD, mobile and agent settlement records</p></div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div><p className="text-muted-foreground">Settlement items</p><p className="font-semibold">320</p></div>
+              <div><p className="text-muted-foreground">Matched pairs</p><p className="font-semibold text-green-600">304</p></div>
+              <div><p className="text-muted-foreground">Open work</p><p className="font-semibold text-amber-600">10 cases</p></div>
+              <div><p className="text-muted-foreground">Escalated</p><p className="font-semibold text-red-600">1 case</p></div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-0 shadow-sm">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="h-9 w-9 rounded-lg bg-blue-100 flex items-center justify-center"><Shield className="h-5 w-5 text-blue-700" /></div>
+              <div><p className="text-sm font-bold">Core Ledger & Evidence Controls</p><p className="text-xs text-muted-foreground">Core-banking, POS, card, reversal and suspense control records</p></div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div><p className="text-muted-foreground">Transaction legs</p><p className="font-semibold">640</p></div>
+              <div><p className="text-muted-foreground">In review</p><p className="font-semibold text-blue-600">3 cases</p></div>
+              <div><p className="text-muted-foreground">Resolved evidence</p><p className="font-semibold text-green-600">2 cases</p></div>
+              <div><p className="text-muted-foreground">Age-tracked cases</p><p className="font-semibold">14 cases</p></div>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Combined Metrics */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard title="Total Transactions" value="3,000,000" subtitle="Combined monthly volume" icon={<Activity className="h-5 w-5" />} accent="blue" />
-        <MetricCard title="Auto-Match Rate" value="95.0%" subtitle="2,850,000 matched automatically" icon={<CheckCircle2 className="h-5 w-5" />} accent="green" trend="up" trendLabel="vs 55% manual baseline" />
-        <MetricCard title="Total Exceptions" value="150,000" subtitle="5% requiring human review" icon={<AlertTriangle className="h-5 w-5" />} accent="amber" />
-        <MetricCard title="Collections Processed" value="₦24.6B" subtitle="Monthly combined portfolio" icon={<DollarSign className="h-5 w-5" />} accent="purple" />
+        <MetricCard title="Transaction Legs" value="640" subtitle="320 settlement items + core ledger" icon={<Activity className="h-5 w-5" />} accent="blue" />
+        <MetricCard title="Auto-Match Rate" value="95.0%" subtitle="304 settlement items matched" icon={<CheckCircle2 className="h-5 w-5" />} accent="green" />
+        <MetricCard title="Control Cases" value="16" subtitle="10 open · 3 in review · 1 escalated · 2 resolved" icon={<AlertTriangle className="h-5 w-5" />} accent="amber" />
+        <MetricCard title="Review Queue" value="7" subtitle="Current open cases for operations" icon={<ClipboardList className="h-5 w-5" />} accent="purple" />
       </div>
 
       {/* Payment Rails Breakdown */}
       <Card className="border-0 shadow-sm">
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold">Payment Rails Coverage — All 7 Rails Active</CardTitle>
+          <CardTitle className="text-sm font-semibold">Control Feed Coverage — Eight Tenant-Scoped Feeds</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
             {PAYMENT_RAILS.map(rail => (
               <div key={rail.code} className="flex items-center gap-3">
                 <div className="w-48 text-xs text-muted-foreground shrink-0">{rail.name}</div>
-                <div className="flex-1 bg-muted rounded-full h-2">
-                  <div className="h-2 rounded-full bg-blue-500" style={{ width: `${rail.pct}%` }} />
-                </div>
-                <div className="w-28 text-right text-xs font-medium">{rail.txns} txns ({rail.pct}%)</div>
-                <Badge variant="outline" className="text-xs text-green-600 border-green-200">95%+ match</Badge>
+                <div className="flex-1 bg-muted rounded-full h-2"><div className="h-2 rounded-full bg-blue-500" style={{ width: "100%" }} /></div>
+                <div className="w-28 text-right text-xs font-medium">Control feed</div>
+                <Badge variant="outline" className="text-xs text-green-600 border-green-200">In scope</Badge>
               </div>
             ))}
           </div>
@@ -447,7 +420,7 @@ function FinServDemoPanel() {
       <div>
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-foreground">FinServ Exception Scenarios — With Plain Language Explanations</h3>
-          <Badge variant="outline" className="text-xs">5 of 150,000 shown</Badge>
+          <Badge variant="outline" className="text-xs">5 of 16 shown</Badge>
         </div>
         <div className="space-y-3">
           {FINSERV_EXCEPTIONS.map((ex, i) => (
@@ -466,14 +439,12 @@ function FinServDemoPanel() {
             <div>
               <p className="text-sm font-bold text-blue-900 mb-1">Financial Services ROI Summary</p>
               <p className="text-xs text-blue-800 leading-relaxed">
-                At 3,000,000 transactions per month across 7 payment rails, manual reconciliation requires a team of 12 finance officers working full-time.
-                ReconcileAI reduces this to 2 officers handling the 5% exception queue.
-                The 95% auto-match rate prevents ₦2.4B in unreconciled collections from ageing beyond 48 hours — a critical regulatory requirement under CBN guidelines.
+                This dataset is a controlled walkthrough, not a production performance claim. It demonstrates how matched settlement items, unresolved exceptions, review assignments, ageing, audit evidence and operational recommendations remain connected inside one tenant.
               </p>
               <div className="grid grid-cols-3 gap-4 mt-3">
-                <div><p className="text-lg font-bold text-blue-900">10 FTEs</p><p className="text-xs text-blue-700">Staff reduction</p></div>
-                <div><p className="text-lg font-bold text-blue-900">₦2.4B</p><p className="text-xs text-blue-700">Collections reconciled daily</p></div>
-                <div><p className="text-lg font-bold text-blue-900">CBN</p><p className="text-xs text-blue-700">Compliance-ready audit trail</p></div>
+                <div><p className="text-lg font-bold text-blue-900">304</p><p className="text-xs text-blue-700">Matched settlement items</p></div>
+                <div><p className="text-lg font-bold text-blue-900">14</p><p className="text-xs text-blue-700">Age-tracked work items</p></div>
+                <div><p className="text-lg font-bold text-blue-900">8</p><p className="text-xs text-blue-700">Controlled data feeds</p></div>
               </div>
             </div>
           </div>

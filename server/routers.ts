@@ -821,7 +821,7 @@ export const appRouter = router({
       const orgId = ctx.user.organizationId ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging();
+      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
       const now = new Date();
       const items = rows.map((r) => ({
         ageDays: ageTracker.ageDays(r.createdAt, now),
@@ -837,7 +837,7 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId ?? 0;
         const settings = orgId ? await db.getAgingSettings(orgId) : null;
         const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-        const rows = await db.getOpenExceptionsForAging();
+        const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
         const now = new Date();
         let items = rows.map((r) => {
           const age = ageTracker.ageDays(r.createdAt, now);
@@ -897,7 +897,7 @@ export const appRouter = router({
       const orgId = ctx.user.organizationId ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging();
+      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
       const now = new Date();
       const overAged = rows.filter(
         (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
@@ -4648,12 +4648,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // prewarmDemoUser at deploy time and by the guest-login path in auth, never
     // by this procedure. `status` below stays open because guests poll it and it
     // only reads.
-     activate: superAdminProcedure
+    activate: superAdminProcedure
       .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
       .mutation(async ({ ctx, input }) => {
         if (input.segment === "finserv") {
           const { seedFinServDemoData } = await import("./demoSeedFinServ");
           const result = await seedFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null, "both");
+          const { ip, ua } = getClientInfo(ctx);
+          await logAudit(ctx.user.id, "activate_finserv_operational_demo", "reconciliation_job", result.jobId, {
+            segment: "finserv",
+            transactionLegs: result.totalTransactions,
+            matchedPairs: result.matchedCount,
+            exceptionCases: result.exceptionCount,
+            reviewQueueOpenToday: result.reviewQueueOpenToday,
+          }, ip, ua);
           return { success: true, ...result };
         }
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
@@ -4662,6 +4670,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
     deactivate: superAdminProcedure
       .mutation(async ({ ctx }) => {
         await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        const { wipeFinServDemoData } = await import("./demoSeedFinServ");
+        await wipeFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true };
       }),
     // Mints a 7-day token granting access to the creating org's data. Part of the
