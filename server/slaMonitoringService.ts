@@ -1,12 +1,34 @@
 /**
  * SLA Monitoring Service
- * Monitors exception resolution times and sends alerts when SLA thresholds are breached.
- * Demo job exceptions (jobs whose name contains "Demo") are excluded from all alerts.
+ *
+ * Watches open exceptions and alerts the platform operator when they age past
+ * the 24-hour resolution target. Demo tenants are excluded, and every breach is
+ * attributed to the organisation it belongs to.
+ *
+ * ── Why this was rewritten ────────────────────────────────────────────────────
+ *
+ * Demo-ness was inferred by substring-matching reconciliation job NAMES for
+ * "Demo" / "demo" / "vs CBS GL" / "BrightGoods" / "Demo Reconciliation". That is
+ * a case-sensitive match against free text each seeder invents for itself, and
+ * it failed the first time a seeder chose a different convention: jobs named
+ * "… vs Core Banking — FSDEMO-v2" matched none of the five patterns, because
+ * `"FSDEMO".includes("Demo")` is false. 374 fabricated exceptions were reported
+ * to the owner as real SLA breaches — under a footer stating that demo data was
+ * excluded, which made the email confidently wrong rather than merely noisy.
+ *
+ * Demo-ness is now read from `organizations.isDemo`, a fact stored where the
+ * fact lives. A new seeder cannot defeat it by picking a different job name.
+ *
+ * The scan was also completely untenanted — it selected every exception on the
+ * platform with no organizationId in the predicate, and reported bare ids and
+ * ages with no attribution. Harmless while one demo tenant existed; with real
+ * banks it emails one client's operational posture into an undifferentiated
+ * list. Exceptions are now grouped and reported per organisation.
  */
 import { notifyOwner } from "./_core/notification";
 import { getDb, getAllUsers } from "./db";
-import { eq, and, or } from "drizzle-orm";
-import { exceptions, reconciliationJobs } from "../drizzle/schema";
+import { and, eq, or, inArray } from "drizzle-orm";
+import { exceptions, organizations } from "../drizzle/schema";
 
 // SLA thresholds in hours
 const SLA_WARNING_THRESHOLD = 20; // Yellow alert
@@ -14,6 +36,8 @@ const SLA_BREACH_THRESHOLD = 24; // Red alert
 
 interface SLABreach {
   exceptionId: number;
+  organizationId: number | null;
+  organizationName: string;
   hoursOpen: number;
   severity: 'warning' | 'critical';
   assignedTo?: number;
@@ -21,79 +45,79 @@ interface SLABreach {
 }
 
 /**
- * Check all open exceptions for SLA breaches and send notifications.
- * Exceptions linked to demo reconciliation jobs are intentionally excluded.
+ * Which organisations are real clients, keyed by id.
+ *
+ * Returns only non-demo organisations. An exception whose organizationId is not
+ * in this map — a demo tenant, or an org-less legacy row — is never alerted on.
+ * Exported for the test, which is the point: the rule is a pure lookup rather
+ * than a pattern buried in a filter.
+ */
+export function realOrganizations(
+  orgs: Array<{ id: number; name: string; isDemo: boolean }>,
+): Map<number, string> {
+  return new Map(orgs.filter((o) => !o.isDemo).map((o) => [o.id, o.name]));
+}
+
+/**
+ * Check open exceptions for SLA breaches and notify the platform operator.
+ *
+ * Demo tenants are excluded by `organizations.isDemo`, not by guessing from job
+ * names. Breaches are attributed to their organisation.
  */
 export async function checkSLABreaches(): Promise<void> {
   try {
     const db = await getDb();
     if (!db) return;
 
-    // 1. Find all demo/seeded job IDs so we can exclude their exceptions.
-    //    Demo jobs are identified by:
-    //    - Having "Demo" or "demo" in their name
-    //    - Being seeded reconciliation jobs (name contains "vs CBS GL" — these are
-    //      the bulk-seeded FinServ demo jobs, not real user-created jobs)
-    const allJobs = await db
-      .select({ id: reconciliationJobs.id, name: reconciliationJobs.name })
-      .from(reconciliationJobs);
+    // 1. Real (non-demo) organisations. Everything else is out of scope before a
+    //    single exception is examined.
+    const orgs = await db
+      .select({ id: organizations.id, name: organizations.name, isDemo: organizations.isDemo })
+      .from(organizations);
+    const real = realOrganizations(orgs);
 
-    const demoJobIds = allJobs
-      .filter(j => {
-        if (!j.name) return false;
-        // Explicitly seeded demo jobs (name contains Demo/demo)
-        if (j.name.includes("Demo") || j.name.includes("demo")) return true;
-        // Bulk-seeded FinServ channel jobs (e.g. "NIBSS_NIP vs CBS GL — April 2026")
-        if (j.name.includes("vs CBS GL")) return true;
-        // BrightGoods FMCG demo reconciliation jobs
-        if (j.name.includes("BrightGoods") || j.name.includes("Demo Reconciliation")) return true;
-        return false;
-      })
-      .map(j => j.id);
+    if (real.size === 0) {
+      console.log('[SLA Monitor] No non-demo organisations — nothing to check.');
+      return;
+    }
 
-    // 2. Fetch all open/in-review exceptions
+    // 2. Open exceptions BELONGING TO those organisations. The organizationId
+    //    predicate is in the query rather than a post-filter, so an org-less
+    //    legacy exception cannot arrive and be attributed to nobody.
     const openExceptions = await db
       .select()
       .from(exceptions)
       .where(
-        or(
-          eq(exceptions.status, "open"),
-          eq(exceptions.status, "in_review")
-        )
+        and(
+          or(eq(exceptions.status, "open"), eq(exceptions.status, "in_review")),
+          inArray(exceptions.organizationId, Array.from(real.keys())),
+        ),
       )
       .limit(10000);
-
-    // Filter out demo job exceptions in JS.
-    // Also exclude exceptions with jobId = 0 — these are seeded demo/FinServ
-    // exceptions inserted without a real reconciliation job reference.
-    const demoJobIdSet = new Set(demoJobIds);
-    const realExceptions = openExceptions.filter(
-      (e) => e.jobId !== 0 && !demoJobIdSet.has(e.jobId)
-    );
 
     const breaches: SLABreach[] = [];
     const now = new Date();
 
-    for (const exception of realExceptions) {
+    for (const exception of openExceptions) {
       if (!exception.createdAt) continue;
+      const orgName = exception.organizationId === null ? null : real.get(exception.organizationId);
+      if (!orgName) continue; // belt and braces; the query already excluded these
 
       const hoursOpen = (now.getTime() - exception.createdAt.getTime()) / (1000 * 60 * 60);
+      const severity =
+        hoursOpen >= SLA_BREACH_THRESHOLD ? 'critical'
+        : hoursOpen >= SLA_WARNING_THRESHOLD ? 'warning'
+        : null;
+      if (!severity) continue;
 
-      if (hoursOpen >= SLA_BREACH_THRESHOLD) {
-        breaches.push({
-          exceptionId: exception.id,
-          hoursOpen: Math.round(hoursOpen * 10) / 10,
-          severity: 'critical',
-          assignedTo: exception.assignedTo || undefined,
-        });
-      } else if (hoursOpen >= SLA_WARNING_THRESHOLD) {
-        breaches.push({
-          exceptionId: exception.id,
-          hoursOpen: Math.round(hoursOpen * 10) / 10,
-          severity: 'warning',
-          assignedTo: exception.assignedTo || undefined,
-        });
-      }
+      breaches.push({
+        exceptionId: exception.id,
+        organizationId: exception.organizationId,
+        organizationName: orgName,
+        hoursOpen: Math.round(hoursOpen * 10) / 10,
+        severity,
+        assignedTo: exception.assignedTo || undefined,
+      });
     }
 
     // Enrich with assigned user names if needed
@@ -107,13 +131,14 @@ export async function checkSLABreaches(): Promise<void> {
       }
     }
 
-    // Send notifications if there are breaches
     if (breaches.length > 0) {
       await sendSLABreachNotification(breaches);
     }
 
+    const demoCount = orgs.length - real.size;
     console.log(
-      `[SLA Monitor] Checked ${realExceptions.length} real exceptions (excluded ${openExceptions.length - realExceptions.length} demo exceptions), found ${breaches.length} SLA breaches`
+      `[SLA Monitor] Checked ${openExceptions.length} open exceptions across ${real.size} client organisation(s) ` +
+      `(${demoCount} demo organisation(s) excluded), found ${breaches.length} SLA breaches`,
     );
   } catch (error) {
     console.error('[SLA Monitor] Error checking SLA breaches:', error);
@@ -129,15 +154,35 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
 
   const lines: string[] = [];
 
+  // Lead with the per-organisation split. 374 bare exception ids told the reader
+  // nothing about who was affected or where to start; once more than one client
+  // exists, the tenant is the first thing that matters.
+  const byOrg = new Map<string, { critical: number; warning: number }>();
+  for (const b of breaches) {
+    const row = byOrg.get(b.organizationName) ?? { critical: 0, warning: 0 };
+    row[b.severity]++;
+    byOrg.set(b.organizationName, row);
+  }
+  if (byOrg.size > 0) {
+    lines.push('By organisation:');
+    for (const [name, c] of Array.from(byOrg.entries()).sort((a, b) => (b[1].critical + b[1].warning) - (a[1].critical + a[1].warning))) {
+      lines.push(`  ${name} — ${c.critical} breached, ${c.warning} approaching`);
+    }
+    lines.push('');
+  }
+
+  const describe = (b: SLABreach) =>
+    `${b.organizationName} · Exception #${b.exceptionId} — ${b.hoursOpen}hrs open — ` +
+    (b.assignedUserName ? `Assigned to: ${b.assignedUserName}` : 'Unassigned');
+
   if (criticalBreaches.length > 0) {
     lines.push(`🔴 CRITICAL — ${criticalBreaches.length} exception${criticalBreaches.length !== 1 ? 's' : ''} breached the 24-hour SLA:`);
     lines.push('');
-    criticalBreaches.slice(0, 10).forEach((breach, i) => {
-      const assignedInfo = breach.assignedUserName
-        ? `Assigned to: ${breach.assignedUserName}`
-        : 'Unassigned';
-      lines.push(`  ${i + 1}. Exception #${breach.exceptionId} — ${breach.hoursOpen}hrs open — ${assignedInfo}`);
-    });
+    // Oldest first — the reader should see the worst, not the lowest id.
+    criticalBreaches.slice()
+      .sort((a, b) => b.hoursOpen - a.hoursOpen)
+      .slice(0, 10)
+      .forEach((breach, i) => lines.push(`  ${i + 1}. ${describe(breach)}`));
     if (criticalBreaches.length > 10) {
       lines.push(`  ...and ${criticalBreaches.length - 10} more critical exceptions`);
     }
@@ -147,13 +192,13 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   if (warningBreaches.length > 0) {
     lines.push(`⚠️ WARNING — ${warningBreaches.length} exception${warningBreaches.length !== 1 ? 's' : ''} approaching the 24-hour SLA limit:`);
     lines.push('');
-    warningBreaches.slice(0, 10).forEach((breach, i) => {
-      const assignedInfo = breach.assignedUserName
-        ? `Assigned to: ${breach.assignedUserName}`
-        : 'Unassigned';
-      const timeRemaining = 24 - breach.hoursOpen;
-      lines.push(`  ${i + 1}. Exception #${breach.exceptionId} — ${breach.hoursOpen}hrs open — ${timeRemaining.toFixed(1)}hrs remaining — ${assignedInfo}`);
-    });
+    warningBreaches.slice()
+      .sort((a, b) => b.hoursOpen - a.hoursOpen)
+      .slice(0, 10)
+      .forEach((breach, i) => {
+        const timeRemaining = SLA_BREACH_THRESHOLD - breach.hoursOpen;
+        lines.push(`  ${i + 1}. ${describe(breach)} — ${timeRemaining.toFixed(1)}hrs remaining`);
+      });
     if (warningBreaches.length > 10) {
       lines.push(`  ...and ${warningBreaches.length - 10} more warning exceptions`);
     }
@@ -161,9 +206,13 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   }
 
   lines.push('Action Required: Please review and resolve these exceptions to maintain SLA compliance.');
-  lines.push('24-hour SLA Target: All exceptions should be resolved within 24 hours of creation.');
+  lines.push(`${SLA_BREACH_THRESHOLD}-hour SLA Target: All exceptions should be resolved within ${SLA_BREACH_THRESHOLD} hours of creation.`);
   lines.push('');
-  lines.push('Note: Demo data exceptions are excluded from this alert.');
+  // States the MECHANISM, not a bare assurance. The previous footer promised
+  // "Demo data exceptions are excluded" while the alert was made almost entirely
+  // of demo data — a claim the reader could not check and that happened to be
+  // false. Naming the rule makes the promise falsifiable.
+  lines.push('Scope: organisations flagged as demo tenants (organizations.isDemo) are excluded from this alert.');
 
   const content = lines.join('\n');
 

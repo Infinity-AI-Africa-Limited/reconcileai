@@ -25,6 +25,8 @@ import {
 import { Loader2, CheckCircle2, AlertCircle, Info, Building2, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { modulePanelFor } from "@/lib/modulePanel";
+import { useOrgSegmentStatus } from "@/hooks/useOrgSegment";
 
 type ModuleType = "settlement" | "account_level";
 
@@ -296,6 +298,9 @@ export default function ModuleConfiguration() {
   const utils = trpc.useUtils();
   const { user } = useAuth();
   const isSuperAdmin = user?.role === "super_admin";
+  // Not useOrgSegment: this page must not treat "the segment did not load" as
+  // "this org gets everything". See lib/modulePanel.
+  const panel = modulePanelFor(useOrgSegmentStatus());
 
   const [overrideDialog, setOverrideDialog] = useState<{
     open: boolean;
@@ -323,7 +328,10 @@ export default function ModuleConfiguration() {
     return config?.isEnabled ?? true;
   };
 
-  if (isLoading) {
+  // The segment is a second, independent query. Waiting only on modules.list
+  // let whichever finished first decide the page, so a merchant whose segment
+  // was still in flight got the unscoped list.
+  if (isLoading || panel.kind === "loading") {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <Loader2 className="h-8 w-8 animate-spin text-[#1B365D]" />
@@ -352,7 +360,27 @@ export default function ModuleConfiguration() {
       </Alert>
 
       <div className="grid gap-6">
-        {(Object.keys(MODULE_INFO) as ModuleType[]).map((moduleType) => {
+        {/* Only the modules this vertical can use. Account-Level reconciles a
+            general ledger against a core banking system; a retail merchant
+            operates neither, and the copy below promises "CBN compliance" and
+            "zero licence revocations" to a reader who answers to no regulator
+            and holds no licence. The server refuses it too — see
+            assertModuleAvailable — so this is presentation, not the gate.
+
+            When the segment could not be loaded we show nothing rather than
+            guess: the wide set offers a merchant a module they cannot enable,
+            the narrow set takes one away from a bank that can. */}
+        {panel.kind === "unresolved" ? (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Modules unavailable</AlertTitle>
+            <AlertDescription>
+              We could not confirm which modules apply to your organisation, so none are
+              shown — listing the wrong ones would be worse than listing none. Reload the
+              page to try again, and contact support if it keeps happening.
+            </AlertDescription>
+          </Alert>
+        ) : panel.modules.map((moduleType) => {
           const info = MODULE_INFO[moduleType];
           const isEnabled = getModuleStatus(moduleType);
           const isToggling = toggleModule.isPending;

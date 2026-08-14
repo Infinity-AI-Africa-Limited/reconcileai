@@ -14,10 +14,8 @@
  */
 
 import { invokeLLM } from "./_core/llm";
-import {
-  nigerianExceptionsTaxonomyPromptBlock,
-  relevantNigerianChannelsForText,
-} from "./exceptions/seed";
+import { nigerianExceptionsTaxonomyPromptBlock, nonInterestTaxonomyPromptBlock } from "./exceptions/seed";
+import { relevantNigerianChannels } from "./exceptions/channelMapping";
 
 // ─── Shared Transaction type (mirrors drizzle schema) ────────────────
 
@@ -30,6 +28,17 @@ export interface SATransaction {
   currency: string;
   transactionDate: string | Date;
   channelId: number;
+  /**
+   * `channels.channelType` for `channelId`, when the caller has it.
+   *
+   * Optional so existing callers keep working, but supplying it is what lets the
+   * Super Agent pick its exception-taxonomy slice from the channel a transaction
+   * actually arrived on instead of guessing from the description. Bank
+   * settlement files rarely say "POS" or "NIP" in prose, so the text heuristic
+   * alone matched nothing and the catalogue silently went uninjected. See
+   * server/exceptions/channelMapping.ts.
+   */
+  channelType?: string | null;
   debitCredit: string;
   isReversal?: boolean | null;
   originalTransactionRef?: string | null;
@@ -504,7 +513,13 @@ export async function diagnoseException(
   txn: SATransaction,
   allTargets: SATransaction[],
   config: { amountTolerance: number; dateWindowDays: number },
-  memoryContext: string = ""
+  memoryContext: string = "",
+  /**
+   * `organizations.bankingModel` for the owning tenant. Omitted means
+   * conventional — see isNonInterestInstitution for why an unknown value must
+   * NOT be read as non-interest.
+   */
+  bankingModel?: string | null,
 ): Promise<ExceptionDiagnosis> {
   const txnAmt = parseFloat(String(txn.amount));
   const parsedRef = parseReference(txn.transactionRef, txn.description);
@@ -513,7 +528,7 @@ export async function diagnoseException(
   const ruleResult = ruleBasedClassify(txn, txnAmt, allTargets, config, parsedRef);
 
   // LLM diagnosis (enriches the rule result with natural language)
-  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext);
+  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext, bankingModel);
 
   return {
     ...ruleResult,
@@ -689,19 +704,34 @@ async function getLLMDiagnosis(
   txn: SATransaction,
   ruleResult: ExceptionDiagnosis,
   parsedRef: ParsedReference,
-  memoryContext: string
+  memoryContext: string,
+  bankingModel?: string | null,
 ): Promise<{ headline: string; rootCause: string; recommendedAction: string }> {
-  // Inject only the taxonomy channels relevant to this transaction's text —
-  // an FMCG deduction gets no channel block; a card/NIP/POS exception gets the
-  // catalogued failure modes, regulatory context, and diagnosis guidance.
+  // Inject only the taxonomy channels relevant to this transaction — the
+  // catalogued failure modes, regulatory context and diagnosis guidance for the
+  // rails it actually touches. An FMCG deduction still gets no channel block.
+  //
+  // The transaction's OWN channel decides first; its text only adds specificity.
+  // Text alone was the whole rule before, which meant a POS settlement row
+  // reading "SETTLEMENT 20260812 BATCH 4471" matched no pattern and was
+  // diagnosed with no knowledge of MSC netting or T+1 windows.
   const channelText = [txn.description, txn.transactionRef, txn.counterparty]
     .filter(Boolean)
     .join(" ");
-  const channels = relevantNigerianChannelsForText(channelText);
+  const channels = relevantNigerianChannels({ channelType: txn.channelType, text: channelText });
   const taxonomyBlock = channels.length > 0 ? nigerianExceptionsTaxonomyPromptBlock(channels) : "";
+
+  // Non-interest (NIFI) institutions additionally get the profit-and-sharing
+  // taxonomy, which is keyed on the ORGANISATION rather than the channel: it
+  // applies across every rail the institution runs. Empty string for a
+  // conventional bank, so nothing is injected and no tokens are spent.
+  const nonInterestBlock = nonInterestTaxonomyPromptBlock(bankingModel);
 
   try {
     const response = await invokeLLM({
+      // Agentic: multi-step diagnosis of a case, the work CLAUDE.md §4 reserves
+      // the stronger model for.
+      modelTier: "agent",
       messages: [
         {
           role: "system",
@@ -713,7 +743,7 @@ Your job is to diagnose payment exceptions with the precision of a Big 4 forensi
 3. Recommend a single, specific next action
 4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable
 
-${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
+${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${nonInterestBlock ? `THIS INSTITUTION IS LICENSED ON NON-INTEREST (NIFI) PRINCIPLES.\nIt runs the same payment rails as any other bank, but income may only arise from a real sale, lease or partnership — never from the passage of time — and investment account holders' funds must stay segregated from shareholders' funds. Treat an entry that accrues purely with time, or a return credited to the wrong pool, as a compliance finding rather than a posting error: it reaches the institution's licence basis and its Advisory Committee of Experts' attestation, so it can be material at an amount that would be immaterial at a conventional bank.\n\nNON-INTEREST EXCEPTION PATTERNS:\n${nonInterestBlock}\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
         },
         {
           role: "user",
@@ -812,6 +842,9 @@ async function generateVendorEmail(txn: SATransaction, diagnosis: ExceptionDiagn
 
   try {
     const response = await invokeLLM({
+      // Agentic: drafts an action the user will send on their own letterhead,
+      // reasoning from the diagnosis rather than summarising it.
+      modelTier: "agent",
       messages: [
         {
           role: "system",

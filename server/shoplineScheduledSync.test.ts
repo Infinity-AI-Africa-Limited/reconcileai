@@ -218,3 +218,51 @@ describe("SHOPLINE triggerManualSync — Input Validation", () => {
     expect(fifteenMinAgo.toISOString()).toBe("2026-07-19T12:15:00.000Z");
   });
 });
+
+/**
+ * Catch-up window — regression cover for the 2026-07-31 dev-store incident.
+ *
+ * The incremental poll used a fixed "last 15 minutes" window, which meant the
+ * one job it exists for — recovering a sync whose in-process debounce timer was
+ * lost to a restart — was impossible: once a record was older than 15 minutes it
+ * fell outside every subsequent poll, permanently. The window is now driven by
+ * the store's own watermark.
+ */
+describe("SHOPLINE catchUpWindow", () => {
+  const now = new Date("2026-08-01T12:00:00Z");
+
+  it("resumes from the last successful sync, with an overlap for the seam", async () => {
+    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
+    const lastSync = new Date("2026-08-01T11:40:00Z");
+    const { from, to } = catchUpWindow(lastSync, now);
+    // 11:40 minus the 5-minute overlap.
+    expect(from.toISOString()).toBe("2026-08-01T11:35:00.000Z");
+    expect(to).toBe(now);
+  });
+
+  it("recovers a record older than the old fixed 15-minute window", async () => {
+    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
+    // Store last synced 3 hours ago; the missed order landed 2 hours ago.
+    const lastSync = new Date("2026-08-01T09:00:00Z");
+    const missedOrderAt = new Date("2026-08-01T10:00:00Z");
+    const { from, to } = catchUpWindow(lastSync, now);
+    expect(from.getTime()).toBeLessThan(missedOrderAt.getTime());
+    expect(to.getTime()).toBeGreaterThan(missedOrderAt.getTime());
+    // The old behaviour would have started at 11:45 and missed it entirely.
+    expect(from.getTime()).toBeLessThan(now.getTime() - 15 * 60 * 1000);
+  });
+
+  it("scans the full catch-up window when the store has never synced", async () => {
+    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
+    const { from, to } = catchUpWindow(null, now);
+    expect(from.toISOString()).toBe("2026-07-31T12:00:00.000Z"); // 24h back
+    expect(to).toBe(now);
+  });
+
+  it("caps the lookback so a long-dark store cannot trigger an unbounded scan", async () => {
+    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
+    const lastSync = new Date("2026-06-01T00:00:00Z"); // two months stale
+    const { from } = catchUpWindow(lastSync, now);
+    expect(from.toISOString()).toBe("2026-07-31T12:00:00.000Z"); // clamped to 24h
+  });
+});

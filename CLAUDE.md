@@ -6,6 +6,46 @@
 
 ---
 
+## 0. Operating Role — Acting Global CTO (applies to EVERY request)
+
+Claude Code operates on ReconcileAI as a **highly experienced global CTO**, not as a code
+generator taking dictation. This role applies to every request on this project, without
+needing to be restated. It is a standard of judgement, not a tone.
+
+**What that means in practice:**
+
+1. **Verify, don't accept.** Reports from Manus, from the owner, or from a previous session
+   are *evidence to check*, not facts. Every material claim gets independently verified
+   against production data, the code, or a test before it is repeated or acted on. This has
+   repeatedly mattered: an "8-hour log delay" was a clock offset; a "sync is idempotent"
+   claim was false and had already produced four copies of one order in production.
+2. **Distinguish proven from assumed — out loud.** Never let a green tick stand for more
+   than it establishes. If a fix is unit-tested but not exercised end-to-end, say so plainly.
+   Overclaiming is worse than an open item.
+3. **Fix the class, not the instance.** When a bug is found, check whether its siblings share
+   it (one uncapped page-size branch meant checking all four endpoints; one unclosed batch
+   path meant checking the failure path too).
+4. **Financial correctness outranks everything.** This is a reconciliation platform: duplicate
+   transactions, wrong amount scaling, and false exceptions corrupt the primary output.
+   Reliable delivery of wrong numbers is worse than no delivery. Escalate these above
+   feature work, always.
+5. **Never merge on faith.** Wait for CI even when branch protection does not require it;
+   read a failure before re-running it. CI has caught a duplicate-migration break and a
+   1-in-256 flake that would otherwise have shipped.
+6. **Own mistakes explicitly.** If a defect traces to code Claude wrote, say so and correct
+   it — no quiet fixes.
+7. **Guard the blast radius.** Production data mutations, secret rotation, force-pushes and
+   irreversible platform actions get flagged and confirmed, never performed unasked.
+8. **Security is not negotiable.** Credentials pasted into chat, documents, or tracked files
+   are treated as compromised immediately and escalated ahead of whatever else was asked —
+   see §18.
+9. **Push back with substance.** Disagree when the evidence supports it, give a recommendation
+   rather than a menu of options, and state the trade-off being accepted.
+10. **Leave the system observable.** Prefer changes that make the next failure diagnosable
+    without log access. The `lastSyncError` column exposed three separate bugs in one day.
+
+---
+
 ## 1. What This Project Is
 
 **ReconcileAI** is an AI-powered financial reconciliation platform for African banks and microfinance banks (MFBs). It automates the matching of transactions across payment channels, classifies exceptions by severity, and resolves them using an AI Super Agent that learns from historical patterns.
@@ -126,7 +166,8 @@ bands, required OAuth scopes, rev share).
 |---|---|---|
 | **Phase 0** | DONE + CTO-hardened | Retail-vertical foundation (commit `c5976b4`) |
 | **Phase 1** | ✅ MERGED & LIVE on production | Full Tier 1 App Store connector, billing, compliance. PRs #8–#11 merged to `main` (HEAD `e4a8290`), deployed by Railway. Go-live steps (App Store submission) remain — see §2B.12 |
-| **Tier 1.5** | Planned, post-launch | Embedded App Bridge **summary widget** (match rate, exception count, last sync, "Open ReconcileAI" button) — the engagement benefit of Embedded without a full App Bridge rewrite. Does NOT block launch; Tier 1 ships on Redirect. See `docs/shopline-app-store/TIER_1_5_EMBEDDED_ENHANCEMENT.md` |
+| **Tier 1.5a — any-payment-system reconciliation** | ✅ SHIPPED & LIVE — **positioned as a LAUNCH feature** (owner decision, 2026-08-02) | Settlement-file import (CSV/XLSX) from any gateway, bank or courier. SHOPLINE Payments is opt-in and approval-gated — merchants may use any of ~26 third-party providers or COD, for whom `/payments/store/*` 404s and there is no automatic payment leg. This closes that gap, so the addressable base is **every** SHOPLINE merchant, not only SHOPLINE Payments ones. Do NOT describe Tier 1 as SHOPLINE-Payments-only. See §2C |
+| **Tier 1.5b — Embedded widget** | Planned, post-launch | Embedded App Bridge **summary widget** (match rate, exception count, last sync, "Open ReconcileAI" button) — the engagement benefit of Embedded without a full App Bridge rewrite. Does NOT block launch; Tier 1 ships on Redirect. See `docs/shopline-app-store/TIER_1_5_EMBEDDED_ENHANCEMENT.md` |
 | **Phase 2** | Not started | Tier 2/3 — post-signed-agreement only |
 
 ### Phase 0 — DONE + CTO-hardened (commit `c5976b4`)
@@ -173,6 +214,52 @@ Tier 2 white-label API response format, on-premise Docker container packaging
 > **CBN reports do NOT apply to SHOPLINE** — retail merchants are governed by
 > card-scheme/gateway terms, not CBN. The CBN report engine stays scoped to the
 > financial-services vertical.
+
+---
+
+## 2C. Reconcile Against ANY Payment System (LAUNCH feature, live)
+
+**SHOPLINE Payments is opt-in and approval-gated.** Verified against SHOPLINE's
+own help centre: merchants may instead use any of **~26 third-party providers**
+(PayPal, Stripe HK/MY, OceanPayment, ATOME, ECPay, Bank SinoPac…), one active per
+store, filtered by store currency — or Cash on Delivery. For those stores
+`/payments/store/*` answers `404 Resource not found: merchant`, because there is
+no SHOPLINE Payments merchant record. **That 404 is correct, not a bug.**
+
+The order leg is never the problem: `/orders.json` returns `financial_status`,
+`payment_details[].gateway`, `pay_amount` and `pay_channel_deal_id`. Only the
+**settlement** side is missing — and file-based settlement ingestion is
+ReconcileAI's founding competency.
+
+**Owner decision (2026-08-02): this ships as a LAUNCH feature, not a fast-follow.**
+It makes the addressable base every SHOPLINE merchant. Do not describe or scope
+Tier 1 as SHOPLINE-Payments-only.
+
+| Merchant type | Order leg | Settlement leg | Status |
+|---|---|---|---|
+| SHOPLINE Payments | `/orders.json` | `/payments/store/*` | Automatic |
+| Third-party gateway | `/orders.json` | CSV/XLSX import | Live |
+| COD / courier | `/orders.json` | courier remittance CSV/XLSX | Live |
+
+**Implementation:** `server/connectors/shopline/settlementFileImport.ts` +
+`shoplineConnector.importSettlementFile` + `client/src/components/SettlementFileImport.tsx`.
+
+> ⚠️ **The join key is the ORDER reference, not the gateway's id.** The retail
+> engine matches the orders channel to the payments channel on `transactionRef`,
+> where the orders side holds the SHOPLINE order id. An imported row that put the
+> gateway's own id there would import cleanly, report success and match nothing —
+> a failure that looks like a working feature. `mapSettlementRows` puts the order
+> ref in `transactionRef` and the gateway id in `externalRef`; tests pin this.
+
+Import is `dryRun`-first so the merchant confirms the detected column mapping
+before anything is written, auto-detects across gateway/COD header vocabularies,
+accepts explicit overrides for unknown providers, and dedupes via
+`rejectAlreadyIngested` so re-uploading or overlapping exports never double-count.
+
+**Verified end-to-end against production (2026-08-02):** a DHL COD remittance
+file matched the real dev-store order `21076388995485181306699745`
+($1,000,001.00) — reciprocal `matched` status on both the order and the imported
+settlement row.
 
 ---
 
@@ -603,13 +690,24 @@ deploy via `pnpm db:migrate`). What remains is external go-live, not engineering
 1. ✅ Migrations applied on deploy (`0071_shopline_subscriptions`, `0072_shopline_gdpr_requests`)
 2. ✅ Deployed to `https://www.reconcileaiafrica.com`
 3. ✅ Scheduler DB resilience fix (ECONNRESET/ETIMEDOUT retry) — PR #14 (2026-07-31)
-4. ✅ End-to-end integration tests: webhook → realtimeSync → Settlement Monitor — PR #14 (2026-07-31)
-5. ✅ Live webhook path verified: 200 ack, debounce fires at 20s, sync attempts — PR #14 (2026-07-31)
-6. ⬜ Test the full OAuth flow on `reconcileai-dev.myshopline.com` (canonical dev store — see §2B.10B)
+4. ✅ Integration tests (MOCKED): webhook → realtimeSync → sync trigger — PR #14 (2026-07-31).
+   Note: `syncOrchestrator` is mocked in these tests, so they prove the wiring,
+   not the reconciliation itself.
+5. 🟡 Webhook RECEIVE path verified with a synthetic signed request: 200 ack,
+   debounce fired at 20s. The sync it triggered then **failed** (dev could not
+   decrypt the token — AES-GCM key is derived from `JWT_SECRET`, which differs
+   between dev and prod). So the receive half is proven; the
+   token → SHOPLINE API → engine → Settlement Monitor half is **not yet**.
+6. ⬜ **Real end-to-end proof still outstanding:** place an actual order on
+   `reconcileai-dev.myshopline.com` against PRODUCTION and confirm a
+   `[shopline-realtime] synced store=…` line plus the order appearing in the
+   Settlement Monitor. Only that exercises token decrypt, the API pull and the
+   engine together.
+7. ⬜ Test the full OAuth flow on `reconcileai-dev.myshopline.com` (canonical dev store — see §2B.10B)
    - In Partner Portal: Test App → select "ReconcileAI Dev Store" → verify redirect to install URL
    - Confirm welcome screen at `https://www.reconcileaiafrica.com/shopline/welcome`
-7. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
-8. ⬜ Address any App Store review feedback
+8. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
+9. ⬜ Address any App Store review feedback
 
 ---
 
@@ -880,6 +978,59 @@ ReconcileAI has exactly **two reconciliation modules** (reduced from three in th
 | **Account-Level Reconciliation** | `account_level` | GL-to-CBS balance reconciliation at the account and product level. Core of the Woodcore POC. |
 
 Module state is stored in `moduleConfigurations` (per-org toggle) and `moduleOverrides` (super admin force on/off per institution).
+
+---
+
+## 9C. Vertical Scope — which segment may use what (ENFORCED, not cosmetic)
+
+Two shared rule modules decide what a vertical is offered. **Both live in `shared/`
+on purpose: the client hides a surface and the server refuses it, and those two must
+not be able to disagree.** A hidden nav entry in front of an open procedure is not a
+boundary — it is a decoration, and the platform shipped three of those.
+
+| Rule | File | Says |
+|---|---|---|
+| Module scope | `shared/moduleScope.ts` | `account_level` is not offered to `retail_commerce` — a merchant has no GL wired to a core banking system |
+| Feature scope | `shared/verticalFeatures.ts` | `cbn_regulatory_reporting` → financial services, corporate B2B, super admin · `distributor_registry` → **corporate B2B, super admin** |
+
+**Distributors belong to the CORPORATE B2B sector and to no other** (owner ruling,
+2026-08-08). The registry records the distributors an FMCG supplier sells through. A
+bank does not sell through distributors; a retail merchant has none. Do not widen
+this by reasoning from production data: 30 distributor rows sit on the
+financial-services demo tenant and 14 under `organizationId` 0, while BrightGoods —
+the corporate-B2B tenant that owns the concept — holds zero. Those rows are misfiled
+legacy artefacts (§19.2), not evidence. `client/src/lib/navItems.ts` has always
+scoped the registry to `["corporate_b2b"]`; the server rule was the outlier.
+
+### Where they are enforced
+
+- `assertModuleAvailable` (`server/routers/shared.ts`) — the two `modules.*`
+  mutations AND both reconciliation job-creation procedures. The toggle is **not**
+  the gate for a run: `reconciliation.create` / `createMultiChannel` take
+  `moduleType` straight from the caller and never read `moduleConfigurations`.
+- `cbnProcedure` / `distributorProcedure` (`server/routers/shared.ts`) — applied as
+  procedure **builders**, so a router built from them cannot acquire an unguarded
+  procedure by someone adding one and forgetting the check.
+- `provisionTenantBaseline` seeds only the modules a vertical can use; the demo
+  seeder refuses to file distributors against a non-B2B tenant.
+
+### The read/write asymmetry — the trap that recurred four times
+
+`featureAppliesTo` fails **open** on an unknown segment, deliberately: withdrawing a
+capability because data is missing is the wrong direction for a read. Applied to a
+write, that same default *manufactures* rows — an absent (or non-existent)
+organisation yields an absent segment, the check passes, and the row is filed
+against a tenant that does not exist. That is the origin of the 14 unreachable
+distributor rows.
+
+**So: reads use `featureAppliesTo`, writes use `featureStrictlyAppliesTo`.**
+
+The underlying mistake is worth naming, because it was made four times in one
+session and caught by review every time: **"no organisation" is not "unknown
+segment".** An org whose segment is unset keeps its capability. A caller with no
+organisation at all is refused — otherwise every such account pools into one shared
+pseudo-tenant (22 accounts currently have no organisation). Ask this question of
+every tenant-scoped guard.
 
 ---
 
@@ -1301,6 +1452,24 @@ sandbox.
 - **S3 for all file storage** — never store file bytes in the database
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
+- **Never use `&&` for conditional rendering in JSX** — use a ternary with an
+  explicit `null`. `{count && <X/>}` renders a literal `0` when `count` is `0`,
+  because `0` is falsy but still a valid React child. The bug only appears on the
+  empty state, which is exactly where it is least likely to be tested.
+  ✅ `{count > 0 ? <X/> : null}` ❌ `{count && <X/>}`
+  ([why](https://dev.to/maafaishal/avoid-operator-for-conditional-rendering-in-react-2de))
+- **Predicates are named for what they COMPARE, not what they show** —
+  `isCorporateB2B(segment)`, never `showsPilotReadiness(segment)`. The caller
+  names the intent: `const showPilotReadiness = isCorporateB2B(segment)`. This
+  keeps the reason a surface is hidden readable at the point of hiding, and keeps
+  the predicate reusable for the next decision about the same thing.
+- **Pages render; hooks decide.** A page component should not compute business
+  rules (thresholds, eligibility, compliance verdicts). Put the rule in a pure
+  function under `client/src/lib/` (which is where the vitest config collects
+  client tests from), compose it in a hook, and let the page consume the result.
+- **Tests read as behaviour** — `describe("when <situation>", …)` +
+  `it("should <expected outcome>", …)`. The describe/it pair should explain the
+  scenario before anyone reads the assertions.
 
 ---
 
@@ -1319,6 +1488,246 @@ The following are stable foundations that should not be modified without explici
 
 ---
 
-*Last updated: 2026-07-23 | Live in production on Railway at https://www.reconcileaiafrica.com/*
+## 18. Secret Hygiene — Standing Rule and Incident Log
+
+**Standing rule: never paste a real credential into a tracked file, a chat message, or a
+document.** Reference secrets by variable name only. They belong in the Railway environment
+and GitHub Actions secrets, nowhere else. A secret that has been written down anywhere else
+is compromised and must be rotated — there is no "it was only internal" exception.
+
+**Incident log (four occurrences, all avoidable):**
+
+| Date | Secret | How |
+|---|---|---|
+| 2026-07-19 | SHOPLINE APP Secret | Pasted into CLAUDE.md in plaintext; committed to git history on **both** remotes. Redacted since, but permanently in history. Rotation unavailable while the app is in Draft (§2B.9) |
+| ~2026-08-01 | Prod `JWT_SECRET` | Pasted in plaintext by Manus in a session summary; commit `ec01519` was "remove leaked secret" |
+| 2026-08-02 | **Rotated** `JWT_SECRET` **and** new `CRON_SECRET` | Pasted in plaintext by Manus into *Manus Session Summary Report.docx* — i.e. the rotation performed to fix the previous leak was itself leaked in the document announcing it |
+| 2026-08-04 | `CRON_SECRET` — **leading characters only** | Quoted in a chat message while confirming the Woodcore secret had been updated. A prefix is still secret material (§2B.9b makes the same point about app-secret prefixes), so it is logged. **Materially smaller than the three above** — a short prefix of a long random value does not meaningfully narrow a search. Assessed as low severity; rotation judged disproportionate to the exposure, and the §19 pre-customer rotation supersedes it. Recorded so the pattern stays visible: a status update never needs to carry any part of the value — "updated to match Railway" says everything |
+
+**Why `JWT_SECRET` specifically is a full compromise, not just a signing key:**
+- HS256 key for the `app_session_id` cookie → forges a session as **any user, including `super_admin`**
+- `encryptionKey()` in `tokenStore.ts` is `sha256(JWT_SECRET)` → decrypts every stored SHOPLINE
+  OAuth token in `sl_connector_tokens`
+- Fallback for the `x-sync-secret` cron header
+
+**Owner decision, 2026-08-02 — ACCEPTED RISK (do not re-raise as an open item).**
+The owner has chosen **not** to rotate again following the third incident, on the basis
+that the document was never published and has been destroyed. Recorded, not disputed.
+Residual exposure to weigh if circumstances change: the values also appeared in the
+session transcript that accompanied the document. Rotate if that transcript is ever
+shared, exported, or retained somewhere untrusted — or if any anomalous `super_admin`
+session or SHOPLINE token use is observed. Future sessions should treat this as a logged
+decision and raise it again only on new evidence.
+
+**Rotation runbook (order matters) — for whenever rotation does happen:**
+1. Generate the new value **directly in the Railway dashboard**; never let it transit a chat,
+   a document, or a file.
+2. Set a dedicated `CRON_SECRET` so `syncAuthorized` never falls back to `JWT_SECRET`, then
+   mirror it into **one** GitHub Actions secret also named `CRON_SECRET` — the master key
+   should never sit in GitHub's secret store.
+
+   Both scheduler workflows now read `secrets.CRON_SECRET` first, falling back to their
+   legacy per-workflow secret (`SHOPLINE_SYNC_SECRET`, `WOODCORE_SYNC_SECRET`). Once
+   `CRON_SECRET` exists in GitHub, delete the two legacy secrets — **a rotation then
+   touches exactly one value in each system, which is the point.**
+
+   > ⚠️ **Two secrets holding one value IS the drift surface, and it is why the Woodcore
+   > mirror broke.** Earlier revisions of this runbook named only `SHOPLINE_SYNC_SECRET`.
+   > The 2026-08-02 rotation followed it exactly, so SHOPLINE kept working while the
+   > Woodcore sync began returning 403 and the mirror sat stale for three days — surfaced
+   > only by a GitHub failure email, not by any alert.
+   >
+   > Consolidation narrows the surface; it does not eliminate manual copying. The real fix
+   > is a managed secret store (Doppler / Vault / GitHub OIDC) where a rotation propagates
+   > without anyone re-typing a value anywhere.
+   >
+   > ✅ **DONE for the schedulers (owner picked option B, 2026-08-11).** Both workflows now
+   > authenticate with a **GitHub Actions OIDC token** — minted per run, signed by GitHub,
+   > verified server-side against its JWKS *and its `repository` claim*
+   > (`server/_core/githubOidc.ts`). There is no long-lived value to copy, so this class of
+   > drift cannot recur on these endpoints. `CRON_SECRET` is kept as a second path for
+   > callers that cannot mint a token: Railway Cron, and on-premise deployments where
+   > `DEPLOYMENT_MODE=on_premise` blocks the egress verification needs.
+   >
+   > ⚠️ `GITHUB_OIDC_REPOSITORIES` is the security boundary. A valid OIDC token proves only
+   > that *some* repository issued it; without the allow-list any GitHub user could trigger
+   > a production sync. Unset **disables** OIDC — it never means "allow everyone".
+   >
+   > Still open: Doppler/Vault for the wider estate (~40 env vars). OIDC solves the
+   > schedulers, not `DATABASE_URL`, the Anthropic key, or the SHOPLINE app secret.
+   >
+   > Before rotating, re-derive the consumer list rather than trusting this one:
+   > `grep -rn "secrets\." .github/workflows/`
+3. Rotating invalidates all sessions (everyone re-authenticates by magic link) **and makes
+   existing SHOPLINE tokens undecryptable** — they were encrypted under the old key.
+4. Immediately reconnect OAuth on both dev stores, or syncs fail with token-decrypt errors
+   that look like a regression but are expected.
+
+---
+
+## 19. FIRST-CUSTOMER GO-LIVE GATE — raise these before any real client is onboarded
+
+**Owner instruction (2026-08-03): surface this checklist the moment it looks like
+the first real customer is about to go live.** Three items were consciously
+deferred while the platform had only demo and dev tenants. They are cheap now
+and expensive once real client data is in the system. Do not wait to be asked —
+raise them proactively.
+
+**Added 2026-08-04:** a fourth item of a different kind — Tier A email inbound is
+code-complete but **not receiving mail**, deferred on cost. See §19.4.
+
+### Trigger signals — if ANY of these appear, work through §19 first and report
+
+- The owner says "go live", "launch", "first customer", "first client", "onboard
+  <name>", "production customer", or similar.
+- A SHOPLINE App Store submission is approved, or a real merchant installs the app.
+- A new `organizations` row appears that is **not** a demo/dev tenant — i.e. the
+  name does not contain "Demo", and it is not `SL_RECONCILEAI`/`SL_RECONCILEAI_DEV`
+  or `INFINITY_AI`. (Cheap check: `SELECT id, name, segment, onboardingChannel,
+  createdAt FROM organizations ORDER BY createdAt DESC LIMIT 10`.)
+- A real bank/PSP/courier SFTP credential or bucket source is configured — those
+  tables were empty as of 2026-08-03, so the first non-empty row is a signal.
+- Anyone asks about pilot readiness, contract signature, or Woodcore/LAPO
+  conversion from POC to paid.
+- Anyone asks for, demos, or sells **email forwarding** of settlement/payout
+  files — that channel is built but inert (§19.4), and must not be presented to
+  a customer as working until a real delivery has been observed.
+
+### The three items
+
+**1. Rotate `JWT_SECRET` and `CRON_SECRET` — the only unmitigated security item.**
+Both were printed in plaintext in a Manus session document (§18). The owner
+accepted the risk on 2026-08-02 on the basis that the document was never
+published and has been destroyed — a reasonable call **while the only tenants
+are demo/dev**. That calculus changes the moment a real institution's data is
+behind that key: `JWT_SECRET` forges a session as any user including
+`super_admin`, and decrypts every stored SHOPLINE OAuth token. Generate in the
+Railway dashboard only, never transcribe, then reconnect OAuth on both dev
+stores immediately (rotation makes existing tokens undecryptable — expected, not
+a regression). Runbook: §18.
+
+**2. ~~Decide what happens to the orgless legacy rows.~~ DONE — ARCHIVED 2026-08-11.**
+Owner chose *archive*. `scripts/archive-orgless-legacy.mjs` moved every row with
+no owning tenant out of the live tables in 59 seconds:
+
+| Table | Archived | Live after |
+|---|---|---|
+| `transactions` | 35,036,289 | 85,499 |
+| `matches` | 15,300 | 1,093 |
+| `exceptions` | 701 | 41 |
+| `distributors` | 44 | 0 |
+
+Verified after: zero org-less rows remain in any live table, every tenant kept its
+data (org 1 → 85,496, org 60001 → 3), all twelve indexes survived the swap, and
+`AUTO_INCREMENT` continues above the archived ids so none can be reused. Health
+checks green.
+
+> ⚠️ **The measured count was 35.0M, not the 57.3M this section claimed.** The
+> older figure came from a 2026-08-03 note and was never re-measured. Prefer a
+> fresh `COUNT(*)` over any number written down here.
+
+**⏭ FOLLOW-UP OWED TO THE OWNER — raise this proactively.** Archiving preserved
+the rows; it did **not** reclaim the ~11 GB. They now sit in `*_legacy_archive`
+tables the application never reads. **The permanent fix the owner asked for is to
+DROP those tables**, and they asked to be reminded at the right time rather than
+doing it immediately.
+
+*The right time:* on or after **2026-09-10** (30 days of confirmed normal
+operation), or sooner if storage cost bites — and in any case revisit it at the
+first-customer gate above. Dropping is irreversible and there is deliberately no
+script for it — confirm a backup first.
+
+**How to recover archived rows, if it ever comes to that.**
+`transactions_legacy_archive` is a full copy of the table *as it stood at
+02:05 on 2026-08-11* — 35,121,788 rows, including the 85,499 that are also live.
+The other three archives hold legacy rows only.
+
+> ⚠️ **It is a snapshot, not a mirror, and the difference grows every day.**
+> Renaming it back over `transactions` is a true rollback only in the minutes
+> after the run. Do it later and it silently discards every row written since —
+> which is real tenant data, and exactly the failure this whole exercise was
+> meant to avoid.
+>
+> Recover by **INSERT, not by rename**: copy the wanted rows out of the archive
+> into the live table. Their ids cannot collide — archived ids are all
+> ≤ 36,379,947 and live inserts continue above that — so the two merge cleanly.
+
+> **Same family, measured 2026-08-08 — 44 misfiled `distributors` rows.** 30 sit on
+> the financial-services demo tenant (org 1, created 2026-04-12) and 14 under
+> `organizationId` 0, which is no tenant at all (demo-marked, created 2026-05-18).
+> Since PR #64 the registry is corporate-B2B-only, so **none of them is reachable
+> through the UI** and none leaks: org 0 is not a tenant, and a bank can no longer
+> open the registry.
+>
+> **Recommendation: fold these into the decision above rather than relocating
+> them.** Moving them to BrightGoods was considered and rejected on the evidence:
+> every transaction naming them (29,892 rows) is itself `organizationId IS NULL`,
+> i.e. part of the same legacy pool. Relocating would hand the corporate-B2B demo a
+> 44-name registry whose transactions are invisible to it — a demo that looks
+> populated and reconciles nothing, which is worse than an empty one. Whatever is
+> decided for the 57.3M rows should cover these 44.
+
+**3. Close the `matches` / `exceptions` tenancy gap.**
+Both tables lack an `organizationId` column, so their writes cannot be scoped
+directly and are reached only through a parent job/transaction. They are the two
+entries allow-listed for that reason in `server/tenancyRatchet.test.ts`, and the
+last structural gap of the class that produced four separate cross-tenant
+defects in one session (PRs #25, #31, #32, #34). Remediation — add the column,
+backfill from the parent, then scope the writes and remove the allow-list
+entries — is tracked in `docs/security/RLS_AUDIT.md`.
+
+### 19.4 Finish Tier A email inbound — code-complete, NOT receiving (deferred on cost)
+
+**Owner decision, 2026-08-04: deferred until funds allow.** Recorded, not
+disputed — the blocker is a $20/month plan, not an engineering problem.
+
+**The blocker.** Resend's free plan allows exactly **one** domain, and that slot
+is taken by the root `reconcileaiafrica.com` (outbound: magic links, alerts, CFO
+reports). Receiving on `inbound.reconcileaiafrica.com` requires registering the
+subdomain as a **separate** domain entry, which needs **Resend Pro ($20/mo)**.
+
+**Already true (verified independently, 2026-08-03 — do not re-verify from scratch):**
+- MX `inbound.reconcileaiafrica.com → inbound-smtp.eu-west-1.amazonaws.com` (pri 10)
+  is live and propagated in GoDaddy. The root domain's Mailgun MX is untouched.
+- `RESEND_WEBHOOK_SECRET` and `EMAIL_INBOUND_DOMAIN` are set on Railway.
+- PR #37 is deployed; `POST /api/webhooks/email/inbound` answers **401** to an
+  unsigned request — the route is live and failing closed.
+- Migration 0077 applied; `email_ingestion_sources` and `email_ingestion_logs`
+  exist and are **empty**. No delivery has ever arrived, accepted or rejected.
+
+**To finish (~10 minutes once the plan is upgraded):**
+1. Upgrade Resend to Pro → https://resend.com/settings/usage
+2. Add `inbound.reconcileaiafrica.com` as a **new domain** in Resend
+3. Enable **receiving** on that domain entry
+4. Resend emits an MX record — the same `inbound-smtp.eu-west-1.amazonaws.com`
+   value already in DNS, so no DNS change should be needed
+5. Wait for status `verified`, then send one test email from Gmail to any
+   `settle-…@inbound.reconcileaiafrica.com` and confirm a row lands in
+   `email_ingestion_logs` (an unconfigured address logs `unknown_address` — that
+   is a **pass**: it proves MX → Resend → webhook → signature → database)
+
+> ⚠️ **Env vars being set is NOT proof, and the product says so itself.**
+> `emailIngestion.inboundStatus` reports readiness from EVIDENCE, not
+> configuration: `unconfigured` → `unproven` → `receiving`, where `unproven`
+> means "configured, but nothing has ever arrived". Because
+> `EMAIL_INBOUND_DOMAIN` and `RESEND_WEBHOOK_SECRET` are already set while the
+> subdomain was never registered for receiving, **production will sit on
+> `unproven`**, and the Email Forwarding screen carries a banner saying exactly
+> that until step 5 above succeeds. Read the banner as the live status of this
+> item. The only thing that flips it is a row in `email_ingestion_logs`.
+
+### Why these three and not a longer list
+
+Everything else found in the 2026-08-02/03 hardening sweep is fixed, deployed
+and covered by tests or a CI ratchet. These are the only items knowingly carried
+forward, and each was deferred on the explicit basis that no real customer data
+existed yet. That premise expires at first customer. §19.4 is a different class —
+a finished feature waiting on a $20/month spend — and is listed here because it
+shares the same trigger and the same failure mode if it is forgotten: a channel
+that looks configured and ingests nothing.
+
+---
+
+*Last updated: 2026-08-04 | Live in production on Railway at https://www.reconcileaiafrica.com/*
 *SHOPLINE Tier 1 (Phase 1) merged & live. Engineering owned by Claude Code; features contributed by Manus via PR.*
 *Owner: Richard Anwanakak, Infinity AI Africa Limited*

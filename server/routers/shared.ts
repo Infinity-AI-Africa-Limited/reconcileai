@@ -8,10 +8,17 @@
  * imports from here instead of re-declaring.
  */
 import { TRPCError } from "@trpc/server";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
+import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
+import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog } from "../db";
-import { users } from "../../drizzle/schema";
+import { getDb, createAuditLog, getChannelByIdForOrg } from "../db";
+import { organizations, users } from "../../drizzle/schema";
+
+// ─── Constants ───────────────────────────────────────────────────────
+
+/** Max length for user-supplied names (jobs, reports, channels). */
+export const MAX_NAME_LENGTH = 255;
 
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.
@@ -58,6 +65,65 @@ export async function assertCanManageUsers(
     }
   }
 }
+
+// ─── Vertical Feature Middleware ─────────────────────────────────────
+
+/** The caller's organisation segment, or null when they have no organisation. */
+async function segmentOf(ctx: { user: { organizationId?: number | null } }): Promise<string | null> {
+  if (!ctx.user.organizationId) return null;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [org] = await drizzle
+    .select({ segment: organizations.segment })
+    .from(organizations)
+    .where(eq(organizations.id, ctx.user.organizationId))
+    .limit(1);
+  return org?.segment ?? null;
+}
+
+/**
+ * A procedure only some verticals may call at all.
+ *
+ * Applied as a procedure BUILDER rather than a line inside each handler on
+ * purpose: a router built from it cannot gain an unguarded procedure by someone
+ * adding one and forgetting the check. That is precisely how the module-scope
+ * gap happened — the guard was on the two module mutations, and the procedures
+ * that actually ran the engine were added without it.
+ *
+ * The segment lookup costs one indexed read on a hot-ish path. Acceptable here
+ * because these routers are low-traffic (regulatory reporting, a distributor
+ * registry), and correctness at the boundary is worth more than the round trip.
+ */
+export function verticalFeatureProcedure(feature: VerticalFeature) {
+  return protectedProcedure.use(async ({ ctx, next }) => {
+    // "No organisation at all" is NOT the same as "segment not yet known", and
+    // the two must not share a branch. An unknown segment keeps the feature by
+    // design (see featureAppliesTo). An account with no organisation has no
+    // institution whose feature this could be — and several CBN handlers fall
+    // back to `ctx.user.organizationId ?? 0`, so allowing it through would pool
+    // every such account into one shared pseudo-tenant able to read and
+    // overwrite each other's report settings and regulatory runs. Refuse before
+    // that fallback is reachable. 22 accounts currently have no organisation;
+    // none of them is a super admin, so this locks out no operator.
+    if (!ctx.user.organizationId) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Your account is not linked to an organisation, so this feature is unavailable.",
+      });
+    }
+    const segment = await segmentOf(ctx);
+    if (!featureAppliesTo(feature, segment)) {
+      throw new TRPCError({ code: "FORBIDDEN", message: featureUnavailableReason(feature, segment) });
+    }
+    return next({ ctx });
+  });
+}
+
+/** CBN/BoU regulatory reporting, attestation, deadlines, Auditor dashboard. */
+export const cbnProcedure = verticalFeatureProcedure("cbn_regulatory_reporting");
+
+/** Distributor identity registry and the Pilot Readiness scorecard over it. */
+export const distributorProcedure = verticalFeatureProcedure("distributor_registry");
 
 // ─── Guest Protection Middleware ─────────────────────────────────────
 
@@ -130,6 +196,70 @@ export function getClientInfo(ctx: any): { ip: string; ua: string } {
     || "unknown";
   const ua = ctx.req?.headers?.["user-agent"] || "unknown";
   return { ip, ua };
+}
+
+/**
+ * Prove an organization may bind a data feed to this channel.
+ *
+ * Every ingestion source — SFTP, bucket drop, email forward, public upload API —
+ * stores a caller-supplied `channelId` that decides what its transactions get
+ * reconciled against. Left unchecked, an admin can bind a feed to a channel
+ * their organization does not own. Ingested rows still carry the SOURCE's
+ * organizationId, so this is not a cross-tenant read; the damage is that one
+ * institution's settlements are matched against another's channel, and that a
+ * foreign channel id becomes bindable and therefore enumerable.
+ *
+ * The same class as #25 / #31 / #32 / #34 — an id from the caller used without
+ * proof of ownership. Note the tenancy ratchet in tenancyRatchet.test.ts cannot
+ * catch this one: it guards id-keyed WRITES in db.ts, and this is a foreign key
+ * accepted on the way in.
+ *
+ * Delegates to `getChannelByIdForOrg`, which applies `channelScope` — the org's
+ * own channels plus the shared platform rails (organizationId NULL), never
+ * widening to everything. NOT_FOUND rather than FORBIDDEN, so a probe cannot
+ * distinguish "not yours" from "does not exist".
+ */
+export async function assertChannelBindable(
+  organizationId: number,
+  channelId: number,
+): Promise<void> {
+  const channel = await getChannelByIdForOrg(channelId, organizationId);
+  if (!channel) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Channel not found" });
+  }
+}
+
+/**
+ * Refuse a module the caller's vertical cannot use.
+ *
+ * Hiding it on the module page is presentation; this is the rule. A retail
+ * merchant has no general ledger wired to a core banking system, so
+ * account_level is meaningless for them — and it was switched ON at
+ * provisioning for every SHOPLINE tenant. See shared/moduleScope.
+ *
+ * Lives here rather than in one router because two domains need it and they
+ * must not be able to disagree: `modules.toggle` / `modules.updateConfig` in
+ * server/routers.ts decide whether the module can be ENABLED, and
+ * ./reconciliation.ts decides whether a run may be CREATED. Guarding only the
+ * first left the engine reachable — the toggle is not the gate, because the
+ * job procedures take moduleType from the caller and never read
+ * moduleConfigurations at all.
+ */
+export async function assertModuleAvailable(
+  ctx: { user: { organizationId?: number | null } },
+  moduleType: "settlement" | "account_level",
+): Promise<void> {
+  if (!ctx.user.organizationId) return;
+  const drizzle = await getDb();
+  if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [org] = await drizzle
+    .select({ segment: organizations.segment })
+    .from(organizations)
+    .where(eq(organizations.id, ctx.user.organizationId))
+    .limit(1);
+  if (!moduleAppliesTo(moduleType, org?.segment)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: moduleUnavailableReason(moduleType, org?.segment) });
+  }
 }
 
 export function sanitizeInput(input: string, maxLength: number = 255): string {

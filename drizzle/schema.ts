@@ -36,6 +36,31 @@ export const organizations = mysqlTable("organizations", {
   // for every org; a client's users can only use Google / Microsoft Entra ID
   // sign-in once the org is switched on here ("when the client requests it").
   // Values: "none" (default) | "google" | "microsoft" | "both".
+  // Which banking model this institution operates on. Orthogonal to `segment`:
+  // a non-interest bank is still `financial_services` and still runs NIP, POS
+  // and cheque clearing — what differs is how income may be earned and shared.
+  //   "conventional" (default) | "non_interest"
+  // Varchar rather than an enum for the same reason as onboardingChannel: the
+  // CBN recognises institutions offering Islamic financial services AND other
+  // non-interest principles, and a window or subsidiary of a conventional bank
+  // is a third shape. Adding one should not need a migration.
+  // Drives the NIFI exception taxonomy (server/exceptions/non-interest.ts),
+  // which applies across every rail rather than to a channel.
+  bankingModel: varchar("bankingModel", { length: 30 }).default("conventional").notNull(),
+  /**
+   * This organisation exists for demos and sales, not for a real client.
+   *
+   * A FACT about the tenant, held where the fact belongs. Demo-ness was
+   * previously inferred by substring-matching free-text reconciliation job names
+   * for "Demo" / "vs CBS GL" / "BrightGoods" — a case-sensitive match against
+   * names each seeder invents independently. A seeder that named its jobs
+   * "… — FSDEMO-v2" matched none of them (uppercase DEMO ≠ Demo), so 374 seeded
+   * exceptions were reported to the owner as real SLA breaches, under an email
+   * footer stating that demo data was excluded.
+   *
+   * Anything that must not treat fabricated data as real reads this column.
+   */
+  isDemo: boolean("isDemo").default(false).notNull(),
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
@@ -80,6 +105,10 @@ export const channels = mysqlTable("channels", {
     "bank_core", "nibss", "pos", "atm", "mobile_money", "bank_transfer",
     "agent_banking", "fintech_api", "card_payments", "rtgs", "swift",
     "mobile_banking", "ussd", "qr_payment",
+    // Cheque clearing (NIBSS NACS / Cheque Truncation). Its own type rather than
+    // folded into bank_transfer, so the Super Agent can select the cheque
+    // taxonomy from the channel — see server/exceptions/channelMapping.ts.
+    "cheque_clearing",
     // Retail / e-commerce channel types (SHOPLINE vertical)
     "ecommerce_gateway", "marketplace_payout", "buy_now_pay_later", "digital_wallet",
   ]).default("bank_transfer").notNull(),
@@ -231,6 +260,14 @@ export type InsertReconciliationJob = typeof reconciliationJobs.$inferInsert;
 // ─── Matches ─────────────────────────────────────────────────────────
 export const matches = mysqlTable("matches", {
   id: int("id").autoincrement().primaryKey(),
+  /**
+   * Owning tenant. Nullable, and deliberately so: 2,000 existing rows point at
+   * a jobId with no surviving job, leaving no parent to inherit an org from.
+   * NULL therefore means "legacy / underivable", exactly as it does on
+   * `transactions` — never "any organization". New rows always carry the
+   * organization of the job that produced them.
+   */
+  organizationId: int("organizationId"),
   jobId: int("jobId").notNull(),
   sourceTransactionId: int("sourceTransactionId").notNull(),
   targetTransactionId: int("targetTransactionId").notNull(),
@@ -247,6 +284,7 @@ export const matches = mysqlTable("matches", {
   reviewedAt: timestamp("reviewedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
+  index("idx_matches_org").on(table.organizationId),
   index("idx_matches_job").on(table.jobId),
   index("idx_matches_source").on(table.sourceTransactionId),
   index("idx_matches_target").on(table.targetTransactionId),
@@ -260,6 +298,8 @@ export type InsertMatch = typeof matches.$inferInsert;
 // ─── Exceptions ──────────────────────────────────────────────────────
 export const exceptions = mysqlTable("exceptions", {
   id: int("id").autoincrement().primaryKey(),
+  /** Owning tenant. Nullable for the same reason as `matches.organizationId`. */
+  organizationId: int("organizationId"),
   jobId: int("jobId").notNull(),
   transactionId: int("transactionId").notNull(),
   category: mysqlEnum("category", [
@@ -306,6 +346,7 @@ export const exceptions = mysqlTable("exceptions", {
   userKeptResolved: boolean("userKeptResolved").default(false),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
+  index("idx_exceptions_org").on(table.organizationId),
   index("idx_exceptions_job").on(table.jobId),
   index("idx_exceptions_txn").on(table.transactionId),
   index("idx_exceptions_status").on(table.status),
@@ -729,6 +770,170 @@ export const sftpIngestionLogs = mysqlTable("sftp_ingestion_logs", {
 export type SftpIngestionLog = typeof sftpIngestionLogs.$inferSelect;
 export type InsertSftpIngestionLog = typeof sftpIngestionLogs.$inferInsert;
 
+// ─── Bucket (object-storage) Drop Ingestion ──────────────────────────
+// The S3-compatible sibling of SFTP. Many banks, PSPs and couriers deliver
+// settlement files to a bucket rather than an SFTP host, and several prefer it
+// (IAM-scoped, no long-lived SSH keys, no host to keep patched).
+//
+// Deliberately parallel to sftp_credentials rather than shoehorned into it: the
+// connection model genuinely differs (bucket/prefix/region/endpoint vs
+// host/port/path) and overloading one table would leave half the columns NULL
+// for every row. Both feed the SAME processing core, which is where sharing
+// actually matters. A future `ingestion_sources` generalisation could unify
+// them, but that is a migration of live SFTP config and not worth it yet.
+export const bucketIngestionSources = mysqlTable("bucket_ingestion_sources", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  userId: int("userId").notNull(), // Who created this config
+  name: varchar("name", { length: 255 }).notNull(),
+  /** s3 = AWS; r2/minio/other require an explicit endpoint. */
+  provider: mysqlEnum("provider", ["s3", "r2", "minio", "other"]).default("s3").notNull(),
+  bucket: varchar("bucket", { length: 255 }).notNull(),
+  /** Key prefix to watch, e.g. "settlements/incoming/". Empty = bucket root. */
+  prefix: varchar("prefix", { length: 500 }).default("").notNull(),
+  region: varchar("region", { length: 64 }).default("auto").notNull(),
+  /** Custom S3 endpoint for R2/MinIO. NULL = AWS default for the region. */
+  endpoint: varchar("endpoint", { length: 500 }),
+  /** Credentials encrypted at rest with the same envelope as SFTP secrets. */
+  accessKeyIdEncrypted: text("accessKeyIdEncrypted"),
+  secretAccessKeyEncrypted: text("secretAccessKeyEncrypted"),
+  filePattern: varchar("filePattern", { length: 255 }).default("*.csv").notNull(),
+  /** Move processed objects under this prefix. NULL + deleteAfterProcess=false
+   *  leaves them in place (dedupe is by content hash, so that is safe). */
+  archivePrefix: varchar("archivePrefix", { length: 500 }),
+  deleteAfterProcess: boolean("deleteAfterProcess").default(false).notNull(),
+  channelId: int("channelId").notNull(),
+  pollingEnabled: boolean("pollingEnabled").default(true).notNull(),
+  pollingIntervalMinutes: int("pollingIntervalMinutes").default(15).notNull(),
+  autoReconcile: boolean("autoReconcile").default(false).notNull(),
+  reconcileTargetChannelId: int("reconcileTargetChannelId"),
+  isActive: boolean("isActive").default(true).notNull(),
+  lastPolledAt: timestamp("lastPolledAt"),
+  lastSuccessAt: timestamp("lastSuccessAt"),
+  lastErrorAt: timestamp("lastErrorAt"),
+  lastErrorMessage: text("lastErrorMessage"),
+  totalFilesProcessed: int("totalFilesProcessed").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_bucket_src_org").on(table.organizationId),
+  index("idx_bucket_src_channel").on(table.channelId),
+  index("idx_bucket_src_active").on(table.isActive),
+]);
+
+export type BucketIngestionSource = typeof bucketIngestionSources.$inferSelect;
+export type InsertBucketIngestionSource = typeof bucketIngestionSources.$inferInsert;
+
+export const bucketIngestionLogs = mysqlTable("bucket_ingestion_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  bucketSourceId: int("bucketSourceId").notNull(),
+  organizationId: int("organizationId").notNull(),
+  channelId: int("channelId").notNull(),
+  objectKey: varchar("objectKey", { length: 1000 }).notNull(),
+  fileSize: int("fileSize"),
+  /** SHA-256 over the object's BYTES — the idempotency key for re-polling. */
+  fileHash: varchar("fileHash", { length: 64 }),
+  totalRows: int("totalRows"),
+  validRows: int("validRows"),
+  invalidRows: int("invalidRows"),
+  status: mysqlEnum("status", ["success", "failed", "partial", "skipped"]).notNull(),
+  errorMessage: text("errorMessage"),
+  processingTimeMs: int("processingTimeMs"),
+  uploadBatchId: int("uploadBatchId"),
+  reconciliationJobId: int("reconciliationJobId"),
+  archivedKey: varchar("archivedKey", { length: 1000 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_bucket_log_src").on(table.bucketSourceId),
+  index("idx_bucket_log_org").on(table.organizationId),
+  index("idx_bucket_log_status").on(table.status),
+  index("idx_bucket_log_hash").on(table.fileHash),
+  index("idx_bucket_log_created").on(table.createdAt),
+]);
+
+export type BucketIngestionLog = typeof bucketIngestionLogs.$inferSelect;
+export type InsertBucketIngestionLog = typeof bucketIngestionLogs.$inferInsert;
+
+// ─── Email-forward Ingestion (Tier A) ────────────────────────────────
+// The genuinely plug-and-play transport: the merchant sets ONE forwarding rule
+// in their mail client and every provider that emails a payout report works,
+// with no API, no credentials and no per-provider integration.
+//
+// It is also the only surface where an unauthenticated stranger can hand us a
+// file, so it carries two independent controls rather than one:
+//   1. addressToken — unguessable, per source. Knowing the address is required.
+//   2. allowedSenders — knowing the address is NOT sufficient; the sender must
+//      also match. An EMPTY allow-list rejects everything (fail closed), so a
+//      half-configured source can never be an open inbox.
+export const emailIngestionSources = mysqlTable("email_ingestion_sources", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  userId: int("userId").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  /** Random, unguessable local-part suffix: settle-<addressToken>@<domain>. */
+  addressToken: varchar("addressToken", { length: 64 }).notNull(),
+  /**
+   * Newline/comma separated senders permitted to deliver here. Entries are
+   * either a full address ("payouts@stripe.com") or a domain ("@stripe.com").
+   * Empty means NOTHING is accepted — never "accept anything".
+   */
+  allowedSenders: text("allowedSenders"),
+  channelId: int("channelId").notNull(),
+  /** Reject attachments above this size before downloading them. */
+  maxAttachmentBytes: int("maxAttachmentBytes").default(10485760).notNull(),
+  isActive: boolean("isActive").default(true).notNull(),
+  lastReceivedAt: timestamp("lastReceivedAt"),
+  lastErrorAt: timestamp("lastErrorAt"),
+  lastErrorMessage: text("lastErrorMessage"),
+  totalFilesProcessed: int("totalFilesProcessed").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_email_src_token").on(table.addressToken),
+  index("idx_email_src_org").on(table.organizationId),
+  index("idx_email_src_active").on(table.isActive),
+]);
+
+export type EmailIngestionSource = typeof emailIngestionSources.$inferSelect;
+export type InsertEmailIngestionSource = typeof emailIngestionSources.$inferInsert;
+
+// Every inbound delivery is logged, ACCEPTED OR NOT. A rejected message is the
+// more interesting record: it is how a leaked address or a probing sender
+// becomes visible instead of silently disappearing.
+export const emailIngestionLogs = mysqlTable("email_ingestion_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Null when the address matched no source — we still record the attempt. */
+  emailSourceId: int("emailSourceId"),
+  organizationId: int("organizationId"),
+  channelId: int("channelId"),
+  /** Provider message id — the idempotency key against webhook retries. */
+  providerMessageId: varchar("providerMessageId", { length: 255 }),
+  fromAddress: varchar("fromAddress", { length: 320 }),
+  toAddress: varchar("toAddress", { length: 320 }),
+  subject: varchar("subject", { length: 500 }),
+  attachmentName: varchar("attachmentName", { length: 500 }),
+  fileSize: int("fileSize"),
+  fileHash: varchar("fileHash", { length: 64 }),
+  totalRows: int("totalRows"),
+  validRows: int("validRows"),
+  invalidRows: int("invalidRows"),
+  status: mysqlEnum("status", ["success", "partial", "failed", "rejected", "skipped"]).notNull(),
+  /** Why a delivery was refused — unknown_address, sender_not_allowed, … */
+  rejectionReason: varchar("rejectionReason", { length: 64 }),
+  errorMessage: text("errorMessage"),
+  uploadBatchId: int("uploadBatchId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_email_log_src").on(table.emailSourceId),
+  index("idx_email_log_org").on(table.organizationId),
+  index("idx_email_log_status").on(table.status),
+  index("idx_email_log_msg").on(table.providerMessageId),
+  index("idx_email_log_created").on(table.createdAt),
+]);
+
+export type EmailIngestionLog = typeof emailIngestionLogs.$inferSelect;
+export type InsertEmailIngestionLog = typeof emailIngestionLogs.$inferInsert;
+
 // ─── User Role Preferences ───────────────────────────────────────────
 export const userRolePreferences = mysqlTable("user_role_preferences", {
   id: int("id").autoincrement().primaryKey(),
@@ -1078,6 +1283,28 @@ export const RESOLUTION_TEMPLATE_CATEGORIES = [
   "chargeback_won_credit_not_posted",
   "chargeback_right_expired",
   "dispute_good_faith_recovery",
+  // Cheque clearing — NIBSS NACS / Cheque Truncation (server/exceptions/cheque.ts)
+  "cheque_returned_credit_not_reversed",
+  "cheque_duplicate_presentment",
+  "cheque_dud_not_reported",
+  "cheque_clearing_settlement_variance",
+  "cheque_micr_ledger_mismatch",
+  "cheque_value_limit_breach",
+  "cheque_stale_or_postdated_paid",
+  "cheque_outward_not_cleared",
+  "cheque_unpresented_aged",
+  // Non-interest (NIFI) banking — selected by organizations.bankingModel rather
+  // than by channel, since it spans every rail (server/exceptions/non-interest.ts)
+  "nifi_interest_bearing_entry",
+  "nifi_commingling_breach",
+  "nifi_non_permissible_income_unsegregated",
+  "nifi_late_payment_charge_to_income",
+  "nifi_profit_distribution_variance",
+  "nifi_per_irr_movement_unapproved",
+  "nifi_murabaha_profit_accrual_mismatch",
+  "nifi_ijara_rental_unmatched",
+  "nifi_salam_istisna_milestone_mismatch",
+  "nifi_wakala_fee_variance",
 ] as const;
 export type ResolutionTemplateCategory = (typeof RESOLUTION_TEMPLATE_CATEGORIES)[number];
 
@@ -1918,6 +2145,10 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
     "org_created",
     "org_segment_updated",
     "org_sso_updated",
+    // Conventional vs non-interest (NIFI). Worth its own event: it changes how
+    // the platform characterises an institution's licence basis, and the
+    // resulting findings are regulator-facing.
+    "org_banking_model_updated",
     "user_role_updated",
     "user_promoted_super_admin",
   ]).notNull(),

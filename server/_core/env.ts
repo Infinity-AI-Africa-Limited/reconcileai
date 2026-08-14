@@ -38,12 +38,24 @@ export const ENV = {
   // pasted with surrounding quotes or a trailing newline in the hosting dashboard.
   directLlmApiKey: cleanSecret(process.env.DIRECT_LLM_API_KEY),
   directLlmApiUrl: cleanSecret(process.env.DIRECT_LLM_API_URL),   // base URL, e.g. https://api.anthropic.com or https://api.openai.com
-  directLlmModel: cleanSecret(process.env.DIRECT_LLM_MODEL),       // e.g. claude-sonnet-4-5, gpt-4o
+  directLlmModel: cleanSecret(process.env.DIRECT_LLM_MODEL),       // e.g. claude-sonnet-5, gpt-4o
+  // Optional SECOND model, used only for genuinely agentic work — the Super
+  // Agent's diagnosis, action drafting and conversational query. CLAUDE.md §4
+  // specifies a stronger model there (claude-opus-4-8) than for classification
+  // and narrative generation. Unset => agentic calls use directLlmModel, so
+  // this changes nothing until it is deliberately set.
+  directLlmModelAgent: cleanSecret(process.env.DIRECT_LLM_MODEL_AGENT),
   // Optional explicit provider selector: "anthropic" | "openai". When empty, auto-detected
   // from the model name ("claude…" → anthropic) or the URL (contains "anthropic").
   directLlmProvider: cleanSecret(process.env.DIRECT_LLM_PROVIDER).toLowerCase(),
   // Transactional email (Resend). When unset, email sending is a no-op (logs a warning).
   resendApiKey: process.env.RESEND_API_KEY ?? "",
+  // Svix signing secret for Resend INBOUND webhooks (email-forward ingestion).
+  // Unset => inbound verification fails closed and no email is ingested.
+  resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET ?? "",
+  // Subdomain that receives forwarded settlement mail, e.g.
+  // "inbound.reconcileaiafrica.com" -> settle-<token>@inbound.reconcileaiafrica.com
+  emailInboundDomain: process.env.EMAIL_INBOUND_DOMAIN ?? "",
   emailFrom: process.env.EMAIL_FROM ?? "",                 // e.g. noreply@reconcileai.vip
   emailFromName: process.env.EMAIL_FROM_NAME ?? "ReconcileAI",
   ownerEmail: process.env.OWNER_EMAIL ?? "",               // recipient for owner/system notifications
@@ -51,6 +63,19 @@ export const ENV = {
   // Shared secret guarding maintenance/cron endpoints (e.g. Woodcore mirror sync).
   // Falls back to JWT_SECRET when unset, so no extra var is strictly required.
   cronSecret: process.env.CRON_SECRET ?? "",
+  // ── GitHub Actions OIDC for the same endpoints (preferred over the secret) ──
+  // A short-lived token GitHub mints per run and signs itself, so there is no
+  // long-lived value copied between two dashboards and therefore nothing to
+  // drift. See server/_core/githubOidc.ts.
+  //
+  // GITHUB_OIDC_REPOSITORIES is the security boundary, not a convenience: a
+  // valid OIDC token proves only that SOME repository issued it, so without an
+  // allow-list any GitHub user could trigger a production sync. Unset leaves
+  // OIDC DISABLED and the shared secret in charge — never "allow everyone".
+  githubOidcAudience: cleanSecret(process.env.GITHUB_OIDC_AUDIENCE),
+  githubOidcRepositories: process.env.GITHUB_OIDC_REPOSITORIES ?? "",
+  // Optional extra pin, e.g. "refs/heads/main". Empty = any ref on an allowed repo.
+  githubOidcRefs: process.env.GITHUB_OIDC_REFS ?? "",
   // Ed25519 PKCS#8 PEM private key used to digitally sign CBN examination reports.
   // When unset, an ephemeral key is generated per-process (dev/demo only).
   cbnSigningPrivateKey: process.env.CBN_SIGNING_PRIVATE_KEY ?? "",

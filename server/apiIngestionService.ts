@@ -1,8 +1,9 @@
-import { getDb } from "./db";
+import { getDb, getChannelByIdForOrg } from "./db";
 import { apiIngestionLogs, uploadBatches, transactions, apiKeys } from "../drizzle/schema";
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "crypto";
 import Papa from "papaparse";
+import { parseAmount, parseDate, normalizeHeader } from "./ingest/fileParser";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -12,14 +13,20 @@ export interface ApiUploadRequest {
   fileName: string;
   fileContent: string; // Base64 or raw CSV
   encoding?: "base64" | "utf8";
-  autoReconcile?: boolean;
-  reconcileTargetChannelId?: number;
+  // NOTE: `autoReconcile` and `reconcileTargetChannelId` used to live here and
+  // in the public zod schema, and appeared in the documented example payload,
+  // but nothing ever read them — the upload returned 200 and no reconciliation
+  // ran. Removed rather than left as a promise the platform does not keep. If
+  // auto-reconciliation is built, `reconcileTargetChannelId` arrives over the
+  // internet-facing API and MUST be tenancy-gated exactly like `channelId` is
+  // below (see the TENANCY GATE in processApiUpload).
 }
 
 export interface ApiUploadResponse {
   success: boolean;
   uploadBatchId?: number;
-  reconciliationJobId?: number;
+  // `reconciliationJobId` was declared here and never assigned — the other half
+  // of the same unimplemented feature.
   totalRows: number;
   validRows: number;
   invalidRows: number;
@@ -76,7 +83,15 @@ export async function validateApiKey(apiKey: string): Promise<{
 
 // ─── File Hash Calculation ──────────────────────────────────────────
 
-export function calculateFileHash(content: string): string {
+/**
+ * Content hash used for duplicate-file detection.
+ *
+ * Accepts a Buffer so binary formats (.xlsx) are hashed over their real bytes.
+ * Hashing a `.toString("utf8")` of a workbook is lossy — invalid byte sequences
+ * collapse to U+FFFD — so two different spreadsheets could hash identically and
+ * the second would be silently discarded as a duplicate.
+ */
+export function calculateFileHash(content: string | Buffer): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
@@ -92,73 +107,102 @@ interface ParsedTransaction {
   [key: string]: any;
 }
 
-export function parseAndValidateCsv(
-  csvContent: string,
-  channelId: number
-): {
+/**
+ * Header vocabularies for bank/PSP exports. Deliberately broad: "any bank"
+ * means we cannot dictate column names, and the previous code accepted exactly
+ * `transactionDate|date|Date` and `amount|Amount`, so a file headed
+ * "Posting Date"/"Value" was rejected wholesale as malformed.
+ */
+const DATE_HEADERS = [
+  "transactiondate", "transaction_date", "date", "posting_date", "posted_at",
+  "value_date", "valuedate", "settlement_date", "created_at", "created",
+  "datetime", "timestamp", "txn_date", "trans_date",
+];
+const AMOUNT_HEADERS = [
+  "amount", "transaction_amount", "txn_amount", "value", "net_amount", "net",
+  "credit", "debit", "total", "total_amount", "settlement_amount", "gross_amount",
+];
+
+/** Case/spacing-insensitive lookup of the first matching header in a row. */
+function pickField(row: Record<string, unknown>, aliases: string[]): string | undefined {
+  const byNorm = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(row)) {
+    const n = normalizeHeader(k);
+    if (n && !byNorm.has(n)) byNorm.set(n, v);
+  }
+  for (const a of aliases) {
+    const v = byNorm.get(a);
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
+  }
+  return undefined;
+}
+
+export interface RowValidationResult {
   valid: ParsedTransaction[];
   invalid: Array<{ row: number; errors: string[] }>;
   totalRows: number;
-} {
-  const parsed = Papa.parse<any>(csvContent, {
-    header: true,
-    skipEmptyLines: true,
-    transformHeader: (header: string) => header.trim(),
-  });
+}
 
+/**
+ * Validate already-parsed rows.
+ *
+ * Split out from `parseAndValidateCsv` so callers that obtained their rows from
+ * a workbook (SFTP/bucket drops, which are frequently .xlsx) share exactly the
+ * same validation as CSV callers, rather than needing the data to be delimited
+ * text first.
+ */
+export function validateParsedRows(rows: Record<string, unknown>[]): RowValidationResult {
   const valid: ParsedTransaction[] = [];
   const invalid: Array<{ row: number; errors: string[] }> = [];
 
-  parsed.data.forEach((row: any, index: number) => {
+  rows.forEach((row: any, index: number) => {
     const errors: string[] = [];
     const rowNum = index + 2; // +2 because index is 0-based and we skip header
 
-    // Required fields validation
-    if (!row.transactionDate && !row.date && !row.Date) {
-      errors.push("Missing transaction date");
-    }
-    if (!row.amount && !row.Amount) {
-      errors.push("Missing amount");
-    }
+    // Header resolution and coercion both come from the shared ingestion core,
+    // so the validator and storeTransactions can never disagree about whether a
+    // value is readable. Previously each had its own parser and its own short
+    // list of accepted spellings.
+    const amountStr = pickField(row, AMOUNT_HEADERS);
+    const dateStr = pickField(row, DATE_HEADERS);
 
-    // Amount validation
-    const amountStr = row.amount || row.Amount;
-    if (amountStr) {
-      const amount = parseFloat(String(amountStr).replace(/[^0-9.-]/g, ""));
-      if (isNaN(amount)) {
-        errors.push("Invalid amount format");
-      }
-    }
-
-    // Date validation
-    const dateStr = row.transactionDate || row.date || row.Date;
-    if (dateStr) {
-      const date = new Date(dateStr);
-      if (isNaN(date.getTime())) {
-        errors.push("Invalid date format");
-      }
-    }
+    if (!dateStr) errors.push("Missing transaction date");
+    if (!amountStr) errors.push("Missing amount");
+    if (amountStr && parseAmount(amountStr) === null) errors.push("Invalid amount format");
+    if (dateStr && parseDate(dateStr) === null) errors.push("Invalid date format");
 
     if (errors.length > 0) {
       invalid.push({ row: rowNum, errors });
     } else {
       valid.push({
+        // Raw row first so the original columns are preserved for rawData…
+        ...row,
+        // …but the RESOLVED values win. Spreading last would let a present-but-
+        // empty `amount` column clobber a value correctly resolved from `Value`.
         transactionDate: dateStr,
         amount: amountStr,
         currency: row.currency || row.Currency || "NGN",
         reference: row.reference || row.Reference || row.ref || "",
         description: row.description || row.Description || "",
         counterparty: row.counterparty || row.Counterparty || row.beneficiary || "",
-        ...row,
       });
     }
   });
 
-  return {
-    valid,
-    invalid,
-    totalRows: parsed.data.length,
-  };
+  return { valid, invalid, totalRows: rows.length };
+}
+
+/** Parse delimited text and validate it. Retained for existing CSV callers. */
+export function parseAndValidateCsv(
+  csvContent: string,
+  channelId: number,
+): RowValidationResult {
+  const parsed = Papa.parse<any>(csvContent, {
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: (header: string) => header.trim(),
+  });
+  return validateParsedRows((parsed.data ?? []) as Record<string, unknown>[]);
 }
 
 // ─── Store Transactions ─────────────────────────────────────────────
@@ -174,14 +218,36 @@ export async function storeTransactions(
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const txnRecords = validRows.map((row) => ({
+  // Coercion goes through the shared ingestion core. The previous inline
+  // `parseFloat(String(x).replace(/[^0-9.-]/g, ""))` corrupted money silently:
+  // the accounting negative "(12.30)" became +12.30 (a refund posted as a
+  // credit) and the European "1.234,56" became 1.23456. Both produced numbers
+  // that still looked plausible, which is the dangerous kind of wrong.
+  const coerced = validRows.map((row) => ({
+    row,
+    amount: parseAmount(row.amount as string),
+    date: parseDate(row.transactionDate as string),
+  }));
+
+  // Defensive: parseAndValidateCsv already rejects these using the SAME parser,
+  // so anything landing here is an upstream inconsistency, not user input.
+  const unusable = coerced.filter((c) => c.amount === null || c.date === null);
+  if (unusable.length > 0) {
+    console.warn(
+      `[apiIngestion] Skipped ${unusable.length} row(s) with unparseable amount/date after validation — batch ${uploadBatchId}`,
+    );
+  }
+
+  const txnRecords = coerced
+    .filter((c): c is typeof c & { amount: number; date: Date } => c.amount !== null && c.date !== null)
+    .map(({ row, amount, date }) => ({
     userId: 0, // System user for API uploads
     batchId: uploadBatchId,
     uploadBatchId,
     channelId,
     organizationId: organizationId ?? null,
-    transactionDate: new Date(row.transactionDate),
-    amount: String(parseFloat(String(row.amount).replace(/[^0-9.-]/g, ""))),
+    transactionDate: date,
+    amount: String(amount),
     currency: row.currency || "NGN",
     reference: row.reference || null,
     description: row.description || null,
@@ -298,6 +364,43 @@ export async function processApiUpload(
 
     const db = await getDb();
     if (!db) throw new Error("Database not available");
+
+    // TENANCY GATE — must come before any read or write keyed on channelId.
+    //
+    // `channelId` is supplied by the CALLER over the public, internet-facing
+    // API. An API key belongs to exactly one organization, so without this an
+    // integration key issued to one bank could push transactions straight into
+    // another bank's channel — a cross-tenant write on the most exposed surface
+    // we have. Shared platform rails (organizationId NULL) remain reachable.
+    const targetChannel = await getChannelByIdForOrg(
+      request.channelId,
+      keyValidation.organizationId ?? null,
+    );
+    if (!targetChannel) {
+      await logApiIngestion({
+        organizationId: keyValidation.organizationId,
+        apiKeyId: keyValidation.apiKeyId,
+        endpoint: "/api/v1/transactions/upload",
+        method: "POST",
+        channelId: request.channelId,
+        fileName: request.fileName,
+        status: "failed",
+        statusCode: 403,
+        errorMessage: "Channel does not belong to this API key's organization",
+        ipAddress,
+        userAgent,
+      });
+      return {
+        success: false,
+        totalRows: 0,
+        validRows: 0,
+        invalidRows: 0,
+        // Deliberately does not distinguish "not yours" from "does not exist";
+        // that difference is an enumeration oracle for other tenants' channels.
+        errors: ["Channel not found"],
+        message: "Channel not found",
+      };
+    }
 
     // Check for duplicate upload
     const [existingBatch] = await db

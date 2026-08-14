@@ -34,7 +34,13 @@ export type NigerianChannelSource =
   | "verve_scheme"
   | "afrigo_scheme"
   | "visa_scheme"
-  | "mastercard_scheme";
+  | "mastercard_scheme"
+  // Cheque clearing — NIBSS NACS / Cheque Truncation (server/exceptions/cheque.ts)
+  | "cheque_clearing"
+  // Non-interest (NIFI) banking. Not a rail: this is the profit-and-sharing
+  // ledger of an institution licensed on non-interest principles, and it spans
+  // every rail that institution uses (server/exceptions/non-interest.ts).
+  | "nifi_ledger";
 
 export interface NigerianChannelException {
   /** Unique key — also a resolution_templates.category enum value. */

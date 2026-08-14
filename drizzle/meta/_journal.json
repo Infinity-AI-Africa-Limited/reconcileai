@@ -526,6 +526,55 @@
       "when": 1785130816957,
       "tag": "0074_subscription_grace_period",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "5",
+      "when": 1785588420738,
+      "tag": "0075_spicy_warbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "5",
+      "when": 1785699208478,
+      "tag": "0076_tranquil_firebrand",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "5",
+      "when": 1785771649510,
+      "tag": "0077_chubby_spencer_smythe",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "5",
+      "when": 1785856548294,
+      "tag": "0078_previous_white_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "5",
+      "when": 1786515422406,
+      "tag": "0079_shiny_odin",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "5",
+      "when": 1786517693142,
+      "tag": "0080_complete_moonstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "5",
+      "when": 1786690620204,
+      "tag": "0081_perfect_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

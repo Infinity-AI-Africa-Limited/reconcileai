@@ -1239,3 +1239,13 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] T1-G7: App Store slot application + listing submission (after all code complete)
 - [ ] T1-G8: DPA (Data Processing Agreement) negotiation with SHOPLINE legal
 - [ ] T1-G9: Revenue share agreement (15% target) with SHOPLINE
+
+## Financial-Services Operational Demo Data
+
+- [x] Create a feature branch from the latest Infinity-AI code and map the current Transactions, Exceptions, Review Queue and dependent views
+- [x] Populate coherent financial-services transaction, exception and review-queue data through the approved demo-data path
+- [x] Reflect demo-data outcomes in connected dashboards, monitoring, ageing, reporting, audit and compliance surfaces
+- [x] Add or update automated tests for the new financial-services demo-data behaviour
+- [x] Run type checks, full tests and production build verification
+- [ ] Perform authenticated visual verification after the reviewed build is deployed
+- [x] Push the feature branch to both GitHub repositories and open Claude Code review PRs

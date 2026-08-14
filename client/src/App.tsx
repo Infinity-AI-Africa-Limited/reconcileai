@@ -1,7 +1,11 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Redirect, Route, Switch, useLocation } from "wouter";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { useOrgSegmentStatus } from "@/hooks/useOrgSegment";
+import { usePortalContext } from "@/contexts/PortalContext";
+import { canReachCallback, canReachPath, landingPathFor } from "@/lib/routeAccess";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
@@ -31,6 +35,8 @@ import TechnicalHandover from "./pages/TechnicalHandover";
 import EmailSettings from "./pages/EmailSettings";
 import ApiIngestion from "./pages/ApiIngestion";
 import SftpConfig from "./pages/SftpConfig";
+import BucketConfig from "./pages/BucketConfig";
+import EmailForwarding from "./pages/EmailForwarding";
 import WoodcoreConnector from "./pages/WoodcoreConnector";
 import AnomalyDetection from "./pages/AnomalyDetection";
 import CfoDashboard from "./pages/CfoDashboard";
@@ -74,12 +80,100 @@ import Support from "./pages/Support";
 import SettlementMonitor from "./pages/SettlementMonitor";
 import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
 
+/**
+ * Send a viewer to the page their vertical actually starts from.
+ *
+ * Waits for the segment before deciding. Redirecting on the pending value would
+ * put every merchant on /dashboard for a frame and then move them, which reads
+ * as a glitch — and on a slow connection, as the wrong landing page.
+ */
+function LandingRedirect() {
+  const { segment, isPending } = useOrgSegmentStatus();
+  if (isPending) {
+    return (
+      <div className="flex h-screen items-center justify-center text-muted-foreground">
+        Loading your workspace…
+      </div>
+    );
+  }
+  return <Redirect to={landingPathFor(segment)} />;
+}
+
+/**
+ * Keep a vertical out of routes built for another one.
+ *
+ * The sidebar already hides them; this stops the URL working anyway. Before it,
+ * a merchant typing /distributors got the page shell and then a screenful of
+ * permission errors from the server — technically guarded, practically broken.
+ *
+ * Every hook runs before the redirect, never after: `segment` arrives from a
+ * query, so an early return placed between hooks changes how many run between
+ * the first and second render — "Rendered fewer hooks than expected", which is
+ * exactly how the auditor page once crashed on a cold load.
+ *
+ * Pending means undecided, not denied. Redirecting while the segment is still
+ * in flight would bounce people out of pages they are entitled to.
+ *
+ * `portal` is passed for the same reason DashboardLayout passes it to navGroup:
+ * inside a tenant portal a super admin is looking at the TENANT's surface, so
+ * the tenant's segment rules apply. Without it the sidebar hid Distributor
+ * Registry from a retail portal while /distributors still loaded.
+ */
+function SegmentGuard({ children }: { children: React.ReactNode }) {
+  const [location] = useLocation();
+  const { segment, isPending } = useOrgSegmentStatus();
+  const { user } = useAuth();
+  const { viewAsOrg } = usePortalContext();
+
+  const opts = { portal: viewAsOrg !== null };
+  const blocked = !isPending && !canReachPath(location, segment, user?.role, opts);
+  if (blocked) return <Redirect to={landingPathFor(segment)} />;
+  return <>{children}</>;
+}
+
 function DashboardPage({ component: Component }: { component: React.ComponentType }) {
   return (
     <DashboardLayout>
-      <Component />
+      <SegmentGuard>
+        <Component />
+      </SegmentGuard>
     </DashboardLayout>
   );
+}
+
+/**
+ * A standalone OAuth landing, kept out of the dashboard chrome on purpose.
+ *
+ * The same ShoplineWelcome component is ALSO mounted at /shopline/connect through
+ * DashboardPage, so it was guarded by one path and wide open on the other: a bank
+ * could open /shopline/welcome — or wouter's aliases /SHOPLINE/WELCOME/ — and be
+ * congratulated on connecting a store it does not have.
+ *
+ * Not DashboardPage, because SHOPLINE's redirect carries no session and the
+ * dashboard requires one. `canReachCallback` refuses only a resolved other
+ * vertical, so the signed-out merchant this page exists for still arrives.
+ *
+ * The segment lookup is gated on being signed in, and that gate is load-bearing
+ * rather than an optimisation. `auth.mySegment` is a protectedProcedure, and
+ * main.tsx redirects the browser to /login on ANY unauthorized query error — so
+ * simply asking for the segment without a session would throw the merchant onto
+ * a login page for an account they do not have yet. Guarding the route must not
+ * cost more than the thing it guards against.
+ */
+function CallbackGuard({ component: Component }: { component: React.ComponentType }) {
+  const [location] = useLocation();
+  const { user, isAuthenticated } = useAuth();
+  const { segment, isPending } = useOrgSegmentStatus({ enabled: isAuthenticated });
+  const { viewAsOrg } = usePortalContext();
+
+  // `signedIn` is what earns the exception, NOT a null segment. A signed-in
+  // viewer whose segment lookup failed also has a null segment, and handing them
+  // the retail screen because the answer is missing would be reading absence as
+  // evidence.
+  const opts = { portal: viewAsOrg !== null, signedIn: isAuthenticated };
+  const blocked = !isPending && !canReachCallback(location, segment, user?.role, opts);
+  if (blocked) return <Redirect to={landingPathFor(segment)} />;
+  return <Component />;
 }
 
 function Router() {
@@ -92,6 +186,10 @@ function Router() {
       <Route path="/payment-processors" component={PaymentProcessorsLanding} />
       <Route path="/docs/:docName" component={DocViewer} />
       <Route path="/documentation">{() => <DashboardPage component={Documentation} />}</Route>
+      {/* Post-login target. Resolves to the vertical's own starting page, so the
+          server does not need to know about segments to send someone somewhere
+          sensible — and /dashboard stays directly reachable for everyone. */}
+      <Route path="/home" component={LandingRedirect} />
       <Route path="/dashboard">{() => <DashboardPage component={Dashboard} />}</Route>
       <Route path="/dashboard/cfo">{() => <DashboardPage component={CfoDashboard} />}</Route>
       <Route path="/dashboard/operations">{() => <DashboardPage component={OperationsDashboard} />}</Route>
@@ -114,6 +212,8 @@ function Router() {
       <Route path="/monitor">{() => <DashboardPage component={Monitor} />}</Route>
       <Route path="/api-ingestion">{() => <DashboardPage component={ApiIngestion} />}</Route>
       <Route path="/sftp-config">{() => <DashboardPage component={SftpConfig} />}</Route>
+      <Route path="/bucket-config">{() => <DashboardPage component={BucketConfig} />}</Route>
+      <Route path="/email-forwarding">{() => <DashboardPage component={EmailForwarding} />}</Route>
       <Route path="/woodcore-connector">{() => <DashboardPage component={WoodcoreConnector} />}</Route>
       <Route path="/anomalies">{() => <DashboardPage component={AnomalyDetection} />}</Route>
       <Route path="/email-settings">{() => <DashboardPage component={EmailSettings} />}</Route>
@@ -150,8 +250,12 @@ function Router() {
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
       <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
       <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
-      <Route path="/shopline/welcome" component={ShoplineWelcome} />
-      <Route path="/shopline/error" component={ShoplineError} />
+      {/* Install callbacks: standalone pages, deliberately NOT wrapped in
+          DashboardPage. SHOPLINE redirects here without a session, so the
+          dashboard's authentication would lock out the merchant this exists
+          for. CallbackGuard turns away a signed-in OTHER vertical instead. */}
+      <Route path="/shopline/welcome">{() => <CallbackGuard component={ShoplineWelcome} />}</Route>
+      <Route path="/shopline/error">{() => <CallbackGuard component={ShoplineError} />}</Route>
       <Route path="/privacy" component={Privacy} />
       <Route path="/terms" component={Terms} />
       <Route path="/support" component={Support} />

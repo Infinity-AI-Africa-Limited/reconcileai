@@ -51,12 +51,13 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   upload_batches: "tenant_nullable",
   transactions: "tenant_nullable",
   reconciliation_jobs: "tenant_nullable",
-  matches: "derived",
-  // AUDIT FINDING: exceptions has NO organizationId — scoped only through its
-  // parent job/transaction. Remediation (add + backfill org column) is tracked
-  // in docs/security/RLS_AUDIT.md; until then all exception queries MUST join
-  // through reconciliation_jobs/transactions for org scoping.
-  exceptions: "derived",
+  // Both carried their own organizationId as of migration 0078, backfilled from
+  // the parent reconciliation job. Nullable rather than required because ~2,000
+  // matches and ~42 exceptions point at a jobId with no surviving job, leaving
+  // nothing to inherit — NULL there means "legacy / underivable", as it does on
+  // transactions. This closes RLS finding F1.
+  matches: "tenant_nullable",
+  exceptions: "tenant_nullable",
   audit_logs: "tenant_nullable",
   exception_aging_settings: "tenant_nullable",
   reconciliation_reports: "tenant_nullable",
@@ -72,6 +73,17 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   api_ingestion_logs: "tenant_nullable",
   sftp_credentials: "tenant_nullable",
   sftp_ingestion_logs: "tenant_nullable",
+  // Object-storage drop ingestion. NOT NULL organizationId — the SFTP pair is
+  // "tenant_nullable" only because it predates the standard; new tables hold
+  // the line.
+  bucket_ingestion_sources: "tenant_required",
+  bucket_ingestion_logs: "tenant_required",
+  // Email-forward ingestion. The source is org-owned; the LOG is nullable by
+  // design because a delivery to an unrecognised address has no organization
+  // yet must still be recorded — an unattributable rejection is exactly the
+  // signal that an address has leaked.
+  email_ingestion_sources: "tenant_required",
+  email_ingestion_logs: "tenant_nullable",
   user_role_preferences: "tenant_nullable",
   anomaly_scores: "tenant_nullable",
   detection_rules: "tenant_nullable",

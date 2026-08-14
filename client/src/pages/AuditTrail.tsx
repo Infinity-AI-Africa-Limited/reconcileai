@@ -66,7 +66,10 @@ export default function AuditTrailPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-primary">Audit Trail</h1>
-        <p className="text-muted-foreground mt-1">Complete log of all system actions for CBN compliance</p>
+        {/* The log itself is vertical-neutral, so the subtitle must be too. It
+            read "for CBN compliance", which asserts a Nigerian banking regulator
+            at a SHOPLINE merchant who answers to card schemes instead. */}
+        <p className="text-muted-foreground mt-1">Complete log of all system actions, for audit and compliance evidence</p>
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-3">

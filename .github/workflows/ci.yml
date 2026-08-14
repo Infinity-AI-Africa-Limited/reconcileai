@@ -3,8 +3,41 @@ name: CI
 on:
   push:
     branches: [main]
+  # EVERY pull request, not only those targeting main.
+  #
+  # `branches:` filters on the pull request's BASE, so `[main]` meant a PR opened
+  # against any other branch got no CI at all — no typecheck, no build, no tests,
+  # no tenancy ratchets. Not a rare shape either: this repo stacks PRs (#8–#11
+  # were a four-deep stack, and #73 was based on #72), and a stacked PR merges
+  # into its parent branch and then reaches main inside the parent's merge, so
+  # the code lands on production having never been checked.
+  #
+  # It fails silently, which is what makes it worth widening rather than
+  # remembering. Greptile still reviews — it is a GitHub App and does not read
+  # this file — so a stacked PR shows a green "Greptile Review" tick and looks
+  # reviewed while the suite never ran. #73 was caught only by counting the
+  # checks (1, not 3) rather than reading their results.
+  #
+  # `workflow_dispatch` below is the manual escape hatch, and it is not a
+  # substitute: it only helps when someone already suspects the runs are missing.
   pull_request:
-    branches: [main]
+    branches: ['**']
+  # Manual re-run, from Actions -> CI -> "Run workflow" (pick the branch).
+  #
+  # Needed because GitHub occasionally DROPS a pull_request event and never
+  # creates a run at all. PR #54 sat with zero CI runs while a PR opened after
+  # it ran normally — Actions was enabled, the workflow was active, and the
+  # branch simply had no run. Recovering it meant pushing a commit purely to
+  # emit a `synchronize` event.
+  #
+  # That is a poor tool now that #47 made this suite BLOCKING: with required
+  # checks and no manual trigger, a dropped event freezes a PR and the only
+  # remedies are a junk commit or close/reopen.
+  #
+  # For a same-repo branch the head SHA is the PR's head SHA, so the checks a
+  # dispatched run publishes satisfy branch protection exactly as an
+  # event-triggered run would.
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -26,15 +59,50 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm check
+      # One rule: react-hooks/rules-of-hooks. It runs here rather than in Tests
+      # because it needs no database and answers in seconds, and because the two
+      # defects it exists for were both invisible to tsc — a hook below an early
+      # return is perfectly well-typed. See eslint.config.js for why the config
+      # is one rule wide, and for the tRPC-shaped half it cannot see (covered by
+      # tools/hookOrder.test.ts in the Tests job).
+      - name: Lint
+        run: pnpm lint
       - name: Build
         run: pnpm build
 
-  # Best-effort until DB/secret-dependent tests are fully wired (see
-  # docs/DEPLOYMENT_RAILWAY.md). Runs against a throwaway MySQL service.
+  # BLOCKING. Runs the full suite against a throwaway MySQL service.
+  #
+  # This was `continue-on-error: true` ("best-effort until DB/secret-dependent
+  # tests are fully wired"). That premise expired, and the flag was actively
+  # dangerous while it lasted: a job failure did NOT fail the workflow, so the
+  # run-level conclusion read `success` even if every test failed. Anything
+  # judging a PR by the run conclusion — a human glancing at the checks, or
+  # automation calling /actions/runs — saw green regardless. Establishing that
+  # tests had actually passed meant querying /actions/runs/<id>/jobs separately.
+  #
+  # It also made the tenancy ratchets decorative. tenancyRatchet, rlsAudit,
+  # readScopeRatchet, channelBinding and guestPrivilege exist for the sole
+  # purpose of failing when a cross-tenant regression is introduced; a ratchet
+  # that cannot block a merge does not ratchet anything.
+  #
+  # Removed only after checking the history rather than assuming: 196 CI runs
+  # back to 2026-06-02 showed 123 Tests failures, so the suite genuinely was
+  # unstable for most of that window. Both causes are now fixed and the last 30
+  # runs are green —
+  #   * June–July: documentation.test.ts / docs-s3.test.ts failed persistently
+  #     (deterministic, not flaky) — the era this comment described;
+  #   * 2026-08-02: a real 1-in-256 flake in tenantHardening.test.ts, where
+  #     tampering a byte to the constant "00" was a no-op whenever the random
+  #     byte already held that value. Fixed in c11d3bc, nine minutes after its
+  #     last failure.
+  #
+  # Known residual risk: the "Push schema to test DB" step has failed once on
+  # its own (run 30700238964). That now blocks a merge. If it proves flaky,
+  # make that step retry — do not restore continue-on-error, which would hide
+  # real test failures to paper over an infrastructure one.
   test:
     name: Tests
     runs-on: ubuntu-latest
-    continue-on-error: true
     services:
       mysql:
         image: mysql:8.0

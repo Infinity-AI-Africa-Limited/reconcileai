@@ -6,8 +6,12 @@ name: Woodcore mirror sync
 #
 # Setup:
 #   1. In Railway, set CRON_SECRET to a strong random value.
-#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret
-#      WOODCORE_SYNC_SECRET with the SAME value.
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret named
+#      CRON_SECRET with the SAME value. Same name on both sides, so a rotation is
+#      one edit in each system and there is no second copy to forget.
+#      WOODCORE_SYNC_SECRET is the legacy name. It is still read as a fallback,
+#      but it is IGNORED whenever CRON_SECRET exists — delete it once CRON_SECRET
+#      is confirmed working, so only one value is left to rotate.
 #   3. After DNS cutover, update SYNC_URL below to https://reconcileaiafrica.com/...
 
 on:
@@ -18,28 +22,118 @@ on:
 jobs:
   trigger-sync:
     runs-on: ubuntu-latest
+    # Canonical repo only, matching the SHOPLINE workflow. Both repos carry this
+    # file (every commit is dual-pushed), and the mirror must not fire at the one
+    # production endpoint.
+    #
+    # This used to be implicit: the mirror has no CRON_SECRET, so the credential
+    # check below skipped it. That proxy stopped working the moment OIDC landed —
+    # `permissions: id-token: write` lives in this file, so the mirror can mint a
+    # token too and would have started calling production, only to be refused by
+    # the repository allow-list and email a failure every night. Stating the real
+    # condition is both correct and cheaper to read.
+    if: github.repository == 'Infinity-AI-Africa-Limited/reconcileai'
+    # Lets this job ask GitHub for a signed OIDC token identifying the workflow
+    # run. `contents: read` is restated because naming any permission drops the
+    # rest to none.
+    permissions:
+      id-token: write
+      contents: read
     env:
       # Use www directly — the bare domain goes through GoDaddy forwarding which
       # strips the POST method on redirect (301 → GET), causing a 405 on the API.
       SYNC_URL: "https://www.reconcileaiafrica.com/api/woodcore/sync"
+      # Must match GITHUB_OIDC_AUDIENCE on the server. Any fixed string works;
+      # the origin is used because it is unambiguous and self-documenting.
+      OIDC_AUDIENCE: "https://www.reconcileaiafrica.com"
     steps:
       - name: Trigger mirror sync
         env:
-          SYNC_SECRET: ${{ secrets.WOODCORE_SYNC_SECRET }}
+          # Prefer a single CRON_SECRET mirroring Railway's variable name, so a
+          # rotation updates ONE GitHub secret instead of one per workflow. Two
+          # secrets holding the same value IS the drift surface — it is exactly
+          # what broke this job on 2026-08-02. Falls back to the legacy
+          # per-workflow secret so nothing breaks before CRON_SECRET is created.
+          SYNC_SECRET: ${{ secrets.CRON_SECRET || secrets.WOODCORE_SYNC_SECRET }}
+          # WHICH secret the line above actually resolved to. `||` yields the
+          # first truthy operand, so a configured CRON_SECRET wins outright and
+          # WOODCORE_SYNC_SECRET is never read. Without carrying that through,
+          # the 403 diagnostic below named the legacy secret unconditionally and
+          # sent the operator to update a value the workflow was ignoring — they
+          # would edit it, re-run, get 403 again, and have no reason to doubt the
+          # instruction. A misleading remedy costs more than no remedy.
+          SECRET_SOURCE: ${{ secrets.CRON_SECRET && 'CRON_SECRET' || (secrets.WOODCORE_SYNC_SECRET && 'WOODCORE_SYNC_SECRET' || 'none') }}
         run: |
-          # Skip cleanly when the secret isn't configured on this repo (e.g. the
-          # MistaRichMan mirror). This prevents spurious "all jobs failed" emails;
-          # the sync only runs where WOODCORE_SYNC_SECRET is set to match the
-          # server's CRON_SECRET (or JWT_SECRET fallback).
-          if [ -z "$SYNC_SECRET" ]; then
-            echo "WOODCORE_SYNC_SECRET is not configured on this repository — skipping sync (expected on the mirror)."
-            exit 0
+          # Ask GitHub for a short-lived token identifying this run. The server
+          # verifies its signature and, critically, the `repository` claim — so
+          # nothing long-lived is copied between two dashboards and there is
+          # nothing to rotate out of step. That copying is what broke this job on
+          # 2026-08-02 and left the mirror stale for three days.
+          #
+          # Best-effort on purpose: the secret header is still sent alongside, so
+          # a deployment that has not yet set GITHUB_OIDC_* keeps working
+          # unchanged. Once the server logs `[syncAuth] authorized ... via
+          # github_oidc`, the secret header and the repo secrets can both go.
+          OIDC_TOKEN=""
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OIDC_AUDIENCE" \
+              | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
           fi
+          # Refuse LOUDLY when neither credential is available, rather than
+          # skipping. The check this replaces ran before the token request and
+          # exited 0, so the last documented rollout step — deleting the repo
+          # secrets once OIDC is proven — would have reported every run GREEN
+          # while syncing nothing. That is strictly worse than the outage this
+          # workflow exists to prevent: the 2026-08-02 drift was at least caught
+          # by a failure email, and a green skip sends none.
+          #
+          # The mirror is handled by the job-level `if:` above, so reaching here
+          # without a credential is a real fault on the canonical repo.
+          if [ -z "$OIDC_TOKEN" ] && [ -z "$SYNC_SECRET" ]; then
+            echo "::error::No credential available — neither a GitHub OIDC token nor CRON_SECRET/WOODCORE_SYNC_SECRET."
+            echo "OIDC needs 'permissions: id-token: write' (set on this job). If that is present and this"
+            echo "still fires, the token request itself failed — check the step log above."
+            echo "Otherwise set CRON_SECRET in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          if [ -n "$OIDC_TOKEN" ] && [ -n "$SYNC_SECRET" ]; then
+            echo "Authenticating with: GitHub OIDC (secret header also sent, as fallback: $SECRET_SOURCE)"
+          elif [ -n "$OIDC_TOKEN" ]; then
+            echo "Authenticating with: GitHub OIDC only (no shared secret configured — the end state)"
+          else
+            echo "Authenticating with: $SECRET_SOURCE (no OIDC token available)"
+          fi
+
           code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
-            -H "x-sync-secret: $SYNC_SECRET" \
+            ${SYNC_SECRET:+-H "x-sync-secret: $SYNC_SECRET"} \
+            ${OIDC_TOKEN:+-H "Authorization: Bearer $OIDC_TOKEN"} \
             "$SYNC_URL")
           echo "HTTP $code"; cat /tmp/resp; echo
           # 202 = started, 409 = a sync is already running — both are fine.
-          if [ "$code" != "202" ] && [ "$code" != "409" ]; then
-            echo "Unexpected status $code (check that WOODCORE_SYNC_SECRET matches the server's CRON_SECRET/JWT_SECRET)"; exit 1
+          if [ "$code" = "202" ] || [ "$code" = "409" ]; then
+            exit 0
           fi
+          echo
+          if [ "$code" = "403" ]; then
+            echo "::error::403 forbidden — the secret this workflow sent ($SECRET_SOURCE) no longer matches the server's CRON_SECRET."
+            echo "This is the expected symptom after a secret rotation: CRON_SECRET (or JWT_SECRET,"
+            echo "which it falls back to) was changed on Railway without updating this repository secret."
+            echo "It happened on 2026-08-02 and the mirror went stale for three days before anyone noticed."
+            echo
+            echo "Fix: copy the CURRENT CRON_SECRET from Railway into"
+            echo "  GitHub → Settings → Secrets and variables → Actions → $SECRET_SOURCE"
+            if [ "$SECRET_SOURCE" = "CRON_SECRET" ]; then
+              echo
+              echo "Note: WOODCORE_SYNC_SECRET is IGNORED while CRON_SECRET exists — editing it"
+              echo "will not clear this error. Once CRON_SECRET is confirmed working, delete the"
+              echo "legacy secret so there is only one value left to rotate."
+            fi
+            echo
+            echo "Then re-run this workflow. The server logs the same diagnosis under [syncAuth]."
+            echo "Rotation runbook: CLAUDE.md §18 — it lists every consumer that must be updated together."
+          else
+            echo "::error::Unexpected status $code from $SYNC_URL"
+          fi
+          exit 1

@@ -1,0 +1,151 @@
+name: SHOPLINE scheduled sync
+
+# Drives the three SHOPLINE scheduled handlers on the Railway server. These
+# endpoints have existed since Phase 1 and are documented in CLAUDE.md §2B.7 as
+# the "safety net" behind real-time webhook reconciliation — but nothing ever
+# called them, so the safety net did not exist in practice. When the in-process
+# debounce timer for a webhook-triggered sync is lost (the scheduler is
+# per-process and its timers are unref'd, so a restart inside the 20s window
+# drops the pending sync), NOTHING recovered it and the merchant's data simply
+# never arrived. That is what happened to the dev-store order on 2026-07-31.
+#
+# Setup (same shared secret as the Woodcore workflow):
+#   1. In Railway, set CRON_SECRET to a strong random value.
+#   2. In GitHub → Settings → Secrets and variables → Actions, add a secret named
+#      CRON_SECRET with the SAME value — one name in both systems.
+#      SHOPLINE_SYNC_SECRET is the legacy name, still read as a fallback but
+#      IGNORED whenever CRON_SECRET exists. Delete it once CRON_SECRET works.
+#
+# Note on cadence: GitHub's scheduler is best-effort and routinely runs late
+# under load, so "*/15" is a floor, not a guarantee. It is adequate as a
+# catch-up net behind real-time webhooks. If the recovery window ever needs to
+# be tight, move these to Railway Cron (same endpoints, same header) or to
+# BullMQ once REDIS_URL is provisioned — see CLAUDE.md §10.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # incremental catch-up sync
+    - cron: "0 3 * * *" # daily full 24h reconciliation
+    - cron: "0 */6 * * *" # webhook subscription health check
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which handler to run"
+        required: true
+        default: syncCycle
+        type: choice
+        options: [syncCycle, dailyBatch, webhookReconciler]
+
+# A long daily batch must not overlap the 15-minute cycle.
+concurrency:
+  group: shopline-sync
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    # Canonical repo only. Both repos carry this file (every commit is
+    # dual-pushed), and with the secret set on both they each fired the same
+    # cron at the same minute against ONE production endpoint — two concurrent
+    # sync cycles per tick. Ingest was not idempotent, so on 2026-08-02 that
+    # helped produce four copies of a single order. Ingest is now deduped, but
+    # halving the concurrency removes the race rather than relying on the guard.
+    if: github.repository == 'Infinity-AI-Africa-Limited/reconcileai'
+    # Lets this job ask GitHub for a signed OIDC token identifying the workflow
+    # run. `contents: read` is restated because naming any permission drops the
+    # rest to none.
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # Use www directly — the bare domain goes through forwarding which strips
+      # the POST method on redirect (301 → GET), causing a 405 on the API.
+      BASE_URL: "https://www.reconcileaiafrica.com/api/scheduled"
+      # Must match GITHUB_OIDC_AUDIENCE on the server.
+      OIDC_AUDIENCE: "https://www.reconcileaiafrica.com"
+    steps:
+      - name: Select handler
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "0 3 * * *")    handler=shoplineDailyBatch ;;
+            "0 */6 * * *")  handler=shoplineWebhookReconciler ;;
+            "*/15 * * * *") handler=shoplineSyncCycle ;;
+            *)
+              # Manual run (no github.event.schedule) — use the chosen input.
+              case "${{ inputs.target }}" in
+                dailyBatch)         handler=shoplineDailyBatch ;;
+                webhookReconciler)  handler=shoplineWebhookReconciler ;;
+                *)                  handler=shoplineSyncCycle ;;
+              esac
+              ;;
+          esac
+          echo "handler=$handler" >> "$GITHUB_OUTPUT"
+          echo "Selected handler: $handler"
+
+      - name: Trigger handler
+        env:
+          # Prefer a single CRON_SECRET mirroring Railway's variable name, so a
+          # rotation updates ONE GitHub secret instead of one per workflow. Two
+          # secrets holding the same value IS the drift surface — that is what
+          # broke the Woodcore sync on 2026-08-02. Falls back to the legacy
+          # per-workflow secret so nothing breaks before CRON_SECRET is created.
+          SYNC_SECRET: ${{ secrets.CRON_SECRET || secrets.SHOPLINE_SYNC_SECRET }}
+          # WHICH secret the line above resolved to. `||` yields the first truthy
+          # operand, so a configured CRON_SECRET wins and SHOPLINE_SYNC_SECRET is
+          # never read — naming the legacy secret in the failure message would
+          # send the operator to edit a value this workflow ignores.
+          SECRET_SOURCE: ${{ secrets.CRON_SECRET && 'CRON_SECRET' || (secrets.SHOPLINE_SYNC_SECRET && 'SHOPLINE_SYNC_SECRET' || 'none') }}
+          HANDLER: ${{ steps.pick.outputs.handler }}
+        run: |
+          # Short-lived token identifying this run; the server checks its
+          # signature and `repository` claim. Best-effort — the secret header is
+          # still sent, so a deployment without GITHUB_OIDC_* keeps working. See
+          # the Woodcore workflow for the full reasoning.
+          OIDC_TOKEN=""
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OIDC_AUDIENCE" \
+              | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+          fi
+          # Loud, not silent. The check this replaces ran before the token
+          # request and exited 0, so deleting the repo secrets — the last step of
+          # the documented rollout — would have reported every run GREEN while
+          # syncing nothing. The mirror is already excluded by the job-level
+          # `if:` above, so reaching here without a credential is a real fault.
+          if [ -z "$OIDC_TOKEN" ] && [ -z "$SYNC_SECRET" ]; then
+            echo "::error::No credential available — neither a GitHub OIDC token nor CRON_SECRET/SHOPLINE_SYNC_SECRET."
+            echo "OIDC needs 'permissions: id-token: write' (set on this job). If that is present and this"
+            echo "still fires, the token request itself failed — check the step log above."
+            exit 1
+          fi
+
+          if [ -n "$OIDC_TOKEN" ] && [ -n "$SYNC_SECRET" ]; then
+            echo "Authenticating with: GitHub OIDC (secret header also sent, as fallback: $SECRET_SOURCE)"
+          elif [ -n "$OIDC_TOKEN" ]; then
+            echo "Authenticating with: GitHub OIDC only (no shared secret configured — the end state)"
+          else
+            echo "Authenticating with: $SECRET_SOURCE (no OIDC token available)"
+          fi
+
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" --max-time 600 -X POST \
+            ${SYNC_SECRET:+-H "x-sync-secret: $SYNC_SECRET"} \
+            ${OIDC_TOKEN:+-H "Authorization: Bearer $OIDC_TOKEN"} \
+            "$BASE_URL/$HANDLER")
+          echo "HTTP $code"; cat /tmp/resp; echo
+          if [ "$code" = "403" ]; then
+            echo "::error::403 forbidden — the secret this workflow sent ($SECRET_SOURCE) no longer matches the server's CRON_SECRET."
+            echo "Fix: copy the CURRENT CRON_SECRET from Railway into"
+            echo "  GitHub → Settings → Secrets and variables → Actions → $SECRET_SOURCE"
+            if [ "$SECRET_SOURCE" = "CRON_SECRET" ]; then
+              echo
+              echo "Note: SHOPLINE_SYNC_SECRET is IGNORED while CRON_SECRET exists — editing it"
+              echo "will not clear this error. Delete it once CRON_SECRET is confirmed working."
+            fi
+            echo "Rotation runbook: CLAUDE.md §18."
+            exit 1
+          fi
+          if [ "$code" != "200" ]; then
+            echo "::error::Unexpected status $code from $BASE_URL/$HANDLER"
+            exit 1
+          fi

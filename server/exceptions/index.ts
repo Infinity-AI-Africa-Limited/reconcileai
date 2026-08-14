@@ -28,6 +28,7 @@ export { MOBILE_CHANNEL_EXCEPTIONS, MOBILE_CHANNEL_EXCEPTION_KEYS } from "./mobi
 export { CARD_SWITCHING_EXCEPTIONS, CARD_SWITCHING_EXCEPTION_KEYS } from "./card-switching";
 export { CARD_SCHEME_EXCEPTIONS, CARD_SCHEME_EXCEPTION_KEYS } from "./card-schemes";
 export { CARD_DISPUTE_EXCEPTIONS, CARD_DISPUTE_EXCEPTION_KEYS } from "./card-disputes";
+export { CHEQUE_EXCEPTIONS, CHEQUE_EXCEPTION_KEYS } from "./cheque";
 
 // Shared types
 export type { NigerianChannelException, NigerianChannelSource } from "./types";
@@ -50,6 +51,8 @@ import { MOBILE_CHANNEL_EXCEPTIONS } from "./mobile-channels";
 import { CARD_SWITCHING_EXCEPTIONS } from "./card-switching";
 import { CARD_SCHEME_EXCEPTIONS } from "./card-schemes";
 import { CARD_DISPUTE_EXCEPTIONS } from "./card-disputes";
+import { CHEQUE_EXCEPTIONS } from "./cheque";
+import { NON_INTEREST_EXCEPTIONS } from "./non-interest";
 import { RETAIL_COMMERCE_EXCEPTIONS } from "./retail-commerce";
 import { UGANDA_EXCEPTIONS } from "./uganda";
 import type { NigerianChannelException } from "./types";
@@ -93,13 +96,14 @@ export const CHANNEL_EXCEPTION_GROUPS = {
   card_switching: CARD_SWITCHING_EXCEPTIONS,
   card_schemes: CARD_SCHEME_EXCEPTIONS,
   card_disputes: CARD_DISPUTE_EXCEPTIONS,
+  cheque: CHEQUE_EXCEPTIONS,
 } as const;
 
 export type NigerianChannelKey = keyof typeof CHANNEL_EXCEPTION_GROUPS;
 
 /**
  * Complete registry of all Nigerian payment channel exceptions.
- * 121 exceptions across 17 channels — the intelligence moat.
+ * 130 exceptions across 18 channels — the intelligence moat.
  */
 export const ALL_NIGERIAN_EXCEPTIONS: NigerianChannelException[] =
   Object.values(CHANNEL_EXCEPTION_GROUPS).flat();
@@ -123,13 +127,27 @@ export const EXCEPTION_REGISTRY = new Map<string, TaxonomyExceptionEntry>([
   ...ALL_NIGERIAN_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
   ...RETAIL_COMMERCE_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
   ...UGANDA_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
+  ...NON_INTEREST_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
 ]);
 
-/** Every exception across all markets/verticals (Nigeria + retail + Uganda). */
+/**
+ * Every exception across all markets/verticals (Nigeria + retail + Uganda +
+ * non-interest).
+ *
+ * NON_INTEREST_EXCEPTIONS are included here and in the registry, but NOT in
+ * CHANNEL_EXCEPTION_GROUPS, and that asymmetry is deliberate. They belong to an
+ * INSTITUTION, not to a rail: a non-interest bank runs the same NIP, POS and
+ * cheque clearing as anyone else, and what differs is how income may be earned
+ * and shared across all of them. They are selected by
+ * `organizations.bankingModel` — see nonInterestTaxonomyPromptBlock in ./seed —
+ * so putting them in the channel map would inject them for a conventional bank
+ * on the strength of a channel type, which is exactly wrong.
+ */
 export const ALL_EXCEPTIONS: TaxonomyExceptionEntry[] = [
   ...ALL_NIGERIAN_EXCEPTIONS,
   ...RETAIL_COMMERCE_EXCEPTIONS,
   ...UGANDA_EXCEPTIONS,
+  ...NON_INTEREST_EXCEPTIONS,
 ];
 
 /**
@@ -153,6 +171,7 @@ export const EXCEPTION_CHANNELS = {
   card_switching: { label: "Card Switching & Processors (Interswitch / UP / eTranzact)", count: CARD_SWITCHING_EXCEPTIONS.length },
   card_schemes: { label: "Card Schemes (Verve / AfriGO / Visa / Mastercard)", count: CARD_SCHEME_EXCEPTIONS.length },
   card_disputes: { label: "Card Disputes & Chargebacks", count: CARD_DISPUTE_EXCEPTIONS.length },
+  cheque: { label: "Cheque Clearing (NIBSS NACS / Truncation)", count: CHEQUE_EXCEPTIONS.length },
 } as const;
 
 // Retail / E-Commerce (SHOPLINE vertical)
@@ -162,3 +181,6 @@ export type { RetailCommerceException, RetailChannelSource } from "./retail-comm
 // Uganda market pack (BoU NPS framework)
 export { UGANDA_EXCEPTIONS, UGANDA_EXCEPTION_KEYS } from "./uganda";
 export type { UgandaChannelException } from "./uganda";
+
+// Non-interest (NIFI) banking — institution-scoped, not channel-scoped.
+export { NON_INTEREST_EXCEPTIONS, NON_INTEREST_EXCEPTION_KEYS } from "./non-interest";

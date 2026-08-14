@@ -429,7 +429,8 @@ export function registerSsoRoutes(app: Express): void {
 
       const cookieOptions = getSessionCookieOptions(req);
       res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      return res.redirect(302, "/dashboard");
+      // Same landing as the magic-link flow — see the note there.
+      return res.redirect(302, "/home");
     } catch (err) {
       console.error("[sso] callback failed:", err);
       loginError(res, "sso_failed");

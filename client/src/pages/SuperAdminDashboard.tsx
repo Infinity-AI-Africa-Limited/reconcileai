@@ -59,6 +59,13 @@ import {
   ResponsiveContainer, AreaChart, Area,
 } from "recharts";
 import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
+import { toSegment } from "@/lib/segments";
+import {
+  BANKING_MODELS,
+  bankingModelAppliesTo,
+  bankingModelLabel,
+  toBankingModel,
+} from "@/lib/bankingModel";
 
 type Segment = "financial_services" | "corporate_b2b" | "super_admin" | "retail_commerce";
 
@@ -68,6 +75,20 @@ const SEGMENT_LABELS: Record<Segment, string> = {
   super_admin: "Infinity AI (Internal)",
   retail_commerce: "Retail Commerce",
 };
+
+/**
+ * Single source of the segment option list, derived from SEGMENT_LABELS so the
+ * two can never disagree.
+ *
+ * This page previously hand-maintained the same list in three places, and one
+ * of them drifted: the per-row segment selector was missing `retail_commerce`.
+ * Because a Radix Select renders blank when `value` matches no item, every
+ * retail org showed an EMPTY segment box — and since the control is also the
+ * setter, one stray click would silently reassign that org's segment. Deriving
+ * the options means adding a segment to the `Segment` union now fails the type
+ * check until SEGMENT_LABELS is updated, and every dropdown picks it up.
+ */
+const SEGMENT_OPTIONS = Object.entries(SEGMENT_LABELS) as Array<[Segment, string]>;
 
 const SEGMENT_COLORS: Record<Segment, string> = {
   financial_services: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
@@ -362,10 +383,9 @@ function CreateOrgDialog({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="financial_services">Financial Services</SelectItem>
-                        <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                        <SelectItem value="super_admin">Infinity AI (Internal)</SelectItem>
-                        <SelectItem value="retail_commerce">Retail Commerce</SelectItem>
+                        {SEGMENT_OPTIONS.map(([value, label]) => (
+                          <SelectItem key={value} value={value}>{label}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -485,6 +505,14 @@ function OrganisationsTable() {
     onError: (err) => toast.error("Failed to update sign-in method", { description: err.message }),
   });
 
+  const updateBankingModel = trpc.superAdmin.setOrganizationBankingModel.useMutation({
+    onSuccess: () => {
+      toast.success("Banking model updated — the Super Agent applies the NIFI taxonomy from the next diagnosis");
+      utils.superAdmin.allOrganizations.invalidate();
+    },
+    onError: (err) => toast.error("Failed to update banking model", { description: err.message }),
+  });
+
   const filtered = (orgs ?? []).filter((org: any) => {
     const matchSearch = !search || org.name.toLowerCase().includes(search.toLowerCase()) || org.code?.toLowerCase().includes(search.toLowerCase());
     const matchSeg = segmentFilter === "all" || org.segment === segmentFilter;
@@ -546,10 +574,9 @@ function OrganisationsTable() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All segments</SelectItem>
-              <SelectItem value="financial_services">Financial Services</SelectItem>
-              <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-              <SelectItem value="super_admin">Infinity AI</SelectItem>
-              <SelectItem value="retail_commerce">Retail Commerce</SelectItem>
+              {SEGMENT_OPTIONS.map(([value, label]) => (
+                <SelectItem key={value} value={value}>{label}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -647,9 +674,9 @@ function OrganisationsTable() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="financial_services">Financial Services</SelectItem>
-                            <SelectItem value="corporate_b2b">Corporate B2B</SelectItem>
-                            <SelectItem value="super_admin">Infinity AI</SelectItem>
+                            {SEGMENT_OPTIONS.map(([value, label]) => (
+                              <SelectItem key={value} value={value}>{label}</SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                         {/* Sign-in method: email link is every org's default; flip
@@ -676,6 +703,34 @@ function OrganisationsTable() {
                             </SelectContent>
                           </Select>
                         )}
+                        {/* Banking model. Orthogonal to segment: a non-interest
+                            bank runs the same rails, but the Super Agent applies
+                            the NIFI taxonomy across all of them (income only from
+                            a real sale, lease or partnership; IAH funds segregated
+                            from shareholders'). The eligibility rule lives in
+                            lib/bankingModel so the next consumer cannot re-derive
+                            it differently. */}
+                        {bankingModelAppliesTo(toSegment(org.segment)) ? (
+                          <Select
+                            value={toBankingModel(org.bankingModel)}
+                            onValueChange={(v) =>
+                              updateBankingModel.mutate({
+                                organizationId: org.id,
+                                bankingModel: toBankingModel(v),
+                              })
+                            }
+                            disabled={updateBankingModel.isPending}
+                          >
+                            <SelectTrigger className="h-7 text-xs w-44" title="Banking model">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {BANKING_MODELS.map((m) => (
+                                <SelectItem key={m} value={m}>{bankingModelLabel(m)}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>

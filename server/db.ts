@@ -1,5 +1,6 @@
-import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne } from "drizzle-orm";
+import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import type { MySqlColumn } from "drizzle-orm/mysql-core";
 import * as schema from "../drizzle/schema";
 import {
   InsertUser, users,
@@ -59,6 +60,13 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/** Force-drop the cached Drizzle instance so the next getDb() call re-creates it.
+ *  Call this whenever a query throws ECONNRESET / ETIMEDOUT so the next tick
+ *  gets a fresh connection instead of retrying on a dead socket. */
+export function resetDb(): void {
+  _db = null;
 }
 
 // Export schema tables for use in routers
@@ -200,17 +208,96 @@ export async function updateUserRole(userId: number, role: "super_admin" | "admi
 
 // ─── Channels ────────────────────────────────────────────────────────
 
-export async function getChannels() {
+/**
+ * Channel visibility rule for a tenant: its OWN channels, plus the shared
+ * platform rails (`organizationId IS NULL` — nibss/pos/atm/bank_statement/…,
+ * seeded once for every institution). Never another tenant's.
+ *
+ * `organizationId` is REQUIRED, and `null` explicitly means platform-wide.
+ * It is deliberately not optional: this function previously took no argument
+ * and returned every channel on the platform to any authenticated caller, so a
+ * default would let the same cross-tenant enumeration reappear the moment
+ * someone forgot an argument. Making the unsafe case spell itself `null` keeps
+ * it greppable and reviewable.
+ */
+/**
+ * The tenancy predicate for any table carrying a nullable `organizationId`.
+ *
+ * `null` means the legacy/unattributed rows — NEVER "any organization". Kept as
+ * one helper so the two spellings can't drift: writing `eq(col, orgId)` without
+ * the null branch silently returns nothing for legacy tenants, and omitting the
+ * predicate entirely returns everyone's.
+ */
+export function orgFilter(
+  column: MySqlColumn,
+  organizationId: number | null,
+) {
+  return organizationId === null ? isNull(column) : eq(column, organizationId);
+}
+
+export function channelScope(organizationId: number | null) {
+  // A caller with no organization gets the shared rails ONLY. `null` must never
+  // widen to "everything" — an org-less user would then silently receive every
+  // tenant's channels, which is the exact bug this replaces.
+  return organizationId === null
+    ? isNull(channels.organizationId)
+    : or(eq(channels.organizationId, organizationId), isNull(channels.organizationId));
+}
+
+export async function getChannels(organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(channels).where(channelScope(organizationId)).orderBy(asc(channels.name));
+}
+
+/**
+ * Every channel on the platform, across all tenants.
+ *
+ * Deliberately a separate, awkwardly-named function rather than a flag on
+ * `getChannels`: cross-tenant reads should be greppable and should require the
+ * author to type something that reads like what it does. Only legitimate uses
+ * are super-admin platform views and internal jobs that genuinely span tenants.
+ */
+export async function getAllChannelsAcrossTenants() {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(channels).orderBy(asc(channels.name));
 }
 
-export async function getChannelByCode(code: string) {
+/**
+ * Look a channel up by code, honouring the same tenancy rule. Returns undefined
+ * when the code belongs to another tenant — so an attacker-supplied
+ * `channelCode` cannot be used to read or write into someone else's channel.
+ */
+export async function getChannelByCode(code: string, organizationId: number | null) {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(channels).where(eq(channels.code, code)).limit(1);
+  const result = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.code, code), channelScope(organizationId)))
+    .limit(1);
   return result[0];
+}
+
+/**
+ * Platform-wide existence check for a channel code.
+ *
+ * `channels.code` carries a GLOBAL unique constraint, so uniqueness on create
+ * must be validated across all tenants — an org-scoped check would pass and
+ * then hit a duplicate-key error at insert. This is the one place a
+ * cross-tenant read is correct, and it deliberately returns only a boolean so
+ * it cannot leak another tenant's channel details.
+ */
+export async function channelCodeExists(code: string): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const [row] = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(eq(channels.code, code))
+    .limit(1);
+  return Boolean(row);
 }
 
 export async function getChannelById(id: number) {
@@ -220,16 +307,46 @@ export async function getChannelById(id: number) {
   return result[0];
 }
 
+/**
+ * Look a channel up by id, honouring the tenancy rule — the by-id counterpart
+ * of `getChannelByCode`.
+ *
+ * Required wherever a channel id arrives from OUTSIDE, most importantly the
+ * public upload API: an API key is issued to one organization, so a
+ * caller-supplied `channelId` must be proven to belong to that organization (or
+ * be a shared rail) before anything is written to it. Returns undefined when it
+ * does not, so the caller fails closed.
+ */
+export async function getChannelByIdForOrg(id: number, organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.id, id), channelScope(organizationId)))
+    .limit(1);
+  return result[0];
+}
+
 export async function createChannel(data: InsertChannel) {
   const db = await getDb();
   if (!db) return;
   await db.insert(channels).values(data);
 }
 
-export async function updateChannel(id: number, data: Partial<InsertChannel>) {
+/** Update a channel the caller's org owns. Returns rows affected (0 = not yours). */
+export async function updateChannel(
+  id: number,
+  organizationId: number,
+  data: Partial<InsertChannel>,
+): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(channels).set(data).where(eq(channels.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(channels)
+    .set(data)
+    .where(and(eq(channels.id, id), eq(channels.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Upload Batches ──────────────────────────────────────────────────
@@ -276,13 +393,20 @@ export async function incrementUploadBatchCounts(id: number, addValid: number, a
     .where(eq(uploadBatches.id, id));
 }
 
-export async function getUploadBatches(userId: number, isAdmin: boolean) {
+/**
+ * Upload batches for ONE organization.
+ *
+ * Was `(userId, isAdmin)`, where `isAdmin` took the branch with no WHERE at all —
+ * so every bank administrator saw every other tenant's uploads on /upload. Same
+ * defect and same fix as getTransactions, getReconciliationJobs and getReports.
+ */
+export async function getUploadBatches(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(uploadBatches).orderBy(desc(uploadBatches.createdAt)).limit(100);
-  }
-  return db.select().from(uploadBatches).where(eq(uploadBatches.userId, userId)).orderBy(desc(uploadBatches.createdAt)).limit(100);
+  return db.select().from(uploadBatches)
+    .where(orgFilter(uploadBatches.organizationId, organizationId))
+    .orderBy(desc(uploadBatches.createdAt))
+    .limit(100);
 }
 
 // ─── Transactions ────────────────────────────────────────────────────
@@ -306,7 +430,29 @@ export async function insertTransactions(txns: InsertTransaction[]) {
   }
 }
 
+/**
+ * Transactions for ONE organization.
+ *
+ * `organizationId` is required and has no default. It was previously absent
+ * entirely: the predicate was built from `userId` (and only when `!isAdmin`)
+ * plus optional filters, so an admin calling with no filters produced an empty
+ * conditions array, a `whereClause` of `undefined`, and therefore
+ * `.where(undefined)` — every row of every tenant on the core financial table.
+ * `channelScope` in this same file carries a comment warning about exactly that
+ * "null must never widen to everything" mistake; this function was the place it
+ * had already happened.
+ *
+ * Required rather than optional-with-a-default so the compiler forces every
+ * call site to state its tenant, instead of inheriting a silent one. `null`
+ * means the legacy rows that carry no organization (see CLAUDE.md §19) — it is
+ * NOT "any organization".
+ *
+ * Cross-tenant reads must not go through here. Follow the precedent of
+ * `getAllChannelsAcrossTenants` and add a separate, awkwardly-named function so
+ * the intent is visible at the call site.
+ */
 export async function getTransactions(filters: {
+  organizationId: number | null;
   userId?: number;
   isAdmin?: boolean;
   channelId?: number;
@@ -322,7 +468,15 @@ export async function getTransactions(filters: {
   const db = await getDb();
   if (!db) return { data: [], total: 0 };
 
-  const conditions = [];
+  // Tenancy predicate first, and unconditionally — it is never optional, so it
+  // also guarantees `conditions` is non-empty and the WHERE can never vanish.
+  // Typed to allow undefined entries because drizzle's `or()` may return one;
+  // `and()` ignores them, and the definite predicate below keeps the result SQL.
+  const conditions: (SQL<unknown> | undefined)[] = [
+    filters.organizationId === null
+      ? isNull(transactions.organizationId)
+      : eq(transactions.organizationId, filters.organizationId),
+  ];
   if (!filters.isAdmin && filters.userId) {
     conditions.push(eq(transactions.userId, filters.userId));
   }
@@ -344,7 +498,10 @@ export async function getTransactions(filters: {
     );
   }
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  // No `: undefined` fallback. The tenancy predicate is unconditional, so an
+  // empty conditions array is impossible — and any path yielding `undefined`
+  // here would restore the unscoped, all-tenant query.
+  const whereClause = and(...conditions);
   const limit = clampLimit(filters.limit);
   const offset = clampOffset(filters.offset);
 
@@ -391,10 +548,62 @@ export async function getChannelTxnAggregate(channelId: number, dateFrom: Date, 
   };
 }
 
-export async function getTransactionsByIds(ids: number[]) {
+/**
+ * Transactions by id, for ONE organization.
+ *
+ * Use this wherever the ids came from the caller. Previously there was only an
+ * unscoped version, so a tRPC input of arbitrary transaction ids read rows from
+ * any tenant — the same class already fixed in `getTransactions` and
+ * `getAuditLogs`.
+ *
+ * The org predicate is AND-ed into each batch's WHERE rather than applied to
+ * the assembled results: filtering after the fact would still have fetched
+ * every foreign row, and one forgotten `.filter()` would restore the leak.
+ */
+export async function getTransactionsByIds(ids: number[], organizationId: number | null) {
   const db = await getDb();
   if (!db || ids.length === 0) return [];
+  const orgPredicate = organizationId === null
+    ? isNull(transactions.organizationId)
+    : eq(transactions.organizationId, organizationId);
   // Batch large ID arrays to prevent query size limits
+  const results = [];
+  for (let i = 0; i < ids.length; i += 500) {
+    const batch = ids.slice(i, i + 500);
+    const batchResult = await db
+      .select()
+      .from(transactions)
+      .where(and(inArray(transactions.id, batch), orgPredicate));
+    results.push(...batchResult);
+  }
+  return results;
+}
+
+/**
+ * Transactions by id with NO tenancy filter. Internal engine use only.
+ *
+ * Deliberately named so the absence of scoping is visible at every call site,
+ * following the precedent of `getAllChannelsAcrossTenants`.
+ *
+ * ONLY legitimate when the ids were derived server-side, in the same cycle,
+ * from a parent row the process already owns — never from request input. Two
+ * such call sites exist, both inside the reconciliation runner:
+ *   - `runDeferredAiAnalysis`, whose ids come from that job's own exceptions
+ *   - `runReconciliation`, whose ids come from the matching engine's result
+ *     over transactions loaded from the job's own channels
+ *
+ * Why these are NOT simply scoped to the job's organizationId: a transaction's
+ * `organizationId` is not guaranteed to equal its job's. The legacy rows carry
+ * NULL (CLAUDE.md §19.2), so an org predicate here could silently return fewer
+ * rows than were just matched — and at the `runReconciliation` call site that
+ * means exceptions never get persisted for the dropped rows. Losing exceptions
+ * is a financial-correctness failure, and a worse outcome than the theoretical
+ * exposure of an id the engine itself produced. Revisit once §19.2 is settled
+ * and transaction/job organizationId are known to agree.
+ */
+export async function getTransactionsByIdsUnscoped(ids: number[]) {
+  const db = await getDb();
+  if (!db || ids.length === 0) return [];
   const results = [];
   for (let i = 0; i < ids.length; i += 500) {
     const batch = ids.slice(i, i + 500);
@@ -470,13 +679,14 @@ export async function updateReconciliationJob(id: number, data: Partial<InsertRe
   await db.update(reconciliationJobs).set(data).where(eq(reconciliationJobs.id, id));
 }
 
-export async function getReconciliationJobs(userId: number, isAdmin: boolean) {
+/** Reconciliation runs for ONE organization. See getUploadBatches for the history. */
+export async function getReconciliationJobs(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(reconciliationJobs).orderBy(desc(reconciliationJobs.createdAt)).limit(100);
-  }
-  return db.select().from(reconciliationJobs).where(eq(reconciliationJobs.userId, userId)).orderBy(desc(reconciliationJobs.createdAt)).limit(100);
+  return db.select().from(reconciliationJobs)
+    .where(orgFilter(reconciliationJobs.organizationId, organizationId))
+    .orderBy(desc(reconciliationJobs.createdAt))
+    .limit(100);
 }
 
 export async function getReconciliationJob(id: number) {
@@ -524,18 +734,43 @@ export async function getMatchesByJob(jobId: number) {
   return db.select().from(matches).where(eq(matches.jobId, jobId)).orderBy(desc(matches.confidenceScore));
 }
 
-export async function updateMatchStatus(id: number, status: string, reviewedBy?: number) {
+/**
+ * Confirm or reject a match, within ONE organization.
+ *
+ * Previously keyed on a bare id, and allow-listed in tenancyRatchet.test.ts
+ * only because `matches` had no organizationId to filter on. It has one now, so
+ * the exemption is gone: an id belonging to another tenant matches no row and
+ * the update is a no-op rather than a cross-tenant write.
+ */
+export async function updateMatchStatus(
+  id: number,
+  organizationId: number | null,
+  status: string,
+  reviewedBy?: number,
+) {
   const db = await getDb();
   if (!db) return;
   const updateData: any = { status };
   if (reviewedBy) { updateData.reviewedBy = reviewedBy; updateData.reviewedAt = new Date(); }
-  await db.update(matches).set(updateData).where(eq(matches.id, id));
+  await db.update(matches).set(updateData).where(and(eq(matches.id, id), orgFilter(matches.organizationId, organizationId)));
 }
 
-export async function getPendingReviewMatches(userId: number, isAdmin: boolean) {
+/**
+ * Matches awaiting human review, for ONE organization.
+ *
+ * The `userId`/`isAdmin` arguments were accepted and never used — the query
+ * filtered on status alone, so every caller received every tenant's review
+ * queue regardless of who asked.
+ */
+export async function getPendingReviewMatches(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(matches).where(eq(matches.status, "pending_review")).orderBy(desc(matches.createdAt)).limit(100);
+  return db
+    .select()
+    .from(matches)
+    .where(and(eq(matches.status, "pending_review"), orgFilter(matches.organizationId, organizationId)))
+    .orderBy(desc(matches.createdAt))
+    .limit(100);
 }
 
 // ─── Exceptions ──────────────────────────────────────────────────────
@@ -559,7 +794,17 @@ export async function insertExceptionsBatch(dataArray: InsertException[]) {
   return ids;
 }
 
+/**
+ * Exceptions for ONE organization.
+ *
+ * This was the last read still allow-listed in readScopeRatchet.test.ts, and
+ * the only reason was that `exceptions` had no organizationId column: with all
+ * filters optional the predicate could vanish and return every tenant's
+ * exceptions. The column now exists (migration 0078), so the exemption is gone
+ * and the tenancy predicate is unconditional like every other scoped reader.
+ */
 export async function getExceptions(filters: {
+  organizationId: number | null;
   jobId?: number;
   status?: string;
   category?: string;
@@ -572,7 +817,9 @@ export async function getExceptions(filters: {
   const db = await getDb();
   if (!db) return { data: [], total: 0 };
 
-  const conditions = [];
+  const conditions: (SQL<unknown> | undefined)[] = [
+    orgFilter(exceptions.organizationId, filters.organizationId),
+  ];
   if (filters.jobId) conditions.push(eq(exceptions.jobId, filters.jobId));
   if (filters.status) conditions.push(eq(exceptions.status, filters.status as any));
   if (filters.category) conditions.push(eq(exceptions.category, filters.category as any));
@@ -580,7 +827,8 @@ export async function getExceptions(filters: {
   if (filters.dateFrom) conditions.push(gte(exceptions.createdAt, filters.dateFrom));
   if (filters.dateTo) conditions.push(lte(exceptions.createdAt, filters.dateTo));
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  // Unconditional tenancy predicate above, so no `: undefined` fallback.
+  const whereClause = and(...conditions);
   const limit = clampLimit(filters.limit);
   const offset = clampOffset(filters.offset);
 
@@ -596,10 +844,21 @@ export async function getExceptions(filters: {
   return { data, total };
 }
 
-export async function updateException(id: number, data: Partial<InsertException>) {
+/**
+ * Update one exception, within ONE organization.
+ *
+ * Allow-listed in tenancyRatchet.test.ts only because `exceptions` had no
+ * organizationId to filter on. It has one now, so the exemption is removed and
+ * an id from another tenant updates nothing.
+ */
+export async function updateException(
+  id: number,
+  organizationId: number | null,
+  data: Partial<InsertException>,
+) {
   const db = await getDb();
   if (!db) return;
-  await db.update(exceptions).set(data).where(eq(exceptions.id, id));
+  await db.update(exceptions).set(data).where(and(eq(exceptions.id, id), orgFilter(exceptions.organizationId, organizationId)));
 }
 
 // ─── Exception Age / Escalation Tracker ──────────────────────────────
@@ -609,7 +868,7 @@ export async function updateException(id: number, data: Partial<InsertException>
  * oldest first — the input to the age/escalation tracker. Resolved/dismissed
  * items are excluded since they no longer age.
  */
-export async function getOpenExceptionsForAging(limit = 2000) {
+export async function getOpenExceptionsForAging(organizationId: number | null, limit = 2000) {
   const db = await getDb();
   if (!db) return [];
   return db
@@ -633,7 +892,10 @@ export async function getOpenExceptionsForAging(limit = 2000) {
     .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
     .leftJoin(reconciliationJobs, eq(exceptions.jobId, reconciliationJobs.id))
     .leftJoin(users, eq(exceptions.assignedTo, users.id))
-    .where(inArray(exceptions.status, ["open", "in_review", "escalated"]))
+    .where(and(
+      orgFilter(exceptions.organizationId, organizationId),
+      inArray(exceptions.status, ["open", "in_review", "escalated"]),
+    ))
     .orderBy(asc(exceptions.createdAt))
     .limit(limit);
 }
@@ -738,7 +1000,20 @@ export async function getAuditChain(organizationId: number | null) {
     .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id));
 }
 
+/**
+ * Audit log entries for ONE organization.
+ *
+ * Same defect and same fix as `getTransactions` above: `organizationId` was
+ * absent, so `getAuditLogs({ limit: 1000 })` — a real call site — built no
+ * predicate at all and returned every tenant's audit trail. On a compliance
+ * product that trail is among the most sensitive tables there is: who did what,
+ * to which entity, from which address.
+ *
+ * Required, not optional. `null` means the global/unscoped chain, matching
+ * `getAuditChain` directly below.
+ */
 export async function getAuditLogs(filters: {
+  organizationId: number | null;
   entityType?: string;
   entityId?: number;
   userId?: number;
@@ -748,12 +1023,16 @@ export async function getAuditLogs(filters: {
   const db = await getDb();
   if (!db) return { data: [], total: 0 };
 
-  const conditions = [];
+  const conditions = [
+    filters.organizationId === null
+      ? isNull(auditLogs.organizationId)
+      : eq(auditLogs.organizationId, filters.organizationId),
+  ];
   if (filters.entityType) conditions.push(eq(auditLogs.entityType, filters.entityType));
   if (filters.entityId) conditions.push(eq(auditLogs.entityId, filters.entityId));
   if (filters.userId) conditions.push(eq(auditLogs.userId, filters.userId));
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const whereClause = and(...conditions);
   const limit = clampLimit(filters.limit);
   const offset = clampOffset(filters.offset);
 
@@ -778,13 +1057,14 @@ export async function createReport(data: InsertReconciliationReport) {
   return result[0].insertId;
 }
 
-export async function getReports(userId: number, isAdmin: boolean) {
+/** Saved reports for ONE organization. See getUploadBatches for the history. */
+export async function getReports(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(reconciliationReports).orderBy(desc(reconciliationReports.createdAt)).limit(100);
-  }
-  return db.select().from(reconciliationReports).where(eq(reconciliationReports.userId, userId)).orderBy(desc(reconciliationReports.createdAt)).limit(100);
+  return db.select().from(reconciliationReports)
+    .where(orgFilter(reconciliationReports.organizationId, organizationId))
+    .orderBy(desc(reconciliationReports.createdAt))
+    .limit(100);
 }
 
 // ─── Webhooks ────────────────────────────────────────────────────────
@@ -819,10 +1099,15 @@ export async function updateWebhook(id: number, data: Partial<InsertWebhook>) {
   await db.update(webhooks).set(data).where(eq(webhooks.id, id));
 }
 
-export async function deleteWebhook(id: number) {
+/** Soft-delete a webhook the caller's org owns. Returns rows affected. */
+export async function deleteWebhook(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(webhooks).set({ isActive: false }).where(eq(webhooks.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(webhooks)
+    .set({ isActive: false })
+    .where(and(eq(webhooks.id, id), eq(webhooks.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── API Keys ────────────────────────────────────────────────────────
@@ -864,39 +1149,112 @@ export async function updateApiKeyLastUsed(id: number) {
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, id));
 }
 
-export async function revokeApiKey(id: number) {
+/** Revoke an API key belonging to the caller's org. Returns rows affected. */
+export async function revokeApiKey(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(apiKeys).set({ isActive: false }).where(eq(apiKeys.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(apiKeys)
+    .set({ isActive: false })
+    .where(and(eq(apiKeys.id, id), eq(apiKeys.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Dashboard Stats ─────────────────────────────────────────────────
 
-export async function getDashboardStats(userId: number, isAdmin: boolean) {
+export type ChannelStat = { channelId: number | null; total: number; matched: number; unmatched: number; exceptions: number };
+
+/**
+ * How long a cached row may be served before it is recomputed.
+ *
+ * The cache previously had exactly ONE invalidation call site (the reconciliation
+ * runner) and no expiry, which is not a cache so much as a write-once snapshot.
+ * Anything that changes transaction counts by another route — ingestion, the
+ * SHOPLINE connector, an archival script — left it silently wrong forever. In
+ * production it was serving a row written 2026-08-02 claiming 5,852,363
+ * transactions while the platform held 85,499, because the org-less archival ran
+ * on 2026-08-11 and never touched it.
+ *
+ * A TTL bounds that failure to five minutes without giving up the full-scan
+ * protection the cache exists for.
+ */
+const DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Dashboard totals for ONE tenant.
+ *
+ * Takes an organizationId, not a `(userId, isAdmin)` pair. The previous signature
+ * was the whole defect: `isAdmin` suppressed the only predicate there was, so any
+ * user with role `admin` — every bank administrator — counted every tenant's
+ * transactions and jobs, and the exceptions query carried no predicate at all for
+ * anybody. `dashboard_stats_cache` has had an `organizationId` column and an index
+ * on it since it was created; nothing ever wrote or read it, so a single global row
+ * was served to whoever asked. Tenancy here now works exactly as it does in
+ * `getTransactions` / `getExceptions`: an unconditional `orgFilter` per table.
+ */
+export async function getDashboardStats(organizationId: number | null) {
   const db = await getDb();
   if (!db) return null;
 
-  // ── Cache-first: read pre-computed stats (avoids full scan of 26M+ rows) ──
-  const cacheRows = await db.select().from(dashboardStatsCache).limit(1);
-  const cached = cacheRows[0];
+  const cacheScope = orgFilter(dashboardStatsCache.organizationId, organizationId);
+  const txnScope = orgFilter(transactions.organizationId, organizationId);
+  const jobScope = orgFilter(reconciliationJobs.organizationId, organizationId);
+  const excScope = orgFilter(exceptions.organizationId, organizationId);
 
-  if (cached) {
-    // Cache hit — return instantly
-    const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
-    const [jobStats] = await db.select({
-      total: sql<number>`count(*)`,
-      completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
-      running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
-      avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
-    }).from(reconciliationJobs).where(jobCondition);
+  // Jobs and exceptions are small and are never cached — only the transaction
+  // counts justify a cache, and only they were ever actually read from one.
+  const [jobStats] = await db.select({
+    total: sql<number>`count(*)`,
+    completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
+    running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
+    avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
+  }).from(reconciliationJobs).where(jobScope);
 
-    const [exceptionStats] = await db.select({
-      total: sql<number>`count(*)`,
-      open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
-      inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
-      resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
-    }).from(exceptions);
+  const [exceptionStats] = await db.select({
+    total: sql<number>`count(*)`,
+    open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
+    inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
+    resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
+  }).from(exceptions).where(excScope);
 
+  // Per-channel breakdown. This returned a hardcoded `[]` before, which is why
+  // the Multi-Channel View reported "No transactions uploaded" against every
+  // channel and the Dashboard's Channel Performance card never rendered at all.
+  const channelRows = await db.select({
+    channelId: transactions.channelId,
+    total: sql<number>`count(*)`,
+    matched: sql<number>`sum(case when ${transactions.status} in ('matched','manually_matched') then 1 else 0 end)`,
+    unmatched: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
+    exceptions: sql<number>`sum(case when ${transactions.status} = 'exception' then 1 else 0 end)`,
+  }).from(transactions).where(txnScope).groupBy(transactions.channelId);
+
+  const channelStats: ChannelStat[] = channelRows.map((r) => ({
+    channelId: r.channelId ?? null,
+    total: Number(r.total || 0),
+    matched: Number(r.matched || 0),
+    unmatched: Number(r.unmatched || 0),
+    exceptions: Number(r.exceptions || 0),
+  }));
+
+  const jobs = {
+    total: Number(jobStats?.total || 0),
+    completed: Number(jobStats?.completed || 0),
+    running: Number(jobStats?.running || 0),
+    avgMatchRate: Number(jobStats?.avgMatchRate || 0),
+  };
+  const exceptionTotals = {
+    total: Number(exceptionStats?.total || 0),
+    open: Number(exceptionStats?.open || 0),
+    inReview: Number(exceptionStats?.inReview || 0),
+    resolved: Number(exceptionStats?.resolved || 0),
+  };
+
+  // ── Cache-first for the transaction totals only (the one full-scan query) ──
+  const [cached] = await db.select().from(dashboardStatsCache).where(cacheScope).limit(1);
+  const fresh =
+    cached && Date.now() - new Date(cached.lastUpdatedAt).getTime() < DASHBOARD_CACHE_TTL_MS;
+
+  if (cached && fresh) {
     return {
       transactions: {
         total: Number(cached.totalTransactions || 0),
@@ -904,99 +1262,61 @@ export async function getDashboardStats(userId: number, isAdmin: boolean) {
         unmatched: Number(cached.unmatchedTransactions || 0),
         exceptions: Number(cached.exceptionTransactions || 0),
       },
-      jobs: {
-        total: Number(jobStats?.total || 0),
-        completed: Number(jobStats?.completed || 0),
-        running: Number(jobStats?.running || 0),
-        avgMatchRate: Number(jobStats?.avgMatchRate || 0),
-      },
-      exceptions: {
-        total: Number(exceptionStats?.total || 0),
-        open: Number(exceptionStats?.open || 0),
-        inReview: Number(exceptionStats?.inReview || 0),
-        resolved: Number(exceptionStats?.resolved || 0),
-      },
-      channelStats: [] as Array<{ channelId: number | null; total: number; matched: number; unmatched: number }>,
+      jobs,
+      exceptions: exceptionTotals,
+      channelStats,
     };
   }
 
-  // ── Cache miss: run full query and seed the cache ──
-  const userCondition = !isAdmin ? eq(transactions.userId, userId) : undefined;
-  const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
+  // The per-channel aggregate above already visited every in-scope row, so the
+  // totals are summed from it rather than re-scanning the table.
+  const txnTotals = channelStats.reduce(
+    (acc, c) => ({
+      total: acc.total + c.total,
+      matched: acc.matched + c.matched,
+      unmatched: acc.unmatched + c.unmatched,
+      exceptions: acc.exceptions + c.exceptions,
+    }),
+    { total: 0, matched: 0, unmatched: 0, exceptions: 0 },
+  );
 
-  const [txnStats] = await db.select({
-    total: sql<number>`count(*)`,
-    matched: sql<number>`sum(case when ${transactions.status} = 'matched' or ${transactions.status} = 'manually_matched' then 1 else 0 end)`,
-    unmatched: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
-    exceptions: sql<number>`sum(case when ${transactions.status} = 'exception' then 1 else 0 end)`,
-  }).from(transactions).where(userCondition);
-
-  const [jobStats] = await db.select({
-    total: sql<number>`count(*)`,
-    completed: sql<number>`sum(case when ${reconciliationJobs.status} = 'completed' then 1 else 0 end)`,
-    running: sql<number>`sum(case when ${reconciliationJobs.status} = 'running' then 1 else 0 end)`,
-    avgMatchRate: sql<number>`avg(${reconciliationJobs.matchRate})`,
-  }).from(reconciliationJobs).where(jobCondition);
-
-  const [exceptionStats] = await db.select({
-    total: sql<number>`count(*)`,
-    open: sql<number>`sum(case when ${exceptions.status} = 'open' then 1 else 0 end)`,
-    inReview: sql<number>`sum(case when ${exceptions.status} = 'in_review' then 1 else 0 end)`,
-    resolved: sql<number>`sum(case when ${exceptions.status} = 'resolved' then 1 else 0 end)`,
-  }).from(exceptions);
-
-  // Seed the cache so future requests are instant
   try {
+    await db.delete(dashboardStatsCache).where(cacheScope);
     await db.insert(dashboardStatsCache).values({
-      totalTransactions: Number(txnStats?.total || 0),
-      matchedTransactions: Number(txnStats?.matched || 0),
-      unmatchedTransactions: Number(txnStats?.unmatched || 0),
-      exceptionTransactions: Number(txnStats?.exceptions || 0),
-      totalJobs: Number(jobStats?.total || 0),
-      completedJobs: Number(jobStats?.completed || 0),
-      runningJobs: Number(jobStats?.running || 0),
-      avgMatchRate: String(Number(jobStats?.avgMatchRate || 0).toFixed(2)),
-      totalExceptions: Number(exceptionStats?.total || 0),
-      openExceptions: Number(exceptionStats?.open || 0),
-      inReviewExceptions: Number(exceptionStats?.inReview || 0),
-      resolvedExceptions: Number(exceptionStats?.resolved || 0),
+      organizationId,
+      totalTransactions: txnTotals.total,
+      matchedTransactions: txnTotals.matched,
+      unmatchedTransactions: txnTotals.unmatched,
+      exceptionTransactions: txnTotals.exceptions,
+      totalJobs: jobs.total,
+      completedJobs: jobs.completed,
+      runningJobs: jobs.running,
+      avgMatchRate: String(jobs.avgMatchRate.toFixed(2)),
+      totalExceptions: exceptionTotals.total,
+      openExceptions: exceptionTotals.open,
+      inReviewExceptions: exceptionTotals.inReview,
+      resolvedExceptions: exceptionTotals.resolved,
     });
   } catch (_e) {
     // Non-fatal: cache seeding failure should not break the dashboard
   }
 
-  return {
-    transactions: {
-      total: Number(txnStats?.total || 0),
-      matched: Number(txnStats?.matched || 0),
-      unmatched: Number(txnStats?.unmatched || 0),
-      exceptions: Number(txnStats?.exceptions || 0),
-    },
-    jobs: {
-      total: Number(jobStats?.total || 0),
-      completed: Number(jobStats?.completed || 0),
-      running: Number(jobStats?.running || 0),
-      avgMatchRate: Number(jobStats?.avgMatchRate || 0),
-    },
-    exceptions: {
-      total: Number(exceptionStats?.total || 0),
-      open: Number(exceptionStats?.open || 0),
-      inReview: Number(exceptionStats?.inReview || 0),
-      resolved: Number(exceptionStats?.resolved || 0),
-    },
-    channelStats: [] as Array<{ channelId: number | null; total: number; matched: number; unmatched: number }>,
-  };
+  return { transactions: txnTotals, jobs, exceptions: exceptionTotals, channelStats };
 }
 
 /**
- * Invalidate the dashboard stats cache after a reconciliation job completes.
- * Call this from the reconciliation runner after each job finishes.
+ * Drop one tenant's cached dashboard totals after their reconciliation job runs.
+ *
+ * Scoped, because the unscoped `delete(dashboardStatsCache)` it replaces threw
+ * away every other tenant's row on any job completion — harmless while a single
+ * global row existed, and a cache-stampede across all tenants once the rows are
+ * per-organization.
  */
-export async function invalidateDashboardStatsCache() {
+export async function invalidateDashboardStatsCache(organizationId: number | null) {
   const db = await getDb();
   if (!db) return;
   try {
-    await db.delete(dashboardStatsCache);
+    await db.delete(dashboardStatsCache).where(orgFilter(dashboardStatsCache.organizationId, organizationId));
   } catch (_e) {
     // Non-fatal
   }
@@ -1027,7 +1347,11 @@ export async function getFullReconciliationReport(jobId: number) {
   const job = await getReconciliationJob(jobId);
   if (!job) return null;
   const jobMatches = await getMatchesByJob(jobId);
-  const { data: jobExceptions } = await getExceptions({ jobId, limit: MAX_QUERY_LIMIT });
+  const { data: jobExceptions } = await getExceptions({
+    organizationId: job.organizationId ?? null,
+    jobId,
+    limit: MAX_QUERY_LIMIT,
+  });
   const allTxns = await getTransactionsForExport(jobId);
   return { job, matches: jobMatches, exceptions: jobExceptions, transactions: allTxns };
 }
@@ -1041,24 +1365,64 @@ export async function createScheduledTask(data: InsertScheduledTask) {
   return result[0].insertId;
 }
 
-export async function updateScheduledTask(id: number, data: Partial<InsertScheduledTask>) {
+/**
+ * Update a scheduled task the caller's org owns. Returns rows affected so the
+ * router can fail closed — a bare-id update let any authenticated user retarget
+ * another institution's schedule.
+ *
+ * Pass `null` only for platform-internal callers (the scheduling engine updates
+ * tasks it selected itself).
+ */
+export async function updateScheduledTask(
+  id: number,
+  organizationId: number | null,
+  data: Partial<InsertScheduledTask>,
+): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(scheduledTasks).set(data).where(eq(scheduledTasks.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(scheduledTasks)
+    .set(data)
+    .where(
+      organizationId === null
+        ? eq(scheduledTasks.id, id)
+        : and(eq(scheduledTasks.id, id), eq(scheduledTasks.organizationId, organizationId)),
+    );
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function getScheduledTasks(userId: number, isAdmin: boolean) {
+/** Scheduled tasks for ONE organization. See getUploadBatches for the history. */
+export async function getScheduledTasks(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  if (isAdmin) {
-    return db.select().from(scheduledTasks).orderBy(desc(scheduledTasks.createdAt)).limit(100);
-  }
   return db.select().from(scheduledTasks)
-    .where(eq(scheduledTasks.userId, userId))
+    .where(orgFilter(scheduledTasks.organizationId, organizationId))
     .orderBy(desc(scheduledTasks.createdAt))
     .limit(100);
 }
 
+/**
+ * One scheduled task, but only if it belongs to this organization.
+ *
+ * The ownership check `schedules.runNow` needs. `getScheduledTaskById` below is
+ * unscoped by design — the scheduler resolves tasks it selected itself — so a
+ * request-supplied id must come through here instead.
+ */
+export async function getScheduledTask(id: number, organizationId: number | null) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(scheduledTasks)
+    .where(and(eq(scheduledTasks.id, id), orgFilter(scheduledTasks.organizationId, organizationId)))
+    .limit(1);
+  return result[0];
+}
+
+/**
+ * One scheduled task by id, with NO tenancy filter.
+ *
+ * Valid only for the scheduling engine, which iterates tasks it selected itself.
+ * Never call this with an id that came from a request — use `getScheduledTask`.
+ */
 export async function getScheduledTaskById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
@@ -1085,10 +1449,15 @@ export async function getDueScheduledTasks(now: Date) {
     .orderBy(asc(scheduledTasks.nextRunAt));
 }
 
-export async function deleteScheduledTask(id: number) {
+/** Soft-delete a scheduled task the caller's org owns. Returns rows affected. */
+export async function deleteScheduledTask(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(scheduledTasks).set({ isActive: false }).where(eq(scheduledTasks.id, id));
+  if (!db) return 0;
+  const result = await db
+    .update(scheduledTasks)
+    .set({ isActive: false })
+    .where(and(eq(scheduledTasks.id, id), eq(scheduledTasks.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Schedule Run History ───────────────────────────────────────────
@@ -1199,11 +1568,12 @@ export async function getActiveJobsProgress() {
 
 // ─── Dashboard Stats (Extended) ─────────────────────────────────────
 
-export async function getMonitoringStats(userId: number, isAdmin: boolean) {
+/** Monitor-page stats for ONE organization. See getUploadBatches for the history. */
+export async function getMonitoringStats(organizationId: number | null) {
   const db = await getDb();
   if (!db) return null;
 
-  const jobCondition = !isAdmin ? eq(reconciliationJobs.userId, userId) : undefined;
+  const jobCondition = orgFilter(reconciliationJobs.organizationId, organizationId);
 
   // Active jobs count
   const [activeJobs] = await db.select({
@@ -1240,7 +1610,7 @@ export async function getMonitoringStats(userId: number, isAdmin: boolean) {
     total: sql<number>`count(*)`,
     active: sql<number>`sum(case when ${scheduledTasks.isActive} = true then 1 else 0 end)`,
   }).from(scheduledTasks)
-    .where(!isAdmin ? eq(scheduledTasks.userId, userId) : undefined);
+    .where(orgFilter(scheduledTasks.organizationId, organizationId));
 
   return {
     activeJobs: {
@@ -1279,16 +1649,20 @@ export async function createSftpCredential(data: InsertSftpCredential) {
   return result.insertId;
 }
 
-export async function getSftpCredentials(userId: number, organizationId?: number) {
+/**
+ * List SFTP credentials for an organization.
+ *
+ * Scoped by ORG, not by the creating user: an SFTP feed is institutional
+ * configuration, so a colleague must be able to see and manage it. The previous
+ * `userId`-only filter both hid teammates' feeds and — because `organizationId`
+ * was optional and callers omitted it — left the org boundary unenforced.
+ */
+export async function getSftpCredentials(organizationId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  let conditions = [eq(sftpCredentials.userId, userId)];
-  
-  if (organizationId) {
-    conditions.push(eq(sftpCredentials.organizationId, organizationId));
-  }
-  
+
+  const conditions = [eq(sftpCredentials.organizationId, organizationId)];
+
   return db
     .select()
     .from(sftpCredentials)
@@ -1296,34 +1670,62 @@ export async function getSftpCredentials(userId: number, organizationId?: number
     .orderBy(desc(sftpCredentials.createdAt));
 }
 
-export async function getSftpCredentialById(id: number) {
+/**
+ * Fetch an SFTP credential, scoped to its owning organization.
+ *
+ * `organizationId` is REQUIRED. These rows hold BANK CONNECTION SECRETS (host,
+ * username, encrypted password/key, remote path), and every accessor here was
+ * previously keyed on `id` alone — so any caller who could guess an id could
+ * read, repoint or delete another tenant's bank feed. Pass `null` only for
+ * genuine platform-internal use (the poller iterates all sources by design).
+ */
+export async function getSftpCredentialById(id: number, organizationId: number | null) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
+
   const [cred] = await db
     .select()
     .from(sftpCredentials)
-    .where(eq(sftpCredentials.id, id))
+    .where(
+      organizationId === null
+        ? eq(sftpCredentials.id, id)
+        : and(eq(sftpCredentials.id, id), eq(sftpCredentials.organizationId, organizationId)),
+    )
     .limit(1);
   
   return cred;
 }
 
-export async function updateSftpCredential(id: number, data: Partial<InsertSftpCredential>) {
+/**
+ * Update an SFTP credential within its owning organization.
+ * Returns the number of rows affected so callers can fail closed (0 = the row
+ * exists but belongs to someone else, or does not exist — deliberately
+ * indistinguishable, so this is not an enumeration oracle).
+ */
+export async function updateSftpCredential(
+  id: number,
+  organizationId: number,
+  data: Partial<InsertSftpCredential>,
+): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  await db
+
+  const result = await db
     .update(sftpCredentials)
     .set({ ...data, updatedAt: new Date() })
-    .where(eq(sftpCredentials.id, id));
+    .where(and(eq(sftpCredentials.id, id), eq(sftpCredentials.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function deleteSftpCredential(id: number) {
+/** Delete an SFTP credential within its owning organization. Returns rows affected. */
+export async function deleteSftpCredential(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  await db.delete(sftpCredentials).where(eq(sftpCredentials.id, id));
+
+  const result = await db
+    .delete(sftpCredentials)
+    .where(and(eq(sftpCredentials.id, id), eq(sftpCredentials.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── SFTP Ingestion Logs ────────────────────────────────────────────
@@ -1340,16 +1742,17 @@ export async function getSftpIngestionLogs(params: {
   const limit = Math.min(params.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = params.offset || 0;
   
-  let query = db.select().from(sftpIngestionLogs);
-  
-  if (params.credentialId) {
-    query = query.where(eq(sftpIngestionLogs.sftpCredentialId, params.credentialId)) as any;
-  }
-  
-  if (params.organizationId) {
-    query = query.where(eq(sftpIngestionLogs.organizationId, params.organizationId)) as any;
-  }
-  
+  // Conditions are AND-ed into a single .where(). Chaining .where() twice does
+  // NOT combine them in drizzle — the second call REPLACES the first, so the
+  // previous form silently dropped whichever filter was applied earlier.
+  const conditions = [];
+  if (params.credentialId) conditions.push(eq(sftpIngestionLogs.sftpCredentialId, params.credentialId));
+  if (params.organizationId) conditions.push(eq(sftpIngestionLogs.organizationId, params.organizationId));
+
+  const query = conditions.length > 0
+    ? db.select().from(sftpIngestionLogs).where(and(...conditions))
+    : db.select().from(sftpIngestionLogs);
+
   return query
     .orderBy(desc(sftpIngestionLogs.createdAt))
     .limit(limit)
@@ -1428,9 +1831,19 @@ export async function storeAnomalyScores(scores: InsertAnomalyScore[]) {
   return results;
 }
 
+/**
+ * Anomaly scores for ONE organization.
+ *
+ * `organizationId` is required and unconditional. It was optional, and the
+ * predicate was assembled from optional filters — so a call with no filters
+ * produced `db.select().from(anomalyScores)` with no WHERE and returned every
+ * tenant's scores. The comment below records an EARLIER bug in this same
+ * function (chained `.where()` replacing rather than combining); this is the
+ * same hazard one layer out, and it is why the parameter is no longer optional.
+ */
 export async function getAnomalyScores(filters: {
+  organizationId: number | null;
   transactionId?: number;
-  organizationId?: number;
   reviewStatus?: string;
   minScore?: number;
   limit?: number;
@@ -1439,29 +1852,32 @@ export async function getAnomalyScores(filters: {
   const db = await getDb();
   if (!db) return [];
   
-  let query = db.select().from(anomalyScores);
-  
-  if (filters.transactionId) {
-    query = query.where(eq(anomalyScores.transactionId, filters.transactionId)) as any;
-  }
-  if (filters.organizationId) {
-    query = query.where(eq(anomalyScores.organizationId, filters.organizationId)) as any;
-  }
-  if (filters.reviewStatus) {
-    query = query.where(eq(anomalyScores.reviewStatus, filters.reviewStatus as any)) as any;
-  }
-  if (filters.minScore) {
-    query = query.where(gte(anomalyScores.anomalyScore, String(filters.minScore))) as any;
-  }
-  
+  // AND the conditions into ONE .where(). Chaining .where() does not combine
+  // in drizzle — each call REPLACES the previous predicate, so the old form
+  // applied only the last matching filter. With minScore last, an
+  // organizationId-filtered call silently returned EVERY tenant's anomaly
+  // scores; transactionId and reviewStatus were dropped too.
+  // Tenancy first and unconditionally, so there is no filter combination that
+  // produces a query without it.
+  const conditions: (SQL<unknown> | undefined)[] = [
+    orgFilter(anomalyScores.organizationId, filters.organizationId),
+  ];
+  if (filters.transactionId) conditions.push(eq(anomalyScores.transactionId, filters.transactionId));
+  if (filters.reviewStatus) conditions.push(eq(anomalyScores.reviewStatus, filters.reviewStatus as any));
+  if (filters.minScore) conditions.push(gte(anomalyScores.anomalyScore, String(filters.minScore)));
+
   const limit = Math.min(filters.limit || DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
   const offset = filters.offset || 0;
-  
-  return query.limit(limit).offset(offset).orderBy(desc(anomalyScores.anomalyScore));
+
+  return db.select().from(anomalyScores)
+    .where(and(...conditions))
+    .limit(limit).offset(offset).orderBy(desc(anomalyScores.anomalyScore));
 }
 
+/** Review an anomaly belonging to the caller's org. Returns rows affected. */
 export async function updateAnomalyReview(
   id: number,
+  organizationId: number,
   reviewData: {
     reviewStatus: string;
     reviewedBy: number;
@@ -1471,25 +1887,26 @@ export async function updateAnomalyReview(
   const db = await getDb();
   if (!db) return null;
   
-  return db.update(anomalyScores)
-    .set({
-      ...reviewData,
-      reviewedAt: new Date(),
-    } as any)
-    .where(eq(anomalyScores.id, id));
+  const result = await db
+    .update(anomalyScores)
+    .set({ ...reviewData, reviewedAt: new Date() } as any)
+    .where(and(eq(anomalyScores.id, id), eq(anomalyScores.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function getDetectionRules(organizationId?: number) {
+/**
+ * Detection rules for ONE organization.
+ *
+ * Required, not optional-with-a-skip: `if (organizationId)` meant a call that
+ * omitted it — or passed 0 — read every tenant's rules. Detection rules encode
+ * how a bank flags anomalies, so leaking them leaks its control posture.
+ */
+export async function getDetectionRules(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];
-  
-  let query = db.select().from(detectionRules);
-  
-  if (organizationId) {
-    query = query.where(eq(detectionRules.organizationId, organizationId)) as any;
-  }
-  
-  return query.orderBy(desc(detectionRules.createdAt));
+  return db.select().from(detectionRules)
+    .where(orgFilter(detectionRules.organizationId, organizationId))
+    .orderBy(desc(detectionRules.createdAt));
 }
 
 export async function createDetectionRule(rule: InsertDetectionRule) {
@@ -1499,20 +1916,29 @@ export async function createDetectionRule(rule: InsertDetectionRule) {
   return db.insert(detectionRules).values(rule);
 }
 
-export async function updateDetectionRule(id: number, updates: Partial<InsertDetectionRule>) {
+/** Update a detection rule the caller's org owns. Returns rows affected. */
+export async function updateDetectionRule(
+  id: number,
+  organizationId: number,
+  updates: Partial<InsertDetectionRule>,
+): Promise<number> {
   const db = await getDb();
-  if (!db) return null;
-  
-  return db.update(detectionRules)
+  if (!db) return 0;
+  const result = await db
+    .update(detectionRules)
     .set(updates as any)
-    .where(eq(detectionRules.id, id));
+    .where(and(eq(detectionRules.id, id), eq(detectionRules.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
-export async function deleteDetectionRule(id: number) {
+/** Delete a detection rule the caller's org owns. Returns rows affected. */
+export async function deleteDetectionRule(id: number, organizationId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return null;
-  
-  return db.delete(detectionRules).where(eq(detectionRules.id, id));
+  if (!db) return 0;
+  const result = await db
+    .delete(detectionRules)
+    .where(and(eq(detectionRules.id, id), eq(detectionRules.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 export async function getFlaggedTransactions(filters: {

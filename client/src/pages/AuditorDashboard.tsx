@@ -4,10 +4,49 @@ import { Shield, FileText, CheckCircle2, TrendingUp, Calendar, Download } from "
 import { Button } from "@/components/ui/button";
 import jsPDF from "jspdf";
 import { useState } from "react";
+import { Redirect } from "wouter";
+import { useOrgSegment } from "@/hooks/useOrgSegment";
+import { isRetailCommerce } from "@/lib/segments";
 
 export default function AuditorDashboard() {
   const [isExporting, setIsExporting] = useState(false);
   const [entityFilter, setEntityFilter] = useState<string | undefined>(undefined);
+  const segment = useOrgSegment();
+
+  // Removing this from the view switcher hid the link, not the page: the route
+  // stayed reachable by URL, bookmark or a shared link. This view is built for
+  // an examiner of a regulated institution — audit-trail volume, a "compliance
+  // rate" — and a merchant has no examiner, so send them back to their own
+  // dashboard rather than render a screen that means nothing to them.
+  //
+  // Presentation. The authorisation is server-side and independent: the audit
+  // procedures are org-scoped, and they now also refuse the retail vertical
+  // outright (shared/verticalFeatures, enforced by `cbnProcedure`). So a
+  // merchant who types the URL is refused by the server whether or not this
+  // redirect fires — which is the point, since a redirect protects nothing.
+  const redirectToOwnDashboard = isRetailCommerce(segment);
+
+  // Every hook runs above the redirect, and the redirect sits below all of them.
+  // `segment` arrives from a tRPC query, so it is null on the first render and
+  // retail_commerce on the next. Returning early *between* hooks meant the first
+  // render called these two and the second did not — "Rendered fewer hooks than
+  // expected", React's own words for an early return that moved. It crashed on
+  // exactly the path this redirect exists to close: a cold load straight to
+  // /dashboard/auditor from a URL, bookmark or shared link, where nothing has
+  // warmed the segment cache and DashboardLayout waits only on auth.
+  //
+  // `enabled` does the skipping instead. It changes what the hooks DO, never how
+  // many of them run, so a merchant on their way out still costs no query.
+  const { data: compliance, isLoading: complianceLoading } = trpc.dashboard.auditorCompliance.useQuery(
+    undefined,
+    { enabled: !redirectToOwnDashboard },
+  );
+  const { data: auditTrail, isLoading: trailLoading } = trpc.dashboard.auditorTrail.useQuery(
+    { entityType: entityFilter, limit: 100 },
+    { enabled: !redirectToOwnDashboard },
+  );
+
+  if (redirectToOwnDashboard) return <Redirect to="/dashboard" />;
 
   const exportToPDF = async () => {
     setIsExporting(true);
@@ -145,12 +184,6 @@ export default function AuditorDashboard() {
       setIsExporting(false);
     }
   };
-  
-  const { data: compliance, isLoading: complianceLoading } = trpc.dashboard.auditorCompliance.useQuery();
-  const { data: auditTrail, isLoading: trailLoading } = trpc.dashboard.auditorTrail.useQuery({
-    entityType: entityFilter,
-    limit: 100
-  });
 
   if (complianceLoading || trailLoading) {
     return (

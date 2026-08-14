@@ -22,6 +22,9 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
+import { useOrgSegment } from "@/hooks/useOrgSegment";
+import { isRetailCommerce, type Segment } from "@/lib/segments";
+import { navGroup, isStaff, type NavEntry } from "@/lib/navItems";
 import {
   LayoutDashboard,
   LogOut,
@@ -62,135 +65,62 @@ import { toast } from "sonner";
 import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock, Map } from "lucide-react";
 import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } from "@/contexts/PortalContext";
 
-type NavItem = { icon: React.ElementType; label: string; path: string; roles?: string[]; segments?: string[] };
+type NavItem = NavEntry & { icon: React.ElementType };
 
-// roles: admin | cfo | operations | compliance | user | super_admin
-// segments: financial_services | corporate_b2b | super_admin (org segment gate)
-// If roles is omitted, item is visible to ALL roles.
-// If segments is omitted, item is visible across ALL segments.
-const menuItems: NavItem[] = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
-  { icon: Sparkles, label: "Super Agent", path: "/super-agent" },
-  { icon: Network, label: "Exception Intelligence", path: "/exception-intelligence" },
-  { icon: LayoutGrid, label: "Demo Dashboard", path: "/demo-dashboard" },
-  { icon: Building2, label: "Distributor Registry", path: "/distributors" },
-  // Upload & Reconciliation: admin + operations only
-  { icon: Upload, label: "Upload Data", path: "/upload", roles: ["admin", "operations"] },
-  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation", roles: ["admin", "operations"] },
-  { icon: FileText, label: "Reports", path: "/reports" },
-  { icon: Calendar, label: "Schedules", path: "/schedules", roles: ["admin", "operations"] },
-  { icon: Activity, label: "Monitor", path: "/monitor" },
-  { icon: BookOpen, label: "Documentation", path: "/documentation" },
-];
+// Path -> icon. The entries themselves live in lib/navItems (one list, shared
+// by the normal sidebar and the portal sidebar). Icons stay here because they
+// are React components and would make that module untestable under the
+// node-environment vitest config. navItems.test asserts this map is complete,
+// so a new entry cannot ship without one.
+const NAV_ICONS: Record<string, React.ElementType> = {
+  "/dashboard": LayoutDashboard,
+  "/super-agent": Sparkles,
+  "/exception-intelligence": Network,
+  "/demo-dashboard": LayoutGrid,
+  "/distributors": Building2,
+  "/settlement-monitor": TrendingUp,
+  "/shopline/sync-status": Activity,
+  "/shopline/connect": Plug,
+  "/upload": Upload,
+  "/reconciliation": GitCompare,
+  "/reports": FileText,
+  "/schedules": Calendar,
+  "/monitor": Activity,
+  "/documentation": BookOpen,
+  "/channels": Layers,
+  "/exceptions": AlertTriangle,
+  "/age-tracker": Clock,
+  "/transactions": Search,
+  "/review": ClipboardList,
+  "/audit": Shield,
+  "/compliance": ShieldCheck,
+  "/cbn-compliance": FileBarChart2,
+  "/admin/users": Users,
+  "/admin/assessments": ClipboardCheck,
+  "/modules": Settings2,
+  "/email-settings": Mail,
+  "/sample-data": Beaker,
+  "/integrations": Plug,
+  "/woodcore-connector": Plug,
+  "/api-ingestion": Code,
+  "/sftp-config": Server,
+  "/bucket-config": Server,
+  "/email-forwarding": Mail,
+  "/anomalies": AlertTriangle,
+  "/admin/super-admin": Globe,
+  "/admin/super-admin/orgs": Network,
+  "/admin/super-admin/users": Users,
+  "/admin/super-admin/analytics": BarChart3,
+  "/admin/poc": FlaskConical,
+  "/admin/roadmap-access": Map,
+};
 
-const adminMenuItems: NavItem[] = [
-  { icon: Layers, label: "Multi-Channel", path: "/channels", roles: ["admin", "operations"] },
-  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions", roles: ["admin", "operations"] },
-  { icon: Clock, label: "Age Tracker", path: "/age-tracker", roles: ["admin", "operations"] },
-  { icon: Search, label: "Transactions", path: "/transactions", roles: ["admin", "operations"] },
-  { icon: ClipboardList, label: "Review Queue", path: "/review", roles: ["admin", "operations"] },
-  // Audit Trail: admin + compliance + cfo
-  { icon: Shield, label: "Audit Trail", path: "/audit", roles: ["admin", "compliance", "cfo"] },
-  { icon: ShieldCheck, label: "Data Protection", path: "/compliance", roles: ["admin", "compliance"] },
-  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance", roles: ["admin", "compliance", "cfo"] },
-  // User Management: admin only
-  { icon: Users, label: "User Management", path: "/admin/users", roles: ["admin"] },
-  { icon: ClipboardCheck, label: "Assessments", path: "/admin/assessments", roles: ["admin"] },
-  { icon: Settings2, label: "Module Configuration", path: "/modules", roles: ["admin"] },
-  { icon: Mail, label: "Email Settings", path: "/email-settings", roles: ["admin"] },
-];
-
-const adminAdvancedItems: NavItem[] = [
-  { icon: Beaker, label: "Sample Data", path: "/sample-data", roles: ["admin"] },
-  { icon: Plug, label: "Integrations", path: "/integrations", roles: ["admin"] },
-  { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector", roles: ["admin"] },
-  { icon: Code, label: "API Ingestion", path: "/api-ingestion", roles: ["admin"] },
-  { icon: Server, label: "SFTP Config", path: "/sftp-config", roles: ["admin"] },
-  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies", roles: ["admin"] },
-];
-
-// ─── Segment-specific nav items ─────────────────────────────────────────────
-// Financial Services portal nav (shown when super_admin enters a financial_services org)
-const financialServicesMenuItems: NavItem[] = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
-  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
-  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
-  { icon: Clock, label: "Age Tracker", path: "/age-tracker" },
-  { icon: Search, label: "Transactions", path: "/transactions" },
-  { icon: Layers, label: "Multi-Channel", path: "/channels" },
-  { icon: ClipboardList, label: "Review Queue", path: "/review" },
-  { icon: FileText, label: "Reports", path: "/reports" },
-  { icon: FileBarChart2, label: "CBN Reports", path: "/cbn-compliance" },
-  { icon: Shield, label: "Audit Trail", path: "/audit" },
-  { icon: ShieldCheck, label: "Data Protection", path: "/compliance" },
-  { icon: Network, label: "Exception Intelligence", path: "/exception-intelligence" },
-  { icon: Activity, label: "Monitor", path: "/monitor" },
-  { icon: Users, label: "User Management", path: "/admin/users" },
-  { icon: Settings2, label: "Module Configuration", path: "/modules" },
-  { icon: Mail, label: "Email Settings", path: "/email-settings" },
-  { icon: Calendar, label: "Schedules", path: "/schedules" },
-  { icon: Upload, label: "Upload Data", path: "/upload" },
-];
-
-// Financial Services portal — Advanced Tools dropdown items
-const financialServicesAdvancedItems: NavItem[] = [
-  { icon: Beaker, label: "Sample Data", path: "/sample-data" },
-  { icon: Plug, label: "Integrations", path: "/integrations" },
-  { icon: Plug, label: "Core Banking Connector", path: "/woodcore-connector" },
-  { icon: Code, label: "API Ingestion", path: "/api-ingestion" },
-  { icon: Server, label: "SFTP Config", path: "/sftp-config" },
-  { icon: AlertTriangle, label: "Anomaly Detection", path: "/anomalies" },
-];
-
-// Corporate B2B portal nav (shown when super_admin enters a corporate_b2b org)
-const corporateB2BMenuItems: NavItem[] = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
-  { icon: Building2, label: "Distributor Registry", path: "/distributors" },
-  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
-  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
-  { icon: Clock, label: "Age Tracker", path: "/age-tracker" },
-  { icon: Search, label: "Transactions", path: "/transactions" },
-  { icon: FileText, label: "Reports", path: "/reports" },
-  { icon: ClipboardList, label: "Review Queue", path: "/review" },
-  { icon: Shield, label: "Audit Trail", path: "/audit" },
-  { icon: Network, label: "Exception Intelligence", path: "/exception-intelligence" },
-  { icon: Activity, label: "Monitor", path: "/monitor" },
-  { icon: Users, label: "User Management", path: "/admin/users" },
-  { icon: Upload, label: "Upload Data", path: "/upload" },
-  { icon: Calendar, label: "Schedules", path: "/schedules" },
-];
-
-// Retail Commerce portal nav (shown for SHOPLINE merchants / retail_commerce orgs)
-const retailCommerceMenuItems: NavItem[] = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
-  { icon: GitCompare, label: "Reconciliation", path: "/reconciliation" },
-  { icon: AlertTriangle, label: "Exceptions", path: "/exceptions" },
-  { icon: Search, label: "Transactions", path: "/transactions" },
-  { icon: TrendingUp, label: "Settlement Monitor", path: "/settlement-monitor" },
-  { icon: Activity, label: "Sync Status", path: "/shopline/sync-status" },
-  { icon: FileText, label: "Reports", path: "/reports" },
-  { icon: Shield, label: "Audit Trail", path: "/audit" },
-  { icon: Plug, label: "SHOPLINE Connection", path: "/shopline/connect" },
-  { icon: Users, label: "User Management", path: "/admin/users" },
-];
-
-// Super Admin items — only visible to super_admin role (Infinity AI staff)
-const superAdminItems: NavItem[] = [
-  { icon: Globe, label: "Platform Overview", path: "/admin/super-admin", roles: ["super_admin"] },
-  { icon: Network, label: "All Organisations", path: "/admin/super-admin/orgs", roles: ["super_admin"] },
-  { icon: Users, label: "All Users", path: "/admin/super-admin/users", roles: ["super_admin"] },
-  { icon: BarChart3, label: "Platform Analytics", path: "/admin/super-admin/analytics", roles: ["super_admin"] },
-  { icon: FlaskConical, label: "POC Hub", path: "/admin/poc", roles: ["super_admin"] },
-  { icon: Map, label: "Roadmap Access", path: "/admin/roadmap-access", roles: ["super_admin"] },
-];
-
-function canAccessNav(item: NavItem, userRole: string | undefined): boolean {
-  if (!item.roles) return true;
-  if (!userRole) return false;
-  // super_admin can see everything (except super_admin-only items are still gated)
-  if (userRole === "super_admin" && !item.roles.includes("super_admin")) return true;
-  return item.roles.includes(userRole);
+/** Attach the icon a NavEntry needs to render. */
+function withIcon(entry: NavEntry): NavItem {
+  return { ...entry, icon: NAV_ICONS[entry.path] ?? LayoutDashboard };
 }
+
+// Role and segment gating live in lib/navItems, applied by navGroup().
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 260;
@@ -269,11 +199,28 @@ type DashboardLayoutContentProps = {
 };
 
 function RoleSwitcher({ location, setLocation }: { location: string; setLocation: (path: string) => void }) {
+  const segment = useOrgSegment();
+
+  // The Auditor view is examination-facing: it reports audit-trail volume and a
+  // "compliance rate" framed for a regulated institution's examiner, and its
+  // sibling procedure feeds the CBN pack. Retail merchants answer to card
+  // schemes and gateway agreements, not an examiner (CLAUDE.md §2A). CFO and
+  // Operations do carry over — "did the money arrive" and "what is unresolved"
+  // are universal.
+  //
+  // Written as a negation on purpose, unlike the dashboard badges: while the
+  // segment is still resolving this stays true, so a loading state never removes
+  // navigation from someone entitled to it. Hiding a menu item for a frame is a
+  // worse trade than briefly showing one.
+  const showAuditorView = !isRetailCommerce(segment);
+
   const dashboardRoutes = [
     { label: "Main", path: "/dashboard", icon: LayoutDashboard },
     { label: "CFO", path: "/dashboard/cfo", icon: TrendingUp },
     { label: "Operations", path: "/dashboard/operations", icon: ClipboardList },
-    { label: "Auditor", path: "/dashboard/auditor", icon: Shield },
+    ...(showAuditorView
+      ? [{ label: "Auditor", path: "/dashboard/auditor", icon: Shield }]
+      : []),
   ];
 
   const currentRoute = dashboardRoutes.find(r => location === r.path) || dashboardRoutes[0];
@@ -323,27 +270,25 @@ function DashboardLayoutContent({
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const { viewAsOrg, isViewingAs, exitPortal } = usePortalContext();
+  // The caller's own vertical, used to filter the DEFAULT nav below. The curated
+  // per-segment lists only apply inside a portal, so without this a merchant
+  // logging in normally saw entries built for other verticals.
+  const segment = useOrgSegment();
 
-  // When viewing as another org, show that org's segment-specific nav instead of the default nav
-  const portalMenuItems = isViewingAs && viewAsOrg
-    ? viewAsOrg.segment === "financial_services"
-      ? financialServicesMenuItems
-      : viewAsOrg.segment === "corporate_b2b"
-        ? corporateB2BMenuItems
-        : viewAsOrg.segment === "retail_commerce"
-          ? retailCommerceMenuItems
-          : menuItems
-    : null;
-
-  // Advanced items for portal context (Financial Services gets the full advanced tools set)
-  const portalAdvancedItems = isViewingAs && viewAsOrg?.segment === "financial_services"
-    ? financialServicesAdvancedItems
-    : null;
-
-  const visibleMenuItems = portalMenuItems ?? menuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdminItems = portalMenuItems ? [] : adminMenuItems.filter(item => canAccessNav(item, user?.role));
-  const visibleAdvancedItems = portalAdvancedItems ?? (portalMenuItems ? [] : adminAdvancedItems.filter(item => canAccessNav(item, user?.role)));
-  const visibleSuperAdminItems = portalMenuItems ? [] : superAdminItems.filter(item => canAccessNav(item, user?.role));
+  // One source (lib/navItems) drives BOTH sidebars. Previously the portal used
+  // curated per-segment arrays while everyone else used a role-filtered default
+  // set, and the two drifted — the retail portal list held /settlement-monitor,
+  // /shopline/sync-status and /shopline/connect, which appeared in no other
+  // list, so a real merchant never saw the screen their vertical is built on.
+  //
+  // In portal mode role gating is dropped (staff are inspecting the tenant's
+  // surface, not exercising their own permissions) but segment gating stays,
+  // which is the whole point of entering a portal.
+  const navOpts = { portal: isViewingAs && viewAsOrg !== null };
+  const visibleMenuItems = navGroup("main", segment, user?.role, navOpts).map(withIcon);
+  const visibleAdminItems = navGroup("admin", segment, user?.role, navOpts).map(withIcon);
+  const visibleAdvancedItems = navGroup("advanced", segment, user?.role, navOpts).map(withIcon);
+  const visibleSuperAdminItems = navGroup("superAdmin", segment, user?.role, navOpts).map(withIcon);
   const allItems = [...visibleMenuItems, ...visibleAdminItems, ...visibleSuperAdminItems];
   // Match the current path segment-aware and prefer the most specific (longest) match,
   // so nested routes like /admin/super-admin/orgs resolve to "All Organisations" rather
@@ -657,7 +602,13 @@ function DashboardLayoutContent({
           </SidebarContent>
 
           <SidebarFooter className="p-3 shrink-0 border-t border-sidebar-border">
-            {/* Demo Mode Toggle */}
+            {/* Demo Mode Toggle — Infinity AI staff only.
+                This rendered for every signed-in user, so a bank administrator
+                saw "Demo Mode: OFF" in their sidebar and one click seeded
+                fabricated BrightGoods FMCG data into their live tenant. Keyed on
+                the super_admin ROLE, matching navItems' `staffOnly` and the
+                server's superAdminProcedure, which now guards the mutations. */}
+            {isStaff(user?.role) ? (
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
               <button
                 onClick={() => isDemoActive ? deactivateDemo.mutate() : activateDemo.mutate({ segment: "fmcg" })}
@@ -720,6 +671,7 @@ function DashboardLayoutContent({
                 </div>
               )}
             </div>
+            ) : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-3 rounded-lg px-1 py-1 hover:bg-sidebar-accent/50 transition-colors w-full text-left group-data-[collapsible=icon]:justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">

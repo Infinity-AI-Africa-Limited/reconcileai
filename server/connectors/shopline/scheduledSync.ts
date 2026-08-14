@@ -27,6 +27,8 @@ interface StoreRow {
   storeId: string;
   currency: string | null;
   apiVersion: string;
+  /** Last SUCCESSFUL sync — the catch-up watermark. NULL = never synced. */
+  lastSyncAt: Date | null;
 }
 
 async function getActiveStores(): Promise<StoreRow[]> {
@@ -40,18 +42,35 @@ async function getActiveStores(): Promise<StoreRow[]> {
       storeId: slConnectorStores.storeId,
       currency: slConnectorStores.currency,
       apiVersion: slConnectorStores.apiVersion,
+      lastSyncAt: slConnectorStores.lastSyncAt,
     })
     .from(slConnectorStores)
     .where(eq(slConnectorStores.status, "active"));
 }
 
-async function updateLastSyncAt(storeId: number): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-  await db
-    .update(slConnectorStores)
-    .set({ lastSyncAt: new Date() })
-    .where(eq(slConnectorStores.id, storeId));
+/** Re-fetch this much before the last successful sync, so a record that landed
+ *  mid-cycle isn't missed at the seam. */
+const WATERMARK_OVERLAP_MS = 5 * 60 * 1000;
+/** Never scan further back than this in one catch-up pass — bounds the number
+ *  of paginated SHOPLINE calls when a store has been dark for a long time.
+ *  The daily batch covers anything older. */
+const MAX_CATCHUP_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Window for an incremental catch-up: from the store's last SUCCESSFUL sync
+ * (minus an overlap) up to now.
+ *
+ * This used to be a fixed "last 15 minutes", which meant the poll could not do
+ * the one job it exists for. If a webhook-triggered sync was lost and the next
+ * poll ran even a minute late, the record fell outside the window permanently
+ * and no later poll would ever reach back for it. A store that has never synced
+ * (`lastSyncAt` NULL) gets the full catch-up window so its backlog is picked up.
+ */
+export function catchUpWindow(lastSyncAt: Date | null, now: Date): { from: Date; to: Date } {
+  const earliest = new Date(now.getTime() - MAX_CATCHUP_MS);
+  if (!lastSyncAt) return { from: earliest, to: now };
+  const from = new Date(lastSyncAt.getTime() - WATERMARK_OVERLAP_MS);
+  return { from: from < earliest ? earliest : from, to: now };
 }
 
 // ─── 1. Incremental Sync (15-min polling fallback) ───────────────────────────
@@ -66,28 +85,27 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
     }
 
     const reports: SyncReport[] = [];
-    const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000);
     const now = new Date();
 
     for (const store of stores) {
+      // Per-store window: each store catches up from its own watermark.
+      const { from, to } = catchUpWindow(store.lastSyncAt, now);
       try {
+        // runSyncCycle records lastSyncAt / lastSyncError on the store row itself.
         const report = await runSyncCycle({
           organizationId: store.organizationId,
           slStoreId: store.id,
-          from: fifteenMinAgo,
-          to: now,
+          from,
+          to,
           triggeredBy: 0, // system
         });
         reports.push(report);
-        if (report.success) {
-          await updateLastSyncAt(store.id);
-        }
       } catch (err) {
         reports.push({
           success: false,
           organizationId: store.organizationId,
           storeHandle: store.storeHandle,
-          window: { from: fifteenMinAgo, to: now },
+          window: { from, to },
           ordersIngested: 0,
           paymentsIngested: 0,
           payoutsIngested: 0,
@@ -103,6 +121,10 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
     const successCount = reports.filter((r) => r.success).length;
     const failCount = reports.filter((r) => !r.success).length;
 
+    for (const r of reports.filter((x) => !x.success)) {
+      console.error(`[shoplineSyncCycle] store=${r.storeHandle} FAILED: ${r.error ?? "unknown error"}`);
+    }
+
     res.json({
       ok: true,
       storesProcessed: stores.length,
@@ -113,6 +135,20 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       totalPayouts: reports.reduce((sum, r) => sum + r.payoutsIngested, 0),
       totalExceptions: reports.reduce((sum, r) => sum + r.exceptionCount, 0),
       durationMs: Date.now() - startedAt,
+      // Per-store detail so an operator running this by hand sees WHICH store
+      // failed and why, without needing the log stream or a DB query.
+      reports: reports.map((r) => ({
+        store: r.storeHandle,
+        success: r.success,
+        window: { from: r.window.from.toISOString(), to: r.window.to.toISOString() },
+        orders: r.ordersIngested,
+        payments: r.paymentsIngested,
+        payouts: r.payoutsIngested,
+        matched: r.matchedCount,
+        exceptions: r.exceptionCount,
+        error: r.error ?? null,
+        durationMs: r.durationMs,
+      })),
     });
   } catch (err) {
     console.error("[shoplineSyncCycle] fatal error:", err);
@@ -149,10 +185,8 @@ export async function handleShoplineDailyBatch(req: Request, res: Response): Pro
           to: now,
           triggeredBy: 0,
         });
+        // runSyncCycle records lastSyncAt / lastSyncError on the store row itself.
         reports.push(report);
-        if (report.success) {
-          await updateLastSyncAt(store.id);
-        }
       } catch (err) {
         reports.push({
           success: false,

@@ -7,7 +7,9 @@ import { pocRouter } from "./routers/poc";
 import { pocKpiRouter } from "./routers/pocKpi";
 import { mobileMoneyRouter } from "./routers/mobileMoney";
 import { erpExportRouter } from "./routers/erpExport";
-import { enqueueReconciliationRun, registerReconciliationRunner } from "./reconciliationQueue";
+import { registerReconciliationRunner } from "./reconciliationQueue";
+import { reconciliationRouter } from "./routers/reconciliation";
+import { modulesRouter } from "./routers/modules";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { shoplineConnectorRouter } from "./routers/shoplineConnector";
 import { lapoRouter } from "./routers/lapo";
@@ -40,6 +42,8 @@ import {
   checkAndSendAlerts,
 } from "./emailReportService";
 import { publicApiRouter } from "./publicApiRouter";
+import { bucketIngestionRouter } from "./routers/bucketIngestion";
+import { emailIngestionRouter } from "./routers/emailIngestion";
 import {
   encryptCredential,
   testSftpConnection,
@@ -47,6 +51,7 @@ import {
   downloadAndProcessSftpFile,
   startSftpPolling,
 } from "./sftpService";
+import { startBucketPolling } from "./bucketIngestionService";
 import { startSLAMonitoring } from "./slaMonitoringService";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 import {
@@ -91,8 +96,10 @@ import { getDb } from "./db";
 // 50 MB Express body limit (~25k rows ≈ 4 MB of JSON).
 const MAX_UPLOAD_TRANSACTIONS = 25000;
 const MAX_SEARCH_LENGTH = 100;
-const MAX_NAME_LENGTH = 255;
 const MAX_QUERY_LIMIT = 500;
+// MAX_NAME_LENGTH now lives in ./routers/shared (imported below) — the
+// extracted reconciliation router needs the same bound, and two copies of a
+// column limit is how they drift apart.
 
 // Canonical public origin for links embedded in outbound emails and exports sent to
 // external recipients (compliance-assessment results, unsubscribe links, CSV report URLs).
@@ -204,6 +211,10 @@ import {
   logAudit,
   getClientInfo,
   sanitizeInput,
+  assertChannelBindable,
+  cbnProcedure,
+  distributorProcedure,
+  MAX_NAME_LENGTH,
 } from "./routers/shared";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
@@ -218,7 +229,7 @@ async function dispatchWebhook(event: string, payload: any) {
 
 // ─── Distributor Identity Registry Router ───────────────────────────
 const distributorRouter = router({
-  list: protectedProcedure
+  list: distributorProcedure
     .input(z.object({
       status: z.string().optional(),
       search: z.string().optional(),
@@ -231,14 +242,14 @@ const distributorRouter = router({
       return db.getDistributors({ organizationId: user.organizationId, ...input });
     }),
 
-  stats: protectedProcedure
+  stats: distributorProcedure
     .query(async ({ ctx }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
       if (!user?.organizationId) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
       return db.getDistributorStats(user.organizationId);
     }),
 
-  create: protectedProcedure
+  create: distributorProcedure
     .input(z.object({
       canonicalName: z.string().min(1),
       registeredBusinessName: z.string().optional(),
@@ -258,7 +269,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  update: protectedProcedure
+  update: distributorProcedure
     .input(z.object({
       id: z.number(),
       canonicalName: z.string().optional(),
@@ -281,7 +292,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  confirm: protectedProcedure
+  confirm: distributorProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
@@ -294,7 +305,7 @@ const distributorRouter = router({
       return { success: true };
     }),
 
-  addVariant: protectedProcedure
+  addVariant: distributorProcedure
     .input(z.object({ id: z.number(), variant: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
@@ -315,6 +326,64 @@ import { createRateLimiter } from "./rateLimiter";
 const magicLinkIpLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10 });
 
 // ─── Router ──────────────────────────────────────────────────────────────
+
+
+/** The caller's organization, or a hard failure. SFTP config is institutional;
+ *  an account with no organization has no business owning a bank feed. */
+function requireOrg(ctx: { user: { organizationId?: number | null } }): number {
+  if (!ctx.user.organizationId) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Your account is not linked to an organization",
+    });
+  }
+  return ctx.user.organizationId;
+}
+
+/** Prove the caller's org owns this credential before acting on it. Throws
+ *  NOT_FOUND either way, so this cannot be used to enumerate other tenants. */
+async function assertOwnsSftpCredential(
+  ctx: { user: { organizationId?: number | null } },
+  credentialId: number,
+): Promise<void> {
+  const cred = await db.getSftpCredentialById(credentialId, requireOrg(ctx));
+  if (!cred) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
+  }
+}
+
+/**
+ * Refuse a super-admin organisation mutation that would match no row.
+ *
+ * All four org-level setters (`updateOrganizationSegment`, `setOrganizationSso`,
+ * `setOrganizationBankingModel`, `setOrganizationIsDemo`) ran
+ * `UPDATE … WHERE id = ?` and returned `{ success: true }` unconditionally, so a
+ * stale, deleted or mistyped id reported success, wrote a misleading audit
+ * entry, and changed nothing.
+ *
+ * That is worst for `setOrganizationIsDemo`, which decides whether a tenant's
+ * SLA alerts are suppressed: believing you have silenced or restored alerting
+ * when you have not is exactly the failure the isDemo work exists to prevent.
+ *
+ * Checks EXISTENCE rather than affectedRows deliberately. MySQL reports
+ * affected_rows as rows CHANGED, not matched, so setting a field to the value it
+ * already holds returns 0 — and rejecting that no-op as "not found" would be a
+ * worse bug than the one being fixed.
+ */
+async function assertOrganizationExists(
+  drizzle: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  organizationId: number,
+): Promise<void> {
+  const { organizations } = await import("../drizzle/schema");
+  const [org] = await drizzle
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  if (!org) {
+    throw new TRPCError({ code: "NOT_FOUND", message: `Organisation ${organizationId} not found` });
+  }
+}
 
 export const appRouter = router({
   system: systemRouter,
@@ -444,8 +513,12 @@ export const appRouter = router({
   // ─── Channels ────────────────────────────────────────────────────
 
   channels: router({
-    list: protectedProcedure.query(async () => {
-      return db.getChannels();
+    list: protectedProcedure.query(async ({ ctx }) => {
+      // Super admins (Infinity AI staff) legitimately span tenants — platform
+      // overview and the portal switcher both need the full estate. Everyone
+      // else sees their own org's channels plus the shared platform rails.
+      if (ctx.user.role === "super_admin") return db.getAllChannelsAcrossTenants();
+      return db.getChannels(ctx.user.organizationId ?? null);
     }),
 
     create: adminProcedure
@@ -465,8 +538,11 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        // Check for duplicate code
-        const existing = await db.getChannelByCode(input.code);
+        // Duplicate check must span ALL tenants: channels.code carries a global
+        // UNIQUE constraint, so an org-scoped check would pass here and then
+        // fail on insert with a duplicate-key error. Returns a boolean only, so
+        // it cannot leak another tenant's channel details.
+        const existing = await db.channelCodeExists(input.code);
         if (existing) {
           throw new TRPCError({ code: "CONFLICT", message: `Channel with code '${input.code}' already exists` });
         }
@@ -494,7 +570,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateChannel(input.id, {
+        await db.updateChannel(input.id, requireOrg(ctx), {
           matchingConfig: input.matchingConfig ? JSON.stringify(input.matchingConfig) : undefined,
           fileFormat: input.fileFormat ? JSON.stringify(input.fileFormat) : undefined,
           isActive: input.isActive,
@@ -526,7 +602,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const channel = await db.getChannelByCode(input.channelCode);
+        const channel = await db.getChannelByCode(input.channelCode, ctx.user.organizationId ?? null);
         if (!channel) {
           throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
         }
@@ -617,7 +693,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        const channel = await db.getChannelByCode(input.channelCode);
+        const channel = await db.getChannelByCode(input.channelCode, ctx.user.organizationId ?? null);
         if (!channel) {
           throw new TRPCError({ code: "NOT_FOUND", message: `Channel '${sanitizeInput(input.channelCode, 50)}' not found` });
         }
@@ -693,8 +769,8 @@ export const appRouter = router({
       }),
 
     history: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      return db.getUploadBatches(ctx.user.id, isAdmin);
+      const isAdmin = ctx.user.role === "admin";
+      return db.getUploadBatches(ctx.user.organizationId ?? null);
     }),
   }),
 
@@ -716,8 +792,9 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         return db.getTransactions({
+          organizationId: ctx.user.organizationId ?? null,
           userId: ctx.user.id,
           isAdmin,
           channelId: input.channelId,
@@ -735,247 +812,7 @@ export const appRouter = router({
 
   // ─── Reconciliation ─────────────────────────────────────────────
 
-  reconciliation: router({
-    create: operationsProcedure
-      .input(
-        z.object({
-          name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["settlement", "account_level"]).default("settlement"),
-          sourceChannelId: z.number().int().positive(),
-          targetChannelId: z.number().int().positive(),
-          dateFrom: z.string().min(1),
-          dateTo: z.string().min(1),
-          amountTolerance: z.number().min(0).max(0.1).default(0.005),
-          dateWindowDays: z.number().int().min(0).max(30).default(3),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-
-        // Validate channels exist
-        const sourceChannel = await db.getChannelById(input.sourceChannelId);
-        const targetChannel = await db.getChannelById(input.targetChannelId);
-        if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-        if (!targetChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
-
-        // Validate date range
-        const dateFrom = new Date(input.dateFrom);
-        const dateTo = new Date(input.dateTo);
-        if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid date range" });
-        }
-        if (dateFrom > dateTo) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
-        }
-
-        const jobId = await db.createReconciliationJob({
-          userId: ctx.user.id,
-          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
-          moduleType: input.moduleType,
-          sourceChannelId: input.sourceChannelId,
-          targetChannelId: input.targetChannelId,
-          dateFrom,
-          dateTo,
-          amountTolerance: String(input.amountTolerance),
-          dateWindowDays: input.dateWindowDays,
-          engineConfig: JSON.stringify({
-            amountTolerance: input.amountTolerance,
-            dateWindowDays: input.dateWindowDays,
-            sourceChannel: sourceChannel.code,
-            targetChannel: targetChannel.code,
-          }),
-          status: "pending",
-        });
-
-        if (!jobId) {
-          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create reconciliation job" });
-        }
-
-        await logAudit(ctx.user.id, "create_reconciliation_job", "reconciliation_job", jobId, input, ip, ua);
-
-        // Run asynchronously through the durable queue (BullMQ when REDIS_URL
-        // is set, in-process otherwise) — retried with a clean artifact reset
-        // per attempt; never lost silently on restart under BullMQ.
-        enqueueReconciliationRun({
-          jobId,
-          sourceChannelId: input.sourceChannelId,
-          targetChannelId: input.targetChannelId,
-          dateFromIso: dateFrom.toISOString(),
-          dateToIso: dateTo.toISOString(),
-          config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-          userId: ctx.user.id,
-        }).catch(err => console.error("[Reconciliation] enqueue failed:", err));
-
-        return { jobId };
-      }),
-
-    // ── Multi-channel single run ──────────────────────────────────────────
-    // Reconcile one source against MANY target channels in a single action.
-    // Fans out to one child job per target (sharing a multiRunId) so results
-    // aggregate into a single combined report — "reconcile across all of the
-    // institution's channels in one run".
-    createMultiChannel: operationsProcedure
-      .input(
-        z.object({
-          name: z.string().min(1).max(MAX_NAME_LENGTH),
-          moduleType: z.enum(["settlement", "account_level"]).default("settlement"),
-          sourceChannelId: z.number().int().positive(),
-          // Explicit target channels, or omit + set allActiveTargets to use every
-          // other active channel.
-          targetChannelIds: z.array(z.number().int().positive()).max(50).optional(),
-          allActiveTargets: z.boolean().default(false),
-          dateFrom: z.string().min(1),
-          dateTo: z.string().min(1),
-          amountTolerance: z.number().min(0).max(0.1).default(0.005),
-          dateWindowDays: z.number().int().min(0).max(30).default(3),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-
-        const sourceChannel = await db.getChannelById(input.sourceChannelId);
-        if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-
-        const dateFrom = new Date(input.dateFrom);
-        const dateTo = new Date(input.dateTo);
-        if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid date range" });
-        }
-        if (dateFrom > dateTo) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
-        }
-
-        // Resolve the target set.
-        let targets: { id: number; name: string; code: string }[] = [];
-        if (input.allActiveTargets) {
-          const all = await db.getChannels();
-          targets = all.filter((c) => c.isActive && c.id !== input.sourceChannelId);
-        } else {
-          const ids = (input.targetChannelIds ?? []).filter((id) => id !== input.sourceChannelId);
-          if (ids.length === 0) {
-            throw new TRPCError({ code: "BAD_REQUEST", message: "Provide at least one target channel (or set allActiveTargets)" });
-          }
-          for (const id of ids) {
-            const ch = await db.getChannelById(id);
-            if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: `Target channel ${id} not found` });
-            targets.push(ch);
-          }
-        }
-        if (targets.length === 0) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "No eligible target channels for this run" });
-        }
-
-        const multiRunId = crypto.randomUUID();
-        const jobIds: number[] = [];
-
-        for (const target of targets) {
-          const jobId = await db.createReconciliationJob({
-            userId: ctx.user.id,
-            name: sanitizeInput(`${input.name} — ${target.name}`, MAX_NAME_LENGTH),
-            moduleType: input.moduleType,
-            sourceChannelId: input.sourceChannelId,
-            targetChannelId: target.id,
-            dateFrom,
-            dateTo,
-            amountTolerance: String(input.amountTolerance),
-            dateWindowDays: input.dateWindowDays,
-            multiRunId,
-            engineConfig: JSON.stringify({
-              amountTolerance: input.amountTolerance,
-              dateWindowDays: input.dateWindowDays,
-              sourceChannel: sourceChannel.code,
-              targetChannel: target.code,
-              multiRunId,
-            }),
-            status: "pending",
-          });
-          if (jobId) {
-            jobIds.push(jobId);
-            enqueueReconciliationRun({
-              jobId,
-              sourceChannelId: input.sourceChannelId,
-              targetChannelId: target.id,
-              dateFromIso: dateFrom.toISOString(),
-              dateToIso: dateTo.toISOString(),
-              config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-              userId: ctx.user.id,
-            }).catch((err) => console.error("[Reconciliation] Multi-channel child enqueue failed:", err));
-          }
-        }
-
-        await logAudit(ctx.user.id, "create_multichannel_reconciliation", "reconciliation_job", jobIds[0] ?? 0,
-          { multiRunId, source: sourceChannel.code, targetCount: targets.length }, ip, ua);
-
-        return { multiRunId, jobIds, targetCount: targets.length };
-      }),
-
-    // Aggregate a multi-channel run into one combined view.
-    getMultiRun: protectedProcedure
-      .input(z.object({ multiRunId: z.string().min(1).max(36) }))
-      .query(async ({ input }) => {
-        const jobs = await db.getReconciliationJobsByMultiRun(input.multiRunId);
-        if (jobs.length === 0) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Multi-channel run not found" });
-        }
-        const channels = await db.getChannels();
-        const nameFor = (id: number) => channels.find((c) => c.id === id)?.name ?? `Channel ${id}`;
-
-        const totals = jobs.reduce(
-          (acc, j) => {
-            acc.totalSourceTxns += j.totalSourceTxns;
-            acc.totalTargetTxns += j.totalTargetTxns;
-            acc.matchedCount += j.matchedCount;
-            acc.exceptionCount += j.exceptionCount;
-            acc.unmatchedCount += j.unmatchedCount;
-            return acc;
-          },
-          { totalSourceTxns: 0, totalTargetTxns: 0, matchedCount: 0, exceptionCount: 0, unmatchedCount: 0 },
-        );
-        const denom = totals.matchedCount + totals.exceptionCount + totals.unmatchedCount;
-        const overallMatchRate = denom > 0 ? parseFloat(((totals.matchedCount / denom) * 100).toFixed(2)) : 0;
-
-        const allDone = jobs.every((j) => j.status === "completed");
-        const anyFailed = jobs.some((j) => j.status === "failed");
-        const anyRunning = jobs.some((j) => j.status === "pending" || j.status === "running");
-        const status = anyRunning ? "running" : allDone ? "completed" : anyFailed ? "completed_with_failures" : "completed";
-
-        return {
-          multiRunId: input.multiRunId,
-          status,
-          jobCount: jobs.length,
-          completedCount: jobs.filter((j) => j.status === "completed").length,
-          ...totals,
-          overallMatchRate,
-          channels: jobs.map((j) => ({
-            jobId: j.id,
-            channel: nameFor(j.targetChannelId),
-            status: j.status,
-            matchedCount: j.matchedCount,
-            exceptionCount: j.exceptionCount,
-            unmatchedCount: j.unmatchedCount,
-            matchRate: j.matchRate,
-          })),
-        };
-      }),
-
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      return db.getReconciliationJobs(ctx.user.id, isAdmin);
-    }),
-
-    get: protectedProcedure
-      .input(z.object({ id: z.number().int().positive() }))
-      .query(async ({ ctx, input }) => {
-        const job = await db.getReconciliationJob(input.id);
-        if (!job) throw new TRPCError({ code: "NOT_FOUND" });
-        const jobMatches = await db.getMatchesByJob(input.id);
-        const { data: jobExceptions } = await db.getExceptions({ jobId: input.id });
-        // Audit: log data access event
-        const { ip, ua } = getClientInfo(ctx);
-        await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua);
-        return { job, matches: jobMatches, exceptions: jobExceptions };
-      }),
-  }),
+  reconciliation: reconciliationRouter,
 
   // ─── Exception Age / Escalation Tracker ──────────────────────────
   ageTracker: router({
@@ -984,7 +821,7 @@ export const appRouter = router({
       const orgId = ctx.user.organizationId ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging();
+      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
       const now = new Date();
       const items = rows.map((r) => ({
         ageDays: ageTracker.ageDays(r.createdAt, now),
@@ -1000,7 +837,7 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId ?? 0;
         const settings = orgId ? await db.getAgingSettings(orgId) : null;
         const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-        const rows = await db.getOpenExceptionsForAging();
+        const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
         const now = new Date();
         let items = rows.map((r) => {
           const age = ageTracker.ageDays(r.createdAt, now);
@@ -1032,7 +869,7 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive(), note: z.string().max(2000).optional() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: "escalated",
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
@@ -1060,12 +897,12 @@ export const appRouter = router({
       const orgId = ctx.user.organizationId ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging();
+      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
       const now = new Date();
       const overAged = rows.filter(
         (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
       );
-      await Promise.all(overAged.map((r) => db.updateException(r.id, { status: "escalated" })));
+      await Promise.all(overAged.map((r) => db.updateException(r.id, ctx.user.organizationId ?? null, { status: "escalated" })));
       const { ip, ua } = getClientInfo(ctx);
       await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
       // Flywheel write-path (audit fix): each bulk escalation is a learnable
@@ -1125,8 +962,8 @@ export const appRouter = router({
           offset: z.number().int().min(0).default(0),
         })
       )
-      .query(async ({ input }) => {
-        return db.getExceptions(input);
+      .query(async ({ ctx, input }) => {
+        return db.getExceptions({ ...input, organizationId: ctx.user.organizationId ?? null });
       }),
 
     resolve: operationsProcedure
@@ -1139,7 +976,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: input.status,
           resolvedBy: ctx.user.id,
           resolvedAt: new Date(),
@@ -1214,19 +1051,18 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const drizzle = await getDb();
-        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
-        await drizzle.update(exceptionsTable)
-          .set({
-            status: "open",
-            resolvedBy: null,
-            resolvedAt: null,
-            resolutionNotes: input.notes ?? null,
-            cbsStillAnomalous: false,
-            userKeptResolved: false,
-          })
-          .where(eq(exceptionsTable.id, input.id));
+        // Through the org-scoped helper, not an inline drizzle write. The inline
+        // form keyed on `input.id` alone, so a caller could reopen another
+        // tenant's resolved exception — and reopening also retracts the
+        // flywheel record below, meaning it reached into their learning data too.
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+          status: "open",
+          resolvedBy: null,
+          resolvedAt: null,
+          resolutionNotes: input.notes ?? null,
+          cbsStillAnomalous: false,
+          userKeptResolved: false,
+        });
         await logAudit(ctx.user.id, "reopen_exception", "exception", input.id, { notes: input.notes }, ip, ua);
 
         // Flywheel retraction (audit fix): a reopened resolution was WRONG —
@@ -1250,7 +1086,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           assignedTo: input.assignedTo,
           assignedAt: new Date(),
           assignedBy: ctx.user.id,
@@ -1271,7 +1107,7 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
         const updatePromises = input.exceptionIds.map(id =>
-          db.updateException(id, {
+          db.updateException(id, ctx.user.organizationId ?? null, {
             assignedTo: input.assignedTo,
             assignedAt: new Date(),
             assignedBy: ctx.user.id,
@@ -1296,10 +1132,13 @@ export const appRouter = router({
       }),
 
     getTeamWorkload: protectedProcedure
-      .query(async () => {
+      .query(async ({ ctx }) => {
         const allUsers = await db.getAllUsers();
         const activeUsers = allUsers.filter(u => u.isActive && !u.isGuest);
-        const exceptionsResult = await db.getExceptions({ limit: 10000 });
+        const exceptionsResult = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
+          limit: 10000,
+        });
         const allExceptions = exceptionsResult.data;
         
         const workloadData = await Promise.all(activeUsers.map(async (user) => {
@@ -1351,7 +1190,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: "escalated",
           resolutionNotes: input.notes ? sanitizeInput(input.notes, 2000) : null,
         });
@@ -1385,7 +1224,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, {
+        await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: "in_review",
           assignedTo: ctx.user.id,
           assignedAt: new Date(),
@@ -1410,6 +1249,7 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
         const exceptions = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
           jobId: input.jobId,
           status: input.status,
           severity: input.severity,
@@ -1564,15 +1404,24 @@ export const appRouter = router({
       }),
 
     // User explicitly keeps the exception RESOLVED despite the CBS re-occurrence.
-    keepResolvedDespiteStaleness: protectedProcedure
+    //
+    // operationsProcedure, matching resolve/reopen/assign/escalate/moveToReview
+    // beside it: this overrides a re-detected anomaly and is the same kind of
+    // write. It was the one exception mutation on protectedProcedure, so CFO and
+    // Compliance — read-only by policy — could suppress a live finding.
+    //
+    // It also wrote `.where(eq(exceptions.id, input.exceptionId))` on a
+    // caller-supplied id with no tenancy predicate, so ANY signed-in user could
+    // mark ANY tenant's exception as kept-resolved. db.updateException carries
+    // the org filter; the inline drizzle write bypassed it. `checkStaleness`
+    // directly above already scoped its own query, which is what made this an
+    // outlier rather than a pattern.
+    keepResolvedDespiteStaleness: operationsProcedure
       .input(z.object({ exceptionId: z.number().int().positive() }))
-      .mutation(async ({ input }) => {
-        const drizzle = await getDb();
-        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { exceptions: exceptionsTable } = await import("../drizzle/schema");
-        await drizzle.update(exceptionsTable)
-          .set({ userKeptResolved: true })
-          .where(eq(exceptionsTable.id, input.exceptionId));
+      .mutation(async ({ ctx, input }) => {
+        await db.updateException(input.exceptionId, ctx.user.organizationId ?? null, {
+          userKeptResolved: true,
+        });
         return { success: true, exceptionId: input.exceptionId };
       }),
   }),
@@ -1671,184 +1520,25 @@ export const appRouter = router({
 
   // ─── Module Configurations ───────────────────────────────────────
 
-  modules: router({    
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const dbConn = await db.getDb();
-      if (!dbConn) return [];
-      
-      const configs = await dbConn.select()
-        .from(db.moduleConfigurations)
-        .where(eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0));
-      return configs;
-    }),
-
-    toggle: adminProcedure
-      .input(z.object({
-        moduleType: z.enum(["settlement", "account_level"]),
-        isEnabled: z.boolean(),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-        const dbConn = await db.getDb();
-        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        
-        const existing = await dbConn.select()
-          .from(db.moduleConfigurations)
-          .where(
-            and(
-              eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0),
-              eq(db.moduleConfigurations.moduleType, input.moduleType)
-            )
-          )
-          .limit(1);
-        
-        if (existing.length > 0) {
-          await dbConn.update(db.moduleConfigurations)
-            .set({ isEnabled: input.isEnabled, updatedAt: new Date() })
-            .where(eq(db.moduleConfigurations.id, existing[0].id));
-        } else {
-          await dbConn.insert(db.moduleConfigurations).values({
-            organizationId: ctx.user.organizationId || 0,
-            moduleType: input.moduleType,
-            isEnabled: input.isEnabled,
-          });
-        }
-        
-        await logAudit(ctx.user.id, "toggle_module", "module_configuration", undefined, {
-          moduleType: input.moduleType,
-          isEnabled: input.isEnabled,
-        }, ip, ua);
-        return { success: true };
-      }),
-
-    updateConfig: adminProcedure
-      .input(z.object({
-        moduleType: z.enum(["settlement", "account_level"]),
-        configuration: z.record(z.string(), z.any()),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-        const dbConn = await db.getDb();
-        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        
-        await dbConn.update(db.moduleConfigurations)
-          .set({ configuration: input.configuration, updatedAt: new Date() })
-          .where(
-            and(
-              eq(db.moduleConfigurations.organizationId, ctx.user.organizationId || 0),
-              eq(db.moduleConfigurations.moduleType, input.moduleType)
-            )
-          );
-        
-        await logAudit(ctx.user.id, "update_module_config", "module_configuration", undefined, {
-          moduleType: input.moduleType,
-        }, ip, ua);
-        return { success: true };
-      }),
-
-    // Super admin: list all orgs with their module override states
-    listOrgOverrides: superAdminProcedure
-      .input(z.object({ organizationId: z.number().int().positive().optional() }))
-      .query(async ({ input }) => {
-        const dbConn = await db.getDb();
-        if (!dbConn) return [];
-        const { moduleOverrides, organizations } = await import("../drizzle/schema");
-        const { eq } = await import("drizzle-orm");
-        let query = dbConn.select({
-          id: moduleOverrides.id,
-          organizationId: moduleOverrides.organizationId,
-          orgName: organizations.name,
-          moduleType: moduleOverrides.moduleType,
-          isEnabled: moduleOverrides.isEnabled,
-          reason: moduleOverrides.reason,
-          setByUserId: moduleOverrides.setByUserId,
-          updatedAt: moduleOverrides.updatedAt,
-        })
-        .from(moduleOverrides)
-        .leftJoin(organizations, eq(moduleOverrides.organizationId, organizations.id));
-        if (input?.organizationId) {
-          return (await query).filter(r => r.organizationId === input.organizationId);
-        }
-        return query;
-      }),
-
-    // Super admin: set or clear a per-institution module override
-    setOrgModuleOverride: superAdminProcedure
-      .input(z.object({
-        organizationId: z.number().int().positive(),
-        moduleType: z.enum(["settlement", "account_level"]),
-        isEnabled: z.boolean(),
-        reason: z.string().max(500).optional(),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-        const dbConn = await db.getDb();
-        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { moduleOverrides } = await import("../drizzle/schema");
-        const { eq, and } = await import("drizzle-orm");
-        const existing = await dbConn.select().from(moduleOverrides)
-          .where(and(
-            eq(moduleOverrides.organizationId, input.organizationId),
-            eq(moduleOverrides.moduleType, input.moduleType)
-          )).limit(1);
-        if (existing.length > 0) {
-          await dbConn.update(moduleOverrides)
-            .set({ isEnabled: input.isEnabled, reason: input.reason ?? null, setByUserId: ctx.user.id, updatedAt: new Date() })
-            .where(eq(moduleOverrides.id, existing[0].id));
-        } else {
-          await dbConn.insert(moduleOverrides).values({
-            organizationId: input.organizationId,
-            moduleType: input.moduleType,
-            isEnabled: input.isEnabled,
-            reason: input.reason ?? null,
-            setByUserId: ctx.user.id,
-          });
-        }
-        await logAudit(ctx.user.id, "set_org_module_override", "module_override", input.organizationId, {
-          moduleType: input.moduleType,
-          isEnabled: input.isEnabled,
-          reason: input.reason,
-        }, ip, ua);
-        return { success: true };
-      }),
-
-    // Super admin: remove a per-institution override (revert to org's own setting)
-    clearOrgModuleOverride: superAdminProcedure
-      .input(z.object({
-        organizationId: z.number().int().positive(),
-        moduleType: z.enum(["settlement", "account_level"]),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-        const dbConn = await db.getDb();
-        if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        const { moduleOverrides } = await import("../drizzle/schema");
-        const { eq, and } = await import("drizzle-orm");
-        await dbConn.delete(moduleOverrides)
-          .where(and(
-            eq(moduleOverrides.organizationId, input.organizationId),
-            eq(moduleOverrides.moduleType, input.moduleType)
-          ));
-        await logAudit(ctx.user.id, "clear_org_module_override", "module_override", input.organizationId, {
-          moduleType: input.moduleType,
-        }, ip, ua);
-        return { success: true };
-      }),
-  }),
+  modules: modulesRouter,
 
   // ─── Review Queue (Matches) ──────────────────────────────────────
 
   review: router({
     pending: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      return db.getPendingReviewMatches(ctx.user.id, isAdmin);
+      // The userId/isAdmin pair this used to pass was accepted and ignored —
+      // the query filtered on status alone, so every caller saw every tenant's
+      // review queue. Scoped by organization now that `matches` carries one,
+      // which supersedes the narrowed isAdmin flag from #45: the function no
+      // longer takes either argument.
+      return db.getPendingReviewMatches(ctx.user.organizationId ?? null);
     }),
 
     approve: guestProtectedProcedure
       .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateMatchStatus(input.matchId, "confirmed", ctx.user.id);
+        await db.updateMatchStatus(input.matchId, ctx.user.organizationId ?? null, "confirmed", ctx.user.id);
         await logAudit(ctx.user.id, "approve_match", "match", input.matchId, {}, ip, ua);
         return { success: true };
       }),
@@ -1857,7 +1547,7 @@ export const appRouter = router({
       .input(z.object({ matchId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateMatchStatus(input.matchId, "rejected", ctx.user.id);
+        await db.updateMatchStatus(input.matchId, ctx.user.organizationId ?? null, "rejected", ctx.user.id);
         await logAudit(ctx.user.id, "reject_match", "match", input.matchId, {}, ip, ua);
         return { success: true };
       }),
@@ -1876,9 +1566,10 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         return db.getAuditLogs({
           ...input,
+          organizationId: ctx.user.organizationId ?? null,
           userId: isAdmin ? undefined : ctx.user.id,
         });
       }),
@@ -1911,10 +1602,11 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
 
         // Fetch up to 10K rows for export
         const { data } = await db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
           entityType: input.entityType,
           limit: input.limit,
           userId: isAdmin ? undefined : ctx.user.id,
@@ -2000,15 +1692,14 @@ export const appRouter = router({
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const isAdmin = ctx.user.role === "admin";
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.id);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         return report;
       }),
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      return db.getReports(ctx.user.id, isAdmin);
+      return db.getReports(ctx.user.organizationId ?? null);
     }),
 
     generate: guestProtectedProcedure
@@ -2025,7 +1716,10 @@ export const appRouter = router({
         if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
         const jobMatches = await db.getMatchesByJob(input.jobId);
-        const { data: jobExceptions } = await db.getExceptions({ jobId: input.jobId });
+        const { data: jobExceptions } = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
+          jobId: input.jobId,
+        });
 
         const summary = {
           jobName: job.name,
@@ -2085,8 +1779,8 @@ export const appRouter = router({
         note: z.string().max(1000).optional(),
         expiresInDays: z.number().int().min(1).max(365).optional(), // null = never
       }))
-      .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+      .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin";
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         const crypto = await import("crypto");
@@ -2113,8 +1807,7 @@ export const appRouter = router({
     listShareTokens: protectedProcedure
       .input(z.object({ reportId: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-        const reports = await db.getReports(ctx.user.id, isAdmin);
+        const reports = await db.getReports(ctx.user.organizationId ?? null);
         const report = reports.find((r) => r.id === input.reportId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         const dbConn = await getDb();
@@ -2410,8 +2103,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-        const allJobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        const allJobs = await db.getReconciliationJobs(ctx.user.organizationId ?? null);
 
         // Filter by date range and status
         let filtered = allJobs.filter((j: any) => j.status === "completed");
@@ -2536,32 +2228,21 @@ export const appRouter = router({
     stats: protectedProcedure
       .input(z.object({ viewAsOrgId: z.number().int().positive().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        // Guest users in demo mode should see all data (no userId filter)
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-        // Super admin portal switching: if viewAsOrgId provided, scope to that org
-        if (input?.viewAsOrgId && ctx.user.role === "super_admin") {
-          const drizzle = await getDb();
-          if (drizzle) {
-            const { reconciliationJobs, transactions } = await import("../drizzle/schema");
-            const { eq, count } = await import("drizzle-orm");
-            const orgId = input.viewAsOrgId;
-            const [jobCount] = await drizzle.select({ count: count() }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, orgId));
-            const [txCount] = await drizzle.select({ count: count() }).from(transactions).where(eq(transactions.organizationId, orgId));
-            // Return shape compatible with getDashboardStats return type
-            return {
-              jobs: { total: Number(jobCount.count), completed: 0, running: 0, avgMatchRate: 0 },
-              transactions: { total: Number(txCount.count), matched: 0, unmatched: 0, exceptions: 0 },
-              exceptions: { total: 0, open: 0, inReview: 0, resolved: 0 },
-              channelStats: [] as any[],
-            };
-          }
-        }
-        return db.getDashboardStats(ctx.user.id, isAdmin);
+        // Super admin portal switching: if viewAsOrgId provided, scope to that org.
+        // This used to run its own cut-down query that returned two counts and
+        // hardcoded every other field to zero, so entering a tenant's portal showed
+        // a 0% match rate and no exceptions no matter what that tenant's data said.
+        // The scoped stats function answers it properly.
+        const orgId =
+          input?.viewAsOrgId && ctx.user.role === "super_admin"
+            ? input.viewAsOrgId
+            : ctx.user.organizationId ?? null;
+        return db.getDashboardStats(orgId);
       }),
 
     // CFO Dashboard Endpoints
     cfoKpis: protectedProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin" || ctx.user.isGuest === true);
+      const stats = await db.getDashboardStats(ctx.user.organizationId ?? null);
       if (!stats) {
         return {
           totalTransactions: 0,
@@ -2587,13 +2268,14 @@ export const appRouter = router({
         channelCodes: z.array(z.string()).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        const channels = await db.getChannels();
+        const channels = await db.getChannels(ctx.user.organizationId ?? null);
         const filteredChannels = input?.channelCodes && input.channelCodes.length > 0
           ? channels.filter((c) => input.channelCodes!.includes(c.code))
           : channels;
         const channelStats = await Promise.all(
           filteredChannels.map(async (channel) => {
             const { data: transactions } = await db.getTransactions({
+              organizationId: ctx.user.organizationId ?? null,
               channelId: channel.id,
               limit: 10000,
               dateFrom: input?.dateFrom,
@@ -2622,7 +2304,7 @@ export const appRouter = router({
         channelCodes: z.array(z.string()).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        const channels = await db.getChannels();
+        const channels = await db.getChannels(ctx.user.organizationId ?? null);
         const filteredChannels = input?.channelCodes && input.channelCodes.length > 0
           ? channels.filter((c) => input.channelCodes!.includes(c.code))
           : channels;
@@ -2646,6 +2328,7 @@ export const appRouter = router({
               const to = new Date(from);
               to.setHours(23, 59, 59, 999);
               const { data: txns } = await db.getTransactions({
+                organizationId: ctx.user.organizationId ?? null,
                 channelId: channel.id,
                 dateFrom: from,
                 dateTo: to,
@@ -2674,6 +2357,7 @@ export const appRouter = router({
       }))
       .query(async ({ ctx, input }) => {
         let { data: exceptions } = await db.getExceptions({
+          organizationId: ctx.user.organizationId ?? null,
           status: "open",
           severity: input.priority !== "all" ? input.priority : undefined,
           limit: input.limit,
@@ -2716,7 +2400,10 @@ export const appRouter = router({
       }),
 
     operationsSla: protectedProcedure.query(async ({ ctx }) => {
-      const { data: allExceptions } = await db.getExceptions({ limit: 1000 });
+      const { data: allExceptions } = await db.getExceptions({
+        organizationId: ctx.user.organizationId ?? null,
+        limit: 1000,
+      });
       const resolved = allExceptions.filter((e) => e.status === "resolved");
       const resolvedWithin24h = resolved.filter((e) => {
         if (!e.resolvedAt) return false;
@@ -2740,9 +2427,16 @@ export const appRouter = router({
     }),
 
     // Auditor Dashboard Endpoints
-    auditorCompliance: protectedProcedure.query(async ({ ctx }) => {
-      const stats = await db.getDashboardStats(ctx.user.id, ctx.user.role === "admin");
-      const { data: auditLogs } = await db.getAuditLogs({ limit: 1000 });
+    // Examination-facing: reports audit-trail volume and a "compliance rate"
+    // framed for a supervisor's examiner, and feeds the CBN pack. Retail
+    // merchants answer to card schemes, not an examiner (CLAUDE.md §2A) — the
+    // client already hides the Auditor role, this is the rule behind it.
+    auditorCompliance: cbnProcedure.query(async ({ ctx }) => {
+      const stats = await db.getDashboardStats(ctx.user.organizationId ?? null);
+      const { data: auditLogs } = await db.getAuditLogs({
+        organizationId: ctx.user.organizationId ?? null,
+        limit: 1000,
+      });
 
       return {
         totalReconciliations: stats?.jobs.total || 0,
@@ -2753,13 +2447,14 @@ export const appRouter = router({
       };
     }),
 
-    auditorTrail: protectedProcedure
+    auditorTrail: cbnProcedure
       .input(z.object({
         entityType: z.string().max(50).optional(),
         limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(100),
       }))
       .query(async ({ ctx, input }) => {
         return db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
           entityType: input.entityType,
           limit: input.limit,
         });
@@ -2835,7 +2530,8 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.deleteWebhook(input.id);
+        const removedWebhook = await db.deleteWebhook(input.id, requireOrg(ctx));
+        if (removedWebhook === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Webhook not found" });
         await logAudit(ctx.user.id, "delete_webhook", "webhook", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -2900,11 +2596,12 @@ export const appRouter = router({
         return { id, key: rawKey, prefix: keyPrefix }; // Return raw key only on creation
       }),
 
-    revoke: protectedProcedure
+    revoke: adminProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.revokeApiKey(input.id);
+        const revokedKey = await db.revokeApiKey(input.id, requireOrg(ctx));
+        if (revokedKey === 0) throw new TRPCError({ code: "NOT_FOUND", message: "API key not found" });
         await logAudit(ctx.user.id, "revoke_api_key", "api_key", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -2912,9 +2609,18 @@ export const appRouter = router({
 
   // ─── SFTP Credentials ────────────────────────────────────────────
 
+  // ─── SFTP credential tenancy helpers ──────────────────────────────────────
+  // These rows hold BANK CONNECTION SECRETS (host, username, encrypted
+  // password/key, remote path). Every accessor was previously keyed on `id`
+  // alone, so a caller who could guess a primary key could read, repoint or
+  // delete another institution's bank feed — and `delete` was reachable from a
+  // guest session. Both helpers below fail closed.
   sftp: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getSftpCredentials(ctx.user.id);
+      // Org-scoped: an SFTP feed is institutional config, so a colleague must
+      // see it — and the previous userId-only filter left the org boundary
+      // entirely unenforced.
+      return db.getSftpCredentials(requireOrg(ctx));
     }),
 
     create: guestProtectedProcedure
@@ -2934,14 +2640,21 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        
+
         if (!input.password && !input.privateKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Either password or private key is required" });
         }
-        
+
+        const organizationId = requireOrg(ctx);
+        // The channel decides what this feed's transactions reconcile against,
+        // and it arrives from the caller — so ownership is proven before it is
+        // stored. Guests never reach here (guestProtectedProcedure rejects
+        // them), so requireOrg has already guaranteed a real organization.
+        await assertChannelBindable(organizationId, input.channelId);
+
         const id = await db.createSftpCredential({
           userId: ctx.user.id,
-          organizationId: 0, // Default organization for now
+          organizationId,
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           host: input.host,
           port: input.port,
@@ -2998,22 +2711,30 @@ export const appRouter = router({
         if (input.archivePath !== undefined) updateData.archivePath = input.archivePath || null;
         if (input.isActive !== undefined) updateData.isActive = input.isActive;
         
-        await db.updateSftpCredential(input.id, updateData);
+        const updated = await db.updateSftpCredential(input.id, requireOrg(ctx), updateData);
+        if (updated === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
+        }
         await logAudit(ctx.user.id, "update_sftp_credential", "sftp_credential", input.id, input, ip, ua);
         
         return { success: true };
       }),
 
-    delete: guestProtectedProcedure
+    // Was guestProtectedProcedure with an unscoped id: a GUEST session could
+    // delete any institution's bank feed by guessing the primary key.
+    delete: adminProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.deleteSftpCredential(input.id);
+        const removed = await db.deleteSftpCredential(input.id, requireOrg(ctx));
+        if (removed === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "SFTP credential not found" });
+        }
         await logAudit(ctx.user.id, "delete_sftp_credential", "sftp_credential", input.id, {}, ip, ua);
         return { success: true };
       }),
 
-    testConnection: protectedProcedure
+    testConnection: adminProcedure
       .input(z.object({
         host: z.string().min(1).max(255),
         port: z.number().int().min(1).max(65535).default(22),
@@ -3027,17 +2748,23 @@ export const appRouter = router({
 
     listFiles: protectedProcedure
       .input(z.object({ credentialId: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // Reaches out to the bank's SFTP host and returns its directory
+        // listing — prove ownership first.
+        await assertOwnsSftpCredential(ctx, input.credentialId);
         return listSftpFiles(input.credentialId);
       }),
 
-    processFile: protectedProcedure
+    processFile: adminProcedure
       .input(z.object({
         credentialId: z.number().int().positive(),
         fileName: z.string().min(1).max(255),
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        // Downloads from the bank's SFTP host and INGESTS into that org's
+        // channel — the most consequential of the three. Prove ownership first.
+        await assertOwnsSftpCredential(ctx, input.credentialId);
         const result = await downloadAndProcessSftpFile(input.credentialId, input.fileName);
         
         await logAudit(ctx.user.id, "process_sftp_file", "sftp_ingestion", input.credentialId, {
@@ -3054,9 +2781,13 @@ export const appRouter = router({
         limit: z.number().int().min(1).max(MAX_QUERY_LIMIT).default(50),
         offset: z.number().int().min(0).default(0),
       }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // Always org-scoped. Without this the procedure returned EVERY tenant's
+        // ingestion history — filenames, remote paths and error text describing
+        // other institutions' bank feeds.
         return db.getSftpIngestionLogs({
           credentialId: input.credentialId,
+          organizationId: requireOrg(ctx),
           limit: input.limit,
           offset: input.offset,
         });
@@ -3067,8 +2798,7 @@ export const appRouter = router({
 
   schedules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      const tasks = await db.getScheduledTasks(ctx.user.id, isAdmin);
+      const tasks = await db.getScheduledTasks(ctx.user.organizationId ?? null);
       return tasks.map((t) => ({
         ...t,
         frequencyDescription: getFrequencyDescription(
@@ -3151,7 +2881,9 @@ export const appRouter = router({
         return { id, nextRun };
       }),
 
-    update: protectedProcedure
+    // A schedule drives reconciliation runs, which is exactly what
+    // operationsProcedure governs — and `runNow` beside it is on the same guard.
+    update: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         name: z.string().min(1).max(MAX_NAME_LENGTH).optional(),
@@ -3194,7 +2926,8 @@ export const appRouter = router({
           scheduledDayOfMonth: input.scheduledDayOfMonth ?? task.scheduledDayOfMonth,
         });
 
-        await db.updateScheduledTask(input.id, updateData);
+        const updatedTask = await db.updateScheduledTask(input.id, requireOrg(ctx), updateData);
+        if (updatedTask === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         await logAudit(ctx.user.id, "update_schedule", "scheduled_task", input.id, input, ip, ua);
         return { success: true, nextRun: updateData.nextRunAt };
       }),
@@ -3203,15 +2936,24 @@ export const appRouter = router({
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.deleteScheduledTask(input.id);
+        const removedTask = await db.deleteScheduledTask(input.id, requireOrg(ctx));
+        if (removedTask === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         await logAudit(ctx.user.id, "delete_schedule", "scheduled_task", input.id, {}, ip, ua);
         return { success: true };
       }),
 
-    runNow: protectedProcedure
+    // operationsProcedure and ownership-checked: this STARTS a reconciliation
+    // run. It took a caller-supplied task id straight into executeScheduledTask,
+    // which resolves it via getScheduledTaskById — no tenancy predicate — so any
+    // signed-in user could trigger any other tenant's scheduled run. `delete`
+    // directly above already passes requireOrg(ctx); this is the same id, and it
+    // needs the same proof of ownership.
+    runNow: operationsProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        const owned = await db.getScheduledTask(input.id, ctx.user.organizationId ?? null);
+        if (!owned) throw new TRPCError({ code: "NOT_FOUND", message: "Scheduled task not found" });
         const result = await executeScheduledTask(input.id);
         await logAudit(ctx.user.id, "manual_run_schedule", "scheduled_task", input.id, result, ip, ua);
         if (!result.success) {
@@ -3300,8 +3042,8 @@ export const appRouter = router({
 
   monitoring: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
-      return db.getMonitoringStats(ctx.user.id, isAdmin);
+      const isAdmin = ctx.user.role === "admin";
+      return db.getMonitoringStats(ctx.user.organizationId ?? null);
     }),
 
     activeJobs: protectedProcedure.query(async () => {
@@ -3319,10 +3061,10 @@ export const appRouter = router({
     recentActivity: protectedProcedure
       .input(z.object({ limit: z.number().int().min(1).max(100).default(20) }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin" || ctx.user.isGuest === true;
+        const isAdmin = ctx.user.role === "admin";
         const jobCondition = !isAdmin ? ctx.user.id : undefined;
         // Get recent completed/failed jobs
-        const jobs = await db.getReconciliationJobs(ctx.user.id, isAdmin);
+        const jobs = await db.getReconciliationJobs(ctx.user.organizationId ?? null);
         return jobs.slice(0, input.limit).map((j) => ({
           id: j.id,
           name: j.name,
@@ -3364,13 +3106,27 @@ export const appRouter = router({
         }).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        const transactions = await db.getTransactionsByIds(input.transactionIds);
+        // Ids arrive from the caller, so the lookup is org-scoped.
+        const requestedIds = Array.from(new Set(input.transactionIds));
+        const transactions = await db.getTransactionsByIds(requestedIds, ctx.user.organizationId ?? null);
         if (transactions.length === 0) {
           throw new TRPCError({ code: "NOT_FOUND", message: "No transactions found" });
+        }
+        // A bulk action must not quietly analyse a subset. If any requested id
+        // resolved to nothing — because it does not exist, or belongs to
+        // another tenant — say so rather than returning anomalies computed over
+        // whatever happened to match. NOT_FOUND for both cases, so this cannot
+        // be used to probe which ids exist elsewhere.
+        if (transactions.length !== requestedIds.length) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: `${requestedIds.length - transactions.length} of ${requestedIds.length} transactions were not found`,
+          });
         }
         
         // Get historical transactions from the same channel
         const historicalResult = await db.getTransactions({
+          organizationId: ctx.user.organizationId ?? null,
           channelId: transactions[0].channelId,
           limit: 1000,
         });
@@ -3414,14 +3170,14 @@ export const appRouter = router({
         });
       }),
 
-    updateReview: protectedProcedure
+    updateReview: operationsProcedure
       .input(z.object({
         id: z.number().int().positive(),
         reviewStatus: z.enum(["pending", "false_positive", "confirmed", "escalated", "resolved"]),
         reviewNotes: z.string().max(1000).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        await db.updateAnomalyReview(input.id, {
+        await db.updateAnomalyReview(input.id, requireOrg(ctx), {
           reviewStatus: input.reviewStatus,
           reviewedBy: ctx.user.id,
           reviewNotes: input.reviewNotes,
@@ -3436,7 +3192,7 @@ export const appRouter = router({
 
   detectionRules: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getDetectionRules(ctx.user.organizationId || undefined);
+      return db.getDetectionRules(ctx.user.organizationId ?? null);
     }),
 
     create: guestProtectedProcedure
@@ -3481,7 +3237,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { id, ...updates } = input;
-        await db.updateDetectionRule(id, {
+        await db.updateDetectionRule(id, requireOrg(ctx), {
           ...updates,
           threshold: updates.threshold ? String(updates.threshold) : undefined,
           ruleConfig: updates.ruleConfig ? JSON.stringify(updates.ruleConfig) : undefined,
@@ -3496,7 +3252,8 @@ export const appRouter = router({
     delete: guestProtectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
-        await db.deleteDetectionRule(input.id);
+        const removedRule = await db.deleteDetectionRule(input.id, requireOrg(ctx));
+        if (removedRule === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Detection rule not found" });
         
         const { ip, ua } = getClientInfo(ctx);
         await logAudit(ctx.user.id, "delete_detection_rule", "detection_rule", input.id, {}, ip, ua);
@@ -3766,7 +3523,11 @@ export const appRouter = router({
       }))
       .query(async ({ ctx, input }) => {
         await assertCanManageUsers(ctx, [input.userId]);
-        const { data } = await db.getAuditLogs({ userId: input.userId, limit: input.limit });
+        const { data } = await db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
+          userId: input.userId,
+          limit: input.limit,
+        });
         return data;
       }),
 
@@ -3777,7 +3538,11 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         await assertCanManageUsers(ctx, [input.userId]);
-        const { data } = await db.getAuditLogs({ userId: input.userId, limit: 500 });
+        const { data } = await db.getAuditLogs({
+          organizationId: ctx.user.organizationId ?? null,
+          userId: input.userId,
+          limit: 500,
+        });
         // Build CSV
         const header = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details", "IP Address", "User Agent"];
         const rows = data.map((entry: any) => [
@@ -3853,6 +3618,7 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
         const { eq } = await import("drizzle-orm");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ segment: input.segment })
           .where(eq(organizations.id, input.organizationId));
@@ -3885,6 +3651,7 @@ export const appRouter = router({
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ ssoProvider: input.ssoProvider })
           .where(eq(organizations.id, input.organizationId));
@@ -3898,6 +3665,75 @@ export const appRouter = router({
           targetType: "organization",
           targetId: input.organizationId,
           newValue: input.ssoProvider,
+        });
+        return { success: true };
+      }),
+
+    /**
+     * Mark an institution as operating on non-interest (NIFI) principles.
+     *
+     * Orthogonal to `segment`: a non-interest bank is still `financial_services`
+     * and still runs NIP, POS and cheque clearing. What changes is that the
+     * Super Agent applies the NIFI taxonomy across every one of those rails —
+     * income may only arise from a real sale, lease or partnership, and
+     * investment account holders' funds must stay segregated from shareholders'.
+     *
+     * Super-admin only, like the SSO opt-in it mirrors, because it changes how
+     * the platform characterises the institution to a regulator-facing audience.
+     * A tenant should not be able to assert its own licence basis.
+     */
+    setOrganizationBankingModel: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        bankingModel: z.enum(["conventional", "non_interest"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
+        await drizzle.update(organizations)
+          .set({ bankingModel: input.bankingModel })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_banking_model", "organization", input.organizationId, {
+          bankingModel: input.bankingModel,
+        });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_banking_model_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          newValue: input.bankingModel,
+        });
+        return { success: true };
+      }),
+
+    /**
+     * Mark an organisation as a demo/sales tenant rather than a real client.
+     *
+     * Read by anything that must not treat fabricated data as real — today the
+     * SLA breach alert, which previously guessed from reconciliation job names
+     * and emailed the owner 374 seeded exceptions as genuine breaches.
+     *
+     * Super-admin only: a tenant must not be able to declare itself a demo and
+     * silence its own SLA alerting.
+     */
+    setOrganizationIsDemo: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        isDemo: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
+        await drizzle.update(organizations)
+          .set({ isDemo: input.isDemo })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_is_demo", "organization", input.organizationId, {
+          isDemo: input.isDemo,
         });
         return { success: true };
       }),
@@ -4176,10 +4012,9 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId;
 
         // Fetch recent exceptions and stats for context
-        const isAdmin = ctx.user.role === 'admin' || ctx.user.isGuest === true;
         const [recentExceptions, recentJobsRaw] = await Promise.all([
-          db.getExceptions({ status: 'open', limit: 20, offset: 0 }),
-          db.getReconciliationJobs(userId, isAdmin),
+          db.getExceptions({ organizationId: ctx.user.organizationId ?? null, status: 'open', limit: 20, offset: 0 }),
+          db.getReconciliationJobs(ctx.user.organizationId ?? null),
         ]);
 
         const exceptionSummary = recentExceptions.data.slice(0, 5).map((e: any) => ({
@@ -4327,6 +4162,9 @@ If no action draft is needed, respond as JSON:
 Always be specific, reference actual exception IDs and amounts where available, and explain your reasoning in plain language suitable for a finance team member.`;
 
         const response = await invokeLLM({
+          // Agentic: the Super Agent's conversational surface — reasons across
+          // the org's exceptions, jobs and history to answer a free-form question.
+          modelTier: 'agent',
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: input.query },
@@ -4381,7 +4219,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-    approveAction: protectedProcedure
+    approveAction: operationsProcedure
       .input(z.object({
         actionType: z.enum(['journal_entry', 'vendor_email', 'credit_note_request', 'payment_allocation', 'escalation']),
         details: z.record(z.string(), z.string()),
@@ -4419,9 +4257,17 @@ Always be specific, reference actual exception IDs and amounts where available, 
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
 
         // Fetch the transaction
-        const txnRowsArr = await db.getTransactionsByIds([input.transactionId]);
+        // Caller-supplied id: scoped, so another tenant's transaction is simply
+        // "not found" via the existing guard below.
+        const txnRowsArr = await db.getTransactionsByIds([input.transactionId], ctx.user.organizationId ?? null);
         const txnRows = txnRowsArr[0];
         if (!txnRows) throw new TRPCError({ code: 'NOT_FOUND', message: 'Transaction not found' });
+
+        // The channel this transaction arrived on decides which slice of the
+        // Nigerian exception catalogue the agent reasons with. Without it the
+        // taxonomy is guessed from the description, which matches nothing on a
+        // typical settlement file — see server/exceptions/channelMapping.ts.
+        const txnChannel = await db.getChannelById(txnRows.channelId);
 
         const txn: SATransaction = {
           id: txnRows.id,
@@ -4432,6 +4278,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           currency: txnRows.currency,
           transactionDate: txnRows.transactionDate,
           channelId: txnRows.channelId,
+          channelType: txnChannel?.channelType ?? null,
           debitCredit: txnRows.debitCredit,
           isReversal: txnRows.isReversal,
           originalTransactionRef: txnRows.originalTransactionRef,
@@ -4464,12 +4311,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const similar = retrieveSimilarMemories(txn, dummyDiagnosis, memories, 3);
         const memoryContext = formatMemoryContext(similar);
 
+        // A non-interest institution gets the NIFI taxonomy on top of the
+        // channel one — it applies across every rail, so it is read from the
+        // organisation rather than from the transaction's channel.
+        const diagnosingOrg = ctx.user.organizationId
+          ? await db.getOrganizationById(ctx.user.organizationId)
+          : null;
+
         // Run deep diagnosis
         const diagnosis = await diagnoseException(
           txn,
           [], // no target txns needed for standalone diagnosis
           { amountTolerance: 0.015, dateWindowDays: 7 },
-          memoryContext
+          memoryContext,
+          diagnosingOrg?.bankingModel ?? null,
         );
 
         // Generate action draft
@@ -4527,7 +4382,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ── Layer 4: Approve or reject a draft ────────────────────────────
-    resolveDraft: protectedProcedure
+    resolveDraft: operationsProcedure
       .input(z.object({
         draftId: z.number().int().positive(),
         decision: z.enum(['approved', 'rejected', 'modified']),
@@ -4569,7 +4424,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // ── Layer 5: Add a resolved case to semantic memory ───────────────
-    addMemory: protectedProcedure
+    addMemory: operationsProcedure
       .input(z.object({
         exceptionId: z.number().int().positive().optional(),
         exceptionCategory: z.string(),
@@ -4781,23 +4636,47 @@ Always be specific, reference actual exception IDs and amounts where available, 
         };
       }),
 
-     activate: protectedProcedure
+    // Seeding and wiping fabricated data is an Infinity AI SALES action, and it
+    // writes into the CALLER'S OWN organization. As protectedProcedure, any
+    // signed-in user at any tenant could seed 60 fabricated transactions, 6
+    // exceptions, 15 distributors and 12 agent-memory records into their live
+    // tenant — and the sidebar rendered a "Demo Mode: OFF" button that did it in
+    // one click, for everyone. On a reconciliation platform that is data
+    // corruption, not a cosmetic issue.
+    //
+    // The guest demo flow is unaffected: guests are seeded server-side by
+    // prewarmDemoUser at deploy time and by the guest-login path in auth, never
+    // by this procedure. `status` below stays open because guests poll it and it
+    // only reads.
+    activate: superAdminProcedure
       .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
       .mutation(async ({ ctx, input }) => {
         if (input.segment === "finserv") {
           const { seedFinServDemoData } = await import("./demoSeedFinServ");
           const result = await seedFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null, "both");
+          const { ip, ua } = getClientInfo(ctx);
+          await logAudit(ctx.user.id, "activate_finserv_operational_demo", "reconciliation_job", result.jobId, {
+            segment: "finserv",
+            transactionLegs: result.totalTransactions,
+            matchedPairs: result.matchedCount,
+            exceptionCases: result.exceptionCount,
+            reviewQueueOpenToday: result.reviewQueueOpenToday,
+          }, ip, ua);
           return { success: true, ...result };
         }
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true, ...result };
       }),
-    deactivate: protectedProcedure
+    deactivate: superAdminProcedure
       .mutation(async ({ ctx }) => {
         await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        const { wipeFinServDemoData } = await import("./demoSeedFinServ");
+        await wipeFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true };
       }),
-    createGuestLink: protectedProcedure
+    // Mints a 7-day token granting access to the creating org's data. Part of the
+    // same sales tool, and staff-only for the same reason.
+    createGuestLink: superAdminProcedure
       .input(z.object({ label: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
@@ -5483,11 +5362,29 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Request data deletion (Clause 7)
+    //
+    // This procedure issues a CERTIFICATE asserting NDPA-compliant destruction,
+    // so its output is a legal artefact, not a status message. Three defects
+    // made that assertion untrue and are fixed here:
+    //
+    //  1. `specific_channel` and `specific_job` were accepted by the input enum
+    //     and implemented NOWHERE — no branch matched them. A request for either
+    //     deleted nothing, was marked "completed", and still returned a
+    //     certificate. They are removed rather than implemented: nothing in the
+    //     client ever sent them, and per-scope destruction is deliberate work
+    //     deserving its own design rather than a branch bolted on beside a
+    //     certificate generator. (The DB column keeps its wider enum; migrations
+    //     are append-only and no existing row needs rewriting.)
+    //  2. `recordsDeleted` counted the org's transactions BEFORE deleting and
+    //     ignored every other table, so the figure on the certificate bore no
+    //     necessary relation to what was removed. It is now the sum of rows
+    //     actually affected.
+    //  3. Every delete was wrapped in `.catch(() => {})`, so a total failure
+    //     still produced "completed" plus a certificate. A failure now marks the
+    //     request `failed` and issues NO certificate.
     requestDeletion: protectedProcedure
       .input(z.object({
-        scope: z.enum(["all_transactions", "specific_channel", "specific_job", "all_data"]),
-        channelId: z.number().optional(),
-        jobId: z.number().optional(),
+        scope: z.enum(["all_transactions", "all_data"]),
         notes: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -5495,52 +5392,70 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { dataDeletionRequests, transactions, uploadBatches, reconciliationJobs, matches, exceptions } = await import("../drizzle/schema");
-        // Count records to be deleted
-        let recordsDeleted = 0;
-        try {
-          const txCount = await drizzle.select({ count: sql<number>`count(*)` }).from(transactions)
-            .where(orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId));
-          recordsDeleted = Number(txCount[0]?.count ?? 0);
-        } catch {}
-        // Create deletion request record
+
         const [req] = await drizzle.insert(dataDeletionRequests).values({
           organizationId: orgId,
           requestedByUserId: ctx.user.id,
           scope: input.scope,
-          channelId: input.channelId,
-          jobId: input.jobId,
           status: "in_progress",
           notes: input.notes,
         }).$returningId();
-        // Perform deletion based on scope
-        if (input.scope === "all_data" || input.scope === "all_transactions") {
-          const txWhereClause = orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId);
-          const jobWhereClause = orgId ? eq(reconciliationJobs.organizationId, orgId) : isNull(reconciliationJobs.organizationId);
-          // Get job IDs for this org to delete matches and exceptions
+
+        const txWhereClause = orgId ? eq(transactions.organizationId, orgId) : isNull(transactions.organizationId);
+        const jobWhereClause = orgId ? eq(reconciliationJobs.organizationId, orgId) : isNull(reconciliationJobs.organizationId);
+
+        // Counted per table so the certificate can itemise what went, rather
+        // than quote a single number nobody can reconcile against anything.
+        const deleted = { matches: 0, exceptions: 0, transactions: 0, uploadBatches: 0, reconciliationJobs: 0 };
+
+        try {
           const orgJobIds = await drizzle.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(jobWhereClause);
-          if (orgJobIds.length > 0) {
-            const jobIdList = orgJobIds.map(j => j.id);
-            // Delete matches and exceptions linked to these jobs
-            for (const jid of jobIdList) {
-              await drizzle.delete(matches).where(eq(matches.jobId, jid)).catch(() => {});
-              await drizzle.delete(exceptions).where(eq(exceptions.jobId, jid)).catch(() => {});
-            }
+          for (const { id: jid } of orgJobIds) {
+            const [m] = await drizzle.delete(matches).where(eq(matches.jobId, jid));
+            deleted.matches += m.affectedRows ?? 0;
+            const [e] = await drizzle.delete(exceptions).where(eq(exceptions.jobId, jid));
+            deleted.exceptions += e.affectedRows ?? 0;
           }
-          await drizzle.delete(transactions).where(txWhereClause).catch(() => {});
+
+          const [t] = await drizzle.delete(transactions).where(txWhereClause);
+          deleted.transactions += t.affectedRows ?? 0;
+
           if (input.scope === "all_data") {
-            await drizzle.delete(uploadBatches).where(orgId ? eq(uploadBatches.organizationId, orgId) : isNull(uploadBatches.organizationId)).catch(() => {});
-            await drizzle.delete(reconciliationJobs).where(jobWhereClause).catch(() => {});
+            const [b] = await drizzle.delete(uploadBatches)
+              .where(orgId ? eq(uploadBatches.organizationId, orgId) : isNull(uploadBatches.organizationId));
+            deleted.uploadBatches += b.affectedRows ?? 0;
+            const [j] = await drizzle.delete(reconciliationJobs).where(jobWhereClause);
+            deleted.reconciliationJobs += j.affectedRows ?? 0;
           }
+        } catch (err) {
+          // No certificate on a failed or partial run. A document asserting
+          // destruction that did not complete is worse than an error, because
+          // it is the artefact a regulator or counterparty relies on.
+          const message = err instanceof Error ? err.message : String(err);
+          await drizzle.update(dataDeletionRequests).set({
+            status: "failed",
+            notes: [input.notes, `Deletion failed: ${message}`].filter(Boolean).join(" | ").slice(0, 2000),
+          }).where(eq(dataDeletionRequests.id, req.id)).catch(() => {});
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Deletion did not complete; no certificate was issued. The request is recorded as failed.',
+          });
         }
-        // Generate deletion certificate
-        const certText = `DATA DELETION CERTIFICATE\n\nIssued by: ReconcileAI (Infinity AI Africa Limited)\nDate: ${new Date().toISOString()}\nOrganisation ID: ${orgId ?? "N/A"}\nScope: ${input.scope}\nRecords deleted: ${recordsDeleted}\nRequested by user ID: ${ctx.user.id}\n\nThis certifies that all data within the specified scope has been permanently deleted from the ReconcileAI platform in accordance with the data return/destruction obligations under the applicable Non-Disclosure Agreement and the Nigeria Data Protection Act 2023 (NDPA).\n\nCertificate ID: CERT-${req.id}-${Date.now()}`;
+
+        const recordsDeleted = Object.values(deleted).reduce((a, b) => a + b, 0);
+        const scopeDescription = input.scope === "all_data"
+          ? "all reconciliation data (transactions, upload batches, reconciliation jobs, matches and exceptions)"
+          : "all transactions, together with their matches and exceptions";
+
+        const certText = `DATA DELETION CERTIFICATE\n\nIssued by: ReconcileAI (Infinity AI Africa Limited)\nDate: ${new Date().toISOString()}\nOrganisation ID: ${orgId ?? "N/A"}\nScope: ${input.scope} — ${scopeDescription}\nRequested by user ID: ${ctx.user.id}\n\nRecords deleted: ${recordsDeleted}\n  Transactions: ${deleted.transactions}\n  Matches: ${deleted.matches}\n  Exceptions: ${deleted.exceptions}\n  Upload batches: ${deleted.uploadBatches}\n  Reconciliation jobs: ${deleted.reconciliationJobs}\n\nThis certifies that the data described above has been permanently deleted from the ReconcileAI platform in accordance with the data return/destruction obligations under the applicable Non-Disclosure Agreement and the Nigeria Data Protection Act 2023 (NDPA). The counts above are the rows actually removed by this request.\n\nCertificate ID: CERT-${req.id}-${Date.now()}`;
+
         await drizzle.update(dataDeletionRequests).set({
           status: "completed",
           completedAt: new Date(),
           recordsDeleted,
           certificateText: certText,
         }).where(eq(dataDeletionRequests.id, req.id));
-        return { success: true, certificateText: certText, recordsDeleted, requestId: req.id };
+        return { success: true, certificateText: certText, recordsDeleted, breakdown: deleted, requestId: req.id };
       }),
 
     // List deletion requests
@@ -5786,10 +5701,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: send a personalised demo invitation email to a specific respondent
-    sendDemoInvite: protectedProcedure
+    sendDemoInvite: superAdminProcedure
       .input(z.object({ token: z.string().length(48) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -5884,7 +5798,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: list all assessments (protected, admin only)
-    listAll: protectedProcedure
+    listAll: superAdminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         pageSize: z.number().min(1).max(100).default(20),
@@ -5896,7 +5810,6 @@ Always be specific, reference actual exception IDs and amounts where available, 
         hasNotes: z.boolean().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -5949,7 +5862,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
 
-    exportCsv: protectedProcedure
+    exportCsv: superAdminProcedure
       .input(z.object({
         riskLevel: z.enum(["critical", "high", "medium", "low"]).optional(),
         emailOptedOut: z.boolean().optional(),
@@ -5957,7 +5870,6 @@ Always be specific, reference actual exception IDs and amounts where available, 
         search: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6022,9 +5934,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
         return { csv, count: rows.length };
       }),
     // Admin: bulk send demo invites to all consented + not yet invited respondents
-    bulkSendDemoInvites: protectedProcedure
+    bulkSendDemoInvites: superAdminProcedure
       .mutation(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6079,10 +5990,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: toggle markedContacted flag on a single assessment
-    markContacted: protectedProcedure
+    markContacted: superAdminProcedure
       .input(z.object({ token: z.string().length(48), contacted: z.boolean() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6097,10 +6007,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: update free-text notes/memo for a single assessment
-    updateNotes: protectedProcedure
+    updateNotes: superAdminProcedure
       .input(z.object({ token: z.string().length(48), notes: z.string().max(2000) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6111,10 +6020,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: set or clear the follow-up due date for a single assessment
-    setFollowUpDue: protectedProcedure
+    setFollowUpDue: superAdminProcedure
       .input(z.object({ token: z.string().length(48), dueAt: z.date().nullable() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6125,13 +6033,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: update the pipeline stage for a single assessment
-    setPipelineStage: protectedProcedure
+    setPipelineStage: superAdminProcedure
       .input(z.object({
         token: z.string().length(48),
         stage: z.enum(["new", "contacted", "demo_booked", "proposal_sent", "closed_won", "closed_lost"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6142,9 +6049,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Admin: count eligible for bulk demo invite (consented, has email, not yet invited, not opted out)
-    countBulkEligible: protectedProcedure
+    countBulkEligible: superAdminProcedure
       .query(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         const { complianceAssessments } = await import("../drizzle/schema");
@@ -6186,6 +6092,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // T24, Mambu, FLEXCUBE and LAPO. Prefer `cbsConnector` in new client code.
   cbsConnector: woodcoreConnectorRouter,
   shoplineConnector: shoplineConnectorRouter,
+  bucketIngestion: bucketIngestionRouter,
+  emailIngestion: emailIngestionRouter,
   // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
   lapo: lapoRouter,
   uganda: ugandaRouter,
@@ -6321,7 +6229,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       };
     }),
 
-    updateSettings: protectedProcedure
+    updateSettings: adminProcedure
       .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
         const orgId = ctx.user.organizationId ?? 0;
@@ -6521,9 +6429,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
         period: z.enum(["7d", "30d", "mtd", "all", "quarterly", "last_quarter"]).default("7d"),
         channelCodes: z.array(z.string()).optional(),
       }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const { buildChannelMetrics, buildCsvContent } = await import("./cfoReportService");
-        const rows = await buildChannelMetrics(input.period, input.channelCodes);
+        const rows = await buildChannelMetrics(ctx.user.organizationId ?? null, input.period, input.channelCodes);
         const csv = buildCsvContent(rows, input.period);
         return { csv, rowCount: rows.length };
       }),
@@ -6537,7 +6445,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
         const { buildChannelMetrics } = await import("./cfoReportService");
-        const rows = await buildChannelMetrics(input.period, input.channelCodes);
+        const rows = await buildChannelMetrics(ctx.user.organizationId ?? null, input.period, input.channelCodes);
 
         const ExcelJS = await loadExcelJS();
         const workbook = new ExcelJS.Workbook();
@@ -6655,9 +6563,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // Channel 30-day drill-down
     channelDrillDown: protectedProcedure
       .input(z.object({ channelCode: z.string() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const { getChannelDrillDown } = await import("./cfoReportService");
-        return getChannelDrillDown(input.channelCode);
+        return getChannelDrillDown(ctx.user.organizationId ?? null, input.channelCode);
       }),
   }),
 });
@@ -6678,7 +6586,10 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
   const txnIds = pending
     .map((e) => e.transactionId)
     .filter((id): id is number => id != null);
-  const txns = await db.getTransactionsByIds(txnIds);
+  // Unscoped by design: these ids come from this job's OWN exceptions, derived
+  // server-side moments ago — never from request input. See the function's
+  // comment for why an org predicate here would risk dropping rows.
+  const txns = await db.getTransactionsByIdsUnscoped(txnIds);
   const txnById = new Map(txns.map((t) => [t.id, t]));
 
   // Cross-institution intelligence read-path (gap-closure plan WS-5): fold
@@ -6716,7 +6627,8 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
         txn as any,
         networkGuidance ? { networkGuidance } : undefined
       );
-      await db.updateException(exc.id, { aiAnalysis: analysis });
+      // Background pass — no request context. The tenant is the job's own.
+      await db.updateException(exc.id, orgId, { aiAnalysis: analysis });
     } catch (err) {
       console.error(`[AI pass] exception ${exc.id} failed:`, err);
     }
@@ -6736,6 +6648,11 @@ async function runReconciliation(
   try {
     await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
     await trackProgress(jobId, "queued", { message: "Job queued for processing" });
+
+    // The owning tenant for every match and exception this run produces. Read
+    // once from the job rather than threaded through the signature, so the
+    // rows can never disagree with their parent. Null for legacy/orgless jobs.
+    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId ?? null;
 
     await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
     const sourceTxns = await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo);
@@ -6778,6 +6695,7 @@ async function runReconciliation(
     // per match (the old per-row path was O(n) DB calls and unusable at 500k).
     const matchRows = result.matches.map((m) => ({
       jobId,
+      organizationId: runOrganizationId,
       sourceTransactionId: m.sourceId,
       targetTransactionId: m.targetId,
       matchType: m.matchType,
@@ -6810,7 +6728,11 @@ async function runReconciliation(
     });
     let exceptionCount = 0;
     const allUnmatched = [...result.unmatchedSource, ...result.unmatchedTarget];
-    const unmatchedTxns = await db.getTransactionsByIds(allUnmatched);
+    // Unscoped by design: these ids are the matching engine's own output over
+    // transactions loaded from this job's channels. Scoping to the job's org
+    // could drop rows whose organizationId is NULL (legacy), and every dropped
+    // row is an exception that never gets persisted.
+    const unmatchedTxns = await db.getTransactionsByIdsUnscoped(allUnmatched);
 
     // AI narrative is deferred to a background pass (runDeferredAiAnalysis) that runs
     // AFTER the job completes — keeps LLM latency out of the hot path.
@@ -6818,6 +6740,7 @@ async function runReconciliation(
       const info = categorizeException(txn, targetTxns, config);
       return {
         jobId,
+        organizationId: runOrganizationId,
         transactionId: txn.id,
         category: info.category,
         severity: info.severity,
@@ -6840,6 +6763,7 @@ async function runReconciliation(
     const duplicateRows = result.duplicates.flatMap((dupGroup) =>
       dupGroup.transactionIds.map((txnId) => ({
         jobId,
+        organizationId: runOrganizationId,
         transactionId: txnId,
         category: "duplicate_transaction" as const,
         severity: "medium" as const,
@@ -6895,8 +6819,10 @@ async function runReconciliation(
       totalCount: totalTxns,
     });
 
-    // Invalidate dashboard stats cache so next load reflects fresh data
-    db.invalidateDashboardStatsCache().catch(() => {});
+    // Invalidate this tenant's dashboard stats cache so their next load is fresh.
+    // Scoped to the run's own organization — the unscoped version dropped every
+    // other tenant's row too.
+    db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {});
 
     // Dispatch webhooks (WS-4 event set)
     dispatchWebhook("reconciliation.completed", {
@@ -6956,6 +6882,9 @@ async function runReconciliation(
 startScheduler(60000);
 // Start SFTP polling service
 startSftpPolling();
+// Start object-storage (S3/R2/MinIO) drop polling — the same ingestion core,
+// for banks and couriers who deliver to a bucket rather than an SFTP host.
+startBucketPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
 // Pre-warm the shared demo user so the first guest gets instant data

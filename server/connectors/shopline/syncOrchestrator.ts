@@ -17,9 +17,9 @@
  *   - The scheduled polling job (every 15 min)
  *   - Manual "Sync Now" from the merchant dashboard
  */
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { getDb } from "../../db";
-import { insertTransactions, createUploadBatch, insertExceptionsBatch } from "../../db";
+import { insertTransactions, createUploadBatch, updateUploadBatch, insertExceptionsBatch } from "../../db";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { transactions, channels } from "../../../drizzle/schema";
 import { getValidToken } from "./tokenStore";
@@ -27,6 +27,7 @@ import {
   fetchOrders,
   fetchPaymentTransactions,
   fetchPayouts,
+  ShoplineApiError,
   type ShoplineOrder,
   type ShoplinePaymentTransaction,
   type ShoplinePayout,
@@ -47,7 +48,7 @@ import {
   runRetailReconciliation,
   type RetailReconciliationConfig,
 } from "../../retailReconciliationEngine";
-import type { Transaction } from "../../../drizzle/schema";
+import type { Transaction, InsertTransaction } from "../../../drizzle/schema";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -77,12 +78,151 @@ export interface SyncReport {
   exceptionCount: number;
   durationMs: number;
   error?: string;
+  /**
+   * Optional legs that were skipped because the store does not have them —
+   * e.g. `["payments","payouts"]` for a store not on SHOPLINE Payments. The
+   * sync still succeeds; this records that its coverage was partial.
+   */
+  degradedLegs?: string[];
 }
 
 /**
- * Run a full sync cycle for a single SHOPLINE store.
+ * Run a full sync cycle for a single SHOPLINE store, recording the outcome on
+ * the store row.
+ *
+ * The outcome write is what makes a failed sync observable: previously a
+ * failure returned a report that only the caller logged, so `lastSyncAt`
+ * remaining NULL could mean either "the trigger never fired" or "it fired and
+ * threw" — indistinguishable without the host's log stream.
  */
 export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
+  const report = await runSyncCycleInner(opts);
+  await persistSyncOutcome(opts.slStoreId, report);
+  return report;
+}
+
+/**
+ * Record the attempt on the store row. Never throws — callers are on the
+ * webhook/cron path and a bookkeeping failure must not mask the real result.
+ */
+async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const now = new Date();
+    await db
+      .update(slConnectorStores)
+      .set(
+        report.success
+          ? { lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null }
+          : { lastSyncAttemptAt: now, lastSyncError: (report.error ?? "unknown error").slice(0, 2000) },
+      )
+      .where(eq(slConnectorStores.id, slStoreId));
+  } catch (err) {
+    console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, err);
+  }
+}
+
+/**
+ * Run one optional SHOPLINE Payments leg, tolerating a store that simply does
+ * not have that product.
+ *
+ * Only 404 is treated as "unavailable" — that is SHOPLINE's answer for a store
+ * with no Payments merchant record. Every other failure (401, 429, 5xx) still
+ * throws, so a genuine outage or a broken request is never silently swallowed
+ * into a green sync.
+ */
+export async function bestEffortLeg<T>(
+  leg: "payments" | "payouts",
+  storeHandle: string,
+  fetcher: () => Promise<T[]>,
+): Promise<{ data: T[]; unavailable: boolean }> {
+  try {
+    return { data: await fetcher(), unavailable: false };
+  } catch (err) {
+    if (err instanceof ShoplineApiError && err.status === 404) {
+      console.warn(
+        `[SHOPLINE] ${leg} unavailable for store=${storeHandle} (404 — store is probably not on SHOPLINE Payments); continuing with orders only`,
+      );
+      return { data: [], unavailable: true };
+    }
+    throw err;
+  }
+}
+
+/** Chunk size for the dedupe lookup — keeps the IN(...) list well under MySQL limits. */
+const DEDUPE_LOOKUP_CHUNK = 500;
+
+/**
+ * Drop candidate rows whose (channelId, transactionRef) is already in the
+ * `transactions` table. This is what makes SHOPLINE ingest idempotent.
+ *
+ * It has to exist because re-ingestion is not an edge case here, it is the
+ * normal path. Three independent mechanisms re-present the same order:
+ *
+ *   1. `catchUpWindow` deliberately re-reads WATERMARK_OVERLAP_MS (5 min)
+ *      before the last successful sync so a record landing on the seam is not
+ *      missed — which guarantees it is fetched twice.
+ *   2. A webhook-triggered realtime sync and a scheduled cycle can cover the
+ *      same window seconds apart.
+ *   3. The cron fires from both GitHub repos against the same endpoint.
+ *
+ * On 2026-08-02 that produced FOUR copies of order 21076388995485181306699745
+ * from four separate cycles (batches 810008/810009/810010/810012). In a
+ * reconciliation product duplicate transactions are not cosmetic: they inflate
+ * settled totals and corrupt the match rate, which is the primary output.
+ *
+ * A UNIQUE index on (channelId, transactionRef) would be the airtight fix, but
+ * it is not available: the shared `transactions` table already holds ~6.6M
+ * duplicated pairs across ~35M rows from other verticals (e.g. seeded
+ * AGENT_BANKING data), so the constraint could not be created and would impose
+ * SHOPLINE's semantics on every other channel. Dedupe is therefore scoped to
+ * this connector.
+ *
+ * Residual risk: two cycles running truly concurrently can both pass this check
+ * before either inserts. The observed collisions were 15-25s apart and are
+ * fully covered. Closing the last gap needs cluster-wide serialisation of sync
+ * cycles — the BullMQ/REDIS_URL item in CLAUDE.md §10.
+ */
+export async function rejectAlreadyIngested(
+  db: Db,
+  rows: InsertTransaction[],
+  channelIds: number[],
+): Promise<InsertTransaction[]> {
+  const refs = Array.from(
+    new Set(rows.map((r) => r.transactionRef).filter((r): r is string => Boolean(r))),
+  );
+  if (refs.length === 0) return rows;
+
+  // Existing keys, looked up via idx_txn_ref_channel.
+  const existing = new Set<string>();
+  for (let i = 0; i < refs.length; i += DEDUPE_LOOKUP_CHUNK) {
+    const chunk = refs.slice(i, i + DEDUPE_LOOKUP_CHUNK);
+    const found = await db
+      .select({ channelId: transactions.channelId, transactionRef: transactions.transactionRef })
+      .from(transactions)
+      .where(
+        and(
+          inArray(transactions.channelId, channelIds),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      );
+    for (const f of found) existing.add(`${f.channelId}::${f.transactionRef}`);
+  }
+  // No early return when `existing` is empty: the filter below ALSO collapses
+  // refs repeated within this single batch, which must happen regardless of
+  // what is already persisted.
+  const seen = new Set<string>();
+  return rows.filter((r) => {
+    if (!r.transactionRef) return true;
+    const key = `${r.channelId}::${r.transactionRef}`;
+    if (existing.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
   const startedAt = Date.now();
   const db = await getDb();
   if (!db) {
@@ -121,6 +261,9 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
   const to = opts.to ?? new Date();
   const from = opts.from ?? new Date(to.getTime() - 24 * 60 * 60 * 1000);
 
+  /** Batch opened by this cycle, if any — closed out on success OR failure. */
+  let openBatchId: number | null = null;
+
   try {
     // Get valid access token
     const accessToken = await getValidToken(db, opts.slStoreId, opts.organizationId, storeHandle);
@@ -133,9 +276,31 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
     const toIso = to.toISOString();
 
     // ── Step 1: Fetch from SHOPLINE APIs ────────────────────────────────────
+    //
+    // Orders are mandatory — they are the merchant's own sales data and every
+    // store has them. A failure here is a real failure.
     const orders = await fetchAllOrders(apiOpts, fromIso, toIso);
-    const payments = await fetchAllPayments(apiOpts, fromIso, toIso);
-    const payouts = await fetchAllPayouts(apiOpts, fromIso, toIso);
+
+    // Payments and payouts come from the SHOPLINE **Payments** product
+    // (`/payments/store/*`), which a store only has if it is onboarded onto
+    // SHOPLINE Payments. Stores using an external gateway — and every blank
+    // dev store — answer 404 `Resource not found: merchant`.
+    //
+    // These legs are therefore BEST-EFFORT. Previously a 404 here aborted the
+    // whole cycle before the upload batch was even created, so orders were
+    // never persisted and `lastSyncAt` never advanced: any merchant not on
+    // SHOPLINE Payments got a permanently empty dashboard. Degrade instead,
+    // and report it, so order-level reconciliation still runs.
+    const payments = await bestEffortLeg("payments", storeHandle, () =>
+      fetchAllPayments(apiOpts, fromIso, toIso),
+    );
+    const payouts = await bestEffortLeg("payouts", storeHandle, () =>
+      fetchAllPayouts(apiOpts, fromIso, toIso),
+    );
+    const degraded = [
+      ...(payments.unavailable ? ["payments"] : []),
+      ...(payouts.unavailable ? ["payouts"] : []),
+    ];
 
     // ── Step 2: Resolve channel IDs for this store ──────────────────────────
     const { ordersChannelId, paymentsChannelId } = await resolveChannelIds(
@@ -152,7 +317,7 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
       fileName: `shopline_sync_${storeHandle}_${fromIso}`,
       fileHash: `shopline_sync_${store.id}_${from.getTime()}_${to.getTime()}`,
       status: "processing",
-      totalRows: orders.length + payments.length + payouts.length,
+      totalRows: orders.length + payments.data.length + payouts.data.length,
       validRows: 0,
       invalidRows: 0,
     });
@@ -160,6 +325,9 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
     if (!batchId) {
       return errorReport(opts, "Failed to create upload batch", startedAt);
     }
+    // Track the open batch so a throw anywhere below cannot strand it at
+    // "processing" — see the catch block.
+    openBatchId = batchId;
 
     // ── Step 4: Normalise and persist ───────────────────────────────────────
     const ctx: IngestContext = {
@@ -172,19 +340,55 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
     };
 
     const orderRows = orders.map((o) => normaliseOrder(o, ctx));
-    const paymentRows = payments.map((p) => normalisePaymentTransaction(p, ctx));
-    const payoutRows = payouts.map((p) => normalisePayout(p, ctx));
+    const paymentRows = payments.data.map((p) => normalisePaymentTransaction(p, ctx));
+    const payoutRows = payouts.data.map((p) => normalisePayout(p, ctx));
 
-    const allRows = [...orderRows, ...paymentRows, ...payoutRows];
+    const candidateRows = [...orderRows, ...paymentRows, ...payoutRows];
+    const allRows = await rejectAlreadyIngested(db, candidateRows, [
+      ordersChannelId,
+      paymentsChannelId,
+    ]);
+    const skipped = candidateRows.length - allRows.length;
+    if (skipped > 0) {
+      console.info(
+        `[SHOPLINE] store=${storeHandle} skipped ${skipped} already-ingested row(s) of ${candidateRows.length}`,
+      );
+    }
     if (allRows.length > 0) {
       await insertTransactions(allRows);
     }
 
-    // ── Step 5: Run reconciliation (unless ingestOnly) ──────────────────────
+    // Close the batch out. Without this it sat at "processing" forever, so the
+    // upload history showed every SHOPLINE sync as permanently in-flight.
+    await updateUploadBatch(batchId, {
+      status: "completed",
+      validRows: allRows.length,
+      invalidRows: 0,
+      completedAt: new Date(),
+    });
+
+    // ── Step 5: Run reconciliation ──────────────────────────────────────────
+    //
+    // Reconciliation needs BOTH legs. When the payments feed is unavailable
+    // (store not on SHOPLINE Payments — see bestEffortLeg above), the target
+    // side is empty, and the engine's only guard is
+    // `sourceRows.length === 0 && targetRows.length === 0` — an AND — so it
+    // would happily match every order against nothing and raise one
+    // high-severity "No matching transaction found" exception per order.
+    //
+    // That claim is also simply untrue: the payment was never *fetched*, so we
+    // cannot say it was not *found*. For a merchant on an external gateway
+    // that is an alert storm across their entire order book. Ingest the orders
+    // so the merchant still sees their sales data, and skip the match.
     let matchedCount = 0;
     let exceptionCount = 0;
+    const reconciliationSkipped = payments.unavailable;
 
-    if (!opts.ingestOnly && allRows.length > 0) {
+    if (reconciliationSkipped) {
+      console.info(
+        `[SHOPLINE] Reconciliation skipped for store=${storeHandle} — payments feed unavailable; ingested ${allRows.length} row(s) only`,
+      );
+    } else if (!opts.ingestOnly && allRows.length > 0) {
       const result = await runReconciliationOnPersistedData(
         db,
         opts.organizationId,
@@ -198,27 +402,42 @@ export async function runSyncCycle(opts: SyncOptions): Promise<SyncReport> {
       exceptionCount = result.exceptionCount;
     }
 
-    // ── Step 6: Update store lastSyncAt ─────────────────────────────────────
-    await db
-      .update(slConnectorStores)
-      .set({ lastSyncAt: new Date() })
-      .where(eq(slConnectorStores.id, opts.slStoreId));
-
+    // Step 6 (lastSyncAt) is handled by persistSyncOutcome in the runSyncCycle
+    // wrapper, so success and failure are recorded through one path.
     return {
       success: true,
       organizationId: opts.organizationId,
       storeHandle,
       window: { from, to },
       ordersIngested: orders.length,
-      paymentsIngested: payments.length,
-      payoutsIngested: payouts.length,
+      paymentsIngested: payments.data.length,
+      payoutsIngested: payouts.data.length,
       totalPersisted: allRows.length,
       matchedCount,
       exceptionCount,
       durationMs: Date.now() - startedAt,
+      ...(degraded.length > 0 ? { degradedLegs: degraded } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Close out a batch opened by this cycle. Without this, any throw after
+    // Step 3 leaves it at "processing" forever — the upload history then shows
+    // phantom in-flight syncs that never resolve. Best-effort: a bookkeeping
+    // failure here must not replace the real error with its own.
+    if (openBatchId !== null) {
+      try {
+        await updateUploadBatch(openBatchId, {
+          status: "failed",
+          errorMessage: message.slice(0, 2000),
+          completedAt: new Date(),
+        });
+      } catch (cleanupErr) {
+        console.error(
+          `[SHOPLINE] Failed to close batch ${openBatchId} after sync error:`,
+          cleanupErr,
+        );
+      }
+    }
     return errorReport(opts, message, startedAt, storeHandle);
   }
 }
@@ -297,7 +516,7 @@ async function fetchAllPayouts(
  * keeps this idempotent: onboarding already created these channels, so a name
  * mismatch here would collide on the unique code and throw on the first sync.
  */
-async function resolveChannelIds(
+export async function resolveChannelIds(
   db: Db,
   organizationId: number,
   storeHandle: string,
@@ -343,7 +562,7 @@ async function resolveChannelIds(
 /**
  * Run the retail reconciliation engine on persisted transactions for the given window.
  */
-async function runReconciliationOnPersistedData(
+export async function runReconciliationOnPersistedData(
   db: Db,
   organizationId: number,
   ordersChannelId: number,
@@ -421,6 +640,10 @@ async function runReconciliationOnPersistedData(
 
     const exceptionRows = result.retailExceptions.map((ex) => ({
       jobId: 0, // synthetic — no reconciliation job for inline sync
+      // With jobId 0 there is no parent to derive the tenant from, so these
+      // rows were previously unattributable to any organization. This is the
+      // path the new column matters most for.
+      organizationId,
       transactionId: ex.transactionId,
       category: mapRetailToCoreCategory(ex.category),
       subCategory: ex.category, // precise retail_* key — feeds the flywheel

@@ -14,9 +14,12 @@ import {
 } from "./seed";
 
 describe("Nigerian exception taxonomy — registry integrity", () => {
-  it("has 121 exceptions across 17 channels", () => {
-    expect(ALL_NIGERIAN_EXCEPTIONS.length).toBe(121);
-    expect(Object.keys(CHANNEL_EXCEPTION_GROUPS).length).toBe(17);
+  it("has 130 exceptions across 18 channels", () => {
+    // 18th channel: cheque clearing (NIBSS NACS / Truncation), added 2026-08-12
+    // as the last major Nigerian rail with no taxonomy. Pinned rather than
+    // computed so that losing a pack to a bad merge fails here.
+    expect(ALL_NIGERIAN_EXCEPTIONS.length).toBe(130);
+    expect(Object.keys(CHANNEL_EXCEPTION_GROUPS).length).toBe(18);
   });
 
   it("channel group counts sum to the registry total and match EXCEPTION_CHANNELS", () => {

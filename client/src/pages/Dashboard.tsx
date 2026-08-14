@@ -6,6 +6,7 @@ import { Loader2, TrendingUp, AlertTriangle, CheckCircle2, XCircle, ClipboardChe
 import { Link } from "wouter";
 import { toast } from "sonner";
 import { usePortalContext } from "@/contexts/PortalContext";
+import { useDashboardVisibility } from "@/hooks/useDashboardVisibility";
 
 export default function Dashboard() {
   const { viewAsOrg, isViewingAs } = usePortalContext();
@@ -13,6 +14,9 @@ export default function Dashboard() {
     isViewingAs && viewAsOrg ? { viewAsOrgId: viewAsOrg.id } : undefined
   );
   const { data: channels } = trpc.channels.list.useQuery();
+  // All "what should this vertical see" logic lives in the hook; the page only
+  // renders what it is told.
+  const { cbnBadge, showPilotReadiness } = useDashboardVisibility(stats);
 
   if (isLoading) {
     return (
@@ -28,18 +32,6 @@ export default function Dashboard() {
 
   const channelMap = new Map(channels?.map((c) => [c.id, c]) || []);
 
-  // CBN compliance health — derived from reconciliation stats vs CBN thresholds
-  const matchRateNum = parseFloat(matchRate);
-  const openExceptions = stats?.exceptions.open ?? 0;
-  const exceptionRatio = stats?.transactions.total
-    ? ((openExceptions / stats.transactions.total) * 100)
-    : 0;
-  const cbnCompliant =
-    matchRateNum >= 95 &&
-    exceptionRatio <= 5 &&
-    openExceptions <= 50;
-  const cbnHasData = (stats?.transactions.total ?? 0) > 0;
-
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -47,22 +39,22 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold tracking-tight text-primary">Dashboard</h1>
           <p className="text-muted-foreground mt-1">Reconciliation overview and analytics</p>
         </div>
-        {cbnHasData && (
+        {cbnBadge ? (
           <Link href="/cbn-compliance">
             <div
               className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold cursor-pointer transition-opacity hover:opacity-80 ${
-                cbnCompliant
+                cbnBadge.compliant
                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                   : "bg-red-50 text-red-700 border border-red-200"
               }`}
             >
-              {cbnCompliant
+              {cbnBadge.compliant
                 ? <ShieldCheck className="h-3.5 w-3.5" />
                 : <ShieldAlert className="h-3.5 w-3.5" />}
-              {cbnCompliant ? "CBN Compliant" : "CBN At Risk"}
+              {cbnBadge.compliant ? "CBN Compliant" : "CBN At Risk"}
             </div>
           </Link>
-        )}
+        ) : null}
       </div>
 
       {/* KPI Cards */}
@@ -177,7 +169,7 @@ export default function Dashboard() {
       </div>
 
       {/* Channel Stats */}
-      {stats?.channelStats && stats.channelStats.length > 0 && (
+      {(stats?.channelStats?.length ?? 0) > 0 ? (
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Channel Performance</CardTitle>
@@ -195,7 +187,7 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {stats.channelStats.map((ch) => {
+                  {stats?.channelStats?.map((ch) => {
                     const channel = ch.channelId != null ? channelMap.get(ch.channelId) : undefined;
                     const rate = ch.total > 0 ? ((Number(ch.matched) / Number(ch.total)) * 100).toFixed(1) : "0.0";
                     return (
@@ -217,10 +209,16 @@ export default function Dashboard() {
             </div>
           </CardContent>
         </Card>
-      )}
+      ) : null}
 
-      {/* Pilot Readiness Scorecard */}
-      <PilotReadinessScorecard stats={stats} channels={channels} />
+      {/* Pilot Readiness Scorecard — Corporate B2B (FMCG) only.
+          It scores distributor name consistency, payment-reference completeness
+          and ERP coverage, reading `distributor.stats`. A retail merchant has no
+          distributor registry, so this rendered a permanently-zero score and a
+          distributor CSV import button on every SHOPLINE dashboard. */}
+      {showPilotReadiness ? (
+        <PilotReadinessScorecard stats={stats} channels={channels} />
+      ) : null}
     </div>
   );
 }
@@ -360,7 +358,7 @@ function PilotReadinessScorecard({ stats, channels }: { stats: any; channels: an
         <div className="mt-4 pt-4 border-t flex items-center justify-between gap-4">
           <p className="text-xs text-muted-foreground flex-1">Overall score is the average of all 5 dimensions. A score ≥ 75 indicates the system is ready for a live pilot.</p>
           <div className="flex items-center gap-3 flex-shrink-0">
-            {dimensions[0].score < 75 && (
+            {dimensions[0].score < 75 ? (
               <>
                 <input
                   ref={csvInputRef}
@@ -380,7 +378,7 @@ function PilotReadinessScorecard({ stats, channels }: { stats: any; channels: an
                   Import Distributors CSV
                 </Button>
               </>
-            )}
+            ) : null}
             <div className="flex items-center gap-2">
               <div className={`h-2.5 w-2.5 rounded-full ${scoreBg} flex-shrink-0`} />
               <span className={`text-xs font-semibold ${scoreColor}`}>{readinessLabel}</span>

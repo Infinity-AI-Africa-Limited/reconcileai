@@ -41,11 +41,21 @@ Used to sign and verify JWT session cookies. Must be kept secret and rotated if 
 # Recommended: Anthropic Claude (native Messages API adapter)
 DIRECT_LLM_API_KEY=sk-ant-...
 DIRECT_LLM_API_URL=https://api.anthropic.com
-DIRECT_LLM_MODEL=claude-sonnet-4-5
+DIRECT_LLM_MODEL=claude-sonnet-5
+# OPTIONAL second model, used ONLY for genuinely agentic work — the Super
+# Agent's diagnosis, action drafting and conversational query. Everything else
+# (exception classification, anomaly narratives, reports, compliance
+# assessment) stays on DIRECT_LLM_MODEL, per the table in CLAUDE.md §4.
+# Unset => agentic calls use DIRECT_LLM_MODEL, so leaving it out changes nothing.
+DIRECT_LLM_MODEL_AGENT=claude-opus-4-8
 # Optional explicit selector: "anthropic" | "openai".
 # Auto-detected from the model name ("claude…") or URL when omitted.
 DIRECT_LLM_PROVIDER=anthropic
 ```
+
+`/api/health` reports both under `checks.llm`: `model`, `agentModel`, and
+`agentModelConfigured`. The last distinguishes "deliberately set to the same
+model" from "never set" — `agentModel` alone cannot.
 
 When `DIRECT_LLM_API_KEY` is set, the Manus Forge gateway is bypassed automatically.
 `DIRECT_LLM_API_URL` is a **base URL** — the correct path (`/v1/messages` for Anthropic,
@@ -54,7 +64,7 @@ trailing `/v1` or the full path are also accepted.
 
 | Provider | `DIRECT_LLM_API_URL` (base) | Model |
 |---|---|---|
-| Anthropic (recommended, cloud) | `https://api.anthropic.com` | `claude-sonnet-4-5` (Super Agent: `claude-opus-4`) |
+| Anthropic (recommended, cloud) | `https://api.anthropic.com` | `claude-sonnet-5` (Super Agent: `claude-opus-4-8`) |
 | OpenAI | `https://api.openai.com` | `gpt-4o-mini` or `gpt-4o` |
 | OpenAI-compatible proxy (LiteLLM) | `https://your-litellm-proxy.com` | provider-prefixed model |
 | **Local Anthropic-compatible** (on-prem) | `http://llm.internal:8080` + `DIRECT_LLM_PROVIDER=anthropic` | self-hosted Claude-compatible gateway |
@@ -147,6 +157,38 @@ NODE_ENV=production
 PORT=3000
 APP_URL=https://reconcileai.vip
 ```
+
+## Scheduler authentication (Woodcore mirror sync, SHOPLINE sync)
+
+Two accepted paths. **GitHub OIDC is preferred**; the shared secret remains for
+callers that cannot use it.
+
+```bash
+# Preferred — GitHub Actions OIDC. Nothing long-lived, so nothing to rotate.
+GITHUB_OIDC_AUDIENCE=https://www.reconcileaiafrica.com
+GITHUB_OIDC_REPOSITORIES=Infinity-AI-Africa-Limited/reconcileai
+GITHUB_OIDC_REFS=refs/heads/main      # optional extra pin; empty = any ref
+
+# Fallback — shared secret (Railway Cron, on-premise, manual operator calls).
+CRON_SECRET=<32+ character random string>
+```
+
+`GITHUB_OIDC_AUDIENCE` must match `OIDC_AUDIENCE` in the two workflow files.
+
+⚠️ **`GITHUB_OIDC_REPOSITORIES` is the security boundary, not a convenience.** A
+valid GitHub OIDC token proves only that *some* repository issued it — anyone
+with a public repo can mint one for any audience. The `repository` claim is what
+makes it authentication. Leaving this unset **disables OIDC** and leaves the
+shared secret in charge; it never means "allow any repository".
+
+The shared secret is deliberately kept because verifying OIDC requires egress to
+`token.actions.githubusercontent.com`, which `DEPLOYMENT_MODE=on_premise` blocks
+by design, and Railway Cron cannot mint an OIDC token at all.
+
+**Rollout:** the workflows send both headers. Watch the server log for
+`[syncAuth] authorized ... via github_oidc` — until that appears, OIDC is not
+carrying anything and deleting the GitHub repo secrets would break the
+schedulers.
 
 ## SFTP Credential Encryption
 

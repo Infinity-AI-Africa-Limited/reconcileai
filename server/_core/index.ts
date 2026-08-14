@@ -10,6 +10,8 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { assertResidencyStartupConfig, describeResidencyPosture } from "./egress";
 import { getLlmProviderInfo } from "./llm";
+import { authorizeSyncRequest, describeSyncAuthFailure, expectedSyncSecret } from "./syncAuth";
+import { verifyGitHubOidcToken, describeOidcFailure } from "./githubOidc";
 import { getDb } from "../db";
 import { seedDefaultResolutionTemplates, seedNigerianExceptionDefaults } from "../seedResolutionTemplates";
 import { sql } from "drizzle-orm";
@@ -346,7 +348,11 @@ async function startServer() {
       const { getSessionCookieOptions } = await import("./cookies");
       const cookieOptions = getSessionCookieOptions(req);
       res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      return res.redirect(302, "/dashboard");
+      // /home, not /dashboard: the client resolves the vertical's own starting
+      // page there (a merchant lands on Settlement Monitor). Keeping the choice
+      // client-side means this route does not need to load the organisation just
+      // to pick a redirect.
+      return res.redirect(302, "/home");
     } catch (err) {
       console.error("[magic-login] error:", err);
       return res.redirect(302, "/?error=login_failed");
@@ -359,21 +365,60 @@ async function startServer() {
   // Guarded by a shared secret (header x-sync-secret == CRON_SECRET, falling back
   // to JWT_SECRET). Lets a scheduler (Railway Cron) or an operator trigger it
   // without an authenticated session.
-  const syncSecret = () => ENV.cronSecret || ENV.cookieSecret;
-  const syncAuthorized = (req: import("express").Request) => {
-    const secret = syncSecret();
-    const provided = (req.headers["x-sync-secret"] as string) || "";
-    return Boolean(secret) && provided === secret;
+  // Constant-time, and it LOGS why it refused. A bare 403 cannot distinguish a
+  // drifted caller secret from a server with no secret configured at all — that
+  // ambiguity is what left the Woodcore mirror sync failing silently for three
+  // days after the 2026-08-02 rotation. The response stays a uniform 403; only
+  // the log says which. See _core/syncAuth.ts.
+  //
+  // Two accepted paths, OIDC preferred: a `Authorization: Bearer <github oidc
+  // jwt>` minted per workflow run, or the legacy `x-sync-secret`. The secret
+  // stays because on-premise mode blocks the egress OIDC verification needs and
+  // Railway Cron cannot mint a token at all. See _core/githubOidc.ts.
+  const syncAuthorized = async (req: import("express").Request) => {
+    const bearer = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || null;
+    const result = await authorizeSyncRequest(
+      {
+        bearerToken: bearer,
+        secretHeader: req.headers["x-sync-secret"] as string | undefined,
+      },
+      {
+        expectedSecret: expectedSyncSecret(),
+        verifyOidc: async (token) => {
+          const outcome = await verifyGitHubOidcToken(token, {
+            audience: ENV.githubOidcAudience,
+            allowedRepositories: ENV.githubOidcRepositories.split(",").map((s) => s.trim()).filter(Boolean),
+            allowedRefs: ENV.githubOidcRefs.split(",").map((s) => s.trim()).filter(Boolean),
+          });
+          return outcome.ok
+            ? { ok: true as const, repository: outcome.repository }
+            : { ok: false as const, reason: outcome.reason, detail: describeOidcFailure(outcome.reason, outcome.detail) };
+        },
+      },
+    );
+    if (result.ok) {
+      // The rollout signal. Until this says github_oidc for the scheduled runs,
+      // OIDC is not carrying anything and the GitHub secrets cannot be deleted.
+      console.log(
+        `[syncAuth] authorized ${req.method} ${req.path} via ${result.via}${result.detail ? ` (${result.detail})` : ""}`,
+      );
+    } else {
+      console.warn(
+        `[syncAuth] refused ${req.method} ${req.path}: ${describeSyncAuthFailure(result.reason)}` +
+          (result.oidcDetail ? ` | oidc: ${result.oidcDetail}` : ""),
+      );
+    }
+    return result.ok;
   };
   app.post("/api/woodcore/sync", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncWoodcoreMirror, syncState } = await import("../woodcoreSync");
     if (syncState.running) return res.status(409).json({ error: "already running", state: syncState });
     syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", e));
     res.status(202).json({ started: true });
   });
   app.get("/api/woodcore/sync", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncState } = await import("../woodcoreSync");
     res.json(syncState);
   });
@@ -431,7 +476,7 @@ async function startServer() {
   // scheme as /api/woodcore/sync. Point a Railway/host cron at this hourly;
   // each connector's own batchSyncHourUtc decides when it actually pulls.
   app.post("/api/scheduled/woodcoreConnectorSync", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     try {
       const { runConnectorTick } = await import("../connectors/woodcore");
       const result = await runConnectorTick();
@@ -442,22 +487,51 @@ async function startServer() {
     }
   });
 
+  // ── Inbound email (Tier A email-forward ingestion) ──────────────────────────
+  // Resend posts `email.received` here. Verification, address resolution and
+  // the sender allow-list all live in handleInboundEmail; only a SIGNATURE
+  // failure returns non-2xx, because Resend retries non-2xx for hours and a
+  // business rejection will never succeed on retry. Answering 200 also refuses
+  // to reveal whether an address exists, so this cannot be probed.
+  app.post("/api/webhooks/email/inbound", async (req, res) => {
+    try {
+      const rawBody =
+        (req as express.Request & { rawBody?: Buffer }).rawBody ??
+        Buffer.from(JSON.stringify(req.body ?? {}), "utf8");
+      const { handleInboundEmail } = await import("../ingest/emailIngestionService");
+      const result = await handleInboundEmail(rawBody, {
+        id: req.headers["svix-id"],
+        timestamp: req.headers["svix-timestamp"],
+        signature: req.headers["svix-signature"],
+      });
+      if (result.status === 401) {
+        console.warn(`[emailIngestion] rejected delivery: ${result.reason}`);
+        return res.status(401).json({ error: "invalid signature" });
+      }
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      // Still 200: an unhandled fault here must not trigger a retry storm.
+      console.error("[emailIngestion] handler threw:", err);
+      return res.status(200).json({ ok: true });
+    }
+  });
+
   // ── SHOPLINE Scheduled Sync Handlers ────────────────────────────────────────
   // POST /api/scheduled/shoplineSyncCycle — 15-min incremental sync for all stores
   app.post("/api/scheduled/shoplineSyncCycle", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineSyncCycle } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineSyncCycle(req, res);
   });
   // POST /api/scheduled/shoplineDailyBatch — daily full 24h reconciliation
   app.post("/api/scheduled/shoplineDailyBatch", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineDailyBatch } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineDailyBatch(req, res);
   });
   // POST /api/scheduled/shoplineWebhookReconciler — daily webhook health check
   app.post("/api/scheduled/shoplineWebhookReconciler", async (req, res) => {
-    if (!syncAuthorized(req)) return res.status(403).json({ error: "forbidden" });
+    if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineWebhookReconciler } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineWebhookReconciler(req, res);
   });
@@ -465,9 +539,18 @@ async function startServer() {
   // ── Live monitoring stream (SSE) ───────────────────────────────────────────
   // GET /api/monitoring/stream — relays reconciliation job-progress events to the
   // dashboard in real time (replaces timer polling). Auth via session cookie.
+  //
+  // Scoped to the viewer's organisation. This endpoint authenticated the caller
+  // and then subscribed them to the PROCESS-WIDE emitter, so every connected
+  // dashboard received every tenant's job progress — phase messages included,
+  // which carry match counts, exception counts and match rates. Authentication
+  // is not authorisation, and a stream needs the tenant check as much as a query
+  // does.
   app.get("/api/monitoring/stream", async (req, res) => {
+    let viewerOrganizationId: number | null;
     try {
-      await sdk.authenticateRequest(req);
+      const user = await sdk.authenticateRequest(req);
+      viewerOrganizationId = user.organizationId ?? null;
     } catch {
       res.status(401).end();
       return;
@@ -481,9 +564,11 @@ async function startServer() {
     res.write("retry: 5000\n\n");
     res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
-    const { jobEvents } = await import("../jobEvents");
+    const { jobEvents, mayReceiveJobEvent } = await import("../jobEvents");
     const onProgress = (payload: unknown) => {
-      res.write(`data: ${JSON.stringify({ type: "progress", ...(payload as object) })}\n\n`);
+      const event = payload as import("../jobEvents").JobProgressEvent;
+      if (!mayReceiveJobEvent(event, viewerOrganizationId)) return;
+      res.write(`data: ${JSON.stringify({ type: "progress", ...event })}\n\n`);
     };
     jobEvents.on("progress", onProgress);
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25000);
