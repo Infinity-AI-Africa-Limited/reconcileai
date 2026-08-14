@@ -85,15 +85,81 @@ export async function trackProgress(
     totalCount: options.totalCount || 0,
   });
 
-  // Push to the live SSE stream for real-time dashboard updates.
-  emitJobProgress({
-    jobId,
-    phase,
-    progress,
-    message,
-    processedCount: options.processedCount || 0,
-    totalCount: options.totalCount || 0,
-  });
+  // Push to the live SSE stream for real-time dashboard updates — but only when
+  // the owning tenant is KNOWN. An unresolved owner is not broadcast at all; see
+  // organizationForJob.
+  const owner = await organizationForJob(jobId);
+  if (owner.known) {
+    emitJobProgress({
+      jobId,
+      organizationId: owner.organizationId,
+      phase,
+      progress,
+      message,
+      processedCount: options.processedCount || 0,
+      totalCount: options.totalCount || 0,
+    });
+  }
+}
+
+/**
+ * Who owns a job — and whether we actually know.
+ *
+ * `known: false` is NOT the same as `organizationId: null`, and collapsing the
+ * two is the defect this type exists to prevent. An earlier revision returned a
+ * bare `number | null` and called it fail-closed on the reasoning that "an
+ * unresolvable job yields null, which only an org-less viewer matches". That is
+ * wrong: `null` is not an empty set, it is a real tenancy bucket — 22 accounts
+ * currently have no organisation — so an unresolved job was broadcast to every
+ * one of them. It failed OPEN toward exactly the viewers least entitled to it.
+ *
+ * The same mistake, in a different pair, as "no organisation is not an unknown
+ * segment" (shared/verticalFeatures): absence of an answer is not an answer.
+ */
+type JobOwner =
+  | { known: true; organizationId: number | null }
+  | { known: false; organizationId: null };
+
+const UNKNOWN_OWNER: JobOwner = { known: false, organizationId: null };
+
+/**
+ * The tenant that owns a job, memoised for the life of the process.
+ *
+ * Resolved HERE rather than threaded through `trackProgress`'s signature, which
+ * is the whole point: there are progress calls scattered across the
+ * reconciliation runner, and any one of them that forgot to pass the tenant
+ * would silently restore the broadcast. Looking it up from the jobId means no
+ * call site can get it wrong.
+ *
+ * A job's owner never changes, so caching a RESOLVED owner is safe and one
+ * lookup per job replaces one per progress event — a run emits a dozen or more.
+ * An unresolved lookup is never cached: a single transient database error would
+ * otherwise pin the wrong answer to that job for the life of the process.
+ */
+const jobOrgCache = new Map<number, number | null>();
+
+async function organizationForJob(jobId: number): Promise<JobOwner> {
+  const cached = jobOrgCache.get(jobId);
+  if (cached !== undefined) return { known: true, organizationId: cached };
+
+  let job: Awaited<ReturnType<typeof db.getReconciliationJob>>;
+  try {
+    job = await db.getReconciliationJob(jobId);
+  } catch {
+    return UNKNOWN_OWNER; // transient DB failure — not cached, retried next event
+  }
+  // No row means deleted or never existed. Either way the owner is unknown, and
+  // an unknown owner must reach nobody rather than defaulting into a bucket.
+  if (!job) return UNKNOWN_OWNER;
+
+  const org = job.organizationId ?? null;
+  jobOrgCache.set(jobId, org);
+  // Bound the map so a long-lived process cannot accumulate every job id.
+  // Insertion-ordered, so Array.from(...).slice takes the OLDEST half.
+  if (jobOrgCache.size > 5000) {
+    for (const k of Array.from(jobOrgCache.keys()).slice(0, 2500)) jobOrgCache.delete(k);
+  }
+  return { known: true, organizationId: org };
 }
 
 function getNextPhaseProgress(currentPhase: JobPhase): number {
