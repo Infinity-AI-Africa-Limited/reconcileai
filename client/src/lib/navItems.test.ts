@@ -13,6 +13,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NAV_ITEMS, navFor, navGroup, type NavEntry } from "./navItems";
+import { canReachPath } from "./routeAccess";
 import type { Segment } from "./segments";
 
 /** Exactly what each portal nav contained before consolidation. */
@@ -220,6 +221,99 @@ describe("when an entry is added to the shared list", () => {
     const known = new Set(NAV_ITEMS.map((e) => e.path));
     const orphans = [...mapped].filter((p) => !known.has(p));
     expect(orphans, `NAV_ICONS maps paths that are not nav entries: ${orphans.join(", ")}`).toEqual([]);
+  });
+});
+
+/**
+ * Found live, mid-demo: "the CBN compliance page is missing".
+ *
+ * Infinity AI's own organisation has segment `super_admin`, so `inSegment`
+ * matched none of the vertical-scoped entries and a signed-in super admin lost
+ * CBN Reports, Data Protection, Sample Data, Core Banking Connector, Distributor
+ * Registry and the retail entries from their sidebar.
+ *
+ * The page was never broken. /cbn-compliance loaded fine if you typed the URL,
+ * because `canReachPath` passes staff, and `cbnProcedure` answered, because
+ * shared/verticalFeatures lists `super_admin` under cbn_regulatory_reporting.
+ * Only the way in was missing — a hidden link in front of an open route and an
+ * open procedure, which is the same class of defect as the reverse.
+ */
+describe("when Infinity AI staff use their own account", () => {
+  // The real shape of the operator's account: super_admin ROLE, and an
+  // organisation whose SEGMENT is also super_admin. The two are independently
+  // mutable, which is why nothing here may key on the segment.
+  const staffNav = navFor("super_admin", "super_admin").map((e) => e.path);
+
+  it("should show CBN Reports", () => {
+    expect(staffNav).toContain("/cbn-compliance");
+  });
+
+  it("should show every vertical-scoped entry, not only the unscoped ones", () => {
+    for (const entry of NAV_ITEMS.filter((e) => e.segments && !e.staffOnly && e.group !== "superAdmin")) {
+      expect(staffNav, `${entry.label} (${entry.path}) missing for staff`).toContain(entry.path);
+    }
+  });
+
+  it("should still show the operator's own tools", () => {
+    expect(staffNav).toContain("/admin/super-admin");
+    expect(staffNav).toContain("/demo-dashboard");
+  });
+
+  it("should agree with the route guard on every path", () => {
+    // The invariant that was broken. If a staff member can OPEN it, they must be
+    // able to SEE it — otherwise the only way in is knowing the URL.
+    for (const entry of NAV_ITEMS) {
+      if (entry.group === "superAdmin") continue;
+      const reachable = canReachPath(entry.path, "super_admin", "super_admin");
+      expect(
+        staffNav.includes(entry.path),
+        `${entry.path}: route says reachable=${reachable}, sidebar says linked=${staffNav.includes(entry.path)}`,
+      ).toBe(reachable);
+    }
+  });
+
+  it("should not depend on the operator org's segment being anything in particular", () => {
+    // `superAdmin.updateOrganizationSegment` can retype any org including
+    // Infinity AI's own, and a super_admin may have no organisation at all.
+    // Neither may empty the sidebar.
+    for (const seg of ["super_admin", "financial_services", "retail_commerce", null] as const) {
+      expect(navFor(seg, "super_admin").map((e) => e.path), `segment=${seg}`).toContain("/cbn-compliance");
+    }
+  });
+});
+
+describe("when staff enter a tenant's portal", () => {
+  it("should still show only that tenant's vertical", () => {
+    // The bypass above is scoped to the operator's OWN account. Inside a portal
+    // the point is to see what the tenant has, so segment gating must survive.
+    const retailPortal = navFor("retail_commerce", "super_admin", { portal: true }).map((e) => e.path);
+    expect(retailPortal).toContain("/settlement-monitor");
+    expect(retailPortal).not.toContain("/cbn-compliance");
+    expect(retailPortal).not.toContain("/distributors");
+  });
+
+  it("should show CBN Reports inside a financial-services portal", () => {
+    const bankPortal = navFor("financial_services", "super_admin", { portal: true }).map((e) => e.path);
+    expect(bankPortal).toContain("/cbn-compliance");
+    expect(bankPortal).not.toContain("/settlement-monitor");
+  });
+});
+
+describe("a bank's own users keep CBN Reports", () => {
+  // The demo path that must never regress, independent of the staff bypass.
+  for (const role of ["admin", "compliance", "cfo"]) {
+    it(`should show it to a ${role}`, () => {
+      expect(navFor("financial_services", role).map((e) => e.path)).toContain("/cbn-compliance");
+    });
+  }
+
+  it("should keep it away from a retail merchant", () => {
+    expect(navFor("retail_commerce", "admin").map((e) => e.path)).not.toContain("/cbn-compliance");
+  });
+
+  it("should keep it away from an operations user", () => {
+    // Not in its roles list — CBN filing is admin/compliance/cfo work.
+    expect(navFor("financial_services", "operations").map((e) => e.path)).not.toContain("/cbn-compliance");
   });
 });
 
