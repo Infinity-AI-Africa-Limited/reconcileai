@@ -66,7 +66,11 @@ interface ExceptionCardProps {
   status: "open" | "in_review" | "resolved" | "escalated";
 }
 
-function ExceptionCard({ type, category, description, plainLanguage, recommendation, severity }: ExceptionCardProps) {
+// `status` must be destructured. Omitted, the bare identifier below resolves to
+// the DOM global `window.status` — a legacy string property — so this compiles
+// cleanly and renders an EMPTY badge on every exception card rather than
+// throwing. A silent wrong answer, which is why the typecheck never caught it.
+function ExceptionCard({ type, category, description, plainLanguage, recommendation, severity, status }: ExceptionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const severityMap = {
     low: "bg-green-100 text-green-700",
@@ -457,7 +461,11 @@ function FinServDemoPanel() {
 // ── Main Demo Dashboard ───────────────────────────────────────────────────────
 
 function printDemoReport(segment: "fmcg" | "finserv") {
-  const title = segment === "fmcg" ? "BrightGoods FMCG — ReconcileAI Demo Report" : "Financial Services (LapoMFB + Renmoney) — ReconcileAI Demo Report";
+  // LapoMFB and Renmoney are REAL Nigerian institutions and are not customers.
+  // Naming them on a printable report implies an engagement that does not exist,
+  // which is a misrepresentation risk in front of exactly the compliance audience
+  // this report is shown to. The demo institution is unnamed instead.
+  const title = segment === "fmcg" ? "BrightGoods FMCG — ReconcileAI Demo Report" : "Financial Services — ReconcileAI Demo Report";
   const date = new Date().toLocaleDateString("en-NG", { year: "numeric", month: "long", day: "numeric" });
   const fmcgContent = `
     <h2>FMCG Reconciliation Summary</h2>
@@ -483,31 +491,46 @@ function printDemoReport(segment: "fmcg" | "finserv") {
     <h2>ROI Summary</h2>
     <p>At 1,000 transactions per reconciliation cycle, ReconcileAI reduces manual reconciliation from 4 finance officers to 1, saving 18.5 hours per cycle. The 95% auto-match rate eliminates ₦600M in annual unreconciled payment risk.</p>
   `;
+  // Every figure below is READ FROM the seeded dataset this page renders.
+  //
+  // The previous version of this report claimed 3,000,000 transactions a month,
+  // 150,000 exceptions, a 10-FTE reduction, ₦2.4B reconciled daily, and that a
+  // 48-hour ageing limit is "a critical CBN regulatory requirement" — against a
+  // dataset of 320 settlement items. It also named LapoMFB and Renmoney, which
+  // are real institutions and not customers.
+  //
+  // This is a printable artefact a prospect keeps. Numbers it states must be the
+  // numbers on the screen it was printed from, and a regulatory obligation must
+  // not be asserted without a citation. Illustrative scale belongs in a pricing
+  // conversation, not in a control report.
   const finservContent = `
     <h2>Financial Services Reconciliation Summary</h2>
+    <p class="meta">Illustrative dataset. Figures below describe this demonstration environment only and are not a client engagement or a performance guarantee.</p>
     <table><tr><th>Metric</th><th>Value</th></tr>
-      <tr><td>Total Transactions</td><td>3,000,000/month</td></tr>
-      <tr><td>Auto-Match Rate</td><td>95.0%</td></tr>
-      <tr><td>Payment Rails Covered</td><td>7 (NIP, Direct Debit, USSD, POS, Mobile, Agent Banking, Card)</td></tr>
-      <tr><td>Exceptions for Review</td><td>150,000 (5%)</td></tr>
-      <tr><td>Staff Reduction</td><td>10 FTEs (12 → 2)</td></tr>
-      <tr><td>Daily Collections Reconciled</td><td>₦2.4B</td></tr>
+      <tr><td>Transaction legs reconciled</td><td>640 (320 settlement items + core ledger)</td></tr>
+      <tr><td>Auto-match rate</td><td>95.0% (304 of 320 settlement items)</td></tr>
+      <tr><td>Control feeds in scope</td><td>8 (NIP, Direct Debit, USSD, Mobile App, Core Banking, POS, Card Scheme, Agent Banking)</td></tr>
+      <tr><td>Control cases raised</td><td>16</td></tr>
+      <tr><td>Case status</td><td>10 open · 3 in review · 1 escalated · 2 resolved</td></tr>
+      <tr><td>Current review queue</td><td>7 open cases</td></tr>
     </table>
-    <h2>Payment Rail Breakdown</h2>
-    <table><tr><th>Rail</th><th>Transactions</th><th>Match Rate</th></tr>
-      <tr><td>NIP / NIBSS</td><td>1,200,000</td><td>97%</td></tr>
-      <tr><td>Direct Debit</td><td>600,000</td><td>94%</td></tr>
-      <tr><td>USSD</td><td>480,000</td><td>93%</td></tr>
-      <tr><td>POS</td><td>360,000</td><td>96%</td></tr>
-      <tr><td>Mobile Banking</td><td>240,000</td><td>95%</td></tr>
-      <tr><td>Agent Banking</td><td>72,000</td><td>92%</td></tr>
-      <tr><td>Card Payments</td><td>48,000</td><td>96%</td></tr>
+    <h2>Control Feed Coverage</h2>
+    <table><tr><th>Feed</th><th>Scope</th></tr>
+      <tr><td>NIBSS NIP Settlement</td><td>In scope</td></tr>
+      <tr><td>NIBSS Direct Debit</td><td>In scope</td></tr>
+      <tr><td>USSD Banking</td><td>In scope</td></tr>
+      <tr><td>Mobile Banking App</td><td>In scope</td></tr>
+      <tr><td>Core Banking Ledger</td><td>In scope</td></tr>
+      <tr><td>POS Acquirer Settlement</td><td>In scope</td></tr>
+      <tr><td>Card Scheme Settlement</td><td>In scope</td></tr>
+      <tr><td>Agent Banking Collection</td><td>In scope</td></tr>
     </table>
     <h2>Exception Narratives (Sample)</h2>
     <p><strong>Failed Direct Debit — Chukwuemeka Obi:</strong> Mandate #DD-2847 failed with code R01 (insufficient funds). Loan repayment of ₦45,000 not collected. Recommendation: retry in 3 days, flag account for collections review.</p>
     <p><strong>USSD Timeout — Amina Yusuf:</strong> Customer initiated ₦12,500 transfer via USSD but session timed out. Debit posted but credit not confirmed. Recommendation: check interbank settlement report, reverse debit if credit not confirmed within 24 hours.</p>
-    <h2>ROI Summary</h2>
-    <p>At 3,000,000 transactions per month across 7 payment rails, ReconcileAI reduces reconciliation staff from 12 to 2 officers. The 95% auto-match rate prevents ₦2.4B in unreconciled collections from ageing beyond 48 hours — a critical CBN regulatory requirement.</p>
+    <h2>What this demonstrates</h2>
+    <p>Eight control feeds are reconciled against the core banking ledger in a single run, with unmatched items classified by cause and routed to a review queue with an ageing clock. The institution keeps the accounting judgement; the platform supplies the evidence and the exception, and records who resolved it and why.</p>
+    <p>Volumes, staffing effects and settlement values for a specific institution depend on its own transaction profile and operating model, and are established during a scoped pilot rather than asserted here.</p>
   `;
   const content = segment === "fmcg" ? fmcgContent : finservContent;
   const html = `<!DOCTYPE html><html><head><title>${title}</title><style>
@@ -524,7 +547,7 @@ function printDemoReport(segment: "fmcg" | "finserv") {
     @media print { body { margin: 20px; } }
   </style></head><body>
     <h1>ReconcileAI — Demo Report</h1>
-    <p class="meta">Prepared by: Infinity AI &nbsp;|&nbsp; Date: ${date} &nbsp;|&nbsp; Segment: ${segment === "fmcg" ? "FMCG (BrightGoods)" : "Financial Services (LapoMFB + Renmoney MFB)"}</p>
+    <p class="meta">Prepared by: Infinity AI &nbsp;|&nbsp; Date: ${date} &nbsp;|&nbsp; Segment: ${segment === "fmcg" ? "FMCG (BrightGoods)" : "Financial Services (illustrative)"}</p>
     ${content}
     <div class="footer">This report was generated by ReconcileAI, a product of Infinity AI. The data shown is for demonstration purposes only. Contact: hello@infinityai.ng</div>
   </body></html>`;

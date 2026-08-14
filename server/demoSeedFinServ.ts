@@ -536,7 +536,7 @@ async function createBatch(
     invalidRows: 0,
     status: "completed",
   });
-  const id = Number((result as { insertId?: number }).insertId ?? 0);
+  const id = Number((result as unknown as { insertId?: number }[])[0]?.insertId ?? 0);
   if (!id) throw new Error(`Unable to create demo batch ${fileName}`);
   return id;
 }
@@ -560,6 +560,31 @@ export async function seedFinServDemoData(
 ): Promise<FinServSeedResult> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+
+  /**
+   * Agent memory is written ONLY when the caller has a real organisation.
+   *
+   * `agentMemory.organizationId` is NOT NULL, which is why the original code
+   * reached for `?? 0`. But organisation 0 is not a tenant: every read of that
+   * table is org-scoped, so those rows can never be retrieved by anyone, and
+   * each org-less caller is pooled into the same pseudo-tenant. That is exactly
+   * how 14 unreachable distributor rows came to sit under organizationId 0
+   * (CLAUDE.md §9C, §19.2). "No organisation" is not "organisation zero".
+   *
+   * Skipping rather than throwing, deliberately. The prewarm demo user and the
+   * guest-login fallback user are both created WITHOUT an organisation, so a
+   * hard refusal would break the guest demo — and the rows being skipped had no
+   * value to lose: written under org 0 they were already unreadable. Everything
+   * else in this seed (transactions, exceptions, matches) targets tables whose
+   * organizationId is nullable and is unaffected.
+   */
+  const canRecordAgentMemory = organizationId !== null && organizationId !== undefined;
+  if (!canRecordAgentMemory) {
+    console.warn(
+      "[finserv-demo] No organizationId — seeding transactions and exceptions but " +
+      "SKIPPING agent memory, which requires a tenant that can read it back.",
+    );
+  }
 
   const plan = buildFinServDemoPlan();
   const now = new Date();
@@ -618,7 +643,7 @@ export async function seedFinServDemoData(
     startedAt: dateDaysAgo(now, 1),
     completedAt: now,
   });
-  const jobId = Number((jobInsert as { insertId?: number }).insertId ?? 0);
+  const jobId = Number((jobInsert as unknown as { insertId?: number }[])[0]?.insertId ?? 0);
   if (!jobId) throw new Error("Unable to create financial-services demo reconciliation job");
 
   const matchRows: Array<typeof matches.$inferInsert> = [];
@@ -647,7 +672,7 @@ export async function seedFinServDemoData(
       status: "matched",
       rawData: demoTag({ kind: "settlement", rail: rail.code, controlOutcome: "matched" }),
     });
-    const sourceTransactionId = Number((sourceInsert as { insertId?: number }).insertId ?? 0);
+    const sourceTransactionId = Number((sourceInsert as unknown as { insertId?: number }[])[0]?.insertId ?? 0);
 
     const targetInsert = await db.insert(transactions).values({
       batchId: coreBatchId,
@@ -666,7 +691,7 @@ export async function seedFinServDemoData(
       status: "matched",
       rawData: demoTag({ kind: "core-ledger", controlOutcome: "matched" }),
     });
-    const targetTransactionId = Number((targetInsert as { insertId?: number }).insertId ?? 0);
+    const targetTransactionId = Number((targetInsert as unknown as { insertId?: number }[])[0]?.insertId ?? 0);
 
     matchRows.push({
       organizationId,
@@ -709,7 +734,7 @@ export async function seedFinServDemoData(
       originalTransactionRef: scenario.isReversal ? scenario.targetRef : null,
       rawData: demoTag({ kind: "settlement-exception", scenario: scenario.id, rail: scenario.railCode, controlOutcome: scenario.status }),
     });
-    const sourceTransactionId = Number((sourceInsert as { insertId?: number }).insertId ?? 0);
+    const sourceTransactionId = Number((sourceInsert as unknown as { insertId?: number }[])[0]?.insertId ?? 0);
 
     await db.insert(transactions).values({
       batchId: coreBatchId,
@@ -756,14 +781,19 @@ export async function seedFinServDemoData(
       cbsVerificationNote: scenario.cbsStillAnomalous ? "Demo control: re-run still identifies the core-banking anomaly." : null,
       createdAt: transactionDate,
     });
-    const exceptionId = Number((exceptionInsert as { insertId?: number }).insertId ?? 0);
+    const exceptionId = Number((exceptionInsert as unknown as { insertId?: number }[])[0]?.insertId ?? 0);
 
     // The agent's evidence store may only learn from a completed or escalated
     // outcome. Open and in-review cases are intentionally excluded so a future
     // diagnosis never presents an unvalidated recommendation as prior practice.
-    if (scenario.status === "resolved" || scenario.status === "escalated") {
+    //
+    // `canRecordAgentMemory` additionally requires a real tenant — see its
+    // definition. Without one these rows would be written under organisation 0
+    // and be unreadable by every org-scoped query, including the one the Super
+    // Agent uses to retrieve them.
+    if (canRecordAgentMemory && (scenario.status === "resolved" || scenario.status === "escalated")) {
       await db.insert(agentMemory).values({
-        organizationId: organizationId ?? 0,
+        organizationId,
         exceptionId,
         exceptionCategory: scenario.category,
         transactionRef: scenario.sourceRef,
@@ -822,7 +852,12 @@ export async function wipeFinServDemoData(userId: number, organizationId: number
     : [];
   const exceptionIds = exceptionRows.map((row) => row.id);
   if (exceptionIds.length) {
-    await db.delete(agentMemory).where(and(eq(agentMemory.organizationId, organizationId ?? 0), inArray(agentMemory.exceptionId, exceptionIds)));
+    // orgFilter, not a bare eq: this function still accepts a null organisation
+    // (a wipe should be able to clean up whatever a previous seed left behind),
+    // and `agentMemory.organizationId` is NOT NULL, so a bare eq would not
+    // type-check against a nullable value. orgFilter resolves null to IS NULL,
+    // which matches nothing here and is the safe outcome for a delete.
+    await db.delete(agentMemory).where(and(orgFilter(agentMemory.organizationId, organizationId), inArray(agentMemory.exceptionId, exceptionIds)));
     await db.delete(exceptions).where(inArray(exceptions.id, exceptionIds));
   }
   if (jobIds.length) {
