@@ -6,6 +6,55 @@ import type { TrpcContext } from "./_core/context";
 
 type AuthenticatedUser = NonNullable<TrpcContext["user"]>;
 
+/**
+ * An organisation id that cannot exist, for tests that must reach a mutation's
+ * authorization layer without changing anything.
+ *
+ * `DATABASE_URL` in a developer `.env` and in CI points at the SHARED database,
+ * so a tRPC mutation invoked from a test is a real write to real data. That is
+ * not hypothetical: the two "does not refuse super_admin" tests below used
+ * `organizationId: 1` and quietly set `isDemo = false` and
+ * `bankingModel = "conventional"` on Globus Bank Nigeria (Demo) on every run.
+ * The isDemo write re-armed the SLA monitor against 411 seeded exceptions and
+ * emailed the owner a 382-breach alert — the precise failure the isDemo column
+ * had just been added to prevent.
+ *
+ * Passing an absent id means `assertOrganizationExists` refuses with NOT_FOUND
+ * BEFORE the UPDATE, which still proves what these tests are for: the caller got
+ * past the super-admin guard and past zod. Authorization is observed; nothing is
+ * mutated.
+ *
+ * Above int range for any plausible seeded id, and asserted below to be absent.
+ */
+const ABSENT_ORG_ID = 2_146_000_000;
+
+/**
+ * Assert a mutation got PAST authorization and validation without writing.
+ *
+ * Two outcomes are both correct, and which occurs depends on the environment
+ * rather than on the code under test:
+ *
+ *   NOT_FOUND              a database is reachable, so assertOrganizationExists
+ *                          ran and refused the absent id before the UPDATE
+ *   INTERNAL_SERVER_ERROR  no database configured, so the procedure failed at
+ *                          getDb() — also before any write
+ *
+ * What must never happen is FORBIDDEN or BAD_REQUEST: either would mean the
+ * caller never reached the mutation, and the test would pass vacuously.
+ * Asserting NOT_FOUND alone made this suite environment-dependent — green in
+ * CI, red locally — which is its own kind of unreliable.
+ */
+async function expectNoWriteButAuthorized(call: () => Promise<unknown>): Promise<void> {
+  try {
+    await call();
+    throw new Error("expected the mutation to be refused for an absent organisation");
+  } catch (err: any) {
+    expect(err.code, `unexpected refusal: ${err.code} ${err.message}`).not.toBe("FORBIDDEN");
+    expect(err.code).not.toBe("BAD_REQUEST");
+    expect(["NOT_FOUND", "INTERNAL_SERVER_ERROR"]).toContain(err.code);
+  }
+}
+
 function createCtxWithRole(role: AuthenticatedUser["role"]): TrpcContext {
   const user: AuthenticatedUser = {
     id: 1,
@@ -185,7 +234,7 @@ describe("superAdmin.setOrganizationBankingModel", () => {
       const caller = appRouter.createCaller(ctx);
       await expect(
         caller.superAdmin.setOrganizationBankingModel({
-          organizationId: 1,
+          organizationId: ABSENT_ORG_ID,
           bankingModel: "non_interest",
         }),
       ).rejects.toMatchObject({ code: "FORBIDDEN" });
@@ -200,7 +249,7 @@ describe("superAdmin.setOrganizationBankingModel", () => {
     const caller = appRouter.createCaller(ctx);
     await expect(
       caller.superAdmin.setOrganizationBankingModel({
-        organizationId: 1,
+        organizationId: ABSENT_ORG_ID,
         bankingModel: "islamic" as unknown as "non_interest",
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
@@ -218,19 +267,15 @@ describe("superAdmin.setOrganizationBankingModel", () => {
   });
 
   it("does not refuse super_admin on authorization grounds", async () => {
-    // Mirrors the admin.users assertions above: without a database the call may
-    // still fail, but never with FORBIDDEN.
-    const ctx = createCtxWithRole("super_admin");
-    const caller = appRouter.createCaller(ctx);
-    try {
-      await caller.superAdmin.setOrganizationBankingModel({
-        organizationId: 1,
+    // Targets an id that cannot exist, so the procedure is refused before any
+    // UPDATE runs — see ABSENT_ORG_ID.
+    const caller = appRouter.createCaller(createCtxWithRole("super_admin"));
+    await expectNoWriteButAuthorized(() =>
+      caller.superAdmin.setOrganizationBankingModel({
+        organizationId: ABSENT_ORG_ID,
         bankingModel: "conventional",
-      });
-    } catch (err: any) {
-      expect(err.code).not.toBe("FORBIDDEN");
-      expect(err.code).not.toBe("BAD_REQUEST");
-    }
+      }),
+    );
   });
 });
 
@@ -246,7 +291,7 @@ describe("superAdmin.setOrganizationIsDemo", () => {
     it(`throws FORBIDDEN for ${role}`, async () => {
       const caller = appRouter.createCaller(createCtxWithRole(role));
       await expect(
-        caller.superAdmin.setOrganizationIsDemo({ organizationId: 1, isDemo: true }),
+        caller.superAdmin.setOrganizationIsDemo({ organizationId: ABSENT_ORG_ID, isDemo: true }),
       ).rejects.toMatchObject({ code: "FORBIDDEN" });
     });
   }
@@ -262,18 +307,22 @@ describe("superAdmin.setOrganizationIsDemo", () => {
     const caller = appRouter.createCaller(createCtxWithRole("super_admin"));
     await expect(
       // @ts-expect-error deliberately wrong type — zod must reject it
-      caller.superAdmin.setOrganizationIsDemo({ organizationId: 1, isDemo: "yes" }),
+      caller.superAdmin.setOrganizationIsDemo({ organizationId: ABSENT_ORG_ID, isDemo: "yes" }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
   it("does not refuse super_admin on authorization grounds", async () => {
+    // NEVER a real organisation id here. The earlier version of this test called
+    // setOrganizationIsDemo({ organizationId: 1, isDemo: false }) and meant only
+    // to observe the authorization result — but the mutation RAN, against the
+    // live database, and switched the demo flag off on org 1 (Globus Bank
+    // Nigeria (Demo)). The SLA monitor then alerted the owner on 382 fabricated
+    // exceptions, which is the exact failure the isDemo column was added to
+    // prevent. Twice, on consecutive CI runs.
     const caller = appRouter.createCaller(createCtxWithRole("super_admin"));
-    try {
-      await caller.superAdmin.setOrganizationIsDemo({ organizationId: 1, isDemo: false });
-    } catch (err: any) {
-      expect(err.code).not.toBe("FORBIDDEN");
-      expect(err.code).not.toBe("BAD_REQUEST");
-    }
+    await expectNoWriteButAuthorized(() =>
+      caller.superAdmin.setOrganizationIsDemo({ organizationId: ABSENT_ORG_ID, isDemo: false }),
+    );
   });
 });
 
@@ -315,5 +364,51 @@ describe("super-admin organisation setters verify the org exists", () => {
         `${proc} must check before updating`,
       ).toBeLessThan(body.indexOf("drizzle.update(organizations)"));
     }
+  });
+});
+
+// ─── Tests must not mutate real organisations ────────────────────────────────
+//
+// The incident: "does not refuse super_admin on authorization grounds" called
+// setOrganizationIsDemo({ organizationId: 1, isDemo: false }) intending only to
+// observe the authorization outcome. DATABASE_URL points at the shared database,
+// so the mutation RAN and turned the demo flag off on Globus Bank Nigeria
+// (Demo). The SLA monitor then alerted the owner on 382 fabricated exceptions —
+// the exact failure isDemo was added to prevent — on two consecutive CI runs.
+//
+// A test that calls a mutation is a write. This pins that no test in this file
+// aims one at an organisation that might exist.
+describe("this test file never aims a mutation at a real organisation", () => {
+  const SELF = readFileSync(join(__dirname, "superAdmin.test.ts"), "utf8");
+  const CODE = SELF.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  it("uses ABSENT_ORG_ID for every organisation-mutating call", () => {
+    // Any organizationId literal handed to a set*/update* mutation must be the
+    // sentinel or an obviously-invalid value that zod rejects before the DB.
+    const offenders: string[] = [];
+    for (const m of CODE.matchAll(/caller\.superAdmin\.(setOrganization\w+|updateOrganization\w+)\(\s*\{[^}]*organizationId:\s*([A-Za-z0-9_]+)/g)) {
+      const [, proc, arg] = m;
+      // 0 and negatives are rejected by zod (BAD_REQUEST) before any query runs.
+      if (arg === "ABSENT_ORG_ID" || arg === "0") continue;
+      offenders.push(`${proc}(organizationId: ${arg})`);
+    }
+    expect(
+      offenders,
+      "A test aims an organisation mutation at an id that may exist. DATABASE_URL " +
+        "points at the shared database, so this is a real write — use ABSENT_ORG_ID, " +
+        "which assertOrganizationExists refuses before the UPDATE.",
+    ).toEqual([]);
+  });
+
+  it("keeps the sentinel outside any plausible real id", () => {
+    expect(ABSENT_ORG_ID).toBeGreaterThan(1_000_000_000);
+    expect(Number.isInteger(ABSENT_ORG_ID)).toBe(true);
+  });
+
+  it("relies on a guard that actually runs before the write", () => {
+    // If assertOrganizationExists were removed, ABSENT_ORG_ID would stop being
+    // protective and these tests would resume writing.
+    const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8");
+    expect(ROUTERS).toMatch(/async function assertOrganizationExists\(/);
   });
 });
