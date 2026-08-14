@@ -568,6 +568,13 @@
       "when": 1786517693142,
       "tag": "0080_complete_moonstone",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "5",
+      "when": 1786690620204,
+      "tag": "0081_perfect_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

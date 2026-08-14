@@ -3673,6 +3673,34 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    /**
+     * Mark an organisation as a demo/sales tenant rather than a real client.
+     *
+     * Read by anything that must not treat fabricated data as real — today the
+     * SLA breach alert, which previously guessed from reconciliation job names
+     * and emailed the owner 374 seeded exceptions as genuine breaches.
+     *
+     * Super-admin only: a tenant must not be able to declare itself a demo and
+     * silence its own SLA alerting.
+     */
+    setOrganizationIsDemo: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        isDemo: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await drizzle.update(organizations)
+          .set({ isDemo: input.isDemo })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_is_demo", "organization", input.organizationId, {
+          isDemo: input.isDemo,
+        });
+        return { success: true };
+      }),
+
     // Create a new organisation (for onboarding a new client instance)
     createOrganization: superAdminProcedure
       .input(z.object({
