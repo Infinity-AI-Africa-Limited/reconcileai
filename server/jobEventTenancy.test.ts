@@ -107,10 +107,53 @@ describe("progress events resolve their tenant without the caller's help", () =>
   it("should look the organisation up from the jobId", () => {
     // Threading it through trackProgress's signature would mean every one of
     // its scattered call sites had to remember; one omission restores the leak.
-    expect(SERVICE).toMatch(/organizationId: await organizationForJob\(jobId\)/);
+    expect(SERVICE).toMatch(/const owner = await organizationForJob\(jobId\)/);
   });
 
-  it("should fail closed when the job cannot be resolved", () => {
-    expect(SERVICE).toMatch(/\?\.organizationId \?\? null/);
+  /**
+   * An unresolved owner must reach NOBODY.
+   *
+   * The first fix returned a bare `number | null` and reasoned that an
+   * unresolvable job "yields null, which only an org-less viewer matches" —
+   * calling that fail-closed. It is not. `null` is a real tenancy bucket with 22
+   * accounts in it, so an unresolved job was broadcast to every one of them: it
+   * failed OPEN toward the viewers least entitled to it. Caught by review on
+   * PR #78.
+   *
+   * Same mistake, different pair, as "no organisation is not an unknown segment"
+   * in shared/verticalFeatures. Absence of an answer is not an answer.
+   */
+  it("should distinguish an unknown owner from a genuinely org-less job", () => {
+    expect(SERVICE).toMatch(/known: true; organizationId: number \| null/);
+    expect(SERVICE).toMatch(/known: false; organizationId: null/);
+  });
+
+  it("should emit only when the owner is known", () => {
+    expect(SERVICE).toMatch(/if \(owner\.known\) \{/);
+    // The old shape collapsed both cases into one nullable value.
+    expect(SERVICE).not.toMatch(/organizationId: await organizationForJob/);
+  });
+
+  it("should treat a missing job as unknown, not as org-less", () => {
+    expect(SERVICE).toMatch(/if \(!job\) return UNKNOWN_OWNER;/);
+  });
+
+  it("should survive a transient database failure without guessing", () => {
+    // A throw must not be read as "this job has no organisation".
+    const body = SERVICE.slice(SERVICE.indexOf("async function organizationForJob"));
+    expect(body).toMatch(/catch \{\s*return UNKNOWN_OWNER;/);
+  });
+
+  it("should never cache an unresolved lookup", () => {
+    // Caching a failed lookup pins the wrong answer to that job for the life of
+    // the process — one transient error becomes a permanent mislabel.
+    const body = SERVICE.slice(
+      SERVICE.indexOf("async function organizationForJob"),
+      SERVICE.indexOf("function getNextPhaseProgress"),
+    );
+    const cacheWrites = [...body.matchAll(/jobOrgCache\.set\(/g)];
+    expect(cacheWrites).toHaveLength(1);
+    // The single write sits after the not-found guard, so only resolved owners reach it.
+    expect(body.indexOf("jobOrgCache.set(")).toBeGreaterThan(body.indexOf("if (!job) return UNKNOWN_OWNER;"));
   });
 });
