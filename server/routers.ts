@@ -352,6 +352,39 @@ async function assertOwnsSftpCredential(
   }
 }
 
+/**
+ * Refuse a super-admin organisation mutation that would match no row.
+ *
+ * All four org-level setters (`updateOrganizationSegment`, `setOrganizationSso`,
+ * `setOrganizationBankingModel`, `setOrganizationIsDemo`) ran
+ * `UPDATE … WHERE id = ?` and returned `{ success: true }` unconditionally, so a
+ * stale, deleted or mistyped id reported success, wrote a misleading audit
+ * entry, and changed nothing.
+ *
+ * That is worst for `setOrganizationIsDemo`, which decides whether a tenant's
+ * SLA alerts are suppressed: believing you have silenced or restored alerting
+ * when you have not is exactly the failure the isDemo work exists to prevent.
+ *
+ * Checks EXISTENCE rather than affectedRows deliberately. MySQL reports
+ * affected_rows as rows CHANGED, not matched, so setting a field to the value it
+ * already holds returns 0 — and rejecting that no-op as "not found" would be a
+ * worse bug than the one being fixed.
+ */
+async function assertOrganizationExists(
+  drizzle: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  organizationId: number,
+): Promise<void> {
+  const { organizations } = await import("../drizzle/schema");
+  const [org] = await drizzle
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  if (!org) {
+    throw new TRPCError({ code: "NOT_FOUND", message: `Organisation ${organizationId} not found` });
+  }
+}
+
 export const appRouter = router({
   system: systemRouter,
 
@@ -3585,6 +3618,7 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
         const { eq } = await import("drizzle-orm");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ segment: input.segment })
           .where(eq(organizations.id, input.organizationId));
@@ -3617,6 +3651,7 @@ export const appRouter = router({
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ ssoProvider: input.ssoProvider })
           .where(eq(organizations.id, input.organizationId));
@@ -3656,6 +3691,7 @@ export const appRouter = router({
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ bankingModel: input.bankingModel })
           .where(eq(organizations.id, input.organizationId));
@@ -3692,6 +3728,7 @@ export const appRouter = router({
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
         await drizzle.update(organizations)
           .set({ isDemo: input.isDemo })
           .where(eq(organizations.id, input.organizationId));
