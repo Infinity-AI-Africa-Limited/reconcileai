@@ -1248,4 +1248,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add or update automated tests for the new financial-services demo-data behaviour
 - [x] Run type checks, full tests and production build verification
 - [ ] Perform authenticated visual verification after the reviewed build is deployed
-- [ ] Push the feature branch to both GitHub repositories and open Claude Code review PRs
+- [x] Push the feature branch to both GitHub repositories and open Claude Code review PRs
