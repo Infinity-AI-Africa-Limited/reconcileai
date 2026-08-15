@@ -24,9 +24,36 @@ type AuthenticatedUser = NonNullable<TrpcContext["user"]>;
  * past the super-admin guard and past zod. Authorization is observed; nothing is
  * mutated.
  *
- * Above int range for any plausible seeded id, and asserted below to be absent.
+ * The value is chosen so no row CAN hold it, rather than so no row currently
+ * does. `organizations.id` is a MySQL signed INT — `int("id").autoincrement()`
+ * — whose maximum is 2,147,483,647, so 2,147,483,648 exceeds what the column is
+ * physically able to store. A `WHERE id = 2147483648` comparison is legal and
+ * simply matches nothing.
+ *
+ * That distinction is the point. The previous sentinel, 2_146_000_000, was
+ * merely implausible: had an organisation ever been created with that id, the
+ * existence guard would have accepted it and these tests would have written to
+ * a real tenant while the regression assertions stayed green. An earlier version
+ * of this comment claimed the value was "asserted below to be absent"; it was
+ * not, and an id that cannot exist needs no such assertion.
  */
-const ABSENT_ORG_ID = 2_146_000_000;
+const MYSQL_SIGNED_INT_MAX = 2_147_483_647;
+const ABSENT_ORG_ID = MYSQL_SIGNED_INT_MAX + 1;
+
+/**
+ * The tRPC error code from a thrown value, without reaching for `any`.
+ *
+ * CLAUDE.md §16 bans `any`, and reading `.code` off an untyped error is exactly
+ * the hole that ban exists to close: a renamed or absent property yields
+ * `undefined`, and `expect(undefined).not.toBe("FORBIDDEN")` passes — so the
+ * assertion silently stops testing anything. Returning a descriptive string for
+ * an unrecognised shape makes that failure visible instead.
+ */
+function errorCode(err: unknown): string {
+  return typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code: unknown }).code)
+    : `<no code: ${String(err)}>`;
+}
 
 /**
  * Assert a mutation got PAST authorization and validation without writing.
@@ -45,14 +72,28 @@ const ABSENT_ORG_ID = 2_146_000_000;
  * CI, red locally — which is its own kind of unreliable.
  */
 async function expectNoWriteButAuthorized(call: () => Promise<unknown>): Promise<void> {
+  // The success case is recorded and asserted OUTSIDE the try. Throwing from
+  // inside it would be caught by the very catch below, turning "the mutation
+  // unexpectedly succeeded" into a confusing assertion about an undefined error
+  // code — the loudest signal in this helper, swallowed by its own handler.
+  let refused: unknown;
+  let succeeded = false;
   try {
     await call();
-    throw new Error("expected the mutation to be refused for an absent organisation");
-  } catch (err: any) {
-    expect(err.code, `unexpected refusal: ${err.code} ${err.message}`).not.toBe("FORBIDDEN");
-    expect(err.code).not.toBe("BAD_REQUEST");
-    expect(["NOT_FOUND", "INTERNAL_SERVER_ERROR"]).toContain(err.code);
+    succeeded = true;
+  } catch (err) {
+    refused = err;
   }
+  expect(
+    succeeded,
+    "the mutation SUCCEEDED against an id that cannot exist — the guard is gone, " +
+      "and a test in this file may now be writing to a real organisation",
+  ).toBe(false);
+
+  const code = errorCode(refused);
+  expect(code, `unexpected refusal: ${code}`).not.toBe("FORBIDDEN");
+  expect(code).not.toBe("BAD_REQUEST");
+  expect(["NOT_FOUND", "INTERNAL_SERVER_ERROR"]).toContain(code);
 }
 
 function createCtxWithRole(role: AuthenticatedUser["role"]): TrpcContext {
@@ -132,9 +173,9 @@ describe("superAdmin.platformStats", () => {
       expect(result).toHaveProperty("totalOrgs");
       expect(result).toHaveProperty("totalUsers");
       expect(result).toHaveProperty("totalJobs");
-    } catch (err: any) {
+    } catch (err) {
       // Only INTERNAL_SERVER_ERROR is acceptable (DB not available in test env)
-      expect(err.code).not.toBe("FORBIDDEN");
+      expect(errorCode(err)).not.toBe("FORBIDDEN");
     }
   });
 });
@@ -171,8 +212,8 @@ describe("superAdmin.platformAnalytics", () => {
       expect(Array.isArray(result.orgGrowth)).toBe(true);
       expect(Array.isArray(result.jobTrend)).toBe(true);
       expect(Array.isArray(result.topOrgs)).toBe(true);
-    } catch (err: any) {
-      expect(err.code).not.toBe("FORBIDDEN");
+    } catch (err) {
+      expect(errorCode(err)).not.toBe("FORBIDDEN");
     }
   });
 });
@@ -201,8 +242,8 @@ describe("admin.users (adminProcedure)", () => {
     try {
       const result = await caller.admin.users();
       expect(Array.isArray(result)).toBe(true);
-    } catch (err: any) {
-      expect(err.code).not.toBe("FORBIDDEN");
+    } catch (err) {
+      expect(errorCode(err)).not.toBe("FORBIDDEN");
     }
   });
 
@@ -212,8 +253,8 @@ describe("admin.users (adminProcedure)", () => {
     try {
       const result = await caller.admin.users();
       expect(Array.isArray(result)).toBe(true);
-    } catch (err: any) {
-      expect(err.code).not.toBe("FORBIDDEN");
+    } catch (err) {
+      expect(errorCode(err)).not.toBe("FORBIDDEN");
     }
   });
 });
@@ -400,9 +441,23 @@ describe("this test file never aims a mutation at a real organisation", () => {
     ).toEqual([]);
   });
 
-  it("keeps the sentinel outside any plausible real id", () => {
-    expect(ABSENT_ORG_ID).toBeGreaterThan(1_000_000_000);
+  it("uses a sentinel the id column cannot physically hold", () => {
+    // Not "implausibly large" — impossible. organizations.id is a MySQL signed
+    // INT, so anything above 2,147,483,647 can never be stored, and the guard
+    // can never be handed a real row by accident.
     expect(Number.isInteger(ABSENT_ORG_ID)).toBe(true);
+    expect(ABSENT_ORG_ID).toBeGreaterThan(MYSQL_SIGNED_INT_MAX);
+    // Still positive, so zod admits it and the call reaches the guard rather
+    // than short-circuiting on BAD_REQUEST — which would pass vacuously.
+    expect(ABSENT_ORG_ID).toBeGreaterThan(0);
+  });
+
+  it("declares the id column as the INT the sentinel is chosen against", () => {
+    // If organizations.id ever widens to bigint, the sentinel stops being
+    // impossible and this assumption needs revisiting.
+    const SCHEMA = readFileSync(join(__dirname, "..", "drizzle", "schema.ts"), "utf8");
+    const orgTable = SCHEMA.slice(SCHEMA.indexOf("export const organizations = mysqlTable("));
+    expect(orgTable.slice(0, 200)).toMatch(/id: int\("id"\)\.autoincrement\(\)/);
   });
 
   it("relies on a guard that actually runs before the write", () => {
