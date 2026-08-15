@@ -868,7 +868,7 @@ export async function updateException(
  * oldest first — the input to the age/escalation tracker. Resolved/dismissed
  * items are excluded since they no longer age.
  */
-export async function getOpenExceptionsForAging(limit = 2000) {
+export async function getOpenExceptionsForAging(organizationId: number | null, limit = 2000) {
   const db = await getDb();
   if (!db) return [];
   return db
@@ -892,7 +892,10 @@ export async function getOpenExceptionsForAging(limit = 2000) {
     .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
     .leftJoin(reconciliationJobs, eq(exceptions.jobId, reconciliationJobs.id))
     .leftJoin(users, eq(exceptions.assignedTo, users.id))
-    .where(inArray(exceptions.status, ["open", "in_review", "escalated"]))
+    .where(and(
+      orgFilter(exceptions.organizationId, organizationId),
+      inArray(exceptions.status, ["open", "in_review", "escalated"]),
+    ))
     .orderBy(asc(exceptions.createdAt))
     .limit(limit);
 }

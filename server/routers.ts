@@ -466,12 +466,20 @@ export const appRouter = router({
         // Pre-warm hasn't run yet (e.g. very first cold start before DB is ready).
         // Fall back to creating a per-session guest and seeding in the background.
         const guestOpenId = 'guest_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+        // Fallback guests join the guest demo organisation rather than being
+        // created org-less. Org-less is a SHARED scope, not a private one —
+        // orgFilter(col, null) is `IS NULL`, so every org-less guest read every
+        // other one's seeded rows, and they collided on the same unsuffixed demo
+        // channel codes. See ensureGuestDemoOrganization.
+        const { ensureGuestDemoOrganization } = await import("./prewarmDemoUser");
+        const guestOrgId = await ensureGuestDemoOrganization();
         await db.upsertUser({
           openId: guestOpenId,
           name: 'Guest User',
           email: `guest_${Date.now()}@demo.reconcileai.com`,
           role: 'user',
           isGuest: true,
+          organizationId: guestOrgId,
         });
         const fallbackUser = await db.getUserByOpenId(guestOpenId);
         if (!fallbackUser) {
@@ -479,9 +487,24 @@ export const appRouter = router({
         }
         setImmediate(async () => {
           try {
-            await seedDemoData(fallbackUser.id, fallbackUser.organizationId ?? null);
-            const { seedFinServDemoData } = await import("./demoSeedFinServ");
-            await seedFinServDemoData(fallbackUser.id, fallbackUser.organizationId ?? null, "both");
+            // Seed ONCE per demo tenant, not once per guest — and once even if
+            // several cold-start logins race.
+            //
+            // Every fallback guest joins the same demo organisation, which is the
+            // documented intent ("all guests share the same read-only view of
+            // that pre-seeded dataset") and is safe because guests cannot write:
+            // guestProtectedProcedure and operationsProcedure both refuse them,
+            // and demo.activate is super-admin only.
+            //
+            // What is NOT safe is seeding per guest into that shared tenant.
+            // seedFinServDemoData wipes by userId, so a second guest's seed does
+            // not replace the first — it ADDS a full dataset, doubling every
+            // figure the demo shows. An inline `if (empty) seed()` was still
+            // check-then-act and lost that race at cold start, which is exactly
+            // when simultaneous guests are most likely. ensureGuestDemoSeeded
+            // collapses concurrent callers onto one in-flight seed.
+            const { ensureGuestDemoSeeded } = await import("./prewarmDemoUser");
+            await ensureGuestDemoSeeded(fallbackUser.id, fallbackUser.organizationId ?? null);
             console.log(`[guestLogin] Fallback background seed complete for guest user ${fallbackUser.id}`);
           } catch (seedErr) {
             console.error("[guestLogin] Fallback background seed failed:", seedErr);
@@ -821,7 +844,7 @@ export const appRouter = router({
       const orgId = ctx.user.organizationId ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging();
+      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
       const now = new Date();
       const items = rows.map((r) => ({
         ageDays: ageTracker.ageDays(r.createdAt, now),
@@ -837,7 +860,7 @@ export const appRouter = router({
         const orgId = ctx.user.organizationId ?? 0;
         const settings = orgId ? await db.getAgingSettings(orgId) : null;
         const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-        const rows = await db.getOpenExceptionsForAging();
+        const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
         const now = new Date();
         let items = rows.map((r) => {
           const age = ageTracker.ageDays(r.createdAt, now);
@@ -897,7 +920,7 @@ export const appRouter = router({
       const orgId = ctx.user.organizationId ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging();
+      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
       const now = new Date();
       const overAged = rows.filter(
         (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
@@ -4648,12 +4671,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
     // prewarmDemoUser at deploy time and by the guest-login path in auth, never
     // by this procedure. `status` below stays open because guests poll it and it
     // only reads.
-     activate: superAdminProcedure
+    activate: superAdminProcedure
       .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
       .mutation(async ({ ctx, input }) => {
         if (input.segment === "finserv") {
           const { seedFinServDemoData } = await import("./demoSeedFinServ");
           const result = await seedFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null, "both");
+          const { ip, ua } = getClientInfo(ctx);
+          await logAudit(ctx.user.id, "activate_finserv_operational_demo", "reconciliation_job", result.jobId, {
+            segment: "finserv",
+            transactionLegs: result.totalTransactions,
+            matchedPairs: result.matchedCount,
+            exceptionCases: result.exceptionCount,
+            reviewQueueOpenToday: result.reviewQueueOpenToday,
+          }, ip, ua);
           return { success: true, ...result };
         }
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
@@ -4662,6 +4693,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
     deactivate: superAdminProcedure
       .mutation(async ({ ctx }) => {
         await wipeDemoData(ctx.user.id, ctx.user.organizationId ?? null);
+        const { wipeFinServDemoData } = await import("./demoSeedFinServ");
+        await wipeFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null);
         return { success: true };
       }),
     // Mints a 7-day token granting access to the creating org's data. Part of the
