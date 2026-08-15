@@ -223,18 +223,21 @@ export async function prewarmDemoUser(): Promise<void> {
     }
 
     // ── 3. Seed FMCG + FinServ data ────────────────────────────────────
+    //
+    // Through the SAME helper the guest fallback uses, not directly.
+    //
+    // `_prewarmInProgress` and `_guestSeedInFlight` are two locks, and they were
+    // guarding one shared organisation. A guest arriving after boot but before
+    // prewarm inserted its first job would find the tenant empty, take the other
+    // lock, and seed a second complete dataset — neither lock ever seeing the
+    // other. Two locks over one resource is not mutual exclusion.
+    //
+    // One lock, entered from both paths, with the emptiness re-check inside it.
     console.log(
       `[Prewarm] Seeding FMCG + FinServ demo data for shared user id=${demoUser.id}…`
     );
 
-    await seedDemoData(demoUser.id, demoUser.organizationId ?? null);
-
-    const { seedFinServDemoData } = await import("./demoSeedFinServ");
-    await seedFinServDemoData(
-      demoUser.id,
-      demoUser.organizationId ?? null,
-      "both"
-    );
+    await ensureGuestDemoSeeded(demoUser.id, demoUser.organizationId ?? null);
 
     _prewarmComplete = true;
     console.log("[Prewarm] ✓ Shared demo user pre-warm complete");

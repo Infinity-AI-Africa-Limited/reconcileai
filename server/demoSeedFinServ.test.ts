@@ -155,4 +155,24 @@ describe("guest fallback seeds the shared demo tenant only once", () => {
     const fn = PREWARM.slice(PREWARM.indexOf("export async function ensureGuestDemoSeeded("));
     expect(fn.slice(0, 2400)).toMatch(/finally \{[\s\S]*_guestSeedInFlight = null;/);
   });
+
+  it("routes the PREWARM path through the same lock, not a second one", () => {
+    // `_prewarmInProgress` and `_guestSeedInFlight` were two locks guarding one
+    // shared organisation. A guest arriving after boot but before prewarm
+    // inserted its first job found the tenant empty, took the other lock, and
+    // seeded a second complete dataset — neither lock ever seeing the other.
+    // Two locks over one resource is not mutual exclusion.
+    const prewarmFn = PREWARM.slice(PREWARM.indexOf("export async function prewarmDemoUser("));
+    expect(prewarmFn).toMatch(/await ensureGuestDemoSeeded\(demoUser\.id/);
+    // Prewarm must not reach the seeders directly, or it bypasses the lock.
+    expect(prewarmFn, "prewarm must not call seedDemoData directly").not.toMatch(/await seedDemoData\(demoUser/);
+    expect(prewarmFn).not.toMatch(/await seedFinServDemoData\(/);
+  });
+
+  it("has exactly one place that calls the seeders", () => {
+    // The invariant behind the two-lock bug: if a second call site appears, it
+    // is by definition outside the lock.
+    const callers = [...PREWARM.matchAll(/await seedDemoData\(/g)].length;
+    expect(callers, "seedDemoData should be called only from inside ensureGuestDemoSeeded").toBe(1);
+  });
 });
