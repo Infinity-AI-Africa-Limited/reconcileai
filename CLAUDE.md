@@ -1422,6 +1422,62 @@ Before merging any `manus/*` branch, verify:
 | **Secrets** | No hardcoded API keys, tokens, or credentials in any file |
 | **Router size** | If `server/routers.ts` grew, check if it should be split into `server/routers/<feature>.ts` |
 
+### Handling Greptile Reviews (applies to EVERY PR, not just `manus/*`)
+
+**Work Greptile's findings to green, proactively.** Do not wait to be handed
+each comment one at a time. When a review lands on a PR — yours or anyone's —
+read every finding, fix what is valid, and keep going until the review status is
+green. A finding that is stale or wrong is *answered on the thread with
+evidence*, not silently skipped; "not valid" is a conclusion that has to be
+shown, and the PR should never be left sitting on an unaddressed review.
+
+**Read the T-Rex Logs and the accompanying artifacts too, not just the summary
+comment.** The inline findings are the headline; the logs and artifacts carry the
+reasoning and the evidence behind them, and they routinely contain detail the
+summary drops. Reviewing only the comment means acting on a conclusion without
+its argument — which is how a stale or misattributed finding gets "fixed" twice,
+or a real one gets waved away.
+
+> ⚠️ **Known access gap (2026-08-11).** T-Rex Logs are not reachable from the
+> GitHub REST API. The `Greptile Review` check exposes only a pass/fail
+> conclusion and a `details_url` of `https://greptile.com/`; there are no inline
+> comments, artifacts, or log links in the API payload, and nothing in this repo
+> references T-Rex. They live in the Greptile dashboard (app.greptile.com). So
+> **ask the owner to paste them, or for the dashboard link**, rather than
+> reporting the review as fully examined from GitHub alone. Say plainly which
+> parts were read and which were not.
+
+**Before concluding a finding is already fixed, verify against the PR head** —
+the working tree is shared and branch heads move. Check that the fixing commit is
+an ancestor of the current head, and that nothing has touched the file since.
+Findings arrive anchored to `original_commit_id`, so GitHub re-renders them
+against the latest commit and a fixed issue can look live indefinitely.
+
+**Check that the review is a review.** Greptile posts a `COMMENTED` review even
+when it has nothing to say — including a trial-credit-limit notice, which is what
+PR #68 received twice while appearing to have been reviewed. A review body
+matching `/credit limit|upgrade your plan/i` means **no review happened**; report
+that rather than treating the PR as reviewed.
+
+**Review is not approval, and a green review does not unblock a merge.** Greptile
+submits `COMMENTED`; GitHub counts only `APPROVED` toward branch protection. As
+of 2026-08-11 `origin/main` requires **1 approving review** plus the **`Tests`**
+check, with **`enforce_admins: true`** and no bypass allowances — so there is no
+break-glass path, for anyone. PRs opened with the owner's credential are authored
+by `MistaRichMan`, and GitHub forbids approving your own PR.
+
+The practical consequence: **prepare the PR, drive CI and the review to green,
+then hand off.** Do not plan on merging. `PUT /pulls/{n}/merge` returns 405
+*"At least 1 approving review is required"*.
+
+Re-derive these settings rather than trusting the numbers above, which change
+without notice. There is no `gh` CLI here, so borrow the credential Git already
+holds:
+
+```bash
+tok=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -n 's/^password=//p'); curl -s -H "Authorization: token $tok" https://api.github.com/repos/Infinity-AI-Africa-Limited/reconcileai/branches/main/protection
+```
+
 ### GitHub Remotes
 
 | Remote name | Repository | Notes |
