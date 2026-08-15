@@ -104,3 +104,39 @@ describe("guest demo accounts belong to a real organisation", () => {
     expect(SEED).toMatch(/_ORG\$\{organizationId\}/);
   });
 });
+
+// ─── The shared demo tenant is seeded once, not once per guest ───────────────
+//
+// Every fallback guest joins the same demo organisation, which is the
+// documented intent — "all guests share the same read-only view of that
+// pre-seeded dataset" — and is safe because guests cannot write:
+// guestProtectedProcedure and operationsProcedure both refuse them, and
+// demo.activate is super-admin only.
+//
+// What is not safe is seeding per guest INTO that shared tenant.
+// seedFinServDemoData wipes by userId, so a second guest's seed does not
+// replace the first — it adds another full dataset. Two cold-start guests would
+// double every transaction and exception the demo shows.
+describe("guest fallback seeds the shared demo tenant only once", () => {
+  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8");
+  const fallback = ROUTERS.slice(
+    ROUTERS.indexOf("const guestOpenId = 'guest_'"),
+    ROUTERS.indexOf("const { sdk } = await import"),
+  );
+
+  it("checks for existing data before seeding", () => {
+    expect(fallback).toMatch(/getReconciliationJobs\(fallbackUser\.organizationId/);
+    expect(fallback).toMatch(/alreadySeeded\.length > 0/);
+  });
+
+  it("returns without seeding when the tenant already has data", () => {
+    const guard = fallback.slice(fallback.indexOf("alreadySeeded.length > 0"));
+    // The early return has to come BEFORE either seeder, or the guard is decoration.
+    expect(guard.indexOf("return;")).toBeLessThan(guard.indexOf("seedDemoData("));
+  });
+
+  it("still seeds when the tenant is empty", () => {
+    expect(fallback).toMatch(/await seedDemoData\(fallbackUser\.id/);
+    expect(fallback).toMatch(/await seedFinServDemoData\(fallbackUser\.id/);
+  });
+});

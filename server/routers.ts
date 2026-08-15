@@ -487,6 +487,24 @@ export const appRouter = router({
         }
         setImmediate(async () => {
           try {
+            // Seed ONCE per demo tenant, not once per guest.
+            //
+            // Every fallback guest joins the same demo organisation — which is
+            // the documented intent ("all guests share the same read-only view
+            // of that pre-seeded dataset") and is safe because guests cannot
+            // write: guestProtectedProcedure and operationsProcedure both refuse
+            // them, and demo.activate is super-admin only.
+            //
+            // What is NOT safe is seeding per guest into that shared tenant.
+            // seedFinServDemoData wipes by userId, so guest B's seed does not
+            // replace guest A's — it ADDS a second full dataset. Two cold-start
+            // guests would double every transaction and exception the demo
+            // shows, three would triple it. Skip when the tenant already has data.
+            const alreadySeeded = await db.getReconciliationJobs(fallbackUser.organizationId ?? null);
+            if (alreadySeeded.length > 0) {
+              console.log(`[guestLogin] Demo tenant already seeded — reusing it for guest ${fallbackUser.id}`);
+              return;
+            }
             await seedDemoData(fallbackUser.id, fallbackUser.organizationId ?? null);
             const { seedFinServDemoData } = await import("./demoSeedFinServ");
             await seedFinServDemoData(fallbackUser.id, fallbackUser.organizationId ?? null, "both");
