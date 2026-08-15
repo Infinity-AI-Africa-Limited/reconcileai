@@ -13,11 +13,61 @@
  */
 
 import { getDb } from "./db";
-import { users } from "../drizzle/schema";
+import { organizations, users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { seedDemoData } from "./demoSeedEngine";
 
 export const DEMO_PREWARM_OPEN_ID = "demo_prewarm_shared_user_v1";
+/** Stable code for the organisation every guest-demo account belongs to. */
+export const GUEST_DEMO_ORG_CODE = "RECONCILEAI_GUEST_DEMO";
+
+/**
+ * The organisation guest-demo accounts belong to, created on first use.
+ *
+ * Guests previously had NO organisation, and everything the demo seeded for
+ * them — jobs, transactions, matches, exceptions, batches, channels — was
+ * written with `organizationId = null`. Org-less is not "private": it is a
+ * SHARED scope. `orgFilter(col, null)` resolves to `IS NULL`, so every org-less
+ * account reads every other org-less account's rows, the eight demo rails
+ * collapsed onto one unsuffixed set of channel codes shared between them, and
+ * the 22 real accounts that happen to have no organisation would have seen the
+ * guest demo data too.
+ *
+ * Giving the demo path a real tenant fixes all of that at the root rather than
+ * patching each read. It also restores agent memory for guests, which had to be
+ * skipped while there was no tenant that could read it back.
+ *
+ * Flagged `isDemo`, so the SLA monitor and anything else that must not treat
+ * fabricated data as real skips it automatically.
+ */
+export async function ensureGuestDemoOrganization(): Promise<number | null> {
+  const db = await getDb();
+  if (!db) return null;
+
+  const [existing] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.code, GUEST_DEMO_ORG_CODE))
+    .limit(1);
+  if (existing) return existing.id;
+
+  await db.insert(organizations).values({
+    name: "ReconcileAI Guest Demo",
+    code: GUEST_DEMO_ORG_CODE,
+    // Guests are shown both the FMCG and the financial-services datasets, so no
+    // single vertical is honest here. financial_services is the closer fit for
+    // what a guest is most likely to be evaluating, and isDemo keeps it out of
+    // anything that reasons about real tenants.
+    segment: "financial_services",
+    isDemo: true,
+  });
+  const [created] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.code, GUEST_DEMO_ORG_CODE))
+    .limit(1);
+  return created?.id ?? null;
+}
 
 let _prewarmComplete = false;
 let _prewarmUserId: number | null = null;
@@ -51,6 +101,9 @@ export async function prewarmDemoUser(): Promise<void> {
       return;
     }
 
+    // ── 0. The tenant the demo data belongs to ─────────────────────────
+    const guestOrgId = await ensureGuestDemoOrganization();
+
     // ── 1. Ensure the shared demo user row exists ──────────────────────
     const existing = await db
       .select()
@@ -68,6 +121,7 @@ export async function prewarmDemoUser(): Promise<void> {
         email: "demo@reconcileai.internal",
         role: "user",
         isGuest: true,
+        organizationId: guestOrgId,
         lastSignedIn: new Date(),
       });
       const created = await db
@@ -81,6 +135,15 @@ export async function prewarmDemoUser(): Promise<void> {
     if (!demoUser) {
       console.error("[Prewarm] Failed to create shared demo user");
       return;
+    }
+
+    // Adopt the demo organisation on an EXISTING shared user too. The account is
+    // long-lived and predates this change, so without the backfill the deployed
+    // prewarm user would keep seeding into the org-less shared scope forever.
+    if (!demoUser.organizationId && guestOrgId) {
+      await db.update(users).set({ organizationId: guestOrgId }).where(eq(users.id, demoUser.id));
+      demoUser = { ...demoUser, organizationId: guestOrgId };
+      console.log(`[Prewarm] Adopted guest demo organisation ${guestOrgId} for shared demo user`);
     }
 
     _prewarmUserId = demoUser.id;

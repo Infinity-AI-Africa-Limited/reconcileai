@@ -466,12 +466,20 @@ export const appRouter = router({
         // Pre-warm hasn't run yet (e.g. very first cold start before DB is ready).
         // Fall back to creating a per-session guest and seeding in the background.
         const guestOpenId = 'guest_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+        // Fallback guests join the guest demo organisation rather than being
+        // created org-less. Org-less is a SHARED scope, not a private one —
+        // orgFilter(col, null) is `IS NULL`, so every org-less guest read every
+        // other one's seeded rows, and they collided on the same unsuffixed demo
+        // channel codes. See ensureGuestDemoOrganization.
+        const { ensureGuestDemoOrganization } = await import("./prewarmDemoUser");
+        const guestOrgId = await ensureGuestDemoOrganization();
         await db.upsertUser({
           openId: guestOpenId,
           name: 'Guest User',
           email: `guest_${Date.now()}@demo.reconcileai.com`,
           role: 'user',
           isGuest: true,
+          organizationId: guestOrgId,
         });
         const fallbackUser = await db.getUserByOpenId(guestOpenId);
         if (!fallbackUser) {
