@@ -43,6 +43,17 @@ type ExceptionCategory =
   | "format_error";
 
 const DEMO_MARKER = "finserv-operational-demo-v1";
+
+/**
+ * The organisation id earlier seeders used when the caller had none.
+ *
+ * Zero is not a tenant and never was — no `organizations` row has it. Rows
+ * written under it are invisible to every org-scoped read and shared by every
+ * org-less caller, which is the same defect as the 14 unreachable distributor
+ * rows in CLAUDE.md §19.2. Nothing writes it any more; this constant exists so
+ * cleanup can still find what was written before.
+ */
+const LEGACY_PSEUDO_TENANT_ID = 0;
 const MATCHED_PAIRS = 304;
 const EXCEPTION_CASES = 16;
 const SETTLEMENT_ITEMS = MATCHED_PAIRS + EXCEPTION_CASES;
@@ -852,12 +863,23 @@ export async function wipeFinServDemoData(userId: number, organizationId: number
     : [];
   const exceptionIds = exceptionRows.map((row) => row.id);
   if (exceptionIds.length) {
-    // orgFilter, not a bare eq: this function still accepts a null organisation
-    // (a wipe should be able to clean up whatever a previous seed left behind),
-    // and `agentMemory.organizationId` is NOT NULL, so a bare eq would not
-    // type-check against a nullable value. orgFilter resolves null to IS NULL,
-    // which matches nothing here and is the safe outcome for a delete.
-    await db.delete(agentMemory).where(and(orgFilter(agentMemory.organizationId, organizationId), inArray(agentMemory.exceptionId, exceptionIds)));
+    // A wipe must reach the rows an EARLIER seed wrote, not just the rows this
+    // version would write.
+    //
+    // `agentMemory.organizationId` is NOT NULL, so orgFilter's null branch
+    // (IS NULL) matches nothing and an org-less deactivation cleaned up
+    // nothing — leaving the pseudo-tenant rows the previous `?? 0` code created
+    // behind forever. Production carries 55 of them today. They are not inert:
+    // eight read paths in routers.ts normalise a missing organisation with
+    // `?? 0`, so every org-less guest sees the accumulated pool.
+    //
+    // So an org-less caller targets the legacy pseudo-tenant explicitly. The
+    // `exceptionId` predicate below still confines the delete to the exceptions
+    // this seed owns, which is what keeps it from reaching anything else.
+    await db.delete(agentMemory).where(and(
+      eq(agentMemory.organizationId, organizationId ?? LEGACY_PSEUDO_TENANT_ID),
+      inArray(agentMemory.exceptionId, exceptionIds),
+    ));
     await db.delete(exceptions).where(inArray(exceptions.id, exceptionIds));
   }
   if (jobIds.length) {

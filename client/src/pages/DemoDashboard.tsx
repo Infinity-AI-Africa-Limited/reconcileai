@@ -491,6 +491,26 @@ function printDemoReport(segment: "fmcg" | "finserv") {
     <h2>ROI Summary</h2>
     <p>At 1,000 transactions per reconciliation cycle, ReconcileAI reduces manual reconciliation from 4 finance officers to 1, saving 18.5 hours per cycle. The 95% auto-match rate eliminates ₦600M in annual unreconciled payment risk.</p>
   `;
+  /**
+   * Case narratives are DERIVED from the same array the page renders, not
+   * retyped alongside it.
+   *
+   * The previous report named "Chukwuemeka Obi" and "Amina Yusuf" with mandate
+   * #DD-2847, ₦45,000 and ₦12,500 — customers, references and amounts from a
+   * dataset that no longer exists. Rewriting the summary figures without
+   * rewriting these left a report whose totals described one dataset and whose
+   * narratives described another, which is a worse artefact than either alone.
+   *
+   * Generating them from FINSERV_EXCEPTIONS means a future change to the cases
+   * cannot leave the printed report behind. The FS-DEMO ids and "Demo Customer"
+   * counterparties are deliberately, visibly fictional.
+   */
+  const finservNarratives = FINSERV_EXCEPTIONS.map(
+    (ex) =>
+      `<p><strong>${ex.type} — ${ex.category} (${ex.severity}, ${ex.status.replace("_", " ")}):</strong> ` +
+      `${ex.description}. ${ex.plainLanguage} <em>Recommendation:</em> ${ex.recommendation}</p>`,
+  ).join("\n    ");
+
   // Every figure below is READ FROM the seeded dataset this page renders.
   //
   // The previous version of this report claimed 3,000,000 transactions a month,
@@ -525,9 +545,8 @@ function printDemoReport(segment: "fmcg" | "finserv") {
       <tr><td>Card Scheme Settlement</td><td>In scope</td></tr>
       <tr><td>Agent Banking Collection</td><td>In scope</td></tr>
     </table>
-    <h2>Exception Narratives (Sample)</h2>
-    <p><strong>Failed Direct Debit — Chukwuemeka Obi:</strong> Mandate #DD-2847 failed with code R01 (insufficient funds). Loan repayment of ₦45,000 not collected. Recommendation: retry in 3 days, flag account for collections review.</p>
-    <p><strong>USSD Timeout — Amina Yusuf:</strong> Customer initiated ₦12,500 transfer via USSD but session timed out. Debit posted but credit not confirmed. Recommendation: check interbank settlement report, reverse debit if credit not confirmed within 24 hours.</p>
+    <h2>Control Cases (from this dataset)</h2>
+    ${finservNarratives}
     <h2>What this demonstrates</h2>
     <p>Eight control feeds are reconciled against the core banking ledger in a single run, with unmatched items classified by cause and routed to a review queue with an ageing clock. The institution keeps the accounting judgement; the platform supplies the evidence and the exception, and records who resolved it and why.</p>
     <p>Volumes, staffing effects and settlement values for a specific institution depend on its own transaction profile and operating model, and are established during a scoped pilot rather than asserted here.</p>
