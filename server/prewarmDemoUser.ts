@@ -87,6 +87,63 @@ export function getPrewarmOrgId(): number | null {
 }
 
 /**
+ * Seed the shared guest demo tenant, at most once, however many callers race.
+ *
+ * A plain `if (empty) seed()` is check-then-act, and the fallback path runs
+ * precisely at COLD START — the one moment several guests are most likely to
+ * arrive together, because a demo link has just been shared. Both callbacks read
+ * an empty tenant, both seed, and since each seed wipes only its OWN userId the
+ * tenant keeps both copies. Every figure in the demo doubles.
+ *
+ * Concurrent callers are collapsed onto one in-flight promise, and the emptiness
+ * check is re-run inside it so a caller that queued behind a completed seed does
+ * not seed again. Same shape as `_prewarmInProgress` below, which exists for
+ * exactly this reason.
+ *
+ * ⚠️ PER-PROCESS. Two Railway instances cold-starting together could still each
+ * seed once. That is the same limitation the SHOPLINE realtime debounce carries
+ * (CLAUDE.md §2B.7) and it has the same answer — a shared lock once REDIS_URL is
+ * provisioned. Acceptable today because the platform runs a single instance, and
+ * the failure mode is duplicated DEMO data rather than anything a tenant owns.
+ */
+let _guestSeedInFlight: Promise<void> | null = null;
+
+export async function ensureGuestDemoSeeded(userId: number, organizationId: number | null): Promise<void> {
+  if (_guestSeedInFlight) {
+    await _guestSeedInFlight;
+    return;
+  }
+  _guestSeedInFlight = (async () => {
+    const db = await getDb();
+    if (!db) return;
+    const { reconciliationJobs } = await import("../drizzle/schema");
+    const { orgFilter } = await import("./db");
+    // Re-checked INSIDE the critical section. A caller that arrived while the
+    // first seed was running would otherwise proceed on a stale reading.
+    const existing = await db
+      .select({ id: reconciliationJobs.id })
+      .from(reconciliationJobs)
+      .where(orgFilter(reconciliationJobs.organizationId, organizationId))
+      .limit(1);
+    if (existing.length > 0) {
+      console.log("[guest-demo] Tenant already seeded — reusing it");
+      return;
+    }
+    await seedDemoData(userId, organizationId);
+    const { seedFinServDemoData } = await import("./demoSeedFinServ");
+    await seedFinServDemoData(userId, organizationId, "both");
+    console.log(`[guest-demo] Seeded shared demo tenant ${organizationId} via user ${userId}`);
+  })();
+
+  try {
+    await _guestSeedInFlight;
+  } finally {
+    // Cleared so a later deactivation can be followed by a fresh seed.
+    _guestSeedInFlight = null;
+  }
+}
+
+/**
  * Ensure the shared demo user exists and has seeded data.
  * Safe to call multiple times — idempotent after first success.
  */

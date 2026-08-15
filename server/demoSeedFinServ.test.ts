@@ -124,19 +124,35 @@ describe("guest fallback seeds the shared demo tenant only once", () => {
     ROUTERS.indexOf("const { sdk } = await import"),
   );
 
-  it("checks for existing data before seeding", () => {
-    expect(fallback).toMatch(/getReconciliationJobs\(fallbackUser\.organizationId/);
-    expect(fallback).toMatch(/alreadySeeded\.length > 0/);
+  const PREWARM = readFileSync(join(__dirname, "prewarmDemoUser.ts"), "utf8");
+
+  it("delegates seeding to the serialised helper", () => {
+    // The fallback must not seed inline. An inline `if (empty) seed()` is
+    // check-then-act: two cold-start logins both read an empty tenant, both
+    // seed, and because each seed wipes only its own userId the tenant keeps
+    // BOTH datasets — doubling every figure the demo shows.
+    expect(fallback).toMatch(/ensureGuestDemoSeeded\(fallbackUser\.id/);
+    expect(fallback, "the fallback must not call the seeders directly").not.toMatch(/await seedDemoData\(/);
+    expect(fallback).not.toMatch(/await seedFinServDemoData\(/);
   });
 
-  it("returns without seeding when the tenant already has data", () => {
-    const guard = fallback.slice(fallback.indexOf("alreadySeeded.length > 0"));
-    // The early return has to come BEFORE either seeder, or the guard is decoration.
-    expect(guard.indexOf("return;")).toBeLessThan(guard.indexOf("seedDemoData("));
+  it("collapses concurrent callers onto one in-flight seed", () => {
+    expect(PREWARM).toMatch(/let _guestSeedInFlight: Promise<void> \| null/);
+    const fn = PREWARM.slice(PREWARM.indexOf("export async function ensureGuestDemoSeeded("));
+    expect(fn.slice(0, 400)).toMatch(/if \(_guestSeedInFlight\) \{/);
   });
 
-  it("still seeds when the tenant is empty", () => {
-    expect(fallback).toMatch(/await seedDemoData\(fallbackUser\.id/);
-    expect(fallback).toMatch(/await seedFinServDemoData\(fallbackUser\.id/);
+  it("re-checks emptiness INSIDE the critical section", () => {
+    // Checking only before taking the lock would let a caller that queued
+    // behind a completed seed proceed on a stale reading.
+    const fn = PREWARM.slice(PREWARM.indexOf("export async function ensureGuestDemoSeeded("));
+    const body = fn.slice(0, 2000);
+    expect(body.indexOf("_guestSeedInFlight = (async () =>")).toBeLessThan(body.indexOf("existing.length > 0"));
+    expect(body.indexOf("existing.length > 0")).toBeLessThan(body.indexOf("await seedDemoData("));
+  });
+
+  it("clears the in-flight handle so a later reseed can run", () => {
+    const fn = PREWARM.slice(PREWARM.indexOf("export async function ensureGuestDemoSeeded("));
+    expect(fn.slice(0, 2400)).toMatch(/finally \{[\s\S]*_guestSeedInFlight = null;/);
   });
 });

@@ -487,27 +487,24 @@ export const appRouter = router({
         }
         setImmediate(async () => {
           try {
-            // Seed ONCE per demo tenant, not once per guest.
+            // Seed ONCE per demo tenant, not once per guest — and once even if
+            // several cold-start logins race.
             //
-            // Every fallback guest joins the same demo organisation — which is
-            // the documented intent ("all guests share the same read-only view
-            // of that pre-seeded dataset") and is safe because guests cannot
-            // write: guestProtectedProcedure and operationsProcedure both refuse
-            // them, and demo.activate is super-admin only.
+            // Every fallback guest joins the same demo organisation, which is the
+            // documented intent ("all guests share the same read-only view of
+            // that pre-seeded dataset") and is safe because guests cannot write:
+            // guestProtectedProcedure and operationsProcedure both refuse them,
+            // and demo.activate is super-admin only.
             //
             // What is NOT safe is seeding per guest into that shared tenant.
-            // seedFinServDemoData wipes by userId, so guest B's seed does not
-            // replace guest A's — it ADDS a second full dataset. Two cold-start
-            // guests would double every transaction and exception the demo
-            // shows, three would triple it. Skip when the tenant already has data.
-            const alreadySeeded = await db.getReconciliationJobs(fallbackUser.organizationId ?? null);
-            if (alreadySeeded.length > 0) {
-              console.log(`[guestLogin] Demo tenant already seeded — reusing it for guest ${fallbackUser.id}`);
-              return;
-            }
-            await seedDemoData(fallbackUser.id, fallbackUser.organizationId ?? null);
-            const { seedFinServDemoData } = await import("./demoSeedFinServ");
-            await seedFinServDemoData(fallbackUser.id, fallbackUser.organizationId ?? null, "both");
+            // seedFinServDemoData wipes by userId, so a second guest's seed does
+            // not replace the first — it ADDS a full dataset, doubling every
+            // figure the demo shows. An inline `if (empty) seed()` was still
+            // check-then-act and lost that race at cold start, which is exactly
+            // when simultaneous guests are most likely. ensureGuestDemoSeeded
+            // collapses concurrent callers onto one in-flight seed.
+            const { ensureGuestDemoSeeded } = await import("./prewarmDemoUser");
+            await ensureGuestDemoSeeded(fallbackUser.id, fallbackUser.organizationId ?? null);
             console.log(`[guestLogin] Fallback background seed complete for guest user ${fallbackUser.id}`);
           } catch (seedErr) {
             console.error("[guestLogin] Fallback background seed failed:", seedErr);
