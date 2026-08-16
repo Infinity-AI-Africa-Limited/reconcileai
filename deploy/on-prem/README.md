@@ -97,13 +97,35 @@ finality.
 For a CPU-only bank deployment, set `OLLAMA_MODEL_MODE=import` and
 `RECON_MODEL=reconcileai` in `.env.onprem`, place the verified
 `reconcileai-recon-3b-q4_k_m.gguf` artifact and its `SHA256SUMS` manifest under
-`deploy/on-prem/models/`, and use the supplied Modelfile. Before shipping the
+`deploy/on-prem/models/`, together with the supplied `models/Modelfile`. Before shipping the
 package, independently compare the manifest digest with the signed release record.
-The CPU bootstrap runs `sha256sum --check --status SHA256SUMS` before `ollama
+The CPU bootstrap runs `sha256sum -c SHA256SUMS >/dev/null` before `ollama
 create`; it refuses the import when the artifact does not match the shipped manifest.
 The import runs inside the private network and does not call the internet. A
 stock-model pull is retained solely for development or controlled demonstrations
 before the deployment is air-gapped.
+
+### Private evidence and report storage
+
+The CPU profile includes an internal-only MinIO service and a one-shot
+`storage-init` service. The bootstrap creates the configured `AWS_S3_BUCKET`
+idempotently before ReconcileAI starts. MinIO has no host port, and the
+application uses `http://minio:9000` only on the internal Docker network.
+
+### Local dashboard access boundary
+
+The CPU profile publishes only the `gateway` service to
+`127.0.0.1:3000` by default. Nginx forwards that loopback-only endpoint to the
+internal app network. The app, MySQL, Ollama, and MinIO have no host-published
+service port. For an institution-managed TLS or LAN endpoint, retain the local
+gateway binding and place the bank-approved reverse proxy in front of it.
+
+Set unique `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values in `.env.onprem`.
+The application receives these as S3-compatible credentials; do not set external
+cloud storage credentials in this profile. A bank that operates an approved
+internal S3-compatible service can replace the MinIO service only after matching
+the same private-network, bucket-bootstrap, access-control, backup, and recovery
+evidence.
 
 ---
 

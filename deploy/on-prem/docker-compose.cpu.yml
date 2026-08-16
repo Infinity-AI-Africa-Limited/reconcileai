@@ -3,14 +3,11 @@
 #
 #   app  ──http──►  ollama (serves a small quantized model on CPU)
 #   app  ──sql───►  db (MySQL)
+#   app  ──s3 ───►  minio (private evidence and report storage)
 #
-# Everything runs on the institution's hardware. The Ollama API is never exposed
-# on a host port; it is reachable only by the app on the private Docker network.
+# Everything runs on the institution's hardware. Service APIs are never exposed
+# on host ports; they are reachable only by the app on the private Docker network.
 # DEPLOYMENT_MODE=on_premise makes the egress guard block outbound internet calls.
-#
-# Run:
-#   cp .env.onprem.example .env.onprem   # then edit secrets
-#   docker compose -f docker-compose.cpu.yml --env-file .env.onprem up -d --build
 # ─────────────────────────────────────────────────────────────────────────────
 name: reconcileai-onprem-cpu
 
@@ -30,12 +27,49 @@ services:
       retries: 12
     networks: [bank-internal]
 
+  # Private S3-compatible storage for uploaded evidence and generated reports.
+  # It has no host port; institutions can replace it with an approved internal
+  # S3 service only after supplying equivalent private-network evidence.
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [bank-internal]
+
+  # Create the app bucket idempotently before ReconcileAI receives traffic.
+  storage-init:
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${AWS_S3_BUCKET}"
+    networks: [bank-internal]
+    restart: "no"
+
   ollama:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
-      - ./ollama/Modelfile:/models/Modelfile:ro
       - ./models:/models:ro
     networks: [bank-internal]
     healthcheck:
@@ -54,6 +88,8 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - ./models:/models:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -61,7 +97,7 @@ services:
         if [ "${OLLAMA_MODEL_MODE:-pull}" = "import" ]; then
           test -f /models/reconcileai-recon-3b-q4_k_m.gguf
           test -f /models/SHA256SUMS
-          (cd /models && sha256sum --check --status SHA256SUMS)
+          (cd /models && sha256sum -c SHA256SUMS >/dev/null)
           ollama create "${RECON_MODEL:?Set RECON_MODEL to reconcileai for imported model}" -f /models/Modelfile
           echo "checksum-verified local model imported: ${RECON_MODEL}"
         else
@@ -80,32 +116,60 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     env_file: .env.onprem
     environment:
       # ── Residency: lock the box down ──
       DEPLOYMENT_MODE: on_premise
-      # `ollama` is an in-stack host — permit it past the egress guard.
-      EGRESS_ALLOWLIST: ollama
+      # In-stack hosts are permitted past the egress guard only by service name.
+      EGRESS_ALLOWLIST: ollama,minio
       # ── Database (bundled MySQL) ──
       DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
       # ── LLM: local, OpenAI-compatible (Ollama) ──
-      DIRECT_LLM_API_KEY: local                       # non-empty placeholder; Ollama ignores it
+      DIRECT_LLM_API_KEY: local
       DIRECT_LLM_API_URL: http://ollama:11434/v1
       DIRECT_LLM_PROVIDER: openai
       DIRECT_LLM_MODEL: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}
+      # ── Storage: private in-stack MinIO (S3-compatible) ──
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+      AWS_S3_ENDPOINT: http://minio:9000
       PORT: 3000
       NODE_ENV: production
-    ports:
-      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     networks: [bank-internal]
+    restart: unless-stopped
+
+  # The only service published to the host. It bridges the Windows Docker
+  # loopback endpoint to the internal app network; data services remain private.
+  gateway:
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./nginx/local-loopback.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:8080"
+    networks: [bank-internal, host-loopback]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
     restart: unless-stopped
 
 volumes:
   db-data:
+  minio-data:
   ollama-models:
 
 networks:
-  # Ollama and MySQL cannot reach the LAN or internet. A bank-approved reverse
-  # proxy reaches the app through the host's loopback binding.
+  # Internal means no container can route to the LAN or internet. A bank-approved
+  # reverse proxy reaches the app only through the host's loopback binding.
   bank-internal:
     internal: true
+  # The gateway alone is attached. It is still published to host loopback only.
+  host-loopback:

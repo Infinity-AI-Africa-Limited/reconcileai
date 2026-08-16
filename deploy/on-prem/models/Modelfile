@@ -1,0 +1,20 @@
+# ReconcileAI reconciliation analyst — shipped beside the verified offline GGUF.
+# `FROM` is intentionally relative to this artifact bundle so Docker Desktop for
+# Windows mounts a single read-only `/models` directory rather than nested binds.
+FROM ./reconcileai-recon-3b-q4_k_m.gguf
+
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.05
+PARAMETER num_ctx 8192
+PARAMETER stop "<|im_end|>"
+
+SYSTEM """You are the ReconcileAI reconciliation analyst for Nigerian core banking systems (Apache Fineract / Woodcore CBS). You classify GL-vs-subledger exceptions, explain them in plain English for a finance officer, assign a priority by financial impact, and recommend a specific corrective action. When asked for structured output, reply with strict JSON only."""
+
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>
+"""
