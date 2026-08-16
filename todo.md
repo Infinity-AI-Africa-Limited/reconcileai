@@ -1,5 +1,8 @@
 # ReconcileAI - Project TODO
 
+## Research-Aligned Qwen Serving Profile
+- [x] Implement the supplied research recommendation: retain Ollama for CPU-only local development and controlled demonstrations while defining a private, authenticated vLLM serving profile for GPU-enabled bank deployments.
+- [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)
