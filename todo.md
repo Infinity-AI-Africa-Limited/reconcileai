@@ -17,6 +17,26 @@
 - [x] Bind the Node server explicitly to `0.0.0.0` inside Docker for the internal gateway path; publish host-loopback access only through the validated Nginx gateway while the app itself has no host port.
 - [x] Add Docker build exclusions for model artifacts, local deployment data, and temporary conversion files so on-premise app rebuilds remain practical on CPU-only hardware.
 - [x] Add a minimal loopback reverse-proxy gateway so Docker Desktop can expose only the app while database, Ollama, and MinIO remain solely on the internal network.
+
+## Dual-Tier Serving — CTO production hardening
+- [x] Hold the CPU application back until `model-init` completes successfully, so a failed artifact verification stops the deployment instead of serving a model that was never imported.
+- [x] Give the GPU profile the gateway pattern: a container attached only to an `internal: true` network cannot serve a published host port (verified — connection refused), so the GPU stack was starting unreachable.
+- [x] Fix the CPU `pull` path, which could not start at all: Compose interpolates `${RECON_MODEL:?}` for every mode regardless of the shell branch. Mode and model now arrive as container environment.
+- [x] Remove every default credential (`change-me`) and make each deployment secret a required variable with no fallback.
+- [x] Give the application a bucket-scoped MinIO service account instead of the storage root credential, and prove it works at bootstrap. Verified against live MinIO: own-bucket read/write allowed; bucket creation, user administration and cross-bucket access denied.
+- [x] Stop loading `.env.onprem` into the application container, so infrastructure secrets stay out of the web app's environment.
+- [x] Pin every image through a required variable and ship real registry digests in the env templates; no `:latest` anywhere.
+- [x] Pass the vLLM key as environment rather than `--api-key`, and use `MYSQL_PWD` for the database health check — both were exposing secrets in container argv.
+- [x] Require an out-of-band `RECON_MODEL_SHA256` in addition to the shipped manifest: a manifest that travels with the artifact cannot authorise its own import.
+- [x] Refuse to boot on-premise with a missing, placeholder or too-short `JWT_SECRET`.
+- [x] Add `pnpm onprem:preflight`, an offline pre-install validator for both profiles, plus structural (parsed-YAML) deployment-contract tests replacing the substring assertions.
+- [x] Stop the evaluation harness reporting a transport failure as a 0% quality score, and let it authenticate against the hardened vLLM endpoint.
+- [x] Fix the dataset builder and evaluation harness crashing on Windows consoles (cp1252) — the CPU tier's own target platform.
+- [x] Merge adapters on CPU and fail loudly if any LoRA module survives, rather than risking a silently part-tuned checkpoint from `device_map="auto"`.
+- [ ] Measure model quality on an institution's human-labelled set inside its environment; the synthetic split cannot support a pilot decision.
+- [ ] Capacity-test both tiers on the approved target hosts; rehearse rollback.
+- [ ] Reduce the on-premise image to production dependencies only.
+
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)

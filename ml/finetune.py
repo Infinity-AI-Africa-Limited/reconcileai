@@ -18,8 +18,14 @@ Example:
 Requires: see requirements.txt. NOTE: not runnable on CPU-only machines.
 """
 import argparse
+import sys
 
-import torch
+# See build_dataset.py: Windows consoles default to cp1252 and crash on non-ASCII.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+import torch  # noqa: E402
 from datasets import load_dataset
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig

@@ -1,37 +1,45 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # ReconcileAI — private CPU/Ollama serving profile (NO GPU REQUIRED)
 #
-#   app  ──http──►  ollama (serves a small quantized model on CPU)
+#   app  ──http──►  ollama (serves a verified quantized model on CPU)
 #   app  ──sql───►  db (MySQL)
 #   app  ──s3 ───►  minio (private evidence and report storage)
 #
 # Everything runs on the institution's hardware. Service APIs are never exposed
 # on host ports; they are reachable only by the app on the private Docker network.
 # DEPLOYMENT_MODE=on_premise makes the egress guard block outbound internet calls.
+#
+# Before starting, validate the profile against its env file:
+#   pnpm onprem:preflight -- --profile cpu --env-file .env.onprem
 # ─────────────────────────────────────────────────────────────────────────────
 name: reconcileai-onprem-cpu
 
 services:
   db:
-    image: mysql:8.0
+    image: ${MYSQL_IMAGE:?Set MYSQL_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: reconcileai
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+      # No default. A silent fallback password is how a "hardened" stack ships
+      # with a known root credential; the deployment must supply its own.
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}
     volumes:
       - db-data:/var/lib/mysql
+    # MYSQL_PWD keeps the password out of the container's process list, which
+    # `docker top` and any in-container process can otherwise read.
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
       interval: 10s
       timeout: 5s
       retries: 12
     networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
 
   # Private S3-compatible storage for uploaded evidence and generated reports.
   # It has no host port; institutions can replace it with an approved internal
   # S3 service only after supplying equivalent private-network evidence.
   minio:
-    image: ${MINIO_IMAGE:-minio/minio:latest}
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     command: server /data --address ":9000" --console-address ":9001"
     environment:
@@ -45,28 +53,51 @@ services:
       timeout: 5s
       retries: 12
     networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
 
-  # Create the app bucket idempotently before ReconcileAI receives traffic.
+  # Creates the app bucket AND a bucket-scoped service account. The application
+  # never receives MinIO root credentials: root can delete every bucket and mint
+  # new users, which is not a privilege a reconciliation web app needs to hold.
   storage-init:
-    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    image: ${MINIO_MC_IMAGE:?Set MINIO_MC_IMAGE to a scanned, pinned image reference}
     depends_on:
       minio:
         condition: service_healthy
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
-        mc mb --ignore-existing "local/$${AWS_S3_BUCKET}"
+        mc alias set root "http://minio:9000" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "root/$${AWS_S3_BUCKET}"
+
+        # Least privilege: read/write objects in exactly one bucket, nothing else.
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]}]}' \
+          "$${AWS_S3_BUCKET}" "$${AWS_S3_BUCKET}" > /tmp/reconcileai-app-policy.json
+
+        # Each step is idempotent on re-run, so these tolerate "already exists".
+        # Correctness is not assumed from them — it is proven by the check below.
+        mc admin user add root "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}" || true
+        mc admin policy create root reconcileai-app /tmp/reconcileai-app-policy.json || true
+        mc admin policy attach root reconcileai-app --user "$${MINIO_APP_ACCESS_KEY}" || true
+
+        # Prove the scoped credential actually works before the app depends on it.
+        # Without this, a silently-failed policy step surfaces later as an upload
+        # error against a bank's evidence file rather than here at start-up.
+        mc alias set appcheck "http://minio:9000" "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}"
+        mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null
+        echo "storage ready: bucket $${AWS_S3_BUCKET}, bucket-scoped app credential verified"
     networks: [bank-internal]
     restart: "no"
+    security_opt: [no-new-privileges:true]
 
   ollama:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    image: ${OLLAMA_IMAGE:?Set OLLAMA_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
@@ -77,35 +108,72 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+    security_opt: [no-new-privileges:true]
 
   # One-shot model bootstrap. `pull` is for local demonstration only. `import`
   # creates the trained model from a verified GGUF artifact already on disk, so a
   # bank installation remains entirely offline after package delivery.
+  #
+  # Mode and model are passed as container environment (not Compose
+  # interpolation) so the shell picks the branch. Compose interpolates every
+  # `${VAR:?...}` in this file at parse time regardless of the `if`, so a
+  # required-value marker written inline here would fail `pull` mode too.
   model-init:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    image: ${OLLAMA_IMAGE:?Set OLLAMA_IMAGE to a scanned, pinned image reference}
     depends_on:
       ollama:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL_MODE: ${OLLAMA_MODEL_MODE:-pull}
+      RECON_MODEL: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}
+      RECON_MODEL_FILE: ${RECON_MODEL_FILE:-reconcileai-recon-3b-q4_k_m.gguf}
+      # Supplied out of band from the signed release record — see the import
+      # branch below for why the shipped manifest alone is not sufficient.
+      RECON_MODEL_SHA256: ${RECON_MODEL_SHA256:-}
     volumes:
       - ./models:/models:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        if [ "${OLLAMA_MODEL_MODE:-pull}" = "import" ]; then
-          test -f /models/reconcileai-recon-3b-q4_k_m.gguf
-          test -f /models/SHA256SUMS
-          (cd /models && sha256sum -c SHA256SUMS >/dev/null)
-          ollama create "${RECON_MODEL:?Set RECON_MODEL to reconcileai for imported model}" -f /models/Modelfile
-          echo "checksum-verified local model imported: ${RECON_MODEL}"
-        else
-          ollama pull "${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}"
-          echo "development model ready: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}"
+        if [ "$${OLLAMA_MODEL_MODE}" != "import" ]; then
+          echo "DEVELOPMENT MODE: pulling stock model $${RECON_MODEL} from the internet."
+          echo "This path is for local demonstration only and must not be used for a bank deployment."
+          ollama pull "$${RECON_MODEL}"
+          exit 0
         fi
+
+        : "$${RECON_MODEL:?Set RECON_MODEL to the Ollama model name to create (e.g. reconcileai)}"
+        : "$${RECON_MODEL_SHA256:?Set RECON_MODEL_SHA256 to the digest from the signed release record}"
+
+        cd /models
+        test -f "$${RECON_MODEL_FILE}" || { echo "missing artifact /models/$${RECON_MODEL_FILE}"; exit 1; }
+        test -f Modelfile           || { echo "missing /models/Modelfile"; exit 1; }
+        test -f SHA256SUMS          || { echo "missing /models/SHA256SUMS"; exit 1; }
+
+        # 1. Transfer integrity — the shipped bytes match the shipped manifest.
+        sha256sum -c SHA256SUMS > /dev/null
+
+        # 2. Authenticity — the bytes ALSO match a digest supplied out of band.
+        #    A manifest that travels with the artifact cannot authorise its own
+        #    import: anyone who can swap the GGUF can regenerate SHA256SUMS to
+        #    match it. RECON_MODEL_SHA256 comes from the institution's secret
+        #    store or signed release record, on a different path to the media.
+        actual="$(sha256sum "$${RECON_MODEL_FILE}" | cut -d ' ' -f 1)"
+        if [ "$${actual}" != "$${RECON_MODEL_SHA256}" ]; then
+          echo "REFUSING IMPORT — /models/$${RECON_MODEL_FILE} does not match the approved release."
+          echo "  on disk:  $${actual}"
+          echo "  approved: $${RECON_MODEL_SHA256}"
+          exit 1
+        fi
+
+        ollama create "$${RECON_MODEL}" -f /models/Modelfile
+        ollama show "$${RECON_MODEL}" > /dev/null
+        echo "verified offline import complete: $${RECON_MODEL} sha256=$${actual}"
     networks: [bank-internal]
     restart: "no"
+    security_opt: [no-new-privileges:true]
 
   app:
     build:
@@ -116,36 +184,61 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      # The app must not accept traffic before the model it is configured to use
+      # exists. model-init has `restart: "no"`, so a checksum mismatch or a
+      # failed import exits non-zero, this condition is never met, and the stack
+      # stops visibly instead of serving an unusable deployment.
+      model-init:
+        condition: service_completed_successfully
       storage-init:
         condition: service_completed_successfully
-    env_file: .env.onprem
+    # Deliberately NOT `env_file: .env.onprem`. That file is the Compose
+    # interpolation source and holds infrastructure secrets — MinIO root, image
+    # digests — which the application has no reason to hold. Loading it wholesale
+    # would hand the web app the storage root credential the bucket-scoped
+    # service account above exists to avoid. Everything the app may see is
+    # enumerated below; add new application variables here explicitly.
     environment:
       # ── Residency: lock the box down ──
       DEPLOYMENT_MODE: on_premise
       # In-stack hosts are permitted past the egress guard only by service name.
       EGRESS_ALLOWLIST: ollama,minio
       # ── Database (bundled MySQL) ──
-      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}@db:3306/reconcileai
       # ── LLM: local, OpenAI-compatible (Ollama) ──
       DIRECT_LLM_API_KEY: local
       DIRECT_LLM_API_URL: http://ollama:11434/v1
       DIRECT_LLM_PROVIDER: openai
       DIRECT_LLM_MODEL: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}
-      # ── Storage: private in-stack MinIO (S3-compatible) ──
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      # ── Storage: private in-stack MinIO (S3-compatible), bucket-scoped ──
+      AWS_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
       AWS_S3_ENDPOINT: http://minio:9000
+      # ── Application ──
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.onprem (openssl rand -hex 32)}
+      APP_URL: ${APP_URL:-http://127.0.0.1:3000}
       PORT: 3000
       NODE_ENV: production
+      # ── Optional internal data source (blank = file-only ingestion) ──
+      WOODCORE_DB_HOST: ${WOODCORE_DB_HOST:-}
+      WOODCORE_DB_PORT: ${WOODCORE_DB_PORT:-3306}
+      WOODCORE_DB_USER: ${WOODCORE_DB_USER:-}
+      WOODCORE_DB_PASSWORD: ${WOODCORE_DB_PASSWORD:-}
+      WOODCORE_DB_NAME: ${WOODCORE_DB_NAME:-}
     networks: [bank-internal]
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
 
-  # The only service published to the host. It bridges the Windows Docker
-  # loopback endpoint to the internal app network; data services remain private.
+  # The only service published to the host. It bridges the Docker loopback
+  # endpoint to the internal app network; data services remain private.
+  #
+  # This indirection is load-bearing, not stylistic: a container attached only
+  # to an `internal: true` network cannot serve a published host port (verified
+  # — the connection is refused), so the app itself cannot be published.
   gateway:
-    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    image: ${NGINX_IMAGE:?Set NGINX_IMAGE to a scanned, pinned image reference}
     depends_on:
       app:
         condition: service_healthy
@@ -160,6 +253,7 @@ services:
       - /var/cache/nginx
       - /var/run
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
 
 volumes:
   db-data:
@@ -171,5 +265,6 @@ networks:
   # reverse proxy reaches the app only through the host's loopback binding.
   bank-internal:
     internal: true
-  # The gateway alone is attached. It is still published to host loopback only.
+  # The gateway alone is attached, and only so that its published port works. It
+  # is still bound to host loopback, and it proxies to the app by service name.
   host-loopback:

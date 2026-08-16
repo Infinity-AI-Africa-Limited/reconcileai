@@ -22,7 +22,16 @@ import argparse
 import json
 import os
 import random
+import sys
 from datetime import date, timedelta
+
+# The CPU tier is delivered onto Windows hosts, where the console defaults to
+# cp1252 and any non-ASCII character in a print() aborts the script — after it
+# has already written some of its output files. Force UTF-8 rather than trading
+# the arrows for ASCII, so the same failure cannot come back with a new glyph.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # ── System prompt: the production framing used by the Layer-3 agent ──────────
 SYSTEM_PROMPT = (

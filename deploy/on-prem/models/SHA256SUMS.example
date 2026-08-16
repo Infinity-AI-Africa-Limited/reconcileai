@@ -1,9 +1,20 @@
-# Generate the real manifest alongside the final model artifact on the controlled
-# packaging machine, then independently compare this digest with the signed release
-# record before delivery to an institution:
+# Transfer-integrity manifest for the offline model artifact.
+#
+# Generate it on the controlled packaging machine, beside the final GGUF:
 #
 #   cd deploy/on-prem/models
 #   sha256sum reconcileai-recon-3b-q4_k_m.gguf > SHA256SUMS
 #
 # Rename this template to SHA256SUMS only after replacing the placeholder below.
+#
+# ── What this file does and does not prove ───────────────────────────────────
+# It proves the shipped bytes match what the packaging machine wrote — i.e. the
+# media survived the journey. It does NOT prove the artifact is the approved one:
+# it travels alongside the GGUF, so anyone able to substitute the model can
+# regenerate this manifest to match their substitute.
+#
+# Authenticity comes from RECON_MODEL_SHA256 in .env.onprem, which the operator
+# takes from the signed release record over a DIFFERENT path than this media.
+# `model-init` checks both, and the application does not start unless both pass.
+# Do not put the approved digest in this file — that would defeat the separation.
 REPLACE_WITH_SHA256  reconcileai-recon-3b-q4_k_m.gguf

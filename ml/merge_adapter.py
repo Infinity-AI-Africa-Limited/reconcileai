@@ -14,7 +14,9 @@ from pathlib import Path
 
 import torch
 from peft import PeftConfig, PeftModel
+from peft import __version__ as peft_version
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import __version__ as transformers_version
 
 
 def sha256_file(path: Path) -> str:
@@ -51,15 +53,32 @@ def main() -> None:
         raise ValueError(f"Refusing to overwrite non-empty output directory: {args.output}")
     args.output.mkdir(parents=True, exist_ok=True)
 
+    # Merge on CPU, deliberately. `device_map="auto"` shards the model across
+    # GPU/CPU/disk, and merge_and_unload() on offloaded or meta tensors either
+    # raises or — worse — writes a checkpoint in which some layers never
+    # received the adapter delta. That produces a model that loads, serves, and
+    # is quietly part-tuned. Merging is memory-bound, not compute-bound, so the
+    # only cost of forcing CPU is a few minutes.
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         revision=args.revision,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
-        device_map="auto",
+        device_map=None,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.revision)
-    merged = PeftModel.from_pretrained(model, str(args.adapter)).merge_and_unload()
+    peft_model = PeftModel.from_pretrained(model, str(args.adapter))
+    merged = peft_model.merge_and_unload()
+
+    # merge_and_unload() returns the base architecture once the LoRA layers are
+    # folded in. If any remain, the merge silently did not happen.
+    leftover = [name for name, _ in merged.named_modules() if "lora" in name.lower()]
+    if leftover:
+        raise RuntimeError(
+            f"Merge incomplete: {len(leftover)} LoRA module(s) survived merge_and_unload, "
+            f"first is {leftover[0]!r}. Refusing to write a part-tuned checkpoint."
+        )
+
     merged.save_pretrained(args.output, safe_serialization=True, max_shard_size="2GB")
     tokenizer.save_pretrained(args.output)
 
@@ -71,7 +90,13 @@ def main() -> None:
         "adapter_type": config.peft_type.value if hasattr(config.peft_type, "value") else str(config.peft_type),
         "merged_with": {
             "torch": torch.__version__,
+            "transformers": transformers_version,
+            "peft": peft_version,
             "cuda_available": torch.cuda.is_available(),
+        },
+        "merged_files_sha256": {
+            path.name: sha256_file(path)
+            for path in sorted(args.output.glob("*.safetensors"))
         },
         "data_scope": "synthetic-only training adapter; no bank, customer, payment, or production data",
     }

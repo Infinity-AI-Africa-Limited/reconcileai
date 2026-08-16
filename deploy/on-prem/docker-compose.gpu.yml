@@ -3,65 +3,132 @@
 #
 #   app  ──authenticated http──►  vllm (serves an approved Qwen artifact)
 #   app  ──sql───►  db (MySQL)
+#   app  ──s3 ───►  minio (private evidence and report storage)
 #
 # Requires the NVIDIA Container Toolkit on an institution-controlled GPU host.
 # This is NOT for developer laptops: use docker-compose.cpu.yml + Ollama there.
 # vLLM has no published host port; traffic is restricted to the private Compose
 # network and the application must authenticate to it with VLLM_API_KEY.
 #
+# This profile is deliberately a COMPLETE deployment, not a serving sidecar: it
+# carries the same storage, gateway, secret and pinning controls as the CPU
+# profile. tools/onPremServingProfile.test.ts asserts that contract against BOTH
+# files, so the two cannot silently drift apart again.
+#
 # Run:
-#   cp .env.onprem.example .env.onprem   # then edit secrets
+#   cp .env.onprem.gpu.example .env.onprem   # then edit secrets
+#   pnpm onprem:preflight -- --profile gpu --env-file .env.onprem
 #   docker compose -f docker-compose.gpu.yml --env-file .env.onprem up -d --build
 # ─────────────────────────────────────────────────────────────────────────────
 name: reconcileai-onprem-gpu
 
 services:
   db:
-    image: mysql:8.0
+    image: ${MYSQL_IMAGE:?Set MYSQL_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: reconcileai
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}
     volumes:
       - db-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
       interval: 10s
       timeout: 5s
       retries: 12
     networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
+
+  minio:
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE to a scanned, pinned image reference}
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
+
+  storage-init:
+    image: ${MINIO_MC_IMAGE:?Set MINIO_MC_IMAGE to a scanned, pinned image reference}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set root "http://minio:9000" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "root/$${AWS_S3_BUCKET}"
+
+        # Least privilege: read/write objects in exactly one bucket, nothing else.
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]}]}' \
+          "$${AWS_S3_BUCKET}" "$${AWS_S3_BUCKET}" > /tmp/reconcileai-app-policy.json
+
+        mc admin user add root "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}" || true
+        mc admin policy create root reconcileai-app /tmp/reconcileai-app-policy.json || true
+        mc admin policy attach root reconcileai-app --user "$${MINIO_APP_ACCESS_KEY}" || true
+
+        mc alias set appcheck "http://minio:9000" "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}"
+        mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null
+        echo "storage ready: bucket $${AWS_S3_BUCKET}, bucket-scoped app credential verified"
+    networks: [bank-internal]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
 
   vllm:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    image: ${VLLM_IMAGE:?Set VLLM_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
-    # In a bank environment, use an image digest and pre-stage the approved model
-    # artifact in hf-cache. Do not rely on an internet model download at the client.
+    # Pre-stage the approved model artifact in hf-cache. Do not rely on an
+    # internet model download at the institution.
     command: >
       --model ${RECON_MODEL:?Set RECON_MODEL to an approved Qwen artifact}
       --served-model-name reconcileai
       --revision ${MODEL_REVISION:?Set MODEL_REVISION to the approved immutable model revision}
       --max-model-len ${VLLM_MAX_MODEL_LEN:-8192}
       --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
-      --api-key ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
       --disable-log-requests
     environment:
       HF_HOME: /root/.cache/huggingface
+      # vLLM reads its serving key from VLLM_API_KEY. Passing it as `--api-key`
+      # instead would place the secret in the container's argv, where `docker
+      # inspect`, `docker top` and any process in the namespace can read it.
+      VLLM_API_KEY: ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
+      # Offline once the artifact is staged: no model fetch at start-up.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
     volumes:
       - hf-cache:/root/.cache/huggingface
+    # PagedAttention needs more shared memory than Docker's 64 MB default.
+    shm_size: ${VLLM_SHM_SIZE:-8gb}
     networks: [bank-internal]
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: ${VLLM_GPU_COUNT:-1}
               capabilities: [gpu]
+    # /health is unauthenticated by design; it reports readiness, not content.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       timeout: 5s
       retries: 30
-      start_period: 180s
+      start_period: 300s
+    security_opt: [no-new-privileges:true]
 
   app:
     build:
@@ -72,24 +139,61 @@ services:
         condition: service_healthy
       vllm:
         condition: service_healthy
-    env_file: .env.onprem
+      storage-init:
+        condition: service_completed_successfully
+    # Deliberately NOT `env_file: .env.onprem` — see the CPU profile for why.
+    # Everything the app may see is enumerated below; add new application
+    # variables here explicitly rather than loading the infrastructure env file.
     environment:
       DEPLOYMENT_MODE: on_premise
-      EGRESS_ALLOWLIST: vllm                # in-stack model host
-      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
+      EGRESS_ALLOWLIST: vllm,minio            # in-stack model and storage hosts
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}@db:3306/reconcileai
       DIRECT_LLM_API_KEY: ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
       DIRECT_LLM_API_URL: http://vllm:8000/v1
       DIRECT_LLM_PROVIDER: openai
-      DIRECT_LLM_MODEL: reconcileai          # matches --served-model-name above
+      DIRECT_LLM_MODEL: reconcileai           # matches --served-model-name above
+      AWS_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+      AWS_S3_ENDPOINT: http://minio:9000
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.onprem (openssl rand -hex 32)}
+      APP_URL: ${APP_URL:-http://127.0.0.1:3000}
       PORT: 3000
       NODE_ENV: production
-    ports:
-      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000"
+      WOODCORE_DB_HOST: ${WOODCORE_DB_HOST:-}
+      WOODCORE_DB_PORT: ${WOODCORE_DB_PORT:-3306}
+      WOODCORE_DB_USER: ${WOODCORE_DB_USER:-}
+      WOODCORE_DB_PASSWORD: ${WOODCORE_DB_PASSWORD:-}
+      WOODCORE_DB_NAME: ${WOODCORE_DB_NAME:-}
     networks: [bank-internal]
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+
+  # As in the CPU profile, the gateway is the only published service. The app
+  # cannot publish its own port: a container attached solely to an
+  # `internal: true` network refuses host connections on a published port.
+  gateway:
+    image: ${NGINX_IMAGE:?Set NGINX_IMAGE to a scanned, pinned image reference}
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./nginx/local-loopback.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:8080"
+    networks: [bank-internal, host-loopback]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
 
 volumes:
   db-data:
+  minio-data:
   hf-cache:
 
 networks:
@@ -97,3 +201,5 @@ networks:
   # bank-approved reverse proxy terminates TLS and reaches the app on loopback.
   bank-internal:
     internal: true
+  # The gateway alone is attached, and only so that its published port works.
+  host-loopback:

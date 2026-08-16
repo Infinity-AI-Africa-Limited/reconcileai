@@ -19,15 +19,41 @@ payment, alter a ledger, or approve a write-off.
 
 ## What is already implemented
 
-The CPU profile now supports a first-class offline import path for a verified GGUF
-artifact and keeps Ollama off host ports. The GPU profile provides an internal-only
-vLLM service with application-to-model authentication, an immutable model-revision
-contract, request-content logging disabled, and host-loopback application binding.
-Both profiles activate ReconcileAI's fail-closed `on_premise` egress guard.
+Both profiles are complete deployments carrying the same control set, asserted
+against both files by `tools/onPremServingProfile.test.ts` so they cannot drift:
+
+| Control | How it is enforced |
+|---|---|
+| Model integrity | `model-init` verifies the GGUF against the shipped `SHA256SUMS` **and** an out-of-band `RECON_MODEL_SHA256`; the app declares `model-init: service_completed_successfully`, so a failed verification stops the deployment instead of serving an unimported model |
+| Serving authentication | vLLM requires `VLLM_API_KEY`, passed as environment (not argv, where `docker inspect` would expose it) |
+| Immutable artifacts | Every image is a required variable pinned by digest; `MODEL_REVISION` is required and a moving branch is rejected; `HF_HUB_OFFLINE=1` |
+| Exposure | One published port — the nginx gateway on host loopback. A container on an `internal: true` network cannot serve a published port, so the app has none |
+| Secrets | No default values anywhere; `.env.onprem` is not loaded into the app container; the app boots only with a real `JWT_SECRET` |
+| Least privilege | Bucket-scoped MinIO service account, verified at bootstrap; `no-new-privileges` on every container |
+| Residency | Fail-closed `on_premise` egress guard, allowlisting only in-stack service names |
+| Pre-install validation | `pnpm onprem:preflight` refuses placeholders, reused secrets, floating tags, `pull` mode, and non-loopback binding |
 
 > These implementation controls provide a safe technical baseline. They do not
 > replace an institution's security architecture, model-risk governance, legal
 > review, operational resilience testing, or change approval.
+
+## What is NOT yet evidenced
+
+Recording this explicitly because a green stack invites the opposite conclusion:
+
+- **Model quality is unmeasured against real data.** The only evidence so far is
+  training loss and a synthetic held-out split drawn from the same generator as
+  the training set. That measures memorisation of the generator, not fitness for
+  a bank's exceptions. Week 4 of the programme below is the gate.
+- **No capacity evidence on any target host.** The reference figures in
+  `deploy/on-prem/README.md` are estimates.
+- **The Q4_K_M quantisation trade-off is unquantified** for this task.
+- **No adversarial testing** of prompt injection, schema violation, or attempts
+  to induce a consequential recommendation.
+- **Rollback has not been rehearsed** on either tier.
+- **The application image still ships development dependencies** — the on-prem
+  Dockerfile copies the full `node_modules` from the builder stage. Reducing it
+  to production dependencies shrinks the delivered attack surface.
 
 ## Six-week accelerated programme
 

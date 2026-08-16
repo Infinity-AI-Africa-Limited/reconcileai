@@ -73,28 +73,61 @@ python llama.cpp/convert_hf_to_gguf.py out/reconcileai-3b-merged \
     reconcileai-recon-3b-q4_k_m.gguf Q4_K_M
 ```
 Place the resulting GGUF and a `SHA256SUMS` manifest in
-`../deploy/on-prem/models/`. Independently verify the manifest against the signed
-release record before delivery. The CPU Compose profile checks this manifest before
-import. Then import into Ollama with the provided Modelfile:
+`../deploy/on-prem/models/`, beside the supplied `Modelfile`:
 ```bash
-cp reconcileai-recon-3b-q4_k_m.gguf ../deploy/on-prem/ollama/
-cd ../deploy/on-prem/ollama && ollama create reconcileai -f Modelfile
+cp reconcileai-recon-3b-q4_k_m.gguf ../deploy/on-prem/models/
+cd ../deploy/on-prem/models && sha256sum reconcileai-recon-3b-q4_k_m.gguf > SHA256SUMS
 ```
-Set `RECON_MODEL=reconcileai` in `.env.onprem` and restart the CPU stack.
+
+Record that digest in the **signed release record** and deliver it to the
+institution separately from the media — it becomes `RECON_MODEL_SHA256`.
+
+Then set in `.env.onprem`:
+```bash
+OLLAMA_MODEL_MODE=import
+RECON_MODEL=reconcileai
+RECON_MODEL_FILE=reconcileai-recon-3b-q4_k_m.gguf
+RECON_MODEL_SHA256=<the digest from the signed release record>
+```
+
+**Do not run `ollama create` yourself.** The CPU Compose profile's `model-init`
+service does it, after checking the artifact against both the shipped manifest
+and the out-of-band digest. Running it by hand skips both checks — which is the
+one thing the packaging process exists to prevent.
 
 ### 3b. Package for GPU (vLLM)
-No conversion needed — point vLLM at the merged dir:
-```yaml
-# in docker-compose.gpu.yml, vllm.command:
---model /models/reconcileai-7b-merged --served-model-name reconcileai
+No conversion needed. Stage the merged model in the `hf-cache` volume the GPU
+profile mounts, and point the profile at it through `.env.onprem`:
+```bash
+RECON_MODEL=/root/.cache/huggingface/reconcileai-7b-merged
+MODEL_REVISION=<reviewed immutable revision, or the release tag of your own artifact>
+HF_HUB_OFFLINE=1
 ```
-(mount the merged dir into the container as `/models`).
+`--served-model-name reconcileai` is already set in the compose file, so the
+application's `DIRECT_LLM_MODEL` needs no change. Staging the weights rather
+than letting vLLM fetch them is what keeps start-up offline.
 
 ### 4. Evaluate (no GPU)
 ```bash
+# CPU / Ollama — the endpoint ignores the bearer token
 python evaluate.py --base-url http://localhost:11434/v1 --model reconcileai --val data/val.jsonl
+
+# GPU / vLLM — the hardened serving profile REQUIRES the key
+VLLM_API_KEY=... python evaluate.py --base-url http://vllm:8000/v1 --model reconcileai --val data/val.jsonl
 ```
+The harness exits non-zero and prints no scorecard if any request failed. A
+transport failure and a bad model both drive accuracy to zero, and an acceptance
+gate must never confuse the two.
+
 Ship when: **JSON ≥ 99%, classification ≥ 95%, priority ≥ 98%.**
+
+> ⚠️ These are product gates measured against the **synthetic** held-out split,
+> which is drawn from the same generator as the training data. A strong score
+> there says the model learned the generator, not that it generalises to a
+> bank's real exceptions. No institution pilot may rely on it: re-measure on the
+> bank's own human-labelled set inside its environment, per
+> [`../docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md`](../docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md)
+> week 4.
 
 ## Why a small model is enough here
 
