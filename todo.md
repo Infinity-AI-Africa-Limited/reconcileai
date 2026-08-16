@@ -3,6 +3,8 @@
 ## Research-Aligned Qwen Serving Profile
 - [x] Implement the supplied research recommendation: retain Ollama for CPU-only local development and controlled demonstrations while defining a private, authenticated vLLM serving profile for GPU-enabled bank deployments.
 - [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
+- [x] Make the CPU/Ollama profile a first-class bank deployment path by supporting offline trained-model import, private networking, loopback-only application binding, and an enforced SHA-256 model-artifact verification gate.
+- [x] Convert the 90-day research roadmap into accelerated dual-tier execution gates without bypassing model-risk, security, or deterministic-control validation, and cover the published plan with regression validation.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)

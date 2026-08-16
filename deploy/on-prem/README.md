@@ -6,7 +6,7 @@ leaves the bank's hardware. It ships in two flavours:
 
 | Stack | File | Needs a GPU? | Best for |
 |---|---|---|---|
-| **CPU development** | `docker-compose.cpu.yml` | ❌ No | Controlled local development and demonstrations. Runs a small quantized Qwen model through Ollama. |
+| **Private CPU serving** | `docker-compose.cpu.yml` | ❌ No | Financial institutions without GPU infrastructure. Runs a verified quantized Qwen model through internal-only Ollama. |
 | **Private GPU serving** | `docker-compose.gpu.yml` | ✅ Yes (institution-controlled NVIDIA host) | Bank pilot or production serving. Runs an approved Qwen artifact through authenticated vLLM. |
 
 Both stacks set `DEPLOYMENT_MODE=on_premise`, which turns on the [data-residency
@@ -40,6 +40,7 @@ cd deploy/on-prem
 cp .env.onprem.example .env.onprem      # edit JWT_SECRET + MYSQL_ROOT_PASSWORD
 
 # CPU (no GPU):
+cp .env.onprem.cpu.example .env.onprem
 docker compose -f docker-compose.cpu.yml --env-file .env.onprem up -d --build
 
 # Private GPU profile — only after the bank has approved the model artifact,
@@ -72,9 +73,10 @@ The bundled MySQL starts empty — apply the schema once before first use. Pick 
 ## Serving boundary: local development versus bank deployment
 
 **Ollama and Qwen are complementary, not alternative model families.** Qwen is the
-model family; Ollama is a convenient local runtime. Keep the CPU profile on a
-developer laptop or controlled internal demonstration environment. It deliberately
-does not expose Ollama’s port to the host network.
+model family; Ollama is the CPU runtime used for local development, controlled
+demonstrations, and first-class bank deployment where GPU infrastructure is not
+available. The CPU profile deliberately does not expose Ollama’s port to the host
+network and supports an offline import of a verified Qwen GGUF artifact.
 
 For a bank-facing pilot or production deployment, use the GPU profile. It keeps
 vLLM on an internal Docker network, requires an API key for the
@@ -91,6 +93,17 @@ deployment-specific `VLLM_API_KEY` from its secret manager, capacity-test eviden
 and a rollback plan. The model must remain advisory: deterministic ReconcileAI
 rules remain the source of truth for balances, matching, postings and settlement
 finality.
+
+For a CPU-only bank deployment, set `OLLAMA_MODEL_MODE=import` and
+`RECON_MODEL=reconcileai` in `.env.onprem`, place the verified
+`reconcileai-recon-3b-q4_k_m.gguf` artifact and its `SHA256SUMS` manifest under
+`deploy/on-prem/models/`, and use the supplied Modelfile. Before shipping the
+package, independently compare the manifest digest with the signed release record.
+The CPU bootstrap runs `sha256sum --check --status SHA256SUMS` before `ollama
+create`; it refuses the import when the artifact does not match the shipped manifest.
+The import runs inside the private network and does not call the internet. A
+stock-model pull is retained solely for development or controlled demonstrations
+before the deployment is air-gapped.
 
 ---
 
