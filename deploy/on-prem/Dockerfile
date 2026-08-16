@@ -15,6 +15,7 @@ WORKDIR /app
 RUN corepack enable
 # Install deps first for layer caching
 COPY package.json pnpm-lock.yaml ./
+COPY patches ./patches
 RUN pnpm install --frozen-lockfile
 # Build frontend (vite → dist/public) and backend (esbuild → dist/index.js)
 COPY . .
