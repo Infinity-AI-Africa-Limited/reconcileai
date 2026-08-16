@@ -1,5 +1,9 @@
 # ReconcileAI - Project TODO
 
+## Active Operational Task: Synthetic-Only QLoRA Training
+- [ ] Complete synthetic-only QLoRA fine-tuning on the active RunPod RTX 4090 pod, evaluate and export the artifact to the local ReconcileAI workspace, then terminate the pod to stop billing.
+- [x] Fix `ml/finetune.py` compatibility with the installed TRL configuration API; static validation, TypeScript, and the full test suite passed before PR submission.
+
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)
