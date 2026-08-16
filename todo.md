@@ -17,6 +17,7 @@
 - [x] Bind the Node server explicitly to `0.0.0.0` inside Docker for the internal gateway path; publish host-loopback access only through the validated Nginx gateway while the app itself has no host port.
 - [x] Add Docker build exclusions for model artifacts, local deployment data, and temporary conversion files so on-premise app rebuilds remain practical on CPU-only hardware.
 - [x] Add a minimal loopback reverse-proxy gateway so Docker Desktop can expose only the app while database, Ollama, and MinIO remain solely on the internal network.
+- [x] Provide Claude Code with a complete production-hardening context, evidence summary, review checklist, and remaining institution-side gates on both dual-tier serving-profile pull requests.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)
