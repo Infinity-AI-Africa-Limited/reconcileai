@@ -1,9 +1,9 @@
 # ReconcileAI - Project TODO
 
 ## Active Operational Task: Synthetic-Only QLoRA Training
-- [ ] Complete synthetic-only QLoRA fine-tuning on the active RunPod RTX 4090 pod, evaluate and export the artifact to the local ReconcileAI workspace, then terminate the pod to stop billing.
+- [x] Fine-tuned the Qwen2.5-3B-Instruct LoRA adapter on 2,200 synthetic examples, validated on 300 held-out synthetic examples, checksum-verified the 456 MB export on Richard’s local workspace, and terminated the temporary RunPod pod and volume.
 - [x] Fix `ml/finetune.py` compatibility with the installed TRL configuration API; static validation, TypeScript, and the full test suite passed before PR submission.
-
+- [ ] Convert the Qwen2.5 Safetensors adapter to a Qwen-compatible GGUF adapter, or deploy it through a compatible Transformers/vLLM runtime, before changing the active local Ollama `RECON_MODEL`; Ollama does not directly support Qwen Safetensors adapters.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)
