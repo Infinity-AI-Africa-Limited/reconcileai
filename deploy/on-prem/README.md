@@ -105,6 +105,20 @@ The import runs inside the private network and does not call the internet. A
 stock-model pull is retained solely for development or controlled demonstrations
 before the deployment is air-gapped.
 
+### Private evidence and report storage
+
+The CPU profile includes an internal-only MinIO service and a one-shot
+`storage-init` service. The bootstrap creates the configured `AWS_S3_BUCKET`
+idempotently before ReconcileAI starts. MinIO has no host port, and the
+application uses `http://minio:9000` only on the internal Docker network.
+
+Set unique `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values in `.env.onprem`.
+The application receives these as S3-compatible credentials; do not set external
+cloud storage credentials in this profile. A bank that operates an approved
+internal S3-compatible service can replace the MinIO service only after matching
+the same private-network, bucket-bootstrap, access-control, backup, and recovery
+evidence.
+
 ---
 
 ## Day-1 vs. fine-tuned model

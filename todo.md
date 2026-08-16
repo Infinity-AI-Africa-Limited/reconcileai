@@ -5,6 +5,12 @@
 - [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
 - [x] Make the CPU/Ollama profile a first-class bank deployment path by supporting offline trained-model import, private networking, loopback-only application binding, and an enforced SHA-256 model-artifact verification gate.
 - [x] Convert the 90-day research roadmap into accelerated dual-tier execution gates without bypassing model-risk, security, or deterministic-control validation, and cover the published plan with regression validation.
+- [x] Merge and quantize the exported synthetic-only Qwen2.5-3B adapter into a checksum-verified GGUF artifact, then validate its import and controlled inference through the local CPU/Ollama stack.
+- [x] Use a temporary GPU conversion pod within the approved additional US$5 cap to merge and quantize the synthetic-only Qwen adapter; export the GGUF locally and terminate the pod and volume immediately after validation.
+- [ ] Restore the local on-premise environment from a known-good configuration, reapply the versioned CPU/Ollama model tag cleanly, and verify all local health checks are green without exposing secrets.
+- [ ] Verify and record the final billing amount for RunPod pod `xaj6n5pcoj25op` to evidence compliance with the approved additional US$5 cap.
+- [ ] Re-run local post-switch regression validation to confirm the active CPU model tag remains available and non-model services are unaffected.
+- [ ] Add a private MinIO S3-compatible service and idempotent bucket bootstrap to the CPU on-premise profile so file storage remains bank-controlled and `/api/health` can validate green without a public cloud dependency.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)

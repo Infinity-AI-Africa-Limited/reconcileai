@@ -8,6 +8,7 @@ describe("private Qwen/vLLM on-premise serving profile", () => {
   const cpuCompose = fs.readFileSync("deploy/on-prem/docker-compose.cpu.yml", "utf8");
   const cpuEnv = fs.readFileSync("deploy/on-prem/.env.onprem.cpu.example", "utf8");
   const executionPlan = fs.readFileSync("docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md", "utf8");
+  const mergeScript = fs.readFileSync("ml/merge_adapter.py", "utf8");
 
   it("keeps the vLLM endpoint on a private network and requires authenticated app access", () => {
     const vllmBlock = compose.slice(compose.indexOf("  vllm:"), compose.indexOf("  app:"));
@@ -40,6 +41,13 @@ describe("private Qwen/vLLM on-premise serving profile", () => {
     expect(cpuCompose).toContain("internal: true");
     expect(cpuEnv).toContain("OLLAMA_MODEL_MODE=import");
     expect(cpuEnv).toContain("RECON_MODEL=reconcileai");
+    expect(cpuCompose).toContain("minio:");
+    expect(cpuCompose).toContain("storage-init:");
+    expect(cpuCompose).toContain("mc mb --ignore-existing");
+    expect(cpuCompose).toContain("AWS_S3_ENDPOINT: http://minio:9000");
+    expect(cpuCompose).toContain("EGRESS_ALLOWLIST: ollama,minio");
+    expect(cpuEnv).toContain("MINIO_ROOT_PASSWORD=replace-with-a-strong-storage-password");
+    expect(readme).toContain("Private evidence and report storage");
   });
 
   it("keeps the accelerated plan explicit about both tiers and immutable control gates", () => {
@@ -48,5 +56,12 @@ describe("private Qwen/vLLM on-premise serving profile", () => {
     expect(executionPlan).toContain("GPU tier");
     expect(executionPlan).toMatch(/no real bank or customer\s+data leaves the institution-controlled environment/);
     expect(executionPlan).toContain("deterministic reconciliation engine remains the source of truth");
+  });
+
+  it("uses a provenance-aware exact-base merge before CPU GGUF packaging", () => {
+    expect(mergeScript).toContain("Adapter base model mismatch");
+    expect(mergeScript).toContain("MODEL_PROVENANCE.json");
+    expect(mergeScript).toContain("synthetic-only training adapter");
+    expect(mergeScript).toContain("safe_serialization=True");
   });
 });
