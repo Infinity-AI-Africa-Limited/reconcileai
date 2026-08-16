@@ -466,12 +466,20 @@ export const appRouter = router({
         // Pre-warm hasn't run yet (e.g. very first cold start before DB is ready).
         // Fall back to creating a per-session guest and seeding in the background.
         const guestOpenId = 'guest_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+        // Fallback guests join the guest demo organisation rather than being
+        // created org-less. Org-less is a SHARED scope, not a private one —
+        // orgFilter(col, null) is `IS NULL`, so every org-less guest read every
+        // other one's seeded rows, and they collided on the same unsuffixed demo
+        // channel codes. See ensureGuestDemoOrganization.
+        const { ensureGuestDemoOrganization } = await import("./prewarmDemoUser");
+        const guestOrgId = await ensureGuestDemoOrganization();
         await db.upsertUser({
           openId: guestOpenId,
           name: 'Guest User',
           email: `guest_${Date.now()}@demo.reconcileai.com`,
           role: 'user',
           isGuest: true,
+          organizationId: guestOrgId,
         });
         const fallbackUser = await db.getUserByOpenId(guestOpenId);
         if (!fallbackUser) {
@@ -479,9 +487,24 @@ export const appRouter = router({
         }
         setImmediate(async () => {
           try {
-            await seedDemoData(fallbackUser.id, fallbackUser.organizationId ?? null);
-            const { seedFinServDemoData } = await import("./demoSeedFinServ");
-            await seedFinServDemoData(fallbackUser.id, fallbackUser.organizationId ?? null, "both");
+            // Seed ONCE per demo tenant, not once per guest — and once even if
+            // several cold-start logins race.
+            //
+            // Every fallback guest joins the same demo organisation, which is the
+            // documented intent ("all guests share the same read-only view of
+            // that pre-seeded dataset") and is safe because guests cannot write:
+            // guestProtectedProcedure and operationsProcedure both refuse them,
+            // and demo.activate is super-admin only.
+            //
+            // What is NOT safe is seeding per guest into that shared tenant.
+            // seedFinServDemoData wipes by userId, so a second guest's seed does
+            // not replace the first — it ADDS a full dataset, doubling every
+            // figure the demo shows. An inline `if (empty) seed()` was still
+            // check-then-act and lost that race at cold start, which is exactly
+            // when simultaneous guests are most likely. ensureGuestDemoSeeded
+            // collapses concurrent callers onto one in-flight seed.
+            const { ensureGuestDemoSeeded } = await import("./prewarmDemoUser");
+            await ensureGuestDemoSeeded(fallbackUser.id, fallbackUser.organizationId ?? null);
             console.log(`[guestLogin] Fallback background seed complete for guest user ${fallbackUser.id}`);
           } catch (seedErr) {
             console.error("[guestLogin] Fallback background seed failed:", seedErr);
