@@ -1,9 +1,10 @@
 # ReconcileAI - Project TODO
 
-## Active Operational Task: Synthetic-Only QLoRA Training
-- [x] Fine-tuned the Qwen2.5-3B-Instruct LoRA adapter on 2,200 synthetic examples, validated on 300 held-out synthetic examples, checksum-verified the 456 MB export on Richard’s local workspace, and terminated the temporary RunPod pod and volume.
-- [x] Fix `ml/finetune.py` compatibility with the installed TRL configuration API; static validation, TypeScript, and the full test suite passed before PR submission.
-- [ ] Convert the Qwen2.5 Safetensors adapter to a Qwen-compatible GGUF adapter, or deploy it through a compatible Transformers/vLLM runtime, before changing the active local Ollama `RECON_MODEL`; Ollama does not directly support Qwen Safetensors adapters.
+## Research-Aligned Qwen Serving Profile
+- [x] Implement the supplied research recommendation: retain Ollama for CPU-only local development and controlled demonstrations while defining a private, authenticated vLLM serving profile for GPU-enabled bank deployments.
+- [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
+- [x] Make the CPU/Ollama profile a first-class bank deployment path by supporting offline trained-model import, private networking, loopback-only application binding, and an enforced SHA-256 model-artifact verification gate.
+- [x] Convert the 90-day research roadmap into accelerated dual-tier execution gates without bypassing model-risk, security, or deterministic-control validation, and cover the published plan with regression validation.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)

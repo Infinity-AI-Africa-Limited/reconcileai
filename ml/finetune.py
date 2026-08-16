@@ -34,8 +34,6 @@ def parse_args():
     ap.add_argument("--out", default="out/reconcileai")
     ap.add_argument("--epochs", type=float, default=3.0)
     ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--warmup-steps", type=int, default=12,
-                    help="optimizer warm-up steps (12 is ~3% of the standard 2,200-example run)")
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--max-seq-len", type=int, default=2048)
@@ -98,12 +96,12 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_steps=args.warmup_steps,
+        warmup_ratio=0.03,
         logging_steps=10,
         eval_strategy="epoch",
         save_strategy="epoch",
         bf16=True,
-        max_length=args.max_seq_len,
+        max_seq_length=args.max_seq_len,
         packing=False,
         dataset_text_field="text",
         report_to="none",

@@ -1,0 +1,9 @@
+# Generate the real manifest alongside the final model artifact on the controlled
+# packaging machine, then independently compare this digest with the signed release
+# record before delivery to an institution:
+#
+#   cd deploy/on-prem/models
+#   sha256sum reconcileai-recon-3b-q4_k_m.gguf > SHA256SUMS
+#
+# Rename this template to SHA256SUMS only after replacing the placeholder below.
+REPLACE_WITH_SHA256  reconcileai-recon-3b-q4_k_m.gguf

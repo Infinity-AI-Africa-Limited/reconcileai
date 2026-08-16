@@ -1,12 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# ReconcileAI — Option 3, CPU stack (NO GPU REQUIRED)
+# ReconcileAI — private CPU/Ollama serving profile (NO GPU REQUIRED)
 #
 #   app  ──http──►  ollama (serves a small quantized model on CPU)
 #   app  ──sql───►  db (MySQL)
 #
-# Everything runs on the bank's hardware. DEPLOYMENT_MODE=on_premise makes the
-# egress guard block any outbound internet call; the in-stack model host
-# (`ollama`) is permitted via EGRESS_ALLOWLIST.
+# Everything runs on the institution's hardware. The Ollama API is never exposed
+# on a host port; it is reachable only by the app on the private Docker network.
+# DEPLOYMENT_MODE=on_premise makes the egress guard block outbound internet calls.
 #
 # Run:
 #   cp .env.onprem.example .env.onprem   # then edit secrets
@@ -28,21 +28,27 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+    networks: [bank-internal]
 
   ollama:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
+      - ./ollama/Modelfile:/models/Modelfile:ro
+      - ./models:/models:ro
+    networks: [bank-internal]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 12
 
-  # One-shot: pulls (or, for the fine-tuned model, expects a pre-imported) model.
+  # One-shot model bootstrap. `pull` is for local demonstration only. `import`
+  # creates the trained model from a verified GGUF artifact already on disk, so a
+  # bank installation remains entirely offline after package delivery.
   model-init:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     depends_on:
       ollama:
         condition: service_healthy
@@ -50,7 +56,19 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - "ollama pull ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M} && echo 'model ready: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}'"
+      - |
+        set -eu
+        if [ "${OLLAMA_MODEL_MODE:-pull}" = "import" ]; then
+          test -f /models/reconcileai-recon-3b-q4_k_m.gguf
+          test -f /models/SHA256SUMS
+          (cd /models && sha256sum --check --status SHA256SUMS)
+          ollama create "${RECON_MODEL:?Set RECON_MODEL to reconcileai for imported model}" -f /models/Modelfile
+          echo "checksum-verified local model imported: ${RECON_MODEL}"
+        else
+          ollama pull "${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}"
+          echo "development model ready: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}"
+        fi
+    networks: [bank-internal]
     restart: "no"
 
   app:
@@ -78,9 +96,16 @@ services:
       PORT: 3000
       NODE_ENV: production
     ports:
-      - "3000:3000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000"
+    networks: [bank-internal]
     restart: unless-stopped
 
 volumes:
   db-data:
   ollama-models:
+
+networks:
+  # Ollama and MySQL cannot reach the LAN or internet. A bank-approved reverse
+  # proxy reaches the app through the host's loopback binding.
+  bank-internal:
+    internal: true
