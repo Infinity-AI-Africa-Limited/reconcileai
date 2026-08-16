@@ -70,7 +70,6 @@ services:
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
-      - ./ollama/Modelfile:/models/Modelfile:ro
       - ./models:/models:ro
     networks: [bank-internal]
     healthcheck:
@@ -89,6 +88,8 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - ./models:/models:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -96,7 +97,7 @@ services:
         if [ "${OLLAMA_MODEL_MODE:-pull}" = "import" ]; then
           test -f /models/reconcileai-recon-3b-q4_k_m.gguf
           test -f /models/SHA256SUMS
-          (cd /models && sha256sum --check --status SHA256SUMS)
+          (cd /models && sha256sum -c SHA256SUMS >/dev/null)
           ollama create "${RECON_MODEL:?Set RECON_MODEL to reconcileai for imported model}" -f /models/Modelfile
           echo "checksum-verified local model imported: ${RECON_MODEL}"
         else
@@ -138,9 +139,26 @@ services:
       AWS_S3_ENDPOINT: http://minio:9000
       PORT: 3000
       NODE_ENV: production
-    ports:
-      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     networks: [bank-internal]
+    restart: unless-stopped
+
+  # The only service published to the host. It bridges the Windows Docker
+  # loopback endpoint to the internal app network; data services remain private.
+  gateway:
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./nginx/local-loopback.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:8080"
+    networks: [bank-internal, host-loopback]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
     restart: unless-stopped
 
 volumes:
@@ -153,3 +171,5 @@ networks:
   # reverse proxy reaches the app only through the host's loopback binding.
   bank-internal:
     internal: true
+  # The gateway alone is attached. It is still published to host loopback only.
+  host-loopback:

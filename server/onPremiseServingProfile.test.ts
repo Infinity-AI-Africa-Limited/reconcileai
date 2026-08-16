@@ -8,6 +8,8 @@ describe("private Qwen/vLLM on-premise serving profile", () => {
   const cpuCompose = fs.readFileSync("deploy/on-prem/docker-compose.cpu.yml", "utf8");
   const cpuEnv = fs.readFileSync("deploy/on-prem/.env.onprem.cpu.example", "utf8");
   const executionPlan = fs.readFileSync("docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md", "utf8");
+  const serverBootstrap = fs.readFileSync("server/_core/index.ts", "utf8");
+  const dockerIgnore = fs.readFileSync(".dockerignore", "utf8");
   const mergeScript = fs.readFileSync("ml/merge_adapter.py", "utf8");
 
   it("keeps the vLLM endpoint on a private network and requires authenticated app access", () => {
@@ -36,9 +38,14 @@ describe("private Qwen/vLLM on-premise serving profile", () => {
     expect(ollamaBlock).toContain("networks: [bank-internal]");
     expect(modelInitBlock).toContain('"${OLLAMA_MODEL_MODE:-pull}" = "import"');
     expect(modelInitBlock).toContain("ollama create");
-    expect(modelInitBlock).toContain("sha256sum --check --status SHA256SUMS");
-    expect(cpuCompose).toContain("${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000");
+    expect(modelInitBlock).toContain("sha256sum -c SHA256SUMS >/dev/null");
+    expect(modelInitBlock).toContain("./models:/models:ro");
+    expect(cpuCompose).toContain("${APP_BIND_ADDRESS:-127.0.0.1}:3000:8080");
     expect(cpuCompose).toContain("internal: true");
+    expect(cpuCompose).toContain("gateway:");
+    expect(cpuCompose).toContain("host-loopback");
+    expect(cpuCompose).not.toContain("./ollama/Modelfile:/models/Modelfile:ro");
+    expect(cpuCompose).toContain("./models:/models:ro");
     expect(cpuEnv).toContain("OLLAMA_MODEL_MODE=import");
     expect(cpuEnv).toContain("RECON_MODEL=reconcileai");
     expect(cpuCompose).toContain("minio:");
@@ -48,6 +55,9 @@ describe("private Qwen/vLLM on-premise serving profile", () => {
     expect(cpuCompose).toContain("EGRESS_ALLOWLIST: ollama,minio");
     expect(cpuEnv).toContain("MINIO_ROOT_PASSWORD=replace-with-a-strong-storage-password");
     expect(readme).toContain("Private evidence and report storage");
+    expect(serverBootstrap).toContain('server.listen(port, "0.0.0.0"');
+    expect(dockerIgnore).toContain("deploy/on-prem/models/");
+    expect(dockerIgnore).toContain("ml/");
   });
 
   it("keeps the accelerated plan explicit about both tiers and immutable control gates", () => {
