@@ -400,7 +400,7 @@ export function createShoplineRouter(): Router {
 async function registerWebhooksForStore(
   opts: ShoplineApiOptions,
 ): Promise<void> {
-  const { SHOPLINE_WEBHOOK_TOPICS } = await import("../../../shared/shoplineConstants");
+  const { SHOPLINE_WEBHOOK_TOPICS, SHOPLINE_BILLING_WEBHOOK_TOPICS } = await import("../../../shared/shoplineConstants");
 
   // Build the webhook callback URL
   // In production this should be the public domain; for now use the app's configured URL
@@ -412,7 +412,11 @@ async function registerWebhooksForStore(
 
   const callbackUrl = `${appUrl}/api/webhooks/shopline`;
 
-  for (const topic of SHOPLINE_WEBHOOK_TOPICS) {
+  // Subscription lifecycle topics are required to keep native SHOPLINE billing
+  // aligned with merchant access. They use the same documented webhook
+  // subscription API and callback contract as store reconciliation topics.
+  const topics = [...SHOPLINE_WEBHOOK_TOPICS, ...SHOPLINE_BILLING_WEBHOOK_TOPICS];
+  for (const topic of topics) {
     try {
       await apiRegisterWebhook(opts, topic, callbackUrl);
     } catch (err) {

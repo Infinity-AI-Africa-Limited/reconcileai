@@ -22,6 +22,7 @@
  */
 
 import { SHOPLINE_API_VERSION } from "../../../shared/shoplineConstants";
+import { waitForShoplineRequestSlot } from "./rateLimiter";
 
 export interface ShoplineApiOptions {
   storeHandle: string;
@@ -66,6 +67,7 @@ async function shoplineRequest<T>(
   init: RequestInit = {},
   attempt = 0,
 ): Promise<{ data: T; nextPageInfo: string | null }> {
+  await waitForShoplineRequestSlot(opts.storeHandle);
   const url = `https://${opts.storeHandle}.myshopline.com/admin/openapi/${SHOPLINE_API_VERSION}${path}`;
   const response = await fetch(url, {
     ...init,

@@ -15,7 +15,10 @@ import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { runSyncCycle, type SyncReport } from "./syncOrchestrator";
 import { listWebhooks, registerWebhook, type ShoplineApiOptions } from "./apiClient";
 import { getValidToken } from "./tokenStore";
-import { SHOPLINE_WEBHOOK_TOPICS } from "../../../shared/shoplineConstants";
+import {
+  SHOPLINE_BILLING_WEBHOOK_TOPICS,
+  SHOPLINE_WEBHOOK_TOPICS,
+} from "../../../shared/shoplineConstants";
 import { ENV } from "../../_core/env";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -313,7 +316,10 @@ export async function handleShoplineWebhookReconciler(
 
         // Determine which required topics are missing
         const existingTopics = new Set(existing.map((w) => w.topic));
-        const requiredTopics = SHOPLINE_WEBHOOK_TOPICS;
+        // Reconcile both operational settlement events and native app-plan
+        // lifecycle events. Missing billing topics would leave subscription
+        // access stale even when order reconciliation webhooks remain healthy.
+        const requiredTopics = [...SHOPLINE_WEBHOOK_TOPICS, ...SHOPLINE_BILLING_WEBHOOK_TOPICS];
         const missing = requiredTopics.filter((t) => !existingTopics.has(t));
         result.missingTopics = missing;
 
