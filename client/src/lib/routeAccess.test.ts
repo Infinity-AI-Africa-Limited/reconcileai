@@ -108,7 +108,7 @@ describe("when the install completes", () => {
     // The screen says "Store Connected Successfully!" and its primary button used
     // to open the operator's dashboard. A merchant's next question is whether
     // their payout landed.
-    expect(PAGE).toMatch(/navigate\(landingPathFor\("retail_commerce"\)\)/);
+    expect(PAGE).toMatch(/enterRetailPortal\(landingPathFor\("retail_commerce"\)\)/);
     expect(PAGE).not.toMatch(/navigate\("\/dashboard"\)/);
   });
 

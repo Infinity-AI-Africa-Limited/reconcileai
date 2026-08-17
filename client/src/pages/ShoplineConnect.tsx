@@ -12,6 +12,9 @@
  * - First sync status (if available)
  */
 import { useLocation, useSearch } from "wouter";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { trpc } from "@/lib/trpc";
+import { usePortalContext, type OrgSegment } from "@/contexts/PortalContext";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, XCircle, ArrowRight, RefreshCw, Shield, Zap } from "lucide-react";
@@ -23,6 +26,35 @@ export function ShoplineWelcome() {
   const orgCode = params.get("org") || "";
   const isReconnection = params.get("reconnect") === "true";
   const [, navigate] = useLocation();
+  const { user } = useAuth();
+  const { enterPortal } = usePortalContext();
+  const isSuperAdmin = user?.role === "super_admin";
+  const { data: organizations } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
+    enabled: isSuperAdmin && Boolean(orgCode),
+  });
+  const retailOrg = organizations?.find(
+    (organization) => organization.code === orgCode && organization.segment === "retail_commerce",
+  );
+
+  /**
+   * This is intentionally restricted to an authorised Infinity AI super-admin
+   * test/support session. It reuses the established portal context rather than
+   * pretending that a SHOPLINE OAuth redirect signs a merchant into ReconcileAI.
+   * Production merchant identity hand-off remains a separate P0 release gate.
+   */
+  const enterRetailPortal = (destination: string) => {
+    if (isSuperAdmin && retailOrg) {
+      enterPortal({
+        id: retailOrg.id,
+        name: retailOrg.name,
+        code: retailOrg.code ?? "",
+        segment: retailOrg.segment as OrgSegment,
+        country: retailOrg.country ?? "GLB",
+        baseCurrency: retailOrg.baseCurrency ?? "USD",
+      });
+    }
+    navigate(destination);
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
@@ -94,7 +126,7 @@ export function ShoplineWelcome() {
                 hardcoded so it follows if retail's landing page ever moves. */}
             <Button
               className="w-full"
-              onClick={() => navigate(landingPathFor("retail_commerce"))}
+              onClick={() => enterRetailPortal(landingPathFor("retail_commerce"))}
             >
               Go to Settlement Monitor
               <ArrowRight className="ml-2 h-4 w-4" />
@@ -102,7 +134,7 @@ export function ShoplineWelcome() {
             <Button
               variant="outline"
               className="w-full"
-              onClick={() => navigate("/shopline/sync-status")}
+              onClick={() => enterRetailPortal("/shopline/sync-status")}
             >
               View Sync Status
             </Button>
