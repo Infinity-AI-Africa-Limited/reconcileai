@@ -1257,4 +1257,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Complete an evidence-based Shopline app submission-readiness review, including remaining functional, security, support, listing, and review-flow requirements.
 - [x] Validate the retail scope with automated tests and a production build: 1,661 tests passed and TypeScript reported zero errors.
 - [ ] Perform authenticated visual verification of the retail merchant portal after the reviewed build is deployed, including the exact sidebar, direct-route redirects, post-install CTA, OAuth, and actual-order flow on ReconcileAI Dev Store.
-- [ ] Submit the validated retail dashboard simplification to both GitHub repositories for Claude Code review.
+- [x] Submit the validated retail dashboard simplification to both GitHub repositories for Claude Code review (Infinity AI PR #87; MistaRichMan PR #21).
