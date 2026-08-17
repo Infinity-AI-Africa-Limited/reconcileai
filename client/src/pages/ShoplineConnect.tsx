@@ -102,9 +102,9 @@ export function ShoplineWelcome() {
             <Button
               variant="outline"
               className="w-full"
-              onClick={() => navigate("/channels")}
+              onClick={() => navigate("/shopline/sync-status")}
             >
-              View Connected Channels
+              View Sync Status
             </Button>
           </div>
         </CardContent>

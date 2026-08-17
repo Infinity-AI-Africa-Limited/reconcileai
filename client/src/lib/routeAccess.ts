@@ -27,7 +27,12 @@ import type { Segment } from "./segments";
  * sees. Every other vertical keeps the dashboard, where that framing is right.
  */
 export function landingPathFor(segment: Segment | null): string {
-  return segment === "retail_commerce" ? "/settlement-monitor" : "/dashboard";
+  if (segment === "retail_commerce") return "/settlement-monitor";
+  // A signed-in account whose tenant has not been classified must not be bounced
+  // into a financial-services dashboard. Support is public and does not recurse
+  // through LandingRedirect, making it a safe configuration-recovery destination.
+  if (segment === null) return "/support";
+  return "/dashboard";
 }
 
 /**

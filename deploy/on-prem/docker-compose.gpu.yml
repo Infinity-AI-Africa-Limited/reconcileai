@@ -1,13 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# ReconcileAI — private Qwen GPU serving profile (NVIDIA GPU REQUIRED)
+# ReconcileAI — Option 3, GPU stack (NVIDIA GPU REQUIRED)
 #
-#   app  ──authenticated http──►  vllm (serves an approved Qwen artifact)
+#   app  ──http──►  vllm (serves a 7-8B model on the GPU, high throughput)
 #   app  ──sql───►  db (MySQL)
 #
-# Requires the NVIDIA Container Toolkit on an institution-controlled GPU host.
-# This is NOT for developer laptops: use docker-compose.cpu.yml + Ollama there.
-# vLLM has no published host port; traffic is restricted to the private Compose
-# network and the application must authenticate to it with VLLM_API_KEY.
+# Requires the NVIDIA Container Toolkit on the host. Use this for banks that have
+# (or rent) a GPU server and want full-quality, low-latency inference.
 #
 # Run:
 #   cp .env.onprem.example .env.onprem   # then edit secrets
@@ -29,26 +27,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    networks: [bank-internal]
 
   vllm:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    image: vllm/vllm-openai:latest
     restart: unless-stopped
-    # In a bank environment, use an image digest and pre-stage the approved model
-    # artifact in hf-cache. Do not rely on an internet model download at the client.
+    # For air-gapped hosts: pre-populate hf-cache on a connected machine and ship
+    # the volume, OR bake the weights into a derived image. HF_TOKEN only needed
+    # at first download on a connected machine.
     command: >
-      --model ${RECON_MODEL:?Set RECON_MODEL to an approved Qwen artifact}
+      --model ${RECON_MODEL:-Qwen/Qwen2.5-7B-Instruct}
       --served-model-name reconcileai
-      --revision ${MODEL_REVISION:?Set MODEL_REVISION to the approved immutable model revision}
-      --max-model-len ${VLLM_MAX_MODEL_LEN:-8192}
-      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
-      --api-key ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
-      --disable-log-requests
+      --max-model-len 8192
+      --gpu-memory-utilization 0.90
     environment:
-      HF_HOME: /root/.cache/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - hf-cache:/root/.cache/huggingface
-    networks: [bank-internal]
     deploy:
       resources:
         reservations:
@@ -77,23 +71,16 @@ services:
       DEPLOYMENT_MODE: on_premise
       EGRESS_ALLOWLIST: vllm                # in-stack model host
       DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
-      DIRECT_LLM_API_KEY: ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
+      DIRECT_LLM_API_KEY: local
       DIRECT_LLM_API_URL: http://vllm:8000/v1
       DIRECT_LLM_PROVIDER: openai
       DIRECT_LLM_MODEL: reconcileai          # matches --served-model-name above
       PORT: 3000
       NODE_ENV: production
     ports:
-      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000"
-    networks: [bank-internal]
+      - "3000:3000"
     restart: unless-stopped
 
 volumes:
   db-data:
   hf-cache:
-
-networks:
-  # No service in this profile can initiate external network traffic. The host's
-  # bank-approved reverse proxy terminates TLS and reaches the app on loopback.
-  bank-internal:
-    internal: true

@@ -6,8 +6,8 @@ leaves the bank's hardware. It ships in two flavours:
 
 | Stack | File | Needs a GPU? | Best for |
 |---|---|---|---|
-| **Private CPU serving** | `docker-compose.cpu.yml` | ❌ No | Financial institutions without GPU infrastructure. Runs a verified quantized Qwen model through internal-only Ollama. |
-| **Private GPU serving** | `docker-compose.gpu.yml` | ✅ Yes (institution-controlled NVIDIA host) | Bank pilot or production serving. Runs an approved Qwen artifact through authenticated vLLM. |
+| **CPU** | `docker-compose.cpu.yml` | ❌ No | Nigerian banks/MFBs with no GPU. Runs a small quantized model on Ollama. |
+| **GPU** | `docker-compose.gpu.yml` | ✅ Yes (1× NVIDIA) | Institutions with (or renting) a GPU box. Runs a 7–8B model on vLLM. |
 
 Both stacks set `DEPLOYMENT_MODE=on_premise`, which turns on the [data-residency
 egress guard](../../server/_core/egress.ts): every outbound call is blocked unless
@@ -40,12 +40,9 @@ cd deploy/on-prem
 cp .env.onprem.example .env.onprem      # edit JWT_SECRET + MYSQL_ROOT_PASSWORD
 
 # CPU (no GPU):
-cp .env.onprem.cpu.example .env.onprem
 docker compose -f docker-compose.cpu.yml --env-file .env.onprem up -d --build
 
-# Private GPU profile — only after the bank has approved the model artifact,
-# immutable revision, vLLM image, secrets, reverse proxy and GPU capacity.
-cp .env.onprem.gpu.example .env.onprem
+# GPU:
 docker compose -f docker-compose.gpu.yml --env-file .env.onprem up -d --build
 ```
 
@@ -67,65 +64,6 @@ The bundled MySQL starts empty — apply the schema once before first use. Pick 
 > `pnpm db:migrate` runs `drizzle-kit migrate` against `drizzle/` (the migration
 > files shipped in the image). For a fully offline rollout, run the migration as a
 > release step in your packaging pipeline before shipping the stack.
-
----
-
-## Serving boundary: local development versus bank deployment
-
-**Ollama and Qwen are complementary, not alternative model families.** Qwen is the
-model family; Ollama is the CPU runtime used for local development, controlled
-demonstrations, and first-class bank deployment where GPU infrastructure is not
-available. The CPU profile deliberately does not expose Ollama’s port to the host
-network and supports an offline import of a verified Qwen GGUF artifact.
-
-For a bank-facing pilot or production deployment, use the GPU profile. It keeps
-vLLM on an internal Docker network, requires an API key for the
-application-to-vLLM hop, suppresses request-content logging at the serving layer,
-and binds the app to host loopback. The bank must put its approved reverse proxy or
-API gateway in front of the app for TLS, OIDC or SSO, RBAC, rate limiting,
-monitoring and immutable audit logging. This Compose profile is a technical
-baseline, not a substitute for the bank's model-risk, security, legal, or
-change-control approval.
-
-Before the GPU profile is started, the institution must provide an approved model
-artifact and immutable revision, a scanned and pinned vLLM container image, a
-deployment-specific `VLLM_API_KEY` from its secret manager, capacity-test evidence,
-and a rollback plan. The model must remain advisory: deterministic ReconcileAI
-rules remain the source of truth for balances, matching, postings and settlement
-finality.
-
-For a CPU-only bank deployment, set `OLLAMA_MODEL_MODE=import` and
-`RECON_MODEL=reconcileai` in `.env.onprem`, place the verified
-`reconcileai-recon-3b-q4_k_m.gguf` artifact and its `SHA256SUMS` manifest under
-`deploy/on-prem/models/`, together with the supplied `models/Modelfile`. Before shipping the
-package, independently compare the manifest digest with the signed release record.
-The CPU bootstrap runs `sha256sum -c SHA256SUMS >/dev/null` before `ollama
-create`; it refuses the import when the artifact does not match the shipped manifest.
-The import runs inside the private network and does not call the internet. A
-stock-model pull is retained solely for development or controlled demonstrations
-before the deployment is air-gapped.
-
-### Private evidence and report storage
-
-The CPU profile includes an internal-only MinIO service and a one-shot
-`storage-init` service. The bootstrap creates the configured `AWS_S3_BUCKET`
-idempotently before ReconcileAI starts. MinIO has no host port, and the
-application uses `http://minio:9000` only on the internal Docker network.
-
-### Local dashboard access boundary
-
-The CPU profile publishes only the `gateway` service to
-`127.0.0.1:3000` by default. Nginx forwards that loopback-only endpoint to the
-internal app network. The app, MySQL, Ollama, and MinIO have no host-published
-service port. For an institution-managed TLS or LAN endpoint, retain the local
-gateway binding and place the bank-approved reverse proxy in front of it.
-
-Set unique `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values in `.env.onprem`.
-The application receives these as S3-compatible credentials; do not set external
-cloud storage credentials in this profile. A bank that operates an approved
-internal S3-compatible service can replace the MinIO service only after matching
-the same private-network, bucket-bootstrap, access-control, backup, and recovery
-evidence.
 
 ---
 
@@ -165,7 +103,7 @@ You do **not** need a trained model to stand this up:
 |---|---|---|---|---|---|
 | CPU | 1.5B Q4 | 4–6 GB | ~2 GB | ~2–4 s | lowest-cost box; fine for batch recon |
 | CPU | 3B Q4 | 8–12 GB | ~3 GB | ~4–8 s | recommended CPU default |
-| GPU | Qwen 8B+ | Size after capacity test | Model + cache | Capacity-test dependent | private vLLM serving only |
+| GPU | 7–8B | 16 GB VRAM | ~16 GB | <1 s | full quality, high throughput |
 
 > Reconciliation is **batch**, not real-time chat — a few seconds per exception on
 > CPU is perfectly acceptable, and most exceptions are resolved by the engine's

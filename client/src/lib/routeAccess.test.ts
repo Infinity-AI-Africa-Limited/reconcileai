@@ -62,11 +62,9 @@ describe("when a merchant signs in", () => {
     expect(landingPathFor("retail_commerce")).toBe("/settlement-monitor");
   });
 
-  it("should still be able to reach the dashboard deliberately", () => {
-    // Demoted to a secondary overview, not removed: it is unscoped in NAV_ITEMS,
-    // so every vertical keeps it in the sidebar and can open it.
-    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
-    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).toBeUndefined();
+  it("should not be able to reach the financial-services dashboard", () => {
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(false);
+    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).not.toContain("retail_commerce");
   });
 });
 
@@ -75,8 +73,8 @@ describe("when a merchant opens the sidebar", () => {
   // how the list happens to be written.
   const merchantMain = navGroup("main", "retail_commerce", "admin").map((e) => e.path);
 
-  it("should show Settlement Monitor above the Dashboard", () => {
-    expect(merchantMain.indexOf("/settlement-monitor")).toBeLessThan(merchantMain.indexOf("/dashboard"));
+  it("should not surface the financial-services dashboard", () => {
+    expect(merchantMain).not.toContain("/dashboard");
   });
 
   it("should open on Settlement Monitor as the very first entry", () => {
@@ -128,9 +126,9 @@ describe("when any other vertical signs in", () => {
   });
 
   it("should land on the dashboard when the segment is unknown", () => {
-    // A legacy org with no segment set still needs somewhere to go, and the
-    // dashboard is the surface every vertical has.
-    expect(landingPathFor(null)).toBe("/dashboard");
+    // A legacy org with no segment set needs a safe recovery route rather than a
+    // financial-services operator dashboard.
+    expect(landingPathFor(null)).toBe("/support");
   });
 });
 
@@ -161,9 +159,9 @@ describe("when a vertical opens a route built for another one", () => {
     expect(canReachPath("/dashboard/auditor", "corporate_b2b", "admin")).toBe(true);
   });
 
-  it("should leave unscoped routes alone", () => {
-    for (const p of ["/reports", "/monitor", "/documentation", "/upload"]) {
-      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(true);
+  it("should refuse financial-services operator routes to a merchant", () => {
+    for (const p of ["/dashboard", "/super-agent", "/exception-intelligence", "/upload", "/reconciliation", "/reports", "/schedules", "/monitor", "/documentation", "/channels", "/age-tracker", "/review", "/audit", "/modules", "/email-settings", "/integrations", "/api-ingestion", "/sftp-config", "/bucket-config", "/email-forwarding", "/anomalies"]) {
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(false);
     }
   });
 
@@ -226,7 +224,7 @@ describe("when staff have entered a tenant's portal", () => {
   });
 
   it("should allow what the viewed tenant DOES have", () => {
-    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/dashboard", "/reports"]) {
+    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/exceptions", "/transactions", "/admin/users"]) {
       expect(canReachPath(p, "retail_commerce", "super_admin", portal), p).toBe(true);
     }
   });

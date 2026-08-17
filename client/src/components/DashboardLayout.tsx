@@ -201,6 +201,10 @@ type DashboardLayoutContentProps = {
 function RoleSwitcher({ location, setLocation }: { location: string; setLocation: (path: string) => void }) {
   const segment = useOrgSegment();
 
+  // A SHOPLINE merchant starts in Settlement Monitor. The dashboard role views
+  // are financial-services operating screens, not a second merchant navigation.
+  if (isRetailCommerce(segment)) return null;
+
   // The Auditor view is examination-facing: it reports audit-trail volume and a
   // "compliance rate" framed for a regulated institution's examiner, and its
   // sibling procedure feeds the CBN pack. Retail merchants answer to card
