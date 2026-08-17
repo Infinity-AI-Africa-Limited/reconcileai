@@ -86,7 +86,7 @@ export const NAV_ITEMS: NavEntry[] = [
   // the end of the retail login redirect; see landingPathFor in lib/routeAccess,
   // which must agree with this ordering.
   { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
-  { label: "Dashboard", path: "/dashboard", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Dashboard", path: "/dashboard", group: "main", segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
   { label: "Super Agent", path: "/super-agent", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
   { label: "Exception Intelligence", path: "/exception-intelligence", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
   { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", staffOnly: true },

@@ -33,6 +33,7 @@ const BEFORE = {
 
 const APPROVED_RETAIL = [
   "/settlement-monitor",
+  "/dashboard",
   "/shopline/sync-status",
   "/shopline/connect",
   "/exceptions",
