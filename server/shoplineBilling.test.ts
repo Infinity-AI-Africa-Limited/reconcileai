@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { processBillingWebhook, hasActiveSubscription, getStoreSubscription, isSyncBlockedBySubscription } from "./connectors/shopline/billingWebhook";
 import { SHOPLINE_BILLING_WEBHOOK_TOPICS, TIER_1_SUBSCRIPTION_BANDS, SHOPLINE_WEBHOOK_TOPICS } from "../shared/shoplineConstants";
 
@@ -27,6 +28,14 @@ describe("SHOPLINE Billing Constants (confirmed portal settings)", () => {
     ]) {
       expect(SHOPLINE_BILLING_WEBHOOK_TOPICS as readonly string[]).not.toContain(bogus);
     }
+  });
+
+  it("includes billing topics in automatic webhook registration and recovery", () => {
+    const registrationSource = readFileSync("server/connectors/shopline/routes.ts", "utf8");
+    const recoverySource = readFileSync("server/connectors/shopline/scheduledSync.ts", "utf8");
+
+    expect(registrationSource).toContain("...SHOPLINE_BILLING_WEBHOOK_TOPICS");
+    expect(recoverySource).toContain("...SHOPLINE_BILLING_WEBHOOK_TOPICS");
   });
 
   it("subscription bands match confirmed portal pricing (7-day trial)", () => {
