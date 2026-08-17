@@ -4,9 +4,9 @@
  * Two rules that used to be one-sided. The sidebar hid entries built for other
  * verticals (PR #52), but the routes behind them stayed open: typing
  * /distributors as a retail merchant loaded the page and filled it with
- * permission errors. And every vertical landed on /dashboard, which answers an
- * operator's question ("how is reconciliation performing") rather than a
- * merchant's ("did my payout land").
+ * permission errors. Retail merchants land on Settlement Monitor for their
+ * payout question, while Dashboard remains the immediately adjacent summary
+ * view in the merchant sidebar.
  */
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
@@ -62,9 +62,9 @@ describe("when a merchant signs in", () => {
     expect(landingPathFor("retail_commerce")).toBe("/settlement-monitor");
   });
 
-  it("should not be able to reach the financial-services dashboard", () => {
-    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(false);
-    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).not.toContain("retail_commerce");
+  it("should be able to reach the merchant Dashboard without landing there by default", () => {
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
+    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).toContain("retail_commerce");
   });
 });
 
@@ -73,8 +73,8 @@ describe("when a merchant opens the sidebar", () => {
   // how the list happens to be written.
   const merchantMain = navGroup("main", "retail_commerce", "admin").map((e) => e.path);
 
-  it("should not surface the financial-services dashboard", () => {
-    expect(merchantMain).not.toContain("/dashboard");
+  it("should surface Dashboard directly below Settlement Monitor", () => {
+    expect(merchantMain.slice(0, 2)).toEqual(["/settlement-monitor", "/dashboard"]);
   });
 
   it("should open on Settlement Monitor as the very first entry", () => {
@@ -160,7 +160,7 @@ describe("when a vertical opens a route built for another one", () => {
   });
 
   it("should refuse financial-services operator routes to a merchant", () => {
-    for (const p of ["/dashboard", "/super-agent", "/exception-intelligence", "/upload", "/reconciliation", "/reports", "/schedules", "/monitor", "/documentation", "/channels", "/age-tracker", "/review", "/audit", "/modules", "/email-settings", "/integrations", "/api-ingestion", "/sftp-config", "/bucket-config", "/email-forwarding", "/anomalies"]) {
+    for (const p of ["/super-agent", "/exception-intelligence", "/upload", "/reconciliation", "/reports", "/schedules", "/monitor", "/documentation", "/channels", "/age-tracker", "/review", "/audit", "/modules", "/email-settings", "/integrations", "/api-ingestion", "/sftp-config", "/bucket-config", "/email-forwarding", "/anomalies"]) {
       expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(false);
     }
   });

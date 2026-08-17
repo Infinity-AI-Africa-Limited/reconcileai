@@ -30,6 +30,7 @@ import { canReachPath } from "./routeAccess";
 const RETAIL_APPROVED = [
   // Retail's own surfaces — the reason the vertical exists.
   "/settlement-monitor",
+  "/dashboard",
   "/shopline/sync-status",
   "/shopline/connect",
   // Merchant controls for SHOPLINE orders, payments, and settlement breaks.
@@ -49,7 +50,6 @@ const DENIED_FOR_RETAIL: Record<string, string> = {
   "/compliance": "NDPA 2023 / NDPR 2019 and CBN retention rules — none of which govern a SHOPLINE merchant",
   "/sample-data": "seeds core_banking, nibss and bank_statement channels: a Nigerian banking demo",
   "/dashboard/auditor": "examination-facing; a merchant has no supervisory examiner",
-  "/dashboard": "Settlement Monitor is the merchant dashboard, avoiding a generic bank operator view",
   "/super-agent": "agent configuration is a platform operating surface, not a merchant workflow",
   "/exception-intelligence": "cross-institution intelligence is not part of the Shopline merchant submission surface",
   "/upload": "Shopline data arrives through authorised API and webhooks, not generic batch upload",
