@@ -1,6 +1,9 @@
 # ReconcileAI - Project TODO
 
 ## Research-Aligned Qwen Serving Profile
+- [x] Implement and validate the portable `/reconciliation` agent-memory six-month aggregation query for organisation 30002 and supported database dialects.
+- [x] Add regression coverage for the six-month boundary and chronological agent-memory month buckets.
+- [ ] Submit the validated reconciliation-query fix to both GitHub repositories for Claude Code production review.
 - [x] Implement the supplied research recommendation: retain Ollama for CPU-only local development and controlled demonstrations while defining a private, authenticated vLLM serving profile for GPU-enabled bank deployments.
 - [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
 - [x] Make the CPU/Ollama profile a first-class bank deployment path by supporting offline trained-model import, private networking, loopback-only application binding, and an enforced SHA-256 model-artifact verification gate.
