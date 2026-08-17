@@ -29,11 +29,16 @@ const BEFORE = {
     "/transactions", "/reports", "/review", "/audit", "/exception-intelligence",
     "/monitor", "/admin/users", "/upload", "/schedules",
   ],
-  retail_commerce: [
-    "/dashboard", "/reconciliation", "/exceptions", "/transactions", "/settlement-monitor",
-    "/shopline/sync-status", "/reports", "/audit", "/shopline/connect", "/admin/users",
-  ],
 } satisfies Record<string, string[]>;
+
+const APPROVED_RETAIL = [
+  "/settlement-monitor",
+  "/shopline/sync-status",
+  "/shopline/connect",
+  "/exceptions",
+  "/transactions",
+  "/admin/users",
+] as const;
 
 const paths = (entries: NavEntry[]) => entries.map((e) => e.path);
 
@@ -60,6 +65,11 @@ describe("when a super admin views a tenant portal", () => {
     expect(retail).toContain("/shopline/sync-status");
     expect(retail).toContain("/shopline/connect");
   });
+
+  it("should show only the approved Shopline merchant surface in a retail portal", () => {
+    const retail = paths(navFor("retail_commerce", "super_admin", { portal: true }));
+    expect(retail.sort()).toEqual([...APPROVED_RETAIL].sort());
+  });
 });
 
 describe("when a real merchant signs in directly", () => {
@@ -79,12 +89,9 @@ describe("when a real merchant signs in directly", () => {
     expect(merchant).not.toContain("/woodcore-connector");
   });
 
-  it("should still offer the vertical-agnostic screens", () => {
-    // Consolidation must not over-correct into a stripped-down sidebar.
+  it("should offer only the approved merchant controls", () => {
     const merchant = paths(navFor("retail_commerce", "admin"));
-    for (const p of ["/dashboard", "/reconciliation", "/exceptions", "/transactions", "/reports", "/audit"]) {
-      expect(merchant, `retail lost ${p}`).toContain(p);
-    }
+    expect(merchant.sort()).toEqual([...APPROVED_RETAIL].sort());
   });
 });
 
@@ -155,10 +162,9 @@ describe("when the segment has not resolved yet", () => {
     expect(loading).not.toContain("/settlement-monitor");
   });
 
-  it("should still render the unrestricted entries, so the sidebar is never empty", () => {
+  it("should not expose a tenant surface before its segment resolves", () => {
     const loading = paths(navFor(null, "admin"));
-    expect(loading).toContain("/dashboard");
-    expect(loading.length).toBeGreaterThan(5);
+    expect(loading).toEqual([]);
   });
 });
 

@@ -1249,3 +1249,12 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Run type checks, full tests and production build verification
 - [ ] Perform authenticated visual verification after the reviewed build is deployed
 - [x] Push the feature branch to both GitHub repositories and open Claude Code review PRs
+
+## Retail Commerce and SHOPLINE App Submission — Infinity AI Main Audit
+
+- [x] Rebase the retail Shopline audit and implementation branch on the latest Infinity-AI-Africa-Limited/reconcileai main branch, treating it as the authoritative source.
+- [x] Audit the retail-commerce dashboard and remove or hide financial-services-only functionality from the Shopline merchant experience.
+- [x] Complete an evidence-based Shopline app submission-readiness review, including remaining functional, security, support, listing, and review-flow requirements.
+- [x] Validate the retail scope with automated tests and a production build: 1,661 tests passed and TypeScript reported zero errors.
+- [ ] Perform authenticated visual verification of the retail merchant portal after the reviewed build is deployed, including the exact sidebar, direct-route redirects, post-install CTA, OAuth, and actual-order flow on ReconcileAI Dev Store.
+- [ ] Submit the validated retail dashboard simplification to both GitHub repositories for Claude Code review.
