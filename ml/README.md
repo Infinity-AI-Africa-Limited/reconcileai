@@ -121,6 +121,33 @@ gate must never confuse the two.
 
 Ship when: **JSON ≥ 99%, classification ≥ 95%, priority ≥ 98%.**
 
+### First measured run (2026-08-18, reference laptop, CPU)
+
+`reconcileai-cpu:synthetic-v1` against a 36-case held-out **synthetic** split:
+
+| Measure | Result | 95% CI | Gate |
+|---|---|---|---|
+| valid JSON | 36/36 — 100% | [90.4, 100] | ≥99% |
+| classification | 36/36 — 100% | [90.4, 100] | ≥95% |
+| priority | 35/36 — 97.2% | [85.8, 99.5] | ≥98% |
+
+**None of these gates is resolved by this run, including the two it appears to
+pass.** At n=36 the confidence interval on a perfect score still reaches down to
+90%, so "100%" and "97.2%" are not distinguishable from each other or from the
+thresholds. Resolving a 98% gate needs a few hundred cases, not 36.
+
+**And the 100% is the least reassuring number here.** The held-out split comes
+from the same generator (`build_dataset.py`) as the training data, so the model
+is being asked to reproduce a distribution it was fitted to. A near-perfect
+score is the *expected* outcome and evidence of memorising the generator — it
+says nothing about a bank's real exceptions, which is the only question that
+matters for a pilot.
+
+What the run does establish: the model emits schema-valid strict JSON reliably,
+terminates cleanly on every case (36/36 `finish_reason=stop`, 136–214 tokens),
+and is not degenerate. That is a smoke test worth having, and it is not an
+acceptance measurement.
+
 > ⚠️ These are product gates measured against the **synthetic** held-out split,
 > which is drawn from the same generator as the training data. A strong score
 > there says the model learned the generator, not that it generalises to a

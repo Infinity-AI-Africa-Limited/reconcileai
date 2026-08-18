@@ -41,10 +41,18 @@ against both files by `tools/onPremServingProfile.test.ts` so they cannot drift:
 
 Recording this explicitly because a green stack invites the opposite conclusion:
 
-- **Model quality is unmeasured against real data.** The only evidence so far is
-  training loss and a synthetic held-out split drawn from the same generator as
-  the training set. That measures memorisation of the generator, not fitness for
-  a bank's exceptions. Week 4 of the programme below is the gate.
+- **Model quality is measured on synthetic data only, and the numbers cannot
+  carry a pilot decision.** First run (2026-08-18): 36/36 valid JSON, 36/36
+  classification, 35/36 priority. Two caveats, each disqualifying on its own.
+  At n=36 the 95% confidence interval on a perfect score still reaches down to
+  90%, so none of the three gates is resolved — not even the two that appear to
+  pass. And the held-out split comes from the same generator as the training
+  data, so a near-perfect score is the expected result of fitting that generator
+  and says nothing about a bank's real exceptions. What it establishes is that
+  the model returns schema-valid JSON and terminates cleanly on every case: a
+  smoke test, not an acceptance measurement. Week 4 against the institution's
+  own human-labelled set remains the gate, and resolving a 98% threshold needs a
+  few hundred cases.
 - **Capacity is measured on one demonstration host only.** 36 held-out cases
   against the trained 3B Q4 model on the reference laptop: p50 58s, p90 119s,
   max 1480s per exception, all 36 completing cleanly at 136-214 output tokens.
