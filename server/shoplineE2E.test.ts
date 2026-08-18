@@ -60,7 +60,14 @@ const mockDb = {
   insert: vi.fn().mockReturnThis(),
   values: vi.fn().mockResolvedValue([{ insertId: 1001 }]),
   update: vi.fn().mockReturnThis(),
-  set: vi.fn().mockReturnThis(),
+  // An update chain ENDS at .where(), and drizzle-mysql resolves it to a
+  // ResultSetHeader. The replay reads affectedRows from it to tell whether it
+  // won the claim, so returning the chainable mock here made every claim look
+  // lost. Kept separate from the select chain's `where`, which stays chainable.
+  updateWhere: vi.fn().mockResolvedValue([{ affectedRows: 1 }]),
+  set: vi.fn(function (this: unknown) {
+    return { where: mockDb.updateWhere };
+  }),
   orderBy: vi.fn().mockReturnThis(),
   innerJoin: vi.fn().mockReturnThis(),
 };
@@ -360,6 +367,19 @@ describe("A1. An admitted delivery that never finished is recovered", () => {
     expect(wrote.some((w) => w.attempts === 2)).toBe(true);
   });
 
+  it("should skip a row another worker claimed first", async () => {
+    // Two scheduled syncs can select the same row before either updates it.
+    // Without an atomic claim both would run the side effect — for an
+    // appsubscription/paid event that applies the billing update twice — and
+    // the outcome writes would then race. affectedRows = 0 means we lost.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    mockDb.updateWhere.mockResolvedValueOnce([{ affectedRows: 0 }]);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary.examined).toBe(1);
+    expect(summary.skipped).toBe(1);
+    expect(summary.processed).toBe(0);
+  });
+
   it("should leave a freshly admitted event alone", async () => {
     // The receiver acks and processes on the same tick, so anything inside the
     // grace window is very likely still in flight — replaying it would
@@ -372,7 +392,7 @@ describe("A1. An admitted delivery that never finished is recovered", () => {
   it("should report an empty sweep when nothing is stalled", async () => {
     mockDb.limit.mockImplementationOnce(async () => []);
     const summary = await replayStalledWebhookEvents(mockDb as never);
-    expect(summary).toEqual({ examined: 0, processed: 0, failed: 0, movedToDlq: 0 });
+    expect(summary).toEqual({ examined: 0, processed: 0, failed: 0, movedToDlq: 0, skipped: 0 });
   });
 });
 

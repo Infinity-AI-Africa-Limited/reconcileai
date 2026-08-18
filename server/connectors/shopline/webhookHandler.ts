@@ -505,6 +505,8 @@ export type WebhookReplaySummary = {
   processed: number;
   failed: number;
   movedToDlq: number;
+  /** Rows another worker claimed first — expected, not an error. */
+  skipped: number;
 };
 
 /**
@@ -546,10 +548,50 @@ export async function replayStalledWebhookEvents(
     processed: 0,
     failed: 0,
     movedToDlq: 0,
+    skipped: 0,
   };
 
   for (const event of stalled) {
-    const attempts = (event.attempts ?? 0) + 1;
+    const observedAttempts = event.attempts ?? 0;
+    const attempts = observedAttempts + 1;
+
+    // CLAIM the row before doing anything with it.
+    //
+    // Selecting and then processing is a read-modify-write across two
+    // statements, and nothing stops a second scheduled sync — another Railway
+    // instance, or an operator hitting the endpoint by hand — from selecting
+    // the same row in between. Both would then run the side effect, which for
+    // an `appsubscription/paid` event means applying the billing update twice,
+    // and the outcome writes would race afterwards so a success could be
+    // overwritten with `failed` or `dlq`.
+    //
+    // The attempt counter doubles as the lease: the UPDATE only matches while
+    // the row still shows the count we read, so exactly one worker can move it
+    // forward and the loser sees affectedRows = 0 and moves on.
+    const claim = await db
+      .update(slConnectorWebhookEvents)
+      .set({ attempts })
+      .where(
+        and(
+          eq(slConnectorWebhookEvents.id, event.id),
+          eq(slConnectorWebhookEvents.attempts, observedAttempts),
+          inArray(slConnectorWebhookEvents.status, ["pending", "failed"]),
+        ),
+      );
+
+    const claimed = (claim as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
+    if (claimed === 0) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    // Every outcome write below is also conditional on still holding the claim,
+    // so a slow worker cannot overwrite a newer attempt's result.
+    const heldClaim = and(
+      eq(slConnectorWebhookEvents.id, event.id),
+      eq(slConnectorWebhookEvents.attempts, attempts),
+    );
+
     try {
       await processWebhookEvent(
         db,
@@ -560,16 +602,16 @@ export async function replayStalledWebhookEvents(
       );
       await db
         .update(slConnectorWebhookEvents)
-        .set({ status: "processed", processedAt: new Date(), attempts })
-        .where(eq(slConnectorWebhookEvents.id, event.id));
+        .set({ status: "processed", processedAt: new Date() })
+        .where(heldClaim);
       summary.processed += 1;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       const exhausted = attempts >= WEBHOOK_MAX_ATTEMPTS;
       await db
         .update(slConnectorWebhookEvents)
-        .set({ status: exhausted ? "dlq" : "failed", attempts, errorMessage })
-        .where(eq(slConnectorWebhookEvents.id, event.id));
+        .set({ status: exhausted ? "dlq" : "failed", errorMessage })
+        .where(heldClaim);
       if (exhausted) {
         summary.movedToDlq += 1;
         console.error(
