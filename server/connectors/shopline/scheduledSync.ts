@@ -15,6 +15,7 @@ import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { runSyncCycle, type SyncReport } from "./syncOrchestrator";
 import { listWebhooks, registerWebhook, type ShoplineApiOptions } from "./apiClient";
 import { getValidToken } from "./tokenStore";
+import { replayStalledWebhookEvents, type WebhookReplaySummary } from "./webhookHandler";
 import {
   SHOPLINE_BILLING_WEBHOOK_TOPICS,
   SHOPLINE_WEBHOOK_TOPICS,
@@ -81,9 +82,34 @@ export function catchUpWindow(lastSyncAt: Date | null, now: Date): { from: Date;
 export async function handleShoplineSyncCycle(req: Request, res: Response): Promise<void> {
   const startedAt = Date.now();
   try {
+    // Drain any webhook the receiver admitted but never finished, BEFORE the
+    // polling pass. The receiver stores a delivery then acknowledges, so a
+    // process restart between the two leaves the row `pending` and a throw
+    // leaves it `failed` — and SHOPLINE will not redeliver after a 2xx, so this
+    // is the only thing that comes back for them.
+    //
+    // Deliberately inside the existing 15-minute cycle rather than on its own
+    // schedule: a recovery path gated on someone remembering to configure a
+    // cron is a recovery path that is not there.
+    let replay: WebhookReplaySummary | null = null;
+    const replayDb = await getDb();
+    if (replayDb) {
+      try {
+        replay = await replayStalledWebhookEvents(replayDb);
+        if (replay.examined > 0) {
+          console.log(
+            `[shoplineSyncCycle] webhook replay: examined=${replay.examined} processed=${replay.processed} failed=${replay.failed} dlq=${replay.movedToDlq}`,
+          );
+        }
+      } catch (err) {
+        // Recovery failing must not take the polling pass down with it.
+        console.error("[shoplineSyncCycle] webhook replay failed:", err);
+      }
+    }
+
     const stores = await getActiveStores();
     if (stores.length === 0) {
-      res.json({ ok: true, skipped: "no_active_stores", durationMs: Date.now() - startedAt });
+      res.json({ ok: true, skipped: "no_active_stores", webhookReplay: replay, durationMs: Date.now() - startedAt });
       return;
     }
 
@@ -133,6 +159,7 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       storesProcessed: stores.length,
       successCount,
       failCount,
+      webhookReplay: replay,
       totalOrders: reports.reduce((sum, r) => sum + r.ordersIngested, 0),
       totalPayments: reports.reduce((sum, r) => sum + r.paymentsIngested, 0),
       totalPayouts: reports.reduce((sum, r) => sum + r.payoutsIngested, 0),

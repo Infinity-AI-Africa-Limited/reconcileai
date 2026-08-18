@@ -28,7 +28,7 @@
  * DLQ: events that fail processing after 3 attempts are marked `dlq`.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, lt } from "drizzle-orm";
 import { getDb } from "../../db";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { slConnectorWebhookEvents, slConnectorStores } from "../../../drizzle/connector_schema";
@@ -482,4 +482,105 @@ async function handleMerchantRedact(
 
   // Phase 2: schedule full data purge (webhook events, synced transactions, etc.)
   // within 30 days per GDPR requirement.
+}
+
+/**
+ * Maximum processing attempts before an event is parked in the DLQ.
+ *
+ * Three, not more: a delivery that has failed three times is failing for a
+ * reason a fourth attempt will not change, and an event retried forever is a
+ * queue that never drains and an alert nobody reads.
+ */
+export const WEBHOOK_MAX_ATTEMPTS = 3;
+
+/**
+ * Don't touch an event younger than this — the receiver acknowledges and
+ * processes on the same tick, so anything newer is very likely still in flight.
+ * Replaying it would double-process a delivery that was about to succeed.
+ */
+export const WEBHOOK_REPLAY_GRACE_MS = 5 * 60_000;
+
+export type WebhookReplaySummary = {
+  examined: number;
+  processed: number;
+  failed: number;
+  movedToDlq: number;
+};
+
+/**
+ * Re-process deliveries that were admitted but never finished.
+ *
+ * Storing the event before acknowledging makes the delivery OURS; it does not
+ * make it done. Two ways a row is left behind, both invisible without this:
+ * the process exits between the ack and the `setImmediate` callback, leaving it
+ * `pending` forever; or processing throws and it is recorded `failed` and never
+ * looked at again. SHOPLINE will not redeliver after a 2xx, so nothing else is
+ * coming — subscription lifecycle, refunds and reconciliation state simply stay
+ * stale.
+ *
+ * Runs inside the existing 15-minute sync cycle rather than on a cron of its
+ * own, deliberately: a recovery path that depends on someone remembering to
+ * configure a schedule is a recovery path that is not there.
+ */
+export async function replayStalledWebhookEvents(
+  db: Db,
+  opts: { limit?: number; graceMs?: number } = {},
+): Promise<WebhookReplaySummary> {
+  const limit = opts.limit ?? 50;
+  const cutoff = new Date(Date.now() - (opts.graceMs ?? WEBHOOK_REPLAY_GRACE_MS));
+
+  const stalled = await db
+    .select()
+    .from(slConnectorWebhookEvents)
+    .where(
+      and(
+        inArray(slConnectorWebhookEvents.status, ["pending", "failed"]),
+        lt(slConnectorWebhookEvents.attempts, WEBHOOK_MAX_ATTEMPTS),
+        lt(slConnectorWebhookEvents.receivedAt, cutoff),
+      ),
+    )
+    .limit(limit);
+
+  const summary: WebhookReplaySummary = {
+    examined: stalled.length,
+    processed: 0,
+    failed: 0,
+    movedToDlq: 0,
+  };
+
+  for (const event of stalled) {
+    const attempts = (event.attempts ?? 0) + 1;
+    try {
+      await processWebhookEvent(
+        db,
+        event.organizationId,
+        event.slStoreId,
+        event.topic,
+        event.payloadJson,
+      );
+      await db
+        .update(slConnectorWebhookEvents)
+        .set({ status: "processed", processedAt: new Date(), attempts })
+        .where(eq(slConnectorWebhookEvents.id, event.id));
+      summary.processed += 1;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const exhausted = attempts >= WEBHOOK_MAX_ATTEMPTS;
+      await db
+        .update(slConnectorWebhookEvents)
+        .set({ status: exhausted ? "dlq" : "failed", attempts, errorMessage })
+        .where(eq(slConnectorWebhookEvents.id, event.id));
+      if (exhausted) {
+        summary.movedToDlq += 1;
+        console.error(
+          `[shopline-webhook] event ${event.id} (${event.topic}) exhausted ${WEBHOOK_MAX_ATTEMPTS} attempts — moved to DLQ:`,
+          errorMessage,
+        );
+      } else {
+        summary.failed += 1;
+      }
+    }
+  }
+
+  return summary;
 }
