@@ -36,6 +36,11 @@
 - [ ] Measure model quality on an institution's human-labelled set inside its environment; the synthetic split cannot support a pilot decision.
 - [ ] Capacity-test both tiers on the approved target hosts; rehearse rollback.
 - [ ] Reduce the on-premise image to production dependencies only.
+## Retail route guard
+- [x] Declare all three RoleSwitcher views, not only the auditor one. The switcher is hidden wholesale from retail, but `/dashboard/cfo` and `/dashboard/operations` stayed openable by URL.
+- [x] Inherit the parent's rule for nested routes so `/reports/:id` is refused wherever `/reports` is; exact-match lookup reported every parameterised route as unscoped.
+- [x] Honour the `roles` field in `canReachPath`. It had the same shape `staffOnly` had before PR #52 — read by the sidebar and by nothing else — so `/admin/super-admin*`, `/admin/poc` and `/admin/roadmap-access` were reachable by any tenant admin who typed the URL. SegmentGuard now also waits for `auth.me`, because a role-scoped path fails closed on an undefined role.
+- [ ] `canReachPath` still ignores the `roles` field that NAV_ITEMS declares, so `/admin/super-admin*` and `/admin/poc` are reachable by any tenant admin who types the URL (server procedures still refuse them). Same shape as the `staffOnly` gap that this module was written to close — worth closing deliberately rather than as a side effect of this PR.
 ## Agent-memory monthly aggregation
 - [x] Replace the MySQL-specific `DATE_FORMAT`/`DATE_SUB` aggregation in `exceptionIntelligence.flywheelStats` with a portable boundary + application-side bucketing.
 - [x] Fix the six-month boundary overflowing into the following month. `setUTCMonth` keeps the day, so 31 August produced 3 March instead of 28 February and the `gte` filter dropped every row in between. Three of five month-ends in a year hit it.
@@ -1298,3 +1303,43 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Run type checks, full tests and production build verification
 - [ ] Perform authenticated visual verification after the reviewed build is deployed
 - [x] Push the feature branch to both GitHub repositories and open Claude Code review PRs
+
+## Retail Commerce and SHOPLINE App Submission — Infinity AI Main Audit
+
+- [x] Rebase the retail Shopline audit and implementation branch on the latest Infinity-AI-Africa-Limited/reconcileai main branch, treating it as the authoritative source.
+- [x] Audit the retail-commerce dashboard and remove or hide financial-services-only functionality from the Shopline merchant experience.
+- [x] Complete an evidence-based Shopline app submission-readiness review, including remaining functional, security, support, listing, and review-flow requirements.
+- [x] Validate the retail scope with automated tests and a production build: 1,661 tests passed and TypeScript reported zero errors.
+- [ ] Perform authenticated visual verification of the retail merchant portal after the reviewed build is deployed, including the exact sidebar, direct-route redirects, post-install CTA, OAuth, and actual-order flow on ReconcileAI Dev Store.
+- [x] Submit the validated retail dashboard simplification to both GitHub repositories for Claude Code review (Infinity AI PR #87; MistaRichMan PR #21).
+- [x] Map the full current Shopline developer documentation—OAuth, scopes, webhooks, subscription lifecycle, GDPR, rate limits, settlement/payment data, app review, listing, and security—to the Infinity AI implementation and identify every functional integration gap.
+- [x] Add process-local per-store SHOPLINE request pacing covering polling, backfill, manual sync, and webhook-subscription API calls; 429 retry alone is not a complete 4-rps control.
+- [ ] Load-test the per-store SHOPLINE rate budget on ReconcileAI Dev Store and replace the process-local scheduler with a distributed limiter before horizontally scaling workers for one merchant.
+- [x] Register and reconcile the required `appsubscription/create`, `appsubscription/paid`, and `appsubscription/expiration` webhook subscriptions through the documented store-authorised subscription API; targeted billing and sync tests plus TypeScript validation passed.
+- [x] Restore the retail-commerce Dashboard directly below Settlement Monitor while keeping all other financial-services-only navigation hidden; 141 focused navigation and route tests plus TypeScript validation passed.
+- [x] Configure the Partner Portal with Richard Anwanakak, `support@reconcileaiafrica.com`, and the canonical customer/store GDPR endpoints while retaining Redirected mode and the non-sales-channel setting.
+- [ ] Capture non-destructive signed live-request evidence for each configured Partner Portal GDPR endpoint using a controlled developer-store payload; do not invoke customer or store redaction on live merchant data.
+- [ ] Complete the remaining live ReconcileAI Dev Store evidence: observe `orders/paid` for paid order 1003, confirm its sync and Settlement Monitor outcome, historical backfill, subscription lifecycle topic delivery, and webhook duplicate/recovery handling. The authorised reconnect/OAuth callback and paid source event are now evidenced.
+- [ ] Verify the new super-admin-only post-OAuth retail portal hand-off reaches `SL_RECONCILEAI_DEV` and displays its connected store in Settlement Monitor rather than the Infinity AI Staff organisation.
+- [ ] Establish a production merchant-identity hand-off after SHOPLINE OAuth; current onboarding creates an invite-style tenant admin without proving the installing merchant can authenticate as that user. Do not treat super-admin portal context as a merchant-login substitute.
+- [ ] Produce and upload the public App Store logo and real developer-store screenshots; retain the Redirected loading mode and accurate non-SHOPLINE-Payments settlement-file limitation in the listing. The reviewer test guide is prepared in the submission package.
+- [x] Revise the Shopline listing copy and create reviewer test instructions so only verified Tier 1 capabilities are claimed, including the settlement-file path for merchants without SHOPLINE Payments data.
+- [ ] Execute all P0 Shopline approval gates: complete Portal contact/GDPR configuration, create reviewer assets and guide, verify subscription lifecycle delivery, and capture full ReconcileAI Dev Store install-to-settlement evidence.
+- [ ] Execute all P1 Shopline readiness gates: controlled 90-day backfill validation, refund/cancellation and pagination tests, rate-budget load test, access-token refresh evidence, privacy/evidence retention review, and support escalation runbook.
+- [ ] Execute all P2 Shopline operational gates: merchant onboarding materials, monitoring/alerting drill, incident and rollback exercise, ongoing release/change-control record, and post-approval Tier 1.5 backlog.
+- [x] Prepare merchant onboarding, operations/incident/rollback, and release-control documentation for the Shopline submission package; live drills remain required after the reviewed release deploys.
+- [x] Create a reviewable ReconcileAI logo suite: combined wordmark and icon, standalone logo mark, and square App Store icon.
+- [x] Obtain Richard’s explicit approval of the square App Store icon before uploading or publishing it to the SHOPLINE listing.
+- [x] Adapt Richard’s supplied Infinity AI circular mark into a 120×120 ReconcileAI App Store icon for review; do not upload before approval.
+- [ ] Capture and upload authentic 1920×1080 ReconcileAI Dev Store screenshots for Settlement Monitor, Dashboard, and SHOPLINE Connect; do not use generated or mocked screens.
+- [x] Verify the configured Tier 1 App Store 7-day trial and five paid subscription plans match the approved merchant-facing price and billing terms.
+- [ ] Complete the App Store Product Features, demo-store URL, contact name, and reviewed About/Privacy/FAQ content in the Partner Portal.
+- [ ] Capture live operational evidence for paid-order reconciliation, monitoring/alert response, incident rollback, and release/change control after the reviewed retail build is deployed.
+- [ ] Create the app release version and submit for SHOPLINE review only after Richard confirms the final submission package.
+- [x] Verify the enabled Partner Portal Tier 1 plans match the approved Starter, Growth, Professional, Scale, and Enterprise monthly and annual price configuration.
+- [ ] At the final go-live decision, replace the App Details public contact email `richard@infinityaiafrica.ai` with `support@reconcileaiafrica.com` and verify the monitored inbox before submission.
+- [x] Add and save the three verified Tier 1 Product Features in the SHOPLINE App Details listing without overstating reconciliation, payout, or write-access capabilities.
+- [x] Prepare a merchant-facing Tier 1 support-escalation and evidence-retention runbook that avoids customer PII, credentials, and unsupported service-level claims.
+- [x] Review and save accurate Tier 1 About copy while preserving the existing Privacy Policy and FAQ URLs, deliberate blank Demo store URL, and current public contact email.
+- [x] Prepare a controlled P2 monitoring, incident, and rollback drill record that distinguishes pre-release code validation from required live developer-store evidence.
+- [x] Diagnose and fix the Manus development-preview Vite HMR WebSocket connection failure without changing production networking behavior; stale preview worker restarted and HMR reconnection verified.

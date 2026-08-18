@@ -4,9 +4,9 @@
  * Two rules that used to be one-sided. The sidebar hid entries built for other
  * verticals (PR #52), but the routes behind them stayed open: typing
  * /distributors as a retail merchant loaded the page and filled it with
- * permission errors. And every vertical landed on /dashboard, which answers an
- * operator's question ("how is reconciliation performing") rather than a
- * merchant's ("did my payout land").
+ * permission errors. Retail merchants land on Settlement Monitor for their
+ * payout question, while Dashboard remains the immediately adjacent summary
+ * view in the merchant sidebar.
  */
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
@@ -62,11 +62,9 @@ describe("when a merchant signs in", () => {
     expect(landingPathFor("retail_commerce")).toBe("/settlement-monitor");
   });
 
-  it("should still be able to reach the dashboard deliberately", () => {
-    // Demoted to a secondary overview, not removed: it is unscoped in NAV_ITEMS,
-    // so every vertical keeps it in the sidebar and can open it.
+  it("should be able to reach the merchant Dashboard without landing there by default", () => {
     expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
-    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).toBeUndefined();
+    expect(NAV_ITEMS.find((e) => e.path === "/dashboard")?.segments).toContain("retail_commerce");
   });
 });
 
@@ -75,8 +73,8 @@ describe("when a merchant opens the sidebar", () => {
   // how the list happens to be written.
   const merchantMain = navGroup("main", "retail_commerce", "admin").map((e) => e.path);
 
-  it("should show Settlement Monitor above the Dashboard", () => {
-    expect(merchantMain.indexOf("/settlement-monitor")).toBeLessThan(merchantMain.indexOf("/dashboard"));
+  it("should surface Dashboard directly below Settlement Monitor", () => {
+    expect(merchantMain.slice(0, 2)).toEqual(["/settlement-monitor", "/dashboard"]);
   });
 
   it("should open on Settlement Monitor as the very first entry", () => {
@@ -110,7 +108,7 @@ describe("when the install completes", () => {
     // The screen says "Store Connected Successfully!" and its primary button used
     // to open the operator's dashboard. A merchant's next question is whether
     // their payout landed.
-    expect(PAGE).toMatch(/navigate\(landingPathFor\("retail_commerce"\)\)/);
+    expect(PAGE).toMatch(/enterRetailPortal\(landingPathFor\("retail_commerce"\)\)/);
     expect(PAGE).not.toMatch(/navigate\("\/dashboard"\)/);
   });
 
@@ -128,9 +126,9 @@ describe("when any other vertical signs in", () => {
   });
 
   it("should land on the dashboard when the segment is unknown", () => {
-    // A legacy org with no segment set still needs somewhere to go, and the
-    // dashboard is the surface every vertical has.
-    expect(landingPathFor(null)).toBe("/dashboard");
+    // A legacy org with no segment set needs a safe recovery route rather than a
+    // financial-services operator dashboard.
+    expect(landingPathFor(null)).toBe("/support");
   });
 });
 
@@ -153,6 +151,54 @@ describe("when a vertical opens a route built for another one", () => {
     }
   });
 
+  it("should refuse every RoleSwitcher view to a merchant, not only the auditor one", () => {
+    // The switcher is hidden wholesale from retail (DashboardLayout), so all
+    // three views are financial-services operating screens. Only the auditor was
+    // declared, which left CFO and Operations openable by typing the URL — and
+    // they cannot inherit from /dashboard, because /dashboard IS offered to
+    // retail as a secondary overview.
+    for (const p of ["/dashboard/cfo", "/dashboard/operations", "/dashboard/auditor"]) {
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(false);
+      expect(canReachPath(p, "financial_services", "admin"), p).toBe(true);
+      expect(canReachPath(p, "corporate_b2b", "admin"), p).toBe(true);
+    }
+    // The parent stays reachable — that is the whole reason the children need
+    // their own declaration rather than an inherited one.
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
+  });
+
+  it("should refuse a nested detail route the parent already refuses", () => {
+    // /reports/:id is mounted with a parameter and will never have a nav entry
+    // of its own. Exact-match lookup called it unscoped, so a merchant opening
+    // a report link landed in a financial-services screen the sidebar had
+    // correctly hidden.
+    expect(canReachPath("/reports", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/reports/42", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/reports/42/", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/Reports/ABC-123", "retail_commerce", "admin")).toBe(false);
+    // and still available to the verticals it belongs to
+    expect(canReachPath("/reports/42", "financial_services", "admin")).toBe(true);
+  });
+
+  it("should let a deeper declaration win over a shallower one", () => {
+    // /dashboard allows retail; /dashboard/auditor does not. A child must not be
+    // widened by its parent, nor a parent narrowed by its child.
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
+    expect(canReachPath("/dashboard/auditor", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/dashboard/auditor/anything", "retail_commerce", "admin")).toBe(false);
+  });
+
+  it("should keep an explicitly unscoped entry unscoped, not inherit a narrower parent", () => {
+    // Team Access is declared for every vertical. If a nested lookup ever starts
+    // inheriting from a narrower ancestor it would silently overrule that.
+    expect(canReachPath("/admin/users", "retail_commerce", "admin")).toBe(true);
+  });
+
+  it("should treat a child of a staff tool as a staff tool", () => {
+    expect(canReachPath("/demo-dashboard/anything", "financial_services", "admin")).toBe(false);
+    expect(canReachPath("/admin/assessments/42", "financial_services", "admin")).toBe(false);
+  });
+
   it("should refuse the examination-facing auditor view to a merchant", () => {
     // Reached from the RoleSwitcher rather than the sidebar, so NAV_ITEMS cannot
     // supply its rule and routeAccess declares it explicitly.
@@ -161,9 +207,9 @@ describe("when a vertical opens a route built for another one", () => {
     expect(canReachPath("/dashboard/auditor", "corporate_b2b", "admin")).toBe(true);
   });
 
-  it("should leave unscoped routes alone", () => {
-    for (const p of ["/reports", "/monitor", "/documentation", "/upload"]) {
-      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(true);
+  it("should refuse financial-services operator routes to a merchant", () => {
+    for (const p of ["/super-agent", "/exception-intelligence", "/upload", "/reconciliation", "/reports", "/schedules", "/monitor", "/documentation", "/channels", "/age-tracker", "/review", "/audit", "/modules", "/email-settings", "/integrations", "/api-ingestion", "/sftp-config", "/bucket-config", "/email-forwarding", "/anomalies"]) {
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(false);
     }
   });
 
@@ -193,6 +239,70 @@ describe("when a vertical opens a route built for another one", () => {
     // This decides what the client OFFERS, not what is permitted. Failing closed
     // on an unknown path would break routes simply for not being nav entries.
     expect(canReachPath("/some/future/page", "retail_commerce", "admin")).toBe(true);
+  });
+});
+
+describe("when a tenant user types the URL of a route their ROLE does not have", () => {
+  it("should refuse the operator's own consoles to a tenant admin", () => {
+    // These declare roles: ["super_admin"] and the sidebar honoured that; the
+    // route did not. A tenant admin got the page and then a screenful of
+    // permission errors from the server — the same "guarded, technically, and a
+    // broken screen in practice" failure staffOnly had before PR #52.
+    for (const p of [
+      "/admin/super-admin",
+      "/admin/super-admin/orgs",
+      "/admin/super-admin/users",
+      "/admin/super-admin/analytics",
+      "/admin/poc",
+      "/admin/roadmap-access",
+    ]) {
+      expect(canReachPath(p, "financial_services", "admin"), p).toBe(false);
+      expect(canReachPath(p, "financial_services", "super_admin"), p).toBe(true);
+    }
+  });
+
+  it("should refuse an admin-only route to a read-only role", () => {
+    expect(canReachPath("/modules", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/modules", "financial_services", "user")).toBe(false);
+    expect(canReachPath("/email-settings", "financial_services", "cfo")).toBe(false);
+  });
+
+  it("should admit a role that IS listed", () => {
+    // /schedules is admin|operations — operations must keep it.
+    expect(canReachPath("/schedules", "financial_services", "operations")).toBe(true);
+    expect(canReachPath("/schedules", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/schedules", "financial_services", "cfo")).toBe(false);
+  });
+
+  it("should leave role-open routes open to every role", () => {
+    // /dashboard declares segments but no roles.
+    for (const role of ["admin", "user", "operations", "cfo", "compliance"]) {
+      expect(canReachPath("/dashboard", "financial_services", role), role).toBe(true);
+    }
+  });
+
+  it("should inherit the parent's role rule for a nested route", () => {
+    expect(canReachPath("/admin/super-admin/orgs/42", "financial_services", "admin")).toBe(false);
+    expect(canReachPath("/admin/super-admin/orgs/42", "financial_services", "super_admin")).toBe(true);
+  });
+
+  it("should drop role gating inside a portal, exactly as the sidebar does", () => {
+    // Entering a portal means looking at the TENANT's surface rather than
+    // exercising the operator's own permissions, so navFor drops role gating
+    // and keeps segment gating. The route guard has to agree or the sidebar and
+    // the URL disagree again — which is the whole bug class this module closes.
+    expect(canReachPath("/modules", "financial_services", "super_admin", { portal: true })).toBe(true);
+    // …while segment gating still bites inside the portal.
+    expect(canReachPath("/distributors", "retail_commerce", "super_admin", { portal: true })).toBe(false);
+  });
+
+  it("should refuse a role-scoped path when the role is not yet known", () => {
+    // Fail closed, matching inRole. SegmentGuard must therefore wait for
+    // auth.me before consulting this, or it would bounce a legitimate admin off
+    // their own page for the width of one request.
+    expect(canReachPath("/modules", "financial_services", undefined)).toBe(false);
+    // An unscoped, role-open path stays reachable regardless.
+    expect(canReachPath("/dashboard", "financial_services", undefined)).toBe(true);
   });
 });
 
@@ -226,7 +336,7 @@ describe("when staff have entered a tenant's portal", () => {
   });
 
   it("should allow what the viewed tenant DOES have", () => {
-    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/dashboard", "/reports"]) {
+    for (const p of ["/settlement-monitor", "/shopline/sync-status", "/exceptions", "/transactions", "/admin/users"]) {
       expect(canReachPath(p, "retail_commerce", "super_admin", portal), p).toBe(true);
     }
   });
@@ -391,7 +501,13 @@ describe("when the rule is derived rather than restated", () => {
     // callback guard quietly stopped passing `signedIn` — which is the flag the
     // whole signed-out exception now turns on.
     const callbackGuard = APP.slice(APP.indexOf("function CallbackGuard"), APP.indexOf("function Router"));
-    expect(callbackGuard).toMatch(/signedIn: isAuthenticated/);
+    // The exception turns on CONFIRMED absence of a session, not on
+    // `isAuthenticated` alone. `auth.me` is a publicProcedure, so a signed-out
+    // visitor resolves to null with no error and a genuine failure resolves to
+    // false WITH one — passing `isAuthenticated` straight through handed the
+    // retail completion screen to a signed-in bank whose lookup failed.
+    expect(callbackGuard).toMatch(/signedIn: !signedOutConfirmed/);
+    expect(callbackGuard).toMatch(/const signedOutConfirmed = !authLoading && !authError && !isAuthenticated/);
     expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
     expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
   });

@@ -28,7 +28,7 @@
  * DLQ: events that fail processing after 3 attempts are marked `dlq`.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { getDb } from "../../db";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { slConnectorWebhookEvents, slConnectorStores } from "../../../drizzle/connector_schema";
@@ -60,17 +60,34 @@ export type WebhookIngestResult =
   | { status: "failed"; error: string };
 
 /**
- * Ingest and process a SHOPLINE webhook delivery.
+ * The outcome of ADMITTING a delivery — everything up to and including the
+ * durable insert, and nothing after it.
  *
- * Design: verify → idempotency check → insert as "pending" → process →
- * mark "processed" or "failed". The HTTP handler responds 200 immediately
- * after the insert (5-second budget). Processing runs inline in Phase 1;
- * Phase 2 will decouple with a job queue.
+ * Split out from processing because the two have opposite failure semantics.
+ * Admission decides what we tell SHOPLINE: once we answer 2xx it stops
+ * retrying and the delivery is ours forever, so nothing may be acknowledged
+ * before it is on disk. Processing decides what we do next, can be retried
+ * from the stored row, and must never hold up the 5-second ack budget.
  */
-export async function ingestWebhook(
+export type WebhookAdmission =
+  | { status: "admitted"; eventId: number; organizationId: number; slStoreId: number; topic: string; payload: unknown }
+  | { status: "duplicate"; webhookId: string }
+  | { status: "invalid_signature" }
+  | { status: "store_not_found"; shopDomain: string };
+
+/**
+ * Admit a delivery: verify → resolve store → dedupe → insert as "pending".
+ *
+ * Stops at the insert on purpose. This is the boundary the HTTP handler must
+ * `await` before answering 2xx, because SHOPLINE treats a 2xx as delivered and
+ * will not send it again — so anything acknowledged before this returns is
+ * simply lost. Throwing is the correct behaviour for an infrastructure failure
+ * here: the caller turns it into a retryable status and SHOPLINE re-delivers.
+ */
+export async function admitWebhook(
   db: Db,
   webhook: InboundWebhook,
-): Promise<WebhookIngestResult> {
+): Promise<WebhookAdmission> {
   // 1. Verify HMAC signature (tolerant: accepts hex or base64)
   const signatureValid = verifyWebhookHmac(
     webhook.rawBody,
@@ -134,36 +151,97 @@ export async function ingestWebhook(
     webhookId: webhook.webhookId,
     topic: webhook.topic,
     payloadJson,
-    status: "pending",
-    attempts: 0,
+    // Admitted straight into `processing` with a lease, because the receiver is
+    // about to process it on the very next tick. Inserting as `pending` left the
+    // row replay-eligible for the whole of that work: if it ran past the grace
+    // period a sweep would claim and dispatch the SAME delivery, and for
+    // appsubscription/paid that bills twice. Holding the lease from the moment
+    // the row exists closes the window instead of narrowing it.
+    //
+    // Crash safety is unchanged — better, in fact. A process that dies mid-work
+    // leaves an expired lease, which the sweep reclaims; before, it left a
+    // `pending` row that looked identical to one never started.
+    status: "processing",
+    attempts: 1,
+    leaseExpiresAt: new Date(Date.now() + WEBHOOK_LEASE_MS),
   });
 
   const eventId = (inserted as { insertId: number }).insertId;
 
-  // 6. Process the event (inline in Phase 1; Phase 2 will enqueue)
+  // The delivery is now durable. Everything past this line is recoverable from
+  // the stored row, so the caller may safely acknowledge.
+  return {
+    status: "admitted",
+    eventId,
+    organizationId: store.organizationId,
+    slStoreId: store.id,
+    topic: webhook.topic,
+    payload: payloadJson,
+  };
+}
+
+/**
+ * Process an already-admitted delivery and record the outcome on its row.
+ *
+ * Runs AFTER the acknowledgement, so it must never throw at the caller: a
+ * failure here is recorded as `failed` on the event and is recoverable, unlike
+ * a failure to admit, which would lose the delivery outright.
+ */
+export async function processAdmittedWebhook(
+  db: Db,
+  admitted: Extract<WebhookAdmission, { status: "admitted" }>,
+): Promise<WebhookIngestResult> {
+  // The row was admitted as `processing` with attempts=1, so this path already
+  // holds the lease. Every write below is conditional on still holding it: if
+  // the lease expired and a sweep reclaimed the row, that sweep owns the
+  // outcome and this one must not overwrite it.
+  const heldClaim = and(
+    eq(slConnectorWebhookEvents.id, admitted.eventId),
+    eq(slConnectorWebhookEvents.attempts, 1),
+    eq(slConnectorWebhookEvents.status, "processing"),
+  );
+
   try {
-    await processWebhookEvent(db, store.organizationId, store.id, webhook.topic, payloadJson);
+    await processWebhookEvent(
+      db,
+      admitted.organizationId,
+      admitted.slStoreId,
+      admitted.topic,
+      admitted.payload,
+    );
 
     await db
       .update(slConnectorWebhookEvents)
-      .set({ status: "processed", processedAt: new Date() })
-      .where(eq(slConnectorWebhookEvents.id, eventId));
+      .set({ status: "processed", processedAt: new Date(), leaseExpiresAt: null })
+      .where(heldClaim);
 
-    return { status: "processed", eventId };
+    return { status: "processed", eventId: admitted.eventId };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
 
     await db
       .update(slConnectorWebhookEvents)
-      .set({
-        status: "failed",
-        attempts: 1,
-        errorMessage,
-      })
-      .where(eq(slConnectorWebhookEvents.id, eventId));
+      .set({ status: "failed", errorMessage, leaseExpiresAt: null })
+      .where(heldClaim);
 
     return { status: "failed", error: errorMessage };
   }
+}
+
+/**
+ * Admit and then process, in one call.
+ *
+ * Retained for callers that legitimately want to block on the whole cycle —
+ * the tRPC replay procedure and the tests. The HTTP receiver deliberately does
+ * NOT use this: it must acknowledge between the two halves.
+ */
+export async function ingestWebhook(
+  db: Db,
+  webhook: InboundWebhook,
+): Promise<WebhookIngestResult> {
+  const admission = await admitWebhook(db, webhook);
+  if (admission.status !== "admitted") return admission;
+  return processAdmittedWebhook(db, admission);
 }
 
 /**
@@ -421,4 +499,186 @@ async function handleMerchantRedact(
 
   // Phase 2: schedule full data purge (webhook events, synced transactions, etc.)
   // within 30 days per GDPR requirement.
+}
+
+/**
+ * Maximum processing attempts before an event is parked in the DLQ.
+ *
+ * Three, not more: a delivery that has failed three times is failing for a
+ * reason a fourth attempt will not change, and an event retried forever is a
+ * queue that never drains and an alert nobody reads.
+ */
+export const WEBHOOK_MAX_ATTEMPTS = 3;
+
+/**
+ * Don't touch an event younger than this — the receiver acknowledges and
+ * processes on the same tick, so anything newer is very likely still in flight.
+ * Replaying it would double-process a delivery that was about to succeed.
+ */
+export const WEBHOOK_REPLAY_GRACE_MS = 5 * 60_000;
+
+/**
+ * How long a claimed row stays off-limits to other sweeps.
+ *
+ * Long enough that a slow `processWebhookEvent` finishes inside it, short
+ * enough that a worker killed mid-flight is recovered within one or two sweeps
+ * rather than never. The sweep runs every 15 minutes, so ten gives one clean
+ * cycle of exclusivity and reclaims on the next.
+ */
+export const WEBHOOK_LEASE_MS = 10 * 60_000;
+
+export type WebhookReplaySummary = {
+  examined: number;
+  processed: number;
+  failed: number;
+  movedToDlq: number;
+  /** Rows another worker claimed first — expected, not an error. */
+  skipped: number;
+};
+
+/**
+ * Re-process deliveries that were admitted but never finished.
+ *
+ * Storing the event before acknowledging makes the delivery OURS; it does not
+ * make it done. Two ways a row is left behind, both invisible without this:
+ * the process exits between the ack and the `setImmediate` callback, leaving it
+ * `pending` forever; or processing throws and it is recorded `failed` and never
+ * looked at again. SHOPLINE will not redeliver after a 2xx, so nothing else is
+ * coming — subscription lifecycle, refunds and reconciliation state simply stay
+ * stale.
+ *
+ * Runs inside the existing 15-minute sync cycle rather than on a cron of its
+ * own, deliberately: a recovery path that depends on someone remembering to
+ * configure a schedule is a recovery path that is not there.
+ */
+export async function replayStalledWebhookEvents(
+  db: Db,
+  opts: { limit?: number; graceMs?: number } = {},
+): Promise<WebhookReplaySummary> {
+  const limit = opts.limit ?? 50;
+  const cutoff = new Date(Date.now() - (opts.graceMs ?? WEBHOOK_REPLAY_GRACE_MS));
+
+  const now = new Date();
+
+  // Eligible rows are those NOT currently leased: pending/failed, or a
+  // `processing` row whose lease has expired because its worker died.
+  const stalled = await db
+    .select()
+    .from(slConnectorWebhookEvents)
+    .where(
+      and(
+        inArray(slConnectorWebhookEvents.status, ["pending", "failed", "processing"]),
+        lt(slConnectorWebhookEvents.attempts, WEBHOOK_MAX_ATTEMPTS),
+        lt(slConnectorWebhookEvents.receivedAt, cutoff),
+        or(
+          isNull(slConnectorWebhookEvents.leaseExpiresAt),
+          lt(slConnectorWebhookEvents.leaseExpiresAt, now),
+        ),
+      ),
+    )
+    .limit(limit);
+
+  const summary: WebhookReplaySummary = {
+    examined: stalled.length,
+    processed: 0,
+    failed: 0,
+    movedToDlq: 0,
+    skipped: 0,
+  };
+
+  for (const event of stalled) {
+    const observedAttempts = event.attempts ?? 0;
+    const attempts = observedAttempts + 1;
+
+    // CLAIM the row before doing anything with it.
+    //
+    // Selecting and then processing is a read-modify-write across two
+    // statements, and nothing stops a second scheduled sync — another Railway
+    // instance, or an operator hitting the endpoint by hand — from selecting
+    // the same row in between. Both would then run the side effect, which for
+    // an `appsubscription/paid` event means applying the billing update twice,
+    // and the outcome writes would race afterwards so a success could be
+    // overwritten with `failed` or `dlq`.
+    //
+    // Incrementing `attempts` alone is NOT exclusive, and that was the bug in
+    // the first version of this: the row stayed `pending`, so once worker A
+    // moved 0 -> 1 a later sweep could read 1, claim 2, and enter
+    // processWebhookEvent while A was still inside it. Both then ran the
+    // billing side effect, and no conditional write afterwards can undo that.
+    //
+    // The claim therefore moves the row OUT of the eligible set — into
+    // `processing` with a lease — in the same atomic UPDATE that increments the
+    // counter. The compare-and-set on `attempts` settles ties between workers
+    // that read the same value; the status change keeps later sweeps out for
+    // the duration of the lease.
+    const leaseExpiresAt = new Date(Date.now() + WEBHOOK_LEASE_MS);
+    const claim = await db
+      .update(slConnectorWebhookEvents)
+      .set({ attempts, status: "processing", leaseExpiresAt })
+      .where(
+        and(
+          eq(slConnectorWebhookEvents.id, event.id),
+          eq(slConnectorWebhookEvents.attempts, observedAttempts),
+          eq(slConnectorWebhookEvents.status, event.status),
+          or(
+            isNull(slConnectorWebhookEvents.leaseExpiresAt),
+            lt(slConnectorWebhookEvents.leaseExpiresAt, now),
+          ),
+        ),
+      );
+
+    const claimed = (claim as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
+    if (claimed === 0) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    // Every outcome write below is also conditional on still holding the claim,
+    // so a slow worker cannot overwrite a newer attempt's result.
+    // Every outcome write is conditional on STILL HOLDING the claim — same id,
+    // same attempt count, still the `processing` row we put there. A worker
+    // whose lease expired and was reclaimed by someone else therefore cannot
+    // land its stale result on top of the newer attempt.
+    const heldClaim = and(
+      eq(slConnectorWebhookEvents.id, event.id),
+      eq(slConnectorWebhookEvents.attempts, attempts),
+      eq(slConnectorWebhookEvents.status, "processing"),
+    );
+
+    try {
+      await processWebhookEvent(
+        db,
+        event.organizationId,
+        event.slStoreId,
+        event.topic,
+        event.payloadJson,
+      );
+      await db
+        .update(slConnectorWebhookEvents)
+        .set({ status: "processed", processedAt: new Date(), leaseExpiresAt: null })
+        .where(heldClaim);
+      summary.processed += 1;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const exhausted = attempts >= WEBHOOK_MAX_ATTEMPTS;
+      await db
+        .update(slConnectorWebhookEvents)
+        // Clearing the lease matters: a `failed` row still carrying a future
+        // lease would sit out its own backoff before the next sweep could see
+        // it, which is a retry delay nobody asked for and nobody documented.
+        .set({ status: exhausted ? "dlq" : "failed", errorMessage, leaseExpiresAt: null })
+        .where(heldClaim);
+      if (exhausted) {
+        summary.movedToDlq += 1;
+        console.error(
+          `[shopline-webhook] event ${event.id} (${event.topic}) exhausted ${WEBHOOK_MAX_ATTEMPTS} attempts — moved to DLQ:`,
+          errorMessage,
+        );
+      } else {
+        summary.failed += 1;
+      }
+    }
+  }
+
+  return summary;
 }

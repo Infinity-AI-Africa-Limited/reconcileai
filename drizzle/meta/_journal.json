@@ -575,6 +575,13 @@
       "when": 1786690620204,
       "tag": "0081_perfect_franklin_richards",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "5",
+      "when": 1787086536168,
+      "tag": "0082_shallow_beyonder",
+      "breakpoints": true
     }
   ]
 }

@@ -30,37 +30,13 @@ import { canReachPath } from "./routeAccess";
 const RETAIL_APPROVED = [
   // Retail's own surfaces — the reason the vertical exists.
   "/settlement-monitor",
+  "/dashboard",
   "/shopline/sync-status",
   "/shopline/connect",
-  // Vertical-neutral reconciliation: same shape for a bank, a distributor and a
-  // merchant, only the counterparty differs.
-  "/dashboard",
-  "/super-agent",
-  "/exception-intelligence",
-  "/upload",
-  "/reconciliation",
-  "/reports",
-  "/schedules",
-  "/monitor",
-  "/documentation",
-  "/channels",
+  // Merchant controls for SHOPLINE orders, payments, and settlement breaks.
   "/exceptions",
-  "/age-tracker",
   "/transactions",
-  "/review",
-  "/audit",
-  "/modules",
-  // Tenant administration.
   "/admin/users",
-  "/email-settings",
-  // Ingestion. A merchant genuinely receives gateway settlement and courier
-  // remittance files by upload, SFTP, bucket drop and email (CLAUDE.md §2C).
-  "/integrations",
-  "/api-ingestion",
-  "/sftp-config",
-  "/bucket-config",
-  "/email-forwarding",
-  "/anomalies",
 ];
 
 /**
@@ -74,6 +50,26 @@ const DENIED_FOR_RETAIL: Record<string, string> = {
   "/compliance": "NDPA 2023 / NDPR 2019 and CBN retention rules — none of which govern a SHOPLINE merchant",
   "/sample-data": "seeds core_banking, nibss and bank_statement channels: a Nigerian banking demo",
   "/dashboard/auditor": "examination-facing; a merchant has no supervisory examiner",
+  "/super-agent": "agent configuration is a platform operating surface, not a merchant workflow",
+  "/exception-intelligence": "cross-institution intelligence is not part of the Shopline merchant submission surface",
+  "/upload": "Shopline data arrives through authorised API and webhooks, not generic batch upload",
+  "/reconciliation": "the merchant uses Settlement Monitor rather than a generic job-control screen",
+  "/reports": "the generic reconciliation-job report is not a Shopline merchant report",
+  "/schedules": "Shopline synchronisation is managed by the connection, not merchant cron settings",
+  "/monitor": "platform-monitoring is not a merchant workflow",
+  "/documentation": "Shopline support is supplied through the merchant support route",
+  "/channels": "the post-install path uses Shopline sync status rather than multi-channel configuration",
+  "/age-tracker": "bank exception ageing is not a Shopline merchant workflow",
+  "/review": "bank-style review queues are not part of the merchant product surface",
+  "/audit": "audit-trail administration is retained for regulated financial-services deployments",
+  "/modules": "module configuration is an enterprise deployment control, not a Shopline merchant control",
+  "/email-settings": "generic email configuration is not a Shopline submission workflow",
+  "/integrations": "Shopline connection is the dedicated merchant integration surface",
+  "/api-ingestion": "generic API ingestion is not used by the Shopline merchant flow",
+  "/sftp-config": "SFTP ingestion is outside the Shopline merchant flow",
+  "/bucket-config": "bucket-drop ingestion is outside the Shopline merchant flow",
+  "/email-forwarding": "email ingestion is outside the Shopline merchant flow",
+  "/anomalies": "cross-channel anomaly tooling is not part of the Tier 1 Shopline merchant experience",
 };
 
 /** Every role a person inside a merchant's tenant can hold. */
@@ -134,18 +130,8 @@ describe("when the rest of the platform is considered", () => {
     }
   });
 
-  it("should leave every unscoped entry genuinely vertical-neutral", () => {
-    // The list this asserts is the one above: anything without a `segments`
-    // annotation is, by definition, offered to retail. So the approved set and
-    // the unscoped entries must not diverge — if a new unscoped entry appears,
-    // the exact-set assertion fails and someone has to decide.
-    const unscoped = NAV_ITEMS.filter(
-      (e) => !e.segments && !e.staffOnly && e.group !== "superAdmin",
-    ).map((e) => e.path);
-    const notApproved = unscoped.filter((p) => !RETAIL_APPROVED.includes(p));
-    expect(
-      notApproved,
-      `unscoped nav entries that retail would see but are not approved: ${notApproved.join(", ")}`,
-    ).toEqual([]);
+  it("should make every merchant route explicitly retail-scoped", () => {
+    const retailEntries = NAV_ITEMS.filter((entry) => entry.segments?.includes("retail_commerce"));
+    expect(retailEntries.map((entry) => entry.path).sort()).toEqual([...RETAIL_APPROVED].sort());
   });
 });

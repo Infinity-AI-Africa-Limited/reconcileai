@@ -289,10 +289,27 @@ export const slConnectorWebhookEvents = mysqlTable(
     topic: varchar("topic", { length: 64 }).notNull(),
     /** Raw payload stored as JSON for replay */
     payloadJson: json("payloadJson"),
-    /** Processing status */
-    status: mysqlEnum("status", ["pending", "processed", "failed", "dlq"]).default("pending").notNull(),
+    /**
+     * Processing status.
+     *
+     * `processing` is a LEASE, not decoration. The replay sweep selects
+     * pending/failed rows, so a row left in one of those states while a worker
+     * is mid-flight can be selected again by the next sweep — and for
+     * `appsubscription/paid` that applies the billing update twice. Claiming
+     * the row into `processing` takes it out of the eligible set for the
+     * duration.
+     */
+    status: mysqlEnum("status", ["pending", "processing", "processed", "failed", "dlq"]).default("pending").notNull(),
     /** Number of processing attempts */
     attempts: int("attempts").default(0).notNull(),
+    /**
+     * When the current `processing` lease expires.
+     *
+     * Without an expiry a worker that dies mid-flight strands its row in
+     * `processing` forever — the same delivery lost, by a tidier route. The
+     * sweep reclaims a lease past this time.
+     */
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
     /** Error message if failed */
     errorMessage: text("errorMessage"),
     receivedAt: timestamp("receivedAt").defaultNow().notNull(),
