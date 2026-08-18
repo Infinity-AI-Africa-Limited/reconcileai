@@ -151,6 +151,54 @@ describe("when a vertical opens a route built for another one", () => {
     }
   });
 
+  it("should refuse every RoleSwitcher view to a merchant, not only the auditor one", () => {
+    // The switcher is hidden wholesale from retail (DashboardLayout), so all
+    // three views are financial-services operating screens. Only the auditor was
+    // declared, which left CFO and Operations openable by typing the URL — and
+    // they cannot inherit from /dashboard, because /dashboard IS offered to
+    // retail as a secondary overview.
+    for (const p of ["/dashboard/cfo", "/dashboard/operations", "/dashboard/auditor"]) {
+      expect(canReachPath(p, "retail_commerce", "admin"), p).toBe(false);
+      expect(canReachPath(p, "financial_services", "admin"), p).toBe(true);
+      expect(canReachPath(p, "corporate_b2b", "admin"), p).toBe(true);
+    }
+    // The parent stays reachable — that is the whole reason the children need
+    // their own declaration rather than an inherited one.
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
+  });
+
+  it("should refuse a nested detail route the parent already refuses", () => {
+    // /reports/:id is mounted with a parameter and will never have a nav entry
+    // of its own. Exact-match lookup called it unscoped, so a merchant opening
+    // a report link landed in a financial-services screen the sidebar had
+    // correctly hidden.
+    expect(canReachPath("/reports", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/reports/42", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/reports/42/", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/Reports/ABC-123", "retail_commerce", "admin")).toBe(false);
+    // and still available to the verticals it belongs to
+    expect(canReachPath("/reports/42", "financial_services", "admin")).toBe(true);
+  });
+
+  it("should let a deeper declaration win over a shallower one", () => {
+    // /dashboard allows retail; /dashboard/auditor does not. A child must not be
+    // widened by its parent, nor a parent narrowed by its child.
+    expect(canReachPath("/dashboard", "retail_commerce", "admin")).toBe(true);
+    expect(canReachPath("/dashboard/auditor", "retail_commerce", "admin")).toBe(false);
+    expect(canReachPath("/dashboard/auditor/anything", "retail_commerce", "admin")).toBe(false);
+  });
+
+  it("should keep an explicitly unscoped entry unscoped, not inherit a narrower parent", () => {
+    // Team Access is declared for every vertical. If a nested lookup ever starts
+    // inheriting from a narrower ancestor it would silently overrule that.
+    expect(canReachPath("/admin/users", "retail_commerce", "admin")).toBe(true);
+  });
+
+  it("should treat a child of a staff tool as a staff tool", () => {
+    expect(canReachPath("/demo-dashboard/anything", "financial_services", "admin")).toBe(false);
+    expect(canReachPath("/admin/assessments/42", "financial_services", "admin")).toBe(false);
+  });
+
   it("should refuse the examination-facing auditor view to a merchant", () => {
     // Reached from the RoleSwitcher rather than the sidebar, so NAV_ITEMS cannot
     // supply its rule and routeAccess declares it explicitly.

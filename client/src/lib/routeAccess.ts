@@ -46,6 +46,16 @@ export function landingPathFor(segment: Segment | null): string {
  * it, not as "not retail", so it reads the same way as a NAV_ITEMS entry.
  */
 const NON_NAV_ROUTE_SEGMENTS: Record<string, Segment[]> = {
+  // All three RoleSwitcher views, not just the auditor one. The switcher is now
+  // hidden wholesale from retail (DashboardLayout), so CFO and Operations are
+  // financial-services operating screens by exactly the same argument — and
+  // listing only the auditor left the other two openable by typing the URL.
+  //
+  // They cannot inherit from `/dashboard`, because `/dashboard` IS offered to
+  // retail as a secondary overview. The parent being allowed is precisely why
+  // these children have to say so themselves.
+  "/dashboard/cfo": ["financial_services", "corporate_b2b", "super_admin"],
+  "/dashboard/operations": ["financial_services", "corporate_b2b", "super_admin"],
   "/dashboard/auditor": ["financial_services", "corporate_b2b", "super_admin"],
   // SHOPLINE install callbacks. Reached from the OAuth redirect rather than any
   // link, and retail through and through — "Store Connected Successfully!", sync
@@ -72,12 +82,53 @@ function normalizePath(path: string): string {
   return trimmed === "" ? "/" : trimmed;
 }
 
+/**
+ * The declared ancestor a nested route inherits its rule from.
+ *
+ * `/reports/:id` has no entry of its own and never will — it is a detail view of
+ * `/reports`, mounted by the router with a parameter. An exact-match lookup
+ * reported it as unscoped, so a retail merchant who opened a report link went
+ * straight into a financial-services screen that the sidebar had correctly
+ * hidden. Every parameterised or detail route in the app has this shape, so the
+ * rule is inherited rather than restated per route: a child is at most as
+ * visible as the parent it hangs off.
+ *
+ * Longest match wins, so a deeper declaration beats a shallower one.
+ */
+function declaredAncestorSegments(key: string): Segment[] | null {
+  const declarations: Array<{ path: string; segments: Segment[] }> = [
+    ...Object.entries(NON_NAV_ROUTE_SEGMENTS).map(([path, segments]) => ({ path, segments })),
+    ...NAV_ITEMS.flatMap((e) => (e.segments ? [{ path: e.path, segments: e.segments }] : [])),
+  ];
+
+  let bestPath = "";
+  let bestSegments: Segment[] | null = null;
+
+  for (const declaration of declarations) {
+    const parent = normalizePath(declaration.path);
+    if (parent === "/" || !key.startsWith(parent + "/")) continue;
+    if (parent.length > bestPath.length) {
+      bestPath = parent;
+      bestSegments = declaration.segments;
+    }
+  }
+
+  return bestSegments;
+}
+
 /** The segments a path is built for, or null when it is for everyone. */
 export function segmentsForPath(path: string): Segment[] | null {
   const key = normalizePath(path);
   const extra = NON_NAV_ROUTE_SEGMENTS[key];
   if (extra) return extra;
-  return NAV_ITEMS.find((e) => normalizePath(e.path) === key)?.segments ?? null;
+
+  // A declared entry answers for itself even when it declares no segments —
+  // that means "every vertical", and inheriting a narrower parent rule would
+  // silently overrule a deliberate decision.
+  const declared = NAV_ITEMS.find((e) => normalizePath(e.path) === key);
+  if (declared) return declared.segments ?? null;
+
+  return declaredAncestorSegments(key);
 }
 
 /**
@@ -101,7 +152,13 @@ export function segmentsForPath(path: string): Segment[] | null {
  */
 export function isStaffPath(path: string): boolean {
   const key = normalizePath(path);
-  return NAV_ITEMS.some((e) => normalizePath(e.path) === key && e.staffOnly === true);
+  return NAV_ITEMS.some((e) => {
+    if (e.staffOnly !== true) return false;
+    const entry = normalizePath(e.path);
+    // Children inherit staffOnly for the same reason they inherit segments: a
+    // detail view of a staff tool is a staff tool.
+    return entry === key || key.startsWith(entry + "/");
+  });
 }
 
 /**

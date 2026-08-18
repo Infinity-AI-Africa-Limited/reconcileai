@@ -1,5 +1,10 @@
 # ReconcileAI - Project TODO
 
+## Retail route guard
+- [x] Declare all three RoleSwitcher views, not only the auditor one. The switcher is hidden wholesale from retail, but `/dashboard/cfo` and `/dashboard/operations` stayed openable by URL.
+- [x] Inherit the parent's rule for nested routes so `/reports/:id` is refused wherever `/reports` is; exact-match lookup reported every parameterised route as unscoped.
+- [ ] `canReachPath` still ignores the `roles` field that NAV_ITEMS declares, so `/admin/super-admin*` and `/admin/poc` are reachable by any tenant admin who types the URL (server procedures still refuse them). Same shape as the `staffOnly` gap that this module was written to close — worth closing deliberately rather than as a side effect of this PR.
+
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)
