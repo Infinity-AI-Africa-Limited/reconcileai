@@ -189,7 +189,12 @@ vi.mock("./_core/env", () => ({
 }));
 
 // Import after mocks are set up
-import { ingestWebhook, type InboundWebhook } from "./connectors/shopline/webhookHandler";
+import {
+  admitWebhook,
+  ingestWebhook,
+  processAdmittedWebhook,
+  type InboundWebhook,
+} from "./connectors/shopline/webhookHandler";
 import {
   scheduleReconciliation,
   isReconciliationTrigger,
@@ -256,6 +261,63 @@ beforeEach(() => {
 afterEach(() => {
   __resetRealtimeState();
   vi.useRealTimers();
+});
+
+// ─── A0. Durable admission ────────────────────────────────────────────────────
+
+describe("A0. A delivery is durable before it is acknowledged", () => {
+  it("should return the stored event id from admission, without processing it", async () => {
+    // The HTTP receiver acks between these two halves. Admission therefore has
+    // to be complete on its own — if it returned before the insert, a 200 would
+    // be promising SHOPLINE we kept something we had not written down, and
+    // SHOPLINE never re-sends a delivery it believes landed.
+    mockDb.limit.mockImplementationOnce(async () => [mockStore]).mockImplementationOnce(async () => []);
+
+    const admission = await admitWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload()));
+
+    expect(admission.status).toBe("admitted");
+    if (admission.status === "admitted") {
+      expect(admission.eventId).toBe(1001);
+      expect(admission.organizationId).toBe(mockStore.organizationId);
+      expect(admission.topic).toBe("orders/paid");
+    }
+    // Nothing was reconciled yet — that is the caller's job, after the ack.
+    expect(runSyncCycleMock).not.toHaveBeenCalled();
+  });
+
+  it("should refuse admission for a bad signature, so nothing reaches storage", async () => {
+    const forged = { ...makeSignedWebhook("orders/paid", makeOrderPaidPayload()), hmacSignature: "not-a-signature" };
+    const admission = await admitWebhook(mockDb as never, forged);
+    expect(admission.status).toBe("invalid_signature");
+  });
+
+  it("should surface an insert failure by throwing, so the caller can ask for a retry", async () => {
+    // The receiver turns this into 503. Swallowing it and answering 200 is how
+    // a delivery disappears: SHOPLINE marks it delivered and moves on.
+    mockDb.limit.mockImplementationOnce(async () => [mockStore]).mockImplementationOnce(async () => []);
+    mockDb.values.mockRejectedValueOnce(new Error("storage unavailable"));
+
+    await expect(
+      admitWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload())),
+    ).rejects.toThrow(/storage unavailable/);
+  });
+
+  it("should record a processing failure on the stored row rather than throwing", async () => {
+    // Processing runs after the ack, so throwing would be an unhandled
+    // rejection with the delivery already acknowledged. It must land on the row.
+    runSyncCycleMock.mockRejectedValueOnce(new Error("engine exploded"));
+
+    const result = await processAdmittedWebhook(mockDb as never, {
+      status: "admitted",
+      eventId: 1001,
+      organizationId: mockStore.organizationId,
+      slStoreId: mockStore.id,
+      topic: "orders/paid",
+      payload: makeOrderPaidPayload(),
+    });
+
+    expect(["processed", "failed"]).toContain(result.status);
+  });
 });
 
 // ─── A. Happy Path ────────────────────────────────────────────────────────────

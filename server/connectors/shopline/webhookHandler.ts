@@ -60,17 +60,34 @@ export type WebhookIngestResult =
   | { status: "failed"; error: string };
 
 /**
- * Ingest and process a SHOPLINE webhook delivery.
+ * The outcome of ADMITTING a delivery — everything up to and including the
+ * durable insert, and nothing after it.
  *
- * Design: verify → idempotency check → insert as "pending" → process →
- * mark "processed" or "failed". The HTTP handler responds 200 immediately
- * after the insert (5-second budget). Processing runs inline in Phase 1;
- * Phase 2 will decouple with a job queue.
+ * Split out from processing because the two have opposite failure semantics.
+ * Admission decides what we tell SHOPLINE: once we answer 2xx it stops
+ * retrying and the delivery is ours forever, so nothing may be acknowledged
+ * before it is on disk. Processing decides what we do next, can be retried
+ * from the stored row, and must never hold up the 5-second ack budget.
  */
-export async function ingestWebhook(
+export type WebhookAdmission =
+  | { status: "admitted"; eventId: number; organizationId: number; slStoreId: number; topic: string; payload: unknown }
+  | { status: "duplicate"; webhookId: string }
+  | { status: "invalid_signature" }
+  | { status: "store_not_found"; shopDomain: string };
+
+/**
+ * Admit a delivery: verify → resolve store → dedupe → insert as "pending".
+ *
+ * Stops at the insert on purpose. This is the boundary the HTTP handler must
+ * `await` before answering 2xx, because SHOPLINE treats a 2xx as delivered and
+ * will not send it again — so anything acknowledged before this returns is
+ * simply lost. Throwing is the correct behaviour for an infrastructure failure
+ * here: the caller turns it into a retryable status and SHOPLINE re-delivers.
+ */
+export async function admitWebhook(
   db: Db,
   webhook: InboundWebhook,
-): Promise<WebhookIngestResult> {
+): Promise<WebhookAdmission> {
   // 1. Verify HMAC signature (tolerant: accepts hex or base64)
   const signatureValid = verifyWebhookHmac(
     webhook.rawBody,
@@ -140,16 +157,44 @@ export async function ingestWebhook(
 
   const eventId = (inserted as { insertId: number }).insertId;
 
-  // 6. Process the event (inline in Phase 1; Phase 2 will enqueue)
+  // The delivery is now durable. Everything past this line is recoverable from
+  // the stored row, so the caller may safely acknowledge.
+  return {
+    status: "admitted",
+    eventId,
+    organizationId: store.organizationId,
+    slStoreId: store.id,
+    topic: webhook.topic,
+    payload: payloadJson,
+  };
+}
+
+/**
+ * Process an already-admitted delivery and record the outcome on its row.
+ *
+ * Runs AFTER the acknowledgement, so it must never throw at the caller: a
+ * failure here is recorded as `failed` on the event and is recoverable, unlike
+ * a failure to admit, which would lose the delivery outright.
+ */
+export async function processAdmittedWebhook(
+  db: Db,
+  admitted: Extract<WebhookAdmission, { status: "admitted" }>,
+): Promise<WebhookIngestResult> {
   try {
-    await processWebhookEvent(db, store.organizationId, store.id, webhook.topic, payloadJson);
+    await processWebhookEvent(
+      db,
+      admitted.organizationId,
+      admitted.slStoreId,
+      admitted.topic,
+      admitted.payload,
+    );
 
     await db
       .update(slConnectorWebhookEvents)
       .set({ status: "processed", processedAt: new Date() })
-      .where(eq(slConnectorWebhookEvents.id, eventId));
+      .where(eq(slConnectorWebhookEvents.id, admitted.eventId));
 
-    return { status: "processed", eventId };
+    return { status: "processed", eventId: admitted.eventId };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -160,10 +205,26 @@ export async function ingestWebhook(
         attempts: 1,
         errorMessage,
       })
-      .where(eq(slConnectorWebhookEvents.id, eventId));
+      .where(eq(slConnectorWebhookEvents.id, admitted.eventId));
 
     return { status: "failed", error: errorMessage };
   }
+}
+
+/**
+ * Admit and then process, in one call.
+ *
+ * Retained for callers that legitimately want to block on the whole cycle —
+ * the tRPC replay procedure and the tests. The HTTP receiver deliberately does
+ * NOT use this: it must acknowledge between the two halves.
+ */
+export async function ingestWebhook(
+  db: Db,
+  webhook: InboundWebhook,
+): Promise<WebhookIngestResult> {
+  const admission = await admitWebhook(db, webhook);
+  if (admission.status !== "admitted") return admission;
+  return processAdmittedWebhook(db, admission);
 }
 
 /**
