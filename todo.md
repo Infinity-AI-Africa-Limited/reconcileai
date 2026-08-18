@@ -1273,3 +1273,17 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Execute all P0 Shopline approval gates: complete Portal contact/GDPR configuration, create reviewer assets and guide, verify subscription lifecycle delivery, and capture full ReconcileAI Dev Store install-to-settlement evidence.
 - [ ] Execute all P1 Shopline readiness gates: controlled 90-day backfill validation, refund/cancellation and pagination tests, rate-budget load test, access-token refresh evidence, privacy/evidence retention review, and support escalation runbook.
 - [ ] Execute all P2 Shopline operational gates: merchant onboarding materials, monitoring/alerting drill, incident and rollback exercise, ongoing release/change-control record, and post-approval Tier 1.5 backlog.
+- [x] Prepare merchant onboarding, operations/incident/rollback, and release-control documentation for the Shopline submission package; live drills remain required after the reviewed release deploys.
+- [x] Create a reviewable ReconcileAI logo suite: combined wordmark and icon, standalone logo mark, and square App Store icon.
+- [x] Obtain Richard’s explicit approval of the square App Store icon before uploading or publishing it to the SHOPLINE listing.
+- [x] Adapt Richard’s supplied Infinity AI circular mark into a 120×120 ReconcileAI App Store icon for review; do not upload before approval.
+- [ ] Capture and upload authentic 1920×1080 ReconcileAI Dev Store screenshots for Settlement Monitor, Dashboard, and SHOPLINE Connect; do not use generated or mocked screens.
+- [x] Verify the configured Tier 1 App Store 7-day trial and five paid subscription plans match the approved merchant-facing price and billing terms.
+- [ ] Complete the App Store Product Features, demo-store URL, contact name, and reviewed About/Privacy/FAQ content in the Partner Portal.
+- [ ] Capture live operational evidence for paid-order reconciliation, monitoring/alert response, incident rollback, and release/change control after the reviewed retail build is deployed.
+- [ ] Create the app release version and submit for SHOPLINE review only after Richard confirms the final submission package.
+- [x] Verify the enabled Partner Portal Tier 1 plans match the approved Starter, Growth, Professional, Scale, and Enterprise monthly and annual price configuration.
+- [ ] At the final go-live decision, replace the App Details public contact email `richard@infinityaiafrica.ai` with `support@reconcileaiafrica.com` and verify the monitored inbox before submission.
+- [x] Add and save the three verified Tier 1 Product Features in the SHOPLINE App Details listing without overstating reconciliation, payout, or write-access capabilities.
+- [x] Prepare a merchant-facing Tier 1 support-escalation and evidence-retention runbook that avoids customer PII, credentials, and unsupported service-level claims.
+- [x] Review and save accurate Tier 1 About copy while preserving the existing Privacy Policy and FAQ URLs, deliberate blank Demo store URL, and current public contact email.

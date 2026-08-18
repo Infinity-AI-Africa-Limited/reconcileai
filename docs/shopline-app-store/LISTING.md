@@ -50,6 +50,24 @@ through SHOPLINE, ReconcileAI supports a settlement-file import workflow.
 **Your data:** read-only access. ReconcileAI never writes to your store, never
 initiates payments, and never sees your bank credentials.
 
+### Current Portal-ready About value
+
+Use the following text for the App Details **About** field at the next approved
+Portal save. It deliberately describes only the verified Tier 1 merchant workflow:
+
+> ReconcileAI is a read-only reconciliation workspace for SHOPLINE merchants. It connects authorised order and payment data, matches orders against the payment and settlement information available for the store, and highlights exceptions that need review. Merchants can investigate fee variances, refunds, chargebacks, capture issues, and settlement shortfalls using linked records. Where the authorised store does not expose the settlement data needed for a native payout match, ReconcileAI provides a settlement-file import path rather than claiming universal payout coverage. ReconcileAI does not write to your store, initiate payments, or request bank credentials.
+
+### Current Portal-ready legal, demo, and contact values
+
+| Field | Save-ready value | Rationale |
+| --- | --- | --- |
+| Privacy Policy | `https://www.reconcileaiafrica.com/privacy` | Current public policy URL. |
+| FAQ | `https://www.reconcileaiafrica.com/support` | Current public support/FAQ URL. |
+| Demo store URL | **Leave blank** | `reconcileai-dev.myshopline.com` currently shows an “Opening soon” page and is not a truthful self-service demo. |
+| Contact name | Richard Anwanakak | Confirmed in App Details. |
+| Contact email — preparation | `richard@infinityaiafrica.ai` | Retain per Richard’s 18 August decision. |
+| Contact email — final go-live | `support@reconcileaiafrica.com` | Replace at final go-live after monitored-inbox verification. |
+
 ## 4. Three feature bullets (required)
 
 1. **Order, payment and settlement matching** — reconcile the data available
