@@ -76,10 +76,12 @@ Place the resulting GGUF and a `SHA256SUMS` manifest in
 `../deploy/on-prem/models/`, beside the supplied `Modelfile`:
 ```bash
 cp reconcileai-recon-3b-q4_k_m.gguf ../deploy/on-prem/models/
-cd ../deploy/on-prem/models && sha256sum reconcileai-recon-3b-q4_k_m.gguf > SHA256SUMS
+cd ../deploy/on-prem/models && sha256sum reconcileai-recon-3b-q4_k_m.gguf Modelfile > SHA256SUMS
 ```
 
-Record that digest in the **signed release record** and deliver it to the
+Record **both** digests in the **signed release record** — the Modelfile is an
+approved artifact too, since it holds the system prompt and the `FROM` that
+picks the weights and deliver it to the
 institution separately from the media — it becomes `RECON_MODEL_SHA256`.
 
 Then set in `.env.onprem`:
@@ -87,7 +89,8 @@ Then set in `.env.onprem`:
 OLLAMA_MODEL_MODE=import
 RECON_MODEL=reconcileai
 RECON_MODEL_FILE=reconcileai-recon-3b-q4_k_m.gguf
-RECON_MODEL_SHA256=<the digest from the signed release record>
+RECON_MODEL_SHA256=<the GGUF digest from the signed release record>
+RECON_MODELFILE_SHA256=<the Modelfile digest from the signed release record>
 ```
 
 **Do not run `ollama create` yourself.** The CPU Compose profile's `model-init`

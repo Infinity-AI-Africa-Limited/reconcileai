@@ -125,6 +125,14 @@ matters:
    swap the model can regenerate the manifest to match it; a manifest cannot
    authorise its own import. The approved digest must reach the institution on a
    different path than the media — the release record, or its secret manager.
+3. the **Modelfile** matches `RECON_MODELFILE_SHA256`, by exactly the same
+   argument. It carries the SYSTEM prompt, the decoding parameters and the
+   `FROM` that selects the weights, so it is the more consequential of the two
+   files: an attacker who cannot touch the approved GGUF can still rewrite the
+   instructions the analyst runs under. Verifying only the weights left that
+   open.
+4. the Modelfile's `FROM` names the artifact just verified, so an approved-looking
+   bundle cannot quietly load a different file sitting in `models/`.
 
 If either check fails, `model-init` exits non-zero. Because the application
 declares `model-init: service_completed_successfully`, **the app never starts**.

@@ -142,16 +142,21 @@ describe.each(PROFILES)("on-premise $name serving profile", ({ composeFile, envE
     expect(script).toContain('mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add');
   });
 
-  it("should rebuild the storage identity rather than adding to whatever it already had", () => {
-    // `mc admin policy attach` is additive and has no replace form, so reusing
-    // MINIO_APP_ACCESS_KEY across deployments keeps every binding the key ever
-    // had — a key that once carried `readwrite` still carries it, and the
-    // bucket scope becomes decoration. Removing the user first is the only mc
-    // operation that guarantees exactly one binding afterwards.
+  it("should detach stale policies without revoking a credential the app is using", () => {
+    // `mc admin policy attach` is additive with no replace form, so a key reused
+    // across deployments keeps every binding it ever had. Removing and re-adding
+    // the user fixes that and ALSO revokes the credential a running app holds —
+    // `compose up -d` runs this while the app is still serving. Detaching the
+    // extras reaches the same end state with no outage.
     const script = String(compose.services["storage-init"].command);
-    expect(script).toContain("mc admin user remove root");
-    // The re-add must NOT be tolerated: if it fails the identity is gone.
-    expect(script).toMatch(/mc admin user add root "\$\$\{key\}" "\$\$\{MINIO_APP_SECRET_KEY\}"\s*$/m);
+    expect(script).toContain("mc admin policy detach root");
+    // Destroying the identity is opt-in, because it is the only way mc can
+    // change a secret and it always interrupts whoever is holding the old one.
+    expect(script).toContain("MINIO_APP_ROTATE");
+    const removeAt = script.indexOf("mc admin user remove root");
+    const rotateGuardAt = script.indexOf('"$${MINIO_APP_ROTATE:-false}" = "true"');
+    expect(rotateGuardAt).toBeGreaterThan(-1);
+    expect(removeAt).toBeGreaterThan(rotateGuardAt);
   });
 
   it("should prove the credential cannot reach another bucket, not just its own", () => {
@@ -212,6 +217,20 @@ describe("CPU profile — verified offline model import", () => {
     expect(script).toContain("RECON_MODEL_SHA256:?");
     expect(script).toContain("REFUSING IMPORT");
     expect(modelInit.environment?.RECON_MODEL_SHA256).toBe("${RECON_MODEL_SHA256:-}");
+  });
+
+  it("should authenticate the Modelfile, not only the weights", () => {
+    // The Modelfile carries the SYSTEM prompt, the decoding parameters and the
+    // FROM that selects the weights. Verifying only the GGUF left the more
+    // consequential file unauthenticated: an attacker who cannot alter the
+    // approved weights can swap this and regenerate the co-delivered
+    // SHA256SUMS, rewriting the instructions a bank's analyst runs under while
+    // every other check still passes. Verified against the real script.
+    expect(script).toContain("RECON_MODELFILE_SHA256:?");
+    expect(script).toContain("sha256sum Modelfile");
+    expect(modelInit.environment?.RECON_MODELFILE_SHA256).toBe("${RECON_MODELFILE_SHA256:-}");
+    // And the approved Modelfile must load the artifact just verified.
+    expect(script).toContain("Modelfile FROM is");
   });
 
   it("should select the import branch at run time so the demo path still parses", () => {

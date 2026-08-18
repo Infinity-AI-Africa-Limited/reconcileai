@@ -91,19 +91,43 @@ services:
         # mc spelling; if both fail, `set -e` stops here.
         mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add root reconcileai-app "$${pol}"
 
-        # RECREATE the identity rather than attaching to whatever it already is.
-        # `mc admin policy attach` is additive and has no "replace" form, so a
-        # redeployment that reuses MINIO_APP_ACCESS_KEY keeps every binding the
-        # key already had. A key that once carried `readwrite` or `consoleAdmin`
-        # still carries it, the attach below succeeds, and the bucket scope
-        # becomes decoration. Removing the user first is the only mc operation
-        # that guarantees exactly one binding afterwards.
+        # Reconcile the identity's POLICIES without destroying the identity.
         #
-        # Safe to do here: this service completes before the app is allowed to
-        # start, so the credential is not in use while it is being rebuilt.
-        mc admin user remove root "$${key}" 2>/dev/null || true
-        mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
-        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || mc admin policy set root reconcileai-app "user=$${key}"
+        # An earlier revision removed and re-added the user, which does
+        # guarantee one binding — and also revokes the credential a RUNNING app
+        # is holding. `docker compose up -d` against a live stack runs this
+        # while the app container is still serving, so an in-place redeploy
+        # would reject evidence uploads for the width of the gap. Detaching the
+        # extra policies achieves the same end state with no outage.
+        if mc admin user info root "$${key}" > /dev/null 2>&1; then
+          if [ "$${MINIO_APP_ROTATE:-false}" = "true" ]; then
+            # The ONLY way mc can change an existing secret. `mc admin user add`
+            # on an existing user reports success and leaves the old secret
+            # working (verified), so a rotation has to be destructive — and
+            # therefore has to be asked for, not assumed. Running containers
+            # keep the old value in their environment and cannot re-authenticate
+            # until they are recreated.
+            echo "MINIO_APP_ROTATE=true — replacing the application identity; existing app containers must be recreated."
+            mc admin user remove root "$${key}"
+            mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+          fi
+        else
+          mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+        fi
+
+        # `mc admin policy attach` is additive and has no replace form, so a key
+        # reused across deployments keeps every binding it ever had: a key that
+        # once carried `readwrite` still carries it, the attach below succeeds,
+        # and the bucket scope is decoration. Detaching everything else is what
+        # makes the scope real.
+        attached="$$(mc --json admin user info root "$${key}" | sed -n 's/.*"policyName":"\([^"]*\)".*/\1/p')"
+        for pol in $$(echo "$${attached}" | tr ',' ' '); do
+          if [ -z "$${pol}" ]; then continue; fi
+          if [ "$${pol}" = "reconcileai-app" ]; then continue; fi
+          echo "detaching stale policy from the application credential: $${pol}"
+          mc admin policy detach root "$${pol}" --user "$${key}" > /dev/null 2>&1 || true
+        done
+        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || true
 
         # Probe every operation the application actually performs, not merely a
         # listing. A credential carrying a list-only policy passes `mc ls` while
@@ -111,6 +135,12 @@ services:
         # that checks the wrong capability is not readiness. `set -e` means any
         # of these failing exits non-zero, so the app never starts.
         mc alias set appcheck "http://minio:9000" "$${key}" "$${MINIO_APP_SECRET_KEY}"
+        if ! mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null 2>&1; then
+          echo "REFUSING TO START — MINIO_APP_SECRET_KEY does not match the stored identity $${key}."
+          echo "mc cannot change an existing secret in place. To rotate, set MINIO_APP_ROTATE=true and"
+          echo "recreate the app container: the running one holds the old secret in its environment."
+          exit 1
+        fi
         probe="appcheck/$${AWS_S3_BUCKET}/.reconcileai-storage-init-probe"
         echo "reconcileai storage readiness probe" | mc pipe "$${probe}"
         mc cat "$${probe}" > /dev/null
