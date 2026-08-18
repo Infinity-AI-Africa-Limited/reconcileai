@@ -1287,3 +1287,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Add and save the three verified Tier 1 Product Features in the SHOPLINE App Details listing without overstating reconciliation, payout, or write-access capabilities.
 - [x] Prepare a merchant-facing Tier 1 support-escalation and evidence-retention runbook that avoids customer PII, credentials, and unsupported service-level claims.
 - [x] Review and save accurate Tier 1 About copy while preserving the existing Privacy Policy and FAQ URLs, deliberate blank Demo store URL, and current public contact email.
+- [x] Prepare a controlled P2 monitoring, incident, and rollback drill record that distinguishes pre-release code validation from required live developer-store evidence.
