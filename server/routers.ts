@@ -18,7 +18,7 @@ import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
-import { eq, or, desc, asc, sql, isNull, and, like, inArray } from "drizzle-orm";
+import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
   runMatchingEngine,
@@ -87,6 +87,7 @@ import {
 } from "./prewarmDemoUser";
 import { agentActionDrafts, agentMemory, organizations, users } from "../drizzle/schema";
 import { getDb } from "./db";
+import { groupMemoryGrowthByMonth, sixMonthsAgoUtc } from "./agentMemoryStats";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -6393,23 +6394,30 @@ Always be specific, reference actual exception IDs and amounts where available, 
         .groupBy(agentMemory.exceptionCategory)
         .orderBy(desc(sql<number>`count(*)`));
 
-      const monthlyRows = await drizzle
-        .select({
-          month: sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`,
-          count: sql<number>`count(*)`,
-        })
+      // Only the timestamps are fetched, and bucketing happens in
+      // agentMemoryStats so no database-specific date function is involved.
+      //
+      // The trade-off: this transfers one row per memory in the window instead
+      // of one row per month. Measured against production rather than assumed —
+      // agent_memory holds 55 rows in total, every one of them on the legacy
+      // organizationId 0 pool, so no tenant currently reaches even three
+      // figures. Revisit if a single tenant approaches six figures per six
+      // months; the bounded alternative is six indexed COUNT(*) range queries,
+      // one per bucket, which stays dialect-neutral because it needs no date
+      // functions either.
+      const memoryTimestampRows = await drizzle
+        .select({ createdAt: agentMemory.createdAt })
         .from(agentMemory)
         .where(and(
           eq(agentMemory.organizationId, orgId),
-          sql`${agentMemory.createdAt} >= DATE_SUB(NOW(), INTERVAL 6 MONTH)`,
+          gte(agentMemory.createdAt, sixMonthsAgoUtc()),
         ))
-        .groupBy(sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`)
-        .orderBy(sql<string>`DATE_FORMAT(${agentMemory.createdAt}, '%Y-%m')`);
+        .orderBy(asc(agentMemory.createdAt));
 
       return {
         totalPatterns: Number(totalRow?.count || 0),
         categoryCoverage: categoryRows.map(r => ({ category: r.category, count: Number(r.count) })),
-        monthlyGrowth: monthlyRows.map(r => ({ month: r.month as string, count: Number(r.count) })),
+        monthlyGrowth: groupMemoryGrowthByMonth(memoryTimestampRows),
       };
     }),
   }),

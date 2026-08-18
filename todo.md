@@ -4,6 +4,13 @@
 - [x] Declare all three RoleSwitcher views, not only the auditor one. The switcher is hidden wholesale from retail, but `/dashboard/cfo` and `/dashboard/operations` stayed openable by URL.
 - [x] Inherit the parent's rule for nested routes so `/reports/:id` is refused wherever `/reports` is; exact-match lookup reported every parameterised route as unscoped.
 - [x] Honour the `roles` field in `canReachPath`. It had the same shape `staffOnly` had before PR #52 — read by the sidebar and by nothing else — so `/admin/super-admin*`, `/admin/poc` and `/admin/roadmap-access` were reachable by any tenant admin who typed the URL. SegmentGuard now also waits for `auth.me`, because a role-scoped path fails closed on an undefined role.
+- [ ] `canReachPath` still ignores the `roles` field that NAV_ITEMS declares, so `/admin/super-admin*` and `/admin/poc` are reachable by any tenant admin who types the URL (server procedures still refuse them). Same shape as the `staffOnly` gap that this module was written to close — worth closing deliberately rather than as a side effect of this PR.
+## Agent-memory monthly aggregation
+- [x] Replace the MySQL-specific `DATE_FORMAT`/`DATE_SUB` aggregation in `exceptionIntelligence.flywheelStats` with a portable boundary + application-side bucketing.
+- [x] Fix the six-month boundary overflowing into the following month. `setUTCMonth` keeps the day, so 31 August produced 3 March instead of 28 February and the `gte` filter dropped every row in between. Three of five month-ends in a year hit it.
+- [x] Pin the boundary against real MySQL 8.0 `DATE_SUB` output for five month-end dates, so the portable version is a faithful port rather than a lookalike.
+- [x] Measure the timestamp-fetch volume against production instead of assuming it: `agent_memory` holds **55 rows in total**, all on the legacy `organizationId = 0` pool. The unbounded fetch is not a concern at any current tenant's scale, and the bounded alternative (six indexed `COUNT(*)` range queries) is recorded at the query site for whenever one approaches six figures per six months.
+- [ ] Separately: because every agent memory sits on `organizationId = 0`, the reconciliation flywheel chart is empty for every real tenant. Worth confirming that is expected rather than a write-path scoping bug.
 
 ## Active Operational Task: Synthetic-Only QLoRA Training
 - [x] Fine-tuned the Qwen2.5-3B-Instruct LoRA adapter on 2,200 synthetic examples, validated on 300 held-out synthetic examples, checksum-verified the 456 MB export on Richard’s local workspace, and terminated the temporary RunPod pod and volume.
