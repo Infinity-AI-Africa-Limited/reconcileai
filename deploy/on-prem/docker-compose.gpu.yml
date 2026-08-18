@@ -269,27 +269,36 @@ services:
             # revision, and the deployment then hangs on a vLLM that cannot load
             # what it was told to load.
             #
-            # MODEL_REVISION may be an immutable commit OR a release tag, and
-            # ml/README.md permits both. Hugging Face stores them differently: a
-            # commit IS the snapshot directory name, while a tag lives in
-            # refs/<tag> as a file containing the commit it points at. Treating a
-            # tag as a literal directory name rejects a fully staged offline
-            # cache that HF itself would resolve — the opposite failure to the one
-            # this gate exists for, and just as effective at blocking a deploy.
-            snapshot="$${target}/snapshots/$${MODEL_REVISION}"
-            if [ ! -d "$${snapshot}" ]; then
-              ref="$${target}/refs/$${MODEL_REVISION}"
-              if [ -f "$${ref}" ]; then
-                resolved="$$(tr -d '[:space:]' < "$${ref}")"
-                snapshot="$${target}/snapshots/$${resolved}"
-                echo "revision $${MODEL_REVISION} is a tag; resolved via refs to $${resolved}"
-              fi
+            # MODEL_REVISION must be an immutable commit SHA, and the gate
+            # enforces that rather than trusting the operator.
+            #
+            # Supporting release tags was a mistake I made answering an earlier
+            # review: a tag is a MUTABLE pointer. `refs/<tag>` can be repointed
+            # at different weights after the institution approved the artifact,
+            # and both the preflight and this gate would still pass while vLLM
+            # served the substitute. For a bank model-supply-chain control the
+            # approved thing has to be the bytes, and the only name that binds
+            # to bytes here is the commit.
+            case "$${MODEL_REVISION}" in
+              *[!0-9a-f]* | "")
+                echo "REFUSING TO START — MODEL_REVISION is not an immutable commit SHA."
+                echo "  got: $${MODEL_REVISION}"
+                echo "A tag or branch can be repointed at different weights after approval."
+                echo "Use the 40-character commit the institution reviewed."
+                exit 1
+                ;;
+            esac
+            if [ "$${#MODEL_REVISION}" -ne 40 ]; then
+              echo "REFUSING TO START — MODEL_REVISION must be a 40-character commit SHA."
+              echo "  got: $${MODEL_REVISION} ($${#MODEL_REVISION} characters)"
+              exit 1
             fi
+
+            snapshot="$${target}/snapshots/$${MODEL_REVISION}"
             test -d "$${snapshot}" || {
               echo "REFUSING TO START — the approved revision is not staged."
-              echo "  expected: $${target}/snapshots/$${MODEL_REVISION}"
-              echo "  or a tag: $${target}/refs/$${MODEL_REVISION} -> snapshots/<commit>"
-              echo "The repository cache exists but does not contain revision $${MODEL_REVISION}."
+              echo "  expected: $${snapshot}"
+              echo "The repository cache exists but does not contain commit $${MODEL_REVISION}."
               echo "Stage that exact revision: vLLM runs offline and will not fetch it."
               exit 1
             }

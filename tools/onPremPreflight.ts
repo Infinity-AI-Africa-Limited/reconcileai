@@ -206,11 +206,20 @@ function checkGpuModel(env: Record<string, string>): Finding[] {
       variable: "MODEL_REVISION",
       message: "still holds the template placeholder. Use the approved immutable revision.",
     });
-  } else if (["main", "master", "latest"].includes(revision.toLowerCase())) {
+  } else if (!/^[0-9a-f]{40}$/i.test(revision) && !(env.RECON_MODEL ?? "").trim().startsWith("/")) {
+    // A branch OR a tag: both are mutable pointers. `refs/<tag>` can be
+    // repointed at different weights after the institution approved the
+    // artifact, and every downstream check would still pass while vLLM served
+    // the substitute. Only a commit binds the approval to the bytes.
+    //
+    // Exempt when RECON_MODEL is a local merged-model path, where there is no
+    // Hugging Face revision to resolve and the field is documentation.
     findings.push({
       severity: "error",
       variable: "MODEL_REVISION",
-      message: `is the moving branch "${revision}". Pin the reviewed commit SHA instead.`,
+      message:
+        `is "${revision}", which is a mutable pointer. A branch or tag can be repointed at ` +
+        "different weights after review. Use the 40-character commit SHA the institution approved.",
     });
   }
 

@@ -148,9 +148,24 @@ describe("when a GPU deployment is correctly configured", () => {
     expect(preflight("gpu", validGpuEnv())).toEqual([]);
   });
 
-  it("should reject a moving branch as the model revision", () => {
-    const env = { ...validGpuEnv(), MODEL_REVISION: "main" };
-    expect(errorsFor("gpu", env)).toContain("MODEL_REVISION");
+  it.each(["main", "master", "latest", "v1.0", "release-2026"])(
+    "should reject the mutable pointer %s as the model revision",
+    (revision) => {
+      // Tags are as mutable as branches — refs/<tag> can be repointed after
+      // review — so the rule is "commit SHA or nothing", not a denylist.
+      expect(errorsFor("gpu", { ...validGpuEnv(), MODEL_REVISION: revision })).toContain("MODEL_REVISION");
+    },
+  );
+
+  it("should accept a 40-character commit SHA", () => {
+    expect(errorsFor("gpu", { ...validGpuEnv(), MODEL_REVISION: "a".repeat(40) })).not.toContain("MODEL_REVISION");
+  });
+
+  it("should not demand a SHA for a local merged-model path", () => {
+    // There is no Hugging Face revision to resolve there; the field is
+    // documentation, and requiring a commit would block a valid deployment.
+    const env = { ...validGpuEnv(), RECON_MODEL: "/root/.cache/huggingface/reconcileai-7b-merged", MODEL_REVISION: "v1.0" };
+    expect(errorsFor("gpu", env)).not.toContain("MODEL_REVISION");
   });
 
   it("should require the vLLM serving key", () => {

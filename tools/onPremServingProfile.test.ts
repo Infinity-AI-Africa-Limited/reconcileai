@@ -284,18 +284,18 @@ describe("GPU profile — staged-model gate", () => {
     expect(script).toContain("the approved revision is not staged");
   });
 
-  it("should resolve a release tag through the cache refs, not treat it as a directory", () => {
-    // ml/README.md permits MODEL_REVISION to be a release tag. HF stores a tag
-    // as refs/<tag> containing the commit, with files under snapshots/<commit> —
-    // so treating the tag as a literal directory name rejects a fully staged
-    // cache that HF itself would resolve. Verified across five layouts:
-    // commit ok, wrong revision refused, tag resolved, dangling tag refused,
-    // repo absent refused.
-    expect(script).toContain('refs/$${MODEL_REVISION}');
-    expect(script).toContain("is a tag; resolved via refs to");
-    // No backslash escapes in the tr argument: this heredoc path has eaten them
-    // before, and a literal tab/newline inside the quotes breaks the YAML.
-    expect(script).toContain("tr -d '[:space:]'");
+  it("should refuse a mutable pointer as the approved revision", () => {
+    // Supporting tags was an over-correction to an earlier review finding. A
+    // tag is a MUTABLE pointer: refs/<tag> can be repointed at different
+    // weights after the institution approved the artifact, and both the
+    // preflight and this gate would still pass while vLLM served the
+    // substitute. Only a commit binds the approval to the bytes — which also
+    // removes the empty-ref path, where a whitespace-only refs file resolved to
+    // the repo-wide snapshots/ directory and any revision's weights satisfied
+    // the search.
+    expect(script).toContain("is not an immutable commit SHA");
+    expect(script).toContain("40-character commit SHA");
+    expect(script).not.toContain("refs/$${MODEL_REVISION}");
   });
 
   it("should follow symlinks when looking for weights", () => {

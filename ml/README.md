@@ -103,12 +103,19 @@ No conversion needed. Stage the merged model in the `hf-cache` volume the GPU
 profile mounts, and point the profile at it through `.env.onprem`:
 ```bash
 RECON_MODEL=/root/.cache/huggingface/reconcileai-7b-merged
-MODEL_REVISION=<reviewed immutable revision, or the release tag of your own artifact>
+MODEL_REVISION=<the 40-char commit SHA the institution reviewed — NOT a tag or branch>
 HF_HUB_OFFLINE=1
 ```
 `--served-model-name reconcileai` is already set in the compose file, so the
 application's `DIRECT_LLM_MODEL` needs no change. Staging the weights rather
 than letting vLLM fetch them is what keeps start-up offline.
+
+> `MODEL_REVISION` must be an immutable commit SHA, and both the preflight and
+> the start-up gate reject anything else. A tag is a mutable pointer: `refs/<tag>`
+> can be repointed at different weights after the institution approved the
+> artifact, and every check downstream would still pass while vLLM served the
+> substitute. For a local merged-model path there is no revision to resolve and
+> the field is documentation only.
 
 ### 4. Evaluate (no GPU)
 ```bash
