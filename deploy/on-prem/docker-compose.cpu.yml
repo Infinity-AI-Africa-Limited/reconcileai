@@ -93,12 +93,19 @@ services:
         # mc spelling; if both fail, `set -e` stops here.
         mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add root reconcileai-app "$${pol}"
 
-        # These two legitimately no-op against an existing deployment ("already
-        # exists" / "already attached"), so their exit codes carry no
-        # information. Correctness is not taken from them — it is proven by the
-        # capability probe below.
-        mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}" 2>/dev/null || true
-        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || mc admin policy set root reconcileai-app "user=$${key}" 2>/dev/null || true
+        # RECREATE the identity rather than attaching to whatever it already is.
+        # `mc admin policy attach` is additive and has no "replace" form, so a
+        # redeployment that reuses MINIO_APP_ACCESS_KEY keeps every binding the
+        # key already had. A key that once carried `readwrite` or `consoleAdmin`
+        # still carries it, the attach below succeeds, and the bucket scope
+        # becomes decoration. Removing the user first is the only mc operation
+        # that guarantees exactly one binding afterwards.
+        #
+        # Safe to do here: this service completes before the app is allowed to
+        # start, so the credential is not in use while it is being rebuilt.
+        mc admin user remove root "$${key}" 2>/dev/null || true
+        mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || mc admin policy set root reconcileai-app "user=$${key}"
 
         # Probe every operation the application actually performs, not merely a
         # listing. A credential carrying a list-only policy passes `mc ls` while
@@ -111,6 +118,30 @@ services:
         mc cat "$${probe}" > /dev/null
         mc rm "$${probe}" > /dev/null
         mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null
+
+        # Prove the scope, not just the access. Everything above passes just as
+        # happily for a credential that can also reach every OTHER bucket, so
+        # least privilege needs a denial test or it is only an assertion.
+        scope_probe="reconcileai-scope-probe"
+        if mc ls "root/$${scope_probe}" > /dev/null 2>&1; then
+          echo "REFUSING TO START — bucket $${scope_probe} already exists; that name is reserved for the scope check."
+          exit 1
+        fi
+        mc mb "root/$${scope_probe}" > /dev/null
+        cross_read=no
+        cross_write=no
+        if mc ls "appcheck/$${scope_probe}" > /dev/null 2>&1; then cross_read=yes; fi
+        if echo scope-probe | mc pipe "appcheck/$${scope_probe}/probe" > /dev/null 2>&1; then cross_write=yes; fi
+        # Always clean up before deciding, so a failure cannot strand the bucket
+        # and trip the reserved-name guard on the next run.
+        mc rb --force "root/$${scope_probe}" > /dev/null 2>&1 || true
+        if [ "$${cross_read}" = yes ] || [ "$${cross_write}" = yes ]; then
+          echo "REFUSING TO START — the application credential reaches beyond $${AWS_S3_BUCKET}."
+          echo "  read other bucket:  $${cross_read}"
+          echo "  write other bucket: $${cross_write}"
+          echo "It is carrying a policy wider than reconcileai-app. Remove the stale binding, or rotate MINIO_APP_ACCESS_KEY."
+          exit 1
+        fi
         echo "storage ready: bucket $${AWS_S3_BUCKET}, scoped credential verified for put/get/delete/list"
     networks: [bank-internal]
     restart: "no"

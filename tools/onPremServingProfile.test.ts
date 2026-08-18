@@ -142,6 +142,33 @@ describe.each(PROFILES)("on-premise $name serving profile", ({ composeFile, envE
     expect(script).toContain('mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add');
   });
 
+  it("should rebuild the storage identity rather than adding to whatever it already had", () => {
+    // `mc admin policy attach` is additive and has no replace form, so reusing
+    // MINIO_APP_ACCESS_KEY across deployments keeps every binding the key ever
+    // had — a key that once carried `readwrite` still carries it, and the
+    // bucket scope becomes decoration. Removing the user first is the only mc
+    // operation that guarantees exactly one binding afterwards.
+    const script = String(compose.services["storage-init"].command);
+    expect(script).toContain("mc admin user remove root");
+    // The re-add must NOT be tolerated: if it fails the identity is gone.
+    expect(script).toMatch(/mc admin user add root "\$\$\{key\}" "\$\$\{MINIO_APP_SECRET_KEY\}"\s*$/m);
+  });
+
+  it("should prove the credential cannot reach another bucket, not just its own", () => {
+    // Every other check passes just as happily for a credential that can also
+    // reach every other bucket, so least privilege needs a denial test or it is
+    // only an assertion. Verified against MinIO: a readwrite credential trips it.
+    const script = String(compose.services["storage-init"].command);
+    expect(script).toContain("reconcileai-scope-probe");
+    expect(script).toContain("reaches beyond");
+    // Cleanup must happen before the verdict, or a failure strands the probe
+    // bucket and the reserved-name guard blocks every later run.
+    const cleanupAt = script.indexOf("mc rb --force");
+    const verdictAt = script.indexOf('if [ "$${cross_read}" = yes ]');
+    expect(cleanupAt).toBeGreaterThan(-1);
+    expect(verdictAt).toBeGreaterThan(cleanupAt);
+  });
+
   it("should wait for storage to be provisioned before the app accepts traffic", () => {
     expect(compose.services.app.depends_on?.["storage-init"]?.condition).toBe("service_completed_successfully");
     expect(compose.services.gateway.depends_on?.app?.condition).toBe("service_healthy");
