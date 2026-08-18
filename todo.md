@@ -4,7 +4,8 @@
 - [x] Replace the MySQL-specific `DATE_FORMAT`/`DATE_SUB` aggregation in `exceptionIntelligence.flywheelStats` with a portable boundary + application-side bucketing.
 - [x] Fix the six-month boundary overflowing into the following month. `setUTCMonth` keeps the day, so 31 August produced 3 March instead of 28 February and the `gte` filter dropped every row in between. Three of five month-ends in a year hit it.
 - [x] Pin the boundary against real MySQL 8.0 `DATE_SUB` output for five month-end dates, so the portable version is a faithful port rather than a lookalike.
-- [ ] Revisit the timestamp fetch if a single tenant approaches six figures of agent memories per six months (bounded alternative: six indexed `COUNT(*)` range queries).
+- [x] Measure the timestamp-fetch volume against production instead of assuming it: `agent_memory` holds **55 rows in total**, all on the legacy `organizationId = 0` pool. The unbounded fetch is not a concern at any current tenant's scale, and the bounded alternative (six indexed `COUNT(*)` range queries) is recorded at the query site for whenever one approaches six figures per six months.
+- [ ] Separately: because every agent memory sits on `organizationId = 0`, the reconciliation flywheel chart is empty for every real tenant. Worth confirming that is expected rather than a write-path scoping bug.
 
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
