@@ -4,7 +4,12 @@
 torch>=2.3
 transformers>=4.45
 peft>=0.13
-trl>=0.11
+# >=0.16 is load-bearing, not tidiness: SFTConfig gained `max_length` in 0.16.0
+# (0.13-0.15 have only `max_seq_length`), and finetune.py passes max_length, so
+# an older release fails with a TypeError before training starts. Upper bound
+# because TRL has renamed SFTConfig fields across minors twice already —
+# max_seq_length -> max_length is exactly why this line needed correcting.
+trl>=0.16,<2
 datasets>=3.0
 accelerate>=1.0
 bitsandbytes>=0.44   # 4-bit QLoRA (GPU only)
