@@ -77,6 +77,10 @@ def main():
     # Ollama ignores the header, so "local" remains the right CPU default.
     ap.add_argument("--api-key", default=os.environ.get("VLLM_API_KEY", "local"),
                     help="bearer token for the serving endpoint (default: $VLLM_API_KEY, else 'local')")
+    # A 3B Q4 model on a laptop CPU exceeded 120s on ~8% of held-out cases during
+    # local validation, so the CPU tier needs headroom the GPU tier does not.
+    ap.add_argument("--timeout", type=int, default=300,
+                    help="per-request timeout in seconds (CPU serving is far slower than GPU)")
     args = ap.parse_args()
 
     rows = [json.loads(line) for line in open(args.val, encoding="utf-8")]
@@ -91,7 +95,7 @@ def main():
         prompt = msgs[:-1]  # system + user
         n += 1
         try:
-            out = chat(args.base_url, args.model, prompt, args.api_key)
+            out = chat(args.base_url, args.model, prompt, args.api_key, args.timeout)
         except Exception as e:  # noqa: BLE001
             failed += 1
             if first_error is None:

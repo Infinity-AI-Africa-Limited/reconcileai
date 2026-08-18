@@ -32,6 +32,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+      # First-run initialisation took ~5 minutes on the reference host, well past
+      # the 120s the retries alone allow. Without a start period the container is
+      # reported unhealthy throughout — which reads as a failed install, and
+      # holds back everything that depends_on it.
+      start_period: 300s
     networks: [bank-internal]
     security_opt: [no-new-privileges:true]
 
