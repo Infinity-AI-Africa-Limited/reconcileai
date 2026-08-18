@@ -389,6 +389,48 @@ describe("A1. An admitted delivery that never finished is recovered", () => {
     expect(summary.examined).toBe(0);
   });
 
+  it("should take the row out of the replayable set while it is being processed", async () => {
+    // Incrementing `attempts` alone was NOT exclusive: the row stayed `pending`,
+    // so once worker A moved 0 -> 1 a later sweep could read 1, claim 2, and
+    // enter processing while A was still inside it. Both then ran the billing
+    // side effect, which no conditional write afterwards can undo. The claim
+    // must move the row into `processing` with a lease, in the same UPDATE.
+    mockDb.set.mockClear();
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    await replayStalledWebhookEvents(mockDb as never);
+
+    const writes = mockDb.set.mock.calls.map((c: unknown[]) => c[0] as Record<string, unknown>);
+    const claim = writes.find((w) => w.status === "processing");
+    expect(claim, "the claim must set status=processing").toBeDefined();
+    expect(claim?.leaseExpiresAt).toBeInstanceOf(Date);
+    // and it must be the FIRST write — a claim after the side effect is no claim.
+    expect(writes[0]?.status).toBe("processing");
+  });
+
+  it("should clear the lease on a terminal outcome", async () => {
+    // A `failed` row still carrying a future lease sits out its own backoff
+    // before the next sweep can see it — an undocumented retry delay.
+    mockDb.set.mockClear();
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    await replayStalledWebhookEvents(mockDb as never);
+
+    const terminal = mockDb.set.mock.calls
+      .map((c: unknown[]) => c[0] as Record<string, unknown>)
+      .filter((w) => ["processed", "failed", "dlq"].includes(String(w.status)));
+    expect(terminal.length).toBeGreaterThan(0);
+    for (const w of terminal) expect(w.leaseExpiresAt).toBeNull();
+  });
+
+  it("should skip a row another worker claimed first", async () => {
+    // affectedRows = 0 means the compare-and-set lost the race. Processing
+    // anyway is exactly the double-billing this guards against.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    mockDb.updateWhere.mockResolvedValueOnce([{ affectedRows: 0 }]);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary.skipped).toBe(1);
+    expect(summary.processed).toBe(0);
+  });
+
   it("should report an empty sweep when nothing is stalled", async () => {
     mockDb.limit.mockImplementationOnce(async () => []);
     const summary = await replayStalledWebhookEvents(mockDb as never);

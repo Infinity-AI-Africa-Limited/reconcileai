@@ -28,7 +28,7 @@
  * DLQ: events that fail processing after 3 attempts are marked `dlq`.
  */
 
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { getDb } from "../../db";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { slConnectorWebhookEvents, slConnectorStores } from "../../../drizzle/connector_schema";
@@ -500,6 +500,16 @@ export const WEBHOOK_MAX_ATTEMPTS = 3;
  */
 export const WEBHOOK_REPLAY_GRACE_MS = 5 * 60_000;
 
+/**
+ * How long a claimed row stays off-limits to other sweeps.
+ *
+ * Long enough that a slow `processWebhookEvent` finishes inside it, short
+ * enough that a worker killed mid-flight is recovered within one or two sweeps
+ * rather than never. The sweep runs every 15 minutes, so ten gives one clean
+ * cycle of exclusivity and reclaims on the next.
+ */
+export const WEBHOOK_LEASE_MS = 10 * 60_000;
+
 export type WebhookReplaySummary = {
   examined: number;
   processed: number;
@@ -531,14 +541,22 @@ export async function replayStalledWebhookEvents(
   const limit = opts.limit ?? 50;
   const cutoff = new Date(Date.now() - (opts.graceMs ?? WEBHOOK_REPLAY_GRACE_MS));
 
+  const now = new Date();
+
+  // Eligible rows are those NOT currently leased: pending/failed, or a
+  // `processing` row whose lease has expired because its worker died.
   const stalled = await db
     .select()
     .from(slConnectorWebhookEvents)
     .where(
       and(
-        inArray(slConnectorWebhookEvents.status, ["pending", "failed"]),
+        inArray(slConnectorWebhookEvents.status, ["pending", "failed", "processing"]),
         lt(slConnectorWebhookEvents.attempts, WEBHOOK_MAX_ATTEMPTS),
         lt(slConnectorWebhookEvents.receivedAt, cutoff),
+        or(
+          isNull(slConnectorWebhookEvents.leaseExpiresAt),
+          lt(slConnectorWebhookEvents.leaseExpiresAt, now),
+        ),
       ),
     )
     .limit(limit);
@@ -565,17 +583,30 @@ export async function replayStalledWebhookEvents(
     // and the outcome writes would race afterwards so a success could be
     // overwritten with `failed` or `dlq`.
     //
-    // The attempt counter doubles as the lease: the UPDATE only matches while
-    // the row still shows the count we read, so exactly one worker can move it
-    // forward and the loser sees affectedRows = 0 and moves on.
+    // Incrementing `attempts` alone is NOT exclusive, and that was the bug in
+    // the first version of this: the row stayed `pending`, so once worker A
+    // moved 0 -> 1 a later sweep could read 1, claim 2, and enter
+    // processWebhookEvent while A was still inside it. Both then ran the
+    // billing side effect, and no conditional write afterwards can undo that.
+    //
+    // The claim therefore moves the row OUT of the eligible set — into
+    // `processing` with a lease — in the same atomic UPDATE that increments the
+    // counter. The compare-and-set on `attempts` settles ties between workers
+    // that read the same value; the status change keeps later sweeps out for
+    // the duration of the lease.
+    const leaseExpiresAt = new Date(Date.now() + WEBHOOK_LEASE_MS);
     const claim = await db
       .update(slConnectorWebhookEvents)
-      .set({ attempts })
+      .set({ attempts, status: "processing", leaseExpiresAt })
       .where(
         and(
           eq(slConnectorWebhookEvents.id, event.id),
           eq(slConnectorWebhookEvents.attempts, observedAttempts),
-          inArray(slConnectorWebhookEvents.status, ["pending", "failed"]),
+          eq(slConnectorWebhookEvents.status, event.status),
+          or(
+            isNull(slConnectorWebhookEvents.leaseExpiresAt),
+            lt(slConnectorWebhookEvents.leaseExpiresAt, now),
+          ),
         ),
       );
 
@@ -587,9 +618,14 @@ export async function replayStalledWebhookEvents(
 
     // Every outcome write below is also conditional on still holding the claim,
     // so a slow worker cannot overwrite a newer attempt's result.
+    // Every outcome write is conditional on STILL HOLDING the claim — same id,
+    // same attempt count, still the `processing` row we put there. A worker
+    // whose lease expired and was reclaimed by someone else therefore cannot
+    // land its stale result on top of the newer attempt.
     const heldClaim = and(
       eq(slConnectorWebhookEvents.id, event.id),
       eq(slConnectorWebhookEvents.attempts, attempts),
+      eq(slConnectorWebhookEvents.status, "processing"),
     );
 
     try {
@@ -602,7 +638,7 @@ export async function replayStalledWebhookEvents(
       );
       await db
         .update(slConnectorWebhookEvents)
-        .set({ status: "processed", processedAt: new Date() })
+        .set({ status: "processed", processedAt: new Date(), leaseExpiresAt: null })
         .where(heldClaim);
       summary.processed += 1;
     } catch (err) {
@@ -610,7 +646,10 @@ export async function replayStalledWebhookEvents(
       const exhausted = attempts >= WEBHOOK_MAX_ATTEMPTS;
       await db
         .update(slConnectorWebhookEvents)
-        .set({ status: exhausted ? "dlq" : "failed", errorMessage })
+        // Clearing the lease matters: a `failed` row still carrying a future
+        // lease would sit out its own backoff before the next sweep could see
+        // it, which is a retry delay nobody asked for and nobody documented.
+        .set({ status: exhausted ? "dlq" : "failed", errorMessage, leaseExpiresAt: null })
         .where(heldClaim);
       if (exhausted) {
         summary.movedToDlq += 1;
