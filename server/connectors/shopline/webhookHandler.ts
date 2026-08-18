@@ -151,8 +151,19 @@ export async function admitWebhook(
     webhookId: webhook.webhookId,
     topic: webhook.topic,
     payloadJson,
-    status: "pending",
-    attempts: 0,
+    // Admitted straight into `processing` with a lease, because the receiver is
+    // about to process it on the very next tick. Inserting as `pending` left the
+    // row replay-eligible for the whole of that work: if it ran past the grace
+    // period a sweep would claim and dispatch the SAME delivery, and for
+    // appsubscription/paid that bills twice. Holding the lease from the moment
+    // the row exists closes the window instead of narrowing it.
+    //
+    // Crash safety is unchanged — better, in fact. A process that dies mid-work
+    // leaves an expired lease, which the sweep reclaims; before, it left a
+    // `pending` row that looked identical to one never started.
+    status: "processing",
+    attempts: 1,
+    leaseExpiresAt: new Date(Date.now() + WEBHOOK_LEASE_MS),
   });
 
   const eventId = (inserted as { insertId: number }).insertId;
@@ -180,6 +191,16 @@ export async function processAdmittedWebhook(
   db: Db,
   admitted: Extract<WebhookAdmission, { status: "admitted" }>,
 ): Promise<WebhookIngestResult> {
+  // The row was admitted as `processing` with attempts=1, so this path already
+  // holds the lease. Every write below is conditional on still holding it: if
+  // the lease expired and a sweep reclaimed the row, that sweep owns the
+  // outcome and this one must not overwrite it.
+  const heldClaim = and(
+    eq(slConnectorWebhookEvents.id, admitted.eventId),
+    eq(slConnectorWebhookEvents.attempts, 1),
+    eq(slConnectorWebhookEvents.status, "processing"),
+  );
+
   try {
     await processWebhookEvent(
       db,
@@ -191,8 +212,8 @@ export async function processAdmittedWebhook(
 
     await db
       .update(slConnectorWebhookEvents)
-      .set({ status: "processed", processedAt: new Date() })
-      .where(eq(slConnectorWebhookEvents.id, admitted.eventId));
+      .set({ status: "processed", processedAt: new Date(), leaseExpiresAt: null })
+      .where(heldClaim);
 
     return { status: "processed", eventId: admitted.eventId };
   } catch (err) {
@@ -200,12 +221,8 @@ export async function processAdmittedWebhook(
 
     await db
       .update(slConnectorWebhookEvents)
-      .set({
-        status: "failed",
-        attempts: 1,
-        errorMessage,
-      })
-      .where(eq(slConnectorWebhookEvents.id, admitted.eventId));
+      .set({ status: "failed", errorMessage, leaseExpiresAt: null })
+      .where(heldClaim);
 
     return { status: "failed", error: errorMessage };
   }

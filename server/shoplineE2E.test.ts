@@ -294,6 +294,22 @@ describe("A0. A delivery is durable before it is acknowledged", () => {
     expect(runSyncCycleMock).not.toHaveBeenCalled();
   });
 
+  it("should admit the row already leased, so the post-ack work is exclusive", async () => {
+    // Inserting as `pending` left the row replay-eligible for the whole of the
+    // post-ack processing: if that ran past the grace period a sweep claimed
+    // and dispatched the SAME delivery, billing an appsubscription/paid twice.
+    // The lease has to exist from the moment the row does.
+    mockDb.values.mockClear();
+    mockDb.limit.mockImplementationOnce(async () => [mockStore]).mockImplementationOnce(async () => []);
+    await admitWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload()));
+
+    const row = mockDb.values.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(row.status).toBe("processing");
+    expect(row.attempts).toBe(1);
+    expect(row.leaseExpiresAt).toBeInstanceOf(Date);
+    expect((row.leaseExpiresAt as Date).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it("should refuse admission for a bad signature, so nothing reaches storage", async () => {
     const forged = { ...makeSignedWebhook("orders/paid", makeOrderPaidPayload()), hmacSignature: "not-a-signature" };
     const admission = await admitWebhook(mockDb as never, forged);
