@@ -190,9 +190,11 @@ vi.mock("./_core/env", () => ({
 
 // Import after mocks are set up
 import {
+  WEBHOOK_MAX_ATTEMPTS,
   admitWebhook,
   ingestWebhook,
   processAdmittedWebhook,
+  replayStalledWebhookEvents,
   type InboundWebhook,
 } from "./connectors/shopline/webhookHandler";
 import {
@@ -317,6 +319,60 @@ describe("A0. A delivery is durable before it is acknowledged", () => {
     });
 
     expect(["processed", "failed"]).toContain(result.status);
+  });
+});
+
+// ─── A1. Recovery for admitted-but-unfinished events ──────────────────────────
+
+describe("A1. An admitted delivery that never finished is recovered", () => {
+  function stalledRow(over: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: 7001,
+      organizationId: mockStore.organizationId,
+      slStoreId: mockStore.id,
+      webhookId: "wh_stalled",
+      topic: "orders/paid",
+      payloadJson: makeOrderPaidPayload(),
+      status: "pending",
+      attempts: 0,
+      receivedAt: new Date(Date.now() - 60 * 60_000),
+      ...over,
+    };
+  }
+
+  it("should reprocess a row left pending by a restart between ack and processing", async () => {
+    // SHOPLINE does not redeliver after a 2xx, so nothing else is coming for
+    // this event. Without the sweep it stays pending forever.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary.examined).toBe(1);
+    expect(summary.processed).toBe(1);
+    expect(summary.movedToDlq).toBe(0);
+  });
+
+  it("should count the attempt it just made, so a row cannot be retried forever", async () => {
+    // The DLQ boundary is attempts >= WEBHOOK_MAX_ATTEMPTS, and it only bites if
+    // each pass actually records its attempt. A replay that reprocessed without
+    // incrementing would loop on the same broken event indefinitely.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow({ attempts: 1 })]);
+    await replayStalledWebhookEvents(mockDb as never);
+    const wrote = mockDb.set.mock.calls.map((c: unknown[]) => c[0] as { attempts?: number });
+    expect(wrote.some((w) => w.attempts === 2)).toBe(true);
+  });
+
+  it("should leave a freshly admitted event alone", async () => {
+    // The receiver acks and processes on the same tick, so anything inside the
+    // grace window is very likely still in flight — replaying it would
+    // double-process a delivery that was about to succeed.
+    mockDb.limit.mockImplementationOnce(async () => []);
+    const summary = await replayStalledWebhookEvents(mockDb as never, { graceMs: 60 * 60_000 });
+    expect(summary.examined).toBe(0);
+  });
+
+  it("should report an empty sweep when nothing is stalled", async () => {
+    mockDb.limit.mockImplementationOnce(async () => []);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary).toEqual({ examined: 0, processed: 0, failed: 0, movedToDlq: 0 });
   });
 });
 
