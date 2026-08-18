@@ -109,6 +109,67 @@ services:
     restart: "no"
     security_opt: [no-new-privileges:true]
 
+  # Refuse to start unless the approved weights are actually staged.
+  #
+  # The GPU profile is air-gapped by design: vllm sits only on `bank-internal`
+  # (internal: true) and runs with HF_HUB_OFFLINE=1, so it cannot fetch a model
+  # from Hugging Face. With an empty hf-cache that produced the worst possible
+  # shape of failure — vllm starts, never becomes healthy, and `app` waits on it
+  # forever, with nothing saying the weights were simply never delivered.
+  #
+  # Attaching vllm to an egress network was the alternative and is rejected: the
+  # residency guarantee is the product here. Staging is the contract, so this
+  # verifies the contract and says plainly which path it looked at.
+  model-check:
+    image: ${VLLM_IMAGE:?Set VLLM_IMAGE to a scanned, pinned image reference}
+    environment:
+      RECON_MODEL: ${RECON_MODEL:?Set RECON_MODEL to an approved Qwen artifact}
+      MODEL_REVISION: ${MODEL_REVISION:?Set MODEL_REVISION to the approved immutable model revision}
+    volumes:
+      - hf-cache:/root/.cache/huggingface:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        cache=/root/.cache/huggingface
+
+        case "$${RECON_MODEL}" in
+          /*)
+            # A local merged-model directory, per ml/README.md step 3b.
+            test -d "$${RECON_MODEL}" || {
+              echo "REFUSING TO START — no model directory at $${RECON_MODEL}."
+              echo "Stage the merged model into the hf-cache volume before starting this profile."
+              exit 1
+            }
+            target="$${RECON_MODEL}"
+            ;;
+          *)
+            # A Hugging Face repo id, stored as models--<org>--<name> in the hub cache.
+            # Replace the FIRST slash only. Going via `tr` then a hyphen swap
+            # corrupts any org whose own name contains a hyphen (my-org/model).
+            repo="models--$$(echo "$${RECON_MODEL}" | sed 's|/|--|')"
+            target="$${cache}/hub/$${repo}"
+            test -d "$${target}" || {
+              echo "REFUSING TO START — $${RECON_MODEL} is not staged in the hf-cache volume."
+              echo "  expected: $${target}"
+              echo "vLLM cannot download it: this profile is air-gapped (internal network, HF_HUB_OFFLINE=1)."
+              echo "Pre-stage the approved revision $${MODEL_REVISION} into the volume, then start again."
+              exit 1
+            }
+            ;;
+        esac
+
+        # A directory alone is not weights — an interrupted copy leaves one behind.
+        if ! find "$${target}" -type f \( -name '*.safetensors' -o -name '*.bin' -o -name '*.gguf' \) | head -1 | grep -q .; then
+          echo "REFUSING TO START — $${target} exists but contains no model weights."
+          echo "The staged copy looks incomplete; re-stage it before starting."
+          exit 1
+        fi
+        echo "approved model staged: $${RECON_MODEL} (revision $${MODEL_REVISION})"
+    networks: [bank-internal]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+
   vllm:
     image: ${VLLM_IMAGE:?Set VLLM_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
@@ -129,6 +190,9 @@ services:
       VLLM_API_KEY: ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
       # Offline once the artifact is staged: no model fetch at start-up.
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
+    depends_on:
+      model-check:
+        condition: service_completed_successfully
     volumes:
       - hf-cache:/root/.cache/huggingface
     # PagedAttention needs more shared memory than Docker's 64 MB default.

@@ -227,6 +227,25 @@ describe("GPU profile — private authenticated serving", () => {
   it("should serve staged weights rather than fetching them at start-up", () => {
     expect(vllm.environment?.HF_HUB_OFFLINE).toBe("${HF_HUB_OFFLINE:-1}");
   });
+
+  it("should refuse to start when the approved weights were never staged", () => {
+    // vllm is air-gapped (internal network + HF_HUB_OFFLINE), so an empty cache
+    // cannot resolve itself. Without this gate it starts, never goes healthy,
+    // and `app` waits on it forever with nothing naming the real cause.
+    const check = compose.services["model-check"];
+    expect(check, "GPU profile must verify staged weights before vllm starts").toBeDefined();
+    expect(check.restart).toBe("no");
+    expect(vllm.depends_on?.["model-check"]?.condition).toBe("service_completed_successfully");
+
+    const script = String(check.command);
+    expect(script).toContain("set -eu");
+    expect(script).toContain("REFUSING TO START");
+    // Mounted read-only: a verification step must not be able to alter what it
+    // verifies, and it has no reason to write.
+    expect(check.volumes).toContain("hf-cache:/root/.cache/huggingface:ro");
+    // A directory alone is not weights — an interrupted copy leaves one behind.
+    expect(script).toContain("safetensors");
+  });
 });
 
 describe("model packaging", () => {

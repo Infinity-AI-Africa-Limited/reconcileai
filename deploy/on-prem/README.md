@@ -138,6 +138,21 @@ stock-model pull is retained solely for development or controlled demonstrations
 before the deployment is air-gapped, and the preflight rejects it for an
 institution deployment.
 
+### GPU: the weights must be staged before the stack starts
+
+The GPU profile is air-gapped the same way the CPU one is — `vllm` sits only on
+`bank-internal` and runs with `HF_HUB_OFFLINE=1` — so it **cannot** download a
+model, even though `RECON_MODEL` looks like a Hugging Face id. Stage the approved
+revision into the `hf-cache` volume as part of the delivery package.
+
+A one-shot `model-check` service verifies this before `vllm` starts and names
+the exact path it looked at. Without it an empty cache produced the worst shape
+of failure available: `vllm` starts, never becomes healthy, and `app` waits on
+it indefinitely with nothing indicating the weights were simply never delivered.
+
+It also rejects a directory that exists but holds no weight files, which is what
+an interrupted copy leaves behind.
+
 ### Private evidence and report storage
 
 Both profiles include an internal-only MinIO service and a one-shot
