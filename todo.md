@@ -1,5 +1,12 @@
 # ReconcileAI - Project TODO
 
+## Agent-memory monthly aggregation
+- [x] Replace the MySQL-specific `DATE_FORMAT`/`DATE_SUB` aggregation in `exceptionIntelligence.flywheelStats` with a portable boundary + application-side bucketing.
+- [x] Fix the six-month boundary overflowing into the following month. `setUTCMonth` keeps the day, so 31 August produced 3 March instead of 28 February and the `gte` filter dropped every row in between. Three of five month-ends in a year hit it.
+- [x] Pin the boundary against real MySQL 8.0 `DATE_SUB` output for five month-end dates, so the portable version is a faithful port rather than a lookalike.
+- [x] Measure the timestamp-fetch volume against production instead of assuming it: `agent_memory` holds **55 rows in total**, all on the legacy `organizationId = 0` pool. The unbounded fetch is not a concern at any current tenant's scale, and the bounded alternative (six indexed `COUNT(*)` range queries) is recorded at the query site for whenever one approaches six figures per six months.
+- [ ] Separately: because every agent memory sits on `organizationId = 0`, the reconciliation flywheel chart is empty for every real tenant. Worth confirming that is expected rather than a write-path scoping bug.
+
 ## Active Operational Task: Synthetic-Only QLoRA Training
 - [x] Fine-tuned the Qwen2.5-3B-Instruct LoRA adapter on 2,200 synthetic examples, validated on 300 held-out synthetic examples, checksum-verified the 456 MB export on Richard’s local workspace, and terminated the temporary RunPod pod and volume.
 - [x] Fix `ml/finetune.py` compatibility with the current TRL configuration API: `max_seq_length` was renamed to `max_length` and is fully removed from TRL (no deprecation shim), so the old field aborts the run.
