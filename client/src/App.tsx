@@ -166,10 +166,19 @@ function DashboardPage({ component: Component }: { component: React.ComponentTyp
  * simply asking for the segment without a session would throw the merchant onto
  * a login page for an account they do not have yet. Guarding the route must not
  * cost more than the thing it guards against.
+ *
+ * That gate is also why this guard has to wait for `auth.me` explicitly.
+ * `isAuthenticated` is false while the session is still loading, which switches
+ * the segment query OFF — and a disabled query reports a RESOLVED null, not a
+ * pending one (see useOrgSegmentStatus, where that is deliberate). So without
+ * the wait the sequence is: auth loading -> signedIn:false -> the signed-out
+ * exception applies -> a signed-in bank user is shown the retail "Store
+ * Connected" screen -> auth resolves -> they are redirected away. Deciding on
+ * `signedIn` before knowing whether they are signed in is the bug.
  */
 function CallbackGuard({ component: Component }: { component: React.ComponentType }) {
   const [location] = useLocation();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading: authLoading } = useAuth();
   const { segment, isPending } = useOrgSegmentStatus({ enabled: isAuthenticated });
   const { viewAsOrg } = usePortalContext();
 
@@ -178,8 +187,13 @@ function CallbackGuard({ component: Component }: { component: React.ComponentTyp
   // the retail screen because the answer is missing would be reading absence as
   // evidence.
   const opts = { portal: viewAsOrg !== null, signedIn: isAuthenticated };
-  const blocked = !isPending && !canReachCallback(location, segment, user?.role, opts);
+  const undecided = authLoading || isPending;
+  const blocked = !undecided && !canReachCallback(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
+  // Render nothing while undecided. The signed-out merchant this page exists
+  // for resolves in one tick; showing them the completion screen a frame early
+  // is not worth showing it to everyone else too.
+  if (undecided) return null;
   return <Component />;
 }
 
