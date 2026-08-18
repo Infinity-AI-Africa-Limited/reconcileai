@@ -41,6 +41,19 @@ The same Super Admin table exposes an established **Enter Portal** control for e
 retail record. Its behaviour is the authorised, non-destructive comparison path for
 the welcome-page context hand-off; no tenant data was changed while observing it.
 
+## Signed GDPR acknowledgement — 18 August 2026
+
+A controlled request was signed with the authorised App Secret and sent only to the
+configured `customers-data-request` endpoint for
+`reconcileai-dev.myshopline.com`. The payload contained a synthetic request
+identifier and no customer name, email, address, payment data, or bank data. The
+production endpoint returned **HTTP 200**, `ok: true`,
+`kind: customer_data_request`, `status: completed`, and `recordsAffected: 0`.
+
+This verifies signature acceptance, store resolution, the audit-acknowledgement
+path, and the non-destructive access-request response. No customer-redaction,
+shop-redaction, uninstallation, or production merchant-data mutation was invoked.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |
