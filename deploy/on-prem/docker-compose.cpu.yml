@@ -80,23 +80,38 @@ services:
         set -eu
         mc alias set root "http://minio:9000" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing "root/$${AWS_S3_BUCKET}"
+        pol=/tmp/reconcileai-app-policy.json
+        key="$${MINIO_APP_ACCESS_KEY}"
 
         # Least privilege: read/write objects in exactly one bucket, nothing else.
         printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]}]}' \
-          "$${AWS_S3_BUCKET}" "$${AWS_S3_BUCKET}" > /tmp/reconcileai-app-policy.json
+          "$${AWS_S3_BUCKET}" "$${AWS_S3_BUCKET}" > "$${pol}"
 
-        # Each step is idempotent on re-run, so these tolerate "already exists".
-        # Correctness is not assumed from them — it is proven by the check below.
-        mc admin user add root "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}" || true
-        mc admin policy create root reconcileai-app /tmp/reconcileai-app-policy.json || true
-        mc admin policy attach root reconcileai-app --user "$${MINIO_APP_ACCESS_KEY}" || true
+        # This one must SUCCEED, not be tolerated. `create` replaces a policy of
+        # the same name, which is what stops a stale, more-restrictive policy
+        # from an earlier deployment surviving into this one. `add` is the older
+        # mc spelling; if both fail, `set -e` stops here.
+        mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add root reconcileai-app "$${pol}"
 
-        # Prove the scoped credential actually works before the app depends on it.
-        # Without this, a silently-failed policy step surfaces later as an upload
-        # error against a bank's evidence file rather than here at start-up.
-        mc alias set appcheck "http://minio:9000" "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}"
+        # These two legitimately no-op against an existing deployment ("already
+        # exists" / "already attached"), so their exit codes carry no
+        # information. Correctness is not taken from them — it is proven by the
+        # capability probe below.
+        mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}" 2>/dev/null || true
+        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || mc admin policy set root reconcileai-app "user=$${key}" 2>/dev/null || true
+
+        # Probe every operation the application actually performs, not merely a
+        # listing. A credential carrying a list-only policy passes `mc ls` while
+        # every evidence upload is denied (verified against MinIO) — readiness
+        # that checks the wrong capability is not readiness. `set -e` means any
+        # of these failing exits non-zero, so the app never starts.
+        mc alias set appcheck "http://minio:9000" "$${key}" "$${MINIO_APP_SECRET_KEY}"
+        probe="appcheck/$${AWS_S3_BUCKET}/.reconcileai-storage-init-probe"
+        echo "reconcileai storage readiness probe" | mc pipe "$${probe}"
+        mc cat "$${probe}" > /dev/null
+        mc rm "$${probe}" > /dev/null
         mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null
-        echo "storage ready: bucket $${AWS_S3_BUCKET}, bucket-scoped app credential verified"
+        echo "storage ready: bucket $${AWS_S3_BUCKET}, scoped credential verified for put/get/delete/list"
     networks: [bank-internal]
     restart: "no"
     security_opt: [no-new-privileges:true]

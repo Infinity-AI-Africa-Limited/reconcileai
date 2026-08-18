@@ -126,6 +126,22 @@ describe.each(PROFILES)("on-premise $name serving profile", ({ composeFile, envE
     expect(compose.services.app.environment?.JWT_SECRET).toContain("JWT_SECRET:?");
   });
 
+  it("should prove the storage credential can write, not merely list", () => {
+    // A list-only policy passes `mc ls` while every evidence upload is denied
+    // (verified against MinIO), so readiness must exercise the operations the
+    // application actually performs. `set -e` turns a failed probe into a
+    // non-zero exit, which the app's depends_on condition then blocks on.
+    const script = String(compose.services["storage-init"].command);
+    expect(script).toContain("set -eu");
+    expect(script).toContain("mc pipe");
+    expect(script).toContain("mc cat");
+    expect(script).toContain("mc rm");
+    // The policy write itself must not be swallowed: a tolerated failure is how
+    // a stale, more-restrictive policy survives into a new deployment. Asserting
+    // the positive form also rules out a `|| true` creeping back onto that line.
+    expect(script).toContain('mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add');
+  });
+
   it("should wait for storage to be provisioned before the app accepts traffic", () => {
     expect(compose.services.app.depends_on?.["storage-init"]?.condition).toBe("service_completed_successfully");
     expect(compose.services.gateway.depends_on?.app?.condition).toBe("service_healthy");
