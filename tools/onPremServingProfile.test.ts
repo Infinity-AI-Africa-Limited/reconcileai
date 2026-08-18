@@ -167,6 +167,16 @@ describe.each(PROFILES)("on-premise $name serving profile", ({ composeFile, envE
     expect(removeAt).toBeGreaterThan(rotateGuardAt);
   });
 
+  it("should assert the resulting policy bindings, not just attempt the detaches", () => {
+    // Each detach is tolerated, and the scope probe only exercises a bucket it
+    // creates for the test — so a stale policy that failed to detach, granting
+    // some OTHER existing bucket, slipped past both. Verified against MinIO:
+    // with `legacy-wide,reconcileai-app` bound, this refuses with exit 1.
+    const script = String(compose.services["storage-init"].command);
+    expect(script).toContain("the application credential is bound to");
+    expect(script).toContain('[ "$${bound}" != "reconcileai-app" ]');
+  });
+
   it("should prove the credential cannot reach another bucket, not just its own", () => {
     // Every other check passes just as happily for a credential that can also
     // reach every other bucket, so least privilege needs a denial test or it is
@@ -258,6 +268,31 @@ describe("CPU profile — verified offline model import", () => {
     const from = /^FROM\s+\.\/(\S+)\s*$/m.exec(modelfile);
     expect(from, "Modelfile must FROM a relative GGUF path").not.toBeNull();
     expect(modelInit.environment?.RECON_MODEL_FILE).toBe(`\${RECON_MODEL_FILE:-${from![1]}}`);
+  });
+});
+
+describe("GPU profile — staged-model gate", () => {
+  const compose = parse(readOnPrem("docker-compose.gpu.yml")) as ComposeFile;
+  const script = String(compose.services["model-check"].command);
+
+  it("should require the approved revision, not merely the repository", () => {
+    // vLLM starts with `--revision ${MODEL_REVISION}` and HF_HUB_OFFLINE=1, so
+    // it resolves exactly snapshots/<revision>. Accepting any snapshot below the
+    // repo passed a cache holding only some other revision, and the deployment
+    // then hung on a vLLM that could not load what it was told to load.
+    expect(script).toContain('snapshots/$${MODEL_REVISION}');
+    expect(script).toContain("the approved revision is not staged");
+  });
+
+  it("should follow symlinks when looking for weights", () => {
+    // The Hugging Face cache stores snapshot files as symlinks into ../../blobs,
+    // so a files-only test rejects a perfectly staged cache.
+    expect(script).toContain("-follow");
+    expect(script).toContain("-type l");
+  });
+
+  it("should hold vLLM back until the gate passes", () => {
+    expect(compose.services.vllm.depends_on?.["model-check"]?.condition).toBe("service_completed_successfully");
   });
 });
 

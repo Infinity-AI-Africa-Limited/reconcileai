@@ -147,6 +147,27 @@ services:
         done
         mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || true
 
+        # Verify the RESULT, not the commands that were meant to produce it.
+        # Each detach above is tolerated, and the scope probe further down only
+        # exercises a bucket it creates for the test — so a stale policy that
+        # failed to detach, granting some OTHER existing bucket, would slip past
+        # both. Asserting the effective binding set is what actually closes it.
+        after="$$(mc --json admin user info root "$${key}")"
+        case "$${after}" in
+          *'"policyName":"'*)
+            rest_after="$${after#*\"policyName\":\"}"
+            bound="$${rest_after%%\"*}"
+            ;;
+          *) bound="" ;;
+        esac
+        if [ "$${bound}" != "reconcileai-app" ]; then
+          echo "REFUSING TO START — the application credential is bound to: $${bound:-<none>}"
+          echo "Expected exactly reconcileai-app. A stale policy could not be detached, so the"
+          echo "credential may still reach buckets outside $${AWS_S3_BUCKET}. Detach it in MinIO,"
+          echo "or rotate the identity with MINIO_APP_ROTATE=true."
+          exit 1
+        fi
+
         # Probe every operation the application actually performs, not merely a
         # listing. A credential carrying a list-only policy passes `mc ls` while
         # every evidence upload is denied (verified against MinIO) — readiness
