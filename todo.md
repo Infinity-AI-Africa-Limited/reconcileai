@@ -1307,3 +1307,8 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Review and save accurate Tier 1 About copy while preserving the existing Privacy Policy and FAQ URLs, deliberate blank Demo store URL, and current public contact email.
 - [x] Prepare a controlled P2 monitoring, incident, and rollback drill record that distinguishes pre-release code validation from required live developer-store evidence.
 - [x] Diagnose and fix the Manus development-preview Vite HMR WebSocket connection failure without changing production networking behavior; stale preview worker restarted and HMR reconnection verified.
+- [x] Verify the merged retail SHOPLINE release against authoritative Infinity AI main: TypeScript passed and the full suite passed (108 files / 1,701 tests); proceed to live P0/P1/P2 evidence on ReconcileAI Dev Store.
+- [x] Resolve the apparent `ExceptionIntelligence` and flywheel TypeScript regressions: they were introduced by the stale sandbox merge, not authoritative Infinity AI main; clean main now passes TypeScript and regression validation.
+- [ ] Fix the production post-OAuth retail tenant-context persistence defect: `SL_RECONCILEAI_DEV` is shown on welcome but Settlement Monitor returns to Infinity AI Staff context with no connected store.
+- [x] Verify ReconcileAI Dev Store’s production organisation binding: `SL_RECONCILEAI_DEV` exists, is active, and is segmented Retail Commerce; the Super Admin retail-total card is inconsistent but does not justify mutating the tenant binding.
+- [x] Implement and validate a fail-closed post-OAuth retail portal guard: wait for the authorised retail record, persist it before navigation, and prevent a staff-context fallback when lookup fails.
