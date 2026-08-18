@@ -501,7 +501,13 @@ describe("when the rule is derived rather than restated", () => {
     // callback guard quietly stopped passing `signedIn` — which is the flag the
     // whole signed-out exception now turns on.
     const callbackGuard = APP.slice(APP.indexOf("function CallbackGuard"), APP.indexOf("function Router"));
-    expect(callbackGuard).toMatch(/signedIn: isAuthenticated/);
+    // The exception turns on CONFIRMED absence of a session, not on
+    // `isAuthenticated` alone. `auth.me` is a publicProcedure, so a signed-out
+    // visitor resolves to null with no error and a genuine failure resolves to
+    // false WITH one — passing `isAuthenticated` straight through handed the
+    // retail completion screen to a signed-in bank whose lookup failed.
+    expect(callbackGuard).toMatch(/signedIn: !signedOutConfirmed/);
+    expect(callbackGuard).toMatch(/const signedOutConfirmed = !authLoading && !authError && !isAuthenticated/);
     expect(APP).toMatch(/<SegmentGuard>[\s\S]*<Component \/>[\s\S]*<\/SegmentGuard>/);
     expect(APP).toMatch(/path="\/home" component=\{LandingRedirect\}/);
   });

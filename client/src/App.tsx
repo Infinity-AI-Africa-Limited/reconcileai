@@ -178,15 +178,26 @@ function DashboardPage({ component: Component }: { component: React.ComponentTyp
  */
 function CallbackGuard({ component: Component }: { component: React.ComponentType }) {
   const [location] = useLocation();
-  const { user, isAuthenticated, loading: authLoading } = useAuth();
+  const { user, isAuthenticated, loading: authLoading, error: authError } = useAuth();
   const { segment, isPending } = useOrgSegmentStatus({ enabled: isAuthenticated });
   const { viewAsOrg } = usePortalContext();
 
-  // `signedIn` is what earns the exception, NOT a null segment. A signed-in
-  // viewer whose segment lookup failed also has a null segment, and handing them
-  // the retail screen because the answer is missing would be reading absence as
-  // evidence.
-  const opts = { portal: viewAsOrg !== null, signedIn: isAuthenticated };
+  // The exception is earned by CONFIRMING there is no session — not by the
+  // absence of one being reported.
+  //
+  // `auth.me` is a publicProcedure returning `ctx.user`, so a signed-out
+  // visitor gets a clean `null` and no error. An error therefore never means
+  // "signed out"; it means the question was not answered. But `useAuth` folds
+  // both into `isAuthenticated: false` with `loading: false`, and taking that
+  // at face value hands the retail completion screen to a signed-in bank whose
+  // lookup happened to fail — the same "absence is not evidence" mistake the
+  // segment half of this function already guards against, one layer up.
+  //
+  // With `retry: false` that is not a flicker either: one failed request and
+  // the answer stays wrong for the life of the page.
+  const signedOutConfirmed = !authLoading && !authError && !isAuthenticated;
+  const opts = { portal: viewAsOrg !== null, signedIn: !signedOutConfirmed };
+
   const undecided = authLoading || isPending;
   const blocked = !undecided && !canReachCallback(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
