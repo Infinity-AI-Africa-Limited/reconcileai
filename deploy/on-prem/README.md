@@ -222,13 +222,30 @@ You do **not** need a trained model to stand this up:
 
 | Stack | Model | RAM | Disk | Latency / exception | Notes |
 |---|---|---|---|---|---|
-| CPU | 1.5B Q4 | 4–6 GB | ~2 GB | ~2–4 s | lowest-cost box; fine for batch recon |
-| CPU | 3B Q4 | 8–12 GB | ~3 GB | ~4–8 s | recommended CPU default |
-| GPU | Qwen 8B+ | Size after capacity test | Model + cache | Capacity-test dependent | private vLLM serving only |
+| CPU | 1.5B Q4 | 4–6 GB | ~2 GB | **not measured** | lowest-cost box |
+| CPU | 3B Q4 | 8–12 GB | ~3 GB | **not measured — see below** | recommended CPU default |
+| GPU | Qwen 8B+ | Size after capacity test | Model + cache | **not measured** | private vLLM serving only |
 
-> Reconciliation is **batch**, not real-time chat — a few seconds per exception on
-> CPU is perfectly acceptable, and most exceptions are resolved by the engine's
-> deterministic classifier before the LLM is even called.
+> ⚠️ **The latency column previously read "~2–4 s" and "~4–8 s". Those were
+> estimates, not measurements, and the first real measurement contradicts them.**
+> Running the held-out evaluation against the trained 3B Q4 model on the
+> reference laptop (Docker Desktop, CPU only), **3 of 36 cases produced no
+> response within 600 seconds**; the rest averaged roughly a minute. A bank
+> sizing its hardware from the old figures would have been wrong by two orders
+> of magnitude.
+>
+> Whether that tail is the model, the host, or the serving configuration is not
+> yet established — a laptop under Docker Desktop is not a capacity benchmark.
+> What *is* established is that no latency figure here can be relied upon until
+> the institution measures it on its own hardware, which is week 4 of
+> [`ACCELERATED_DUAL_TIER_EXECUTION.md`](../../docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md).
+> Leaving a plausible-looking estimate in this column is worse than leaving it
+> blank, so it is blank.
+
+> Reconciliation is **batch**, not real-time chat, and most exceptions are
+> resolved by the engine's deterministic classifier before the LLM is called at
+> all — so a slow tail matters far less here than it would in a chat product.
+> That is a reason to measure it rather than a reason not to.
 
 ---
 
