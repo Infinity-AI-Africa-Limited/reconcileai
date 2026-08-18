@@ -71,6 +71,10 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
       MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
       MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      # Opt-in destructive rotation. Without this passed through, the script's
+      # check defaults to false and the rotation branch is unreachable — the
+      # flag would look supported and do nothing.
+      MINIO_APP_ROTATE: ${MINIO_APP_ROTATE:-false}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -120,7 +124,19 @@ services:
         # once carried `readwrite` still carries it, the attach below succeeds,
         # and the bucket scope is decoration. Detaching everything else is what
         # makes the scope real.
-        attached="$$(mc --json admin user info root "$${key}" | sed -n 's/.*"policyName":"\([^"]*\)".*/\1/p')"
+        # Parsed with shell builtins on purpose: the minio/mc image ships bash
+        # plus cut/tr/head and has NO sed, grep or awk. An earlier revision used
+        # sed here and aborted the whole initializer with "sed: command not
+        # found" on every deployment — caught by running it in the real image
+        # rather than a convenient one.
+        info="$$(mc --json admin user info root "$${key}")"
+        case "$${info}" in
+          *'"policyName":"'*)
+            rest="$${info#*\"policyName\":\"}"
+            attached="$${rest%%\"*}"
+            ;;
+          *) attached="" ;;
+        esac
         for pol in $$(echo "$${attached}" | tr ',' ' '); do
           if [ -z "$${pol}" ]; then continue; fi
           if [ "$${pol}" = "reconcileai-app" ]; then continue; fi
@@ -134,8 +150,11 @@ services:
         # every evidence upload is denied (verified against MinIO) — readiness
         # that checks the wrong capability is not readiness. `set -e` means any
         # of these failing exits non-zero, so the app never starts.
-        mc alias set appcheck "http://minio:9000" "$${key}" "$${MINIO_APP_SECRET_KEY}"
-        if ! mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null 2>&1; then
+        # `mc alias set` validates the credential as it stores it, so a stale
+        # secret fails HERE — and with set -e that aborted the script on mc's
+        # raw "signature does not match", which names neither the cause nor the
+        # remedy. Catch it and say what actually happened.
+        if ! mc alias set appcheck "http://minio:9000" "$${key}" "$${MINIO_APP_SECRET_KEY}" > /dev/null 2>&1; then
           echo "REFUSING TO START — MINIO_APP_SECRET_KEY does not match the stored identity $${key}."
           echo "mc cannot change an existing secret in place. To rotate, set MINIO_APP_ROTATE=true and"
           echo "recreate the app container: the running one holds the old secret in its environment."

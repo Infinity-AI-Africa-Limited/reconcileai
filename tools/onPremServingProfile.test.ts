@@ -153,6 +153,14 @@ describe.each(PROFILES)("on-premise $name serving profile", ({ composeFile, envE
     // Destroying the identity is opt-in, because it is the only way mc can
     // change a secret and it always interrupts whoever is holding the old one.
     expect(script).toContain("MINIO_APP_ROTATE");
+    // The flag has to REACH the container, or the branch is unreachable and the
+    // whole opt-in is theatre — it shipped that way once.
+    expect(compose.services["storage-init"].environment?.MINIO_APP_ROTATE).toBe("${MINIO_APP_ROTATE:-false}");
+    // minio/mc has bash, cut, tr and head — but no sed, grep or awk. Using one
+    // aborted the initializer with "command not found" on every deployment.
+    expect(script).not.toMatch(/sed/);
+    expect(script).not.toMatch(/awk/);
+    expect(script).not.toMatch(/grep/);
     const removeAt = script.indexOf("mc admin user remove root");
     const rotateGuardAt = script.indexOf('"$${MINIO_APP_ROTATE:-false}" = "true"');
     expect(rotateGuardAt).toBeGreaterThan(-1);
