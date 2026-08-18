@@ -14,7 +14,7 @@
  * sends someone to a page that means something to them instead of one that
  * errors. Never the only thing standing between a caller and data.
  */
-import { NAV_ITEMS, inSegment, isStaff, passesStaffGate } from "./navItems";
+import { NAV_ITEMS, inRole, inSegment, isStaff, passesStaffGate } from "./navItems";
 import type { Segment } from "./segments";
 
 /**
@@ -95,25 +95,27 @@ function normalizePath(path: string): string {
  *
  * Longest match wins, so a deeper declaration beats a shallower one.
  */
-function declaredAncestorSegments(key: string): Segment[] | null {
-  const declarations: Array<{ path: string; segments: Segment[] }> = [
+function nearestDeclaring<T>(key: string, pick: (entry: { path: string; segments?: Segment[]; roles?: string[] }) => T | undefined): T | null {
+  const declarations: Array<{ path: string; segments?: Segment[]; roles?: string[] }> = [
     ...Object.entries(NON_NAV_ROUTE_SEGMENTS).map(([path, segments]) => ({ path, segments })),
-    ...NAV_ITEMS.flatMap((e) => (e.segments ? [{ path: e.path, segments: e.segments }] : [])),
+    ...NAV_ITEMS.map((e) => ({ path: e.path, segments: e.segments, roles: e.roles })),
   ];
 
   let bestPath = "";
-  let bestSegments: Segment[] | null = null;
+  let best: T | null = null;
 
   for (const declaration of declarations) {
+    const value = pick(declaration);
+    if (value === undefined) continue;
     const parent = normalizePath(declaration.path);
     if (parent === "/" || !key.startsWith(parent + "/")) continue;
     if (parent.length > bestPath.length) {
       bestPath = parent;
-      bestSegments = declaration.segments;
+      best = value;
     }
   }
 
-  return bestSegments;
+  return best;
 }
 
 /** The segments a path is built for, or null when it is for everyone. */
@@ -128,7 +130,28 @@ export function segmentsForPath(path: string): Segment[] | null {
   const declared = NAV_ITEMS.find((e) => normalizePath(e.path) === key);
   if (declared) return declared.segments ?? null;
 
-  return declaredAncestorSegments(key);
+  return nearestDeclaring(key, (e) => e.segments);
+}
+
+/**
+ * The roles a path is built for, or null when it is open to every role.
+ *
+ * `roles` had exactly the shape `staffOnly` had before PR #52: honoured by the
+ * sidebar and by nothing else. `/admin/super-admin`, its three sub-routes and
+ * `/admin/poc` are declared `roles: ["super_admin"]`, and any tenant admin who
+ * typed one got the page — then a screenful of permission errors from the
+ * server, which is the exact failure this module was written to end.
+ */
+export function rolesForPath(path: string): string[] | null {
+  const key = normalizePath(path);
+  // NON_NAV_ROUTE_SEGMENTS carries no role rules, so a match there means the
+  // route is role-open; only NAV_ITEMS declares roles.
+  if (NON_NAV_ROUTE_SEGMENTS[key]) return null;
+
+  const declared = NAV_ITEMS.find((e) => normalizePath(e.path) === key);
+  if (declared) return declared.roles ?? null;
+
+  return nearestDeclaring(key, (e) => e.roles);
 }
 
 /**
@@ -186,6 +209,11 @@ export function isStaffPath(path: string): boolean {
  * A null segment refuses a scoped path, matching `inSegment` exactly. Callers
  * must therefore not consult this while the segment is still resolving — see
  * SegmentGuard, which waits.
+ *
+ * The same now applies to ROLE. `inRole` refuses a role-scoped path when the
+ * role is undefined, so consulting this before `auth.me` has resolved would
+ * bounce a legitimate admin off their own page for the width of one request.
+ * SegmentGuard waits on both.
  */
 export function canReachPath(
   path: string,
@@ -198,9 +226,20 @@ export function canReachPath(
   // point is to see the TENANT's surface). Either way a staff tool is refused —
   // `navFor` excludes staffOnly entries from a portal for the same reason.
   if (isStaffPath(path)) return false;
+
   const segments = segmentsForPath(path);
-  if (!segments) return true;
-  return inSegment({ label: "", path, group: "main", segments }, segment);
+  if (segments && !inSegment({ label: "", path, group: "main", segments }, segment)) return false;
+
+  // Role gating is dropped inside a portal, exactly as `navFor` drops it: staff
+  // are looking at the TENANT's surface, not exercising their own permissions.
+  // Outside a portal it applies, and the early staff return above means this
+  // only ever narrows things for non-staff.
+  if (!opts.portal) {
+    const roles = rolesForPath(path);
+    if (roles && !inRole({ label: "", path, group: "main", roles }, role)) return false;
+  }
+
+  return true;
 }
 
 /**

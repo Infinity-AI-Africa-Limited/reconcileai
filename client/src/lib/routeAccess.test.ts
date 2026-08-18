@@ -242,6 +242,70 @@ describe("when a vertical opens a route built for another one", () => {
   });
 });
 
+describe("when a tenant user types the URL of a route their ROLE does not have", () => {
+  it("should refuse the operator's own consoles to a tenant admin", () => {
+    // These declare roles: ["super_admin"] and the sidebar honoured that; the
+    // route did not. A tenant admin got the page and then a screenful of
+    // permission errors from the server — the same "guarded, technically, and a
+    // broken screen in practice" failure staffOnly had before PR #52.
+    for (const p of [
+      "/admin/super-admin",
+      "/admin/super-admin/orgs",
+      "/admin/super-admin/users",
+      "/admin/super-admin/analytics",
+      "/admin/poc",
+      "/admin/roadmap-access",
+    ]) {
+      expect(canReachPath(p, "financial_services", "admin"), p).toBe(false);
+      expect(canReachPath(p, "financial_services", "super_admin"), p).toBe(true);
+    }
+  });
+
+  it("should refuse an admin-only route to a read-only role", () => {
+    expect(canReachPath("/modules", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/modules", "financial_services", "user")).toBe(false);
+    expect(canReachPath("/email-settings", "financial_services", "cfo")).toBe(false);
+  });
+
+  it("should admit a role that IS listed", () => {
+    // /schedules is admin|operations — operations must keep it.
+    expect(canReachPath("/schedules", "financial_services", "operations")).toBe(true);
+    expect(canReachPath("/schedules", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/schedules", "financial_services", "cfo")).toBe(false);
+  });
+
+  it("should leave role-open routes open to every role", () => {
+    // /dashboard declares segments but no roles.
+    for (const role of ["admin", "user", "operations", "cfo", "compliance"]) {
+      expect(canReachPath("/dashboard", "financial_services", role), role).toBe(true);
+    }
+  });
+
+  it("should inherit the parent's role rule for a nested route", () => {
+    expect(canReachPath("/admin/super-admin/orgs/42", "financial_services", "admin")).toBe(false);
+    expect(canReachPath("/admin/super-admin/orgs/42", "financial_services", "super_admin")).toBe(true);
+  });
+
+  it("should drop role gating inside a portal, exactly as the sidebar does", () => {
+    // Entering a portal means looking at the TENANT's surface rather than
+    // exercising the operator's own permissions, so navFor drops role gating
+    // and keeps segment gating. The route guard has to agree or the sidebar and
+    // the URL disagree again — which is the whole bug class this module closes.
+    expect(canReachPath("/modules", "financial_services", "super_admin", { portal: true })).toBe(true);
+    // …while segment gating still bites inside the portal.
+    expect(canReachPath("/distributors", "retail_commerce", "super_admin", { portal: true })).toBe(false);
+  });
+
+  it("should refuse a role-scoped path when the role is not yet known", () => {
+    // Fail closed, matching inRole. SegmentGuard must therefore wait for
+    // auth.me before consulting this, or it would bounce a legitimate admin off
+    // their own page for the width of one request.
+    expect(canReachPath("/modules", "financial_services", undefined)).toBe(false);
+    // An unscoped, role-open path stays reachable regardless.
+    expect(canReachPath("/dashboard", "financial_services", undefined)).toBe(true);
+  });
+});
+
 describe("when the viewer is Infinity AI staff on their own account", () => {
   it("should reach every vertical's routes", () => {
     // The operator supports every tenant, and redirecting them off a URL they

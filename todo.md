@@ -3,7 +3,7 @@
 ## Retail route guard
 - [x] Declare all three RoleSwitcher views, not only the auditor one. The switcher is hidden wholesale from retail, but `/dashboard/cfo` and `/dashboard/operations` stayed openable by URL.
 - [x] Inherit the parent's rule for nested routes so `/reports/:id` is refused wherever `/reports` is; exact-match lookup reported every parameterised route as unscoped.
-- [ ] `canReachPath` still ignores the `roles` field that NAV_ITEMS declares, so `/admin/super-admin*` and `/admin/poc` are reachable by any tenant admin who types the URL (server procedures still refuse them). Same shape as the `staffOnly` gap that this module was written to close — worth closing deliberately rather than as a side effect of this PR.
+- [x] Honour the `roles` field in `canReachPath`. It had the same shape `staffOnly` had before PR #52 — read by the sidebar and by nothing else — so `/admin/super-admin*`, `/admin/poc` and `/admin/roadmap-access` were reachable by any tenant admin who typed the URL. SegmentGuard now also waits for `auth.me`, because a role-scoped path fails closed on an undefined role.
 
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)

@@ -114,6 +114,12 @@ function LandingRedirect() {
  * Pending means undecided, not denied. Redirecting while the segment is still
  * in flight would bounce people out of pages they are entitled to.
  *
+ * That now covers the ROLE as well as the segment. `canReachPath` refuses a
+ * role-scoped path when the role is undefined, and `auth.me` resolves on its own
+ * schedule — so waiting only on the segment query would redirect a legitimate
+ * admin off their own page for the width of one request, then leave them on the
+ * landing page wondering. Both answers have to be in before a decision is made.
+ *
  * `portal` is passed for the same reason DashboardLayout passes it to navGroup:
  * inside a tenant portal a super admin is looking at the TENANT's surface, so
  * the tenant's segment rules apply. Without it the sidebar hid Distributor
@@ -122,11 +128,12 @@ function LandingRedirect() {
 function SegmentGuard({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const { segment, isPending } = useOrgSegmentStatus();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const { viewAsOrg } = usePortalContext();
 
   const opts = { portal: viewAsOrg !== null };
-  const blocked = !isPending && !canReachPath(location, segment, user?.role, opts);
+  const undecided = isPending || authLoading;
+  const blocked = !undecided && !canReachPath(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
   return <>{children}</>;
 }
