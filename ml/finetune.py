@@ -34,8 +34,16 @@ def parse_args():
     ap.add_argument("--out", default="out/reconcileai")
     ap.add_argument("--epochs", type=float, default=3.0)
     ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--warmup-steps", type=int, default=12,
-                    help="optimizer warm-up steps (12 is ~3% of the standard 2,200-example run)")
+    # `warmup_ratio` was NOT removed by TRL: SFTConfig -> _BaseConfig ->
+    # transformers.TrainingArguments, which still defines it (verified against
+    # trl 1.10.0). So the ratio stays the default, because it tracks dataset
+    # size — a fixed step count silently under-warms a larger run and
+    # over-warms a small one. --warmup-steps is an explicit override, and
+    # TrainingArguments prefers it whenever it is greater than zero.
+    ap.add_argument("--warmup-ratio", type=float, default=0.03,
+                    help="fraction of total steps spent warming up (used unless --warmup-steps is set)")
+    ap.add_argument("--warmup-steps", type=int, default=0,
+                    help="absolute warm-up steps; overrides --warmup-ratio when > 0")
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--max-seq-len", type=int, default=2048)
@@ -98,6 +106,7 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
+        warmup_ratio=args.warmup_ratio,
         warmup_steps=args.warmup_steps,
         logging_steps=10,
         eval_strategy="epoch",
