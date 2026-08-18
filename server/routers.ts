@@ -6394,6 +6394,16 @@ Always be specific, reference actual exception IDs and amounts where available, 
         .groupBy(agentMemory.exceptionCategory)
         .orderBy(desc(sql<number>`count(*)`));
 
+      // Only the timestamps are fetched, and bucketing happens in
+      // agentMemoryStats so no database-specific date function is involved.
+      //
+      // The trade-off: this transfers one row per memory in the window instead
+      // of one row per month. That is fine at current per-tenant volumes and
+      // strictly safer than the DATE_FORMAT/DATE_SUB grouping it replaces, which
+      // failed outright in production. Revisit if a single tenant approaches
+      // six figures of agent memories per six months — the bounded alternative
+      // is six indexed COUNT(*) range queries, one per bucket, which stays
+      // dialect-neutral because it needs no date functions either.
       const memoryTimestampRows = await drizzle
         .select({ createdAt: agentMemory.createdAt })
         .from(agentMemory)

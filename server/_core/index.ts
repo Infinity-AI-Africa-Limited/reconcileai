@@ -644,9 +644,7 @@ async function startServer() {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
   }
 
-  // Bind all container interfaces; Docker publishes this only through the
-  // Compose-controlled host loopback mapping in on-premise deployments.
-  server.listen(port, "0.0.0.0", () => {
+  server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
   });
 }

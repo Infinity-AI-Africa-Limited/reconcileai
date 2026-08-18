@@ -1,26 +1,11 @@
 # ReconcileAI - Project TODO
 
-## Research-Aligned Qwen Serving Profile
-- [x] Implement and validate the portable `/reconciliation` agent-memory six-month aggregation query for organisation 30002 and supported database dialects.
-- [x] Add regression coverage for the six-month boundary and chronological agent-memory month buckets.
-- [x] Submit the validated reconciliation-query fix to both GitHub repositories for Claude Code production review (Infinity AI PR #86; MistaRichMan PR #20).
-- [x] Implement the supplied research recommendation: retain Ollama for CPU-only local development and controlled demonstrations while defining a private, authenticated vLLM serving profile for GPU-enabled bank deployments.
-- [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
-- [x] Make the CPU/Ollama profile a first-class bank deployment path by supporting offline trained-model import, private networking, loopback-only application binding, and an enforced SHA-256 model-artifact verification gate.
-- [x] Convert the 90-day research roadmap into accelerated dual-tier execution gates without bypassing model-risk, security, or deterministic-control validation, and cover the published plan with regression validation.
-- [x] Merge and quantize the exported synthetic-only Qwen2.5-3B adapter into a checksum-verified GGUF artifact, then validate its import and controlled inference through the local CPU/Ollama stack.
-- [x] Use a temporary GPU conversion pod within the approved additional US$5 cap to merge and quantize the synthetic-only Qwen adapter; export the GGUF locally and terminate the pod and volume immediately after validation.
-- [x] Restore the local on-premise environment from a known-good configuration, reapply the versioned CPU/Ollama model tag cleanly, and verify all local health checks are green without exposing secrets.
-- [x] Verify and record the final RunPod balance after pod `xaj6n5pcoj25op` deletion: the console showed US$7.94 remaining from the US$10 credit balance, evidencing aggregate temporary GPU spend of US$2.06 and compliance with the approved additional US$5 cap.
-- [x] Re-run local post-switch regression validation to confirm the active CPU model tag remains available and non-model services are unaffected.
-- [x] Add a private MinIO S3-compatible service and idempotent bucket bootstrap to the CPU on-premise profile so file storage remains bank-controlled and `/api/health` can validate green without a public cloud dependency.
-- [x] Remove the nested read-only Ollama model mount so the CPU profile starts reliably on Docker Desktop for Windows while retaining the verified offline artifact gate.
-- [x] Use checksum syntax compatible with the actual Ollama runtime in the offline model bootstrap and validate the gate through Docker Desktop.
-- [x] Mount the verified offline artifact directory into the one-shot model-bootstrap service so its checksum gate and Ollama import can actually execute.
-- [x] Bind the Node server explicitly to `0.0.0.0` inside Docker for the internal gateway path; publish host-loopback access only through the validated Nginx gateway while the app itself has no host port.
-- [x] Add Docker build exclusions for model artifacts, local deployment data, and temporary conversion files so on-premise app rebuilds remain practical on CPU-only hardware.
-- [x] Add a minimal loopback reverse-proxy gateway so Docker Desktop can expose only the app while database, Ollama, and MinIO remain solely on the internal network.
-- [x] Provide Claude Code with a complete production-hardening context, evidence summary, review checklist, and remaining institution-side gates on both dual-tier serving-profile pull requests.
+## Agent-memory monthly aggregation
+- [x] Replace the MySQL-specific `DATE_FORMAT`/`DATE_SUB` aggregation in `exceptionIntelligence.flywheelStats` with a portable boundary + application-side bucketing.
+- [x] Fix the six-month boundary overflowing into the following month. `setUTCMonth` keeps the day, so 31 August produced 3 March instead of 28 February and the `gte` filter dropped every row in between. Three of five month-ends in a year hit it.
+- [x] Pin the boundary against real MySQL 8.0 `DATE_SUB` output for five month-end dates, so the portable version is a faithful port rather than a lookalike.
+- [ ] Revisit the timestamp fetch if a single tenant approaches six figures of agent memories per six months (bounded alternative: six indexed `COUNT(*)` range queries).
+
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)

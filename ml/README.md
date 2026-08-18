@@ -54,17 +54,7 @@ python finetune.py --base Qwen/Qwen2.5-3B-Instruct \
 Produces a LoRA adapter and (with `--merge`) a full merged model dir.
 
 ### 3a. Package for CPU (Ollama / GGUF)
-First merge the adapter with its **exact** full-precision base model. The merge step
-writes `MODEL_PROVENANCE.json`, including adapter hashes and the declared synthetic-only
-data scope. It must never be pointed at a different Qwen variant.
-```bash
-python merge_adapter.py \
-  --base-model Qwen/Qwen2.5-3B-Instruct \
-  --adapter /path/to/reconcileai-adapter \
-  --output out/reconcileai-3b-merged
-```
-
-Convert the resulting merged model to GGUF and quantize to 4-bit, using `llama.cpp`:
+Convert the merged model to GGUF and quantize to 4-bit, using `llama.cpp`:
 ```bash
 # one-time, on any machine with llama.cpp built:
 python llama.cpp/convert_hf_to_gguf.py out/reconcileai-3b-merged \
@@ -72,10 +62,7 @@ python llama.cpp/convert_hf_to_gguf.py out/reconcileai-3b-merged \
 ./llama.cpp/llama-quantize reconcileai-recon-3b-f16.gguf \
     reconcileai-recon-3b-q4_k_m.gguf Q4_K_M
 ```
-Place the resulting GGUF and a `SHA256SUMS` manifest in
-`../deploy/on-prem/models/`. Independently verify the manifest against the signed
-release record before delivery. The CPU Compose profile checks this manifest before
-import. Then import into Ollama with the provided Modelfile:
+Then import into Ollama with the provided Modelfile:
 ```bash
 cp reconcileai-recon-3b-q4_k_m.gguf ../deploy/on-prem/ollama/
 cd ../deploy/on-prem/ollama && ollama create reconcileai -f Modelfile
