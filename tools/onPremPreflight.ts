@@ -206,7 +206,14 @@ function checkGpuModel(env: Record<string, string>): Finding[] {
       variable: "MODEL_REVISION",
       message: "still holds the template placeholder. Use the approved immutable revision.",
     });
-  } else if (!/^[0-9a-f]{40}$/i.test(revision) && !(env.RECON_MODEL ?? "").trim().startsWith("/")) {
+    // Lowercase only, and NOT case-insensitively. Git and Hugging Face both
+    // render commits in lowercase, and the on-disk cache directory is named
+    // with that exact string — so an uppercase SHA does not identify a staged
+    // snapshot no matter how the validator feels about it. Accepting it here
+    // while the start-up gate rejected it meant preflight passed and the
+    // deployment then died in model-check, which is the worst split: the tool
+    // whose job is to catch this beforehand said yes.
+  } else if (!/^[0-9a-f]{40}$/.test(revision) && !(env.RECON_MODEL ?? "").trim().startsWith("/")) {
     // A branch OR a tag: both are mutable pointers. `refs/<tag>` can be
     // repointed at different weights after the institution approved the
     // artifact, and every downstream check would still pass while vLLM served

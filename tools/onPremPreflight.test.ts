@@ -161,6 +161,16 @@ describe("when a GPU deployment is correctly configured", () => {
     expect(errorsFor("gpu", { ...validGpuEnv(), MODEL_REVISION: "a".repeat(40) })).not.toContain("MODEL_REVISION");
   });
 
+  it("should reject an UPPERCASE SHA, matching the start-up gate exactly", () => {
+    // The two validators disagreeing is worse than either being strict: an
+    // uppercase revision passed preflight and then died in model-check, so the
+    // tool whose whole job is to catch this beforehand said yes. Lowercase is
+    // also the correct rule — the HF cache directory is named with that exact
+    // string, so an uppercase SHA identifies no staged snapshot.
+    expect(errorsFor("gpu", { ...validGpuEnv(), MODEL_REVISION: "A".repeat(40) })).toContain("MODEL_REVISION");
+    expect(errorsFor("gpu", { ...validGpuEnv(), MODEL_REVISION: "aB".repeat(20) })).toContain("MODEL_REVISION");
+  });
+
   it("should not demand a SHA for a local merged-model path", () => {
     // There is no Hugging Face revision to resolve there; the field is
     // documentation, and requiring a commit would block a valid deployment.
