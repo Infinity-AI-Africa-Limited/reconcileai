@@ -268,14 +268,32 @@ services:
             # any snapshot below the repo passes a cache holding only some other
             # revision, and the deployment then hangs on a vLLM that cannot load
             # what it was told to load.
-            target="$${target}/snapshots/$${MODEL_REVISION}"
-            test -d "$${target}" || {
+            #
+            # MODEL_REVISION may be an immutable commit OR a release tag, and
+            # ml/README.md permits both. Hugging Face stores them differently: a
+            # commit IS the snapshot directory name, while a tag lives in
+            # refs/<tag> as a file containing the commit it points at. Treating a
+            # tag as a literal directory name rejects a fully staged offline
+            # cache that HF itself would resolve — the opposite failure to the one
+            # this gate exists for, and just as effective at blocking a deploy.
+            snapshot="$${target}/snapshots/$${MODEL_REVISION}"
+            if [ ! -d "$${snapshot}" ]; then
+              ref="$${target}/refs/$${MODEL_REVISION}"
+              if [ -f "$${ref}" ]; then
+                resolved="$$(tr -d '[:space:]' < "$${ref}")"
+                snapshot="$${target}/snapshots/$${resolved}"
+                echo "revision $${MODEL_REVISION} is a tag; resolved via refs to $${resolved}"
+              fi
+            fi
+            test -d "$${snapshot}" || {
               echo "REFUSING TO START — the approved revision is not staged."
-              echo "  expected: $${target}"
+              echo "  expected: $${target}/snapshots/$${MODEL_REVISION}"
+              echo "  or a tag: $${target}/refs/$${MODEL_REVISION} -> snapshots/<commit>"
               echo "The repository cache exists but does not contain revision $${MODEL_REVISION}."
               echo "Stage that exact revision: vLLM runs offline and will not fetch it."
               exit 1
             }
+            target="$${snapshot}"
             ;;
         esac
 

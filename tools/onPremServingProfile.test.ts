@@ -284,6 +284,20 @@ describe("GPU profile — staged-model gate", () => {
     expect(script).toContain("the approved revision is not staged");
   });
 
+  it("should resolve a release tag through the cache refs, not treat it as a directory", () => {
+    // ml/README.md permits MODEL_REVISION to be a release tag. HF stores a tag
+    // as refs/<tag> containing the commit, with files under snapshots/<commit> —
+    // so treating the tag as a literal directory name rejects a fully staged
+    // cache that HF itself would resolve. Verified across five layouts:
+    // commit ok, wrong revision refused, tag resolved, dangling tag refused,
+    // repo absent refused.
+    expect(script).toContain('refs/$${MODEL_REVISION}');
+    expect(script).toContain("is a tag; resolved via refs to");
+    // No backslash escapes in the tr argument: this heredoc path has eaten them
+    // before, and a literal tab/newline inside the quotes breaks the YAML.
+    expect(script).toContain("tr -d '[:space:]'");
+  });
+
   it("should follow symlinks when looking for weights", () => {
     // The Hugging Face cache stores snapshot files as symlinks into ../../blobs,
     // so a files-only test rejects a perfectly staged cache.
