@@ -1,5 +1,23 @@
 # ReconcileAI - Project TODO
 
+## Retail route guard
+- [x] Declare all three RoleSwitcher views, not only the auditor one. The switcher is hidden wholesale from retail, but `/dashboard/cfo` and `/dashboard/operations` stayed openable by URL.
+- [x] Inherit the parent's rule for nested routes so `/reports/:id` is refused wherever `/reports` is; exact-match lookup reported every parameterised route as unscoped.
+- [x] Honour the `roles` field in `canReachPath`. It had the same shape `staffOnly` had before PR #52 — read by the sidebar and by nothing else — so `/admin/super-admin*`, `/admin/poc` and `/admin/roadmap-access` were reachable by any tenant admin who typed the URL. SegmentGuard now also waits for `auth.me`, because a role-scoped path fails closed on an undefined role.
+- [ ] `canReachPath` still ignores the `roles` field that NAV_ITEMS declares, so `/admin/super-admin*` and `/admin/poc` are reachable by any tenant admin who types the URL (server procedures still refuse them). Same shape as the `staffOnly` gap that this module was written to close — worth closing deliberately rather than as a side effect of this PR.
+## Agent-memory monthly aggregation
+- [x] Replace the MySQL-specific `DATE_FORMAT`/`DATE_SUB` aggregation in `exceptionIntelligence.flywheelStats` with a portable boundary + application-side bucketing.
+- [x] Fix the six-month boundary overflowing into the following month. `setUTCMonth` keeps the day, so 31 August produced 3 March instead of 28 February and the `gte` filter dropped every row in between. Three of five month-ends in a year hit it.
+- [x] Pin the boundary against real MySQL 8.0 `DATE_SUB` output for five month-end dates, so the portable version is a faithful port rather than a lookalike.
+- [x] Measure the timestamp-fetch volume against production instead of assuming it: `agent_memory` holds **55 rows in total**, all on the legacy `organizationId = 0` pool. The unbounded fetch is not a concern at any current tenant's scale, and the bounded alternative (six indexed `COUNT(*)` range queries) is recorded at the query site for whenever one approaches six figures per six months.
+- [ ] Separately: because every agent memory sits on `organizationId = 0`, the reconciliation flywheel chart is empty for every real tenant. Worth confirming that is expected rather than a write-path scoping bug.
+
+## Active Operational Task: Synthetic-Only QLoRA Training
+- [x] Fine-tuned the Qwen2.5-3B-Instruct LoRA adapter on 2,200 synthetic examples, validated on 300 held-out synthetic examples, checksum-verified the 456 MB export on Richard’s local workspace, and terminated the temporary RunPod pod and volume.
+- [x] Fix `ml/finetune.py` compatibility with the current TRL configuration API: `max_seq_length` was renamed to `max_length` and is fully removed from TRL (no deprecation shim), so the old field aborts the run.
+- [x] Raise the TRL floor to `>=0.16,<2`. `max_seq_length` -> `max_length` was a real rename, but `ml/requirements.txt` still allowed `trl>=0.11`, and SFTConfig only gained `max_length` in 0.16.0 — so a clean install per the requirements file failed with a TypeError before training started. Boundary established by reading the sdist of every release from 0.13 to 0.21.
+- [x] Correct the accompanying `warmup_ratio` claim. That field was **not** removed — `SFTConfig` extends `_BaseConfig`, which extends `transformers.TrainingArguments`, which still defines it (verified against trl 1.10.0 source). The ratio is therefore restored as the default because it scales with dataset size; `--warmup-steps` remains as an explicit override for a fixed step count.
+- [ ] Convert the Qwen2.5 Safetensors adapter to a Qwen-compatible GGUF adapter, or deploy it through a compatible Transformers/vLLM runtime, before changing the active local Ollama `RECON_MODEL`; Ollama does not directly support Qwen Safetensors adapters.
 ## Core Infrastructure
 - [x] Database schema (transactions, reconciliation_jobs, matches, exceptions, audit_logs, channels)
 - [x] Global theming with Infinity AI branding (Navy #1B365D, Coral #F47458, Light #F8F9FA, Inter font)
@@ -1289,3 +1307,8 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Review and save accurate Tier 1 About copy while preserving the existing Privacy Policy and FAQ URLs, deliberate blank Demo store URL, and current public contact email.
 - [x] Prepare a controlled P2 monitoring, incident, and rollback drill record that distinguishes pre-release code validation from required live developer-store evidence.
 - [x] Diagnose and fix the Manus development-preview Vite HMR WebSocket connection failure without changing production networking behavior; stale preview worker restarted and HMR reconnection verified.
+- [x] Verify the merged retail SHOPLINE release against authoritative Infinity AI main: TypeScript passed and the full suite passed (108 files / 1,701 tests); proceed to live P0/P1/P2 evidence on ReconcileAI Dev Store.
+- [x] Resolve the apparent `ExceptionIntelligence` and flywheel TypeScript regressions: they were introduced by the stale sandbox merge, not authoritative Infinity AI main; clean main now passes TypeScript and regression validation.
+- [ ] Fix the production post-OAuth retail tenant-context persistence defect: `SL_RECONCILEAI_DEV` is shown on welcome but Settlement Monitor returns to Infinity AI Staff context with no connected store.
+- [x] Verify ReconcileAI Dev Store’s production organisation binding: `SL_RECONCILEAI_DEV` exists, is active, and is segmented Retail Commerce; the Super Admin retail-total card is inconsistent but does not justify mutating the tenant binding.
+- [x] Implement and validate a fail-closed post-OAuth retail portal guard: wait for the authorised retail record, persist it before navigation, and prevent a staff-context fallback when lookup fails.

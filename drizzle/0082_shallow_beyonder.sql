@@ -1,0 +1,2 @@
+ALTER TABLE `sl_connector_webhook_events` MODIFY COLUMN `status` enum('pending','processing','processed','failed','dlq') NOT NULL DEFAULT 'pending';--> statement-breakpoint
+ALTER TABLE `sl_connector_webhook_events` ADD `leaseExpiresAt` timestamp;

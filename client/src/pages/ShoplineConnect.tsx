@@ -11,6 +11,7 @@
  * - Link to the dashboard
  * - First sync status (if available)
  */
+import { useEffect, useState } from "react";
 import { useLocation, useSearch } from "wouter";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
@@ -29,12 +30,18 @@ export function ShoplineWelcome() {
   const { user } = useAuth();
   const { enterPortal } = usePortalContext();
   const isSuperAdmin = user?.role === "super_admin";
-  const { data: organizations } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
+  const { data: organizations, isLoading: isLoadingOrganizations } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
     enabled: isSuperAdmin && Boolean(orgCode),
   });
   const retailOrg = organizations?.find(
     (organization) => organization.code === orgCode && organization.segment === "retail_commerce",
   );
+  const requiresSupportPortalContext = isSuperAdmin && Boolean(orgCode);
+  const [portalContextError, setPortalContextError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPortalContextError(null);
+  }, [orgCode]);
 
   /**
    * This is intentionally restricted to an authorised Infinity AI super-admin
@@ -43,7 +50,17 @@ export function ShoplineWelcome() {
    * Production merchant identity hand-off remains a separate P0 release gate.
    */
   const enterRetailPortal = (destination: string) => {
-    if (isSuperAdmin && retailOrg) {
+    // A support-session redirect carries an organisation code but not a merchant
+    // identity. Refuse navigation until the existing, authorised retail record has
+    // been resolved and synchronously persisted to sessionStorage by PortalContext.
+    // Sending staff to the destination without this context exposes the staff view
+    // and makes an otherwise successful OAuth reconnect look like a failed store.
+    if (requiresSupportPortalContext) {
+      if (isLoadingOrganizations) return;
+      if (!retailOrg) {
+        setPortalContextError("The retail store context could not be resolved. Return to the Super Admin portal and verify the connected store before retrying.");
+        return;
+      }
       enterPortal({
         id: retailOrg.id,
         name: retailOrg.name,
@@ -55,6 +72,8 @@ export function ShoplineWelcome() {
     }
     navigate(destination);
   };
+
+  const isPortalActionDisabled = requiresSupportPortalContext && (isLoadingOrganizations || !retailOrg);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
@@ -127,17 +146,22 @@ export function ShoplineWelcome() {
             <Button
               className="w-full"
               onClick={() => enterRetailPortal(landingPathFor("retail_commerce"))}
+              disabled={isPortalActionDisabled}
             >
-              Go to Settlement Monitor
+              {isLoadingOrganizations ? "Preparing Settlement Monitor…" : "Go to Settlement Monitor"}
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
             <Button
               variant="outline"
               className="w-full"
               onClick={() => enterRetailPortal("/shopline/sync-status")}
+              disabled={isPortalActionDisabled}
             >
               View Sync Status
             </Button>
+            {portalContextError && (
+              <p className="text-sm text-destructive" role="alert">{portalContextError}</p>
+            )}
           </div>
         </CardContent>
       </Card>

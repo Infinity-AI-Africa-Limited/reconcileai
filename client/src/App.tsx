@@ -114,6 +114,12 @@ function LandingRedirect() {
  * Pending means undecided, not denied. Redirecting while the segment is still
  * in flight would bounce people out of pages they are entitled to.
  *
+ * That now covers the ROLE as well as the segment. `canReachPath` refuses a
+ * role-scoped path when the role is undefined, and `auth.me` resolves on its own
+ * schedule — so waiting only on the segment query would redirect a legitimate
+ * admin off their own page for the width of one request, then leave them on the
+ * landing page wondering. Both answers have to be in before a decision is made.
+ *
  * `portal` is passed for the same reason DashboardLayout passes it to navGroup:
  * inside a tenant portal a super admin is looking at the TENANT's surface, so
  * the tenant's segment rules apply. Without it the sidebar hid Distributor
@@ -122,11 +128,12 @@ function LandingRedirect() {
 function SegmentGuard({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const { segment, isPending } = useOrgSegmentStatus();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const { viewAsOrg } = usePortalContext();
 
   const opts = { portal: viewAsOrg !== null };
-  const blocked = !isPending && !canReachPath(location, segment, user?.role, opts);
+  const undecided = isPending || authLoading;
+  const blocked = !undecided && !canReachPath(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
   return <>{children}</>;
 }
@@ -159,20 +166,45 @@ function DashboardPage({ component: Component }: { component: React.ComponentTyp
  * simply asking for the segment without a session would throw the merchant onto
  * a login page for an account they do not have yet. Guarding the route must not
  * cost more than the thing it guards against.
+ *
+ * That gate is also why this guard has to wait for `auth.me` explicitly.
+ * `isAuthenticated` is false while the session is still loading, which switches
+ * the segment query OFF — and a disabled query reports a RESOLVED null, not a
+ * pending one (see useOrgSegmentStatus, where that is deliberate). So without
+ * the wait the sequence is: auth loading -> signedIn:false -> the signed-out
+ * exception applies -> a signed-in bank user is shown the retail "Store
+ * Connected" screen -> auth resolves -> they are redirected away. Deciding on
+ * `signedIn` before knowing whether they are signed in is the bug.
  */
 function CallbackGuard({ component: Component }: { component: React.ComponentType }) {
   const [location] = useLocation();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading: authLoading, error: authError } = useAuth();
   const { segment, isPending } = useOrgSegmentStatus({ enabled: isAuthenticated });
   const { viewAsOrg } = usePortalContext();
 
-  // `signedIn` is what earns the exception, NOT a null segment. A signed-in
-  // viewer whose segment lookup failed also has a null segment, and handing them
-  // the retail screen because the answer is missing would be reading absence as
-  // evidence.
-  const opts = { portal: viewAsOrg !== null, signedIn: isAuthenticated };
-  const blocked = !isPending && !canReachCallback(location, segment, user?.role, opts);
+  // The exception is earned by CONFIRMING there is no session — not by the
+  // absence of one being reported.
+  //
+  // `auth.me` is a publicProcedure returning `ctx.user`, so a signed-out
+  // visitor gets a clean `null` and no error. An error therefore never means
+  // "signed out"; it means the question was not answered. But `useAuth` folds
+  // both into `isAuthenticated: false` with `loading: false`, and taking that
+  // at face value hands the retail completion screen to a signed-in bank whose
+  // lookup happened to fail — the same "absence is not evidence" mistake the
+  // segment half of this function already guards against, one layer up.
+  //
+  // With `retry: false` that is not a flicker either: one failed request and
+  // the answer stays wrong for the life of the page.
+  const signedOutConfirmed = !authLoading && !authError && !isAuthenticated;
+  const opts = { portal: viewAsOrg !== null, signedIn: !signedOutConfirmed };
+
+  const undecided = authLoading || isPending;
+  const blocked = !undecided && !canReachCallback(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
+  // Render nothing while undecided. The signed-out merchant this page exists
+  // for resolves in one tick; showing them the completion screen a frame early
+  // is not worth showing it to everyone else too.
+  if (undecided) return null;
   return <Component />;
 }
 
