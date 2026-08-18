@@ -24,7 +24,7 @@ import {
 } from "./auth";
 import { verifyOAuthSignature, verifyWebhookHmac } from "./signature";
 import { onboardShoplineMerchant } from "./onboarding";
-import { ingestWebhook } from "./webhookHandler";
+import { admitWebhook, processAdmittedWebhook } from "./webhookHandler";
 import { processGdprRequest, verifyGdprSignature, type GdprKind } from "./gdpr";
 import { fetchStoreMetadata, registerWebhook as apiRegisterWebhook } from "./apiClient";
 import type { ShoplineApiOptions } from "./apiClient";
@@ -325,26 +325,62 @@ export function createShoplineRouter(): Router {
         return res.status(401).json({ error: "Invalid signature" });
       }
 
-      // Process the webhook event (async — return 200 immediately)
+      // A 2xx tells SHOPLINE the delivery is ours and it will never send it
+      // again. So the event must be ON DISK before we answer — acknowledging
+      // first and persisting later silently drops whatever fails in between,
+      // and webhook-only state (subscription lifecycle, refunds) then goes
+      // stale with nothing to indicate it.
       const { getDb } = await import("../../db");
       const db = await getDb();
-      if (db) {
-        ingestWebhook(db, {
-          webhookId,
-          topic,
-          hmacSignature: hmacHeader,
-          shopDomain,
-          rawBody,
-        }).catch((err: unknown) => {
-          console.error("[shopline-webhook] Processing error:", err);
-        });
+      if (!db) {
+        // Retryable on purpose. SHOPLINE re-delivers for 48 hours, which is
+        // long enough to outlast a database blip; answering 200 here would
+        // discard the delivery to save a log line.
+        console.error("[shopline-webhook] no database — refusing delivery so SHOPLINE retries:", webhookId);
+        return res.status(503).json({ error: "Storage unavailable, retry later" });
       }
 
-      // Always return 200 quickly to prevent SHOPLINE retries
-      return res.status(200).json({ ok: true });
+      const admission = await admitWebhook(db, {
+        webhookId,
+        topic,
+        hmacSignature: hmacHeader,
+        shopDomain,
+        rawBody,
+      });
+
+      if (admission.status === "invalid_signature") {
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+
+      // Unknown store and duplicate are both terminal, and both must ack.
+      // Retrying either would burn SHOPLINE's 19-attempt budget and end with
+      // the subscription deleted — the store will not appear because we said
+      // no 19 times, and a duplicate is already handled.
+      if (admission.status === "store_not_found") {
+        console.warn("[shopline-webhook] no store for delivery:", webhookId, admission.shopDomain);
+        return res.status(200).json({ ok: true, ignored: "unknown_store" });
+      }
+      if (admission.status === "duplicate") {
+        return res.status(200).json({ ok: true, duplicate: true });
+      }
+
+      // Durable now. Acknowledge, then process — the 5-second budget covers the
+      // insert only, and a processing failure is recorded on the stored row
+      // rather than lost.
+      res.status(200).json({ ok: true, eventId: admission.eventId });
+
+      setImmediate(() => {
+        void processAdmittedWebhook(db, admission).catch((err: unknown) => {
+          console.error("[shopline-webhook] processing error for event", admission.eventId, err);
+        });
+      });
+      return;
     } catch (err) {
-      console.error("[shopline-webhook] error:", err);
-      return res.status(200).json({ ok: true }); // Still 200 to prevent retries
+      // Admission itself failed. This is exactly the case that must NOT be
+      // acknowledged: nothing was stored, so a 200 here loses the delivery.
+      console.error("[shopline-webhook] admission failed, asking SHOPLINE to retry:", err);
+      if (res.headersSent) return;
+      return res.status(503).json({ error: "Temporarily unable to accept webhook" });
     }
   });
 
