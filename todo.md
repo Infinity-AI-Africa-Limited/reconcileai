@@ -1288,3 +1288,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Prepare a merchant-facing Tier 1 support-escalation and evidence-retention runbook that avoids customer PII, credentials, and unsupported service-level claims.
 - [x] Review and save accurate Tier 1 About copy while preserving the existing Privacy Policy and FAQ URLs, deliberate blank Demo store URL, and current public contact email.
 - [x] Prepare a controlled P2 monitoring, incident, and rollback drill record that distinguishes pre-release code validation from required live developer-store evidence.
+- [x] Diagnose and fix the Manus development-preview Vite HMR WebSocket connection failure without changing production networking behavior; stale preview worker restarted and HMR reconnection verified.
