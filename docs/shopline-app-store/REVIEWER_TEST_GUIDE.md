@@ -9,10 +9,7 @@ for bank credentials.
 
 > Use only the designated SHOPLINE developer-store test account supplied through
 > the review arrangement. Do not enter a real merchant store, personal customer
-> information, production payment credentials, or bank data. Before submission,
-> ReconcileAI must confirm the account configured in the Partner Portal can enter
-> the provisioned retail tenant; a stored email/password is not presented as proof
-> of an authenticated ReconcileAI merchant session.
+> information, production payment credentials, or bank data.
 
 ## What the reviewer should validate
 
@@ -20,7 +17,7 @@ for bank credentials.
 |---|---|---|
 | 1 | Start installation from the App Store listing and approve the requested read-only scopes. | The app opens in a browser tab through the configured Redirected flow. |
 | 2 | Complete SHOPLINE authorisation. | ReconcileAI verifies the callback and provisions the authorised store connection. |
-| 3 | Open **Settlement Monitor** from the authenticated provisioned retail tenant. | The merchant home shows settlement status, sync state, and the information available for the authorised test store. |
+| 3 | Open **Settlement Monitor**. | The merchant home shows settlement status, sync state, and the information available for the authorised test store. |
 | 4 | Open **Dashboard** beneath Settlement Monitor. | The merchant receives a summary view without financial-services, bank, or core-banking controls. |
 | 5 | Open **SHOPLINE Sync Status**. | The reviewer can see the store connection, recent sync/webhook state, and a controlled manual-sync action where enabled. |
 | 6 | Open **Orders & Payments** and **Payment Exceptions**. | The reviewer sees retail-relevant records and exceptions only. |
