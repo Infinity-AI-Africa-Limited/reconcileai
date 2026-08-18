@@ -45,14 +45,15 @@ Recording this explicitly because a green stack invites the opposite conclusion:
   training loss and a synthetic held-out split drawn from the same generator as
   the training set. That measures memorisation of the generator, not fitness for
   a bank's exceptions. Week 4 of the programme below is the gate.
-- **No capacity evidence on any target host, and the first measurement was
-  alarming.** Running the held-out evaluation against the trained 3B Q4 model on
-  the reference laptop, **3 of 36 cases returned nothing within 600 seconds**.
-  The sizing table in `deploy/on-prem/README.md` previously advertised "~4–8 s
-  per exception" from estimate alone; its latency column is now blank, because a
-  plausible-looking wrong number is worse than an admitted gap. Establishing
-  whether that tail is the model, the quantisation, or the host is week 3–4 work
-  and must happen on the institution's hardware.
+- **Capacity is measured on one demonstration host only.** 36 held-out cases
+  against the trained 3B Q4 model on the reference laptop: p50 58s, p90 119s,
+  max 1480s per exception, all 36 completing cleanly at 136-214 output tokens.
+  The three slow cases produced the same token counts at 1/20th the rate, so the
+  tail is host stalling rather than model behaviour — but a laptop under Docker
+  Desktop is not a capacity benchmark either way. The institution's own figures
+  are week 3-4 work. The sizing table previously advertised "~4-8 s per
+  exception" from estimate alone, which was wrong by roughly an order of
+  magnitude at the median.
 - **The Q4_K_M quantisation trade-off is unquantified** for this task.
 - **No adversarial testing** of prompt injection, schema violation, or attempts
   to induce a consequential recommendation.
