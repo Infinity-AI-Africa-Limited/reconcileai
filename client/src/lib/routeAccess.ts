@@ -14,7 +14,7 @@
  * sends someone to a page that means something to them instead of one that
  * errors. Never the only thing standing between a caller and data.
  */
-import { NAV_ITEMS, inSegment, isStaff, passesStaffGate } from "./navItems";
+import { NAV_ITEMS, inRole, inSegment, isStaff, passesStaffGate } from "./navItems";
 import type { Segment } from "./segments";
 
 /**
@@ -27,7 +27,12 @@ import type { Segment } from "./segments";
  * sees. Every other vertical keeps the dashboard, where that framing is right.
  */
 export function landingPathFor(segment: Segment | null): string {
-  return segment === "retail_commerce" ? "/settlement-monitor" : "/dashboard";
+  if (segment === "retail_commerce") return "/settlement-monitor";
+  // A signed-in account whose tenant has not been classified must not be bounced
+  // into a financial-services dashboard. Support is public and does not recurse
+  // through LandingRedirect, making it a safe configuration-recovery destination.
+  if (segment === null) return "/support";
+  return "/dashboard";
 }
 
 /**
@@ -41,6 +46,16 @@ export function landingPathFor(segment: Segment | null): string {
  * it, not as "not retail", so it reads the same way as a NAV_ITEMS entry.
  */
 const NON_NAV_ROUTE_SEGMENTS: Record<string, Segment[]> = {
+  // All three RoleSwitcher views, not just the auditor one. The switcher is now
+  // hidden wholesale from retail (DashboardLayout), so CFO and Operations are
+  // financial-services operating screens by exactly the same argument — and
+  // listing only the auditor left the other two openable by typing the URL.
+  //
+  // They cannot inherit from `/dashboard`, because `/dashboard` IS offered to
+  // retail as a secondary overview. The parent being allowed is precisely why
+  // these children have to say so themselves.
+  "/dashboard/cfo": ["financial_services", "corporate_b2b", "super_admin"],
+  "/dashboard/operations": ["financial_services", "corporate_b2b", "super_admin"],
   "/dashboard/auditor": ["financial_services", "corporate_b2b", "super_admin"],
   // SHOPLINE install callbacks. Reached from the OAuth redirect rather than any
   // link, and retail through and through — "Store Connected Successfully!", sync
@@ -67,12 +82,76 @@ function normalizePath(path: string): string {
   return trimmed === "" ? "/" : trimmed;
 }
 
+/**
+ * The declared ancestor a nested route inherits its rule from.
+ *
+ * `/reports/:id` has no entry of its own and never will — it is a detail view of
+ * `/reports`, mounted by the router with a parameter. An exact-match lookup
+ * reported it as unscoped, so a retail merchant who opened a report link went
+ * straight into a financial-services screen that the sidebar had correctly
+ * hidden. Every parameterised or detail route in the app has this shape, so the
+ * rule is inherited rather than restated per route: a child is at most as
+ * visible as the parent it hangs off.
+ *
+ * Longest match wins, so a deeper declaration beats a shallower one.
+ */
+function nearestDeclaring<T>(key: string, pick: (entry: { path: string; segments?: Segment[]; roles?: string[] }) => T | undefined): T | null {
+  const declarations: Array<{ path: string; segments?: Segment[]; roles?: string[] }> = [
+    ...Object.entries(NON_NAV_ROUTE_SEGMENTS).map(([path, segments]) => ({ path, segments })),
+    ...NAV_ITEMS.map((e) => ({ path: e.path, segments: e.segments, roles: e.roles })),
+  ];
+
+  let bestPath = "";
+  let best: T | null = null;
+
+  for (const declaration of declarations) {
+    const value = pick(declaration);
+    if (value === undefined) continue;
+    const parent = normalizePath(declaration.path);
+    if (parent === "/" || !key.startsWith(parent + "/")) continue;
+    if (parent.length > bestPath.length) {
+      bestPath = parent;
+      best = value;
+    }
+  }
+
+  return best;
+}
+
 /** The segments a path is built for, or null when it is for everyone. */
 export function segmentsForPath(path: string): Segment[] | null {
   const key = normalizePath(path);
   const extra = NON_NAV_ROUTE_SEGMENTS[key];
   if (extra) return extra;
-  return NAV_ITEMS.find((e) => normalizePath(e.path) === key)?.segments ?? null;
+
+  // A declared entry answers for itself even when it declares no segments —
+  // that means "every vertical", and inheriting a narrower parent rule would
+  // silently overrule a deliberate decision.
+  const declared = NAV_ITEMS.find((e) => normalizePath(e.path) === key);
+  if (declared) return declared.segments ?? null;
+
+  return nearestDeclaring(key, (e) => e.segments);
+}
+
+/**
+ * The roles a path is built for, or null when it is open to every role.
+ *
+ * `roles` had exactly the shape `staffOnly` had before PR #52: honoured by the
+ * sidebar and by nothing else. `/admin/super-admin`, its three sub-routes and
+ * `/admin/poc` are declared `roles: ["super_admin"]`, and any tenant admin who
+ * typed one got the page — then a screenful of permission errors from the
+ * server, which is the exact failure this module was written to end.
+ */
+export function rolesForPath(path: string): string[] | null {
+  const key = normalizePath(path);
+  // NON_NAV_ROUTE_SEGMENTS carries no role rules, so a match there means the
+  // route is role-open; only NAV_ITEMS declares roles.
+  if (NON_NAV_ROUTE_SEGMENTS[key]) return null;
+
+  const declared = NAV_ITEMS.find((e) => normalizePath(e.path) === key);
+  if (declared) return declared.roles ?? null;
+
+  return nearestDeclaring(key, (e) => e.roles);
 }
 
 /**
@@ -96,7 +175,13 @@ export function segmentsForPath(path: string): Segment[] | null {
  */
 export function isStaffPath(path: string): boolean {
   const key = normalizePath(path);
-  return NAV_ITEMS.some((e) => normalizePath(e.path) === key && e.staffOnly === true);
+  return NAV_ITEMS.some((e) => {
+    if (e.staffOnly !== true) return false;
+    const entry = normalizePath(e.path);
+    // Children inherit staffOnly for the same reason they inherit segments: a
+    // detail view of a staff tool is a staff tool.
+    return entry === key || key.startsWith(entry + "/");
+  });
 }
 
 /**
@@ -124,6 +209,11 @@ export function isStaffPath(path: string): boolean {
  * A null segment refuses a scoped path, matching `inSegment` exactly. Callers
  * must therefore not consult this while the segment is still resolving — see
  * SegmentGuard, which waits.
+ *
+ * The same now applies to ROLE. `inRole` refuses a role-scoped path when the
+ * role is undefined, so consulting this before `auth.me` has resolved would
+ * bounce a legitimate admin off their own page for the width of one request.
+ * SegmentGuard waits on both.
  */
 export function canReachPath(
   path: string,
@@ -136,9 +226,20 @@ export function canReachPath(
   // point is to see the TENANT's surface). Either way a staff tool is refused —
   // `navFor` excludes staffOnly entries from a portal for the same reason.
   if (isStaffPath(path)) return false;
+
   const segments = segmentsForPath(path);
-  if (!segments) return true;
-  return inSegment({ label: "", path, group: "main", segments }, segment);
+  if (segments && !inSegment({ label: "", path, group: "main", segments }, segment)) return false;
+
+  // Role gating is dropped inside a portal, exactly as `navFor` drops it: staff
+  // are looking at the TENANT's surface, not exercising their own permissions.
+  // Outside a portal it applies, and the early staff return above means this
+  // only ever narrows things for non-staff.
+  if (!opts.portal) {
+    const roles = rolesForPath(path);
+    if (roles && !inRole({ label: "", path, group: "main", roles }, role)) return false;
+  }
+
+  return true;
 }
 
 /**

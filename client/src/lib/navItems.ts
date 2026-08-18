@@ -86,9 +86,9 @@ export const NAV_ITEMS: NavEntry[] = [
   // the end of the retail login redirect; see landingPathFor in lib/routeAccess,
   // which must agree with this ordering.
   { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
-  { label: "Dashboard", path: "/dashboard", group: "main" },
-  { label: "Super Agent", path: "/super-agent", group: "main" },
-  { label: "Exception Intelligence", path: "/exception-intelligence", group: "main" },
+  { label: "Dashboard", path: "/dashboard", group: "main", segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Super Agent", path: "/super-agent", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Exception Intelligence", path: "/exception-intelligence", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
   { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", staffOnly: true },
   { label: "Distributor Registry", path: "/distributors", group: "main", segments: ["corporate_b2b"] },
   // The remaining retail-only surfaces. These existed ONLY in the portal list
@@ -96,20 +96,20 @@ export const NAV_ITEMS: NavEntry[] = [
   // around. Secondary to Settlement Monitor, so they stay below the shared entries.
   { label: "Sync Status", path: "/shopline/sync-status", group: "main", segments: ["retail_commerce"] },
   { label: "SHOPLINE Connection", path: "/shopline/connect", group: "main", segments: ["retail_commerce"] },
-  { label: "Upload Data", path: "/upload", group: "main", roles: ["admin", "operations"] },
-  { label: "Reconciliation", path: "/reconciliation", group: "main", roles: ["admin", "operations"] },
-  { label: "Reports", path: "/reports", group: "main" },
-  { label: "Schedules", path: "/schedules", group: "main", roles: ["admin", "operations"] },
-  { label: "Monitor", path: "/monitor", group: "main" },
-  { label: "Documentation", path: "/documentation", group: "main" },
+  { label: "Upload Data", path: "/upload", group: "main", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Reconciliation", path: "/reconciliation", group: "main", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Reports", path: "/reports", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Schedules", path: "/schedules", group: "main", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Monitor", path: "/monitor", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Documentation", path: "/documentation", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
 
   // ── Admin ─────────────────────────────────────────────────────────────────
-  { label: "Multi-Channel", path: "/channels", group: "admin", roles: ["admin", "operations"] },
-  { label: "Exceptions", path: "/exceptions", group: "admin", roles: ["admin", "operations"] },
-  { label: "Age Tracker", path: "/age-tracker", group: "admin", roles: ["admin", "operations"] },
-  { label: "Transactions", path: "/transactions", group: "admin", roles: ["admin", "operations"] },
-  { label: "Review Queue", path: "/review", group: "admin", roles: ["admin", "operations"] },
-  { label: "Audit Trail", path: "/audit", group: "admin", roles: ["admin", "compliance", "cfo"] },
+  { label: "Multi-Channel", path: "/channels", group: "admin", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Payment Exceptions", path: "/exceptions", group: "admin", roles: ["admin", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Age Tracker", path: "/age-tracker", group: "admin", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Orders & Payments", path: "/transactions", group: "admin", roles: ["admin", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Review Queue", path: "/review", group: "admin", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Audit Trail", path: "/audit", group: "admin", roles: ["admin", "compliance", "cfo"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
   // Nigerian data protection: the frameworks on this page are NDPA 2023 and
   // NDPR 2019, and its retention guidance is "aligned with CBN records retention
   // guidelines for financial institutions". A SHOPLINE merchant is governed by
@@ -118,12 +118,12 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Data Protection", path: "/compliance", group: "admin", roles: ["admin", "compliance"], segments: ["financial_services", "corporate_b2b"] },
   // Nigerian banking-regulator pack — financial services only (CLAUDE.md §2A).
   { label: "CBN Reports", path: "/cbn-compliance", group: "admin", roles: ["admin", "compliance", "cfo"], segments: ["financial_services"] },
-  { label: "User Management", path: "/admin/users", group: "admin", roles: ["admin"] },
+  { label: "Team Access", path: "/admin/users", group: "admin", roles: ["admin"], segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
   // No `roles` alongside `staffOnly`: staffOnly is already the narrower gate, and
   // a second list only invites the two to disagree.
   { label: "Assessments", path: "/admin/assessments", group: "admin", staffOnly: true },
-  { label: "Module Configuration", path: "/modules", group: "admin", roles: ["admin"] },
-  { label: "Email Settings", path: "/email-settings", group: "admin", roles: ["admin"] },
+  { label: "Module Configuration", path: "/modules", group: "admin", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Email Settings", path: "/email-settings", group: "admin", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
 
   // ── Advanced tools ────────────────────────────────────────────────────────
   // Seeds a Nigerian banking / FMCG demo: its channels are core_banking (CBS),
@@ -131,14 +131,14 @@ export const NAV_ITEMS: NavEntry[] = [
   // them to fill their own tenant with transactions from a vertical they are not
   // in, and none of it would reconcile against their orders.
   { label: "Sample Data", path: "/sample-data", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b"] },
-  { label: "Integrations", path: "/integrations", group: "advanced", roles: ["admin"] },
+  { label: "Integrations", path: "/integrations", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
   // CBS connectors onboard bank / MFB clients.
   { label: "Core Banking Connector", path: "/woodcore-connector", group: "advanced", roles: ["admin"], segments: ["financial_services"] },
-  { label: "API Ingestion", path: "/api-ingestion", group: "advanced", roles: ["admin"] },
-  { label: "SFTP Config", path: "/sftp-config", group: "advanced", roles: ["admin"] },
-  { label: "Bucket Drops", path: "/bucket-config", group: "advanced", roles: ["admin"] },
-  { label: "Email Forwarding", path: "/email-forwarding", group: "advanced", roles: ["admin"] },
-  { label: "Anomaly Detection", path: "/anomalies", group: "advanced", roles: ["admin"] },
+  { label: "API Ingestion", path: "/api-ingestion", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "SFTP Config", path: "/sftp-config", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Bucket Drops", path: "/bucket-config", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Email Forwarding", path: "/email-forwarding", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Anomaly Detection", path: "/anomalies", group: "advanced", roles: ["admin"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
 
   // ── Super admin (Infinity AI staff) ───────────────────────────────────────
   { label: "Platform Overview", path: "/admin/super-admin", group: "superAdmin", roles: ["super_admin"] },

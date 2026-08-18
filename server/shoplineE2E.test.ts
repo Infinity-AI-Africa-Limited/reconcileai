@@ -60,7 +60,14 @@ const mockDb = {
   insert: vi.fn().mockReturnThis(),
   values: vi.fn().mockResolvedValue([{ insertId: 1001 }]),
   update: vi.fn().mockReturnThis(),
-  set: vi.fn().mockReturnThis(),
+  // An update chain ENDS at .where(), and drizzle-mysql resolves it to a
+  // ResultSetHeader. The replay reads affectedRows from it to tell whether it
+  // won the claim, so returning the chainable mock here made every claim look
+  // lost. Kept separate from the select chain's `where`, which stays chainable.
+  updateWhere: vi.fn().mockResolvedValue([{ affectedRows: 1 }]),
+  set: vi.fn(function (this: unknown) {
+    return { where: mockDb.updateWhere };
+  }),
   orderBy: vi.fn().mockReturnThis(),
   innerJoin: vi.fn().mockReturnThis(),
 };
@@ -189,7 +196,14 @@ vi.mock("./_core/env", () => ({
 }));
 
 // Import after mocks are set up
-import { ingestWebhook, type InboundWebhook } from "./connectors/shopline/webhookHandler";
+import {
+  WEBHOOK_MAX_ATTEMPTS,
+  admitWebhook,
+  ingestWebhook,
+  processAdmittedWebhook,
+  replayStalledWebhookEvents,
+  type InboundWebhook,
+} from "./connectors/shopline/webhookHandler";
 import {
   scheduleReconciliation,
   isReconciliationTrigger,
@@ -256,6 +270,188 @@ beforeEach(() => {
 afterEach(() => {
   __resetRealtimeState();
   vi.useRealTimers();
+});
+
+// ─── A0. Durable admission ────────────────────────────────────────────────────
+
+describe("A0. A delivery is durable before it is acknowledged", () => {
+  it("should return the stored event id from admission, without processing it", async () => {
+    // The HTTP receiver acks between these two halves. Admission therefore has
+    // to be complete on its own — if it returned before the insert, a 200 would
+    // be promising SHOPLINE we kept something we had not written down, and
+    // SHOPLINE never re-sends a delivery it believes landed.
+    mockDb.limit.mockImplementationOnce(async () => [mockStore]).mockImplementationOnce(async () => []);
+
+    const admission = await admitWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload()));
+
+    expect(admission.status).toBe("admitted");
+    if (admission.status === "admitted") {
+      expect(admission.eventId).toBe(1001);
+      expect(admission.organizationId).toBe(mockStore.organizationId);
+      expect(admission.topic).toBe("orders/paid");
+    }
+    // Nothing was reconciled yet — that is the caller's job, after the ack.
+    expect(runSyncCycleMock).not.toHaveBeenCalled();
+  });
+
+  it("should admit the row already leased, so the post-ack work is exclusive", async () => {
+    // Inserting as `pending` left the row replay-eligible for the whole of the
+    // post-ack processing: if that ran past the grace period a sweep claimed
+    // and dispatched the SAME delivery, billing an appsubscription/paid twice.
+    // The lease has to exist from the moment the row does.
+    mockDb.values.mockClear();
+    mockDb.limit.mockImplementationOnce(async () => [mockStore]).mockImplementationOnce(async () => []);
+    await admitWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload()));
+
+    const row = mockDb.values.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(row.status).toBe("processing");
+    expect(row.attempts).toBe(1);
+    expect(row.leaseExpiresAt).toBeInstanceOf(Date);
+    expect((row.leaseExpiresAt as Date).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("should refuse admission for a bad signature, so nothing reaches storage", async () => {
+    const forged = { ...makeSignedWebhook("orders/paid", makeOrderPaidPayload()), hmacSignature: "not-a-signature" };
+    const admission = await admitWebhook(mockDb as never, forged);
+    expect(admission.status).toBe("invalid_signature");
+  });
+
+  it("should surface an insert failure by throwing, so the caller can ask for a retry", async () => {
+    // The receiver turns this into 503. Swallowing it and answering 200 is how
+    // a delivery disappears: SHOPLINE marks it delivered and moves on.
+    mockDb.limit.mockImplementationOnce(async () => [mockStore]).mockImplementationOnce(async () => []);
+    mockDb.values.mockRejectedValueOnce(new Error("storage unavailable"));
+
+    await expect(
+      admitWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload())),
+    ).rejects.toThrow(/storage unavailable/);
+  });
+
+  it("should record a processing failure on the stored row rather than throwing", async () => {
+    // Processing runs after the ack, so throwing would be an unhandled
+    // rejection with the delivery already acknowledged. It must land on the row.
+    runSyncCycleMock.mockRejectedValueOnce(new Error("engine exploded"));
+
+    const result = await processAdmittedWebhook(mockDb as never, {
+      status: "admitted",
+      eventId: 1001,
+      organizationId: mockStore.organizationId,
+      slStoreId: mockStore.id,
+      topic: "orders/paid",
+      payload: makeOrderPaidPayload(),
+    });
+
+    expect(["processed", "failed"]).toContain(result.status);
+  });
+});
+
+// ─── A1. Recovery for admitted-but-unfinished events ──────────────────────────
+
+describe("A1. An admitted delivery that never finished is recovered", () => {
+  function stalledRow(over: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: 7001,
+      organizationId: mockStore.organizationId,
+      slStoreId: mockStore.id,
+      webhookId: "wh_stalled",
+      topic: "orders/paid",
+      payloadJson: makeOrderPaidPayload(),
+      status: "pending",
+      attempts: 0,
+      receivedAt: new Date(Date.now() - 60 * 60_000),
+      ...over,
+    };
+  }
+
+  it("should reprocess a row left pending by a restart between ack and processing", async () => {
+    // SHOPLINE does not redeliver after a 2xx, so nothing else is coming for
+    // this event. Without the sweep it stays pending forever.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary.examined).toBe(1);
+    expect(summary.processed).toBe(1);
+    expect(summary.movedToDlq).toBe(0);
+  });
+
+  it("should count the attempt it just made, so a row cannot be retried forever", async () => {
+    // The DLQ boundary is attempts >= WEBHOOK_MAX_ATTEMPTS, and it only bites if
+    // each pass actually records its attempt. A replay that reprocessed without
+    // incrementing would loop on the same broken event indefinitely.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow({ attempts: 1 })]);
+    await replayStalledWebhookEvents(mockDb as never);
+    const wrote = mockDb.set.mock.calls.map((c: unknown[]) => c[0] as { attempts?: number });
+    expect(wrote.some((w) => w.attempts === 2)).toBe(true);
+  });
+
+  it("should skip a row another worker claimed first", async () => {
+    // Two scheduled syncs can select the same row before either updates it.
+    // Without an atomic claim both would run the side effect — for an
+    // appsubscription/paid event that applies the billing update twice — and
+    // the outcome writes would then race. affectedRows = 0 means we lost.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    mockDb.updateWhere.mockResolvedValueOnce([{ affectedRows: 0 }]);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary.examined).toBe(1);
+    expect(summary.skipped).toBe(1);
+    expect(summary.processed).toBe(0);
+  });
+
+  it("should leave a freshly admitted event alone", async () => {
+    // The receiver acks and processes on the same tick, so anything inside the
+    // grace window is very likely still in flight — replaying it would
+    // double-process a delivery that was about to succeed.
+    mockDb.limit.mockImplementationOnce(async () => []);
+    const summary = await replayStalledWebhookEvents(mockDb as never, { graceMs: 60 * 60_000 });
+    expect(summary.examined).toBe(0);
+  });
+
+  it("should take the row out of the replayable set while it is being processed", async () => {
+    // Incrementing `attempts` alone was NOT exclusive: the row stayed `pending`,
+    // so once worker A moved 0 -> 1 a later sweep could read 1, claim 2, and
+    // enter processing while A was still inside it. Both then ran the billing
+    // side effect, which no conditional write afterwards can undo. The claim
+    // must move the row into `processing` with a lease, in the same UPDATE.
+    mockDb.set.mockClear();
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    await replayStalledWebhookEvents(mockDb as never);
+
+    const writes = mockDb.set.mock.calls.map((c: unknown[]) => c[0] as Record<string, unknown>);
+    const claim = writes.find((w) => w.status === "processing");
+    expect(claim, "the claim must set status=processing").toBeDefined();
+    expect(claim?.leaseExpiresAt).toBeInstanceOf(Date);
+    // and it must be the FIRST write — a claim after the side effect is no claim.
+    expect(writes[0]?.status).toBe("processing");
+  });
+
+  it("should clear the lease on a terminal outcome", async () => {
+    // A `failed` row still carrying a future lease sits out its own backoff
+    // before the next sweep can see it — an undocumented retry delay.
+    mockDb.set.mockClear();
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    await replayStalledWebhookEvents(mockDb as never);
+
+    const terminal = mockDb.set.mock.calls
+      .map((c: unknown[]) => c[0] as Record<string, unknown>)
+      .filter((w) => ["processed", "failed", "dlq"].includes(String(w.status)));
+    expect(terminal.length).toBeGreaterThan(0);
+    for (const w of terminal) expect(w.leaseExpiresAt).toBeNull();
+  });
+
+  it("should skip a row another worker claimed first", async () => {
+    // affectedRows = 0 means the compare-and-set lost the race. Processing
+    // anyway is exactly the double-billing this guards against.
+    mockDb.limit.mockImplementationOnce(async () => [stalledRow()]);
+    mockDb.updateWhere.mockResolvedValueOnce([{ affectedRows: 0 }]);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary.skipped).toBe(1);
+    expect(summary.processed).toBe(0);
+  });
+
+  it("should report an empty sweep when nothing is stalled", async () => {
+    mockDb.limit.mockImplementationOnce(async () => []);
+    const summary = await replayStalledWebhookEvents(mockDb as never);
+    expect(summary).toEqual({ examined: 0, processed: 0, failed: 0, movedToDlq: 0, skipped: 0 });
+  });
 });
 
 // ─── A. Happy Path ────────────────────────────────────────────────────────────
