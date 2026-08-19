@@ -54,6 +54,33 @@ This verifies signature acceptance, store resolution, the audit-acknowledgement
 path, and the non-destructive access-request response. No customer-redaction,
 shop-redaction, uninstallation, or production merchant-data mutation was invoked.
 
+## Deployed tenant-context repair recheck — pending route outcome
+
+After Richard confirmed the reviewed repair merged and deployed, the production
+welcome URL for `SL_RECONCILEAI_DEV` loaded successfully and displayed the expected
+developer-store organisation code. The remaining check is the post-load transition
+to Settlement Monitor: it must preserve the Retail Commerce context and display the
+connected store. This record must not treat the welcome-page render alone as a
+successful tenant-context hand-off.
+
+The route transition was subsequently completed after the deployed repair. Settlement
+Monitor now displays **“Viewing as portal: ReconcileAI Dev Store · Retail Commerce ·
+SL_RECONCILEAI_DEV”** and the retail-only navigation surface, confirming that the
+portal context persists correctly. The page still reports **“No active SHOPLINE stores
+connected”** in that organisation. The tenant-context P0 defect is therefore fixed;
+the remaining P0 blocker is the connector-store activation/visibility path required
+before paid-order and sync evidence can be captured.
+
+The connector row was then read without mutation and confirmed active under
+`SL_RECONCILEAI_DEV`, with a successful recent sync timestamp and no recorded sync
+error. The visibility gap is therefore a server-side scope defect, not an inactive
+store: Settlement Monitor used the authenticated Infinity AI Staff user’s
+`organizationId` rather than the verified super-admin portal organisation. The
+pending repair carries an explicit organisation override only on the affected
+SHOPLINE procedures and resolves it through the existing `resolveOrgScope` guard.
+That guard rejects overrides for every non-super-admin user; it does not trust the
+browser portal label as an authorisation decision.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |

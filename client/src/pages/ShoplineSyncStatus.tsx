@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,10 +48,15 @@ function formatDate(date: string | Date | null): string {
 
 export default function ShoplineSyncStatus() {
   const [triggering, setTriggering] = useState(false);
+  const { viewAsOrg } = usePortalContext();
+  const portalScope = useMemo(
+    () => ({ organizationId: viewAsOrg?.id }),
+    [viewAsOrg?.id],
+  );
 
-  const { data: stores, isLoading: storesLoading } = trpc.shoplineConnector.listStores.useQuery({});
+  const { data: stores, isLoading: storesLoading } = trpc.shoplineConnector.listStores.useQuery(portalScope);
   const { data: webhookEvents, isLoading: eventsLoading, refetch } = trpc.shoplineConnector.recentWebhookEvents.useQuery(
-    { limit: 50 },
+    { limit: 50, ...portalScope },
     { refetchInterval: 15000 },
   );
 
@@ -178,7 +184,7 @@ export default function ShoplineSyncStatus() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => triggerSync.mutate({ storeId: store.id })}
+                        onClick={() => triggerSync.mutate({ storeId: store.id, ...portalScope })}
                         disabled={triggerSync.isPending}
                       >
                         {triggerSync.isPending ? (
