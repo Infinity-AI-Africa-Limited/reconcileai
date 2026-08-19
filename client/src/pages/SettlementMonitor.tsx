@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,12 +63,17 @@ function formatTimeAgo(date: string | Date | null): string {
 
 export default function SettlementMonitor() {
   const [refreshing, setRefreshing] = useState(false);
+  const { viewAsOrg } = usePortalContext();
   // Declared with the other hooks, ABOVE the isLoading early return — a hook
   // after a conditional return changes hook order between renders and throws.
   const [showImporter, setShowImporter] = useState(false);
+  const portalScope = useMemo(
+    () => ({ organizationId: viewAsOrg?.id }),
+    [viewAsOrg?.id],
+  );
 
-  const { data: stores, isLoading: storesLoading } = trpc.shoplineConnector.listStores.useQuery({});
-  const { data: syncStatus, isLoading: syncLoading, refetch } = trpc.shoplineConnector.syncStatus.useQuery(undefined, {
+  const { data: stores, isLoading: storesLoading } = trpc.shoplineConnector.listStores.useQuery(portalScope);
+  const { data: syncStatus, isLoading: syncLoading, refetch } = trpc.shoplineConnector.syncStatus.useQuery(portalScope, {
     refetchInterval: 30000, // auto-refresh every 30s
   });
 

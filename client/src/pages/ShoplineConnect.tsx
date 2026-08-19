@@ -11,7 +11,6 @@
  * - Link to the dashboard
  * - First sync status (if available)
  */
-import { useEffect, useState } from "react";
 import { useLocation, useSearch } from "wouter";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
@@ -20,6 +19,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, XCircle, ArrowRight, RefreshCw, Shield, Zap } from "lucide-react";
 import { landingPathFor } from "@/lib/routeAccess";
+import {
+  canEnterPortal,
+  portalHandoffMessage,
+  shoplinePortalHandoff,
+} from "@/lib/shoplinePortalHandoff";
 
 export function ShoplineWelcome() {
   const searchString = useSearch();
@@ -30,18 +34,26 @@ export function ShoplineWelcome() {
   const { user } = useAuth();
   const { enterPortal } = usePortalContext();
   const isSuperAdmin = user?.role === "super_admin";
-  const { data: organizations, isLoading: isLoadingOrganizations } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
+  const {
+    data: organizations,
+    isLoading: isLoadingOrganizations,
+    isError: isOrganizationsError,
+  } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
     enabled: isSuperAdmin && Boolean(orgCode),
   });
   const retailOrg = organizations?.find(
     (organization) => organization.code === orgCode && organization.segment === "retail_commerce",
   );
-  const requiresSupportPortalContext = isSuperAdmin && Boolean(orgCode);
-  const [portalContextError, setPortalContextError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setPortalContextError(null);
-  }, [orgCode]);
+  // The rule lives in lib/ so its four outcomes are testable without rendering.
+  const handoff = shoplinePortalHandoff({
+    isSuperAdmin,
+    orgCode,
+    isLoading: isLoadingOrganizations,
+    isError: isOrganizationsError,
+    retailOrg,
+  });
+  const handoffMessage = portalHandoffMessage(handoff);
 
   /**
    * This is intentionally restricted to an authorised Infinity AI super-admin
@@ -55,12 +67,8 @@ export function ShoplineWelcome() {
     // been resolved and synchronously persisted to sessionStorage by PortalContext.
     // Sending staff to the destination without this context exposes the staff view
     // and makes an otherwise successful OAuth reconnect look like a failed store.
-    if (requiresSupportPortalContext) {
-      if (isLoadingOrganizations) return;
-      if (!retailOrg) {
-        setPortalContextError("The retail store context could not be resolved. Return to the Super Admin portal and verify the connected store before retrying.");
-        return;
-      }
+    if (!canEnterPortal(handoff)) return;
+    if (handoff.status === "ready" && retailOrg) {
       enterPortal({
         id: retailOrg.id,
         name: retailOrg.name,
@@ -73,7 +81,7 @@ export function ShoplineWelcome() {
     navigate(destination);
   };
 
-  const isPortalActionDisabled = requiresSupportPortalContext && (isLoadingOrganizations || !retailOrg);
+  const isPortalActionDisabled = !canEnterPortal(handoff);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
@@ -148,7 +156,7 @@ export function ShoplineWelcome() {
               onClick={() => enterRetailPortal(landingPathFor("retail_commerce"))}
               disabled={isPortalActionDisabled}
             >
-              {isLoadingOrganizations ? "Preparing Settlement Monitor…" : "Go to Settlement Monitor"}
+              {handoff.status === "resolving" ? "Preparing Settlement Monitor…" : "Go to Settlement Monitor"}
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
             <Button
@@ -159,9 +167,15 @@ export function ShoplineWelcome() {
             >
               View Sync Status
             </Button>
-            {portalContextError && (
-              <p className="text-sm text-destructive" role="alert">{portalContextError}</p>
-            )}
+            {/* Rendered from derived state, not from a click. The previous version
+                set this in the click handler while the same condition disabled
+                the button, so it could never appear — the screen failed closed
+                in silence. Ternary with an explicit null per CLAUDE.md §16. */}
+            {handoffMessage !== null ? (
+              <p className="text-sm text-destructive" role="alert">
+                {handoffMessage}
+              </p>
+            ) : null}
           </div>
         </CardContent>
       </Card>
