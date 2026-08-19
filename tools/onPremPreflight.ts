@@ -168,25 +168,35 @@ function checkCpuModel(env: Record<string, string>): Finding[] {
     return findings;
   }
 
-  const digest = (env.RECON_MODEL_SHA256 ?? "").trim();
-  if (!digest) {
-    findings.push({
-      severity: "error",
-      variable: "RECON_MODEL_SHA256",
-      message: "is required in import mode. Supply the digest from the signed release record.",
-    });
-  } else if (looksLikePlaceholder(digest)) {
-    findings.push({
-      severity: "error",
-      variable: "RECON_MODEL_SHA256",
-      message: "still holds the template placeholder.",
-    });
-  } else if (!/^[0-9a-f]{64}$/i.test(digest)) {
-    findings.push({
-      severity: "error",
-      variable: "RECON_MODEL_SHA256",
-      message: "is not a 64-character hex SHA-256 digest.",
-    });
+  // Both digests, checked identically, from one list.
+  //
+  // model-init verifies the GGUF *and* the Modelfile — the Modelfile carries the
+  // system prompt, decoding parameters and the FROM line, so an unverified one
+  // can repoint the import at other bytes or silently change the model's
+  // behaviour. Preflight validated only the GGUF, so a deployment that left
+  // RECON_MODELFILE_SHA256 at its template value was reported READY and then
+  // aborted in model-init. Iterating keeps the two from drifting apart the way
+  // the SHA casing rule did.
+  for (const variable of ["RECON_MODEL_SHA256", "RECON_MODELFILE_SHA256"] as const) {
+    const digest = (env[variable] ?? "").trim();
+    if (!digest) {
+      findings.push({
+        severity: "error",
+        variable,
+        message: "is required in import mode. Supply the digest from the signed release record.",
+      });
+    } else if (looksLikePlaceholder(digest)) {
+      findings.push({ severity: "error", variable, message: "still holds the template placeholder." });
+    } else if (!/^[0-9a-f]{64}$/.test(digest)) {
+      // Lowercase, matching `sha256sum` output and the shell comparison in
+      // model-init — an uppercase digest fails there, so accepting it here would
+      // repeat exactly the split this loop exists to close.
+      findings.push({
+        severity: "error",
+        variable,
+        message: "is not a lowercase 64-character hex SHA-256 digest, as `sha256sum` emits.",
+      });
+    }
   }
 
   if (!(env.RECON_MODEL ?? "").trim()) {

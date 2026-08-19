@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
+import { preflight } from "./onPremPreflight";
 
 /**
  * Deployment-contract tests for the two on-premise serving profiles.
@@ -349,6 +350,64 @@ describe("GPU profile — private authenticated serving", () => {
     // A directory alone is not weights — an interrupted copy leaves one behind.
     expect(script).toContain("safetensors");
   });
+});
+
+describe("the preflight and the start-up gate agree on what is required", () => {
+  /**
+   * This is the recurring failure on this profile, not a one-off: the gate
+   * demands a variable, the preflight does not check it, and the tool whose
+   * whole purpose is to catch that beforehand reports READY. It has now
+   * happened for the SHA casing rule and for RECON_MODELFILE_SHA256.
+   *
+   * So rather than test another instance, derive the contract: every
+   * `$${VAR:?...}` marker in model-init is a hard requirement, and preflight
+   * must produce an error when it is missing.
+   */
+  const cpu = parse(readOnPrem("docker-compose.cpu.yml")) as ComposeFile;
+  const script = String(cpu.services["model-init"].command);
+  const required = [...script.matchAll(/\$\$\{([A-Z0-9_]+):\?/g)].map((m) => m[1]);
+
+  function validImportEnv(): Record<string, string> {
+    return {
+      JWT_SECRET: "a".repeat(64),
+      MYSQL_ROOT_PASSWORD: "Db-Password-12345",
+      MINIO_ROOT_PASSWORD: "Root-Password-12345",
+      MINIO_APP_SECRET_KEY: "App-Password-12345",
+      MYSQL_IMAGE: `mysql@sha256:${"1".repeat(64)}`,
+      MINIO_IMAGE: `minio/minio@sha256:${"2".repeat(64)}`,
+      MINIO_MC_IMAGE: `minio/mc@sha256:${"3".repeat(64)}`,
+      OLLAMA_IMAGE: `ollama/ollama@sha256:${"4".repeat(64)}`,
+      NGINX_IMAGE: `nginx@sha256:${"5".repeat(64)}`,
+      OLLAMA_MODEL_MODE: "import",
+      RECON_MODEL: "reconcileai",
+      RECON_MODEL_SHA256: "f".repeat(64),
+      RECON_MODELFILE_SHA256: "e".repeat(64),
+      APP_BIND_ADDRESS: "127.0.0.1",
+    };
+  }
+
+  it("should find the requirements the import gate actually enforces", () => {
+    // Guards against the sweep below going vacuous if the markers are renamed.
+    expect(required).toContain("RECON_MODEL_SHA256");
+    expect(required).toContain("RECON_MODELFILE_SHA256");
+  });
+
+  it("should start from a configuration preflight certifies", () => {
+    expect(preflight("cpu", validImportEnv()).filter((f) => f.severity === "error")).toEqual([]);
+  });
+
+  it.each(required)(
+    "should reject a config missing %s, which model-init requires",
+    (variable: string) => {
+      const env = { ...validImportEnv() };
+      delete env[variable];
+      const errors = preflight("cpu", env).filter((f) => f.severity === "error");
+      expect(
+        errors.map((f) => f.variable),
+        `model-init demands ${variable} but preflight certified a config without it`,
+      ).toContain(variable);
+    },
+  );
 });
 
 describe("model packaging", () => {

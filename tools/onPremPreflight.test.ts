@@ -20,6 +20,7 @@ function validCpuEnv(): Record<string, string> {
     OLLAMA_MODEL_MODE: "import",
     RECON_MODEL: "reconcileai",
     RECON_MODEL_SHA256: "f".repeat(64),
+    RECON_MODELFILE_SHA256: "e".repeat(64),
     APP_BIND_ADDRESS: "127.0.0.1",
   };
 }
@@ -29,6 +30,7 @@ function validGpuEnv(): Record<string, string> {
   delete env.OLLAMA_IMAGE;
   delete env.OLLAMA_MODEL_MODE;
   delete env.RECON_MODEL_SHA256;
+  delete env.RECON_MODELFILE_SHA256;
   return {
     ...env,
     VLLM_API_KEY: "vllm-Deployment-Specific-Key",
@@ -137,9 +139,24 @@ describe("when the CPU model bootstrap is not release-controlled", () => {
     expect(errorsFor("cpu", env)).toContain("RECON_MODEL_SHA256");
   });
 
-  it("should reject a digest that is not 64 hex characters", () => {
-    const env = { ...validCpuEnv(), RECON_MODEL_SHA256: "not-a-digest" };
-    expect(errorsFor("cpu", env)).toContain("RECON_MODEL_SHA256");
+  it.each(["RECON_MODEL_SHA256", "RECON_MODELFILE_SHA256"] as const)(
+    "should hold %s to the same rules",
+    (variable) => {
+      // model-init verifies BOTH the GGUF and the Modelfile, but preflight
+      // checked only the GGUF — so a deployment that left the Modelfile digest
+      // at its template value was reported READY and then aborted at start-up.
+      // The Modelfile is not incidental: it carries the FROM line, the system
+      // prompt and the decoding parameters.
+      expect(errorsFor("cpu", { ...validCpuEnv(), [variable]: "" })).toContain(variable);
+      expect(errorsFor("cpu", { ...validCpuEnv(), [variable]: "replace-with-the-digest" })).toContain(variable);
+      expect(errorsFor("cpu", { ...validCpuEnv(), [variable]: "not-a-digest" })).toContain(variable);
+      // Uppercase fails the shell comparison in model-init, so it must fail here.
+      expect(errorsFor("cpu", { ...validCpuEnv(), [variable]: "A".repeat(64) })).toContain(variable);
+    },
+  );
+
+  it("should certify a config only when BOTH digests are real", () => {
+    expect(errorsFor("cpu", validCpuEnv())).toEqual([]);
   });
 });
 
