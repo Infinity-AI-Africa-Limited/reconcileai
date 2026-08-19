@@ -1316,3 +1316,5 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Resolve the remaining ReconcileAI Dev Store connector activation/visibility gap: the correct retail Settlement Monitor context is live but currently reports no active connected SHOPLINE store.
 - [ ] Fix Settlement Monitor server-side organisation scoping: the retail portal UI persists `SL_RECONCILEAI_DEV`, but `syncStatus` derives `orgId` from the underlying Infinity AI Staff user and returns staff-scoped connector data.
 - [x] Implement and validate secure server-side retail portal scoping for SHOPLINE reads and manual sync: explicit organisation overrides use the existing super-admin-only `resolveOrgScope` guard; TypeScript and 1,707 full-suite tests pass.
+- [ ] Verify the deployed server-side portal-scope repair returns the active `reconcileai-dev` store and its actual sync state inside the `SL_RECONCILEAI_DEV` Settlement Monitor.
+- [ ] Submit the unmerged server-side portal-scoping commit for review: PR #89 merged before this follow-on commit reached the review branch, so authoritative main does not yet contain the actual data-scope repair.
