@@ -1322,7 +1322,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [ ] Complete the remaining live ReconcileAI Dev Store evidence: observe `orders/paid` for paid order 1003, confirm its sync and Settlement Monitor outcome, historical backfill, subscription lifecycle topic delivery, and webhook duplicate/recovery handling. The authorised reconnect/OAuth callback and paid source event are now evidenced.
 - [ ] Verify the new super-admin-only post-OAuth retail portal hand-off reaches `SL_RECONCILEAI_DEV` and displays its connected store in Settlement Monitor rather than the Infinity AI Staff organisation.
 - [ ] Establish a production merchant-identity hand-off after SHOPLINE OAuth; current onboarding creates an invite-style tenant admin without proving the installing merchant can authenticate as that user. Do not treat super-admin portal context as a merchant-login substitute.
-- [ ] Produce and upload the public App Store logo and real developer-store screenshots; retain the Redirected loading mode and accurate non-SHOPLINE-Payments settlement-file limitation in the listing. The reviewer test guide is prepared in the submission package.
+- [x] Produce and upload the public App Store logo and real developer-store screenshots; retain the Redirected loading mode and accurate non-SHOPLINE-Payments settlement-file limitation in the listing. The reviewer test guide is prepared in the submission package.
 - [x] Revise the Shopline listing copy and create reviewer test instructions so only verified Tier 1 capabilities are claimed, including the settlement-file path for merchants without SHOPLINE Payments data.
 - [ ] Execute all P0 Shopline approval gates: complete Portal contact/GDPR configuration, create reviewer assets and guide, verify subscription lifecycle delivery, and capture full ReconcileAI Dev Store install-to-settlement evidence.
 - [ ] Execute all P1 Shopline readiness gates: controlled 90-day backfill validation, refund/cancellation and pagination tests, rate-budget load test, access-token refresh evidence, privacy/evidence retention review, and support escalation runbook.
@@ -1331,7 +1331,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Create a reviewable ReconcileAI logo suite: combined wordmark and icon, standalone logo mark, and square App Store icon.
 - [x] Obtain Richard’s explicit approval of the square App Store icon before uploading or publishing it to the SHOPLINE listing.
 - [x] Adapt Richard’s supplied Infinity AI circular mark into a 120×120 ReconcileAI App Store icon for review; do not upload before approval.
-- [ ] Capture and upload authentic 1920×1080 ReconcileAI Dev Store screenshots for Settlement Monitor, Dashboard, and SHOPLINE Connect; do not use generated or mocked screens.
+- [x] Capture and upload authentic 1920×1080 ReconcileAI Dev Store screenshots for Settlement Monitor, Sync Status, and SHOPLINE Connection; do not use generated or mocked screens.
 - [x] Verify the configured Tier 1 App Store 7-day trial and five paid subscription plans match the approved merchant-facing price and billing terms.
 - [ ] Complete the App Store Product Features, demo-store URL, contact name, and reviewed About/Privacy/FAQ content in the Partner Portal.
 - [ ] Capture live operational evidence for paid-order reconciliation, monitoring/alert response, incident rollback, and release/change control after the reviewed retail build is deployed.
@@ -1369,3 +1369,15 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Execute a non-destructive P2 fail-closed incident drill: the unsigned synthetic GDPR request to production was rejected with HTTP 401 before any data-rights processing occurred.
 - [x] Define and measure the ReconcileAI Dev Store controlled match-rate baseline: 4 matched legs of 6 total legs equals 66.7%, comprising two matched order/remittance pairs and two outstanding order-only legs.
 - [x] Run a transparent deterministic clean-data benchmark through the real engine: 197 exact pairs plus six intentional exception legs produced 394 matched legs of 400 total, or 98.5%; retain its stated synthetic-only conditions in any marketing use.
+- [x] Validate the uploaded live-production Settlement Monitor, Sync Status, and SHOPLINE Connection captures against SHOPLINE’s 1920×1080 screenshot requirement and prepare compliant non-generated submission assets.
+- [x] Replace the initial non-compliant watermark-bearing capture set with clean 16:9 authentic browser-native captures and export exact 1920×1080 submission assets without cropping, padding, or content alteration.
+- [x] Validate the replacement screenshot set’s exact dimensions and visual integrity: all final exports are 1920×1080 PNGs and watermark-free.
+- [x] Capture exact 1920×1080 watermark-free production screenshots on Richard’s behalf using the uploaded clean browser-native source captures and proportional, content-preserving 16:9 export.
+- [x] Proportionally resize the uploaded authentic 2048×1152 browser-native captures to exact 1920×1080 App Store assets and validate each exported PNG.
+- [x] Produce clean, authentic App Store screenshot assets for Settlement Monitor, Sync Status, and SHOPLINE Connection; each final export is 1920×1080 with no visual-content alteration.
+- [ ] Activate a controlled no-charge developer-store subscription test and verify at least one signed SHOPLINE lifecycle delivery plus the resulting `sl_connector_subscriptions` state; do not submit or charge a merchant plan.
+- [ ] Activate the user-approved 7-day ReconcileAI Dev Store trial, capture signed creation/activation evidence, and cancel it before any paid renewal.
+- [ ] Obtain a SHOPLINE-supported billing-test environment or eligible controlled store for no-charge subscription lifecycle evidence; the current development-store Test App flow supports OAuth/access testing only and exposes no trial-plan activation.
+- [x] Prepare a concise SHOPLINE support request for the supported no-charge app-subscription lifecycle test path, including trial creation, activation, cancellation, and webhook verification.
+- [x] Retain the unavailable live paid/expiration subscription lifecycle proof as an explicit pre-submission caveat until SHOPLINE provides a supported controlled billing-test route.
+- [x] Produce the final verified SHOPLINE submission-readiness assessment, separating completed developer-store evidence from the subscription-lifecycle caveat and final owner decisions.
