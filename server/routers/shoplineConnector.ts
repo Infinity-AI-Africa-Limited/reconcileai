@@ -52,6 +52,7 @@ import { ingestWebhook } from "../connectors/shopline/webhookHandler";
 import { runSettlementSync } from "../connectors/shopline/settlementSync";
 import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
 import { ENV } from "../_core/env";
+import { resolveOrgScope } from "../_core/tenancy";
 import {
   SHOPLINE_WEBHOOK_TOPICS,
   SHOPLINE_REQUIRED_SCOPES,
@@ -90,13 +91,7 @@ function resolveOrgId(
   user: { role?: string | null; organizationId?: number | null },
   override?: number,
 ): number {
-  if (override !== undefined) {
-    if (user.role !== "super_admin") {
-      throw new TRPCError({ code: "FORBIDDEN", message: "Only super admins can act on another organization" });
-    }
-    return override;
-  }
-  return requireOrgId(user);
+  return resolveOrgScope(user, override);
 }
 
 // ─── Router ────────────────────────────────────────────────────────────────
@@ -547,11 +542,13 @@ export const shoplineConnectorRouter = router({
    * Derived from real reconciliation state in the transactions table (scoped
    * to this org's SHOPLINE channels), not from webhook-delivery counts.
    */
-  syncStatus: protectedProcedure.query(async ({ ctx }) => {
+  syncStatus: protectedProcedure
+    .input(z.object({ organizationId: z.number().int().positive().optional() }))
+    .query(async ({ ctx, input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-    const orgId = requireOrgId(ctx.user);
+    const orgId = resolveOrgId(ctx.user, input.organizationId);
 
     // This org's SHOPLINE channels (retail_commerce orgs are SHOPLINE-only, but
     // filter by channel type so a mixed org stays correct).
@@ -684,12 +681,12 @@ export const shoplineConnectorRouter = router({
    * Recent webhook events for the sync status page.
    */
   recentWebhookEvents: protectedProcedure
-    .input(z.object({ limit: z.number().min(1).max(200).default(50) }))
+    .input(z.object({ limit: z.number().min(1).max(200).default(50), organizationId: z.number().int().positive().optional() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       const events = await db
         .select({
@@ -724,12 +721,12 @@ export const shoplineConnectorRouter = router({
    * Trigger a manual sync for a specific store (any authenticated user).
    */
   triggerManualSync: protectedProcedure
-    .input(z.object({ storeId: z.number() }))
+    .input(z.object({ storeId: z.number(), organizationId: z.number().int().positive().optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      const orgId = requireOrgId(ctx.user);
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       // Verify store belongs to org
       const stores = await db
