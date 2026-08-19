@@ -12,6 +12,7 @@
  */
 import { useState, useRef } from "react";
 import { trpc } from "@/lib/trpc";
+import { usePortalContext } from "@/contexts/PortalContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -58,6 +59,7 @@ async function readFile(file: File): Promise<{ content: string; encoding: "utf8"
 }
 
 export function SettlementFileImport({ onImported }: { onImported?: () => void }) {
+  const { viewAsOrg } = usePortalContext();
   const [file, setFile] = useState<File | null>(null);
   const [sourceLabel, setSourceLabel] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -77,6 +79,7 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
       const { content, encoding } = await readFile(file);
       const res = await importFile.mutateAsync({
         fileName: file.name,
+        organizationId: viewAsOrg?.id,
         content,
         contentEncoding: encoding,
         sourceLabel: sourceLabel.trim() || file.name,

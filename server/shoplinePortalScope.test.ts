@@ -67,6 +67,17 @@ const SCOPED_CALLS: ReadonlyArray<readonly [string, (c: Caller, orgId: number) =
   ["getStore", (c, orgId) => c.shoplineConnector.getStore({ storeId: 1, organizationId: orgId })],
   ["planStatus", (c, orgId) => c.shoplineConnector.planStatus({ organizationId: orgId })],
   [
+    "importSettlementFile",
+    (c, orgId) =>
+      c.shoplineConnector.importSettlementFile({
+        organizationId: orgId,
+        fileName: "scope-test.csv",
+        content: "order_id,amount\norder-1,1.00",
+        sourceLabel: "scope test",
+        dryRun: true,
+      }),
+  ],
+  [
     "exceptionIntelligence",
     (c, orgId) => c.shoplineConnector.exceptionIntelligence({ category: "retail_chargeback", organizationId: orgId }),
   ],

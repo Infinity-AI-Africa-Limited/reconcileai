@@ -812,6 +812,8 @@ export const shoplineConnectorRouter = router({
     .input(
       z.object({
         fileName: z.string().min(1).max(255),
+        /** Super-admin portal context only; validated by resolveOrgId below. */
+        organizationId: z.number().int().positive().optional(),
         /** Base64 for spreadsheets, raw text for CSV. */
         content: z.string().min(1).max(14_000_000), // ~10MB decoded
         contentEncoding: z.enum(["utf8", "base64"]).default("utf8"),
@@ -826,8 +828,8 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
-
+      // Reject a tenant-supplied portal override before any database access.
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
