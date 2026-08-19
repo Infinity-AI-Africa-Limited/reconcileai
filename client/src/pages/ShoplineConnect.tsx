@@ -19,6 +19,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, XCircle, ArrowRight, RefreshCw, Shield, Zap } from "lucide-react";
 import { landingPathFor } from "@/lib/routeAccess";
+import {
+  canEnterPortal,
+  portalHandoffMessage,
+  shoplinePortalHandoff,
+} from "@/lib/shoplinePortalHandoff";
 
 export function ShoplineWelcome() {
   const searchString = useSearch();
@@ -29,12 +34,26 @@ export function ShoplineWelcome() {
   const { user } = useAuth();
   const { enterPortal } = usePortalContext();
   const isSuperAdmin = user?.role === "super_admin";
-  const { data: organizations } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
+  const {
+    data: organizations,
+    isLoading: isLoadingOrganizations,
+    isError: isOrganizationsError,
+  } = trpc.superAdmin.allOrganizations.useQuery(undefined, {
     enabled: isSuperAdmin && Boolean(orgCode),
   });
   const retailOrg = organizations?.find(
     (organization) => organization.code === orgCode && organization.segment === "retail_commerce",
   );
+
+  // The rule lives in lib/ so its four outcomes are testable without rendering.
+  const handoff = shoplinePortalHandoff({
+    isSuperAdmin,
+    orgCode,
+    isLoading: isLoadingOrganizations,
+    isError: isOrganizationsError,
+    retailOrg,
+  });
+  const handoffMessage = portalHandoffMessage(handoff);
 
   /**
    * This is intentionally restricted to an authorised Infinity AI super-admin
@@ -43,7 +62,13 @@ export function ShoplineWelcome() {
    * Production merchant identity hand-off remains a separate P0 release gate.
    */
   const enterRetailPortal = (destination: string) => {
-    if (isSuperAdmin && retailOrg) {
+    // A support-session redirect carries an organisation code but not a merchant
+    // identity. Refuse navigation until the existing, authorised retail record has
+    // been resolved and synchronously persisted to sessionStorage by PortalContext.
+    // Sending staff to the destination without this context exposes the staff view
+    // and makes an otherwise successful OAuth reconnect look like a failed store.
+    if (!canEnterPortal(handoff)) return;
+    if (handoff.status === "ready" && retailOrg) {
       enterPortal({
         id: retailOrg.id,
         name: retailOrg.name,
@@ -55,6 +80,8 @@ export function ShoplineWelcome() {
     }
     navigate(destination);
   };
+
+  const isPortalActionDisabled = !canEnterPortal(handoff);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
@@ -127,17 +154,28 @@ export function ShoplineWelcome() {
             <Button
               className="w-full"
               onClick={() => enterRetailPortal(landingPathFor("retail_commerce"))}
+              disabled={isPortalActionDisabled}
             >
-              Go to Settlement Monitor
+              {handoff.status === "resolving" ? "Preparing Settlement Monitor…" : "Go to Settlement Monitor"}
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
             <Button
               variant="outline"
               className="w-full"
               onClick={() => enterRetailPortal("/shopline/sync-status")}
+              disabled={isPortalActionDisabled}
             >
               View Sync Status
             </Button>
+            {/* Rendered from derived state, not from a click. The previous version
+                set this in the click handler while the same condition disabled
+                the button, so it could never appear — the screen failed closed
+                in silence. Ternary with an explicit null per CLAUDE.md §16. */}
+            {handoffMessage !== null ? (
+              <p className="text-sm text-destructive" role="alert">
+                {handoffMessage}
+              </p>
+            ) : null}
           </div>
         </CardContent>
       </Card>
