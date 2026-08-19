@@ -369,41 +369,44 @@ Package handed to the institution:
 reconcileai-deployment-v1.0/
 ├── reconcileai-app-v1.0.tar.gz     # load directly — no build at the bank
 ├── docker-compose.cpu.yml
-├── .env.onprem.example
+├── .env.onprem.cpu.example
 ├── scripts/bootstrap-admin.mjs
-├── ollama/Modelfile
-├── models/reconcileai-3b-q4.gguf   # the trained model (~2 GB)
+├── models/Modelfile                # sits beside the GGUF it references
+├── models/reconcileai-recon-3b-q4_k_m.gguf   # the trained model (~2 GB)
+├── models/SHA256SUMS               # transfer integrity for the GGUF
 ├── INSTALL.md                      # the C3 sequence
 └── COMPLIANCE.md                   # section 6, tailored to the bank
 \`\`\`
 
+The approved SHA-256 digest is **not** in the package. It travels separately, on
+a different path, and goes into \`RECON_MODEL_SHA256\`.
+
 ### C2 — Import the trained model offline
 
-For the trained model you do not pull from a registry — that needs internet. Mount the model file and build it from the local definition instead:
+The trained model is not pulled from a registry — that needs internet. \`model-init\`
+in \`docker-compose.cpu.yml\` already implements this: it mounts \`./models\` read-only,
+verifies the GGUF against both the shipped \`SHA256SUMS\` and the out-of-band
+\`RECON_MODEL_SHA256\`, and only then runs \`ollama create\`.
 
-\`\`\`yaml
-  ollama:
-    volumes:
-      - ollama-models:/root/.ollama
-      - ./ollama/Modelfile:/models/Modelfile:ro
-      - ./models:/models:ro
+Set the import mode in \`.env.onprem\`:
 
-  model-init:
-    image: ollama/ollama:latest
-    depends_on: { ollama: { condition: service_healthy } }
-    environment: { OLLAMA_HOST: "http://ollama:11434" }
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["ollama create reconcileai -f /models/Modelfile"]
-    restart: "no"
+\`\`\`bash
+OLLAMA_MODEL_MODE=import
+RECON_MODEL=reconcileai
+RECON_MODEL_FILE=reconcileai-recon-3b-q4_k_m.gguf
+RECON_MODEL_SHA256=<digest from the signed release record>
 \`\`\`
 
-Set \`RECON_MODEL=reconcileai\` so the application and the model server agree on the tag. The model definition already carries the ReconcileAI system prompt and its temperature and context settings.
+Do **not** run \`ollama create\` by hand. Doing so bypasses both integrity checks,
+which is the entire point of shipping the model this way. If the digest does not
+match, \`model-init\` exits non-zero and the application never starts.
 
 ### C3 — Install at the institution (no internet required)
 
 \`\`\`bash
 docker load < reconcileai-app-v1.0.tar.gz
-cp .env.onprem.example .env.onprem     # set the passwords, model tag, and app URL
+cp .env.onprem.cpu.example .env.onprem  # set the passwords, image digests, model digest, app URL
+pnpm onprem:preflight -- --profile cpu --env-file .env.onprem   # refuses placeholders and floating tags
 
 docker compose -f docker-compose.cpu.yml --env-file .env.onprem up -d
 docker compose -f docker-compose.cpu.yml --env-file .env.onprem exec app npx drizzle-kit migrate
