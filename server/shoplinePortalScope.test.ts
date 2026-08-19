@@ -67,6 +67,17 @@ const SCOPED_CALLS: ReadonlyArray<readonly [string, (c: Caller, orgId: number) =
   ["getStore", (c, orgId) => c.shoplineConnector.getStore({ storeId: 1, organizationId: orgId })],
   ["planStatus", (c, orgId) => c.shoplineConnector.planStatus({ organizationId: orgId })],
   [
+    "importSettlementFile",
+    (c, orgId) =>
+      c.shoplineConnector.importSettlementFile({
+        organizationId: orgId,
+        fileName: "scope-test.csv",
+        content: "order_id,amount\norder-1,1.00",
+        sourceLabel: "scope test",
+        dryRun: true,
+      }),
+  ],
+  [
     "exceptionIntelligence",
     (c, orgId) => c.shoplineConnector.exceptionIntelligence({ category: "retail_chargeback", organizationId: orgId }),
   ],
@@ -183,6 +194,47 @@ describe("when Infinity AI staff name another organisation", () => {
     const code = await codeOf(() => run(callerAs("super_admin"), OTHER_ORG));
     expect(code).not.toBe("FORBIDDEN");
     expect(code).not.toBe("UNAUTHORIZED");
+  });
+});
+
+describe("when an operator writes into a tenant from its portal", () => {
+  it("should audit a cross-tenant settlement import", async () => {
+    // Portal scope is what makes this necessary. Before it, an import could only
+    // land in the caller's OWN organisation, so the rows identified their
+    // author; a super admin can now create financial transactions in a
+    // merchant's ledger and nothing on those rows says who did.
+    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
+    const importer = router.slice(router.indexOf("importSettlementFile:"));
+    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+
+    expect(commitBlock).toContain('eventType: "tenant_data_imported"');
+    // On the committing path only — a dry run writes nothing to audit — and
+    // only when the operator named a tenant other than their own, so routine
+    // merchant self-service does not fill the operator log.
+    expect(commitBlock).toContain("input.organizationId !== undefined && orgId !== ctx.user.organizationId");
+    const auditAt = commitBlock.indexOf("tenant_data_imported");
+    const dryRunReturn = commitBlock.indexOf("dryRun: true");
+    expect(auditAt, "the audit must sit on the commit path, after the dry-run return").toBeGreaterThan(dryRunReturn);
+  });
+
+  it("should not let a failed audit report a committed import as failed", () => {
+    // By the time the audit runs, the settlement rows and reconciliation
+    // results are already committed and none of it is transactional. An audit
+    // insert that threw would reach the enclosing catch, mark the upload batch
+    // `failed` and return an error for work that succeeded — the merchant is
+    // told nothing imported while their ledger says otherwise, and retries.
+    //
+    // An unattributed write is recoverable from the log line; a ledger that
+    // disagrees with its own status is not.
+    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
+    const importer = router.slice(router.indexOf("importSettlementFile:"));
+    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+
+    const auditAt = commitBlock.indexOf("logPlatformEvent({");
+    const guardAt = commitBlock.lastIndexOf("try {", auditAt);
+    const rescueAt = commitBlock.indexOf("AUDIT WRITE FAILED", auditAt);
+    expect(guardAt, "the audit call must be inside its own try").toBeGreaterThan(-1);
+    expect(rescueAt, "and its catch must say so loudly").toBeGreaterThan(auditAt);
   });
 });
 

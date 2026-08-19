@@ -81,6 +81,74 @@ SHOPLINE procedures and resolves it through the existing `resolveOrgScope` guard
 That guard rejects overrides for every non-super-admin user; it does not trust the
 browser portal label as an authorisation decision.
 
+## Deployed portal-scope verification — 19 August 2026
+
+After the follow-on portal-scoping release was merged and deployed, the OAuth welcome
+route was reopened for `SL_RECONCILEAI_DEV`, then **Go to Settlement Monitor** was
+used to establish the portal context. The production Settlement Monitor displayed
+the expected Retail Commerce portal banner and an active `reconcileai-dev` store in
+USD, with a recent successful sync timestamp. This confirms that the server-side
+SHOPLINE reads now honour the authorised super-admin portal organisation rather than
+the underlying Infinity AI Staff organisation.
+
+Displayed settlement figures remain product-preview data until they are tied to the
+controlled paid-order evidence below; this verification establishes tenant scope and
+connector visibility only, not a merchant financial-performance claim.
+
+The tenant-scoped **Sync Status** page was also verified on 19 August 2026. It showed
+`reconcileai-dev` as active, fourteen processed webhook deliveries, zero pending
+deliveries, and zero failed deliveries. The latest delivery history included
+`orders/create`, `order_transactions/create`, `orders/updated`, and `orders/paid`,
+all processed for the developer store. This establishes delivery acceptance and
+processing health; the separate order/payment reconciliation evidence is documented
+from the redacted transaction ledger.
+
+## Controlled paid-order source event — 19 August 2026
+
+A single developer-store cash-on-delivery order, **#1004**, was created at 11:21
+GMT+1 using a synthetic ReconcileAI test contact and delivery record. No real payment
+method, customer data, or merchant order was used. The order total was the existing
+developer-store test product price plus configured test shipping. The next controlled
+step is to mark this developer-store order paid through the authorised admin workflow,
+then record only the order reference, webhook topic/status, sync result, and
+reconciliation outcome.
+
+Order #1004 was then manually marked **Paid** through the developer-store Cash on
+Delivery workflow. The order administration record showed the paid status, full test
+amount as customer payment and total paid, and a platform event noting that the
+payment request was processed. This is the controlled paid-event source; no real
+payment was taken. The remaining P0 proof is the resulting SHOPLINE delivery,
+tenant-scoped sync, and ReconcileAI reconciliation record.
+
+The tenant-scoped Sync Status view then confirmed the complete delivery sequence for
+the controlled paid event: `order_transactions/create` at 11:21, `orders/create` and
+`orders/updated` at 11:22, and `orders/paid` at 11:25 on 19 August 2026. All four
+were processed for `reconcileai-dev`. The page showed eighteen processed events,
+zero pending, zero failed, and a recent successful store sync. This proves delivery,
+signature acceptance, store resolution, processing, and the scoped operational
+dashboard path; the next check ties the resulting order and payment rows to the
+Settlement Monitor reconciliation result.
+
+The redacted reconciliation ledger was queried for the controlled #1004 order
+reference. It contains one `sl_orders_reconcileai-dev` row, status `unmatched`, at
+the expected test amount, but no corresponding `sl_payments_reconcileai-dev` row.
+This is the verified Tier 1 boundary for a Cash on Delivery store rather than an
+ingestion defect: SHOPLINE’s optional Payments endpoints return no merchant payment
+feed for stores not on SHOPLINE Payments, and Cash on Delivery does not create a
+gateway-captured payment record. The live evidence therefore proves the webhook and
+order-ingestion path. The correct Tier 1 completion path is a controlled
+settlement-file import, which represents the courier or payment-provider remittance
+leg and can then reconcile against the ingested order.
+
+The approved one-row synthetic remittance CSV was uploaded in the persisted
+`SL_RECONCILEAI_DEV` Settlement Monitor portal and passed browser-side file handling.
+Column detection then returned **“No active SHOPLINE store for this organisation.”**
+The active store is visible to the same portal in Settlement Monitor and Sync Status,
+so this is a separate server-side scope gap in the settlement-file import procedure.
+No settlement row was imported and no reconciliation state was changed. The import
+procedure must apply the same existing super-admin-only organisation resolution used
+by the tenant-scoped SHOPLINE reads before this controlled test is retried.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |

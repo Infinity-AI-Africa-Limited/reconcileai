@@ -53,6 +53,7 @@ import { runSettlementSync } from "../connectors/shopline/settlementSync";
 import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
 import { ENV } from "../_core/env";
 import { resolveOrgScope } from "../_core/tenancy";
+import { logPlatformEvent } from "../db";
 import {
   SHOPLINE_WEBHOOK_TOPICS,
   SHOPLINE_REQUIRED_SCOPES,
@@ -812,6 +813,8 @@ export const shoplineConnectorRouter = router({
     .input(
       z.object({
         fileName: z.string().min(1).max(255),
+        /** Super-admin portal context only; validated by resolveOrgId below. */
+        organizationId: z.number().int().positive().optional(),
         /** Base64 for spreadsheets, raw text for CSV. */
         content: z.string().min(1).max(14_000_000), // ~10MB decoded
         contentEncoding: z.enum(["utf8", "base64"]).default("utf8"),
@@ -826,8 +829,8 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const orgId = requireOrgId(ctx.user);
-
+      // Reject a tenant-supplied portal override before any database access.
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -922,6 +925,55 @@ export const shoplineConnectorRouter = router({
           );
           matchedCount = result.matchedCount;
           exceptionCount = result.exceptionCount;
+        }
+
+        // Record the operator who wrote into this tenant.
+        //
+        // Portal scope is what makes this necessary: before it, an import could
+        // only land in the caller's OWN organisation, so the rows identified
+        // their author. A super admin can now create financial transactions in
+        // a merchant's ledger, and nothing on those rows says who did.
+        //
+        // Only on the committing path — a dry run writes nothing — and only for
+        // a cross-tenant write, so a merchant importing their own settlements
+        // does not fill the operator log with routine activity.
+        if (input.organizationId !== undefined && orgId !== ctx.user.organizationId) {
+          // The audit must not be able to fail the import.
+          //
+          // By this line the settlement rows and the reconciliation results are
+          // already committed, and none of it is in a transaction. Letting a
+          // failed audit insert reach the enclosing catch would mark the upload
+          // batch `failed` and return an error for work that actually
+          // succeeded — the merchant is told nothing imported while their
+          // ledger says otherwise, and the obvious response is to retry.
+          //
+          // So the failure is made loud rather than fatal: an unattributed
+          // write is recoverable from this log line, a ledger that disagrees
+          // with its own status is not.
+          try {
+            await logPlatformEvent({
+              actorId: ctx.user.id,
+              actorName: ctx.user.name ?? undefined,
+              eventType: "tenant_data_imported",
+              targetType: "organization",
+              targetId: orgId,
+              targetName: store.storeHandle,
+              newValue: JSON.stringify({
+                fileName: input.fileName,
+                sourceLabel: input.sourceLabel,
+                imported: fresh.length,
+                duplicates,
+                failed: failures.length,
+              }),
+            });
+          } catch (auditErr) {
+            console.error(
+              "[shopline-settlement] AUDIT WRITE FAILED for a committed cross-tenant import — " +
+                `actor=${ctx.user.id} targetOrg=${orgId} store=${store.storeHandle} ` +
+                `file=${input.fileName} imported=${fresh.length} duplicates=${duplicates} failed=${failures.length}`,
+              auditErr,
+            );
+          }
         }
 
         return {
