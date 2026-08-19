@@ -149,6 +149,106 @@ No settlement row was imported and no reconciliation state was changed. The impo
 procedure must apply the same existing super-admin-only organisation resolution used
 by the tenant-scoped SHOPLINE reads before this controlled test is retried.
 
+## Deployed settlement-file import — 19 August 2026
+
+Following deployment of the settlement-import scope repair, the same persisted
+`SL_RECONCILEAI_DEV` portal successfully accepted the approved one-row synthetic
+remittance CSV. Column detection identified `order_id`, `transaction_id`,
+`settlement_amount`, `currency`, `settlement_date`, `fee`, and `description`, then
+enabled the one-row import. After import, Settlement Monitor returned to the retail
+overview with changed aggregate cards, confirming that the tenant-scoped import
+completed. The exact order #1004 reconciliation result must be verified from the
+redacted ledger before the P0 match claim is recorded.
+
+The post-import redacted ledger query confirmed the complete two-leg match for the
+controlled order. The original SHOPLINE order row and imported remittance row each
+hold the same synthetic test amount in USD, both are `matched`, and their reciprocal
+`matchId` values link them to one another. The remittance uses the synthetic
+`COD-TEST-1004-20260819` reference. This completes the Tier 1 order-to-remittance
+reconciliation proof for Cash on Delivery without claiming a native SHOPLINE Payments
+gateway record or using merchant/customer payment data.
+
+Before the controlled recovery run, the tenant-scoped Sync Status page showed
+`reconcileai-dev` active, 18 processed webhook deliveries, zero pending, and zero
+failed. Its recent-event ledger retained the controlled #1004 event sequence,
+including `order_transactions/create`, `orders/create`, `orders/updated`, and
+`orders/paid`, all marked processed. This is the baseline for the bounded manual-sync
+idempotency check; the recovery must not create a duplicate order, remittance,
+exception, or webhook side effect.
+
+The same tenant-scoped Sync Status row exposed the authorised **Sync Now** control
+for the active developer store. The controlled recovery will run only against that
+store and will be compared with the redacted #1004 match pair and the 18-delivery
+baseline above.
+
+Richard executed the bounded recovery on 19 August 2026. The live confirmation
+reported **“Sync triggered for reconcileai-dev — 1 orders, 0 payments processed.”**
+The redacted post-recovery ledger retained exactly two #1004 rows: the source order
+and the synthetic remittance, each with a duplicate count of one, `matched` status,
+and reciprocal match IDs. No exception rows reference either controlled transaction.
+This verifies that the manual recovery read the store safely and preserved the
+existing match without duplicate transaction, remittance, exception, or webhook
+side effects.
+
+## Fail-closed incident drill — 19 August 2026
+
+A deliberately unsigned, synthetic customer-data request was sent to the configured
+production SHOPLINE GDPR endpoint. It returned **HTTP 401**. This confirms the
+production boundary rejects unsigned webhook/GDPR traffic before it can reach the
+customer-data processing path. The request used only the `reconcileai-dev` store
+identifier and a synthetic drill identifier; it contained no customer, payment, or
+bank data. No accepted GDPR audit row, redaction, or store action was created.
+
+## Screenshot validation — 19 August 2026
+
+Richard supplied four authentic production captures covering Settlement Monitor, Sync
+Status summary, Sync Status store/webhook detail, and SHOPLINE Connection. Their
+content supports the reviewer narrative: the ReconcileAI Dev Store retail portal is
+active, the controlled `orders/paid` delivery is processed, and the store is
+connected. They are not yet valid App Store upload assets because they measure
+approximately **1896–1897 × 742–745 pixels**, not 1920×1080, and each includes an
+operating-system activation watermark. They must be recaptured at 1920×1080 without
+the watermark rather than stretched, padded, or semantically altered.
+
+Richard then supplied clean browser-native 2048×1152 (16:9) captures for Settlement
+Monitor, Sync Status, and SHOPLINE Connection. Each was proportionally downscaled
+with a Lanczos filter to an exact 1920×1080 PNG without cropping, padding, text
+editing, or content generation. The resulting validated App Store assets are:
+
+| Screenshot | Validated export |
+| --- | --- |
+| Settlement Monitor | `reconcileai-settlement-monitor-1920x1080.png` |
+| Sync Status | `reconcileai-sync-status-1920x1080.png` |
+| SHOPLINE Connection | `reconcileai-shopline-connection-1920x1080.png` |
+
+The clean captures supersede the earlier non-compliant watermark-bearing image set.
+
+On 19 August 2026, the three final 1920×1080 PNG assets were uploaded to the
+SHOPLINE **Product preview** section and the App Details listing returned **“Saved
+successfully.”** The listing now displays the three production preview thumbnails;
+no app version was created and no review submission was made as part of this save.
+
+## Subscription lifecycle evidence check — 19 August 2026
+
+The ReconcileAI Dev Store connector record was inspected without mutation. No
+`sl_connector_subscriptions` record exists for `reconcileai-dev`, and no persisted
+delivery exists for the configured app-subscription lifecycle topics. This does not
+disprove registration in the connector; it means the developer-store test has not
+yet activated a SHOPLINE-managed app subscription lifecycle. The required P0 proof
+remains a signed lifecycle delivery and resulting subscription-state row for the
+developer store, captured through a controlled test-plan activation rather than a
+merchant charge.
+
+The authorised Partner Portal **Test App in development store** screen was opened
+for ReconcileAI Dev Store on 19 August 2026. Its only available action is **Test
+App**, which invokes the access/OAuth test flow; it exposes no subscription-plan or
+trial activation control. The developer-store admin also labels this package as for
+app development and access verification only. Therefore a no-charge lifecycle trial
+cannot be activated through this development-store package. No subscription, charge,
+or billing state was created during this attempt. The lifecycle P0 proof requires a
+SHOPLINE-supported billing-test environment or a controlled, cancellable trial in an
+eligible non-development store.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |
