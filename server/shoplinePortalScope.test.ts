@@ -197,6 +197,27 @@ describe("when Infinity AI staff name another organisation", () => {
   });
 });
 
+describe("when an operator writes into a tenant from its portal", () => {
+  it("should audit a cross-tenant settlement import", async () => {
+    // Portal scope is what makes this necessary. Before it, an import could only
+    // land in the caller's OWN organisation, so the rows identified their
+    // author; a super admin can now create financial transactions in a
+    // merchant's ledger and nothing on those rows says who did.
+    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
+    const importer = router.slice(router.indexOf("importSettlementFile:"));
+    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+
+    expect(commitBlock).toContain('eventType: "tenant_data_imported"');
+    // On the committing path only — a dry run writes nothing to audit — and
+    // only when the operator named a tenant other than their own, so routine
+    // merchant self-service does not fill the operator log.
+    expect(commitBlock).toContain("input.organizationId !== undefined && orgId !== ctx.user.organizationId");
+    const auditAt = commitBlock.indexOf("tenant_data_imported");
+    const dryRunReturn = commitBlock.indexOf("dryRun: true");
+    expect(auditAt, "the audit must sit on the commit path, after the dry-run return").toBeGreaterThan(dryRunReturn);
+  });
+});
+
 describe("when no organisation is named", () => {
   it.each(SCOPED_CALLS)("should not refuse %s for an ordinary tenant user", async (_name, run) => {
     // Omitting the override is the normal path: the procedure falls back to the

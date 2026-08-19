@@ -1,0 +1,1 @@
+ALTER TABLE `platform_audit_logs` MODIFY COLUMN `eventType` enum('org_created','org_segment_updated','org_sso_updated','org_banking_model_updated','user_role_updated','user_promoted_super_admin','tenant_data_imported') NOT NULL;

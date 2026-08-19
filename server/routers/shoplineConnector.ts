@@ -53,6 +53,7 @@ import { runSettlementSync } from "../connectors/shopline/settlementSync";
 import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
 import { ENV } from "../_core/env";
 import { resolveOrgScope } from "../_core/tenancy";
+import { logPlatformEvent } from "../db";
 import {
   SHOPLINE_WEBHOOK_TOPICS,
   SHOPLINE_REQUIRED_SCOPES,
@@ -924,6 +925,34 @@ export const shoplineConnectorRouter = router({
           );
           matchedCount = result.matchedCount;
           exceptionCount = result.exceptionCount;
+        }
+
+        // Record the operator who wrote into this tenant.
+        //
+        // Portal scope is what makes this necessary: before it, an import could
+        // only land in the caller's OWN organisation, so the rows identified
+        // their author. A super admin can now create financial transactions in
+        // a merchant's ledger, and nothing on those rows says who did.
+        //
+        // Only on the committing path — a dry run writes nothing — and only for
+        // a cross-tenant write, so a merchant importing their own settlements
+        // does not fill the operator log with routine activity.
+        if (input.organizationId !== undefined && orgId !== ctx.user.organizationId) {
+          await logPlatformEvent({
+            actorId: ctx.user.id,
+            actorName: ctx.user.name ?? undefined,
+            eventType: "tenant_data_imported",
+            targetType: "organization",
+            targetId: orgId,
+            targetName: store.storeHandle,
+            newValue: JSON.stringify({
+              fileName: input.fileName,
+              sourceLabel: input.sourceLabel,
+              imported: fresh.length,
+              duplicates,
+              failed: failures.length,
+            }),
+          });
         }
 
         return {

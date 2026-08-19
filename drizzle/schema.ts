@@ -2151,6 +2151,16 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
     "org_banking_model_updated",
     "user_role_updated",
     "user_promoted_super_admin",
+    /**
+     * An operator wrote tenant data from inside that tenant's portal.
+     *
+     * Portal scope lets a super admin act AS a tenant — necessary for support,
+     * and the point at which "who did this" stops being answerable from the
+     * row itself. A settlement import creates financial transactions in a
+     * merchant's ledger; without this the only record is that the merchant's
+     * own organisation received them.
+     */
+    "tenant_data_imported",
   ]).notNull(),
   // Target entity
   targetType: mysqlEnum("targetType", ["organization", "user"]).notNull(),
