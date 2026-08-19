@@ -33,6 +33,7 @@
  * it would make an authorisation test fail for unrelated reasons.
  */
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { TRPCError } from "@trpc/server";
 import { appRouter } from "./routers";
 
@@ -63,7 +64,74 @@ const SCOPED_CALLS: ReadonlyArray<readonly [string, (c: Caller, orgId: number) =
   ["recentWebhookEvents", (c, orgId) => c.shoplineConnector.recentWebhookEvents({ limit: 50, organizationId: orgId })],
   ["triggerManualSync", (c, orgId) => c.shoplineConnector.triggerManualSync({ storeId: 1, organizationId: orgId })],
   ["listStores", (c, orgId) => c.shoplineConnector.listStores({ organizationId: orgId })],
+  ["getStore", (c, orgId) => c.shoplineConnector.getStore({ storeId: 1, organizationId: orgId })],
+  ["planStatus", (c, orgId) => c.shoplineConnector.planStatus({ organizationId: orgId })],
+  [
+    "exceptionIntelligence",
+    (c, orgId) => c.shoplineConnector.exceptionIntelligence({ category: "retail_chargeback", organizationId: orgId }),
+  ],
 ] as const;
+
+/**
+ * Operator tools that also name an organisation, but for a different reason.
+ *
+ * `provisionStore` is a `superAdminProcedure` whose `organizationId` is
+ * REQUIRED — it provisions a store into a named tenant, so there is no
+ * "own organisation" fallback to test. It is gated by the procedure's own
+ * middleware rather than by `resolveOrgScope`.
+ *
+ * It is listed because the refusal property is identical and worth asserting: a
+ * tenant admin must not be able to provision a store into somebody else's
+ * organisation. Only the no-override case does not apply to it.
+ */
+const OPERATOR_ONLY_CALLS: ReadonlyArray<readonly [string, (c: Caller, orgId: number) => Promise<unknown>]> = [
+  [
+    "provisionStore",
+    (c, orgId) =>
+      c.shoplineConnector.provisionStore({
+        organizationId: orgId,
+        storeHandle: "some-store",
+        storeShoplineId: "1785294964809",
+        currency: "USD",
+      }),
+  ],
+] as const;
+
+/** Everything that lets a caller name a tenant, however it is gated. */
+const ALL_ORG_NAMING_CALLS = [...SCOPED_CALLS, ...OPERATOR_ONLY_CALLS] as const;
+
+/**
+ * The roster above must not go stale, and enumerating it by hand is how it did.
+ *
+ * The first version covered four procedures. `exceptionIntelligence` and
+ * `planStatus` also take an `organizationId`, were also authorising AFTER the
+ * database lookup, and were simply absent — so the suite reported green over an
+ * incomplete fix. Review caught what these tests were shaped not to see.
+ *
+ * So the roster is checked against the router rather than trusted: every
+ * procedure whose INPUT SCHEMA declares `organizationId` must appear above.
+ */
+function proceduresAcceptingAnOrgOverride(): string[] {
+  const source = readFileSync("server/routers/shoplineConnector.ts", "utf8");
+  const declarations = [
+    // `\w*` not `\w+`: protectedProcedure has nothing between the prefix and
+    // "Procedure", so a + here silently matches only superAdminProcedure and the
+    // detector reports one procedure instead of seven — a vacuous check that
+    // looks like a passing one.
+    ...source.matchAll(/^[ ]{2,4}([A-Za-z][A-Za-z0-9]*): (?:protected|super|public)\w*Procedure/gm),
+  ];
+  const found = new Set<string>();
+
+  for (const [index, declaration] of declarations.entries()) {
+    const start = declaration.index ?? 0;
+    const end = declarations[index + 1]?.index ?? source.length;
+    // Only the input schema counts. `organizationId` appears throughout the
+    // handler bodies as a column reference, which would match every procedure.
+    const head = source.slice(start, end).split("=> {")[0];
+    if (/organizationId: z\./.test(head)) found.add(declaration[1]);
+  }
+  return [...found];
+}
 
 /** The tRPC error code a call rejected with, or null if it did not reject. */
 async function codeOf(run: () => Promise<unknown>): Promise<string | null> {
@@ -75,8 +143,23 @@ async function codeOf(run: () => Promise<unknown>): Promise<string | null> {
   }
 }
 
+describe("the roster of scoped procedures", () => {
+  it("should cover every procedure that accepts an organizationId override", () => {
+    const declared = proceduresAcceptingAnOrgOverride().sort();
+    const covered = ALL_ORG_NAMING_CALLS.map(([name]) => name).sort();
+    // A new override-taking procedure fails here until it is exercised below.
+    // That is the only thing stopping this suite drifting back to partial, which
+    // is how exceptionIntelligence and planStatus went unnoticed the first time.
+    expect(covered).toEqual(expect.arrayContaining(declared));
+  });
+
+  it("should find some, so the check above cannot pass vacuously", () => {
+    expect(proceduresAcceptingAnOrgOverride().length).toBeGreaterThanOrEqual(6);
+  });
+});
+
 describe("when a tenant user names another organisation", () => {
-  it.each(SCOPED_CALLS)("should refuse %s with FORBIDDEN", async (_name, run) => {
+  it.each(ALL_ORG_NAMING_CALLS)("should refuse %s with FORBIDDEN", async (_name, run) => {
     for (const role of ["admin", "user", "operations", "compliance", "cfo"]) {
       const code = await codeOf(() => run(callerAs(role), OTHER_ORG));
       expect(code, `role ${role} must not read organisation ${OTHER_ORG}`).toBe("FORBIDDEN");

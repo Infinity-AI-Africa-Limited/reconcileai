@@ -297,9 +297,10 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .query(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const { getRetailExceptionIntelligence } = await import("../connectors/shopline/retailIntelligence");
       return getRetailExceptionIntelligence(orgId, input.category, input.amount ?? 0);
     }),
@@ -314,9 +315,10 @@ export const shoplineConnectorRouter = router({
   planStatus: protectedProcedure
     .input(z.object({ organizationId: z.number().optional() }))
     .query(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       // Subscription (may be null before the first billing webhook).
       const [sub] = await db
@@ -824,9 +826,10 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      const orgId = requireOrgId(ctx.user);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const orgId = requireOrgId(ctx.user);
 
       const [store] = await db
         .select()
