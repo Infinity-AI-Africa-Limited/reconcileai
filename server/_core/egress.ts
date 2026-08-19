@@ -11,6 +11,11 @@
  * it, so an accidental external call fails closed instead of silently shipping
  * data off-box. In the default "cloud" mode it is a no-op (current behaviour).
  */
+import {
+  MIN_SIGNING_SECRET_LENGTH,
+  deploymentSecretProblem,
+  describeSecretProblem,
+} from "../../shared/deploymentSecrets";
 import { ENV } from "./env";
 
 export type DeploymentMode = "cloud" | "on_premise";
@@ -91,11 +96,26 @@ export function isEgressAllowed(url: string): boolean {
 /**
  * Fail-fast startup validation for on-premise mode. Refuses to boot when the
  * configuration would leak data off-box (Forge enabled, or an LLM endpoint that
- * resolves to the public internet). No-op in cloud mode.
+ * resolves to the public internet) or when a deployment secret was never
+ * replaced. No-op in cloud mode.
  */
 export function assertResidencyStartupConfig(): void {
   if (!isOnPremise()) return;
   const problems: string[] = [];
+
+  // An air-gapped install is handed over on physical media and set up by
+  // someone following a runbook. A JWT_SECRET left at its template value forges
+  // a session as any user, including super_admin — and nothing else in the
+  // stack would notice, because a placeholder secret signs cookies perfectly
+  // well. Fail the boot instead, where the operator is still watching.
+  const secretProblem = deploymentSecretProblem(ENV.cookieSecret, MIN_SIGNING_SECRET_LENGTH);
+  if (secretProblem) {
+    problems.push(
+      `${describeSecretProblem("JWT_SECRET", secretProblem, MIN_SIGNING_SECRET_LENGTH)} ` +
+        "It signs session cookies and derives the token-encryption key. Generate a unique value " +
+        "per deployment with `openssl rand -hex 32`.",
+    );
+  }
 
   if (ENV.forgeApiKey.trim()) {
     problems.push(

@@ -1,5 +1,41 @@
 # ReconcileAI - Project TODO
 
+## Research-Aligned Qwen Serving Profile
+- [x] Implement the supplied research recommendation: retain Ollama for CPU-only local development and controlled demonstrations while defining a private, authenticated vLLM serving profile for GPU-enabled bank deployments.
+- [ ] Run the private vLLM profile only on a bank-approved GPU host after model artifact approval, image vulnerability scanning and digest pinning, secret-manager configuration, capacity tests, reverse-proxy controls, and formal model-risk approval.
+- [x] Make the CPU/Ollama profile a first-class bank deployment path by supporting offline trained-model import, private networking, loopback-only application binding, and an enforced SHA-256 model-artifact verification gate.
+- [x] Convert the 90-day research roadmap into accelerated dual-tier execution gates without bypassing model-risk, security, or deterministic-control validation, and cover the published plan with regression validation.
+- [x] Merge and quantize the exported synthetic-only Qwen2.5-3B adapter into a checksum-verified GGUF artifact, then validate its import and controlled inference through the local CPU/Ollama stack.
+- [x] Use a temporary GPU conversion pod within the approved additional US$5 cap to merge and quantize the synthetic-only Qwen adapter; export the GGUF locally and terminate the pod and volume immediately after validation.
+- [x] Restore the local on-premise environment from a known-good configuration, reapply the versioned CPU/Ollama model tag cleanly, and verify all local health checks are green without exposing secrets.
+- [x] Verify and record the final RunPod balance after pod `xaj6n5pcoj25op` deletion: the console showed US$7.94 remaining from the US$10 credit balance, evidencing aggregate temporary GPU spend of US$2.06 and compliance with the approved additional US$5 cap.
+- [x] Re-run local post-switch regression validation to confirm the active CPU model tag remains available and non-model services are unaffected.
+- [x] Add a private MinIO S3-compatible service and idempotent bucket bootstrap to the CPU on-premise profile so file storage remains bank-controlled and `/api/health` can validate green without a public cloud dependency.
+- [x] Remove the nested read-only Ollama model mount so the CPU profile starts reliably on Docker Desktop for Windows while retaining the verified offline artifact gate.
+- [x] Use checksum syntax compatible with the actual Ollama runtime in the offline model bootstrap and validate the gate through Docker Desktop.
+- [x] Mount the verified offline artifact directory into the one-shot model-bootstrap service so its checksum gate and Ollama import can actually execute.
+- [x] Bind the Node server explicitly to `0.0.0.0` inside Docker for the internal gateway path; publish host-loopback access only through the validated Nginx gateway while the app itself has no host port.
+- [x] Add Docker build exclusions for model artifacts, local deployment data, and temporary conversion files so on-premise app rebuilds remain practical on CPU-only hardware.
+- [x] Add a minimal loopback reverse-proxy gateway so Docker Desktop can expose only the app while database, Ollama, and MinIO remain solely on the internal network.
+
+## Dual-Tier Serving — CTO production hardening
+- [x] Hold the CPU application back until `model-init` completes successfully, so a failed artifact verification stops the deployment instead of serving a model that was never imported.
+- [x] Give the GPU profile the gateway pattern: a container attached only to an `internal: true` network cannot serve a published host port (verified — connection refused), so the GPU stack was starting unreachable.
+- [x] Fix the CPU `pull` path, which could not start at all: Compose interpolates `${RECON_MODEL:?}` for every mode regardless of the shell branch. Mode and model now arrive as container environment.
+- [x] Remove every default credential (`change-me`) and make each deployment secret a required variable with no fallback.
+- [x] Give the application a bucket-scoped MinIO service account instead of the storage root credential, and prove it works at bootstrap. Verified against live MinIO: own-bucket read/write allowed; bucket creation, user administration and cross-bucket access denied.
+- [x] Stop loading `.env.onprem` into the application container, so infrastructure secrets stay out of the web app's environment.
+- [x] Pin every image through a required variable and ship real registry digests in the env templates; no `:latest` anywhere.
+- [x] Pass the vLLM key as environment rather than `--api-key`, and use `MYSQL_PWD` for the database health check — both were exposing secrets in container argv.
+- [x] Require an out-of-band `RECON_MODEL_SHA256` in addition to the shipped manifest: a manifest that travels with the artifact cannot authorise its own import.
+- [x] Refuse to boot on-premise with a missing, placeholder or too-short `JWT_SECRET`.
+- [x] Add `pnpm onprem:preflight`, an offline pre-install validator for both profiles, plus structural (parsed-YAML) deployment-contract tests replacing the substring assertions.
+- [x] Stop the evaluation harness reporting a transport failure as a 0% quality score, and let it authenticate against the hardened vLLM endpoint.
+- [x] Fix the dataset builder and evaluation harness crashing on Windows consoles (cp1252) — the CPU tier's own target platform.
+- [x] Merge adapters on CPU and fail loudly if any LoRA module survives, rather than risking a silently part-tuned checkpoint from `device_map="auto"`.
+- [ ] Measure model quality on an institution's human-labelled set inside its environment; the synthetic split cannot support a pilot decision.
+- [ ] Capacity-test both tiers on the approved target hosts; rehearse rollback.
+- [ ] Reduce the on-premise image to production dependencies only.
 ## Retail route guard
 - [x] Declare all three RoleSwitcher views, not only the auditor one. The switcher is hidden wholesale from retail, but `/dashboard/cfo` and `/dashboard/operations` stayed openable by URL.
 - [x] Inherit the parent's rule for nested routes so `/reports/:id` is refused wherever `/reports` is; exact-match lookup reported every parameterised route as unscoped.

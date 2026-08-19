@@ -1,61 +1,368 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# ReconcileAI — Option 3, GPU stack (NVIDIA GPU REQUIRED)
+# ReconcileAI — private Qwen GPU serving profile (NVIDIA GPU REQUIRED)
 #
-#   app  ──http──►  vllm (serves a 7-8B model on the GPU, high throughput)
+#   app  ──authenticated http──►  vllm (serves an approved Qwen artifact)
 #   app  ──sql───►  db (MySQL)
+#   app  ──s3 ───►  minio (private evidence and report storage)
 #
-# Requires the NVIDIA Container Toolkit on the host. Use this for banks that have
-# (or rent) a GPU server and want full-quality, low-latency inference.
+# Requires the NVIDIA Container Toolkit on an institution-controlled GPU host.
+# This is NOT for developer laptops: use docker-compose.cpu.yml + Ollama there.
+# vLLM has no published host port; traffic is restricted to the private Compose
+# network and the application must authenticate to it with VLLM_API_KEY.
+#
+# This profile is deliberately a COMPLETE deployment, not a serving sidecar: it
+# carries the same storage, gateway, secret and pinning controls as the CPU
+# profile. tools/onPremServingProfile.test.ts asserts that contract against BOTH
+# files, so the two cannot silently drift apart again.
 #
 # Run:
-#   cp .env.onprem.example .env.onprem   # then edit secrets
+#   cp .env.onprem.gpu.example .env.onprem   # then edit secrets
+#   pnpm onprem:preflight -- --profile gpu --env-file .env.onprem
 #   docker compose -f docker-compose.gpu.yml --env-file .env.onprem up -d --build
 # ─────────────────────────────────────────────────────────────────────────────
 name: reconcileai-onprem-gpu
 
 services:
   db:
-    image: mysql:8.0
+    image: ${MYSQL_IMAGE:?Set MYSQL_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: reconcileai
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}
     volumes:
       - db-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
       interval: 10s
       timeout: 5s
       retries: 12
+      # First-run initialisation took ~5 minutes on the reference host, well past
+      # the 120s the retries alone allow. Without a start period the container is
+      # reported unhealthy throughout — which reads as a failed install, and
+      # holds back everything that depends_on it.
+      start_period: 300s
+    networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
+
+  minio:
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE to a scanned, pinned image reference}
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
+
+  storage-init:
+    image: ${MINIO_MC_IMAGE:?Set MINIO_MC_IMAGE to a scanned, pinned image reference}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      # Opt-in destructive rotation. Without this passed through, the script's
+      # check defaults to false and the rotation branch is unreachable — the
+      # flag would look supported and do nothing.
+      MINIO_APP_ROTATE: ${MINIO_APP_ROTATE:-false}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set root "http://minio:9000" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "root/$${AWS_S3_BUCKET}"
+        pol=/tmp/reconcileai-app-policy.json
+        key="$${MINIO_APP_ACCESS_KEY}"
+
+        # Least privilege: read/write objects in exactly one bucket, nothing else.
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]}]}' \
+          "$${AWS_S3_BUCKET}" "$${AWS_S3_BUCKET}" > "$${pol}"
+
+        # This one must SUCCEED, not be tolerated. `create` replaces a policy of
+        # the same name, which is what stops a stale, more-restrictive policy
+        # from an earlier deployment surviving into this one. `add` is the older
+        # mc spelling; if both fail, `set -e` stops here.
+        mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add root reconcileai-app "$${pol}"
+
+        # Reconcile the identity's POLICIES without destroying the identity.
+        #
+        # An earlier revision removed and re-added the user, which does
+        # guarantee one binding — and also revokes the credential a RUNNING app
+        # is holding. `docker compose up -d` against a live stack runs this
+        # while the app container is still serving, so an in-place redeploy
+        # would reject evidence uploads for the width of the gap. Detaching the
+        # extra policies achieves the same end state with no outage.
+        if mc admin user info root "$${key}" > /dev/null 2>&1; then
+          if [ "$${MINIO_APP_ROTATE:-false}" = "true" ]; then
+            # The ONLY way mc can change an existing secret. `mc admin user add`
+            # on an existing user reports success and leaves the old secret
+            # working (verified), so a rotation has to be destructive — and
+            # therefore has to be asked for, not assumed. Running containers
+            # keep the old value in their environment and cannot re-authenticate
+            # until they are recreated.
+            echo "MINIO_APP_ROTATE=true — replacing the application identity; existing app containers must be recreated."
+            mc admin user remove root "$${key}"
+            mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+          fi
+        else
+          mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+        fi
+
+        # `mc admin policy attach` is additive and has no replace form, so a key
+        # reused across deployments keeps every binding it ever had: a key that
+        # once carried `readwrite` still carries it, the attach below succeeds,
+        # and the bucket scope is decoration. Detaching everything else is what
+        # makes the scope real.
+        # Parsed with shell builtins on purpose: the minio/mc image ships bash
+        # plus cut/tr/head and has NO sed, grep or awk. An earlier revision used
+        # sed here and aborted the whole initializer with "sed: command not
+        # found" on every deployment — caught by running it in the real image
+        # rather than a convenient one.
+        info="$$(mc --json admin user info root "$${key}")"
+        case "$${info}" in
+          *'"policyName":"'*)
+            rest="$${info#*\"policyName\":\"}"
+            attached="$${rest%%\"*}"
+            ;;
+          *) attached="" ;;
+        esac
+        for pol in $$(echo "$${attached}" | tr ',' ' '); do
+          if [ -z "$${pol}" ]; then continue; fi
+          if [ "$${pol}" = "reconcileai-app" ]; then continue; fi
+          echo "detaching stale policy from the application credential: $${pol}"
+          mc admin policy detach root "$${pol}" --user "$${key}" > /dev/null 2>&1 || true
+        done
+        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || true
+
+        # Verify the RESULT, not the commands that were meant to produce it.
+        # Each detach above is tolerated, and the scope probe further down only
+        # exercises a bucket it creates for the test — so a stale policy that
+        # failed to detach, granting some OTHER existing bucket, would slip past
+        # both. Asserting the effective binding set is what actually closes it.
+        after="$$(mc --json admin user info root "$${key}")"
+        case "$${after}" in
+          *'"policyName":"'*)
+            rest_after="$${after#*\"policyName\":\"}"
+            bound="$${rest_after%%\"*}"
+            ;;
+          *) bound="" ;;
+        esac
+        if [ "$${bound}" != "reconcileai-app" ]; then
+          echo "REFUSING TO START — the application credential is bound to: $${bound:-<none>}"
+          echo "Expected exactly reconcileai-app. A stale policy could not be detached, so the"
+          echo "credential may still reach buckets outside $${AWS_S3_BUCKET}. Detach it in MinIO,"
+          echo "or rotate the identity with MINIO_APP_ROTATE=true."
+          exit 1
+        fi
+
+        # Probe every operation the application actually performs, not merely a
+        # listing. A credential carrying a list-only policy passes `mc ls` while
+        # every evidence upload is denied (verified against MinIO) — readiness
+        # that checks the wrong capability is not readiness. `set -e` means any
+        # of these failing exits non-zero, so the app never starts.
+        # `mc alias set` validates the credential as it stores it, so a stale
+        # secret fails HERE — and with set -e that aborted the script on mc's
+        # raw "signature does not match", which names neither the cause nor the
+        # remedy. Catch it and say what actually happened.
+        if ! mc alias set appcheck "http://minio:9000" "$${key}" "$${MINIO_APP_SECRET_KEY}" > /dev/null 2>&1; then
+          echo "REFUSING TO START — MINIO_APP_SECRET_KEY does not match the stored identity $${key}."
+          echo "mc cannot change an existing secret in place. To rotate, set MINIO_APP_ROTATE=true and"
+          echo "recreate the app container: the running one holds the old secret in its environment."
+          exit 1
+        fi
+        probe="appcheck/$${AWS_S3_BUCKET}/.reconcileai-storage-init-probe"
+        echo "reconcileai storage readiness probe" | mc pipe "$${probe}"
+        mc cat "$${probe}" > /dev/null
+        mc rm "$${probe}" > /dev/null
+        mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null
+
+        # Prove the scope, not just the access. Everything above passes just as
+        # happily for a credential that can also reach every OTHER bucket, so
+        # least privilege needs a denial test or it is only an assertion.
+        scope_probe="reconcileai-scope-probe"
+        if mc ls "root/$${scope_probe}" > /dev/null 2>&1; then
+          echo "REFUSING TO START — bucket $${scope_probe} already exists; that name is reserved for the scope check."
+          exit 1
+        fi
+        mc mb "root/$${scope_probe}" > /dev/null
+        cross_read=no
+        cross_write=no
+        if mc ls "appcheck/$${scope_probe}" > /dev/null 2>&1; then cross_read=yes; fi
+        if echo scope-probe | mc pipe "appcheck/$${scope_probe}/probe" > /dev/null 2>&1; then cross_write=yes; fi
+        # Always clean up before deciding, so a failure cannot strand the bucket
+        # and trip the reserved-name guard on the next run.
+        mc rb --force "root/$${scope_probe}" > /dev/null 2>&1 || true
+        if [ "$${cross_read}" = yes ] || [ "$${cross_write}" = yes ]; then
+          echo "REFUSING TO START — the application credential reaches beyond $${AWS_S3_BUCKET}."
+          echo "  read other bucket:  $${cross_read}"
+          echo "  write other bucket: $${cross_write}"
+          echo "It is carrying a policy wider than reconcileai-app. Remove the stale binding, or rotate MINIO_APP_ACCESS_KEY."
+          exit 1
+        fi
+        echo "storage ready: bucket $${AWS_S3_BUCKET}, scoped credential verified for put/get/delete/list"
+    networks: [bank-internal]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+
+  # Refuse to start unless the approved weights are actually staged.
+  #
+  # The GPU profile is air-gapped by design: vllm sits only on `bank-internal`
+  # (internal: true) and runs with HF_HUB_OFFLINE=1, so it cannot fetch a model
+  # from Hugging Face. With an empty hf-cache that produced the worst possible
+  # shape of failure — vllm starts, never becomes healthy, and `app` waits on it
+  # forever, with nothing saying the weights were simply never delivered.
+  #
+  # Attaching vllm to an egress network was the alternative and is rejected: the
+  # residency guarantee is the product here. Staging is the contract, so this
+  # verifies the contract and says plainly which path it looked at.
+  model-check:
+    image: ${VLLM_IMAGE:?Set VLLM_IMAGE to a scanned, pinned image reference}
+    environment:
+      RECON_MODEL: ${RECON_MODEL:?Set RECON_MODEL to an approved Qwen artifact}
+      MODEL_REVISION: ${MODEL_REVISION:?Set MODEL_REVISION to the approved immutable model revision}
+    volumes:
+      - hf-cache:/root/.cache/huggingface:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        cache=/root/.cache/huggingface
+
+        case "$${RECON_MODEL}" in
+          /*)
+            # A local merged-model directory, per ml/README.md step 3b.
+            test -d "$${RECON_MODEL}" || {
+              echo "REFUSING TO START — no model directory at $${RECON_MODEL}."
+              echo "Stage the merged model into the hf-cache volume before starting this profile."
+              exit 1
+            }
+            target="$${RECON_MODEL}"
+            ;;
+          *)
+            # A Hugging Face repo id, stored as models--<org>--<name> in the hub cache.
+            # Replace the FIRST slash only. Going via `tr` then a hyphen swap
+            # corrupts any org whose own name contains a hyphen (my-org/model).
+            repo="models--$$(echo "$${RECON_MODEL}" | sed 's|/|--|')"
+            target="$${cache}/hub/$${repo}"
+            test -d "$${target}" || {
+              echo "REFUSING TO START — $${RECON_MODEL} is not staged in the hf-cache volume."
+              echo "  expected: $${target}"
+              echo "vLLM cannot download it: this profile is air-gapped (internal network, HF_HUB_OFFLINE=1)."
+              echo "Pre-stage the approved revision $${MODEL_REVISION} into the volume, then start again."
+              exit 1
+            }
+            # The repo directory is not the answer — the REVISION is. vLLM starts
+            # with `--revision ${MODEL_REVISION}` and HF_HUB_OFFLINE=1, so it
+            # resolves exactly snapshots/<revision> and nothing else. Accepting
+            # any snapshot below the repo passes a cache holding only some other
+            # revision, and the deployment then hangs on a vLLM that cannot load
+            # what it was told to load.
+            #
+            # MODEL_REVISION must be an immutable commit SHA, and the gate
+            # enforces that rather than trusting the operator.
+            #
+            # Supporting release tags was a mistake I made answering an earlier
+            # review: a tag is a MUTABLE pointer. `refs/<tag>` can be repointed
+            # at different weights after the institution approved the artifact,
+            # and both the preflight and this gate would still pass while vLLM
+            # served the substitute. For a bank model-supply-chain control the
+            # approved thing has to be the bytes, and the only name that binds
+            # to bytes here is the commit.
+            case "$${MODEL_REVISION}" in
+              *[!0-9a-f]* | "")
+                echo "REFUSING TO START — MODEL_REVISION is not an immutable commit SHA."
+                echo "  got: $${MODEL_REVISION}"
+                echo "A tag or branch can be repointed at different weights after approval."
+                echo "Use the 40-character commit the institution reviewed."
+                exit 1
+                ;;
+            esac
+            if [ "$${#MODEL_REVISION}" -ne 40 ]; then
+              echo "REFUSING TO START — MODEL_REVISION must be a 40-character commit SHA."
+              echo "  got: $${MODEL_REVISION} ($${#MODEL_REVISION} characters)"
+              exit 1
+            fi
+
+            snapshot="$${target}/snapshots/$${MODEL_REVISION}"
+            test -d "$${snapshot}" || {
+              echo "REFUSING TO START — the approved revision is not staged."
+              echo "  expected: $${snapshot}"
+              echo "The repository cache exists but does not contain commit $${MODEL_REVISION}."
+              echo "Stage that exact revision: vLLM runs offline and will not fetch it."
+              exit 1
+            }
+            target="$${snapshot}"
+            ;;
+        esac
+
+        # A directory alone is not weights — an interrupted copy leaves one
+        # behind. `-type l` matters as much as `-type f`: the Hugging Face cache
+        # stores snapshot files as symlinks into ../../blobs, so a files-only
+        # test would reject a perfectly staged cache.
+        if ! find "$${target}/" -follow \( -type f -o -type l \) \( -name '*.safetensors' -o -name '*.bin' -o -name '*.gguf' \) | head -1 | grep -q .; then
+          echo "REFUSING TO START — $${target} exists but contains no model weights."
+          echo "The staged copy looks incomplete; re-stage it before starting."
+          exit 1
+        fi
+        echo "approved model staged: $${RECON_MODEL} (revision $${MODEL_REVISION})"
+    networks: [bank-internal]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
 
   vllm:
-    image: vllm/vllm-openai:latest
+    image: ${VLLM_IMAGE:?Set VLLM_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
-    # For air-gapped hosts: pre-populate hf-cache on a connected machine and ship
-    # the volume, OR bake the weights into a derived image. HF_TOKEN only needed
-    # at first download on a connected machine.
+    # Pre-stage the approved model artifact in hf-cache. Do not rely on an
+    # internet model download at the institution.
     command: >
-      --model ${RECON_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      --model ${RECON_MODEL:?Set RECON_MODEL to an approved Qwen artifact}
       --served-model-name reconcileai
-      --max-model-len 8192
-      --gpu-memory-utilization 0.90
+      --revision ${MODEL_REVISION:?Set MODEL_REVISION to the approved immutable model revision}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-8192}
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      --disable-log-requests
     environment:
-      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      # vLLM reads its serving key from VLLM_API_KEY. Passing it as `--api-key`
+      # instead would place the secret in the container's argv, where `docker
+      # inspect`, `docker top` and any process in the namespace can read it.
+      VLLM_API_KEY: ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
+      # Offline once the artifact is staged: no model fetch at start-up.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
+    depends_on:
+      model-check:
+        condition: service_completed_successfully
     volumes:
       - hf-cache:/root/.cache/huggingface
+    # PagedAttention needs more shared memory than Docker's 64 MB default.
+    shm_size: ${VLLM_SHM_SIZE:-8gb}
+    networks: [bank-internal]
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: ${VLLM_GPU_COUNT:-1}
               capabilities: [gpu]
+    # /health is unauthenticated by design; it reports readiness, not content.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       timeout: 5s
       retries: 30
-      start_period: 180s
+      start_period: 300s
+    security_opt: [no-new-privileges:true]
 
   app:
     build:
@@ -66,21 +373,67 @@ services:
         condition: service_healthy
       vllm:
         condition: service_healthy
-    env_file: .env.onprem
+      storage-init:
+        condition: service_completed_successfully
+    # Deliberately NOT `env_file: .env.onprem` — see the CPU profile for why.
+    # Everything the app may see is enumerated below; add new application
+    # variables here explicitly rather than loading the infrastructure env file.
     environment:
       DEPLOYMENT_MODE: on_premise
-      EGRESS_ALLOWLIST: vllm                # in-stack model host
-      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
-      DIRECT_LLM_API_KEY: local
+      EGRESS_ALLOWLIST: vllm,minio            # in-stack model and storage hosts
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}@db:3306/reconcileai
+      DIRECT_LLM_API_KEY: ${VLLM_API_KEY:?Set VLLM_API_KEY to a deployment-specific secret}
       DIRECT_LLM_API_URL: http://vllm:8000/v1
       DIRECT_LLM_PROVIDER: openai
-      DIRECT_LLM_MODEL: reconcileai          # matches --served-model-name above
+      DIRECT_LLM_MODEL: reconcileai           # matches --served-model-name above
+      AWS_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+      AWS_S3_ENDPOINT: http://minio:9000
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.onprem (openssl rand -hex 32)}
+      APP_URL: ${APP_URL:-http://127.0.0.1:3000}
       PORT: 3000
       NODE_ENV: production
-    ports:
-      - "3000:3000"
+      WOODCORE_DB_HOST: ${WOODCORE_DB_HOST:-}
+      WOODCORE_DB_PORT: ${WOODCORE_DB_PORT:-3306}
+      WOODCORE_DB_USER: ${WOODCORE_DB_USER:-}
+      WOODCORE_DB_PASSWORD: ${WOODCORE_DB_PASSWORD:-}
+      WOODCORE_DB_NAME: ${WOODCORE_DB_NAME:-}
+    networks: [bank-internal]
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+
+  # As in the CPU profile, the gateway is the only published service. The app
+  # cannot publish its own port: a container attached solely to an
+  # `internal: true` network refuses host connections on a published port.
+  gateway:
+    image: ${NGINX_IMAGE:?Set NGINX_IMAGE to a scanned, pinned image reference}
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./nginx/local-loopback.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:8080"
+    networks: [bank-internal, host-loopback]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
 
 volumes:
   db-data:
+  minio-data:
   hf-cache:
+
+networks:
+  # No service in this profile can initiate external network traffic. The host's
+  # bank-approved reverse proxy terminates TLS and reaches the app on loopback.
+  bank-internal:
+    internal: true
+  # The gateway alone is attached, and only so that its published port works.
+  host-loopback:
