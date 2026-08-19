@@ -13,8 +13,11 @@
 FROM node:22-bookworm AS builder
 WORKDIR /app
 RUN corepack enable
-# Install deps first for layer caching
+# Install deps first for layer caching. `patches/` must be staged with the
+# manifest: package.json declares patchedDependencies, so pnpm resolves the
+# patch file during install, long before `COPY . .` would have brought it in.
 COPY package.json pnpm-lock.yaml ./
+COPY patches ./patches
 RUN pnpm install --frozen-lockfile
 # Build frontend (vite → dist/public) and backend (esbuild → dist/index.js)
 COPY . .
@@ -35,6 +38,9 @@ COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
 COPY --from=builder /app/scripts ./scripts
 EXPOSE 3000
 # Liveness: the app exposes GET /api/healthz (200 when the process is up).
+# 127.0.0.1, not localhost: the server binds 0.0.0.0 (IPv4), while `localhost`
+# can resolve to ::1 first and turn a healthy app into a failing health check —
+# which in the Compose profiles would block the gateway from ever starting.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-  CMD node -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "dist/index.js"]

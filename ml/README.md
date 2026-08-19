@@ -54,7 +54,17 @@ python finetune.py --base Qwen/Qwen2.5-3B-Instruct \
 Produces a LoRA adapter and (with `--merge`) a full merged model dir.
 
 ### 3a. Package for CPU (Ollama / GGUF)
-Convert the merged model to GGUF and quantize to 4-bit, using `llama.cpp`:
+First merge the adapter with its **exact** full-precision base model. The merge step
+writes `MODEL_PROVENANCE.json`, including adapter hashes and the declared synthetic-only
+data scope. It must never be pointed at a different Qwen variant.
+```bash
+python merge_adapter.py \
+  --base-model Qwen/Qwen2.5-3B-Instruct \
+  --adapter /path/to/reconcileai-adapter \
+  --output out/reconcileai-3b-merged
+```
+
+Convert the resulting merged model to GGUF and quantize to 4-bit, using `llama.cpp`:
 ```bash
 # one-time, on any machine with llama.cpp built:
 python llama.cpp/convert_hf_to_gguf.py out/reconcileai-3b-merged \
@@ -62,26 +72,99 @@ python llama.cpp/convert_hf_to_gguf.py out/reconcileai-3b-merged \
 ./llama.cpp/llama-quantize reconcileai-recon-3b-f16.gguf \
     reconcileai-recon-3b-q4_k_m.gguf Q4_K_M
 ```
-Then import into Ollama with the provided Modelfile:
+Place the resulting GGUF and a `SHA256SUMS` manifest in
+`../deploy/on-prem/models/`, beside the supplied `Modelfile`:
 ```bash
-cp reconcileai-recon-3b-q4_k_m.gguf ../deploy/on-prem/ollama/
-cd ../deploy/on-prem/ollama && ollama create reconcileai -f Modelfile
+cp reconcileai-recon-3b-q4_k_m.gguf ../deploy/on-prem/models/
+cd ../deploy/on-prem/models && sha256sum reconcileai-recon-3b-q4_k_m.gguf Modelfile > SHA256SUMS
 ```
-Set `RECON_MODEL=reconcileai` in `.env.onprem` and restart the CPU stack.
+
+Record **both** digests in the **signed release record** — the Modelfile is an
+approved artifact too, since it holds the system prompt and the `FROM` that
+picks the weights and deliver it to the
+institution separately from the media — it becomes `RECON_MODEL_SHA256`.
+
+Then set in `.env.onprem`:
+```bash
+OLLAMA_MODEL_MODE=import
+RECON_MODEL=reconcileai
+RECON_MODEL_FILE=reconcileai-recon-3b-q4_k_m.gguf
+RECON_MODEL_SHA256=<the GGUF digest from the signed release record>
+RECON_MODELFILE_SHA256=<the Modelfile digest from the signed release record>
+```
+
+**Do not run `ollama create` yourself.** The CPU Compose profile's `model-init`
+service does it, after checking the artifact against both the shipped manifest
+and the out-of-band digest. Running it by hand skips both checks — which is the
+one thing the packaging process exists to prevent.
 
 ### 3b. Package for GPU (vLLM)
-No conversion needed — point vLLM at the merged dir:
-```yaml
-# in docker-compose.gpu.yml, vllm.command:
---model /models/reconcileai-7b-merged --served-model-name reconcileai
+No conversion needed. Stage the merged model in the `hf-cache` volume the GPU
+profile mounts, and point the profile at it through `.env.onprem`:
+```bash
+RECON_MODEL=/root/.cache/huggingface/reconcileai-7b-merged
+MODEL_REVISION=<the 40-char commit SHA the institution reviewed — NOT a tag or branch>
+HF_HUB_OFFLINE=1
 ```
-(mount the merged dir into the container as `/models`).
+`--served-model-name reconcileai` is already set in the compose file, so the
+application's `DIRECT_LLM_MODEL` needs no change. Staging the weights rather
+than letting vLLM fetch them is what keeps start-up offline.
+
+> `MODEL_REVISION` must be an immutable commit SHA, and both the preflight and
+> the start-up gate reject anything else. A tag is a mutable pointer: `refs/<tag>`
+> can be repointed at different weights after the institution approved the
+> artifact, and every check downstream would still pass while vLLM served the
+> substitute. For a local merged-model path there is no revision to resolve and
+> the field is documentation only.
 
 ### 4. Evaluate (no GPU)
 ```bash
+# CPU / Ollama — the endpoint ignores the bearer token
 python evaluate.py --base-url http://localhost:11434/v1 --model reconcileai --val data/val.jsonl
+
+# GPU / vLLM — the hardened serving profile REQUIRES the key
+VLLM_API_KEY=... python evaluate.py --base-url http://vllm:8000/v1 --model reconcileai --val data/val.jsonl
 ```
+The harness exits non-zero and prints no scorecard if any request failed. A
+transport failure and a bad model both drive accuracy to zero, and an acceptance
+gate must never confuse the two.
+
 Ship when: **JSON ≥ 99%, classification ≥ 95%, priority ≥ 98%.**
+
+### First measured run (2026-08-18, reference laptop, CPU)
+
+`reconcileai-cpu:synthetic-v1` against a 36-case held-out **synthetic** split:
+
+| Measure | Result | 95% CI | Gate |
+|---|---|---|---|
+| valid JSON | 36/36 — 100% | [90.4, 100] | ≥99% |
+| classification | 36/36 — 100% | [90.4, 100] | ≥95% |
+| priority | 35/36 — 97.2% | [85.8, 99.5] | ≥98% |
+
+**None of these gates is resolved by this run, including the two it appears to
+pass.** At n=36 the confidence interval on a perfect score still reaches down to
+90%, so "100%" and "97.2%" are not distinguishable from each other or from the
+thresholds. Resolving a 98% gate needs a few hundred cases, not 36.
+
+**And the 100% is the least reassuring number here.** The held-out split comes
+from the same generator (`build_dataset.py`) as the training data, so the model
+is being asked to reproduce a distribution it was fitted to. A near-perfect
+score is the *expected* outcome and evidence of memorising the generator — it
+says nothing about a bank's real exceptions, which is the only question that
+matters for a pilot.
+
+What the run does establish: the model emits schema-valid strict JSON reliably,
+terminates cleanly on every case (36/36 `finish_reason=stop`, 136–214 tokens),
+and is not degenerate. That is a smoke test worth having, and it is not an
+acceptance measurement.
+
+> ⚠️ These are product gates measured against the **synthetic** held-out split,
+> which is drawn from the same generator as the training data. A strong score
+> there says the model learned the generator, not that it generalises to a
+> bank's real exceptions. No institution pilot may rely on it: re-measure on the
+> bank's own human-labelled set inside its environment, per
+> [`../docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md`](../docs/deployment/ACCELERATED_DUAL_TIER_EXECUTION.md)
+> week 4.
 
 ## Why a small model is enough here
 

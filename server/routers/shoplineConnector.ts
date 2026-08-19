@@ -229,10 +229,15 @@ export const shoplineConnectorRouter = router({
   listStores: protectedProcedure
     .input(z.object({ organizationId: z.number().optional() }))
     .query(async ({ ctx, input }) => {
+      // Authorise BEFORE touching the database. Refusing a caller needs no
+      // connection, and resolving the scope second meant an unauthorised
+      // cross-tenant request got INTERNAL_SERVER_ERROR rather than FORBIDDEN
+      // whenever the database was down — the wrong answer, and one that also
+      // made the guard untestable without a live database.
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       return db
         .select()
@@ -247,10 +252,10 @@ export const shoplineConnectorRouter = router({
   getStore: protectedProcedure
     .input(z.object({ storeId: z.number(), organizationId: z.number().optional() }))
     .query(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       const stores = await db
         .select()
@@ -292,9 +297,10 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .query(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const { getRetailExceptionIntelligence } = await import("../connectors/shopline/retailIntelligence");
       return getRetailExceptionIntelligence(orgId, input.category, input.amount ?? 0);
     }),
@@ -309,9 +315,10 @@ export const shoplineConnectorRouter = router({
   planStatus: protectedProcedure
     .input(z.object({ organizationId: z.number().optional() }))
     .query(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       // Subscription (may be null before the first billing webhook).
       const [sub] = await db
@@ -392,10 +399,10 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       const to = input.toDate ? new Date(input.toDate) : new Date();
       const from = input.fromDate
@@ -427,10 +434,10 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       const stores = await db
         .select()
@@ -479,10 +486,10 @@ export const shoplineConnectorRouter = router({
   uninstall: connectorAdminProcedure
     .input(z.object({ storeId: z.number(), organizationId: z.number().optional() }))
     .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       await db
         .update(slConnectorStores)
@@ -545,177 +552,177 @@ export const shoplineConnectorRouter = router({
   syncStatus: protectedProcedure
     .input(z.object({ organizationId: z.number().int().positive().optional() }))
     .query(async ({ ctx, input }) => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
-    const orgId = resolveOrgId(ctx.user, input.organizationId);
-
-    // This org's SHOPLINE channels (retail_commerce orgs are SHOPLINE-only, but
-    // filter by channel type so a mixed org stays correct).
-    const orgChannels = await db
-      .select({ id: channels.id, code: channels.code })
-      .from(channels)
-      .where(and(eq(channels.organizationId, orgId), eq(channels.channelType, "ecommerce_gateway")));
-    const channelIds = orgChannels.map((c) => c.id);
-    // Channel codes are `sl_orders_<handle>` / `sl_payments_<handle>` (see
-    // onboarding.ts), so the store handle is recoverable without another join.
-    const handleByChannelId = new Map(
-      orgChannels.map((c) => [c.id, c.code.replace(/^sl_(orders|payments)_/, "")]),
-    );
-
-    // Reconciliation state, computed in-DB in a single pass.
-    const [agg] = channelIds.length
-      ? await db
-          .select({
-            matched: sql<number>`sum(case when ${transactions.status} in ('matched','manually_matched') then 1 else 0 end)`,
-            settledAmount: sql<number>`coalesce(sum(case when ${transactions.status} in ('matched','manually_matched') then abs(${transactions.amount}) else 0 end), 0)`,
-            pendingAmount: sql<number>`coalesce(sum(case when ${transactions.status} = 'unmatched' then abs(${transactions.amount}) else 0 end), 0)`,
-            pendingCount: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
-            total: sql<number>`count(*)`,
-          })
-          .from(transactions)
-          .where(inArray(transactions.channelId, channelIds))
-      : [{ matched: 0, settledAmount: 0, pendingAmount: 0, pendingCount: 0, total: 0 }];
-
-    const matched = Number(agg?.matched ?? 0);
-    const total = Number(agg?.total ?? 0);
-
-    // Open exceptions on this org's SHOPLINE transactions.
-    const [exAgg] = channelIds.length
-      ? await db
-          .select({ open: sql<number>`count(*)` })
-          .from(exceptions)
-          .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
-          .where(and(inArray(transactions.channelId, channelIds), eq(exceptions.status, "open")))
-      : [{ open: 0 }];
-
-    // Payment-leg presence. A merchant on a third-party gateway or COD has an
-    // order book and no payment feed, which reconciles to a legitimate-looking
-    // 0% match rate. Reporting the two sides separately lets the UI say WHY
-    // instead of presenting an unexplained zero.
-    const ordersChannelIds = orgChannels.filter((c) => c.code.startsWith("sl_orders_")).map((c) => c.id);
-    const paymentsChannelIds = orgChannels.filter((c) => c.code.startsWith("sl_payments_")).map((c) => c.id);
-    const countIn = async (ids: number[]) => {
-      if (ids.length === 0) return 0;
-      const [r] = await db
-        .select({ n: sql<number>`count(*)` })
-        .from(transactions)
-        .where(inArray(transactions.channelId, ids));
-      return Number(r?.n ?? 0);
-    };
-    const orderRowCount = await countIn(ordersChannelIds);
-    const paymentRowCount = await countIn(paymentsChannelIds);
-
-    // Sync health — so an empty dashboard can explain itself. A store whose
-    // syncs are failing (or has never synced) otherwise renders as a page of
-    // legitimate-looking zeros.
-    const storeHealth = await db
-      .select({
-        storeHandle: slConnectorStores.storeHandle,
-        lastSyncAt: slConnectorStores.lastSyncAt,
-        lastSyncAttemptAt: slConnectorStores.lastSyncAttemptAt,
-        lastSyncError: slConnectorStores.lastSyncError,
-      })
-      .from(slConnectorStores)
-      .where(and(eq(slConnectorStores.organizationId, orgId), eq(slConnectorStores.status, "active")));
-
-    // Recent payouts — the settlement leg. `normalisePayout` writes these with a
-    // `PAYOUT_` transactionRef prefix (unique to payouts; orders/refunds/balance
-    // txns use bare ids, `REFUND_` and `BT_`), and sets `valueDate` only when
-    // SHOPLINE reported the payout as SUCCESS — which is what distinguishes a
-    // paid payout from one still in flight.
-    // NOTE: `_` is a LIKE wildcard in MySQL, so the prefix must be escaped.
-    const payoutRows = channelIds.length
-      ? await db
-          .select({
-            id: transactions.id,
-            channelId: transactions.channelId,
-            amount: transactions.amount,
-            currency: transactions.currency,
-            transactionDate: transactions.transactionDate,
-            valueDate: transactions.valueDate,
-            status: transactions.status,
-          })
-          .from(transactions)
-          .where(
-            and(
-              inArray(transactions.channelId, channelIds),
-              like(transactions.transactionRef, "PAYOUT\\_%"),
-            ),
-          )
-          .orderBy(desc(transactions.transactionDate))
-          .limit(20)
-      : [];
-
-    return {
-      totalSettled: Number(agg?.settledAmount ?? 0),
-      totalPending: Number(agg?.pendingAmount ?? 0),
-      totalExceptions: Number(exAgg?.open ?? 0),
-      matchRate: total > 0 ? (matched / total) * 100 : 0,
-      matchedCount: matched,
-      pendingCount: Number(agg?.pendingCount ?? 0),
-      orderRowCount,
-      paymentRowCount,
-      /** Orders present but no payment leg at all — nothing to reconcile against. */
-      paymentFeedMissing: orderRowCount > 0 && paymentRowCount === 0,
-      syncHealth: storeHealth.map((s) => ({
-        storeHandle: s.storeHandle,
-        lastSyncAt: s.lastSyncAt ? s.lastSyncAt.toISOString() : null,
-        lastSyncAttemptAt: s.lastSyncAttemptAt ? s.lastSyncAttemptAt.toISOString() : null,
-        lastSyncError: s.lastSyncError,
-        neverSynced: s.lastSyncAt === null,
-      })),
-      recentPayouts: payoutRows.map((p) => ({
-        id: p.id,
-        date: p.transactionDate.toISOString(),
-        storeHandle: handleByChannelId.get(p.channelId) ?? "unknown",
-        amount: Number(p.amount),
-        currency: p.currency ?? "USD",
-        status: p.valueDate ? "paid" : "pending",
-        reconciled: p.status === "matched" || p.status === "manually_matched",
-      })),
-    };
-  }),
-
-  /**
-   * Recent webhook events for the sync status page.
-   */
-  recentWebhookEvents: protectedProcedure
-    .input(z.object({ limit: z.number().min(1).max(200).default(50), organizationId: z.number().int().positive().optional() }))
-    .query(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
+      // This org's SHOPLINE channels (retail_commerce orgs are SHOPLINE-only, but
+      // filter by channel type so a mixed org stays correct).
+      const orgChannels = await db
+        .select({ id: channels.id, code: channels.code })
+        .from(channels)
+        .where(and(eq(channels.organizationId, orgId), eq(channels.channelType, "ecommerce_gateway")));
+      const channelIds = orgChannels.map((c) => c.id);
+      // Channel codes are `sl_orders_<handle>` / `sl_payments_<handle>` (see
+      // onboarding.ts), so the store handle is recoverable without another join.
+      const handleByChannelId = new Map(
+        orgChannels.map((c) => [c.id, c.code.replace(/^sl_(orders|payments)_/, "")]),
+      );
 
-      const events = await db
-        .select({
-          id: slConnectorWebhookEvents.id,
-          topic: slConnectorWebhookEvents.topic,
-          status: slConnectorWebhookEvents.status,
-          receivedAt: slConnectorWebhookEvents.receivedAt,
-          slStoreId: slConnectorWebhookEvents.slStoreId,
-        })
-        .from(slConnectorWebhookEvents)
-        .where(eq(slConnectorWebhookEvents.organizationId, orgId))
-        .orderBy(desc(slConnectorWebhookEvents.receivedAt))
-        .limit(input.limit);
-
-      // Enrich with store handle
-      const storeIds = Array.from(new Set(events.map((e) => e.slStoreId)));
-      const stores = storeIds.length > 0
+      // Reconciliation state, computed in-DB in a single pass.
+      const [agg] = channelIds.length
         ? await db
-            .select({ id: slConnectorStores.id, storeHandle: slConnectorStores.storeHandle })
-            .from(slConnectorStores)
-            .where(eq(slConnectorStores.organizationId, orgId))
-        : [];
-      const storeMap = new Map(stores.map((s) => [s.id, s.storeHandle]));
+            .select({
+              matched: sql<number>`sum(case when ${transactions.status} in ('matched','manually_matched') then 1 else 0 end)`,
+              settledAmount: sql<number>`coalesce(sum(case when ${transactions.status} in ('matched','manually_matched') then abs(${transactions.amount}) else 0 end), 0)`,
+              pendingAmount: sql<number>`coalesce(sum(case when ${transactions.status} = 'unmatched' then abs(${transactions.amount}) else 0 end), 0)`,
+              pendingCount: sql<number>`sum(case when ${transactions.status} = 'unmatched' then 1 else 0 end)`,
+              total: sql<number>`count(*)`,
+            })
+            .from(transactions)
+            .where(inArray(transactions.channelId, channelIds))
+        : [{ matched: 0, settledAmount: 0, pendingAmount: 0, pendingCount: 0, total: 0 }];
 
-      return events.map((e) => ({
-        ...e,
-        storeHandle: storeMap.get(e.slStoreId) ?? "unknown",
-      }));
+      const matched = Number(agg?.matched ?? 0);
+      const total = Number(agg?.total ?? 0);
+
+      // Open exceptions on this org's SHOPLINE transactions.
+      const [exAgg] = channelIds.length
+        ? await db
+            .select({ open: sql<number>`count(*)` })
+            .from(exceptions)
+            .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
+            .where(and(inArray(transactions.channelId, channelIds), eq(exceptions.status, "open")))
+        : [{ open: 0 }];
+
+      // Payment-leg presence. A merchant on a third-party gateway or COD has an
+      // order book and no payment feed, which reconciles to a legitimate-looking
+      // 0% match rate. Reporting the two sides separately lets the UI say WHY
+      // instead of presenting an unexplained zero.
+      const ordersChannelIds = orgChannels.filter((c) => c.code.startsWith("sl_orders_")).map((c) => c.id);
+      const paymentsChannelIds = orgChannels.filter((c) => c.code.startsWith("sl_payments_")).map((c) => c.id);
+      const countIn = async (ids: number[]) => {
+        if (ids.length === 0) return 0;
+        const [r] = await db
+          .select({ n: sql<number>`count(*)` })
+          .from(transactions)
+          .where(inArray(transactions.channelId, ids));
+        return Number(r?.n ?? 0);
+      };
+      const orderRowCount = await countIn(ordersChannelIds);
+      const paymentRowCount = await countIn(paymentsChannelIds);
+
+      // Sync health — so an empty dashboard can explain itself. A store whose
+      // syncs are failing (or has never synced) otherwise renders as a page of
+      // legitimate-looking zeros.
+      const storeHealth = await db
+        .select({
+          storeHandle: slConnectorStores.storeHandle,
+          lastSyncAt: slConnectorStores.lastSyncAt,
+          lastSyncAttemptAt: slConnectorStores.lastSyncAttemptAt,
+          lastSyncError: slConnectorStores.lastSyncError,
+        })
+        .from(slConnectorStores)
+        .where(and(eq(slConnectorStores.organizationId, orgId), eq(slConnectorStores.status, "active")));
+
+      // Recent payouts — the settlement leg. `normalisePayout` writes these with a
+      // `PAYOUT_` transactionRef prefix (unique to payouts; orders/refunds/balance
+      // txns use bare ids, `REFUND_` and `BT_`), and sets `valueDate` only when
+      // SHOPLINE reported the payout as SUCCESS — which is what distinguishes a
+      // paid payout from one still in flight.
+      // NOTE: `_` is a LIKE wildcard in MySQL, so the prefix must be escaped.
+      const payoutRows = channelIds.length
+        ? await db
+            .select({
+              id: transactions.id,
+              channelId: transactions.channelId,
+              amount: transactions.amount,
+              currency: transactions.currency,
+              transactionDate: transactions.transactionDate,
+              valueDate: transactions.valueDate,
+              status: transactions.status,
+            })
+            .from(transactions)
+            .where(
+              and(
+                inArray(transactions.channelId, channelIds),
+                like(transactions.transactionRef, "PAYOUT\\_%"),
+              ),
+            )
+            .orderBy(desc(transactions.transactionDate))
+            .limit(20)
+        : [];
+
+      return {
+        totalSettled: Number(agg?.settledAmount ?? 0),
+        totalPending: Number(agg?.pendingAmount ?? 0),
+        totalExceptions: Number(exAgg?.open ?? 0),
+        matchRate: total > 0 ? (matched / total) * 100 : 0,
+        matchedCount: matched,
+        pendingCount: Number(agg?.pendingCount ?? 0),
+        orderRowCount,
+        paymentRowCount,
+        /** Orders present but no payment leg at all — nothing to reconcile against. */
+        paymentFeedMissing: orderRowCount > 0 && paymentRowCount === 0,
+        syncHealth: storeHealth.map((s) => ({
+          storeHandle: s.storeHandle,
+          lastSyncAt: s.lastSyncAt ? s.lastSyncAt.toISOString() : null,
+          lastSyncAttemptAt: s.lastSyncAttemptAt ? s.lastSyncAttemptAt.toISOString() : null,
+          lastSyncError: s.lastSyncError,
+          neverSynced: s.lastSyncAt === null,
+        })),
+        recentPayouts: payoutRows.map((p) => ({
+          id: p.id,
+          date: p.transactionDate.toISOString(),
+          storeHandle: handleByChannelId.get(p.channelId) ?? "unknown",
+          amount: Number(p.amount),
+          currency: p.currency ?? "USD",
+          status: p.valueDate ? "paid" : "pending",
+          reconciled: p.status === "matched" || p.status === "manually_matched",
+        })),
+      };
     }),
+
+    /**
+     * Recent webhook events for the sync status page.
+     */
+    recentWebhookEvents: protectedProcedure
+      .input(z.object({ limit: z.number().min(1).max(200).default(50), organizationId: z.number().int().positive().optional() }))
+      .query(async ({ ctx, input }) => {
+        const orgId = resolveOrgId(ctx.user, input.organizationId);
+
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+        const events = await db
+          .select({
+            id: slConnectorWebhookEvents.id,
+            topic: slConnectorWebhookEvents.topic,
+            status: slConnectorWebhookEvents.status,
+            receivedAt: slConnectorWebhookEvents.receivedAt,
+            slStoreId: slConnectorWebhookEvents.slStoreId,
+          })
+          .from(slConnectorWebhookEvents)
+          .where(eq(slConnectorWebhookEvents.organizationId, orgId))
+          .orderBy(desc(slConnectorWebhookEvents.receivedAt))
+          .limit(input.limit);
+
+        // Enrich with store handle
+        const storeIds = Array.from(new Set(events.map((e) => e.slStoreId)));
+        const stores = storeIds.length > 0
+          ? await db
+              .select({ id: slConnectorStores.id, storeHandle: slConnectorStores.storeHandle })
+              .from(slConnectorStores)
+              .where(eq(slConnectorStores.organizationId, orgId))
+          : [];
+        const storeMap = new Map(stores.map((s) => [s.id, s.storeHandle]));
+
+        return events.map((e) => ({
+          ...e,
+          storeHandle: storeMap.get(e.slStoreId) ?? "unknown",
+        }));
+      }),
 
   /**
    * Trigger a manual sync for a specific store (any authenticated user).
@@ -723,10 +730,10 @@ export const shoplineConnectorRouter = router({
   triggerManualSync: protectedProcedure
     .input(z.object({ storeId: z.number(), organizationId: z.number().int().positive().optional() }))
     .mutation(async ({ ctx, input }) => {
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const orgId = resolveOrgId(ctx.user, input.organizationId);
 
       // Verify store belongs to org
       const stores = await db
@@ -805,6 +812,8 @@ export const shoplineConnectorRouter = router({
     .input(
       z.object({
         fileName: z.string().min(1).max(255),
+        /** Super-admin portal context only; validated by resolveOrgId below. */
+        organizationId: z.number().int().positive().optional(),
         /** Base64 for spreadsheets, raw text for CSV. */
         content: z.string().min(1).max(14_000_000), // ~10MB decoded
         contentEncoding: z.enum(["utf8", "base64"]).default("utf8"),
@@ -819,9 +828,10 @@ export const shoplineConnectorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      // Reject a tenant-supplied portal override before any database access.
+      const orgId = resolveOrgId(ctx.user, input.organizationId);
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const orgId = requireOrgId(ctx.user);
 
       const [store] = await db
         .select()

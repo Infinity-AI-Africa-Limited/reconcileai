@@ -1,57 +1,329 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# ReconcileAI — Option 3, CPU stack (NO GPU REQUIRED)
+# ReconcileAI — private CPU/Ollama serving profile (NO GPU REQUIRED)
 #
-#   app  ──http──►  ollama (serves a small quantized model on CPU)
+#   app  ──http──►  ollama (serves a verified quantized model on CPU)
 #   app  ──sql───►  db (MySQL)
+#   app  ──s3 ───►  minio (private evidence and report storage)
 #
-# Everything runs on the bank's hardware. DEPLOYMENT_MODE=on_premise makes the
-# egress guard block any outbound internet call; the in-stack model host
-# (`ollama`) is permitted via EGRESS_ALLOWLIST.
+# Everything runs on the institution's hardware. Service APIs are never exposed
+# on host ports; they are reachable only by the app on the private Docker network.
+# DEPLOYMENT_MODE=on_premise makes the egress guard block outbound internet calls.
 #
-# Run:
-#   cp .env.onprem.example .env.onprem   # then edit secrets
-#   docker compose -f docker-compose.cpu.yml --env-file .env.onprem up -d --build
+# Before starting, validate the profile against its env file:
+#   pnpm onprem:preflight -- --profile cpu --env-file .env.onprem
 # ─────────────────────────────────────────────────────────────────────────────
 name: reconcileai-onprem-cpu
 
 services:
   db:
-    image: mysql:8.0
+    image: ${MYSQL_IMAGE:?Set MYSQL_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: reconcileai
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+      # No default. A silent fallback password is how a "hardened" stack ships
+      # with a known root credential; the deployment must supply its own.
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}
     volumes:
       - db-data:/var/lib/mysql
+    # MYSQL_PWD keeps the password out of the container's process list, which
+    # `docker top` and any in-container process can otherwise read.
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
       interval: 10s
       timeout: 5s
       retries: 12
+      # First-run initialisation took ~5 minutes on the reference host, well past
+      # the 120s the retries alone allow. Without a start period the container is
+      # reported unhealthy throughout — which reads as a failed install, and
+      # holds back everything that depends_on it.
+      start_period: 300s
+    networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
+
+  # Private S3-compatible storage for uploaded evidence and generated reports.
+  # It has no host port; institutions can replace it with an approved internal
+  # S3 service only after supplying equivalent private-network evidence.
+  minio:
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE to a scanned, pinned image reference}
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [bank-internal]
+    security_opt: [no-new-privileges:true]
+
+  # Creates the app bucket AND a bucket-scoped service account. The application
+  # never receives MinIO root credentials: root can delete every bucket and mint
+  # new users, which is not a privilege a reconciliation web app needs to hold.
+  storage-init:
+    image: ${MINIO_MC_IMAGE:?Set MINIO_MC_IMAGE to a scanned, pinned image reference}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.onprem}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.onprem}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      # Opt-in destructive rotation. Without this passed through, the script's
+      # check defaults to false and the rotation branch is unreachable — the
+      # flag would look supported and do nothing.
+      MINIO_APP_ROTATE: ${MINIO_APP_ROTATE:-false}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set root "http://minio:9000" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "root/$${AWS_S3_BUCKET}"
+        pol=/tmp/reconcileai-app-policy.json
+        key="$${MINIO_APP_ACCESS_KEY}"
+
+        # Least privilege: read/write objects in exactly one bucket, nothing else.
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]}]}' \
+          "$${AWS_S3_BUCKET}" "$${AWS_S3_BUCKET}" > "$${pol}"
+
+        # This one must SUCCEED, not be tolerated. `create` replaces a policy of
+        # the same name, which is what stops a stale, more-restrictive policy
+        # from an earlier deployment surviving into this one. `add` is the older
+        # mc spelling; if both fail, `set -e` stops here.
+        mc admin policy create root reconcileai-app "$${pol}" 2>/dev/null || mc admin policy add root reconcileai-app "$${pol}"
+
+        # Reconcile the identity's POLICIES without destroying the identity.
+        #
+        # An earlier revision removed and re-added the user, which does
+        # guarantee one binding — and also revokes the credential a RUNNING app
+        # is holding. `docker compose up -d` against a live stack runs this
+        # while the app container is still serving, so an in-place redeploy
+        # would reject evidence uploads for the width of the gap. Detaching the
+        # extra policies achieves the same end state with no outage.
+        if mc admin user info root "$${key}" > /dev/null 2>&1; then
+          if [ "$${MINIO_APP_ROTATE:-false}" = "true" ]; then
+            # The ONLY way mc can change an existing secret. `mc admin user add`
+            # on an existing user reports success and leaves the old secret
+            # working (verified), so a rotation has to be destructive — and
+            # therefore has to be asked for, not assumed. Running containers
+            # keep the old value in their environment and cannot re-authenticate
+            # until they are recreated.
+            echo "MINIO_APP_ROTATE=true — replacing the application identity; existing app containers must be recreated."
+            mc admin user remove root "$${key}"
+            mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+          fi
+        else
+          mc admin user add root "$${key}" "$${MINIO_APP_SECRET_KEY}"
+        fi
+
+        # `mc admin policy attach` is additive and has no replace form, so a key
+        # reused across deployments keeps every binding it ever had: a key that
+        # once carried `readwrite` still carries it, the attach below succeeds,
+        # and the bucket scope is decoration. Detaching everything else is what
+        # makes the scope real.
+        # Parsed with shell builtins on purpose: the minio/mc image ships bash
+        # plus cut/tr/head and has NO sed, grep or awk. An earlier revision used
+        # sed here and aborted the whole initializer with "sed: command not
+        # found" on every deployment — caught by running it in the real image
+        # rather than a convenient one.
+        info="$$(mc --json admin user info root "$${key}")"
+        case "$${info}" in
+          *'"policyName":"'*)
+            rest="$${info#*\"policyName\":\"}"
+            attached="$${rest%%\"*}"
+            ;;
+          *) attached="" ;;
+        esac
+        for pol in $$(echo "$${attached}" | tr ',' ' '); do
+          if [ -z "$${pol}" ]; then continue; fi
+          if [ "$${pol}" = "reconcileai-app" ]; then continue; fi
+          echo "detaching stale policy from the application credential: $${pol}"
+          mc admin policy detach root "$${pol}" --user "$${key}" > /dev/null 2>&1 || true
+        done
+        mc admin policy attach root reconcileai-app --user "$${key}" 2>/dev/null || true
+
+        # Verify the RESULT, not the commands that were meant to produce it.
+        # Each detach above is tolerated, and the scope probe further down only
+        # exercises a bucket it creates for the test — so a stale policy that
+        # failed to detach, granting some OTHER existing bucket, would slip past
+        # both. Asserting the effective binding set is what actually closes it.
+        after="$$(mc --json admin user info root "$${key}")"
+        case "$${after}" in
+          *'"policyName":"'*)
+            rest_after="$${after#*\"policyName\":\"}"
+            bound="$${rest_after%%\"*}"
+            ;;
+          *) bound="" ;;
+        esac
+        if [ "$${bound}" != "reconcileai-app" ]; then
+          echo "REFUSING TO START — the application credential is bound to: $${bound:-<none>}"
+          echo "Expected exactly reconcileai-app. A stale policy could not be detached, so the"
+          echo "credential may still reach buckets outside $${AWS_S3_BUCKET}. Detach it in MinIO,"
+          echo "or rotate the identity with MINIO_APP_ROTATE=true."
+          exit 1
+        fi
+
+        # Probe every operation the application actually performs, not merely a
+        # listing. A credential carrying a list-only policy passes `mc ls` while
+        # every evidence upload is denied (verified against MinIO) — readiness
+        # that checks the wrong capability is not readiness. `set -e` means any
+        # of these failing exits non-zero, so the app never starts.
+        # `mc alias set` validates the credential as it stores it, so a stale
+        # secret fails HERE — and with set -e that aborted the script on mc's
+        # raw "signature does not match", which names neither the cause nor the
+        # remedy. Catch it and say what actually happened.
+        if ! mc alias set appcheck "http://minio:9000" "$${key}" "$${MINIO_APP_SECRET_KEY}" > /dev/null 2>&1; then
+          echo "REFUSING TO START — MINIO_APP_SECRET_KEY does not match the stored identity $${key}."
+          echo "mc cannot change an existing secret in place. To rotate, set MINIO_APP_ROTATE=true and"
+          echo "recreate the app container: the running one holds the old secret in its environment."
+          exit 1
+        fi
+        probe="appcheck/$${AWS_S3_BUCKET}/.reconcileai-storage-init-probe"
+        echo "reconcileai storage readiness probe" | mc pipe "$${probe}"
+        mc cat "$${probe}" > /dev/null
+        mc rm "$${probe}" > /dev/null
+        mc ls "appcheck/$${AWS_S3_BUCKET}" > /dev/null
+
+        # Prove the scope, not just the access. Everything above passes just as
+        # happily for a credential that can also reach every OTHER bucket, so
+        # least privilege needs a denial test or it is only an assertion.
+        scope_probe="reconcileai-scope-probe"
+        if mc ls "root/$${scope_probe}" > /dev/null 2>&1; then
+          echo "REFUSING TO START — bucket $${scope_probe} already exists; that name is reserved for the scope check."
+          exit 1
+        fi
+        mc mb "root/$${scope_probe}" > /dev/null
+        cross_read=no
+        cross_write=no
+        if mc ls "appcheck/$${scope_probe}" > /dev/null 2>&1; then cross_read=yes; fi
+        if echo scope-probe | mc pipe "appcheck/$${scope_probe}/probe" > /dev/null 2>&1; then cross_write=yes; fi
+        # Always clean up before deciding, so a failure cannot strand the bucket
+        # and trip the reserved-name guard on the next run.
+        mc rb --force "root/$${scope_probe}" > /dev/null 2>&1 || true
+        if [ "$${cross_read}" = yes ] || [ "$${cross_write}" = yes ]; then
+          echo "REFUSING TO START — the application credential reaches beyond $${AWS_S3_BUCKET}."
+          echo "  read other bucket:  $${cross_read}"
+          echo "  write other bucket: $${cross_write}"
+          echo "It is carrying a policy wider than reconcileai-app. Remove the stale binding, or rotate MINIO_APP_ACCESS_KEY."
+          exit 1
+        fi
+        echo "storage ready: bucket $${AWS_S3_BUCKET}, scoped credential verified for put/get/delete/list"
+    networks: [bank-internal]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
 
   ollama:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:?Set OLLAMA_IMAGE to a scanned, pinned image reference}
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
+      - ./models:/models:ro
+    networks: [bank-internal]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 12
+    security_opt: [no-new-privileges:true]
 
-  # One-shot: pulls (or, for the fine-tuned model, expects a pre-imported) model.
+  # One-shot model bootstrap. `pull` is for local demonstration only. `import`
+  # creates the trained model from a verified GGUF artifact already on disk, so a
+  # bank installation remains entirely offline after package delivery.
+  #
+  # Mode and model are passed as container environment (not Compose
+  # interpolation) so the shell picks the branch. Compose interpolates every
+  # `${VAR:?...}` in this file at parse time regardless of the `if`, so a
+  # required-value marker written inline here would fail `pull` mode too.
   model-init:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:?Set OLLAMA_IMAGE to a scanned, pinned image reference}
     depends_on:
       ollama:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL_MODE: ${OLLAMA_MODEL_MODE:-pull}
+      RECON_MODEL: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}
+      RECON_MODEL_FILE: ${RECON_MODEL_FILE:-reconcileai-recon-3b-q4_k_m.gguf}
+      # Supplied out of band from the signed release record — see the import
+      # branch below for why the shipped manifest alone is not sufficient.
+      RECON_MODEL_SHA256: ${RECON_MODEL_SHA256:-}
+      # The Modelfile needs the same treatment: it carries the SYSTEM prompt,
+      # the decoding parameters and the FROM that selects the weights, so it is
+      # every bit as much an approved artifact as the GGUF itself.
+      RECON_MODELFILE_SHA256: ${RECON_MODELFILE_SHA256:-}
+    volumes:
+      - ./models:/models:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - "ollama pull ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M} && echo 'model ready: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}'"
+      - |
+        set -eu
+        if [ "$${OLLAMA_MODEL_MODE}" != "import" ]; then
+          echo "DEVELOPMENT MODE: pulling stock model $${RECON_MODEL} from the internet."
+          echo "This path is for local demonstration only and must not be used for a bank deployment."
+          ollama pull "$${RECON_MODEL}"
+          exit 0
+        fi
+
+        : "$${RECON_MODEL:?Set RECON_MODEL to the Ollama model name to create (e.g. reconcileai)}"
+        : "$${RECON_MODEL_SHA256:?Set RECON_MODEL_SHA256 to the digest from the signed release record}"
+        : "$${RECON_MODELFILE_SHA256:?Set RECON_MODELFILE_SHA256 to the Modelfile digest from the signed release record}"
+
+        cd /models
+        test -f "$${RECON_MODEL_FILE}" || { echo "missing artifact /models/$${RECON_MODEL_FILE}"; exit 1; }
+        test -f Modelfile           || { echo "missing /models/Modelfile"; exit 1; }
+        test -f SHA256SUMS          || { echo "missing /models/SHA256SUMS"; exit 1; }
+
+        # 1. Transfer integrity — the shipped bytes match the shipped manifest.
+        sha256sum -c SHA256SUMS > /dev/null
+
+        # 2. Authenticity — the bytes ALSO match a digest supplied out of band.
+        #    A manifest that travels with the artifact cannot authorise its own
+        #    import: anyone who can swap the GGUF can regenerate SHA256SUMS to
+        #    match it. RECON_MODEL_SHA256 comes from the institution's secret
+        #    store or signed release record, on a different path to the media.
+        actual="$(sha256sum "$${RECON_MODEL_FILE}" | cut -d ' ' -f 1)"
+        if [ "$${actual}" != "$${RECON_MODEL_SHA256}" ]; then
+          echo "REFUSING IMPORT — /models/$${RECON_MODEL_FILE} does not match the approved release."
+          echo "  on disk:  $${actual}"
+          echo "  approved: $${RECON_MODEL_SHA256}"
+          exit 1
+        fi
+
+        # 3. The Modelfile is an approved artifact too, and verifying only the
+        #    GGUF left the more consequential half unauthenticated. `ollama
+        #    create` takes its SYSTEM prompt, decoding PARAMETERs and TEMPLATE
+        #    from this file, and its FROM decides which weights load at all. An
+        #    attacker who cannot alter the approved GGUF can still swap this and
+        #    regenerate the co-delivered SHA256SUMS — rewriting the instructions
+        #    a bank's reconciliation analyst runs under, while every check above
+        #    still passes. Same argument as step 2, applied to the other file.
+        actual_modelfile="$(sha256sum Modelfile | cut -d ' ' -f 1)"
+        if [ "$${actual_modelfile}" != "$${RECON_MODELFILE_SHA256}" ]; then
+          echo "REFUSING IMPORT — /models/Modelfile does not match the approved release."
+          echo "  on disk:  $${actual_modelfile}"
+          echo "  approved: $${RECON_MODELFILE_SHA256}"
+          exit 1
+        fi
+
+        # 4. And the approved Modelfile must load the artifact just verified,
+        #    not another file that happens to be sitting in /models.
+        from_line="$(sed -n 's/^FROM[[:space:]]*\.\/\([^[:space:]]*\).*/\1/p' Modelfile | head -1)"
+        if [ "$${from_line}" != "$${RECON_MODEL_FILE}" ]; then
+          echo "REFUSING IMPORT — Modelfile FROM is '$${from_line}', expected '$${RECON_MODEL_FILE}'."
+          exit 1
+        fi
+
+        ollama create "$${RECON_MODEL}" -f /models/Modelfile
+        ollama show "$${RECON_MODEL}" > /dev/null
+        echo "verified offline import complete: $${RECON_MODEL} sha256=$${actual}"
+    networks: [bank-internal]
     restart: "no"
+    security_opt: [no-new-privileges:true]
 
   app:
     build:
@@ -62,25 +334,87 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
-    env_file: .env.onprem
+      # The app must not accept traffic before the model it is configured to use
+      # exists. model-init has `restart: "no"`, so a checksum mismatch or a
+      # failed import exits non-zero, this condition is never met, and the stack
+      # stops visibly instead of serving an unusable deployment.
+      model-init:
+        condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+    # Deliberately NOT `env_file: .env.onprem`. That file is the Compose
+    # interpolation source and holds infrastructure secrets — MinIO root, image
+    # digests — which the application has no reason to hold. Loading it wholesale
+    # would hand the web app the storage root credential the bucket-scoped
+    # service account above exists to avoid. Everything the app may see is
+    # enumerated below; add new application variables here explicitly.
     environment:
       # ── Residency: lock the box down ──
       DEPLOYMENT_MODE: on_premise
-      # `ollama` is an in-stack host — permit it past the egress guard.
-      EGRESS_ALLOWLIST: ollama
+      # In-stack hosts are permitted past the egress guard only by service name.
+      EGRESS_ALLOWLIST: ollama,minio
       # ── Database (bundled MySQL) ──
-      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-change-me}@db:3306/reconcileai
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.onprem}@db:3306/reconcileai
       # ── LLM: local, OpenAI-compatible (Ollama) ──
-      DIRECT_LLM_API_KEY: local                       # non-empty placeholder; Ollama ignores it
+      DIRECT_LLM_API_KEY: local
       DIRECT_LLM_API_URL: http://ollama:11434/v1
       DIRECT_LLM_PROVIDER: openai
       DIRECT_LLM_MODEL: ${RECON_MODEL:-qwen2.5:3b-instruct-q4_K_M}
+      # ── Storage: private in-stack MinIO (S3-compatible), bucket-scoped ──
+      AWS_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.onprem}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.onprem}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-reconcileai}
+      AWS_S3_ENDPOINT: http://minio:9000
+      # ── Application ──
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.onprem (openssl rand -hex 32)}
+      APP_URL: ${APP_URL:-http://127.0.0.1:3000}
       PORT: 3000
       NODE_ENV: production
-    ports:
-      - "3000:3000"
+      # ── Optional internal data source (blank = file-only ingestion) ──
+      WOODCORE_DB_HOST: ${WOODCORE_DB_HOST:-}
+      WOODCORE_DB_PORT: ${WOODCORE_DB_PORT:-3306}
+      WOODCORE_DB_USER: ${WOODCORE_DB_USER:-}
+      WOODCORE_DB_PASSWORD: ${WOODCORE_DB_PASSWORD:-}
+      WOODCORE_DB_NAME: ${WOODCORE_DB_NAME:-}
+    networks: [bank-internal]
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+
+  # The only service published to the host. It bridges the Docker loopback
+  # endpoint to the internal app network; data services remain private.
+  #
+  # This indirection is load-bearing, not stylistic: a container attached only
+  # to an `internal: true` network cannot serve a published host port (verified
+  # — the connection is refused), so the app itself cannot be published.
+  gateway:
+    image: ${NGINX_IMAGE:?Set NGINX_IMAGE to a scanned, pinned image reference}
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./nginx/local-loopback.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:8080"
+    networks: [bank-internal, host-loopback]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
 
 volumes:
   db-data:
+  minio-data:
   ollama-models:
+
+networks:
+  # Internal means no container can route to the LAN or internet. A bank-approved
+  # reverse proxy reaches the app only through the host's loopback binding.
+  bank-internal:
+    internal: true
+  # The gateway alone is attached, and only so that its published port works. It
+  # is still bound to host loopback, and it proxies to the app by service name.
+  host-loopback:

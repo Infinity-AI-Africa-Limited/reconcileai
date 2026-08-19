@@ -4,12 +4,18 @@ import { describe, it, expect, vi, afterEach } from "vitest";
  * ENV is computed at import time from process.env, so each scenario resets the
  * module registry and re-imports egress.ts with the desired environment.
  */
+/** A JWT_SECRET that satisfies the on-premise boot guard, for the cases not testing it. */
+const STRONG_JWT_SECRET = "b3d1f8c04a7e2951f6a8c0d2e4b6a8901c3e5d7f9a1b3c5d7e9f0a2b4c6d8e0f";
+
 async function loadEgress(env: Record<string, string>) {
   vi.resetModules();
   // Clear the vars these tests care about so ambient env can't leak in.
   for (const k of ["DEPLOYMENT_MODE", "EGRESS_ALLOWLIST", "BUILT_IN_FORGE_API_KEY", "DIRECT_LLM_API_KEY", "DIRECT_LLM_API_URL"]) {
     vi.stubEnv(k, "");
   }
+  // The on-premise startup check now also validates JWT_SECRET, so pin it
+  // rather than letting the developer's ambient .env decide the outcome.
+  vi.stubEnv("JWT_SECRET", STRONG_JWT_SECRET);
   for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
   return await import("./egress");
 }
@@ -96,6 +102,30 @@ describe("residency startup check", () => {
       DIRECT_LLM_API_KEY: "k",
       DIRECT_LLM_API_URL: "http://localhost:11434",
     });
+    expect(() => e.assertResidencyStartupConfig()).not.toThrow();
+  });
+});
+
+describe("on-premise deployment-secret guard", () => {
+  const localLlm = { DEPLOYMENT_MODE: "on_premise", DIRECT_LLM_API_KEY: "k", DIRECT_LLM_API_URL: "http://localhost:11434" };
+
+  it("refuses to boot when JWT_SECRET is still the shipped placeholder", async () => {
+    const e = await loadEgress({ ...localLlm, JWT_SECRET: "replace-with-a-64-char-random-secret" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/JWT_SECRET still holds a template placeholder/);
+  });
+
+  it("refuses to boot when JWT_SECRET is unset", async () => {
+    const e = await loadEgress({ ...localLlm, JWT_SECRET: "" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/JWT_SECRET is not set/);
+  });
+
+  it("refuses to boot when JWT_SECRET is too short to be a signing key", async () => {
+    const e = await loadEgress({ ...localLlm, JWT_SECRET: "abc123" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/shorter than 32 characters/);
+  });
+
+  it("does not police secrets in cloud mode, where the platform manages them", async () => {
+    const e = await loadEgress({ DEPLOYMENT_MODE: "cloud", JWT_SECRET: "change-me" });
     expect(() => e.assertResidencyStartupConfig()).not.toThrow();
   });
 });
