@@ -216,6 +216,26 @@ describe("when an operator writes into a tenant from its portal", () => {
     const dryRunReturn = commitBlock.indexOf("dryRun: true");
     expect(auditAt, "the audit must sit on the commit path, after the dry-run return").toBeGreaterThan(dryRunReturn);
   });
+
+  it("should not let a failed audit report a committed import as failed", () => {
+    // By the time the audit runs, the settlement rows and reconciliation
+    // results are already committed and none of it is transactional. An audit
+    // insert that threw would reach the enclosing catch, mark the upload batch
+    // `failed` and return an error for work that succeeded — the merchant is
+    // told nothing imported while their ledger says otherwise, and retries.
+    //
+    // An unattributed write is recoverable from the log line; a ledger that
+    // disagrees with its own status is not.
+    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
+    const importer = router.slice(router.indexOf("importSettlementFile:"));
+    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+
+    const auditAt = commitBlock.indexOf("logPlatformEvent({");
+    const guardAt = commitBlock.lastIndexOf("try {", auditAt);
+    const rescueAt = commitBlock.indexOf("AUDIT WRITE FAILED", auditAt);
+    expect(guardAt, "the audit call must be inside its own try").toBeGreaterThan(-1);
+    expect(rescueAt, "and its catch must say so loudly").toBeGreaterThan(auditAt);
+  });
 });
 
 describe("when no organisation is named", () => {
