@@ -149,6 +149,56 @@ No settlement row was imported and no reconciliation state was changed. The impo
 procedure must apply the same existing super-admin-only organisation resolution used
 by the tenant-scoped SHOPLINE reads before this controlled test is retried.
 
+## Deployed settlement-file import — 19 August 2026
+
+Following deployment of the settlement-import scope repair, the same persisted
+`SL_RECONCILEAI_DEV` portal successfully accepted the approved one-row synthetic
+remittance CSV. Column detection identified `order_id`, `transaction_id`,
+`settlement_amount`, `currency`, `settlement_date`, `fee`, and `description`, then
+enabled the one-row import. After import, Settlement Monitor returned to the retail
+overview with changed aggregate cards, confirming that the tenant-scoped import
+completed. The exact order #1004 reconciliation result must be verified from the
+redacted ledger before the P0 match claim is recorded.
+
+The post-import redacted ledger query confirmed the complete two-leg match for the
+controlled order. The original SHOPLINE order row and imported remittance row each
+hold the same synthetic test amount in USD, both are `matched`, and their reciprocal
+`matchId` values link them to one another. The remittance uses the synthetic
+`COD-TEST-1004-20260819` reference. This completes the Tier 1 order-to-remittance
+reconciliation proof for Cash on Delivery without claiming a native SHOPLINE Payments
+gateway record or using merchant/customer payment data.
+
+Before the controlled recovery run, the tenant-scoped Sync Status page showed
+`reconcileai-dev` active, 18 processed webhook deliveries, zero pending, and zero
+failed. Its recent-event ledger retained the controlled #1004 event sequence,
+including `order_transactions/create`, `orders/create`, `orders/updated`, and
+`orders/paid`, all marked processed. This is the baseline for the bounded manual-sync
+idempotency check; the recovery must not create a duplicate order, remittance,
+exception, or webhook side effect.
+
+The same tenant-scoped Sync Status row exposed the authorised **Sync Now** control
+for the active developer store. The controlled recovery will run only against that
+store and will be compared with the redacted #1004 match pair and the 18-delivery
+baseline above.
+
+Richard executed the bounded recovery on 19 August 2026. The live confirmation
+reported **“Sync triggered for reconcileai-dev — 1 orders, 0 payments processed.”**
+The redacted post-recovery ledger retained exactly two #1004 rows: the source order
+and the synthetic remittance, each with a duplicate count of one, `matched` status,
+and reciprocal match IDs. No exception rows reference either controlled transaction.
+This verifies that the manual recovery read the store safely and preserved the
+existing match without duplicate transaction, remittance, exception, or webhook
+side effects.
+
+## Fail-closed incident drill — 19 August 2026
+
+A deliberately unsigned, synthetic customer-data request was sent to the configured
+production SHOPLINE GDPR endpoint. It returned **HTTP 401**. This confirms the
+production boundary rejects unsigned webhook/GDPR traffic before it can reach the
+customer-data processing path. The request used only the `reconcileai-dev` store
+identifier and a synthetic drill identifier; it contained no customer, payment, or
+bank data. No accepted GDPR audit row, redaction, or store action was created.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |
