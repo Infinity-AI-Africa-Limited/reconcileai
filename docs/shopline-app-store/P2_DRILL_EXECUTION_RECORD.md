@@ -13,6 +13,47 @@ On 18 August 2026, the release candidate passed TypeScript validation and the fu
 automated suite (107 files / 1,662 tests). This supports the drill readiness but does
 not substitute for a live production exercise.
 
+On 18 August 2026, the authorised Partner Portal confirmed that **ReconcileAI Dev
+Store** (`reconcileai-dev`) remains the primary development store. Its administration
+session was opened successfully for the post-merge installation and tenant-context
+exercise. This confirms developer-store access only; it is not proof that the
+ReconcileAI merchant tenant hand-off, sync, or settlement evidence has succeeded.
+
+The post-merge **Test App** flow subsequently completed the production OAuth callback
+and reached `https://www.reconcileaiafrica.com/shopline/welcome?org=SL_RECONCILEAI_DEV&reconnect=true`.
+The welcome page correctly displayed the expected organisation code. However, after
+using **Go to Settlement Monitor**, the application still displayed the Infinity AI
+Staff context, financial-services navigation, and “No active SHOPLINE stores
+connected.” The super-admin retail portal context was therefore **not persisted**
+across the route transition. This is a P0 defect: no paid-order, sync, or settlement
+claim may be treated as valid until the hand-off reaches `SL_RECONCILEAI_DEV` in the
+Settlement Monitor.
+
+The production **Super Admin → Organisations** view separately confirmed that
+`SL_RECONCILEAI_DEV` exists as active **ReconcileAI Dev Store**, segment **Retail
+Commerce**, alongside `SL_RECONCILEAI`. The overview card nevertheless reported
+zero retail organisations, which is a separate reporting inconsistency. The tenant
+hand-off defect is therefore not evidence of a missing retail organisation or a
+non-retail connector binding; the fix must preserve the existing retail record and
+make the verified portal context reach the Settlement Monitor.
+
+The same Super Admin table exposes an established **Enter Portal** control for each
+retail record. Its behaviour is the authorised, non-destructive comparison path for
+the welcome-page context hand-off; no tenant data was changed while observing it.
+
+## Signed GDPR acknowledgement — 18 August 2026
+
+A controlled request was signed with the authorised App Secret and sent only to the
+configured `customers-data-request` endpoint for
+`reconcileai-dev.myshopline.com`. The payload contained a synthetic request
+identifier and no customer name, email, address, payment data, or bank data. The
+production endpoint returned **HTTP 200**, `ok: true`,
+`kind: customer_data_request`, `status: completed`, and `recordsAffected: 0`.
+
+This verifies signature acceptance, store resolution, the audit-acknowledgement
+path, and the non-destructive access-request response. No customer-redaction,
+shop-redaction, uninstallation, or production merchant-data mutation was invoked.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |
