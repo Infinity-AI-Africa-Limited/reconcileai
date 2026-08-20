@@ -199,6 +199,56 @@ customer-data processing path. The request used only the `reconcileai-dev` store
 identifier and a synthetic drill identifier; it contained no customer, payment, or
 bank data. No accepted GDPR audit row, redaction, or store action was created.
 
+## Screenshot validation — 19 August 2026
+
+Richard supplied four authentic production captures covering Settlement Monitor, Sync
+Status summary, Sync Status store/webhook detail, and SHOPLINE Connection. Their
+content supports the reviewer narrative: the ReconcileAI Dev Store retail portal is
+active, the controlled `orders/paid` delivery is processed, and the store is
+connected. They are not yet valid App Store upload assets because they measure
+approximately **1896–1897 × 742–745 pixels**, not 1920×1080, and each includes an
+operating-system activation watermark. They must be recaptured at 1920×1080 without
+the watermark rather than stretched, padded, or semantically altered.
+
+Richard then supplied clean browser-native 2048×1152 (16:9) captures for Settlement
+Monitor, Sync Status, and SHOPLINE Connection. Each was proportionally downscaled
+with a Lanczos filter to an exact 1920×1080 PNG without cropping, padding, text
+editing, or content generation. The resulting validated App Store assets are:
+
+| Screenshot | Validated export |
+| --- | --- |
+| Settlement Monitor | `reconcileai-settlement-monitor-1920x1080.png` |
+| Sync Status | `reconcileai-sync-status-1920x1080.png` |
+| SHOPLINE Connection | `reconcileai-shopline-connection-1920x1080.png` |
+
+The clean captures supersede the earlier non-compliant watermark-bearing image set.
+
+On 19 August 2026, the three final 1920×1080 PNG assets were uploaded to the
+SHOPLINE **Product preview** section and the App Details listing returned **“Saved
+successfully.”** The listing now displays the three production preview thumbnails;
+no app version was created and no review submission was made as part of this save.
+
+## Subscription lifecycle evidence check — 19 August 2026
+
+The ReconcileAI Dev Store connector record was inspected without mutation. No
+`sl_connector_subscriptions` record exists for `reconcileai-dev`, and no persisted
+delivery exists for the configured app-subscription lifecycle topics. This does not
+disprove registration in the connector; it means the developer-store test has not
+yet activated a SHOPLINE-managed app subscription lifecycle. The required P0 proof
+remains a signed lifecycle delivery and resulting subscription-state row for the
+developer store, captured through a controlled test-plan activation rather than a
+merchant charge.
+
+The authorised Partner Portal **Test App in development store** screen was opened
+for ReconcileAI Dev Store on 19 August 2026. Its only available action is **Test
+App**, which invokes the access/OAuth test flow; it exposes no subscription-plan or
+trial activation control. The developer-store admin also labels this package as for
+app development and access verification only. Therefore a no-charge lifecycle trial
+cannot be activated through this development-store package. No subscription, charge,
+or billing state was created during this attempt. The lifecycle P0 proof requires a
+SHOPLINE-supported billing-test environment or a controlled, cancellable trial in an
+eligible non-development store.
+
 ## Monitoring and alert-response drill
 
 | Step | Controlled action | Expected evidence | Pass condition |
@@ -223,6 +273,20 @@ outcome, and any corrective action to this record only after each live drill. A
 customer-redaction or shop-redaction request is explicitly outside this exercise;
 the GDPR proof is limited to a signed, non-destructive customer-data acknowledgement.
 
-The P2 live drills remain blocked until Infinity AI PR #87 receives the required
-review and its approved release is deployed. No App Store review submission should
-be created before this record contains the completed live evidence.
+**The PR #87 precondition is now satisfied**, and is recorded here rather than
+deleted so the sequence stays auditable: #87 was approved and merged on
+2026-08-18T21:41:33Z, and the production service has since restarted on the merged
+code (`/api/health` reporting a process start after the merge, not the stale uptime
+that masked two earlier failed deploys). The drills are therefore unblocked.
+
+Unblocked is not complete. **No App Store review submission should be created before
+this record contains the completed live evidence**, and that control stands on its
+own — it is not discharged by #87 shipping, by the automated suite passing, or by
+the readiness assessment listing the owner's Portal gates. Sections of this record
+are still open, including the note above that displayed settlement figures remain
+product-preview data until they are tied to the controlled paid-order evidence.
+
+`FINAL_SUBMISSION_READINESS_2026-08-19.md` lists this as gate 4 of six. If that
+document and this one ever disagree about whether submission is permitted, **this
+record wins**: it is the one holding the evidence, and the readiness page is a
+summary of it.
