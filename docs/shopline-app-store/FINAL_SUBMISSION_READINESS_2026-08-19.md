@@ -13,10 +13,39 @@ development-store package exposes OAuth/access testing but no no-charge plan or
 trial activation route. A support request is prepared in
 `SHOPLINE_BILLING_TEST_SUPPORT_REQUEST.md`.
 
-The remaining owner-controlled gates before an App Store review submission are the
-public support-email switchover, creation of the app version, and a decision on
-whether the documented subscription-lifecycle caveat is acceptable or must be closed
-through SHOPLINE’s supported billing-test route.
+## Gates remaining before Submit for Review
+
+This list is the complete set, and it is deliberately longer than the owner-facing
+summary it replaced. An earlier revision named three gates — email switchover, app
+version creation, and the lifecycle decision — as though they were the whole
+remainder. Two further controls exist in this repository and neither was listed, so
+a release owner following this page alone could have submitted while those controls
+still said not to. A readiness page that understates the gate set is worse than no
+readiness page, because it is the document someone acts on.
+
+**Owner-controlled, in the Partner Portal**
+
+| # | Gate | Tracked in |
+| --- | --- | --- |
+| 1 | Switch the public contact email from `richard@infinityaiafrica.ai` to the monitored `support@reconcileaiafrica.com`, and test the inbox | `RELEASE_CONTROL_RECORD.md` — marked **P0 before Submit for Review** |
+| 2 | Create the app version | Partner Portal |
+| 3 | Decide whether the subscription-lifecycle caveat is accepted as a known limitation, or must be closed first | This document, plus `SHOPLINE_BILLING_TEST_SUPPORT_REQUEST.md` |
+
+**Repository controls that also gate submission**
+
+| # | Control | Where it is stated |
+| --- | --- | --- |
+| 4 | *"No App Store review submission should be created before this record contains the completed live evidence."* The drill record is a **pre-execution control**, and sections of it remain open — the settlement figures shown in the tenant-scoped views are still designated product-preview data until tied to the controlled paid-order evidence | `P2_DRILL_EXECUTION_RECORD.md` |
+| 5 | Three subscription-lifecycle tasks are still open, not merely caveated: activating a controlled no-charge subscription test and verifying a signed lifecycle delivery plus the resulting `sl_connector_subscriptions` state; activating and then cancelling the approved 7-day trial before renewal; and obtaining a SHOPLINE-supported billing-test route | `todo.md`, unchecked |
+
+Gate 5 is worth separating from gate 3, because they are easy to conflate and the
+difference decides whether submission is permitted. Gate 3 is a *decision* the owner
+may take either way. Gate 5 is *work that has not been done*. Recording the lifecycle
+gap as an accepted caveat does not complete those tasks; it only states that the
+package ships without that evidence, which is a claim SHOPLINE's reviewer may test.
+
+**Nothing here authorises submission on its own.** Gates 1–3 are the owner's to
+close; gates 4–5 are closed by evidence, not by decision.
 
 ## Verified P0 evidence
 

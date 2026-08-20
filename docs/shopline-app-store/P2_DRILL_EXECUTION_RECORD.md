@@ -273,6 +273,20 @@ outcome, and any corrective action to this record only after each live drill. A
 customer-redaction or shop-redaction request is explicitly outside this exercise;
 the GDPR proof is limited to a signed, non-destructive customer-data acknowledgement.
 
-The P2 live drills remain blocked until Infinity AI PR #87 receives the required
-review and its approved release is deployed. No App Store review submission should
-be created before this record contains the completed live evidence.
+**The PR #87 precondition is now satisfied**, and is recorded here rather than
+deleted so the sequence stays auditable: #87 was approved and merged on
+2026-08-18T21:41:33Z, and the production service has since restarted on the merged
+code (`/api/health` reporting a process start after the merge, not the stale uptime
+that masked two earlier failed deploys). The drills are therefore unblocked.
+
+Unblocked is not complete. **No App Store review submission should be created before
+this record contains the completed live evidence**, and that control stands on its
+own — it is not discharged by #87 shipping, by the automated suite passing, or by
+the readiness assessment listing the owner's Portal gates. Sections of this record
+are still open, including the note above that displayed settlement figures remain
+product-preview data until they are tied to the controlled paid-order evidence.
+
+`FINAL_SUBMISSION_READINESS_2026-08-19.md` lists this as gate 4 of five. If that
+document and this one ever disagree about whether submission is permitted, **this
+record wins**: it is the one holding the evidence, and the readiness page is a
+summary of it.
