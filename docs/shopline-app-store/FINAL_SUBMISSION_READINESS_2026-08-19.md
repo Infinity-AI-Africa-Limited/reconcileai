@@ -29,7 +29,7 @@ readiness page, because it is the document someone acts on.
 | --- | --- | --- |
 | 1 | Switch the public contact email from `richard@infinityaiafrica.ai` to the monitored `support@reconcileaiafrica.com`, and test the inbox | `RELEASE_CONTROL_RECORD.md` — marked **P0 before Submit for Review** |
 | 2 | Create the app version | Partner Portal |
-| 3 | Decide whether the subscription-lifecycle caveat is accepted as a known limitation, or must be closed first | This document, plus `SHOPLINE_BILLING_TEST_SUPPORT_REQUEST.md` |
+| 3 | Decide how the subscription-lifecycle gap is resolved: pursue the supported billing-test route and close gate 5 with evidence, or amend the control in `P2_DRILL_EXECUTION_RECORD.md`. Accepting it as a "known limitation" is **not** a third option that permits submission — see step 3 of the actions below | `SHOPLINE_BILLING_TEST_SUPPORT_REQUEST.md`, and the drill record for an amendment |
 
 **Repository controls that also gate submission**
 
@@ -110,15 +110,31 @@ match rate.
    `P2_DRILL_EXECUTION_RECORD.md`; gate 5 closed by the three lifecycle tasks in
    `todo.md` being done; and gate 6, Richard's confirmation of the final package.
 
-   **Accepting the caveat under gate 3 does not close gate 5.** An earlier draft of
-   this step said gate 5 was satisfied by "the three lifecycle tasks being closed or
-   the caveat formally accepted", which reopened the escape hatch this page exists
-   to remove — and contradicted its own statement two sections above that gates 4–5
-   close by evidence rather than by decision.
+   **Gate 5 cannot be closed or waived from this page.** Two earlier drafts tried:
+   the first said gate 5 was satisfied by the tasks closing "or the caveat formally
+   accepted", and the second replaced that with a recorded waiver. Both were wrong
+   for the same reason, which only became clear on reading the authoritative record
+   rather than reasoning from this summary.
 
-   The owner may still choose to submit without that evidence. That choice is a
-   **recorded waiver of gate 5**, not gate 5 being met, and the difference is not
-   pedantry: a waiver says the package ships with a known gap that SHOPLINE's
-   reviewer may probe, while "satisfied" says the evidence exists. Only one of those
-   is true. A waiver must be written into `RELEASE_CONTROL_RECORD.md` naming what is
-   missing, and confirmed under gate 6.
+   `P2_DRILL_EXECUTION_RECORD.md` classes the lifecycle proof as **required P0
+   proof** in its own right — "a signed lifecycle delivery and resulting
+   subscription-state row" — inside the record that gate 4 protects. Gate 4 is
+   absolute: no submission before that record contains its completed live evidence.
+   So a waiver written here would authorise exactly what gate 4 forbids, and a
+   summary page has no standing to waive a control defined in the record it
+   summarises.
+
+   That leaves gate 3 with two honest outcomes, not three:
+
+   - **Pursue the supported route.** Send the request in
+     `SHOPLINE_BILLING_TEST_SUPPORT_REQUEST.md`, obtain a no-charge billing-test
+     environment, complete the three tasks, and close gate 5 with evidence.
+   - **Amend the control.** If the owner concludes the package should ship without
+     lifecycle proof, that decision must be made *in* `P2_DRILL_EXECUTION_RECORD.md`
+     — reclassifying the lifecycle proof as not-P0 for this release, with the
+     reasoning recorded there and confirmed under gate 6.
+
+   The second is the owner's to make. It is deliberately not phrased as a
+   convenience: changing a release control should look like changing a release
+   control, in the record that holds it, rather than as a line in a readiness
+   summary that a reader could mistake for the gate having been met.
