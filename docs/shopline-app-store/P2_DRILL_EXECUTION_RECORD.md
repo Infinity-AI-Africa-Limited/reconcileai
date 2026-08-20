@@ -286,7 +286,7 @@ the readiness assessment listing the owner's Portal gates. Sections of this reco
 are still open, including the note above that displayed settlement figures remain
 product-preview data until they are tied to the controlled paid-order evidence.
 
-`FINAL_SUBMISSION_READINESS_2026-08-19.md` lists this as gate 4 of five. If that
+`FINAL_SUBMISSION_READINESS_2026-08-19.md` lists this as gate 4 of six. If that
 document and this one ever disagree about whether submission is permitted, **this
 record wins**: it is the one holding the evidence, and the readiness page is a
 summary of it.

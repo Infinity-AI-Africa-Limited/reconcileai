@@ -37,6 +37,7 @@ readiness page, because it is the document someone acts on.
 | --- | --- | --- |
 | 4 | *"No App Store review submission should be created before this record contains the completed live evidence."* The drill record is a **pre-execution control**, and sections of it remain open — the settlement figures shown in the tenant-scoped views are still designated product-preview data until tied to the controlled paid-order evidence | `P2_DRILL_EXECUTION_RECORD.md` |
 | 5 | Three subscription-lifecycle tasks are still open, not merely caveated: activating a controlled no-charge subscription test and verifying a signed lifecycle delivery plus the resulting `sl_connector_subscriptions` state; activating and then cancelling the approved 7-day trial before renewal; and obtaining a SHOPLINE-supported billing-test route | `todo.md`, unchecked |
+| 6 | *"Create the app release version and submit for SHOPLINE review only after Richard confirms the final submission package."* An explicit owner sign-off on the package as a whole, distinct from gates 1–3, which are individual Portal actions | `todo.md`, unchecked |
 
 Gate 5 is worth separating from gate 3, because they are easy to conflate and the
 difference decides whether submission is permitted. Gate 3 is a *decision* the owner
@@ -44,8 +45,20 @@ may take either way. Gate 5 is *work that has not been done*. Recording the life
 gap as an accepted caveat does not complete those tasks; it only states that the
 package ships without that evidence, which is a claim SHOPLINE's reviewer may test.
 
-**Nothing here authorises submission on its own.** Gates 1–3 are the owner's to
-close; gates 4–5 are closed by evidence, not by decision.
+Gate 6 is the last word and is not implied by the others. Closing gates 1–5 makes the
+package submittable; it does not make it submitted-with-approval. The owner signs off
+on the package as a whole.
+
+**Nothing here authorises submission on its own.** Gates 1–3 are Portal actions the
+owner takes, gates 4–5 close by evidence rather than by decision, and gate 6 is an
+explicit confirmation that the whole package is ready.
+
+> A note on how this list was corrected, because it bears on trusting it. The first
+> version named three gates. The second — written to fix that — added gates 4 and 5
+> but still missed gate 6, because it was assembled by reading this pull request's
+> own changes rather than the whole of `todo.md`. Review caught it. If a further
+> control exists that is not listed here, this page is still wrong, and the records
+> it cites remain the authority over it.
 
 ## Verified P0 evidence
 
@@ -86,5 +99,14 @@ match rate.
    subscription-lifecycle caveat for the initial review package.
 2. Change the App Details contact email to `support@reconcileaiafrica.com` and
    confirm that inbox is monitored before creating the app version.
-3. Create the App Store version and review submission only after the preceding
-   decision is documented.
+3. Create the App Store version and review submission only after **all six gates
+   above are closed** — not merely after the lifecycle decision in step 1 is
+   documented. That earlier wording referenced only this list's own preceding step
+   and silently omitted the repository controls, so following these actions in order
+   could produce a submission while the drill record still prohibited one.
+
+   Concretely, before creating the version: gates 1–3 done in the Partner Portal;
+   gate 4 satisfied by completed live evidence appended to
+   `P2_DRILL_EXECUTION_RECORD.md`; gate 5 satisfied by the three lifecycle tasks in
+   `todo.md` being closed or the caveat formally accepted under gate 3; and gate 6,
+   Richard's confirmation of the final package.
