@@ -106,7 +106,19 @@ match rate.
    could produce a submission while the drill record still prohibited one.
 
    Concretely, before creating the version: gates 1–3 done in the Partner Portal;
-   gate 4 satisfied by completed live evidence appended to
-   `P2_DRILL_EXECUTION_RECORD.md`; gate 5 satisfied by the three lifecycle tasks in
-   `todo.md` being closed or the caveat formally accepted under gate 3; and gate 6,
-   Richard's confirmation of the final package.
+   gate 4 closed by completed live evidence appended to
+   `P2_DRILL_EXECUTION_RECORD.md`; gate 5 closed by the three lifecycle tasks in
+   `todo.md` being done; and gate 6, Richard's confirmation of the final package.
+
+   **Accepting the caveat under gate 3 does not close gate 5.** An earlier draft of
+   this step said gate 5 was satisfied by "the three lifecycle tasks being closed or
+   the caveat formally accepted", which reopened the escape hatch this page exists
+   to remove — and contradicted its own statement two sections above that gates 4–5
+   close by evidence rather than by decision.
+
+   The owner may still choose to submit without that evidence. That choice is a
+   **recorded waiver of gate 5**, not gate 5 being met, and the difference is not
+   pedantry: a waiver says the package ships with a known gap that SHOPLINE's
+   reviewer may probe, while "satisfied" says the evidence exists. Only one of those
+   is true. A waiver must be written into `RELEASE_CONTROL_RECORD.md` naming what is
+   missing, and confirmed under gate 6.
