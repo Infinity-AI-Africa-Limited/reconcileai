@@ -70,7 +70,7 @@ explicit confirmation that the whole package is ready.
 | Tier 1 reconciliation fallback | Complete | Controlled synthetic remittance import created a reciprocal matched order/remittance pair for #1004. |
 | Recovery and idempotency | Complete | Manual recovery processed one order and no native payments; the matched pair stayed at one source order and one remittance, with no linked exception. |
 | GDPR signature handling | Complete | Signed non-destructive acknowledgement returned 200; unsigned synthetic request rejected with 401. |
-| App-subscription lifecycle | Caveat | No test subscription row or lifecycle delivery can be created in the current development-store package. |
+| App-subscription lifecycle | **Open — gate 5** | No test subscription row or lifecycle delivery can be created in the current development-store package. "Caveat" here describes the situation, not a cleared gate: the drill record classes this proof as required P0. |
 
 ## Verified P1 and P2 evidence
 
