@@ -23,6 +23,16 @@ The live Settlement Monitor verifies an active `reconcileai-dev` SHOPLINE connec
 
 The actual Payment Exceptions route provides the real exception-management controls: date range, status/category/severity filters, export, and glossary. The dashboard’s one open exception is outside the current date views, so this route has no populated record to open safely in the retail tenant. The video should not imply a visible retail exception has been resolved. The populated financial-services tenant will instead provide the unresolved-exception, owner/ageing, AI-assist, human-approval, and audit-trail sequence.
 
+Visual re-edit diagnosis: the primary capture begins in the Retail Commerce portal, then moves through Settlement Monitor, Orders & Payments, empty Payment Exceptions, and the platform-control centre. The Financial Services and Corporate B2B visual sequences do not sit at the correct points relative to the narration; the short secondary capture does not reach the Corporate B2B dashboard. The corrected edit must use targeted still/live captures: Financial Services dashboard and Exception Intelligence during the financial narration; Settlement Monitor during the retail narration; and the Corporate B2B dashboard/Pilot Readiness Scorecard during the Corporate B2B narration. Empty transaction and exception tables must not be shown when the narration describes a populated workflow.
+
+The primary capture contains authentic browser-native ReconcileAI Dev Store frames: portal dashboard, Settlement Monitor, Orders & Payments, Payment Exceptions, and platform-control views. These are usable only in the Retail Commerce section. A later local-capture tab moved to the Manus interface, so any replacement screen must be checked before use; the corrected edit must never substitute a Manus/agent interface for a ReconcileAI platform view.
+
+The alternate local Chrome tab is a protected WoodCore POC access screen. It is invite-only and does not contain a completed operational workflow; it must not be shown or used as a substitute for the live Financial Services platform capture.
+
+The first Chrome tab is the authenticated `reconcileaiafrica.com` platform tab and correctly mirrors the live ReconcileAI Dev Store Settlement Monitor. It is the only tab to use for the corrected product visual captures. The developer toolbar/debug banner is browser chrome, not part of the platform, and will be cropped from final product visuals without altering platform content.
+
+The corrected visual render was checked at the Financial Services and Retail Commerce timing checkpoints. The browser chrome/debug banner is absent from the rendered product area; the Financial Services dashboard visibly carries the Financial Services portal identity and operational metrics, while the Retail Commerce portion visibly carries the ReconcileAI Dev Store portal identity and SHOPLINE Settlement Monitor. Both retain explicit controlled-data disclosure strips.
+
 ## User-mandated content constraints
 
 1. Record actual platform views rather than mock screens or screenshots.

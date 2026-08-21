@@ -1387,3 +1387,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Incorporate the supplied WoodCore LOI, paid-POC, willingness-to-pay, founder-achievement, legal, and commitment evidence into the YC application pack.
 - [x] Extract and integrate the now-public Embed application context document into the YC application pack.
 - [x] Produce a sub-three-minute, under-100 MB investor demo video of the live ReconcileAI platform with Nigerian male narration and accurate three-vertical coverage.
+- [x] Re-edit the investor demo visuals so every live-platform screen precisely matches the approved narration timeline.
