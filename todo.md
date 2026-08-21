@@ -1388,3 +1388,5 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Extract and integrate the now-public Embed application context document into the YC application pack.
 - [x] Produce a sub-three-minute, under-100 MB investor demo video of the live ReconcileAI platform with Nigerian male narration and accurate three-vertical coverage.
 - [x] Re-edit the investor demo visuals so every live-platform screen precisely matches the approved narration timeline.
+- [x] Verify the deployed PR #94/#95 SHOPLINE submission package and document the remaining go-live action sequence while awaiting SHOPLINE’s billing-test response.
+- [x] Produce a second ReconcileAI investor video from Richard’s approved script, using the established Nigerian male voice and authentic, narration-matched production-platform visuals.
