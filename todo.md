@@ -1390,3 +1390,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Re-edit the investor demo visuals so every live-platform screen precisely matches the approved narration timeline.
 - [x] Verify the deployed PR #94/#95 SHOPLINE submission package and document the remaining go-live action sequence while awaiting SHOPLINE’s billing-test response.
 - [x] Produce a second ReconcileAI investor video from Richard’s approved script, using the established Nigerian male voice and authentic, narration-matched production-platform visuals.
+- [x] Complete a detailed Financial Services vertical go-live readiness assessment and phased bank-deployment plan with evidence gates, owners, and rollback controls.
