@@ -1,0 +1,15 @@
+ReconcileAI turns fragmented financial records into a controlled reconciliation workflow.
+
+What you are seeing is the live ReconcileAI platform. The examples shown in this video use controlled, synthetic or masked data, so no bank, customer, payment or merchant data is exposed. The workflow itself is real.
+
+We start in Financial Services. Banks, microfinance banks and fintechs reconcile activity across core banking, instant payments, cards, POS, mobile, agents and settlement files. ReconcileAI brings those sources into one operating view, applies deterministic matching to the routine records, and makes the unresolved items visible by channel, severity and owner.
+
+The important point is governance. ReconcileAI does not silently post a financial decision. A break becomes an exception with context, an accountable owner, ageing, a review path and an audit record. The AI investigation layer helps an operator understand the likely cause, retrieve comparable resolution patterns and prepare the next action. A human remains responsible for approval.
+
+The same control model extends to Retail Commerce. Here, the live ReconcileAI Dev Store connects to SHOPLINE and tracks orders, payments, settlements, pending payout and open exceptions from one settlement monitor. The figures on screen are controlled development-store data, not a claimed production result. The product gives a merchant operations team a clear answer to one question: did the money arrive, and if not, what must happen next?
+
+The third vertical is Corporate B2B, built for distributor-led FMCG and treasury operations. Finance teams can assess data readiness, register distributors, ingest payment and invoice sources, then reconcile complex many-to-one and one-to-many payment relationships. That is the operating reality behind distributor payments, not a simplified spreadsheet model.
+
+Across all three verticals, ReconcileAI keeps the same promise: ingest, match, investigate, approve and evidence. It gives teams less manual searching, clearer exception ownership and a defensible record of every decision.
+
+ReconcileAI is building the control layer for financial operations across African payment ecosystems.
