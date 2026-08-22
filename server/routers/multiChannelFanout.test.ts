@@ -57,7 +57,7 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
     expect(proc).toContain("// PARTIAL FAILURE.");
     const message = section("Failed to queue multi-channel reconciliation processing.", "cause: error,");
     expect(message).toContain("multiRunId ${multiRunId}");
-    expect(message).toContain("enqueued.join");
+    expect(message).toContain("stillRunning.join");
     expect(message).toContain("rather than retrying");
   });
 
@@ -65,8 +65,9 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
     // The rest would otherwise sit "pending" — indistinguishable from queued —
     // until the two-hour boot sweep abandons them.
     expect(proc).toContain("const neverAttempted = created.filter(");
-    // The ambiguous job is failed alongside them, not left pending.
-    expect(proc).toContain("for (const c of [{ jobId: ambiguous }, ...neverAttempted]) {");
+    // The ambiguous job is settled separately, by the database, because it is
+    // the only one a worker could be racing us for.
+    expect(proc).toContain("abandonUnstartedReconciliationJob(ambiguous, failedAt)");
   });
 
   it("should record the audit entry even when the fan-out later fails", () => {
@@ -77,32 +78,27 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
     expect(enqueue).toBeGreaterThan(audit);
   });
 
-  it("should make an un-enqueued job TERMINAL, because a rejected enqueue proves nothing", () => {
-    // Redis may persist the entry and then the client lose the response. A job
-    // marked only "failed" stays retryable by design (the runner-failure retry
-    // contract depends on it), so an entry that did land would later execute a
-    // reconciliation the caller was told had failed. `abandonedAt` makes the
-    // handler refuse it.
+  it("should abandon the never-attempted jobs outright — nothing can be racing them", () => {
+    // The loop never reached them, so no queue entry exists anywhere and an
+    // unconditional abandonment is correct.
+    expect(proc).toContain("const neverAttempted = created.filter(");
+    expect(proc).toContain("for (const c of neverAttempted) {");
     expect(proc).toContain("abandonedAt: failedAt");
   });
 
-  it("should distinguish the ambiguous job from the ones never attempted", () => {
-    // They are not equivalent: the loop never reached `neverAttempted`, so no
-    // queue entry can exist for them anywhere, whereas the job whose enqueue
-    // threw may or may not have been persisted.
-    expect(proc).toContain("const ambiguous = jobId;");
-    expect(proc).toContain("const neverAttempted = created.filter(");
+  it("should let the DATABASE settle the ambiguous job rather than guessing", () => {
+    // A rejected enqueue does not prove non-acceptance, so caller and worker
+    // can both believe they own the job. abandonUnstartedReconciliationJob only
+    // applies while the row is still "pending"; a worker that already claimed
+    // it has moved it to "running" and wins instead.
+    expect(proc).toContain("const abandonedAmbiguous = await db.abandonUnstartedReconciliationJob(ambiguous, failedAt);");
   });
 
-  it("should disclose the ambiguous job id, since abandonment there is best-effort", () => {
-    // The abandonment can lose a race against a worker that already picked the
-    // entry up. That window cannot be closed without a dispatch handshake, so
-    // the caller is told the id and can watch it via getMultiRun instead of
-    // retrying into an overlapping second fan-out.
-    const message = section("Failed to queue multi-channel reconciliation processing.", "cause: error,");
-    expect(message).toContain("MAY also have started");
-    expect(message).toContain("${ambiguous}");
-    expect(proc).toContain("RESIDUAL RACE");
+  it("should report the ambiguous job as RUNNING when the worker won the race", () => {
+    // Reporting it as failed while it proceeds is the precise defect this
+    // resolution exists to prevent.
+    expect(proc).toContain("const stillRunning = abandonedAmbiguous ? enqueued : [...enqueued, ambiguous];");
+    expect(proc).toContain("had already been picked up by a worker and is running");
   });
 
 });
@@ -110,8 +106,10 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
 describe("when a single-channel run fails to enqueue", () => {
   const proc = section("create: operationsProcedure", "createMultiChannel: operationsProcedure");
 
-  it("should also mark the job terminal, not merely failed", () => {
-    // Same ambiguity, same fix — the class, not just the multi-channel instance.
-    expect(proc).toContain("abandonedAt: failedAt");
+  it("should use the same contended abandonment, not an unconditional one", () => {
+    // Same ambiguity, same resolution — the class, not just the multi-channel
+    // instance that was flagged.
+    expect(proc).toContain("await db.abandonUnstartedReconciliationJob(jobId, new Date());");
+    expect(proc).toContain("had already been picked up by a worker and is running");
   });
 });

@@ -685,6 +685,39 @@ export async function updateReconciliationJob(id: number, data: Partial<InsertRe
   await db.update(reconciliationJobs).set(data).where(eq(reconciliationJobs.id, id));
 }
 
+/**
+ * Abandon a job ONLY while it is still unstarted, and report whether that won.
+ *
+ * Half of the enqueue-ambiguity resolution; the other half is claimJob in
+ * server/reconciliationQueue.ts. When `queue.add` rejects we cannot tell whether
+ * the entry was persisted, so caller and worker race: the caller wants to
+ * declare the job dead, a worker may already be starting it. Letting both
+ * proceed on their own reading of the row is what allowed a job the caller
+ * reported as failed to run anyway.
+ *
+ * The database arbitrates instead, and exactly one side wins:
+ *   - caller first  → status is still "pending", this update applies, the
+ *                     worker's claim then finds `abandonedAt` set and refuses.
+ *   - worker first  → the claim moved the row to "running", this update matches
+ *                     nothing, and the caller reports the job as started rather
+ *                     than failed — which is the truth.
+ *
+ * Returns true when the abandonment took effect.
+ */
+export async function abandonUnstartedReconciliationJob(id: number, at: Date): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db
+    .update(reconciliationJobs)
+    .set({ status: "failed", completedAt: at, abandonedAt: at })
+    .where(and(
+      eq(reconciliationJobs.id, id),
+      eq(reconciliationJobs.status, "pending"),
+      isNull(reconciliationJobs.abandonedAt),
+    ));
+  return Number((result as any)?.[0]?.affectedRows ?? 0) > 0;
+}
+
 /** Reconciliation runs for ONE organization. See getUploadBatches for the history. */
 export async function getReconciliationJobs(organizationId: number | null) {
   const db = await getDb();

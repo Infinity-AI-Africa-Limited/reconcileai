@@ -115,13 +115,19 @@ export const reconciliationRouter = router({
           userId: ctx.user.id,
         });
       } catch (error) {
-        // Terminal, for the same reason as the multi-channel path below: a
-        // rejected enqueue does not prove the entry was not persisted, and a
-        // merely-"failed" job stays retryable, so a late-delivered entry would
-        // run a reconciliation the caller was already told had failed.
-        const failedAt = new Date();
-        await db.updateReconciliationJob(jobId, { status: "failed", completedAt: failedAt, abandonedAt: failedAt });
-        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to queue reconciliation processing.", cause: error });
+        // Contended abandonment, same as the multi-channel path below. A
+        // rejected enqueue does not prove the entry was not persisted, so this
+        // only applies while the row is still "pending" — a worker that already
+        // claimed it wins instead, and the caller is told the run is under way
+        // rather than being told it failed while it proceeds.
+        const stopped = await db.abandonUnstartedReconciliationJob(jobId, new Date());
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: stopped
+            ? "Failed to queue reconciliation processing. The run was stopped before it started."
+            : `Failed to queue reconciliation processing, but job ${jobId} had already been picked up by a worker and is running. Track it rather than retrying.`,
+          cause: error,
+        });
       }
 
       return { jobId };
@@ -252,18 +258,8 @@ export const reconciliationRouter = router({
           enqueued.push(jobId);
         } catch (error) {
           // PARTIAL FAILURE. Jobs already enqueued are running and cannot be
-          // recalled — the queue owns them now. Two things must happen, and the
-          // previous version did neither:
+          // recalled — the queue owns them now.
           //
-          //   1. Fail every job that was NOT enqueued, not just this one.
-          //      Otherwise the rest sit "pending" for two hours until the boot
-          //      sweep abandons them, looking queued the whole time.
-          //   2. TELL THE CALLER what is still running. The old error carried
-          //      no multiRunId and no job ids, so a client's only recovery was
-          //      to retry — which starts a SECOND fan-out over the same
-          //      channels and date range, overlapping the runs still in flight.
-          //      With the ids in hand the caller can watch the partial run via
-          //      getMultiRun instead of duplicating it.
           // Three populations, and they are NOT equivalent:
           //
           //   enqueued        — acknowledged; definitely in flight.
@@ -278,12 +274,9 @@ export const reconciliationRouter = router({
           );
           const failedAt = new Date();
 
-          for (const c of [{ jobId: ambiguous }, ...neverAttempted]) {
-            // TERMINAL, not merely "failed". A job marked only "failed" stays
-            // retryable by design — the runner-failure retry contract depends
-            // on that — so an entry that did land would later execute a
-            // reconciliation the caller was told had failed. `abandonedAt`
-            // makes the handler refuse it outright.
+          // Never attempted: no entry exists, so no worker can be racing us.
+          // An unconditional abandonment is correct and cannot be contended.
+          for (const c of neverAttempted) {
             await db.updateReconciliationJob(c.jobId, {
               status: "failed",
               completedAt: failedAt,
@@ -291,33 +284,29 @@ export const reconciliationRouter = router({
             });
           }
 
-          // RESIDUAL RACE, stated plainly rather than papered over.
-          //
-          // For the ambiguous job the abandonment above is best-effort: if the
-          // entry did land AND a worker reads the row before this update
-          // commits, that worker proceeds and the run happens. Closing that
-          // window completely needs a dispatch handshake (worker refuses until
-          // the row is marked dispatch-confirmed), which costs a deferral on
-          // every run under the in-process backend — the default deployment
-          // today, where the handler is invoked on the next tick, before any
-          // post-enqueue write could possibly commit. The standard fix is a
-          // transactional outbox, which belongs with the durable-queue work
-          // (go-live plan Phase 1 item 2) rather than here.
-          //
-          // So the harm that CAN be closed here is closed: the caller is told
-          // the ambiguous job's id, so it can watch that run via getMultiRun
-          // instead of retrying into an overlapping second fan-out.
+          // The ambiguous job is CONTENDED, so the database decides rather than
+          // this process guessing. abandonUnstartedReconciliationJob only
+          // applies while the row is still "pending"; a worker that already
+          // claimed it has moved it to "running" and wins instead. Exactly one
+          // side succeeds, and the caller is told which — so "failed" here is
+          // never a claim about a run that is actually proceeding.
+          const abandonedAmbiguous = await db.abandonUnstartedReconciliationJob(ambiguous, failedAt);
+
+          const stillRunning = abandonedAmbiguous ? enqueued : [...enqueued, ambiguous];
+          const failedCount = neverAttempted.length + (abandonedAmbiguous ? 1 : 0);
+
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
             message:
               `Failed to queue multi-channel reconciliation processing. ` +
-              `${enqueued.length} of ${created.length} channel runs were accepted and are still ` +
-              `in progress (job ids: ${enqueued.join(", ") || "none"}). ` +
-              `Job ${ambiguous} MAY also have started — the queue rejected the request without ` +
-              `confirming whether it was persisted. ` +
-              `Track all of these with multiRunId ${multiRunId} rather than retrying, which would ` +
-              `run the same channels and date range a second time. ` +
-              `The remaining ${neverAttempted.length} were never queued and are marked failed.`,
+              `${stillRunning.length} of ${created.length} channel runs are in progress ` +
+              `(job ids: ${stillRunning.join(", ") || "none"}). ` +
+              (abandonedAmbiguous
+                ? `Job ${ambiguous} was stopped before it started. `
+                : `Job ${ambiguous} had already been picked up by a worker and is running. `) +
+              `Track these with multiRunId ${multiRunId} rather than retrying, which would run ` +
+              `the same channels and date range a second time. ` +
+              `${failedCount} job(s) were marked failed.`,
             cause: error,
           });
         }

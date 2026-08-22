@@ -20,9 +20,9 @@ const PAYLOAD: ReconciliationRunPayload = {
 };
 
 function makeDeps(
-  overrides: Partial<RunHandlerDeps> & { statuses?: string[]; abandonedAt?: Date | null } = {},
+  overrides: Partial<RunHandlerDeps> & { statuses?: string[]; abandonedAt?: Date | null; claimResult?: boolean } = {},
 ) {
-  const calls = { reset: 0, run: 0, runnerArgs: [] as unknown[] };
+  const calls = { reset: 0, run: 0, claim: 0, runnerArgs: [] as unknown[] };
   const statuses = overrides.statuses ?? ["pending", "completed"];
   const abandonedAt = overrides.abandonedAt ?? null;
   let statusIdx = 0;
@@ -30,6 +30,7 @@ function makeDeps(
     loadJobState:
       overrides.loadJobState ??
       (async () => ({ status: statuses[Math.min(statusIdx++, statuses.length - 1)], abandonedAt })),
+    claimJob: overrides.claimJob ?? (async () => { calls.claim += 1; return overrides.claimResult ?? true; }),
     resetArtifacts: overrides.resetArtifacts ?? (async () => { calls.reset += 1; }),
     getRunner: overrides.getRunner ?? (() => async (...args: unknown[]) => {
       calls.run += 1;
@@ -154,5 +155,31 @@ describe("the stale-job sweep", () => {
   it("should report only rows the UPDATE actually touched", () => {
     // Falling back to the pre-update count would over-report recoveries.
     expect(SOURCE).toContain("Number((result as any)?.[0]?.affectedRows ?? 0)");
+  });
+});
+
+describe("when the enqueue outcome was ambiguous", () => {
+  it("should refuse to run if it cannot claim the job, and touch nothing", async () => {
+    // The router's contended abandonment won the race, so this worker must not
+    // reset artifacts or execute — the caller has already been told the run
+    // was stopped before it started.
+    const { deps, calls } = makeDeps({ statuses: ["pending"], claimResult: false });
+    await makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 });
+    expect(calls.claim).toBe(1);
+    expect(calls.reset).toBe(0);
+    expect(calls.run).toBe(0);
+  });
+
+  it("should claim BEFORE resetting artifacts, never after", async () => {
+    // Claiming after the reset would destroy a job's matches and exceptions
+    // and only then discover it was not ours to run.
+    const order: string[] = [];
+    const { deps } = makeDeps({
+      statuses: ["pending", "completed"],
+      claimJob: async () => { order.push("claim"); return true; },
+      resetArtifacts: async () => { order.push("reset"); },
+    });
+    await makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 });
+    expect(order).toEqual(["claim", "reset"]);
   });
 });

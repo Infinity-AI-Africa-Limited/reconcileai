@@ -30,7 +30,7 @@
  * and is REGISTERED here at module load — no import cycle. The full extraction
  * to server/reconciliationRunner.ts remains split-plan item 12.
  */
-import { and, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, notInArray, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { reconciliationJobs, matches, exceptions as exceptionsTable, transactions } from "../drizzle/schema";
 import { createQueue, type JobQueue } from "./jobQueue";
@@ -118,6 +118,8 @@ export interface JobExecutionState {
 
 export interface RunHandlerDeps {
   loadJobState(jobId: number): Promise<JobExecutionState | null>; // null = job gone
+  /** Take ownership of the run, or report that someone else settled it first. */
+  claimJob(jobId: number): Promise<boolean>;
   resetArtifacts(jobId: number): Promise<void>;
   getRunner(): ReconciliationRunner | null;
 }
@@ -133,6 +135,54 @@ const defaultDeps: RunHandlerDeps = {
       .limit(1);
     return row ? { status: row.status, abandonedAt: row.abandonedAt ?? null } : null;
   },
+
+  /**
+   * Atomic claim — the worker half of the enqueue-ambiguity resolution
+   * (db.abandonUnstartedReconciliationJob is the caller half).
+   *
+   * The `abandonedAt` check in the handler is a plain read, and a read cannot
+   * settle a race: when `queue.add` rejects without confirming whether the
+   * entry was persisted, the router writes the abandonment marker at the same
+   * moment a worker may be starting the very job it is abandoning. Whoever
+   * reads stale data wins, which is how a job the caller reported as failed
+   * could still run.
+   *
+   * So ownership is taken in a single conditional statement rather than decided
+   * from a prior read. The UPDATE re-asserts `abandonedAt IS NULL` as part of
+   * the transition to "running", and the confirmation read afterwards catches
+   * an abandonment that committed in between — at which point nothing has been
+   * touched yet, because the handler claims BEFORE resetting artifacts.
+   *
+   * Exactly one side wins, decided by the database:
+   *   - abandonment first → this UPDATE matches nothing, the read sees
+   *     `abandonedAt`, the run is refused.
+   *   - claim first → the row is "running", so the caller's conditional
+   *     abandonment matches nothing and it reports the job as started.
+   */
+  async claimJob(jobId) {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable");
+    await db
+      .update(reconciliationJobs)
+      .set({ status: "running", startedAt: new Date() })
+      .where(and(
+        eq(reconciliationJobs.id, jobId),
+        isNull(reconciliationJobs.abandonedAt),
+        notInArray(reconciliationJobs.status, ["completed", "cancelled"]),
+      ));
+
+    // Confirmation read rather than affectedRows: MySQL reports 0 affected rows
+    // when a matched row's values are unchanged, which would misread a genuine
+    // re-claim as a loss.
+    const [row] = await db
+      .select({ status: reconciliationJobs.status, abandonedAt: reconciliationJobs.abandonedAt })
+      .from(reconciliationJobs)
+      .where(eq(reconciliationJobs.id, jobId))
+      .limit(1);
+    if (!row) return false;
+    return row.abandonedAt == null && row.status !== "completed" && row.status !== "cancelled";
+  },
+
   resetArtifacts: resetJobArtifacts,
   getRunner: () => runner,
 };
@@ -164,6 +214,20 @@ export function makeRunHandler(deps: RunHandlerDeps) {
       console.warn(
         `[reconciliationQueue] job ${p.jobId} was abandoned by the recovery sweep at ` +
           `${state.abandonedAt.toISOString()}; refusing to execute a resurrected queue entry`,
+      );
+      return;
+    }
+
+    // ATOMIC CLAIM, before anything is touched.
+    //
+    // The abandonment check above is a plain read, and a read cannot settle a
+    // race with the router's post-rejection abandonment write. This takes
+    // ownership conditionally instead, so an abandonment that commits between
+    // that read and here is still caught — while nothing has been modified yet.
+    if (!(await deps.claimJob(p.jobId))) {
+      console.warn(
+        `[reconciliationQueue] job ${p.jobId} was settled by another party before this worker ` +
+          `could claim it; refusing to run`,
       );
       return;
     }
