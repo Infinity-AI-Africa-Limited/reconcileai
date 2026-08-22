@@ -686,6 +686,42 @@ export async function updateReconciliationJob(id: number, data: Partial<InsertRe
 }
 
 /**
+ * Write a run's terminal result ONLY if the job has not been abandoned.
+ *
+ * The recovery sweep can declare a job dead while a worker is still executing
+ * it — it has no cancellation channel, so the worker runs to completion and
+ * then writes its result. An unconditional write there would flip a terminal
+ * `failed` + `abandonedAt` row back to `completed`, leaving a row that is both
+ * completed and abandoned, reporting success for a run users were already told
+ * had failed.
+ *
+ * Returns false when the job was abandoned mid-run, so the caller can discard
+ * that run's artifacts instead of leaving matches and exceptions attached to a
+ * job the platform has declared dead.
+ */
+export async function finalizeReconciliationJobIfNotAbandoned(
+  id: number,
+  data: Partial<InsertReconciliationJob>,
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  await db
+    .update(reconciliationJobs)
+    .set(data)
+    .where(and(eq(reconciliationJobs.id, id), isNull(reconciliationJobs.abandonedAt)));
+
+  // Confirmation read rather than affectedRows, for the same reason as
+  // claimJob: MySQL reports 0 affected rows when a matched row's values are
+  // unchanged, and a false negative here would discard a legitimate result.
+  const [row] = await db
+    .select({ abandonedAt: reconciliationJobs.abandonedAt })
+    .from(reconciliationJobs)
+    .where(eq(reconciliationJobs.id, id))
+    .limit(1);
+  return row != null && row.abandonedAt == null;
+}
+
+/**
  * Abandon a job ONLY while it is still unstarted, and report whether that won.
  *
  * Half of the enqueue-ambiguity resolution; the other half is claimJob in

@@ -330,12 +330,30 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
 
   // Read the ids first: the UPDATE cannot report which rows it touched, and
   // without them the queue entries cannot be identified for removal.
+  // Staleness is measured from the last sign of LIFE, not from row creation.
+  //
+  // `createdAt` alone says nothing about whether a worker is active: a job can
+  // sit queued behind others for hours and start seconds ago, and a large
+  // reconciliation can legitimately run past the window. Sweeping on creation
+  // age therefore declares live runs dead — and because `abandonedAt` is
+  // terminal, that is not a cosmetic mistake.
+  //
+  // `startedAt` is refreshed on every claim (claimJob above) and again by the
+  // runner, so COALESCE gives "last known activity", falling back to creation
+  // for a job that never started at all.
+  //
+  // This is a proxy, not a heartbeat. A run that genuinely exceeds the window
+  // without re-claiming is still swept, which is why the completion path also
+  // refuses to resurrect an abandoned job (see
+  // db.finalizeReconciliationJobIfNotAbandoned). A real worker heartbeat
+  // belongs with the durable-queue work — go-live plan Phase 1 item 2.
+  const lastActivity = sql`COALESCE(${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})`;
   const stuck = await db
     .select({ id: reconciliationJobs.id })
     .from(reconciliationJobs)
     .where(and(
       inArray(reconciliationJobs.status, ["pending", "running"]),
-      lt(reconciliationJobs.createdAt, cutoff),
+      lt(lastActivity, cutoff),
       isNull(reconciliationJobs.abandonedAt),
     ));
   if (stuck.length === 0) return { recovered: 0 };
@@ -355,7 +373,10 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
       // and the user already shown a success. Re-checking here means such a row
       // no longer matches and is left exactly as the worker left it.
       inArray(reconciliationJobs.status, ["pending", "running"]),
-      lt(reconciliationJobs.createdAt, cutoff),
+      // The SAME liveness predicate as the select above — if these two ever
+      // disagree the update stops re-asserting what was actually selected,
+      // which is the whole point of repeating it.
+      lt(lastActivity, cutoff),
       isNull(reconciliationJobs.abandonedAt),
     ));
   const recovered = Number((result as any)?.[0]?.affectedRows ?? 0);

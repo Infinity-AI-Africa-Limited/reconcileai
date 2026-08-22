@@ -132,6 +132,17 @@ describe("makeRunHandler", () => {
 describe("the stale-job sweep", () => {
   const SOURCE = fs.readFileSync(path.join(__dirname, "reconciliationQueue.ts"), "utf8");
 
+  it("should measure staleness from the last sign of life, not row creation", () => {
+    // createdAt alone says nothing about whether a worker is active: a job can
+    // sit queued for hours and start seconds ago. Sweeping on creation age
+    // declares live runs dead, and abandonment is terminal.
+    expect(SOURCE).toContain("COALESCE(${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})");
+    // Both the select and the re-asserting update must use the SAME predicate,
+    // or the update stops re-asserting what was actually selected.
+    expect(SOURCE.match(/lt\(lastActivity, cutoff\)/g) ?? []).toHaveLength(2);
+    expect(SOURCE).not.toContain("lt(reconciliationJobs.createdAt, cutoff)");
+  });
+
   it("should re-assert its selection predicates inside the UPDATE", () => {
     // Selecting ids and then updating by id alone is not atomic. A worker that
     // completes one of those jobs in the gap would have its finished run
@@ -142,7 +153,7 @@ describe("the stale-job sweep", () => {
       SOURCE.indexOf("const recovered ="),
     );
     expect(update).toContain("inArray(reconciliationJobs.status,");
-    expect(update).toContain("lt(reconciliationJobs.createdAt, cutoff)");
+    expect(update).toContain("lt(lastActivity, cutoff)");
     expect(update).toContain("isNull(reconciliationJobs.abandonedAt)");
   });
 
@@ -181,5 +192,28 @@ describe("when the enqueue outcome was ambiguous", () => {
     });
     await makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 });
     expect(order).toEqual(["claim", "reset"]);
+  });
+});
+
+describe("when the sweep abandons a run that is still executing", () => {
+  // The sweep has no cancellation channel, so a worker declared dead keeps
+  // going and reaches its terminal write. That write must not resurrect it.
+  const RUNNER = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
+  const DB = fs.readFileSync(path.join(__dirname, "db.ts"), "utf8");
+
+  it("should refuse to report success for a job the platform declared dead", () => {
+    // An unconditional write would leave a row that is BOTH completed and
+    // abandoned, reporting success for a run users were told had failed.
+    expect(RUNNER).toContain("const finalized = await db.finalizeReconciliationJobIfNotAbandoned(jobId, {");
+    expect(DB).toContain("export async function finalizeReconciliationJobIfNotAbandoned(");
+    expect(DB).toContain("isNull(reconciliationJobs.abandonedAt)");
+  });
+
+  it("should discard that run's artifacts rather than book them under a failed job", () => {
+    // Matches and exceptions are financial control records. Leaving them
+    // attached to a job that officially failed is worse than losing the run.
+    const branch = RUNNER.slice(RUNNER.indexOf("if (!finalized) {"), RUNNER.indexOf("if (!finalized) {") + 1200);
+    expect(branch).toContain("resetJobArtifacts(jobId)");
+    expect(branch).toContain("return;");
   });
 });

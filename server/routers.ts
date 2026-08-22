@@ -6936,7 +6936,12 @@ async function runReconciliation(
       if (count > dominantCount) { dominantCurrency = ccy; dominantCount = count; }
     }
 
-    await db.updateReconciliationJob(jobId, {
+    // Conditional, because the recovery sweep can declare this job dead WHILE
+    // it is running — there is no cancellation channel, so we only find out
+    // here. Writing unconditionally would flip a terminal failed+abandoned row
+    // back to "completed", reporting success for a run users were already told
+    // had failed.
+    const finalized = await db.finalizeReconciliationJobIfNotAbandoned(jobId, {
       status: "completed",
       matchedCount,
       exceptionCount,
@@ -6946,6 +6951,21 @@ async function runReconciliation(
       currency: dominantCurrency,
       completedAt: new Date(),
     });
+
+    if (!finalized) {
+      // The platform already declared this run dead. Its matches and exceptions
+      // are the output of a job that officially failed, and leaving them would
+      // put financial control records on the books under a failed run. Discard
+      // them and return without the completion audit/webhook.
+      console.error(
+        `[Reconciliation] job ${jobId} was abandoned by the recovery sweep while it was still ` +
+          `running; discarding this run's artifacts rather than reporting success`,
+      );
+      const { resetJobArtifacts } = await import("./reconciliationQueue");
+      await resetJobArtifacts(jobId);
+      await trackProgress(jobId, "failed", { message: "Run was abandoned by recovery before it finished" });
+      return;
+    }
 
     await logAudit(userId, "complete_reconciliation", "reconciliation_job", jobId, {
       matchedCount,
