@@ -30,6 +30,15 @@ const ALLOWED: Record<string, string> = {
   incrementUploadBatchCounts: "same batch the caller just created; appendBatch verifies batch.userId first",
   updateScheduleRunHistory: "run-history id is created by the scheduling engine itself",
   updateReconciliationJob: "job id originates from the caller's own reconciliation run",
+  // Same provenance as updateReconciliationJob above: the job id comes from the
+  // run this process is executing, never from a request. Scoping either by
+  // organizationId would be ceremony rather than protection — the only org
+  // available is read from this very row, so the predicate is tautological, and
+  // a mismatch would silently lose a completed run's results.
+  completeReconciliationJobClearingAbandonment: "job id comes from the run this process is executing",
+  // touchReconciliationJobHeartbeat is deliberately NOT here: its predicate is
+  // compound (`AND abandonedAt IS NULL`), so the detector does not flag it and
+  // the staleness check below would reject a needless entry.
 
   // updateMatchStatus and updateException were here because `matches` and
   // `exceptions` had no organizationId to filter on. Migration 0078 added it to

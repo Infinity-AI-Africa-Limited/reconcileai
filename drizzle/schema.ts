@@ -61,6 +61,10 @@ export const organizations = mysqlTable("organizations", {
    * Anything that must not treat fabricated data as real reads this column.
    */
   isDemo: boolean("isDemo").default(false).notNull(),
+  // Bank-controlled boundary for all model-assisted exception analysis. When
+  // false, deterministic matching, exception routing and audit evidence remain
+  // available, but no exception context is sent to a model provider.
+  aiAssistanceEnabled: boolean("aiAssistanceEnabled").default(true).notNull(),
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
@@ -242,6 +246,27 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   excludedItems: json("excludedItems"),
   startedAt: timestamp("startedAt"),
   completedAt: timestamp("completedAt"),
+  /**
+   * Set by recoverStuckReconciliationJobs() when a job stuck in pending/running
+   * past the staleness window is declared dead. It is NOT the same thing as
+   * status "failed": a runner-failed job is eligible for a queue retry, whereas
+   * an abandoned one has already been reported to the user as failed and must
+   * never execute again. A durable BullMQ entry can outlive the sweep, and the
+   * handler resets the job's artifacts before running — so without this marker a
+   * resurrected entry would wipe and re-run work the user already saw finish.
+   */
+  abandonedAt: timestamp("abandonedAt"),
+  /**
+   * Liveness signal, refreshed periodically by the runner while a job executes.
+   *
+   * Distinct from `startedAt`, which records when the run began and must stay
+   * accurate for duration reporting. Without a heartbeat the recovery sweep can
+   * only guess from age, so a reconciliation that legitimately runs longer than
+   * the staleness window gets declared dead while it is still working — and
+   * because abandonment is terminal and its artifacts are discarded, that
+   * destroys real work rather than merely mislabelling it.
+   */
+  heartbeatAt: timestamp("heartbeatAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_jobs_user").on(table.userId),
@@ -298,8 +323,12 @@ export type InsertMatch = typeof matches.$inferInsert;
 // ─── Exceptions ──────────────────────────────────────────────────────
 export const exceptions = mysqlTable("exceptions", {
   id: int("id").autoincrement().primaryKey(),
-  /** Owning tenant. Nullable for the same reason as `matches.organizationId`. */
-  organizationId: int("organizationId"),
+  /**
+   * Owning tenant. Financial-services exceptions are control records and must
+   * never be attributable to "no organisation". Migration 0084 quarantines
+   * legacy orphaned rows before enforcing this at the database layer.
+   */
+  organizationId: int("organizationId").notNull(),
   jobId: int("jobId").notNull(),
   transactionId: int("transactionId").notNull(),
   category: mysqlEnum("category", [
@@ -2145,6 +2174,7 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
     "org_created",
     "org_segment_updated",
     "org_sso_updated",
+    "org_ai_assistance_updated",
     // Conventional vs non-interest (NIFI). Worth its own event: it changes how
     // the platform characterises an institution's licence basis, and the
     // resulting findings are regulator-facing.

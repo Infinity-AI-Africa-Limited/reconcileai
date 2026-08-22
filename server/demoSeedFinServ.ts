@@ -571,6 +571,9 @@ export async function seedFinServDemoData(
 ): Promise<FinServSeedResult> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  if (organizationId == null) {
+    throw new Error("Financial Services demo seed requires an owning organizationId");
+  }
 
   /**
    * Agent memory is written ONLY when the caller has a real organisation.
@@ -589,14 +592,6 @@ export async function seedFinServDemoData(
    * else in this seed (transactions, exceptions, matches) targets tables whose
    * organizationId is nullable and is unaffected.
    */
-  const canRecordAgentMemory = organizationId !== null && organizationId !== undefined;
-  if (!canRecordAgentMemory) {
-    console.warn(
-      "[finserv-demo] No organizationId — seeding transactions and exceptions but " +
-      "SKIPPING agent memory, which requires a tenant that can read it back.",
-    );
-  }
-
   const plan = buildFinServDemoPlan();
   const now = new Date();
 
@@ -798,11 +793,9 @@ export async function seedFinServDemoData(
     // outcome. Open and in-review cases are intentionally excluded so a future
     // diagnosis never presents an unvalidated recommendation as prior practice.
     //
-    // `canRecordAgentMemory` additionally requires a real tenant — see its
-    // definition. Without one these rows would be written under organisation 0
-    // and be unreadable by every org-scoped query, including the one the Super
-    // Agent uses to retrieve them.
-    if (canRecordAgentMemory && (scenario.status === "resolved" || scenario.status === "escalated")) {
+    // This seeder now refuses an org-less invocation before any row is written,
+    // so every completed/escalated scenario has a real tenant owner.
+    if (scenario.status === "resolved" || scenario.status === "escalated") {
       await db.insert(agentMemory).values({
         organizationId,
         exceptionId,

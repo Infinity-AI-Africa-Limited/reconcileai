@@ -301,7 +301,7 @@ async function startServer() {
     try {
       const { consumeMagicLinkToken } = await import("../magicLinkService");
       const { getUserById, upsertUser, createAuditLog } = await import("../db");
-      const { COOKIE_NAME, ONE_YEAR_MS } = await import("@shared/const");
+      const { COOKIE_NAME } = await import("@shared/const");
 
       const userId = await consumeMagicLinkToken(token);
       if (!userId) {
@@ -322,7 +322,7 @@ async function startServer() {
       // Create a JWT session token using the user's openId (same as OAuth flow)
       const sessionToken = await sdk.createSessionToken(user.openId, {
         name: user.name || "",
-        expiresInMs: ONE_YEAR_MS,
+        expiresInMs: ENV.sessionTtlMs,
       });
 
       // Update lastSignedIn
@@ -347,7 +347,7 @@ async function startServer() {
 
       const { getSessionCookieOptions } = await import("./cookies");
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ENV.sessionTtlMs });
       // /home, not /dashboard: the client resolves the vertical's own starting
       // page there (a merchant lands on Settlement Monitor). Keeping the choice
       // client-side means this route does not need to load the organisation just
