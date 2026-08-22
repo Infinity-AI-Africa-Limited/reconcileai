@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { calculateCorporateB2BPilotReadiness, requirePilotManager } from "./routers/corporateB2BPilot";
+import { calculateCorporateB2BPilotReadiness } from "./corporateB2BPilotReadiness";
+import { corporateB2BPilotConfigInput, requirePilotManager } from "./routers/corporateB2BPilot";
 
 const approvedConfig = {
   noWriteAcknowledged: true,
@@ -73,5 +74,32 @@ describe("Corporate B2B pilot readiness", () => {
       roster: { total: 10, pending: 0, flagged: 0 },
     });
     expect(readiness.blockedBy).toContain("B5");
+  });
+
+  it("does not treat whitespace-only pilot, close-owner, or legal references as evidence", () => {
+    const readiness = calculateCorporateB2BPilotReadiness({
+      config: {
+        ...approvedConfig,
+        pilotScope: "   ",
+        dailyCloseOwner: "\t",
+        contractReference: " ",
+        dataProcessingReference: "\n",
+      },
+      sources: [
+        { sourceType: "invoice_ar", status: "approved", customerOwnedCredentials: true, controlTotalRequired: true },
+        { sourceType: "bank_statement", status: "approved", customerOwnedCredentials: true, controlTotalRequired: true },
+      ],
+      roster: { total: 10, pending: 0, flagged: 0 },
+    });
+    expect(readiness.blockedBy).toEqual(expect.arrayContaining(["B0", "B4", "B8"]));
+  });
+
+  it("rejects whitespace-only evidence before it can be persisted by a management mutation", () => {
+    const result = corporateB2BPilotConfigInput.safeParse({
+      country: "nigeria", pilotState: "preparation", pilotScope: "  ", noWriteAcknowledged: true,
+      aiAssistanceMode: "disabled", dataContractStatus: "draft", rosterStatus: "draft", allocationPolicyStatus: "approved", dailyCloseOwner: "\t",
+      operationalRecoveryStatus: "not_tested", retentionDays: 90, contractStatus: "approved", dataProcessingStatus: "approved", contractReference: " ", dataProcessingReference: "\n",
+    });
+    expect(result.success).toBe(false);
   });
 });

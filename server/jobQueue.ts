@@ -28,12 +28,46 @@ export interface EnqueueOptions {
   backoffMs?: number;
 }
 
+export interface QueueCreateOptions extends EnqueueOptions {
+  /** Refuse the in-process fallback. Required for bank-facing reconciliation. */
+  requireDurable?: boolean;
+  /**
+   * Opt in ONLY when this queue's job names identify a unit of work uniquely.
+   * The name then becomes the durable backend's job id, which makes entries
+   * addressable by `remove()` and makes a double enqueue de-duplicate instead
+   * of running twice.
+   *
+   * OFF BY DEFAULT, and it must stay that way. `webhook-delivery` enqueues
+   * under the EVENT name (`reconciliation.completed`, …), which every delivery
+   * of that event shares — turning those into job ids would collapse all of
+   * them into one and silently drop every webhook after the first.
+   */
+  uniqueJobNames?: boolean;
+}
+
 export type JobHandler<T> = (job: QueueJob<T>) => Promise<void>;
 
 export interface JobQueue<T> {
   enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void>;
+  /**
+   * Drop a not-yet-running entry by the name it was enqueued under. Present
+   * only on durable backends: the in-process queue holds its work in closures
+   * with nothing addressable to remove, and loses everything on restart anyway.
+   *
+   * Best-effort by contract — an entry that is already active cannot be
+   * removed, so callers must not rely on this alone to stop work. It exists to
+   * reclaim capacity, never as the sole guard against a job executing.
+   */
+  remove?(name: string): Promise<void>;
   /** Which backend is live — surfaced in health/ops output. */
   readonly backend: "bullmq" | "in-process";
+}
+
+export class DurableQueueUnavailableError extends Error {
+  constructor(queueName: string, reason: string) {
+    super(`[queue:${queueName}] durable BullMQ processing is required but unavailable: ${reason}`);
+    this.name = "DurableQueueUnavailableError";
+  }
 }
 
 const MAX_BACKOFF_MS = 10 * 60 * 1000;
@@ -95,6 +129,7 @@ async function createBullMqQueue<T>(
   handler: JobHandler<T>,
   defaults: Required<EnqueueOptions>,
   redisUrl: string,
+  uniqueJobNames: boolean,
 ): Promise<JobQueue<T>> {
   const { Queue, Worker } = await import("bullmq");
   const connection = { url: redisUrl } as any;
@@ -127,8 +162,22 @@ async function createBullMqQueue<T>(
       await queue.add(name, data, {
         attempts: opts?.attempts ?? defaults.attempts,
         backoff: { type: "exponential", delay: opts?.backoffMs ?? defaults.backoffMs },
+        // Deterministic id only where the caller guarantees names are unique
+        // per unit of work — see QueueCreateOptions.uniqueJobNames.
+        ...(uniqueJobNames ? { jobId: name } : {}),
       });
     },
+    // Addressable only when the name IS the job id; without that there is
+    // nothing to look up, so the capability is simply absent.
+    ...(uniqueJobNames
+      ? {
+          async remove(name: string) {
+            // Throws if the entry is currently active. Callers treat removal as
+            // best-effort, so surface it rather than swallowing it here.
+            await queue.remove(name);
+          },
+        }
+      : {}),
   };
 }
 
@@ -141,7 +190,7 @@ async function createBullMqQueue<T>(
 export async function createQueue<T>(
   queueName: string,
   handler: JobHandler<T>,
-  opts?: EnqueueOptions,
+  opts?: QueueCreateOptions,
 ): Promise<JobQueue<T>> {
   const defaults: Required<EnqueueOptions> = {
     attempts: opts?.attempts ?? 6,
@@ -151,15 +200,24 @@ export async function createQueue<T>(
   const redisUrl = process.env.REDIS_URL?.trim();
   if (redisUrl) {
     try {
-      const q = await createBullMqQueue<T>(queueName, handler, defaults, redisUrl);
+      const q = await createBullMqQueue<T>(queueName, handler, defaults, redisUrl, opts?.uniqueJobNames === true);
       console.log(`[queue:${queueName}] BullMQ backend active`);
       return q;
     } catch (err) {
+      if (opts?.requireDurable) {
+        throw new DurableQueueUnavailableError(
+          queueName,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
       console.error(
         `[queue:${queueName}] BullMQ init failed — falling back to in-process queue:`,
         err instanceof Error ? err.message : err,
       );
     }
+  }
+  if (opts?.requireDurable) {
+    throw new DurableQueueUnavailableError(queueName, "REDIS_URL is not configured");
   }
   return new InProcessQueue<T>(queueName, handler, defaults);
 }
