@@ -134,6 +134,17 @@ function SegmentGuard({ children }: { children: React.ReactNode }) {
 
   const opts = { portal: viewAsOrg !== null };
   const undecided = isPending || authLoading;
+  // Never mount a segment-scoped page while the organisation lookup is pending.
+  // Its own tRPC queries would otherwise run for the caller's stale or unknown
+  // context before this guard can redirect, producing server permission errors
+  // instead of an intentional navigation decision.
+  if (undecided) {
+    return (
+      <div className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground">
+        Loading your workspace…
+      </div>
+    );
+  }
   const blocked = !undecided && !canReachPath(location, segment, user?.role, opts);
   if (blocked) return <Redirect to={landingPathFor(segment)} />;
   return <>{children}</>;

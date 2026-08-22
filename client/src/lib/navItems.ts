@@ -42,6 +42,12 @@ export type NavEntry = {
   /** Omitted = every vertical. */
   segments?: Segment[];
   /**
+   * The entry is meaningful only inside its declared tenant segment, including
+   * for Infinity AI staff. This prevents a staff own-account shortcut from
+   * mounting a page whose server procedure requires a customer tenant.
+   */
+  strictSegment?: boolean;
+  /**
    * An Infinity AI staff tool, keyed on the super_admin ROLE.
    *
    * This is deliberately NOT `segments: ["super_admin"]`, which is how it was
@@ -95,7 +101,7 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Exception Intelligence", path: "/exception-intelligence", group: "main", segments: ["financial_services", "super_admin"] },
   { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", staffOnly: true },
   { label: "Distributor Registry", path: "/distributors", group: "main", segments: ["corporate_b2b"] },
-  { label: "Pilot Controls", path: "/corporate-pilot-controls", group: "main", roles: ["admin", "cfo"], segments: ["corporate_b2b"] },
+  { label: "Pilot Controls", path: "/corporate-pilot-controls", group: "main", roles: ["admin", "cfo"], segments: ["corporate_b2b"], strictSegment: true },
   // The remaining retail-only surfaces. These existed ONLY in the portal list
   // before, so a real merchant could not reach the screens the vertical is built
   // around. Secondary to Settlement Monitor, so they stay below the shared entries.
@@ -228,7 +234,7 @@ export function navFor(
   }
   const staff = isStaff(role);
   return NAV_ITEMS.filter(
-    (e) => passesStaffGate(e, role) && inRole(e, role) && (staff || inSegment(e, segment)),
+    (e) => passesStaffGate(e, role) && inRole(e, role) && (e.strictSegment ? inSegment(e, segment) : staff || inSegment(e, segment)),
   );
 }
 

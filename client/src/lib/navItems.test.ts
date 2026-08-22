@@ -308,10 +308,11 @@ describe("when Infinity AI staff use their own account", () => {
     expect(staffNav).toContain("/cbn-compliance");
   });
 
-  it("should show every vertical-scoped entry, not only the unscoped ones", () => {
-    for (const entry of NAV_ITEMS.filter((e) => e.segments && !e.staffOnly && e.group !== "superAdmin")) {
+  it("should show cross-vertical entries but not tenant-only control workspaces", () => {
+    for (const entry of NAV_ITEMS.filter((e) => e.segments && !e.strictSegment && !e.staffOnly && e.group !== "superAdmin")) {
       expect(staffNav, `${entry.label} (${entry.path}) missing for staff`).toContain(entry.path);
     }
+    expect(staffNav).not.toContain("/corporate-pilot-controls");
   });
 
   it("should still show the operator's own tools", () => {
