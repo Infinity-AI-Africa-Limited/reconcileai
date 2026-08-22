@@ -196,25 +196,34 @@ describe("when the enqueue outcome was ambiguous", () => {
 });
 
 describe("when the sweep abandons a run that is still executing", () => {
-  // The sweep has no cancellation channel, so a worker declared dead keeps
-  // going and reaches its terminal write. That write must not resurrect it.
+  // The sweep has no cancellation channel and cannot see inside a synchronous
+  // matching pass, so a healthy long run CAN be declared dead. What matters is
+  // what happens when that run then finishes.
   const RUNNER = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
   const DB = fs.readFileSync(path.join(__dirname, "db.ts"), "utf8");
 
-  it("should refuse to report success for a job the platform declared dead", () => {
-    // An unconditional write would leave a row that is BOTH completed and
-    // abandoned, reporting success for a run users were told had failed.
-    expect(RUNNER).toContain("const finalized = await db.finalizeReconciliationJobIfNotAbandoned(jobId, {");
-    expect(DB).toContain("export async function finalizeReconciliationJobIfNotAbandoned(");
-    expect(DB).toContain("isNull(reconciliationJobs.abandonedAt)");
+  it("should treat completion as proof the sweep was wrong, and clear the abandonment", () => {
+    expect(RUNNER).toContain("const { wasAbandoned } = await db.completeReconciliationJobClearingAbandonment(jobId, {");
+    const fn = DB.slice(DB.indexOf("export async function completeReconciliationJobClearingAbandonment"));
+    expect(fn.slice(0, 900)).toContain("abandonedAt: null");
   });
 
-  it("should discard that run's artifacts rather than book them under a failed job", () => {
-    // Matches and exceptions are financial control records. Leaving them
-    // attached to a job that officially failed is worse than losing the run.
-    const branch = RUNNER.slice(RUNNER.indexOf("if (!finalized) {"), RUNNER.indexOf("if (!finalized) {") + 1200);
-    expect(branch).toContain("resetJobArtifacts(jobId)");
-    expect(branch).toContain("return;");
+  it("should KEEP the run's artifacts — losing computed results is worse than a wrong status", () => {
+    // An earlier revision discarded them. Matches and exceptions are real
+    // financial output; destroying them to protect a status field is the wrong
+    // trade, especially when the verdict that triggered it is a guess.
+    const tail = RUNNER.slice(RUNNER.indexOf("completeReconciliationJobClearingAbandonment"));
+    expect(tail.slice(0, 1500)).not.toContain("resetJobArtifacts");
+  });
+
+  it("should report the wrong verdict loudly, since it means the window is too tight", () => {
+    expect(RUNNER).toContain("the sweep's verdict was wrong and has been cleared");
+  });
+
+  it("should still refuse to START an abandoned job — the terminal guarantee is unchanged", () => {
+    // Clearing abandonedAt on completion is about finishing, not starting.
+    const QUEUE = fs.readFileSync(path.join(__dirname, "reconciliationQueue.ts"), "utf8");
+    expect(QUEUE).toContain("if (state.abandonedAt != null) {");
   });
 });
 
@@ -222,6 +231,16 @@ describe("the liveness heartbeat", () => {
   const RUNNER = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
   const DB = fs.readFileSync(path.join(__dirname, "db.ts"), "utf8");
   const QUEUE = fs.readFileSync(path.join(__dirname, "reconciliationQueue.ts"), "utf8");
+
+  it("should bracket the synchronous matching pass, which no timer can cover", () => {
+    // runMatchingEngine blocks the event loop, so the interval cannot fire
+    // during it. Bracketing means the window need only cover ONE pass.
+    const around = RUNNER.slice(
+      RUNNER.indexOf("Beat immediately before and after the matching pass"),
+      RUNNER.indexOf("await trackProgress(jobId, \"pass3_tolerance_match\""),
+    );
+    expect(around.match(/touchReconciliationJobHeartbeat\(jobId\)/g) ?? []).toHaveLength(2);
+  });
 
   it("should beat far more often than the staleness window", () => {
     // A heartbeat slower than the window would let a live run be declared dead

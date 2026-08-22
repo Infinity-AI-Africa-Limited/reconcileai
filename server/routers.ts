@@ -6847,10 +6847,28 @@ async function runReconciliation(
       message: `Processing ${sourceTxns.length} source and ${targetTxns.length} target transactions`,
       totalCount: sourceTxns.length + targetTxns.length,
     });
+    // Beat immediately before and after the matching pass.
+    //
+    // runMatchingEngine is SYNCHRONOUS and holds the event loop for its whole
+    // duration, so the interval heartbeat above cannot fire while it runs — on
+    // a large job this is precisely when liveness matters most. Bracketing the
+    // pass does not solve that (nothing timer-based can), but it means the
+    // staleness window only has to cover ONE matching pass rather than the
+    // whole run, and the timestamp entering the pass is as fresh as possible.
+    //
+    // The complete fix is to yield inside the engine or move the heartbeat to a
+    // worker thread; both need real-volume measurement first — go-live plan
+    // Phase 1 item 2. Until then the safety net is that completing a run clears
+    // its abandonment (completeReconciliationJobClearingAbandonment), so a
+    // wrong verdict here costs a transient status, never the results.
+    await db.touchReconciliationJobHeartbeat(jobId);
+
     // excludeFeeNoise: set aside general bank fees/charges/levies so they don't
     // skew matching or inflate exceptions. Card-settlement fees (interchange,
     // scheme, MDR…) are guarded in the engine and stay in the reconciliation.
     const result = runMatchingEngine(sourceTxns, targetTxns, { ...config, excludeFeeNoise: true });
+
+    await db.touchReconciliationJobHeartbeat(jobId);
     if (result.excluded.length > 0) {
       await db.updateReconciliationJob(jobId, {
         excludedCount: result.excluded.length,
@@ -6973,12 +6991,12 @@ async function runReconciliation(
       if (count > dominantCount) { dominantCurrency = ccy; dominantCount = count; }
     }
 
-    // Conditional, because the recovery sweep can declare this job dead WHILE
-    // it is running — there is no cancellation channel, so we only find out
-    // here. Writing unconditionally would flip a terminal failed+abandoned row
-    // back to "completed", reporting success for a run users were already told
-    // had failed.
-    const finalized = await db.finalizeReconciliationJobIfNotAbandoned(jobId, {
+    // The recovery sweep can declare this job dead WHILE it is running — it has
+    // no cancellation channel, and it cannot see inside a synchronous matching
+    // pass, so its verdict is a guess from silence. Arriving here falsifies it:
+    // the run finished. Complete it and clear the abandonment rather than
+    // discarding real computed output to protect a status field.
+    const { wasAbandoned } = await db.completeReconciliationJobClearingAbandonment(jobId, {
       status: "completed",
       matchedCount,
       exceptionCount,
@@ -6989,19 +7007,14 @@ async function runReconciliation(
       completedAt: new Date(),
     });
 
-    if (!finalized) {
-      // The platform already declared this run dead. Its matches and exceptions
-      // are the output of a job that officially failed, and leaving them would
-      // put financial control records on the books under a failed run. Discard
-      // them and return without the completion audit/webhook.
+    if (wasAbandoned) {
+      // Loud, because it means the staleness window is too tight for this
+      // institution's data volume — the run was healthy and still got swept.
       console.error(
-        `[Reconciliation] job ${jobId} was abandoned by the recovery sweep while it was still ` +
-          `running; discarding this run's artifacts rather than reporting success`,
+        `[Reconciliation] job ${jobId} completed in ${processingTimeMs}ms after the recovery ` +
+          `sweep had marked it abandoned; the sweep's verdict was wrong and has been cleared. ` +
+          `Results are intact. Raise STUCK_JOB_MAX_AGE_MS or reduce batch size if this recurs.`,
       );
-      const { resetJobArtifacts } = await import("./reconciliationQueue");
-      await resetJobArtifacts(jobId);
-      await trackProgress(jobId, "failed", { message: "Run was abandoned by recovery before it finished" });
-      return;
     }
 
     await logAudit(userId, "complete_reconciliation", "reconciliation_job", jobId, {

@@ -707,39 +707,50 @@ export async function touchReconciliationJobHeartbeat(id: number): Promise<void>
 }
 
 /**
- * Write a run's terminal result ONLY if the job has not been abandoned.
+ * Write a run's terminal result, clearing any abandonment the sweep applied
+ * while the run was still executing. Reports whether that happened.
  *
- * The recovery sweep can declare a job dead while a worker is still executing
- * it — it has no cancellation channel, so the worker runs to completion and
- * then writes its result. An unconditional write there would flip a terminal
- * `failed` + `abandonedAt` row back to `completed`, leaving a row that is both
- * completed and abandoned, reporting success for a run users were already told
- * had failed.
+ * COMPLETION IS PROOF OF LIVENESS, and it beats the sweep's guess.
  *
- * Returns false when the job was abandoned mid-run, so the caller can discard
- * that run's artifacts instead of leaving matches and exceptions attached to a
- * job the platform has declared dead.
+ * The sweep declares a job dead from silence — it has no cancellation channel
+ * and no way to interrupt a worker. Its verdict is an inference, and a worker
+ * arriving here has definitively falsified it: this run finished. Only a worker
+ * that claimed the job BEFORE the abandonment can reach this point, because
+ * claimJob refuses to start an abandoned one, so completion cannot come from a
+ * resurrected duplicate.
+ *
+ * An earlier revision refused the write and discarded the run's artifacts. That
+ * was the wrong trade: it destroyed a completed reconciliation's matches and
+ * exceptions — real computed financial output — to protect a status field. The
+ * sweep cannot see inside a synchronous matching pass (runMatchingEngine blocks
+ * the event loop, so even the heartbeat timer cannot fire during one), which
+ * makes a wrong verdict entirely reachable on a large run. Losing the results
+ * of such a run is far worse than briefly having shown "failed".
+ *
+ * Clearing `abandonedAt` here does NOT weaken the terminal guarantee the queue
+ * handler relies on: that guarantee is "an abandoned job never STARTS", and
+ * this job is finishing, not starting. It lands on `completed`, which the
+ * handler already skips.
  */
-export async function finalizeReconciliationJobIfNotAbandoned(
+export async function completeReconciliationJobClearingAbandonment(
   id: number,
   data: Partial<InsertReconciliationJob>,
-): Promise<boolean> {
+): Promise<{ wasAbandoned: boolean }> {
   const db = await getDb();
-  if (!db) return false;
-  await db
-    .update(reconciliationJobs)
-    .set(data)
-    .where(and(eq(reconciliationJobs.id, id), isNull(reconciliationJobs.abandonedAt)));
+  if (!db) return { wasAbandoned: false };
 
-  // Confirmation read rather than affectedRows, for the same reason as
-  // claimJob: MySQL reports 0 affected rows when a matched row's values are
-  // unchanged, and a false negative here would discard a legitimate result.
-  const [row] = await db
+  const [before] = await db
     .select({ abandonedAt: reconciliationJobs.abandonedAt })
     .from(reconciliationJobs)
     .where(eq(reconciliationJobs.id, id))
     .limit(1);
-  return row != null && row.abandonedAt == null;
+
+  await db
+    .update(reconciliationJobs)
+    .set({ ...data, abandonedAt: null })
+    .where(eq(reconciliationJobs.id, id));
+
+  return { wasAbandoned: before?.abandonedAt != null };
 }
 
 /**
