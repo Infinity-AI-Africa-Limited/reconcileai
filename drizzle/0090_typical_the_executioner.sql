@@ -1,4 +1,4 @@
-CREATE TABLE `corporate_b2b_pilot_configs` (
+CREATE TABLE IF NOT EXISTS `corporate_b2b_pilot_configs` (
 	`id` int AUTO_INCREMENT NOT NULL,
 	`organizationId` int NOT NULL,
 	`country` enum('uganda','nigeria') NOT NULL DEFAULT 'nigeria',
@@ -24,7 +24,7 @@ CREATE TABLE `corporate_b2b_pilot_configs` (
 	CONSTRAINT `corporate_b2b_pilot_configs_organizationId_unique` UNIQUE(`organizationId`)
 );
 --> statement-breakpoint
-CREATE TABLE `corporate_b2b_pilot_sources` (
+CREATE TABLE IF NOT EXISTS `corporate_b2b_pilot_sources` (
 	`id` int AUTO_INCREMENT NOT NULL,
 	`organizationId` int NOT NULL,
 	`sourceType` enum('invoice_ar','bank_statement','mobile_money','psp_collection','erp_export') NOT NULL,
