@@ -1402,3 +1402,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 ## Corporate B2B Payments Go-Live
 
 - [x] Complete a detailed Corporate B2B payments go-live readiness assessment and phased FMCG/distributor deployment plan with evidence gates, owners, and rollback controls.
+- [x] Update the Corporate B2B deployment plan with Nigeria-specific payment, privacy, data, operational, and rollout requirements.

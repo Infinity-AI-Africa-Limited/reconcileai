@@ -1,7 +1,7 @@
 # ReconcileAI Corporate B2B Payments — Go-Live Readiness & Deployment Plan
 
 **Prepared:** 22 August 2026  
-**Scope:** Uganda FMCG/distributor beachhead, then repeatable Corporate B2B deployments  
+**Scope:** Uganda and Nigeria FMCG/distributor beachheads, then repeatable Corporate B2B deployments  
 **Decision standard:** Operationally safe reconciliation control; **not** a payment-initiation launch  
 **Assessment type:** Technical and operational guidance, not formal legal advice. The anchor customer’s legal, tax, information-security and finance-control owners must confirm institution-specific obligations.
 
@@ -27,6 +27,20 @@ The Uganda beachhead should be **FMCG distribution**, where a manufacturer or na
 
 Those facts do not prove a particular distributor’s payment mix, ERP, mobile-money contract, bank interface, tax treatment, or data-retention obligations. The anchor customer must provide those facts before solution design. ReconcileAI should remain a reconciliation-control software provider, not represent itself as a payment service provider or system operator. If the intended workflow changes that boundary, Uganda legal counsel must assess the National Payment Systems framework before launch.[1]
 
+Nigeria is the second launch geography, with the same FMCG/distributor wedge but a different evidence model. CBN identifies NIBSS, banks, payment service providers and switching companies as key payment-system participants, while NIBSS describes NIP as an account-based, real-time EFT service serving business-to-business transfers.[3] [4] A Nigerian customer pilot must therefore use **customer-authorised copies** of its bank, PSP, NIP-related or mobile-money evidence; ReconcileAI must not imply that it can initiate NIP transfers, perform name enquiry, query transaction status or access account balances unless the customer or an authorised provider has formally enabled that capability.[4]
+
+The Nigerian rollout also requires a specific privacy workstream. The NDPC hosts the Nigeria Data Protection Act and the associated controller/processor, breach-reporting and audit services.[5] The customer and ReconcileAI must document their data-protection roles, the lawful basis for operational records, approved recipients, retention, security safeguards, incident procedure and any external-processing route before approved live data is received.
+
+### 1.1 Two-market launch posture
+
+| Dimension | Uganda | Nigeria |
+|---|---|---|
+| Initial customer profile | FMCG manufacturer, national distributor or regional sub-distributor using bank transfers and MTN MoMo/Airtel Money | FMCG manufacturer or national distributor using bank transfers, NIP-originated receipts, PSP/collection reports and any approved mobile-money evidence |
+| Control focus | Distributor receipts, invoice allocations, mobile-money/bank settlement timing and trade deductions | Distributor receipts, bank/NIP evidence, payment-reference quality, bank charges, returns and trade deductions |
+| Regulated-party boundary | Do not operate a payment service or system without separate analysis under the NPS framework | Do not operate or present as a payment service, switch or NIP participant; use customer-authorised evidence only |
+| Privacy baseline | Customer contract, local counsel review and approved data route | NDPA roles, data-processing terms, lawful basis, retention, incident handling and external-data-route approval |
+| First pilot | Read-only; 10–30 distributors; two authorised rails | Read-only; 10–30 distributors; bank evidence plus one additional authorised collection/payment evidence source |
+
 ## 2. What is currently evidenced in the product
 
 ### 2.1 Controls that can support a controlled pilot
@@ -51,14 +65,14 @@ The public API ingestion service accepts data, validates and stores it, but deli
 | ID | Gap or dependency | Why it blocks a production B2B release | Required closure evidence | Owner |
 |---|---|---|---|---|
 | **B0** | Launch boundary not formally signed | A reconciliation platform must not accidentally become an unauthorised payment or ERP-posting workflow. | Signed scope: read-only ingestion and reconciliation; no payment initiation, account access, ERP posting, emails or credit notes. | Customer CFO / Legal / ReconcileAI |
-| **B1** | No customer-approved canonical data contract | The platform currently maps generic transaction files, not a distributor’s authoritative AR, invoice, bank and mobile-money semantics. | Field-level mapping; sample files; source-of-truth hierarchy; refresh cadence; treatment of reversals, fees, taxes, deductions and credit notes. | Customer Finance + IT + ReconcileAI |
-| **B2** | No verified production connector for the anchor distributor’s ERP, bank or mobile-money providers | Generic API, CSV, SFTP and bucket ingestion are foundations, not evidence of a working customer integration. | Signed interface approach, credentials held by customer, sandbox/file validation, error/retry runbook and source reconciliation. | Customer IT + provider + ReconcileAI |
+| **B1** | No customer-approved canonical data contract | The platform currently maps generic transaction files, not a distributor’s authoritative AR, invoice, bank, NIP-related or mobile-money semantics. | Field-level mapping; sample files; source-of-truth hierarchy; refresh cadence; treatment of reversals, fees, taxes, deductions and credit notes. | Customer Finance + IT + ReconcileAI |
+| **B2** | No verified production connector for the anchor distributor’s ERP, bank, PSP or mobile-money providers | Generic API, CSV, SFTP and bucket ingestion are foundations, not evidence of a working customer integration. | Signed interface approach, credentials held by customer, sandbox/file validation, error/retry runbook and source reconciliation. | Customer IT + provider + ReconcileAI |
 | **B3** | Customer master-data governance unproven | Distributor aliases and invoice references can produce false match candidates when poorly governed. | Approved pilot roster, alias policy, maker/checker change process and duplicate-account rules. | Customer Finance / Sales Operations |
 | **B4** | Allocation and deduction controls are proposals, not accounting authority | Automated allocation could misstate receivables, trade spend or revenue. | Approval matrix, approved deduction catalogue, variance thresholds and signed daily-close procedure. | Customer Financial Controller |
 | **B5** | External-model/data boundary needs an approved setting | Customer operational records must not be sent to an external model without an approved data-processing route. | Disable AI assistance by tenant, or run it in the approved private path; retain model/data-flow sign-off. | Customer DPO / InfoSec + ReconcileAI |
 | **B6** | Durable processing and tenant-hardening code remains under review | The P1–P7 foundation controls are in PR review and must be deployed before real customer data. | Merge, deploy and evidence Infinity AI PR #96 and mirror PR #26; configure Redis/BullMQ where queueing is enabled. | ReconcileAI |
 | **B7** | Evidence-retention and recovery design untested with customer data | Finance must reproduce a daily conclusion after a source, worker or integration failure. | Backup/restore test, ingestion replay, duplicate-file test, time-bound retention policy and documented export process. | Customer IT + ReconcileAI |
-| **B8** | Commercial and privacy contract not executed | The pilot needs clear allocation of data, confidentiality, support and liability responsibilities. | Mutual NDA where required, DPA/data-processing terms, pilot SOW, security annex and named support contacts. | Customer Legal / ReconcileAI |
+| **B8** | Commercial and privacy contract not executed | The pilot needs clear allocation of data, confidentiality, support and liability responsibilities. | Mutual NDA where required, DPA/data-processing terms, pilot SOW, security annex and named support contacts. Nigerian customers additionally require NDPA role, lawful-basis, retention and incident-path approval. | Customer Legal / ReconcileAI |
 
 ## 4. Recommended first pilot design
 
@@ -76,21 +90,21 @@ The first customer should be an anchor FMCG manufacturer, national distributor o
 
 ## 5. Phased execution plan
 
-### Phase 0 — Sponsor alignment and control-fit workshop (Week 0)
+### Phase 0 — Sponsor alignment and country selection (Week 0)
 
-ReconcileAI and the prospect should convene a 90-minute workshop with the CFO or Financial Controller, Head of Sales Operations, IT/integration owner, data-protection or legal contact, and the daily reconciliation owner. The meeting must select one payable/receivable flow, name its source systems and approvers, agree the no-write boundary, and document the success metric. A vague “reconcile all distributor payments” mandate is not sufficient.
+ReconcileAI and the prospect should convene a 90-minute workshop with the CFO or Financial Controller, Head of Sales Operations, IT/integration owner, data-protection or legal contact, and the daily reconciliation owner. The meeting must select one payable/receivable flow, name its source systems and approvers, agree the no-write boundary, document the success metric and identify the rollout geography. A vague “reconcile all distributor payments” mandate is not sufficient.
 
 **Exit gate:** Signed one-page pilot charter, named owners, source list, no-write boundary, and commercial next step.
 
-### Phase 1 — Data contract and safe sample validation (Weeks 1–2)
+### Phase 1 — Country-specific data contract and safe sample validation (Weeks 1–2)
 
-The customer supplies masked or approved extracts from invoice/AR, bank account, mobile-money and any settlement source. ReconcileAI creates a field-level canonical mapping, validates transaction amount/date/reference semantics, identifies missing identifiers and prepares an exception taxonomy specific to the customer’s trade-deduction and returns process. The customer confirms the hierarchy of evidence: for example, which source is authoritative when a bank statement and distributor remittance advice conflict.
+The customer supplies masked or approved extracts from invoice/AR, bank account, mobile-money and any settlement source. For Nigeria, the package should include customer-authorised bank/NIP-related receipt evidence and any PSP collection report used in the selected flow. ReconcileAI creates a field-level canonical mapping, validates transaction amount/date/reference semantics, identifies missing identifiers and prepares an exception taxonomy specific to the customer’s trade-deduction and returns process. The customer confirms the hierarchy of evidence: for example, which source is authoritative when a bank statement and distributor remittance advice conflict.
 
 **Exit gate:** Customer-signed data dictionary; source quality report; approved roster and alias file; repeatable ingestion run with no unresolved structural parsing error.
 
 ### Phase 2 — Integration and dry-run control build (Weeks 3–4)
 
-Implement the smallest approved ingestion route: signed SFTP/bucket drop, customer-held API key, or scheduled export. Configure channels, define idempotency keys and cut-off rules, and execute three non-destructive dry runs. Validate the handling of duplicate files, missing files, changed columns, duplicate payment references, partial payment, short payment, trade deduction, bank fee, reversal and delayed mobile-money settlement.
+Implement the smallest approved ingestion route: signed SFTP/bucket drop, customer-held API key, or scheduled export. Configure channels, define idempotency keys and cut-off rules, and execute three non-destructive dry runs. Validate the handling of duplicate files, missing files, changed columns, duplicate payment references, partial payment, short payment, trade deduction, bank fee, reversal and delayed mobile-money settlement. For Nigeria, specifically test the customer’s NIP-related payment-reference and transaction-status evidence without connecting ReconcileAI directly to NIP.
 
 **Exit gate:** Three consecutive successful dry runs; reconciliation runbook; source-file recovery evidence; customer and ReconcileAI support contacts; approved rollback to manual Excel reconciliation.
 
@@ -127,7 +141,7 @@ Rollback must be practical rather than theoretical. ReconcileAI should be remove
 
 ## 8. Immediate next actions
 
-1. **Select the anchor customer.** Prioritise the FMCG distributor/manufacturer path already opened through Movit Products, subject to a discovery call confirming source access and a named finance sponsor.
+1. **Run two parallel discovery tracks.** Prioritise the Uganda FMCG distributor/manufacturer path already opened through Movit Products, while opening a Nigeria FMCG manufacturer/distributor track. Select the first customer that provides a named finance sponsor, a bounded use case and safe sample files.
 2. **Send the pilot charter, not a generic software proposal.** Ask for the 90-minute control-fit workshop and the five named customer roles.
 3. **Request only masked sample files initially.** Invoice/AR export, one bank statement, mobile-money statement if used, distributor master and existing reconciliation workbook.
 4. **Close the ReconcileAI foundation gate.** Wait for Claude Code review of Infinity AI PR #96 and mirror PR #26, merge only after the production-hardening decision, then deploy and verify the P1–P7 controls.
@@ -137,3 +151,6 @@ Rollback must be practical rather than theoretical. ReconcileAI should be remove
 
 1. [Bank of Uganda, *Strengthening Uganda’s Financial Infrastructure*](https://bou.or.ug/financial_infrastructure_innovation)
 2. [GSMA, *State of the Industry Report on Mobile Money 2026*](https://www.gsma.com/sotir/)
+3. [Central Bank of Nigeria, *Payments System Supervision*](https://www.cbn.gov.ng/PaymentsSystem/)
+4. [NIBSS, *NIBSS Instant Payment*](https://nibss-plc.com.ng/nibss-instant-payment/)
+5. [Nigeria Data Protection Commission, *Nigeria Data Protection Act, 2023*](https://ndpc.gov.ng/download/nigeria-data-protection-act-2023)
