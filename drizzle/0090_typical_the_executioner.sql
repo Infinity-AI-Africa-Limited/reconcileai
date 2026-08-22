@@ -42,6 +42,6 @@ CREATE TABLE IF NOT EXISTS `corporate_b2b_pilot_sources` (
 	CONSTRAINT `corporate_b2b_pilot_sources_id` PRIMARY KEY(`id`)
 );
 --> statement-breakpoint
-CREATE INDEX `idx_b2b_pilot_state` ON `corporate_b2b_pilot_configs` (`pilotState`);--> statement-breakpoint
-CREATE INDEX `idx_b2b_pilot_sources_org` ON `corporate_b2b_pilot_sources` (`organizationId`);--> statement-breakpoint
-CREATE INDEX `idx_b2b_pilot_sources_status` ON `corporate_b2b_pilot_sources` (`status`);
+CREATE INDEX IF NOT EXISTS `idx_b2b_pilot_state` ON `corporate_b2b_pilot_configs` (`pilotState`);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS `idx_b2b_pilot_sources_org` ON `corporate_b2b_pilot_sources` (`organizationId`);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS `idx_b2b_pilot_sources_status` ON `corporate_b2b_pilot_sources` (`status`);
