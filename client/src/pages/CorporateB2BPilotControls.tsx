@@ -52,9 +52,13 @@ export default function CorporateB2BPilotControls() {
     setSourceName("");
   };
 
-  if (readiness.isLoading) return <div className="p-6 text-sm text-muted-foreground">Loading pilot controls…</div>;
+  // React Query can briefly expose a settled query without cached data while the
+  // authenticated tenant context is resolving. Treat that as a loading state
+  // rather than dereferencing readiness fields and turning a safe pilot-control
+  // page into an error boundary.
+  if (readiness.isLoading || !readiness.data) return <div className="p-6 text-sm text-muted-foreground">Loading pilot controls…</div>;
   if (readiness.error) return <div className="p-6 text-sm text-destructive">{readiness.error.message}</div>;
-  const data = readiness.data!;
+  const data = readiness.data;
 
   return <div className="space-y-6 p-4 md:p-6">
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">

@@ -118,16 +118,18 @@ describe("when a surface belongs to another vertical", () => {
 });
 
 describe("when the rest of the platform is considered", () => {
-  it("should not have narrowed any other vertical by accident", () => {
-    // Scoping a surface away from retail must not remove it from the verticals
-    // that do use it. Data Protection and Sample Data were unscoped before; both
-    // must survive for the two verticals named on them.
-    for (const path of ["/compliance", "/sample-data"]) {
-      const entry = NAV_ITEMS.find((e) => e.path === path)!;
-      expect(entry.segments, path).toEqual(["financial_services", "corporate_b2b"]);
-      expect(canReachPath(path, "financial_services", "admin"), path).toBe(true);
-      expect(canReachPath(path, "corporate_b2b", "admin"), path).toBe(true);
-    }
+  it("should preserve Data Protection for the two verticals that require it", () => {
+    const entry = NAV_ITEMS.find((e) => e.path === "/compliance")!;
+    expect(entry.segments).toEqual(["financial_services", "corporate_b2b"]);
+    expect(canReachPath("/compliance", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/compliance", "corporate_b2b", "admin")).toBe(true);
+  });
+
+  it("should reserve Sample Data for Financial Services rather than a live B2B pilot", () => {
+    const entry = NAV_ITEMS.find((e) => e.path === "/sample-data")!;
+    expect(entry.segments).toEqual(["financial_services"]);
+    expect(canReachPath("/sample-data", "financial_services", "admin")).toBe(true);
+    expect(canReachPath("/sample-data", "corporate_b2b", "admin")).toBe(false);
   });
 
   it("should make every merchant route explicitly retail-scoped", () => {
