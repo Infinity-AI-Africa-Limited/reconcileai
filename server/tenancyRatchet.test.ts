@@ -30,6 +30,17 @@ const ALLOWED: Record<string, string> = {
   incrementUploadBatchCounts: "same batch the caller just created; appendBatch verifies batch.userId first",
   updateScheduleRunHistory: "run-history id is created by the scheduling engine itself",
   updateReconciliationJob: "job id originates from the caller's own reconciliation run",
+  // Same provenance as updateReconciliationJob above, and a STRICTER predicate:
+  // it writes only WHERE abandonedAt IS NULL. The job id comes from the queue
+  // payload for a run this process is executing, never from a request.
+  //
+  // Flagged by the bare-id `where` in its CONFIRMATION READ, not by the write —
+  // the write itself is already compound. Scoping either statement by
+  // organizationId would be ceremony rather than protection: the only org
+  // available to the caller is read from this very row, so the predicate would
+  // be tautological, and a mismatch would silently discard a completed run's
+  // results. Left keyed on the id deliberately.
+  finalizeReconciliationJobIfNotAbandoned: "job id comes from the run this process is executing; predicate is stricter than updateReconciliationJob",
 
   // updateMatchStatus and updateException were here because `matches` and
   // `exceptions` had no organizationId to filter on. Migration 0078 added it to
