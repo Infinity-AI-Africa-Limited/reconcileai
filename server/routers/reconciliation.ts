@@ -264,19 +264,26 @@ export const reconciliationRouter = router({
           //      channels and date range, overlapping the runs still in flight.
           //      With the ids in hand the caller can watch the partial run via
           //      getMultiRun instead of duplicating it.
-          const notEnqueued = created.filter((c) => !enqueued.includes(c.jobId));
+          // Three populations, and they are NOT equivalent:
+          //
+          //   enqueued        — acknowledged; definitely in flight.
+          //   ambiguous       — THIS job. The enqueue threw, which does not
+          //                     prove non-acceptance: Redis may have persisted
+          //                     the entry and the client then lost the response.
+          //   neverAttempted  — the loop had not reached them, so no entry can
+          //                     exist for them anywhere.
+          const ambiguous = jobId;
+          const neverAttempted = created.filter(
+            (c) => c.jobId !== ambiguous && !enqueued.includes(c.jobId),
+          );
           const failedAt = new Date();
-          for (const c of notEnqueued) {
-            // TERMINAL, not merely "failed".
-            //
-            // A rejected enqueue does NOT prove the job was not accepted: Redis
-            // may have persisted the entry and then the client lost the
-            // response. Marking such a job only "failed" leaves it retryable by
-            // design (the runner-failure retry contract depends on that), so a
-            // BullMQ entry that did land would later execute a reconciliation
-            // the caller was told had failed and which is absent from the
-            // in-flight ids below — the exact overlap this handler exists to
-            // prevent. `abandonedAt` makes the handler refuse it outright.
+
+          for (const c of [{ jobId: ambiguous }, ...neverAttempted]) {
+            // TERMINAL, not merely "failed". A job marked only "failed" stays
+            // retryable by design — the runner-failure retry contract depends
+            // on that — so an entry that did land would later execute a
+            // reconciliation the caller was told had failed. `abandonedAt`
+            // makes the handler refuse it outright.
             await db.updateReconciliationJob(c.jobId, {
               status: "failed",
               completedAt: failedAt,
@@ -284,14 +291,33 @@ export const reconciliationRouter = router({
             });
           }
 
+          // RESIDUAL RACE, stated plainly rather than papered over.
+          //
+          // For the ambiguous job the abandonment above is best-effort: if the
+          // entry did land AND a worker reads the row before this update
+          // commits, that worker proceeds and the run happens. Closing that
+          // window completely needs a dispatch handshake (worker refuses until
+          // the row is marked dispatch-confirmed), which costs a deferral on
+          // every run under the in-process backend — the default deployment
+          // today, where the handler is invoked on the next tick, before any
+          // post-enqueue write could possibly commit. The standard fix is a
+          // transactional outbox, which belongs with the durable-queue work
+          // (go-live plan Phase 1 item 2) rather than here.
+          //
+          // So the harm that CAN be closed here is closed: the caller is told
+          // the ambiguous job's id, so it can watch that run via getMultiRun
+          // instead of retrying into an overlapping second fan-out.
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
             message:
-              `Failed to queue multi-channel reconciliation processing. ${enqueued.length} of ` +
-              `${created.length} channel runs were already started and are still in progress — ` +
-              `track them with multiRunId ${multiRunId} (job ids: ${enqueued.join(", ") || "none"}) ` +
-              `rather than retrying, which would run them a second time. ` +
-              `The remaining ${notEnqueued.length} were marked failed.`,
+              `Failed to queue multi-channel reconciliation processing. ` +
+              `${enqueued.length} of ${created.length} channel runs were accepted and are still ` +
+              `in progress (job ids: ${enqueued.join(", ") || "none"}). ` +
+              `Job ${ambiguous} MAY also have started — the queue rejected the request without ` +
+              `confirming whether it was persisted. ` +
+              `Track all of these with multiRunId ${multiRunId} rather than retrying, which would ` +
+              `run the same channels and date range a second time. ` +
+              `The remaining ${neverAttempted.length} were never queued and are marked failed.`,
             cause: error,
           });
         }

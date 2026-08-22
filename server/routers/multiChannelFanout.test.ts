@@ -64,8 +64,9 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
   it("should fail every job it did not enqueue, not only the one that threw", () => {
     // The rest would otherwise sit "pending" — indistinguishable from queued —
     // until the two-hour boot sweep abandons them.
-    expect(proc).toContain("const notEnqueued = created.filter((c) => !enqueued.includes(c.jobId));");
-    expect(proc).toContain("for (const c of notEnqueued) {");
+    expect(proc).toContain("const neverAttempted = created.filter(");
+    // The ambiguous job is failed alongside them, not left pending.
+    expect(proc).toContain("for (const c of [{ jobId: ambiguous }, ...neverAttempted]) {");
   });
 
   it("should record the audit entry even when the fan-out later fails", () => {
@@ -80,10 +81,30 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
     // Redis may persist the entry and then the client lose the response. A job
     // marked only "failed" stays retryable by design (the runner-failure retry
     // contract depends on it), so an entry that did land would later execute a
-    // reconciliation the caller was told had failed and which is missing from
-    // the reported in-flight ids. `abandonedAt` makes the handler refuse it.
+    // reconciliation the caller was told had failed. `abandonedAt` makes the
+    // handler refuse it.
     expect(proc).toContain("abandonedAt: failedAt");
   });
+
+  it("should distinguish the ambiguous job from the ones never attempted", () => {
+    // They are not equivalent: the loop never reached `neverAttempted`, so no
+    // queue entry can exist for them anywhere, whereas the job whose enqueue
+    // threw may or may not have been persisted.
+    expect(proc).toContain("const ambiguous = jobId;");
+    expect(proc).toContain("const neverAttempted = created.filter(");
+  });
+
+  it("should disclose the ambiguous job id, since abandonment there is best-effort", () => {
+    // The abandonment can lose a race against a worker that already picked the
+    // entry up. That window cannot be closed without a dispatch handshake, so
+    // the caller is told the id and can watch it via getMultiRun instead of
+    // retrying into an overlapping second fan-out.
+    const message = section("Failed to queue multi-channel reconciliation processing.", "cause: error,");
+    expect(message).toContain("MAY also have started");
+    expect(message).toContain("${ambiguous}");
+    expect(proc).toContain("RESIDUAL RACE");
+  });
+
 });
 
 describe("when a single-channel run fails to enqueue", () => {
