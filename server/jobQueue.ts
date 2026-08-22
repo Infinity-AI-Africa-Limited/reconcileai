@@ -47,8 +47,29 @@ export interface QueueCreateOptions extends EnqueueOptions {
 
 export type JobHandler<T> = (job: QueueJob<T>) => Promise<void>;
 
+/**
+ * Operational snapshot of a queue, for /api/health.
+ *
+ * The go-live plan's exit criterion for durable processing asks for
+ * "Redis/BullMQ health evidence". Before this, production could not report
+ * WHICH backend was live — a deployment running the in-process fallback and one
+ * running BullMQ were indistinguishable from outside, which is precisely the
+ * thing an institution needs to see.
+ */
+export interface QueueStats {
+  backend: "bullmq" | "in-process";
+  /** Survives process restart and is safe across multiple instances. */
+  durable: boolean;
+  /** Present only on BullMQ; the in-process queue has no inspectable store. */
+  counts?: { waiting: number; active: number; completed: number; failed: number; delayed: number };
+  /** Populated when the counts lookup itself fails, so a broken Redis is visible. */
+  error?: string;
+}
+
 export interface JobQueue<T> {
   enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void>;
+  /** Operational snapshot for health output. */
+  stats(): Promise<QueueStats>;
   /**
    * Drop a not-yet-running entry by the name it was enqueued under. Present
    * only on durable backends: the in-process queue holds its work in closures
@@ -87,6 +108,12 @@ class InProcessQueue<T> implements JobQueue<T> {
     private readonly handler: JobHandler<T>,
     private readonly defaults: Required<EnqueueOptions>,
   ) {}
+
+  async stats(): Promise<QueueStats> {
+    // No inspectable store: work lives in closures and dies with the process.
+    // Reporting `durable: false` is the point — it is the degraded signal.
+    return { backend: this.backend, durable: false };
+  }
 
   async enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
     const attempts = opts?.attempts ?? this.defaults.attempts;
@@ -158,6 +185,26 @@ async function createBullMqQueue<T>(
 
   return {
     backend: "bullmq" as const,
+    async stats(): Promise<QueueStats> {
+      try {
+        const c = await queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
+        return {
+          backend: "bullmq",
+          durable: true,
+          counts: {
+            waiting: c.waiting ?? 0,
+            active: c.active ?? 0,
+            completed: c.completed ?? 0,
+            failed: c.failed ?? 0,
+            delayed: c.delayed ?? 0,
+          },
+        };
+      } catch (err) {
+        // A queue that cannot be counted is a queue whose Redis is unwell —
+        // report it rather than presenting a healthy-looking empty snapshot.
+        return { backend: "bullmq", durable: true, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
     async enqueue(name: string, data: T, opts?: EnqueueOptions) {
       await queue.add(name, data, {
         attempts: opts?.attempts ?? defaults.attempts,
@@ -181,6 +228,31 @@ async function createBullMqQueue<T>(
   };
 }
 
+// ─── Live-queue registry (health/ops) ─────────────────────────────────────────
+
+/**
+ * Every queue this process created, so /api/health can report on what is
+ * actually running rather than on what the configuration implies.
+ */
+const LIVE_QUEUES = new Map<string, JobQueue<unknown>>();
+
+/** Snapshot of every live queue, keyed by name. Never throws. */
+export async function allQueueStats(): Promise<Record<string, QueueStats>> {
+  const out: Record<string, QueueStats> = {};
+  for (const [name, q] of LIVE_QUEUES) {
+    try {
+      out[name] = await q.stats();
+    } catch (err) {
+      out[name] = {
+        backend: q.backend,
+        durable: q.backend === "bullmq",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+  return out;
+}
+
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 /**
@@ -202,6 +274,7 @@ export async function createQueue<T>(
     try {
       const q = await createBullMqQueue<T>(queueName, handler, defaults, redisUrl, opts?.uniqueJobNames === true);
       console.log(`[queue:${queueName}] BullMQ backend active`);
+      LIVE_QUEUES.set(queueName, q as JobQueue<unknown>);
       return q;
     } catch (err) {
       if (opts?.requireDurable) {
@@ -219,5 +292,7 @@ export async function createQueue<T>(
   if (opts?.requireDurable) {
     throw new DurableQueueUnavailableError(queueName, "REDIS_URL is not configured");
   }
-  return new InProcessQueue<T>(queueName, handler, defaults);
+  const fallback = new InProcessQueue<T>(queueName, handler, defaults);
+  LIVE_QUEUES.set(queueName, fallback as JobQueue<unknown>);
+  return fallback;
 }

@@ -131,9 +131,49 @@ async function startServer() {
       };
     }
 
-    // 3. App metadata
+    // 4. Job queue — WHICH backend is actually live, and its depth.
+    //
+    // Durable processing is a pilot blocker (go-live plan Phase 1 item 2), and
+    // its exit criterion asks for "Redis/BullMQ health evidence". Without this
+    // an instance running the in-process fallback and one running BullMQ look
+    // identical from outside — so nobody could tell whether reconciliation runs
+    // survive a restart.
+    //
+    // "degraded", not "error", when the fallback is live: the platform works,
+    // it is simply single-instance and loses queued work on restart. That is a
+    // correct state for a demo deployment and a blocking one for a bank, and
+    // the distinction belongs to the reader, not to this endpoint.
+    try {
+      const { allQueueStats } = await import("../jobQueue");
+      const queues = await allQueueStats();
+      const names = Object.keys(queues);
+      const anyBroken = names.some((n) => queues[n].error);
+      const allDurable = names.length > 0 && names.every((n) => queues[n].durable);
+      checks.queue = {
+        status: anyBroken ? "error" : allDurable ? "ok" : "degraded",
+        durable: allDurable,
+        // No queue has been created yet in this process — reconciliation and
+        // webhook delivery both build theirs lazily on first use.
+        ...(names.length === 0 ? { note: "no queue initialised yet" } : { queues }),
+      };
+    } catch (err) {
+      checks.queue = {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // 5. App metadata
+    // "degraded" is reported, not alarmed on. Production runs the in-process
+    // queue today, so treating degraded as failure would flip this endpoint to
+    // 503 the moment the queue check shipped — turning a known, accepted state
+    // into a page. The durability evidence is in `checks.queue.durable` for
+    // whoever needs it; only a genuine error (a broken dependency) is fatal.
+    //
+    // Existing checks emit only "ok" or "error", so their behaviour is
+    // unchanged. Railway's own probe is /api/healthz, which is untouched.
     const allOk = Object.values(checks).every(
-      (c) => (c as { status: string }).status === "ok"
+      (c) => (c as { status: string }).status !== "error"
     );
 
     const body = {
