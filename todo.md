@@ -1394,3 +1394,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Remove the amendment path as well — the readiness page was defining a procedure for reclassifying the drill record's own P0 requirement, which the drill record does not provide. Gate 3 now has one outcome this page can offer (pursue the supported billing-test route). Three drafts each carried the same error in different words: a summary claiming authority over the record it summarises.
 - [x] Sweep ALL the SHOPLINE release documents for the same bypass rather than patching one row at a time. `RELEASE_CONTROL_RECORD.md` carried it too — "Support route **or owner acceptance** required before review submission" — and the readiness status table still read "Caveat", which scans as a cleared gate. Both now state that the drill record classes the lifecycle proof as required P0, so acceptance does not discharge it.
 - [ ] Owner decision: `P2_DRILL_EXECUTION_RECORD.md` defines NO procedure for amending its own requirements. Worth deciding deliberately, in that record, rather than inventing one the first time it becomes inconvenient.
+
+## Corporate B2B Pilot Controls Follow-up
+
+- [ ] Fix the confirmed CFO authorization middleware mismatch and readiness-error loading-state ordering in Corporate B2B Pilot Controls, then update both review branches.

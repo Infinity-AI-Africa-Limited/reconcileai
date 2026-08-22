@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCorporateB2BPilotReadiness } from "./routers/corporateB2BPilot";
+import { calculateCorporateB2BPilotReadiness, requirePilotManager } from "./routers/corporateB2BPilot";
 
 const approvedConfig = {
   noWriteAcknowledged: true,
@@ -18,6 +18,13 @@ const approvedConfig = {
 };
 
 describe("Corporate B2B pilot readiness", () => {
+  it("allows a CFO to manage audited pilot controls while retaining the explicit role boundary", () => {
+    expect(() => requirePilotManager("cfo")).not.toThrow();
+    expect(() => requirePilotManager("admin")).not.toThrow();
+    expect(() => requirePilotManager("super_admin")).not.toThrow();
+    expect(() => requirePilotManager("operations")).toThrow(/Only a CFO, administrator, or Infinity AI staff member/);
+  });
+
   it("fails closed until external B6 foundation evidence exists", () => {
     const readiness = calculateCorporateB2BPilotReadiness({
       config: approvedConfig,

@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { pilotReadinessDisplayState } from "@/lib/corporateB2BPilotReadiness";
 import { toast } from "sonner";
 
 type PilotForm = {
@@ -52,13 +53,20 @@ export default function CorporateB2BPilotControls() {
     setSourceName("");
   };
 
+  const displayState = pilotReadinessDisplayState({
+    isLoading: readiness.isLoading,
+    hasData: Boolean(readiness.data),
+    hasError: Boolean(readiness.error),
+  });
+  const data = readiness.data;
+  // Error takes precedence over a missing response; otherwise a rejected query
+  // without cached data becomes an indefinite loading state.
+  if (displayState === "error") return <div className="p-6 text-sm text-destructive">{readiness.error?.message}</div>;
   // React Query can briefly expose a settled query without cached data while the
   // authenticated tenant context is resolving. Treat that as a loading state
   // rather than dereferencing readiness fields and turning a safe pilot-control
   // page into an error boundary.
-  if (readiness.isLoading || !readiness.data) return <div className="p-6 text-sm text-muted-foreground">Loading pilot controls…</div>;
-  if (readiness.error) return <div className="p-6 text-sm text-destructive">{readiness.error.message}</div>;
-  const data = readiness.data;
+  if (displayState === "loading" || !data) return <div className="p-6 text-sm text-muted-foreground">Loading pilot controls…</div>;
 
   return <div className="space-y-6 p-4 md:p-6">
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">

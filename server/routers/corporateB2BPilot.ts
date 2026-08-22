@@ -15,7 +15,7 @@ import {
   organizations,
 } from "../../drizzle/schema";
 import { getDb } from "../db";
-import { adminProcedure, protectedProcedure, router } from "../_core/trpc";
+import { protectedProcedure, router } from "../_core/trpc";
 import { logAudit } from "./shared";
 
 const SOURCE_TYPES = ["invoice_ar", "bank_statement", "mobile_money", "psp_collection", "erp_export"] as const;
@@ -45,7 +45,7 @@ function canManagePilot(role: string) {
   return role === "admin" || role === "cfo" || role === "super_admin";
 }
 
-function requirePilotManager(role: string) {
+export function requirePilotManager(role: string) {
   if (!canManagePilot(role)) {
     throw new TRPCError({ code: "FORBIDDEN", message: "Only a CFO, administrator, or Infinity AI staff member can change pilot controls." });
   }
@@ -125,7 +125,10 @@ const configInput = z.object({
 export const corporateB2BPilotRouter = router({
   readiness: protectedProcedure.query(({ ctx }) => loadReadiness(ctx.user)),
 
-  updateConfig: adminProcedure.input(configInput).mutation(async ({ ctx, input }) => {
+  // Pilot Controls intentionally permits CFOs as well as admins. `adminProcedure`
+  // rejects CFOs before requirePilotManager can apply that approved policy, so use
+  // the authenticated procedure and enforce the explicit role boundary here.
+  updateConfig: protectedProcedure.input(configInput).mutation(async ({ ctx, input }) => {
     requirePilotManager(ctx.user.role);
     const { db, organizationId } = await requireCorporateB2B(ctx.user);
     if (input.aiAssistanceMode === "private_approved" && !input.aiBoundaryReference?.trim()) {
@@ -143,7 +146,7 @@ export const corporateB2BPilotRouter = router({
     return loadReadiness(ctx.user);
   }),
 
-  createSource: adminProcedure.input(z.object({
+  createSource: protectedProcedure.input(z.object({
     sourceType: z.enum(SOURCE_TYPES), displayName: z.string().min(1).max(255),
     deliveryMethod: z.enum(DELIVERY_METHODS), expectedCutoff: z.string().max(64).optional(),
     sourceOwner: z.string().max(255).optional(), notes: z.string().max(2000).optional(),
@@ -155,7 +158,7 @@ export const corporateB2BPilotRouter = router({
     return { id: Number(result.insertId) };
   }),
 
-  updateSourceStatus: adminProcedure.input(z.object({
+  updateSourceStatus: protectedProcedure.input(z.object({
     id: z.number().int().positive(), status: z.enum(SOURCE_STATUSES), customerOwnedCredentials: z.boolean(), controlTotalRequired: z.boolean(),
   })).mutation(async ({ ctx, input }) => {
     requirePilotManager(ctx.user.role);
@@ -168,7 +171,7 @@ export const corporateB2BPilotRouter = router({
     return { success: true };
   }),
 
-  deleteSource: adminProcedure.input(z.object({ id: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+  deleteSource: protectedProcedure.input(z.object({ id: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
     requirePilotManager(ctx.user.role);
     const { db, organizationId } = await requireCorporateB2B(ctx.user);
     const result = await db.delete(corporateB2BPilotSources).where(and(eq(corporateB2BPilotSources.id, input.id), eq(corporateB2BPilotSources.organizationId, organizationId)));
