@@ -5663,8 +5663,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const riskLevel = overallScore >= 80 ? "low" : overallScore >= 60 ? "medium" : overallScore >= 40 ? "high" : "critical";
 
         // ── AI Narrative ─────────────────────────────────────────────
+        // Public lead-generation funnel: an ANONYMOUS respondent has no tenant,
+        // and the content is their own self-reported questionnaire scores rather
+        // than an institution's operational data — so the switch has nothing to
+        // read and the funnel keeps working. But a SIGNED-IN respondent from an
+        // institution that has switched AI assistance off must not have their
+        // submission narrated by a model. They still get the score and the
+        // record; only the generated narrative is withheld.
+        const narrativeAllowed =
+          ctx.user?.organizationId == null
+            ? true
+            : await isTenantAiAllowed(ctx.user.organizationId);
+
         let aiNarrative: string | null = null;
-        try {
+        if (narrativeAllowed) try {
           const { invokeLLM } = await import("./_core/llm");
           const weakCategories = Object.entries(categoryScores)
             .filter(([, s]) => s < 60)

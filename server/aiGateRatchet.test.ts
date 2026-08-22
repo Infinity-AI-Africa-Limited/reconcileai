@@ -38,6 +38,7 @@ const MODEL_REACHING_SYMBOLS = [
 ];
 
 const MODEL_REACHING_RE = new RegExp("(" + MODEL_REACHING_SYMBOLS.join("|") + ")[ ]*[(]");
+const MODEL_REACHING_RE_GLOBAL = new RegExp("(" + MODEL_REACHING_SYMBOLS.join("|") + ")[ ]*[(]", "g");
 
 /**
  * Every server module that reaches a model, and its tenancy classification.
@@ -158,5 +159,66 @@ describe("when a tenant has switched AI assistance off", () => {
     // authorises an egress of tenant data, so ambiguity must refuse.
     expect(aiGate).toContain("if (orgId === null) return false;");
     expect(aiGate).toContain("if (orgId === null) throw new TenantAiDisabledError(null, surface);");
+  });
+});
+
+/**
+ * Per-CALL-SITE check.
+ *
+ * The inventory test above proves which FILES reach a model. That is not the
+ * same invariant, and the difference was a live bug: `routers.ts` was correctly
+ * classified "gated" on the strength of four gated surfaces while a fifth
+ * `invokeLLM` — the public compliance-assessment narrative — sat ungated in the
+ * same file. A file-level ratchet can never see that.
+ *
+ * So this walks every model-reaching call in routers.ts back to its enclosing
+ * tRPC procedure and requires a gate between the two.
+ */
+describe("every model call site inside routers.ts sits behind a gate", () => {
+  const ROUTERS = fs.readFileSync(path.join(SERVER, "routers.ts"), "utf8");
+
+  /** Tokens that constitute a gate for the procedure they appear in. */
+  const GATES = ["assertTenantAiAllowedForRequest(", "isTenantAiAllowed("];
+
+  /**
+   * Procedures allowed to reach a model with no tenant gate, and why. Every
+   * entry is a surface where no owning organisation exists to consult.
+   */
+  const EXEMPT: Record<string, string> = {
+    "runFullPOC": "Woodcore POC engine — the procedure takes no ctx and is keyed by product config, not a tenant",
+  };
+
+  function enclosingProcedure(index: number): string {
+    // Nearest preceding `name: xxxProcedure` declaration, or the nearest
+    // preceding top-level function for the background passes.
+    const before = ROUTERS.slice(0, index);
+    const proc = [...before.matchAll(/(\w+)\s*:\s*\w*[Pp]rocedure/g)].pop();
+    const fn = [...before.matchAll(/^async function (\w+)/gm)].pop();
+    const procAt = proc ? proc.index ?? -1 : -1;
+    const fnAt = fn ? fn.index ?? -1 : -1;
+    return procAt >= fnAt ? (proc ? proc[1] : "<unknown>") : (fn ? fn[1] : "<unknown>");
+  }
+
+  it("has no ungated model call in routers.ts", () => {
+    const offenders: string[] = [];
+    for (const m of ROUTERS.matchAll(MODEL_REACHING_RE_GLOBAL)) {
+      const at = m.index ?? 0;
+      const owner = enclosingProcedure(at);
+      if (owner in EXEMPT) continue;
+
+      // Search back to the start of the enclosing procedure/function only, so a
+      // gate on an EARLIER procedure cannot vouch for this one.
+      const before = ROUTERS.slice(0, at);
+      const ownerAt = Math.max(
+        before.lastIndexOf(owner + ":"),
+        before.lastIndexOf("async function " + owner),
+      );
+      const body = ROUTERS.slice(ownerAt < 0 ? 0 : ownerAt, at);
+      if (!GATES.some((g) => body.includes(g))) {
+        const line = before.split(String.fromCharCode(10)).length;
+        offenders.push(`${owner} (routers.ts:${line}) reaches a model with no tenant gate`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
