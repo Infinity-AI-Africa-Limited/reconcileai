@@ -69,6 +69,21 @@ export default function CorporateB2BPilotControls() {
   if (displayState === "loading" || !data) return <div className="p-6 text-sm text-muted-foreground">Loading pilot controls…</div>;
 
   return <div className="space-y-6 p-4 md:p-6">
+    {/* A background refresh failed while cached readiness is still on screen.
+        The controls stay usable — losing the page and the operator's unsaved
+        entries to a transient blip is worse — but the gate states below drive
+        pilot eligibility, so the fact that they could not be confirmed has to
+        be visible rather than implied. */}
+    {displayState === "stale" ? (
+      <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>
+          <span className="font-semibold">Showing the last confirmed readiness.</span>{" "}
+          The latest refresh failed{readiness.error?.message ? ` (${readiness.error.message})` : ""}, so the
+          gate states below may be out of date. Refresh before relying on them for a pilot decision.
+        </span>
+      </div>
+    ) : null}
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div>
         <p className="text-sm font-semibold text-primary">Corporate B2B · controlled pilot</p>
