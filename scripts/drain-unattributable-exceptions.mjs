@@ -50,7 +50,8 @@ const COLUMNS = [
   "createdAt",
 ];
 
-const QUARANTINE_REASON = "legacy exception has no derivable organization owner";
+// Suffixed per row with the transaction tenant candidate (or "none").
+const QUARANTINE_REASON = "no derivable owner; txn tenant candidate: ";
 
 async function main() {
   const url = process.env.DATABASE_URL;
@@ -103,10 +104,18 @@ async function main() {
       return;
     }
 
-    const cols = COLUMNS.map((x) => `\`${x}\``).join(", ");
+    const selectCols = COLUMNS.map((x) => `\`e\`.\`${x}\``).join(", ");
+    const insertCols = COLUMNS.map((x) => `\`${x}\``).join(", ");
+    // Record the transaction tenant CANDIDATE per row. Migration 0084 refuses to
+    // backfill from it (with the job gone there is nothing to corroborate it
+    // against), but a quarantined record carrying no trace of who it might have
+    // belonged to makes later recovery pure guesswork. Evidence, not a rule.
     const [ins] = await c.query(
-      `INSERT IGNORE INTO \`exception_ownership_quarantine\` (${cols}, \`quarantineReason\`) ` +
-        `SELECT ${cols}, ? FROM \`exceptions\` WHERE \`organizationId\` IS NULL`,
+      `INSERT IGNORE INTO \`exception_ownership_quarantine\` (${insertCols}, \`quarantineReason\`) ` +
+        `SELECT ${selectCols}, CONCAT(?, COALESCE(CAST(\`t\`.\`organizationId\` AS CHAR), 'none')) ` +
+        `FROM \`exceptions\` \`e\` ` +
+        `LEFT JOIN \`transactions\` \`t\` ON \`t\`.\`id\` = \`e\`.\`transactionId\` ` +
+        `WHERE \`e\`.\`organizationId\` IS NULL`,
       [QUARANTINE_REASON],
     );
     console.log(`\nquarantined ...... ${ins.affectedRows}`);

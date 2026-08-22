@@ -12,8 +12,8 @@
 --    and its job belong to different tenants it files the exception against
 --    the transaction's tenant, so the row becomes visible to an organisation
 --    that did not run the reconciliation and vanishes from the reports of the
---    job that produced it. The job is authoritative; the transaction is only a
---    fallback for rows whose job is missing or itself unattributed.
+--    job that produced it. The job is the ONLY authority here: where it cannot
+--    name an owner, nothing else is allowed to guess one.
 --
 -- 2. UNATTRIBUTABLE ROWS ARE NEVER DESTROYED BY AN AUTOMATED DEPLOY.
 --    `pnpm db:migrate` runs unattended as a Railway pre-deploy step and in
@@ -57,17 +57,22 @@ UPDATE `exceptions` AS `e`
   JOIN `reconciliation_jobs` AS `j` ON `j`.`id` = `e`.`jobId`
   SET `e`.`organizationId` = `j`.`organizationId`
   WHERE `e`.`organizationId` IS NULL AND `j`.`organizationId` IS NOT NULL;--> statement-breakpoint
--- Rule 1, fallback ONLY: the parent job is gone or itself unattributed, so the
--- transaction is the last remaining evidence of ownership. Migration 0078
--- documented that ~42 exceptions point at a jobId with no surviving job; this
--- recovers those instead of quarantining them.
-UPDATE `exceptions` AS `e`
-  JOIN `transactions` AS `t` ON `t`.`id` = `e`.`transactionId`
-  LEFT JOIN `reconciliation_jobs` AS `j` ON `j`.`id` = `e`.`jobId`
-  SET `e`.`organizationId` = `t`.`organizationId`
-  WHERE `e`.`organizationId` IS NULL
-    AND `t`.`organizationId` IS NOT NULL
-    AND `j`.`organizationId` IS NULL;--> statement-breakpoint
+-- There is deliberately NO transaction-based fallback.
+--
+-- Migration 0078 noted ~42 exceptions whose jobId has no surviving job, and it
+-- is tempting to recover those from the transaction. But those are exactly the
+-- rows where the authoritative evidence is GONE: with no job there is nothing
+-- to check the transaction's tenant against, and a transaction and its job can
+-- belong to different organisations. Filing a financial control record against
+-- a guessed tenant is the very defect this migration exists to prevent — it
+-- would surface the exception to an organisation that never ran the
+-- reconciliation, and hide it from the one that did. A fallback is not safer
+-- than quarantine merely because it keeps the row in the live table.
+--
+-- So anything the job cannot attribute falls through to the assertion below,
+-- is preserved by the operator drain, and is restored by a human who can say
+-- which tenant it belongs to. The drain reports the transaction's tenant as a
+-- CANDIDATE for exactly that decision, without acting on it.
 -- Rule 2: impact assertion. If any exception still has no derivable owner this
 -- INSERT attempts to write NULL into a NOT NULL column, MySQL/TiDB raise
 -- error 1048 and the migration — and therefore the deploy — stops before the

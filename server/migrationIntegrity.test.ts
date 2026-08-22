@@ -91,20 +91,20 @@ describe("migration meta snapshots", () => {
 describe("migration 0084 (exception ownership)", () => {
   const sql = fs.readFileSync(path.join(DRIZZLE, "0084_exception_ownership_required.sql"), "utf8");
 
-  it("should derive ownership from the reconciliation job before the transaction", () => {
+  it("should derive ownership from the reconciliation job, and from nothing else", () => {
     // Runtime ownership comes from the parent job (runReconciliation's
     // `runOrganizationId`), and migration 0078 backfilled the same column the
-    // same way. A transaction-first backfill files the exception against the
-    // wrong tenant wherever the two differ — visible to an org that never ran
-    // the reconciliation, and missing from the reports of the job that did.
-    const jobJoin = sql.indexOf("JOIN `reconciliation_jobs` AS `j`");
-    const txnJoin = sql.indexOf("JOIN `transactions` AS `t`");
-    expect(jobJoin).toBeGreaterThan(-1);
-    expect(txnJoin).toBeGreaterThan(jobJoin);
+    // same way. The job is the only authority.
+    expect(sql).toContain("JOIN `reconciliation_jobs` AS `j`");
   });
 
-  it("should use the transaction only where the job cannot supply an owner", () => {
-    expect(sql).toContain("AND `j`.`organizationId` IS NULL");
+  it("should not guess an owner from the transaction when the job cannot supply one", () => {
+    // Those are exactly the rows where the authoritative evidence is gone: with
+    // no job there is nothing to corroborate the transaction's tenant against,
+    // and the two can differ. Filing a control record against a guessed tenant
+    // is the defect this migration exists to prevent, so unattributable rows
+    // fall through to the assertion and are preserved by the operator drain.
+    expect(sql).not.toContain("JOIN `transactions`");
   });
 
   it("should never delete exception rows during an unattended deploy", () => {

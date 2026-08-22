@@ -58,13 +58,12 @@ describe("Financial Services exception tenancy hardening", () => {
     expect(drain).toContain("DRY RUN");
   });
 
-  it("derives legacy ownership from the reconciliation job, not the transaction", () => {
+  it("derives legacy ownership from the reconciliation job and never guesses one", () => {
     // Runtime exception ownership comes from the parent job, and migration 0078
-    // backfilled the same column the same way. Preferring the transaction files
-    // the row against the wrong tenant wherever the two differ.
-    const jobJoin = migration.indexOf("JOIN `reconciliation_jobs` AS `j`");
-    const txnJoin = migration.indexOf("JOIN `transactions` AS `t`");
-    expect(jobJoin).toBeGreaterThan(-1);
-    expect(txnJoin).toBeGreaterThan(jobJoin);
+    // backfilled the same column the same way. Where the job cannot name an
+    // owner nothing else may: the transaction's tenant can differ from the
+    // job's, and with the job gone there is nothing to check it against.
+    expect(migration).toContain("JOIN `reconciliation_jobs` AS `j`");
+    expect(migration).not.toContain("JOIN `transactions`");
   });
 });
