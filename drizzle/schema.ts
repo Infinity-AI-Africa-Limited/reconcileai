@@ -61,6 +61,10 @@ export const organizations = mysqlTable("organizations", {
    * Anything that must not treat fabricated data as real reads this column.
    */
   isDemo: boolean("isDemo").default(false).notNull(),
+  // Bank-controlled boundary for all model-assisted exception analysis. When
+  // false, deterministic matching, exception routing and audit evidence remain
+  // available, but no exception context is sent to a model provider.
+  aiAssistanceEnabled: boolean("aiAssistanceEnabled").default(true).notNull(),
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
@@ -298,8 +302,12 @@ export type InsertMatch = typeof matches.$inferInsert;
 // ─── Exceptions ──────────────────────────────────────────────────────
 export const exceptions = mysqlTable("exceptions", {
   id: int("id").autoincrement().primaryKey(),
-  /** Owning tenant. Nullable for the same reason as `matches.organizationId`. */
-  organizationId: int("organizationId"),
+  /**
+   * Owning tenant. Financial-services exceptions are control records and must
+   * never be attributable to "no organisation". Migration 0084 quarantines
+   * legacy orphaned rows before enforcing this at the database layer.
+   */
+  organizationId: int("organizationId").notNull(),
   jobId: int("jobId").notNull(),
   transactionId: int("transactionId").notNull(),
   category: mysqlEnum("category", [
@@ -2145,6 +2153,7 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
     "org_created",
     "org_segment_updated",
     "org_sso_updated",
+    "org_ai_assistance_updated",
     // Conventional vs non-interest (NIFI). Worth its own event: it changes how
     // the platform characterises an institution's licence basis, and the
     // resulting findings are regulator-facing.

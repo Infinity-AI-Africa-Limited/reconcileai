@@ -370,6 +370,9 @@ async function segmentOfOrg(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, 
 export async function seedFmcgDemoData(userId: number, orgId: number | null): Promise<DemoSeedResult> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  if (orgId == null) {
+    throw new Error("Corporate B2B demo seed requires an owning organizationId");
+  }
 
   // 1. Seed distributors — corporate B2B tenants only.
   //
@@ -504,7 +507,7 @@ export async function seedFmcgDemoData(userId: number, orgId: number | null): Pr
     const scenario = allExceptionScenarios[i];
     const srcId = exceptionTxnIds[i]?.srcId;
     if (!srcId) continue;
-    await db.insert(exceptions).values({ jobId: job.id, transactionId: srcId, category: scenario.category, severity: scenario.severity, description: `${scenario.srcDesc} — ${scenario.tgtDesc}`, aiAnalysis: scenario.aiAnalysis, suggestedResolution: scenario.suggestedResolution, status: "open" });
+    await db.insert(exceptions).values({ organizationId: orgId, jobId: job.id, transactionId: srcId, category: scenario.category, severity: scenario.severity, description: `${scenario.srcDesc} — ${scenario.tgtDesc}`, aiAnalysis: scenario.aiAnalysis, suggestedResolution: scenario.suggestedResolution, status: "open" });
     const allExc = await db.select().from(exceptions).where(eq(exceptions.jobId, job.id)).orderBy(sql`id DESC`).limit(1);
     exceptionIds.push(allExc[0].id);
   }
@@ -520,6 +523,9 @@ export async function seedFmcgDemoData(userId: number, orgId: number | null): Pr
 export async function seedFinservDemoData(userId: number, orgId: number | null): Promise<DemoSeedResult> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  if (orgId == null) {
+    throw new Error("Financial Services demo seed requires an owning organizationId");
+  }
 
   // 1. Channels — all Nigerian payment rails
   const channelIds: Record<string, number> = {};
@@ -610,7 +616,7 @@ export async function seedFinservDemoData(userId: number, orgId: number | null):
     const scenario = allExceptionScenarios[i];
     const srcId = exceptionTxnIds[i]?.srcId;
     if (!srcId) continue;
-    await db.insert(exceptions).values({ jobId: job.id, transactionId: srcId, category: scenario.category, severity: scenario.severity, description: `${scenario.srcDesc} — ${scenario.tgtDesc}`, aiAnalysis: scenario.aiAnalysis, suggestedResolution: scenario.suggestedResolution, status: "open" });
+    await db.insert(exceptions).values({ organizationId: orgId, jobId: job.id, transactionId: srcId, category: scenario.category, severity: scenario.severity, description: `${scenario.srcDesc} — ${scenario.tgtDesc}`, aiAnalysis: scenario.aiAnalysis, suggestedResolution: scenario.suggestedResolution, status: "open" });
     const allExc = await db.select().from(exceptions).where(eq(exceptions.jobId, job.id)).orderBy(sql`id DESC`).limit(1);
     exceptionIds.push(allExc[0].id);
   }

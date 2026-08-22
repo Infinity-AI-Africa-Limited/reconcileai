@@ -7,6 +7,15 @@
     "noEmit": true,
     "module": "ESNext",
     "strict": true,
+    // Unset, TypeScript defaults to ES5, which makes iterating a Set or a
+    // RegExp iterator an error even though `lib` is esnext and the app runs on
+    // Node 22. Production code happens not to do it, so `pnpm check` stayed
+    // green and the misconfiguration went unnoticed; it accounted for 26 of the
+    // 92 errors that appear the moment test files are typechecked.
+    //
+    // Affects checking only — the shipped bundles are built by Vite and esbuild
+    // with their own targets. Verified: production code still checks clean.
+    "target": "ES2022",
     "lib": ["esnext", "dom", "dom.iterable"],
     "jsx": "preserve",
     "esModuleInterop": true,

@@ -24,7 +24,7 @@ import crypto from "crypto";
 import { eq } from "drizzle-orm";
 import type { Express, Request, Response } from "express";
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "jose";
-import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
+import { COOKIE_NAME } from "@shared/const";
 import { organizations, users } from "../../drizzle/schema";
 import { getDb } from "../db";
 import { getSessionCookieOptions } from "./cookies";
@@ -401,7 +401,7 @@ export function registerSsoRoutes(app: Express): void {
       // ── Mint the session (same shape as magic-link login) ──
       const sessionToken = await sdk.createSessionToken(user.openId, {
         name: user.name || identity.name || "",
-        expiresInMs: ONE_YEAR_MS,
+        expiresInMs: ENV.sessionTtlMs,
       });
       await db
         .update(users)
@@ -428,7 +428,7 @@ export function registerSsoRoutes(app: Express): void {
       }
 
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ENV.sessionTtlMs });
       // Same landing as the magic-link flow — see the note there.
       return res.redirect(302, "/home");
     } catch (err) {

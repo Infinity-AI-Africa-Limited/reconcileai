@@ -128,6 +128,12 @@ export async function getOrganizationById(id: number) {
   return result[0];
 }
 
+/** Fail closed when an organisation is absent or unavailable: no model call is safer than ambiguous tenancy. */
+export async function isOrganizationAiAssistanceEnabled(id: number): Promise<boolean> {
+  const org = await getOrganizationById(id);
+  return org?.aiAssistanceEnabled === true;
+}
+
 // ─── Users ───────────────────────────────────────────────────────────
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -775,7 +781,14 @@ export async function getPendingReviewMatches(organizationId: number | null) {
 
 // ─── Exceptions ──────────────────────────────────────────────────────
 
+function assertExceptionTenantOwnership(data: Pick<InsertException, "organizationId">) {
+  if (!Number.isInteger(data.organizationId) || (data.organizationId as number) <= 0) {
+    throw new Error("Exception writes require a valid owning organizationId");
+  }
+}
+
 export async function insertException(data: InsertException) {
+  assertExceptionTenantOwnership(data);
   const db = await getDb();
   if (!db) return null;
   const result = await db.insert(exceptions).values(data);
@@ -783,6 +796,7 @@ export async function insertException(data: InsertException) {
 }
 
 export async function insertExceptionsBatch(dataArray: InsertException[]) {
+  for (const data of dataArray) assertExceptionTenantOwnership(data);
   const db = await getDb();
   if (!db || dataArray.length === 0) return [];
   const ids: number[] = [];
@@ -922,10 +936,11 @@ export async function upsertAgingSettings(organizationId: number, slaDays: numbe
   }
 }
 
-// High/critical exceptions for a job that still need an AI narrative (aiAnalysis
-// null). Backs the deferred, out-of-hot-path AI pass; restartable because it
-// re-queries the DB rather than relying on in-memory state.
-export async function getJobExceptionsNeedingAi(jobId: number) {
+// High/critical exceptions for one tenant-owned job that still need an AI
+// narrative (aiAnalysis null). The organization predicate is mandatory even
+// though the job id is server-generated: it is the final data-boundary check
+// before exception context can reach an AI provider.
+export async function getJobExceptionsNeedingAi(jobId: number, organizationId: number) {
   const db = await getDb();
   if (!db) return [];
   return db
@@ -934,6 +949,7 @@ export async function getJobExceptionsNeedingAi(jobId: number) {
     .where(
       and(
         eq(exceptions.jobId, jobId),
+        eq(exceptions.organizationId, organizationId),
         isNull(exceptions.aiAnalysis),
         inArray(exceptions.severity, ["high", "critical"] as any)
       )
