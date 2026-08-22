@@ -355,6 +355,14 @@ export function createApiGateway(): express.Router {
       }
       const currency = typeof b.currency === "string" && b.currency.length === 3 ? b.currency.toUpperCase() : "NGN";
 
+      // Tenant AI opt-out (server/aiGate.ts). The API key's organisation is the
+      // tenant here; an opted-out institution must not reach a model through
+      // the public API any more than through the UI.
+      const { isTenantAiAllowed } = await import("../aiGate");
+      if (!(await isTenantAiAllowed(req.apiAuth?.organizationId))) {
+        return sendError(res, 403, "AI_ASSISTANCE_DISABLED", "AI assistance is disabled for this organisation.");
+      }
+
       const { getAIAnalysis } = await import("../reconciliationEngine");
       const learning = await import("../institutionalLearning");
       const ei = await import("../exceptionIntelligence");

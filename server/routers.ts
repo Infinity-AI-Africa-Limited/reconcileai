@@ -17,6 +17,7 @@ import { ugandaRouter } from "./routers/uganda";
 import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { assertTenantAiAllowed, isTenantAiAllowed, TenantAiDisabledError } from "./aiGate";
 import * as db from "./db";
 import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
 import { storagePut } from "./storage";
@@ -384,6 +385,31 @@ async function assertOrganizationExists(
     .limit(1);
   if (!org) {
     throw new TRPCError({ code: "NOT_FOUND", message: `Organisation ${organizationId} not found` });
+  }
+}
+
+/**
+ * Tenant AI opt-out for request-scoped surfaces (server/aiGate.ts).
+ *
+ * FORBIDDEN, not PRECONDITION_FAILED: the tenant is not missing a setup step,
+ * the institution has withheld consent. The message says so plainly so an
+ * operator does not go hunting for a broken model configuration.
+ */
+async function assertTenantAiAllowedForRequest(
+  organizationId: number | null | undefined,
+  surface: string,
+): Promise<number> {
+  try {
+    return await assertTenantAiAllowed(organizationId, surface);
+  } catch (error) {
+    if (error instanceof TenantAiDisabledError) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "AI assistance is disabled for this organisation. A super admin can re-enable it in organisation settings.",
+        cause: error,
+      });
+    }
+    throw error;
   }
 }
 
@@ -3156,10 +3182,22 @@ export const appRouter = router({
           limit: 1000,
         });
         
+        // Tenant AI opt-out. Only ONE of the five detectors calls a model
+        // (detectSuspiciousDescriptions, which ships transaction descriptions
+        // to the LLM); the other four are pure statistics that send nothing
+        // anywhere. So an opted-out tenant loses the model detector, not the
+        // whole feature — refusing the route would withdraw z-score, IQR,
+        // time-pattern and counterparty detection that the switch never
+        // covered.
+        const anomalyConfig = { ...(input.config as AnomalyDetectionConfig) };
+        if (!(await isTenantAiAllowed(ctx.user.organizationId))) {
+          anomalyConfig.enableLLM = false;
+        }
+
         const anomalies = await detectAnomalies(
           transactions,
           historicalResult.data,
-          input.config as AnomalyDetectionConfig
+          anomalyConfig
         );
         
         // Store anomaly scores
@@ -3694,6 +3732,37 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    // A bank can run deterministic reconciliation and governed exception
+    // handling without exposing exception context to any model provider. This
+    // control is super-admin-only so a bank's approved configuration cannot be
+    // changed by an ordinary tenant user.
+    setOrganizationAiAssistance: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        aiAssistanceEnabled: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
+        await drizzle.update(organizations)
+          .set({ aiAssistanceEnabled: input.aiAssistanceEnabled })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_ai_assistance", "organization", input.organizationId, {
+          aiAssistanceEnabled: input.aiAssistanceEnabled,
+        });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_ai_assistance_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          newValue: input.aiAssistanceEnabled ? "enabled" : "disabled",
+        });
+        return { success: true };
+      }),
+
     /**
      * Mark an institution as operating on non-interest (NIFI) principles.
      *
@@ -3879,7 +3948,7 @@ export const appRouter = router({
     // Get platform audit logs
     auditLogs: superAdminProcedure
       .input(z.object({
-        eventType: z.enum(["org_created", "org_segment_updated", "user_role_updated", "user_promoted_super_admin"]).optional(),
+        eventType: z.enum(["org_created", "org_segment_updated", "org_sso_updated", "org_ai_assistance_updated", "org_banking_model_updated", "user_role_updated", "user_promoted_super_admin", "tenant_data_imported"]).optional(),
         limit: z.number().int().min(1).max(200).default(50),
         offset: z.number().int().min(0).default(0),
       }))
@@ -4036,6 +4105,12 @@ export const appRouter = router({
       .mutation(async ({ input, ctx }) => {
         const userId = ctx.user.id;
         const orgId = ctx.user.organizationId;
+
+        // Tenant AI opt-out, BEFORE any tenant context is read. This surface
+        // submits the organisation's exceptions, job statistics and learned
+        // resolution history to a model, so the guard has to precede the loads
+        // below — not merely the invokeLLM call at the bottom.
+        await assertTenantAiAllowedForRequest(orgId, "superAgent.query");
 
         // Fetch recent exceptions and stats for context
         const [recentExceptions, recentJobsRaw] = await Promise.all([
@@ -4279,6 +4354,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
       .mutation(async ({ input, ctx }) => {
         const userId = ctx.user.id;
         const orgId = ctx.user.organizationId ?? 0;
+
+        // Same tenant AI opt-out as superAgent.query. This path sends the
+        // transaction plus recalled agent memory to a model, so it is gated on
+        // the same switch and before the reads that build that context.
+        await assertTenantAiAllowedForRequest(ctx.user.organizationId, "superAgent.diagnose");
+
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
 
@@ -5605,8 +5686,20 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const riskLevel = overallScore >= 80 ? "low" : overallScore >= 60 ? "medium" : overallScore >= 40 ? "high" : "critical";
 
         // ── AI Narrative ─────────────────────────────────────────────
+        // Public lead-generation funnel: an ANONYMOUS respondent has no tenant,
+        // and the content is their own self-reported questionnaire scores rather
+        // than an institution's operational data — so the switch has nothing to
+        // read and the funnel keeps working. But a SIGNED-IN respondent from an
+        // institution that has switched AI assistance off must not have their
+        // submission narrated by a model. They still get the score and the
+        // record; only the generated narrative is withheld.
+        const narrativeAllowed =
+          ctx.user?.organizationId == null
+            ? true
+            : await isTenantAiAllowed(ctx.user.organizationId);
+
         let aiNarrative: string | null = null;
-        try {
+        if (narrativeAllowed) try {
           const { invokeLLM } = await import("./_core/llm");
           const weakCategories = Object.entries(categoryScores)
             .filter(([, s]) => s < 60)
@@ -6628,13 +6721,40 @@ export type AppRouter = typeof appRouter;
 // ─── Background Reconciliation Runner ────────────────────────────────
 
 /**
+ * How often a running reconciliation refreshes its liveness signal.
+ *
+ * Must stay comfortably below STUCK_JOB_MAX_AGE_MS in reconciliationQueue.ts
+ * (2h) — a heartbeat slower than the staleness window would let a live run be
+ * declared dead between beats, which is the whole failure this prevents. Five
+ * minutes gives a ~24x margin at negligible write cost.
+ */
+const RECONCILIATION_HEARTBEAT_MS = 5 * 60 * 1000;
+
+/**
  * Deferred AI analysis pass — runs OUT of the reconciliation hot path.
  * Re-queries the job's high/critical exceptions whose aiAnalysis is still null,
  * generates a Claude narrative for each, and persists it. Restartable: safe to
  * re-run since it only touches exceptions that still lack analysis.
  */
 async function runDeferredAiAnalysis(jobId: number): Promise<void> {
-  const pending = await db.getJobExceptionsNeedingAi(jobId);
+  const job = await db.getReconciliationJob(jobId);
+  const organizationId = job?.organizationId;
+  if (organizationId == null) {
+    // Bank-safe default: do not read or send exception context to an AI pass
+    // unless the parent job has a durable tenant boundary.
+    console.error(`[AI pass] job ${jobId} has no owning organization; refusing deferred analysis`);
+    return;
+  }
+  const tenantId = organizationId;
+
+  // Same gate as every request-scoped surface (server/aiGate.ts) — a background
+  // pass skips quietly rather than raising, but the decision is the one rule.
+  if (!(await isTenantAiAllowed(tenantId))) {
+    console.info(`[AI pass] tenant ${tenantId} has AI assistance disabled; skipping deferred model analysis`);
+    return;
+  }
+
+  const pending = await db.getJobExceptionsNeedingAi(jobId, tenantId);
   if (pending.length === 0) return;
 
   const txnIds = pending
@@ -6651,18 +6771,15 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
   // org's reciprocal opt-in inside getSharedRecommendations, which also records
   // the consume request/hit that powers the "recommendations informed by
   // cross-institution patterns %" metric. Cached per category per job.
-  const job = await db.getReconciliationJob(jobId);
-  const orgId = job?.organizationId ?? null;
-  const ei = orgId != null ? await import("./exceptionIntelligence") : null;
-  const learning = orgId != null ? await import("./institutionalLearning") : null;
+  const ei = await import("./exceptionIntelligence");
+  const learning = await import("./institutionalLearning");
   const networkGuidanceByCategory = new Map<string, string>();
   async function networkGuidanceFor(category: string): Promise<string> {
-    if (orgId == null || !ei || !learning) return "";
     const cached = networkGuidanceByCategory.get(category);
     if (cached !== undefined) return cached;
     let guidance = "";
     try {
-      const recs = await ei.getSharedRecommendations(orgId, category);
+      const recs = await ei.getSharedRecommendations(tenantId, category);
       guidance = learning.formatNetworkGuidance(recs);
     } catch (err) {
       console.error(`[AI pass] network lookup for "${category}" failed (non-fatal):`, err);
@@ -6681,8 +6798,9 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
         txn as any,
         networkGuidance ? { networkGuidance } : undefined
       );
-      // Background pass — no request context. The tenant is the job's own.
-      await db.updateException(exc.id, orgId, { aiAnalysis: analysis });
+      // Background pass — no request context. The tenant is the job's own and
+      // has already been verified before any exception or AI processing.
+      await db.updateException(exc.id, tenantId, { aiAnalysis: analysis });
     } catch (err) {
       console.error(`[AI pass] exception ${exc.id} failed:`, err);
     }
@@ -6699,14 +6817,45 @@ async function runReconciliation(
   userId: number
 ) {
   const startTime = Date.now();
+
+  // LIVENESS HEARTBEAT.
+  //
+  // The recovery sweep can only tell a wedged run from a working one by how
+  // recently it showed signs of life. Without this, a reconciliation that
+  // legitimately runs longer than the staleness window is declared dead while
+  // it is still working — and since abandonment is terminal AND its artifacts
+  // are discarded, that destroys real work rather than merely mislabelling it.
+  //
+  // An interval rather than a per-checkpoint touch, because the gap that
+  // matters is INSIDE a single long phase (a large matching pass), where no
+  // progress checkpoint fires for minutes at a time.
+  //
+  // unref() so a stray timer can never hold the process open, and every error
+  // swallowed: a failed heartbeat must not fail the reconciliation.
+  const heartbeat = setInterval(() => {
+    db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
+      console.warn(`[Reconciliation] heartbeat failed for job ${jobId} (non-fatal):`, err),
+    );
+  }, RECONCILIATION_HEARTBEAT_MS);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+
   try {
-    await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
+    await db.updateReconciliationJob(jobId, {
+      status: "running",
+      startedAt: new Date(),
+      // Seed the signal immediately; the first interval tick is minutes away.
+      heartbeatAt: new Date(),
+    });
     await trackProgress(jobId, "queued", { message: "Job queued for processing" });
 
-    // The owning tenant for every match and exception this run produces. Read
-    // once from the job rather than threaded through the signature, so the
-    // rows can never disagree with their parent. Null for legacy/orgless jobs.
-    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId ?? null;
+    // The owning tenant for every match and exception this run produces. A
+    // Financial Services run without an attributable owner is unsafe: it could
+    // create data that cannot be authorized, audited or safely sent to the
+    // deferred AI pass. Legacy/orgless jobs must be remediated, not re-run.
+    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId;
+    if (runOrganizationId == null) {
+      throw new Error(`[Reconciliation] job ${jobId} has no owning organization; refusing to run`);
+    }
 
     await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
     const sourceTxns = await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo);
@@ -6721,10 +6870,28 @@ async function runReconciliation(
       message: `Processing ${sourceTxns.length} source and ${targetTxns.length} target transactions`,
       totalCount: sourceTxns.length + targetTxns.length,
     });
+    // Beat immediately before and after the matching pass.
+    //
+    // runMatchingEngine is SYNCHRONOUS and holds the event loop for its whole
+    // duration, so the interval heartbeat above cannot fire while it runs — on
+    // a large job this is precisely when liveness matters most. Bracketing the
+    // pass does not solve that (nothing timer-based can), but it means the
+    // staleness window only has to cover ONE matching pass rather than the
+    // whole run, and the timestamp entering the pass is as fresh as possible.
+    //
+    // The complete fix is to yield inside the engine or move the heartbeat to a
+    // worker thread; both need real-volume measurement first — go-live plan
+    // Phase 1 item 2. Until then the safety net is that completing a run clears
+    // its abandonment (completeReconciliationJobClearingAbandonment), so a
+    // wrong verdict here costs a transient status, never the results.
+    await db.touchReconciliationJobHeartbeat(jobId);
+
     // excludeFeeNoise: set aside general bank fees/charges/levies so they don't
     // skew matching or inflate exceptions. Card-settlement fees (interchange,
     // scheme, MDR…) are guarded in the engine and stay in the reconciliation.
     const result = runMatchingEngine(sourceTxns, targetTxns, { ...config, excludeFeeNoise: true });
+
+    await db.touchReconciliationJobHeartbeat(jobId);
     if (result.excluded.length > 0) {
       await db.updateReconciliationJob(jobId, {
         excludedCount: result.excluded.length,
@@ -6847,7 +7014,12 @@ async function runReconciliation(
       if (count > dominantCount) { dominantCurrency = ccy; dominantCount = count; }
     }
 
-    await db.updateReconciliationJob(jobId, {
+    // The recovery sweep can declare this job dead WHILE it is running — it has
+    // no cancellation channel, and it cannot see inside a synchronous matching
+    // pass, so its verdict is a guess from silence. Arriving here falsifies it:
+    // the run finished. Complete it and clear the abandonment rather than
+    // discarding real computed output to protect a status field.
+    const { wasAbandoned } = await db.completeReconciliationJobClearingAbandonment(jobId, {
       status: "completed",
       matchedCount,
       exceptionCount,
@@ -6857,6 +7029,16 @@ async function runReconciliation(
       currency: dominantCurrency,
       completedAt: new Date(),
     });
+
+    if (wasAbandoned) {
+      // Loud, because it means the staleness window is too tight for this
+      // institution's data volume — the run was healthy and still got swept.
+      console.error(
+        `[Reconciliation] job ${jobId} completed in ${processingTimeMs}ms after the recovery ` +
+          `sweep had marked it abandoned; the sweep's verdict was wrong and has been cleared. ` +
+          `Results are intact. Raise STUCK_JOB_MAX_AGE_MS or reduce batch size if this recurs.`,
+      );
+    }
 
     await logAudit(userId, "complete_reconciliation", "reconciliation_job", jobId, {
       matchedCount,
@@ -6928,6 +7110,11 @@ async function runReconciliation(
 
     await trackProgress(jobId, "failed", { message: `Failed: ${String(error)}` });
     dispatchWebhook("reconciliation.failed", { jobId, error: String(error) });
+  } finally {
+    // Every exit path, including the early return when the run was abandoned
+    // mid-flight — a heartbeat outliving its run would keep a dead job looking
+    // alive and defeat the sweep entirely.
+    clearInterval(heartbeat);
   }
 }
 

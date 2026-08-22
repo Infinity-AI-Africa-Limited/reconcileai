@@ -25,7 +25,7 @@ import {
   MAX_NAME_LENGTH,
 } from "./shared";
 import * as db from "../db";
-import { enqueueReconciliationRun } from "../reconciliationQueue";
+import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
 
 export const reconciliationRouter = router({
   create: operationsProcedure
@@ -66,6 +66,16 @@ export const reconciliationRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
       }
 
+      try {
+        await assertReconciliationQueueAvailable();
+      } catch (error) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Reconciliation processing is unavailable until the required durable queue is healthy.",
+          cause: error,
+        });
+      }
+
       const jobId = await db.createReconciliationJob({
         userId: ctx.user.id,
         name: sanitizeInput(input.name, MAX_NAME_LENGTH),
@@ -94,15 +104,31 @@ export const reconciliationRouter = router({
       // Run asynchronously through the durable queue (BullMQ when REDIS_URL
       // is set, in-process otherwise) — retried with a clean artifact reset
       // per attempt; never lost silently on restart under BullMQ.
-      enqueueReconciliationRun({
-        jobId,
-        sourceChannelId: input.sourceChannelId,
-        targetChannelId: input.targetChannelId,
-        dateFromIso: dateFrom.toISOString(),
-        dateToIso: dateTo.toISOString(),
-        config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-        userId: ctx.user.id,
-      }).catch(err => console.error("[Reconciliation] enqueue failed:", err));
+      try {
+        await enqueueReconciliationRun({
+          jobId,
+          sourceChannelId: input.sourceChannelId,
+          targetChannelId: input.targetChannelId,
+          dateFromIso: dateFrom.toISOString(),
+          dateToIso: dateTo.toISOString(),
+          config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+          userId: ctx.user.id,
+        });
+      } catch (error) {
+        // Contended abandonment, same as the multi-channel path below. A
+        // rejected enqueue does not prove the entry was not persisted, so this
+        // only applies while the row is still "pending" — a worker that already
+        // claimed it wins instead, and the caller is told the run is under way
+        // rather than being told it failed while it proceeds.
+        const stopped = await db.abandonUnstartedReconciliationJob(jobId, new Date());
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: stopped
+            ? "Failed to queue reconciliation processing. The run was stopped before it started."
+            : `Failed to queue reconciliation processing, but job ${jobId} had already been picked up by a worker and is running. Track it rather than retrying.`,
+          cause: error,
+        });
+      }
 
       return { jobId };
     }),
@@ -147,6 +173,16 @@ export const reconciliationRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
       }
 
+      try {
+        await assertReconciliationQueueAvailable();
+      } catch (error) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Reconciliation processing is unavailable until the required durable queue is healthy.",
+          cause: error,
+        });
+      }
+
       // Resolve the target set.
       let targets: { id: number; name: string; code: string }[] = [];
       if (input.allActiveTargets) {
@@ -168,8 +204,13 @@ export const reconciliationRouter = router({
       }
 
       const multiRunId = crypto.randomUUID();
-      const jobIds: number[] = [];
 
+      // ── Phase 1: persist every child job ────────────────────────────────
+      // Rows first, enqueue second. Creating and enqueueing in one pass meant a
+      // failure on target N left targets 1..N-1 already RUNNING while the error
+      // named only target N — see the partial-failure handling below for why
+      // that combination is the dangerous one.
+      const created: { jobId: number; targetId: number }[] = [];
       for (const target of targets) {
         const jobId = await db.createReconciliationJob({
           userId: ctx.user.id,
@@ -191,22 +232,85 @@ export const reconciliationRouter = router({
           }),
           status: "pending",
         });
-        if (jobId) {
-          jobIds.push(jobId);
-          enqueueReconciliationRun({
+        if (jobId) created.push({ jobId, targetId: target.id });
+      }
+
+      const jobIds = created.map((c) => c.jobId);
+
+      // Audit BEFORE enqueueing: if the fan-out fails halfway, the multi-run
+      // still has to be attributable to whoever started it.
+      await logAudit(ctx.user.id, "create_multichannel_reconciliation", "reconciliation_job", jobIds[0] ?? 0,
+        { multiRunId, source: sourceChannel.code, targetCount: targets.length }, ip, ua);
+
+      // ── Phase 2: enqueue ────────────────────────────────────────────────
+      const enqueued: number[] = [];
+      for (const { jobId, targetId } of created) {
+        try {
+          await enqueueReconciliationRun({
             jobId,
             sourceChannelId: input.sourceChannelId,
-            targetChannelId: target.id,
+            targetChannelId: targetId,
             dateFromIso: dateFrom.toISOString(),
             dateToIso: dateTo.toISOString(),
             config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
             userId: ctx.user.id,
-          }).catch((err) => console.error("[Reconciliation] Multi-channel child enqueue failed:", err));
+          });
+          enqueued.push(jobId);
+        } catch (error) {
+          // PARTIAL FAILURE. Jobs already enqueued are running and cannot be
+          // recalled — the queue owns them now.
+          //
+          // Three populations, and they are NOT equivalent:
+          //
+          //   enqueued        — acknowledged; definitely in flight.
+          //   ambiguous       — THIS job. The enqueue threw, which does not
+          //                     prove non-acceptance: Redis may have persisted
+          //                     the entry and the client then lost the response.
+          //   neverAttempted  — the loop had not reached them, so no entry can
+          //                     exist for them anywhere.
+          const ambiguous = jobId;
+          const neverAttempted = created.filter(
+            (c) => c.jobId !== ambiguous && !enqueued.includes(c.jobId),
+          );
+          const failedAt = new Date();
+
+          // Never attempted: no entry exists, so no worker can be racing us.
+          // An unconditional abandonment is correct and cannot be contended.
+          for (const c of neverAttempted) {
+            await db.updateReconciliationJob(c.jobId, {
+              status: "failed",
+              completedAt: failedAt,
+              abandonedAt: failedAt,
+            });
+          }
+
+          // The ambiguous job is CONTENDED, so the database decides rather than
+          // this process guessing. abandonUnstartedReconciliationJob only
+          // applies while the row is still "pending"; a worker that already
+          // claimed it has moved it to "running" and wins instead. Exactly one
+          // side succeeds, and the caller is told which — so "failed" here is
+          // never a claim about a run that is actually proceeding.
+          const abandonedAmbiguous = await db.abandonUnstartedReconciliationJob(ambiguous, failedAt);
+
+          const stillRunning = abandonedAmbiguous ? enqueued : [...enqueued, ambiguous];
+          const failedCount = neverAttempted.length + (abandonedAmbiguous ? 1 : 0);
+
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message:
+              `Failed to queue multi-channel reconciliation processing. ` +
+              `${stillRunning.length} of ${created.length} channel runs are in progress ` +
+              `(job ids: ${stillRunning.join(", ") || "none"}). ` +
+              (abandonedAmbiguous
+                ? `Job ${ambiguous} was stopped before it started. `
+                : `Job ${ambiguous} had already been picked up by a worker and is running. `) +
+              `Track these with multiRunId ${multiRunId} rather than retrying, which would run ` +
+              `the same channels and date range a second time. ` +
+              `${failedCount} job(s) were marked failed.`,
+            cause: error,
+          });
         }
       }
-
-      await logAudit(ctx.user.id, "create_multichannel_reconciliation", "reconciliation_job", jobIds[0] ?? 0,
-        { multiRunId, source: sourceChannel.code, targetCount: targets.length }, ip, ua);
 
       return { multiRunId, jobIds, targetCount: targets.length };
     }),

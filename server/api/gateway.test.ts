@@ -4,7 +4,7 @@
  * backoff math used by webhook delivery.
  */
 import { describe, it, expect } from "vitest";
-import { createQueue, backoffDelayMs } from "../jobQueue";
+import { createQueue, backoffDelayMs, DurableQueueUnavailableError } from "../jobQueue";
 import { runSandboxReconciliation } from "./sandbox";
 import { publicApiRateKey } from "../rateLimiter";
 
@@ -13,6 +13,16 @@ describe("jobQueue — in-process backend", () => {
     expect(process.env.REDIS_URL).toBeFalsy();
     const q = await createQueue("test-q", async () => {});
     expect(q.backend).toBe("in-process");
+  });
+
+  it("refuses the in-process fallback when a bank deployment requires durable processing", async () => {
+    const originalRedisUrl = process.env.REDIS_URL;
+    delete process.env.REDIS_URL;
+    await expect(
+      createQueue("bank-required-durability", async () => {}, { requireDurable: true }),
+    ).rejects.toBeInstanceOf(DurableQueueUnavailableError);
+    if (originalRedisUrl === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = originalRedisUrl;
   });
 
   it("executes enqueued jobs", async () => {

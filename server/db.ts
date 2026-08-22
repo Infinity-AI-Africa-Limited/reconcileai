@@ -128,6 +128,12 @@ export async function getOrganizationById(id: number) {
   return result[0];
 }
 
+/** Fail closed when an organisation is absent or unavailable: no model call is safer than ambiguous tenancy. */
+export async function isOrganizationAiAssistanceEnabled(id: number): Promise<boolean> {
+  const org = await getOrganizationById(id);
+  return org?.aiAssistanceEnabled === true;
+}
+
 // ─── Users ───────────────────────────────────────────────────────────
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -679,6 +685,107 @@ export async function updateReconciliationJob(id: number, data: Partial<InsertRe
   await db.update(reconciliationJobs).set(data).where(eq(reconciliationJobs.id, id));
 }
 
+/**
+ * Refresh a running job's liveness signal.
+ *
+ * Deliberately NOT keyed on `startedAt`, which records when the run began and
+ * must stay accurate for duration reporting. Guarded on `abandonedAt IS NULL`
+ * so a heartbeat can never revive a job the recovery sweep already declared
+ * dead — the marker stays terminal.
+ *
+ * Best-effort by design: a failed heartbeat must not fail the reconciliation.
+ * The worst case is that the sweep eventually treats the run as stale, which is
+ * exactly the behaviour that existed before heartbeats.
+ */
+export async function touchReconciliationJobHeartbeat(id: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(reconciliationJobs)
+    .set({ heartbeatAt: new Date() })
+    .where(and(eq(reconciliationJobs.id, id), isNull(reconciliationJobs.abandonedAt)));
+}
+
+/**
+ * Write a run's terminal result, clearing any abandonment the sweep applied
+ * while the run was still executing. Reports whether that happened.
+ *
+ * COMPLETION IS PROOF OF LIVENESS, and it beats the sweep's guess.
+ *
+ * The sweep declares a job dead from silence — it has no cancellation channel
+ * and no way to interrupt a worker. Its verdict is an inference, and a worker
+ * arriving here has definitively falsified it: this run finished. Only a worker
+ * that claimed the job BEFORE the abandonment can reach this point, because
+ * claimJob refuses to start an abandoned one, so completion cannot come from a
+ * resurrected duplicate.
+ *
+ * An earlier revision refused the write and discarded the run's artifacts. That
+ * was the wrong trade: it destroyed a completed reconciliation's matches and
+ * exceptions — real computed financial output — to protect a status field. The
+ * sweep cannot see inside a synchronous matching pass (runMatchingEngine blocks
+ * the event loop, so even the heartbeat timer cannot fire during one), which
+ * makes a wrong verdict entirely reachable on a large run. Losing the results
+ * of such a run is far worse than briefly having shown "failed".
+ *
+ * Clearing `abandonedAt` here does NOT weaken the terminal guarantee the queue
+ * handler relies on: that guarantee is "an abandoned job never STARTS", and
+ * this job is finishing, not starting. It lands on `completed`, which the
+ * handler already skips.
+ */
+export async function completeReconciliationJobClearingAbandonment(
+  id: number,
+  data: Partial<InsertReconciliationJob>,
+): Promise<{ wasAbandoned: boolean }> {
+  const db = await getDb();
+  if (!db) return { wasAbandoned: false };
+
+  const [before] = await db
+    .select({ abandonedAt: reconciliationJobs.abandonedAt })
+    .from(reconciliationJobs)
+    .where(eq(reconciliationJobs.id, id))
+    .limit(1);
+
+  await db
+    .update(reconciliationJobs)
+    .set({ ...data, abandonedAt: null })
+    .where(eq(reconciliationJobs.id, id));
+
+  return { wasAbandoned: before?.abandonedAt != null };
+}
+
+/**
+ * Abandon a job ONLY while it is still unstarted, and report whether that won.
+ *
+ * Half of the enqueue-ambiguity resolution; the other half is claimJob in
+ * server/reconciliationQueue.ts. When `queue.add` rejects we cannot tell whether
+ * the entry was persisted, so caller and worker race: the caller wants to
+ * declare the job dead, a worker may already be starting it. Letting both
+ * proceed on their own reading of the row is what allowed a job the caller
+ * reported as failed to run anyway.
+ *
+ * The database arbitrates instead, and exactly one side wins:
+ *   - caller first  → status is still "pending", this update applies, the
+ *                     worker's claim then finds `abandonedAt` set and refuses.
+ *   - worker first  → the claim moved the row to "running", this update matches
+ *                     nothing, and the caller reports the job as started rather
+ *                     than failed — which is the truth.
+ *
+ * Returns true when the abandonment took effect.
+ */
+export async function abandonUnstartedReconciliationJob(id: number, at: Date): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db
+    .update(reconciliationJobs)
+    .set({ status: "failed", completedAt: at, abandonedAt: at })
+    .where(and(
+      eq(reconciliationJobs.id, id),
+      eq(reconciliationJobs.status, "pending"),
+      isNull(reconciliationJobs.abandonedAt),
+    ));
+  return Number((result as any)?.[0]?.affectedRows ?? 0) > 0;
+}
+
 /** Reconciliation runs for ONE organization. See getUploadBatches for the history. */
 export async function getReconciliationJobs(organizationId: number | null) {
   const db = await getDb();
@@ -775,7 +882,14 @@ export async function getPendingReviewMatches(organizationId: number | null) {
 
 // ─── Exceptions ──────────────────────────────────────────────────────
 
+function assertExceptionTenantOwnership(data: Pick<InsertException, "organizationId">) {
+  if (!Number.isInteger(data.organizationId) || (data.organizationId as number) <= 0) {
+    throw new Error("Exception writes require a valid owning organizationId");
+  }
+}
+
 export async function insertException(data: InsertException) {
+  assertExceptionTenantOwnership(data);
   const db = await getDb();
   if (!db) return null;
   const result = await db.insert(exceptions).values(data);
@@ -783,6 +897,7 @@ export async function insertException(data: InsertException) {
 }
 
 export async function insertExceptionsBatch(dataArray: InsertException[]) {
+  for (const data of dataArray) assertExceptionTenantOwnership(data);
   const db = await getDb();
   if (!db || dataArray.length === 0) return [];
   const ids: number[] = [];
@@ -922,10 +1037,11 @@ export async function upsertAgingSettings(organizationId: number, slaDays: numbe
   }
 }
 
-// High/critical exceptions for a job that still need an AI narrative (aiAnalysis
-// null). Backs the deferred, out-of-hot-path AI pass; restartable because it
-// re-queries the DB rather than relying on in-memory state.
-export async function getJobExceptionsNeedingAi(jobId: number) {
+// High/critical exceptions for one tenant-owned job that still need an AI
+// narrative (aiAnalysis null). The organization predicate is mandatory even
+// though the job id is server-generated: it is the final data-boundary check
+// before exception context can reach an AI provider.
+export async function getJobExceptionsNeedingAi(jobId: number, organizationId: number) {
   const db = await getDb();
   if (!db) return [];
   return db
@@ -934,6 +1050,7 @@ export async function getJobExceptionsNeedingAi(jobId: number) {
     .where(
       and(
         eq(exceptions.jobId, jobId),
+        eq(exceptions.organizationId, organizationId),
         isNull(exceptions.aiAnalysis),
         inArray(exceptions.severity, ["high", "critical"] as any)
       )
