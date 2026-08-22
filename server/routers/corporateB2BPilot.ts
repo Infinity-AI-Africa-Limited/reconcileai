@@ -1,31 +1,21 @@
-/**
- * Corporate B2B controlled-pilot readiness.
- *
- * This router tracks the evidence needed for a *read-only* FMCG/distributor
- * reconciliation pilot. It never stores provider credentials, initiates a
- * payment, posts to an ERP, or represents a customer attestation as proof.
- */
+/** Corporate B2B no-write pilot control router. */
 import { TRPCError } from "@trpc/server";
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
+import { corporateB2BPilotConfigs, corporateB2BPilotSources, distributors, organizations } from "../../drizzle/schema";
+import { createAuditLogRequired, getDb } from "../db";
 import {
-  corporateB2BPilotConfigs,
-  corporateB2BPilotSources,
-  distributors,
-  organizations,
-} from "../../drizzle/schema";
-import { getDb } from "../db";
+  calculateCorporateB2BPilotReadiness,
+  CORPORATE_B2B_DELIVERY_METHODS,
+  CORPORATE_B2B_SOURCE_STATUSES,
+  CORPORATE_B2B_SOURCE_TYPES,
+  type CorporateB2BPilotReadinessConfig,
+  type CorporateB2BPilotReadinessSource,
+} from "../corporateB2BPilotReadiness";
 import { protectedProcedure, router } from "../_core/trpc";
-import { logAudit } from "./shared";
-
-const SOURCE_TYPES = ["invoice_ar", "bank_statement", "mobile_money", "psp_collection", "erp_export"] as const;
-const DELIVERY_METHODS = ["manual_export", "sftp", "bucket", "api"] as const;
-const SOURCE_STATUSES = ["draft", "tested", "approved", "active", "suspended"] as const;
 
 function requireOrg(user: { organizationId?: number | null }): number {
-  if (!user.organizationId) {
-    throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your account is not linked to an organisation." });
-  }
+  if (!user.organizationId) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your account is not linked to an organisation." });
   return user.organizationId;
 }
 
@@ -33,150 +23,72 @@ async function requireCorporateB2B(user: { organizationId?: number | null }) {
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
   const organizationId = requireOrg(user);
-  const [org] = await db.select({ segment: organizations.segment }).from(organizations)
-    .where(eq(organizations.id, organizationId)).limit(1);
-  if (org?.segment !== "corporate_b2b") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Corporate B2B pilot controls are only available in the Corporate B2B portal." });
-  }
+  const [org] = await db.select({ segment: organizations.segment }).from(organizations).where(eq(organizations.id, organizationId)).limit(1);
+  if (org?.segment !== "corporate_b2b") throw new TRPCError({ code: "FORBIDDEN", message: "Corporate B2B pilot controls are only available in the Corporate B2B portal." });
   return { db, organizationId };
 }
 
-function canManagePilot(role: string) {
-  return role === "admin" || role === "cfo" || role === "super_admin";
-}
-
-export function requirePilotManager(role: string) {
-  if (!canManagePilot(role)) {
+export function requirePilotManager(role: string): void {
+  if (!(["admin", "cfo", "super_admin"] as const).includes(role as "admin" | "cfo" | "super_admin")) {
     throw new TRPCError({ code: "FORBIDDEN", message: "Only a CFO, administrator, or Infinity AI staff member can change pilot controls." });
   }
 }
 
-export function calculateCorporateB2BPilotReadiness(input: {
-  config: any | null;
-  sources: Array<any>;
-  roster: { total: number; pending: number; flagged: number };
-}) {
-  const { config, sources } = input;
-  const { total, pending, flagged } = input.roster;
-  const sourceCount = sources.length;
-  const testedSources = sources.filter((source) => source.status === "tested" || source.status === "approved" || source.status === "active");
-  const approvedSources = sources.filter((source) => source.status === "approved" || source.status === "active");
-  const safeSources = sources.every((source) => source.customerOwnedCredentials && source.controlTotalRequired);
-  const hasInvoiceEvidence = approvedSources.some((source) => source.sourceType === "invoice_ar");
-  const hasReceiptEvidence = approvedSources.some((source) => ["bank_statement", "mobile_money", "psp_collection"].includes(source.sourceType));
-  const gates = [
-    { id: "B0", label: "Read-only launch boundary", ready: Boolean(config?.noWriteAcknowledged && config?.pilotScope), detail: "No payment initiation, account access, ERP posting, customer messaging, or credit-note action." },
-    { id: "B1", label: "Canonical data contract", ready: config?.dataContractStatus === "approved" && hasInvoiceEvidence && hasReceiptEvidence, detail: "Approved invoice/AR and receipt evidence with a documented source hierarchy." },
-    { id: "B2", label: "Customer-authorised source route", ready: testedSources.length >= 2 && safeSources, detail: "At least two tested customer-controlled sources, each with a control total." },
-    { id: "B3", label: "Distributor master-data governance", ready: config?.rosterStatus === "approved" && total > 0 && pending === 0 && flagged === 0, detail: "An approved roster with no unconfirmed or flagged distributor identities." },
-    { id: "B4", label: "Allocation and daily-close policy", ready: config?.allocationPolicyStatus === "approved" && Boolean(config?.dailyCloseOwner), detail: "Human-approved allocation proposals and a named daily finance-close owner." },
-    { id: "B5", label: "AI and external-data boundary", ready: config?.aiAssistanceMode === "disabled" || (config?.aiAssistanceMode === "private_approved" && Boolean(config?.aiBoundaryReference)), detail: "AI is disabled by default; a private approved route requires a recorded sign-off reference." },
-    { id: "B6", label: "Foundation hardening deployment", ready: true, detail: "The P1–P7 foundation release is merged and proven. Durable queue configuration remains mandatory where the selected deployment enables queued processing." },
-    { id: "B7", label: "Recovery and retention evidence", ready: config?.operationalRecoveryStatus === "passed" && Number(config?.retentionDays ?? 0) > 0, detail: "Successful replay/recovery evidence and a time-bound retention policy." },
-    { id: "B8", label: "Commercial and data-processing terms", ready: config?.contractStatus === "approved" && config?.dataProcessingStatus === "approved" && Boolean(config?.contractReference) && Boolean(config?.dataProcessingReference), detail: "Recorded contract and data-processing references; the customer remains responsible for legal validity." },
-  ];
-  return { gates, sourceCount, testedSources: testedSources.length, approvedSources: approvedSources.length, canStartReadOnlyPilot: gates.every((gate) => gate.ready), blockedBy: gates.filter((gate) => !gate.ready).map((gate) => gate.id) };
-}
+const optionalText = (max: number) => z.string().trim().max(max).optional().transform((value) => value || undefined);
+const requiredText = (max: number) => z.string().trim().min(1).max(max);
+export const corporateB2BPilotConfigInput = z.object({
+  country: z.enum(["uganda", "nigeria"]),
+  pilotState: z.enum(["preparation", "data_validation", "dry_run", "parallel_run", "limited_control", "suspended"]),
+  pilotScope: optionalText(500), noWriteAcknowledged: z.boolean(), aiAssistanceMode: z.enum(["disabled", "private_approved"]), aiBoundaryReference: optionalText(255),
+  dataContractStatus: z.enum(["draft", "approved"]), rosterStatus: z.enum(["draft", "approved"]), allocationPolicyStatus: z.enum(["draft", "approved"]), dailyCloseOwner: optionalText(255),
+  operationalRecoveryStatus: z.enum(["not_tested", "passed"]), retentionDays: z.number().int().min(1).max(3650),
+  contractStatus: z.enum(["draft", "approved"]), dataProcessingStatus: z.enum(["draft", "approved"]), contractReference: optionalText(255), dataProcessingReference: optionalText(255),
+}).superRefine((value, ctx) => {
+  if (value.noWriteAcknowledged && !value.pilotScope) ctx.addIssue({ code: "custom", path: ["pilotScope"], message: "A bounded pilot scope is required before acknowledging the no-write boundary." });
+  if (value.allocationPolicyStatus === "approved" && !value.dailyCloseOwner) ctx.addIssue({ code: "custom", path: ["dailyCloseOwner"], message: "An approved allocation policy requires a daily close owner." });
+  if (value.aiAssistanceMode === "private_approved" && !value.aiBoundaryReference) ctx.addIssue({ code: "custom", path: ["aiBoundaryReference"], message: "A private AI route requires an approved boundary reference." });
+  if (value.contractStatus === "approved" && !value.contractReference) ctx.addIssue({ code: "custom", path: ["contractReference"], message: "Approved commercial terms require a reference." });
+  if (value.dataProcessingStatus === "approved" && !value.dataProcessingReference) ctx.addIssue({ code: "custom", path: ["dataProcessingReference"], message: "Approved data-processing terms require a reference." });
+});
+
+const sourceInput = z.object({ sourceType: z.enum(CORPORATE_B2B_SOURCE_TYPES), displayName: requiredText(255), deliveryMethod: z.enum(CORPORATE_B2B_DELIVERY_METHODS), expectedCutoff: optionalText(64), sourceOwner: optionalText(255), notes: optionalText(2000) });
+const sourceStatusInput = z.object({ id: z.number().int().positive(), status: z.enum(CORPORATE_B2B_SOURCE_STATUSES), customerOwnedCredentials: z.boolean(), controlTotalRequired: z.boolean() });
 
 async function loadReadiness(user: { organizationId?: number | null }) {
   const { db, organizationId } = await requireCorporateB2B(user);
-  const [config] = await db.select().from(corporateB2BPilotConfigs)
-    .where(eq(corporateB2BPilotConfigs.organizationId, organizationId)).limit(1);
-  const sources = await db.select().from(corporateB2BPilotSources)
-    .where(eq(corporateB2BPilotSources.organizationId, organizationId));
-  const [roster] = await db.select({
-    total: sql<number>`count(*)`,
-    pending: sql<number>`sum(case when ${distributors.status} = 'pending_confirmation' then 1 else 0 end)`,
-    flagged: sql<number>`sum(case when ${distributors.status} = 'flagged' then 1 else 0 end)`,
-  }).from(distributors).where(eq(distributors.organizationId, organizationId));
-
-  const total = Number(roster?.total ?? 0);
-  const pending = Number(roster?.pending ?? 0);
-  const flagged = Number(roster?.flagged ?? 0);
-  const readiness = calculateCorporateB2BPilotReadiness({ config: config ?? null, sources, roster: { total, pending, flagged } });
-
-  return {
-    config: config ?? null,
-    sources,
-    roster: { total, pending, flagged },
-    ...readiness,
-  };
+  const [config] = await db.select().from(corporateB2BPilotConfigs).where(eq(corporateB2BPilotConfigs.organizationId, organizationId)).limit(1);
+  const sources = await db.select().from(corporateB2BPilotSources).where(eq(corporateB2BPilotSources.organizationId, organizationId));
+  const [roster] = await db.select({ total: sql<number>`count(*)`, pending: sql<number>`sum(case when ${distributors.status} = 'pending_confirmation' then 1 else 0 end)`, flagged: sql<number>`sum(case when ${distributors.status} = 'flagged' then 1 else 0 end)` }).from(distributors).where(eq(distributors.organizationId, organizationId));
+  const rosterState = { total: Number(roster?.total ?? 0), pending: Number(roster?.pending ?? 0), flagged: Number(roster?.flagged ?? 0) };
+  const readiness = calculateCorporateB2BPilotReadiness({ config: (config ?? null) as CorporateB2BPilotReadinessConfig | null, sources: sources as CorporateB2BPilotReadinessSource[], roster: rosterState });
+  return { config: config ?? null, sources, roster: rosterState, ...readiness };
 }
-
-const configInput = z.object({
-  country: z.enum(["uganda", "nigeria"]),
-  pilotState: z.enum(["preparation", "data_validation", "dry_run", "parallel_run", "limited_control", "suspended"]),
-  pilotScope: z.string().max(500).optional(),
-  noWriteAcknowledged: z.boolean(),
-  aiAssistanceMode: z.enum(["disabled", "private_approved"]),
-  aiBoundaryReference: z.string().max(255).optional(),
-  dataContractStatus: z.enum(["draft", "approved"]),
-  rosterStatus: z.enum(["draft", "approved"]),
-  allocationPolicyStatus: z.enum(["draft", "approved"]),
-  dailyCloseOwner: z.string().max(255).optional(),
-  operationalRecoveryStatus: z.enum(["not_tested", "passed"]),
-  retentionDays: z.number().int().min(1).max(3650),
-  contractStatus: z.enum(["draft", "approved"]),
-  dataProcessingStatus: z.enum(["draft", "approved"]),
-  contractReference: z.string().max(255).optional(),
-  dataProcessingReference: z.string().max(255).optional(),
-});
 
 export const corporateB2BPilotRouter = router({
   readiness: protectedProcedure.query(({ ctx }) => loadReadiness(ctx.user)),
-
-  // Pilot Controls intentionally permits CFOs as well as admins. `adminProcedure`
-  // rejects CFOs before requirePilotManager can apply that approved policy, so use
-  // the authenticated procedure and enforce the explicit role boundary here.
-  updateConfig: protectedProcedure.input(configInput).mutation(async ({ ctx, input }) => {
-    requirePilotManager(ctx.user.role);
-    const { db, organizationId } = await requireCorporateB2B(ctx.user);
-    if (input.aiAssistanceMode === "private_approved" && !input.aiBoundaryReference?.trim()) {
-      throw new TRPCError({ code: "BAD_REQUEST", message: "A private AI route requires an approved boundary reference." });
-    }
-    const values = { ...input, organizationId, updatedByUserId: ctx.user.id };
-    const [existing] = await db.select({ id: corporateB2BPilotConfigs.id }).from(corporateB2BPilotConfigs)
-      .where(eq(corporateB2BPilotConfigs.organizationId, organizationId)).limit(1);
-    if (existing) await db.update(corporateB2BPilotConfigs).set(values).where(eq(corporateB2BPilotConfigs.id, existing.id));
-    else await db.insert(corporateB2BPilotConfigs).values(values);
-    await logAudit(ctx.user.id, "corporate_b2b_pilot_config_updated", "corporate_b2b_pilot", existing?.id, {
-      country: input.country, pilotState: input.pilotState, noWriteAcknowledged: input.noWriteAcknowledged,
-      aiAssistanceMode: input.aiAssistanceMode, dataContractStatus: input.dataContractStatus,
+  updateConfig: protectedProcedure.input(corporateB2BPilotConfigInput).mutation(async ({ ctx, input }) => {
+    requirePilotManager(ctx.user.role); const { db, organizationId } = await requireCorporateB2B(ctx.user);
+    await db.transaction(async (tx) => {
+      const [existing] = await tx.select({ id: corporateB2BPilotConfigs.id }).from(corporateB2BPilotConfigs).where(eq(corporateB2BPilotConfigs.organizationId, organizationId)).limit(1);
+      const values = { ...input, organizationId, updatedByUserId: ctx.user.id };
+      if (existing) await tx.update(corporateB2BPilotConfigs).set(values).where(eq(corporateB2BPilotConfigs.id, existing.id)); else await tx.insert(corporateB2BPilotConfigs).values(values);
+      await createAuditLogRequired(tx, { userId: ctx.user.id, organizationId, action: "corporate_b2b_pilot_config_updated", entityType: "corporate_b2b_pilot", entityId: existing?.id, details: JSON.stringify({ country: input.country, pilotState: input.pilotState, noWriteAcknowledged: input.noWriteAcknowledged, aiAssistanceMode: input.aiAssistanceMode, dataContractStatus: input.dataContractStatus }) });
     });
     return loadReadiness(ctx.user);
   }),
-
-  createSource: protectedProcedure.input(z.object({
-    sourceType: z.enum(SOURCE_TYPES), displayName: z.string().min(1).max(255),
-    deliveryMethod: z.enum(DELIVERY_METHODS), expectedCutoff: z.string().max(64).optional(),
-    sourceOwner: z.string().max(255).optional(), notes: z.string().max(2000).optional(),
-  })).mutation(async ({ ctx, input }) => {
-    requirePilotManager(ctx.user.role);
-    const { db, organizationId } = await requireCorporateB2B(ctx.user);
-    const [result] = await db.insert(corporateB2BPilotSources).values({ ...input, organizationId, createdByUserId: ctx.user.id });
-    await logAudit(ctx.user.id, "corporate_b2b_pilot_source_created", "corporate_b2b_pilot_source", Number(result.insertId), { sourceType: input.sourceType, deliveryMethod: input.deliveryMethod });
-    return { id: Number(result.insertId) };
+  createSource: protectedProcedure.input(sourceInput).mutation(async ({ ctx, input }) => {
+    requirePilotManager(ctx.user.role); const { db, organizationId } = await requireCorporateB2B(ctx.user); let id = 0;
+    await db.transaction(async (tx) => { const [result] = await tx.insert(corporateB2BPilotSources).values({ ...input, organizationId, createdByUserId: ctx.user.id }); id = Number(result.insertId); await createAuditLogRequired(tx, { userId: ctx.user.id, organizationId, action: "corporate_b2b_pilot_source_created", entityType: "corporate_b2b_pilot_source", entityId: id, details: JSON.stringify({ sourceType: input.sourceType, deliveryMethod: input.deliveryMethod }) }); });
+    return { id };
   }),
-
-  updateSourceStatus: protectedProcedure.input(z.object({
-    id: z.number().int().positive(), status: z.enum(SOURCE_STATUSES), customerOwnedCredentials: z.boolean(), controlTotalRequired: z.boolean(),
-  })).mutation(async ({ ctx, input }) => {
-    requirePilotManager(ctx.user.role);
-    const { db, organizationId } = await requireCorporateB2B(ctx.user);
-    const result = await db.update(corporateB2BPilotSources).set({
-      status: input.status, customerOwnedCredentials: input.customerOwnedCredentials, controlTotalRequired: input.controlTotalRequired,
-    }).where(and(eq(corporateB2BPilotSources.id, input.id), eq(corporateB2BPilotSources.organizationId, organizationId)));
-    if (!result[0]?.affectedRows) throw new TRPCError({ code: "NOT_FOUND", message: "Pilot source not found." });
-    await logAudit(ctx.user.id, "corporate_b2b_pilot_source_updated", "corporate_b2b_pilot_source", input.id, { status: input.status, customerOwnedCredentials: input.customerOwnedCredentials, controlTotalRequired: input.controlTotalRequired });
+  updateSourceStatus: protectedProcedure.input(sourceStatusInput).mutation(async ({ ctx, input }) => {
+    requirePilotManager(ctx.user.role); const { db, organizationId } = await requireCorporateB2B(ctx.user);
+    await db.transaction(async (tx) => { const result = await tx.update(corporateB2BPilotSources).set({ status: input.status, customerOwnedCredentials: input.customerOwnedCredentials, controlTotalRequired: input.controlTotalRequired }).where(and(eq(corporateB2BPilotSources.id, input.id), eq(corporateB2BPilotSources.organizationId, organizationId))); if (!result[0]?.affectedRows) throw new TRPCError({ code: "NOT_FOUND", message: "Pilot source not found." }); await createAuditLogRequired(tx, { userId: ctx.user.id, organizationId, action: "corporate_b2b_pilot_source_updated", entityType: "corporate_b2b_pilot_source", entityId: input.id, details: JSON.stringify({ status: input.status, customerOwnedCredentials: input.customerOwnedCredentials, controlTotalRequired: input.controlTotalRequired }) }); });
     return { success: true };
   }),
-
   deleteSource: protectedProcedure.input(z.object({ id: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-    requirePilotManager(ctx.user.role);
-    const { db, organizationId } = await requireCorporateB2B(ctx.user);
-    const result = await db.delete(corporateB2BPilotSources).where(and(eq(corporateB2BPilotSources.id, input.id), eq(corporateB2BPilotSources.organizationId, organizationId)));
-    if (!result[0]?.affectedRows) throw new TRPCError({ code: "NOT_FOUND", message: "Pilot source not found." });
-    await logAudit(ctx.user.id, "corporate_b2b_pilot_source_deleted", "corporate_b2b_pilot_source", input.id, {});
+    requirePilotManager(ctx.user.role); const { db, organizationId } = await requireCorporateB2B(ctx.user);
+    await db.transaction(async (tx) => { const result = await tx.delete(corporateB2BPilotSources).where(and(eq(corporateB2BPilotSources.id, input.id), eq(corporateB2BPilotSources.organizationId, organizationId))); if (!result[0]?.affectedRows) throw new TRPCError({ code: "NOT_FOUND", message: "Pilot source not found." }); await createAuditLogRequired(tx, { userId: ctx.user.id, organizationId, action: "corporate_b2b_pilot_source_deleted", entityType: "corporate_b2b_pilot_source", entityId: input.id, details: "{}" }); });
     return { success: true };
   }),
 });
