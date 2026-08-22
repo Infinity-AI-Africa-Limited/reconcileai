@@ -1,5 +1,0 @@
--- Schema snapshot marker: the reviewed P1/P6 changes were delivered in
--- 0084_exception_ownership_required.sql,
--- 0085_tenant_ai_assistance_control.sql, and
--- 0086_platform_ai_assistance_event.sql.
--- No additional database operation is required in this marker migration.

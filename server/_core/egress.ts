@@ -117,27 +117,6 @@ export function assertResidencyStartupConfig(): void {
     );
   }
 
-  // A bank deployment must not derive its data-encryption root from the session
-  // signing key. Local/air-gapped installs require their own 256-bit key;
-  // private-cloud installs using KMS require an explicit customer-managed key id.
-  if (ENV.tenantKeyProvider === "aws_kms") {
-    if (!ENV.tenantKmsKeyId) {
-      problems.push(
-        "TENANT_KEY_PROVIDER=aws_kms requires TENANT_KMS_KEY_ID for tenant data-key wrapping.",
-      );
-    }
-  } else if (!/^[0-9a-fA-F]{64}$/.test(ENV.tenantMasterKey)) {
-    problems.push(
-      "TENANT_MASTER_KEY must be a dedicated 64-hex-character key in on-premise mode; JWT_SECRET-derived tenant encryption is not permitted for a bank deployment.",
-    );
-  }
-
-  if (!["worm_s3", "db_write_deny"].includes(ENV.auditImmutabilityMode)) {
-    problems.push(
-      "AUDIT_IMMUTABILITY_MODE must be set to worm_s3 or db_write_deny in on-premise mode. Application hash chaining is tamper-evident, not infrastructure-immutable.",
-    );
-  }
-
   if (ENV.forgeApiKey.trim()) {
     problems.push(
       "BUILT_IN_FORGE_API_KEY is set — Manus Forge routes prompts to forge.manus.im. Unset it in on-premise mode.",

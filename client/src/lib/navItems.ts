@@ -91,6 +91,7 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Exception Intelligence", path: "/exception-intelligence", group: "main", segments: ["financial_services", "corporate_b2b", "super_admin"] },
   { label: "Demo Dashboard", path: "/demo-dashboard", group: "main", staffOnly: true },
   { label: "Distributor Registry", path: "/distributors", group: "main", segments: ["corporate_b2b"] },
+  { label: "Pilot Controls", path: "/corporate-pilot-controls", group: "main", roles: ["admin", "cfo"], segments: ["corporate_b2b"] },
   // The remaining retail-only surfaces. These existed ONLY in the portal list
   // before, so a real merchant could not reach the screens the vertical is built
   // around. Secondary to Settlement Monitor, so they stay below the shared entries.

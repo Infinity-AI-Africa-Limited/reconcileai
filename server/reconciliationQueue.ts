@@ -28,7 +28,6 @@ import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { reconciliationJobs, matches, exceptions as exceptionsTable, transactions } from "../drizzle/schema";
 import { createQueue, type JobQueue } from "./jobQueue";
-import { ENV } from "./_core/env";
 
 export interface ReconciliationRunPayload {
   jobId: number;
@@ -167,22 +166,10 @@ function getQueue(): Promise<JobQueue<ReconciliationRunPayload>> {
     queuePromise = createQueue<ReconciliationRunPayload>(
       "reconciliation-runs",
       makeRunHandler(defaultDeps),
-      {
-        attempts: MAX_RUN_ATTEMPTS,
-        backoffMs: RETRY_BACKOFF_MS,
-        // On-premise mode always represents an institution-controlled data
-        // boundary. A reconciliation job must therefore survive process loss;
-        // private-cloud bank deployments opt in with the explicit flag.
-        requireDurable: ENV.deploymentMode === "on_premise" || ENV.reconciliationRequireDurableQueue,
-      },
+      { attempts: MAX_RUN_ATTEMPTS, backoffMs: RETRY_BACKOFF_MS },
     );
   }
   return queuePromise;
-}
-
-/** Initialise the queue before a job row is created so unavailable durability never leaves a pending run behind. */
-export async function assertReconciliationQueueAvailable(): Promise<void> {
-  await getQueue();
 }
 
 export async function enqueueReconciliationRun(payload: ReconciliationRunPayload): Promise<void> {

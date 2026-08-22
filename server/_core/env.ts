@@ -16,14 +16,6 @@ function cleanSecret(v: string | undefined): string {
   return s;
 }
 
-function boundedSessionTtlMs(raw: string | undefined): number {
-  const minutes = Number.parseInt(raw ?? "480", 10);
-  // Eight hours is the default business-day session; institutions may select a
-  // shorter policy, but never a value below 15 minutes or above 24 hours.
-  const boundedMinutes = Number.isFinite(minutes) ? Math.min(Math.max(minutes, 15), 1_440) : 480;
-  return boundedMinutes * 60_000;
-}
-
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
   cookieSecret: process.env.JWT_SECRET ?? "",
@@ -31,14 +23,6 @@ export const ENV = {
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   isProduction: process.env.NODE_ENV === "production",
-  // The token and cookie lifetime used by application login paths. This is
-  // deliberately independent of the SDK fallback so the bank deployment policy
-  // cannot inherit a framework-level one-year default.
-  sessionTtlMs: boundedSessionTtlMs(process.env.SESSION_TTL_MINUTES),
-  // Bank deployments must select an infrastructure-enforced audit posture. The
-  // selected mode is validated at startup; its grant/WORM evidence remains a
-  // bank-side go-live artefact, not an application claim.
-  auditImmutabilityMode: (process.env.AUDIT_IMMUTABILITY_MODE ?? "unconfigured").toLowerCase(),
   // Data-residency posture. "on_premise" enforces that no transaction data leaves
   // the deployment: all outbound calls are blocked except to loopback/private hosts
   // and EGRESS_ALLOWLIST. "cloud" (default) keeps today's behaviour (internet LLM, etc.).
@@ -79,10 +63,6 @@ export const ENV = {
   // Shared secret guarding maintenance/cron endpoints (e.g. Woodcore mirror sync).
   // Falls back to JWT_SECRET when unset, so no extra var is strictly required.
   cronSecret: process.env.CRON_SECRET ?? "",
-  // Bank deployments set this to true. Reconciliation work then refuses to run
-  // unless BullMQ/Redis is available; an in-memory retry queue is not evidence
-  // of durable financial-operations processing.
-  reconciliationRequireDurableQueue: /^(1|true)$/i.test(process.env.RECONCILIATION_REQUIRE_DURABLE_QUEUE ?? ""),
   // ── GitHub Actions OIDC for the same endpoints (preferred over the secret) ──
   // A short-lived token GitHub mints per run and signs itself, so there is no
   // long-lived value copied between two dashboards and therefore nothing to

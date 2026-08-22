@@ -28,24 +28,12 @@ export interface EnqueueOptions {
   backoffMs?: number;
 }
 
-export interface QueueCreateOptions extends EnqueueOptions {
-  /** Refuse the in-process fallback. Required for bank-facing reconciliation. */
-  requireDurable?: boolean;
-}
-
 export type JobHandler<T> = (job: QueueJob<T>) => Promise<void>;
 
 export interface JobQueue<T> {
   enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void>;
   /** Which backend is live — surfaced in health/ops output. */
   readonly backend: "bullmq" | "in-process";
-}
-
-export class DurableQueueUnavailableError extends Error {
-  constructor(queueName: string, reason: string) {
-    super(`[queue:${queueName}] durable BullMQ processing is required but unavailable: ${reason}`);
-    this.name = "DurableQueueUnavailableError";
-  }
 }
 
 const MAX_BACKOFF_MS = 10 * 60 * 1000;
@@ -153,7 +141,7 @@ async function createBullMqQueue<T>(
 export async function createQueue<T>(
   queueName: string,
   handler: JobHandler<T>,
-  opts?: QueueCreateOptions,
+  opts?: EnqueueOptions,
 ): Promise<JobQueue<T>> {
   const defaults: Required<EnqueueOptions> = {
     attempts: opts?.attempts ?? 6,
@@ -167,20 +155,11 @@ export async function createQueue<T>(
       console.log(`[queue:${queueName}] BullMQ backend active`);
       return q;
     } catch (err) {
-      if (opts?.requireDurable) {
-        throw new DurableQueueUnavailableError(
-          queueName,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
       console.error(
         `[queue:${queueName}] BullMQ init failed — falling back to in-process queue:`,
         err instanceof Error ? err.message : err,
       );
     }
-  }
-  if (opts?.requireDurable) {
-    throw new DurableQueueUnavailableError(queueName, "REDIS_URL is not configured");
   }
   return new InProcessQueue<T>(queueName, handler, defaults);
 }

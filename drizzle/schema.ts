@@ -61,10 +61,6 @@ export const organizations = mysqlTable("organizations", {
    * Anything that must not treat fabricated data as real reads this column.
    */
   isDemo: boolean("isDemo").default(false).notNull(),
-  // Bank-controlled boundary for all model-assisted exception analysis. When
-  // false, deterministic matching, exception routing and audit evidence remain
-  // available, but no exception context is sent to a model provider.
-  aiAssistanceEnabled: boolean("aiAssistanceEnabled").default(true).notNull(),
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
@@ -302,12 +298,8 @@ export type InsertMatch = typeof matches.$inferInsert;
 // ─── Exceptions ──────────────────────────────────────────────────────
 export const exceptions = mysqlTable("exceptions", {
   id: int("id").autoincrement().primaryKey(),
-  /**
-   * Owning tenant. Financial-services exceptions are control records and must
-   * never be attributable to "no organisation". Migration 0084 quarantines
-   * legacy orphaned rows before enforcing this at the database layer.
-   */
-  organizationId: int("organizationId").notNull(),
+  /** Owning tenant. Nullable for the same reason as `matches.organizationId`. */
+  organizationId: int("organizationId"),
   jobId: int("jobId").notNull(),
   transactionId: int("transactionId").notNull(),
   category: mysqlEnum("category", [
@@ -1412,6 +1404,63 @@ export const distributors = mysqlTable("distributors", {
 export type Distributor = typeof distributors.$inferSelect;
 export type InsertDistributor = typeof distributors.$inferInsert;
 
+// ─── Corporate B2B Read-Only Pilot Controls ──────────────────────────
+// These records deliberately capture *evidence and policy*, not payment
+// authority. The first FMCG/distributor release is a reconciliation-control
+// pilot: it may ingest approved evidence and create proposals, but never
+// initiates payments, posts to an ERP, or sends a customer-facing action.
+export const corporateB2BPilotConfigs = mysqlTable("corporate_b2b_pilot_configs", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull().unique(),
+  country: mysqlEnum("country", ["uganda", "nigeria"]).default("nigeria").notNull(),
+  pilotState: mysqlEnum("pilotState", ["preparation", "data_validation", "dry_run", "parallel_run", "limited_control", "suspended"]).default("preparation").notNull(),
+  pilotScope: varchar("pilotScope", { length: 500 }),
+  noWriteAcknowledged: boolean("noWriteAcknowledged").default(false).notNull(),
+  aiAssistanceMode: mysqlEnum("aiAssistanceMode", ["disabled", "private_approved"]).default("disabled").notNull(),
+  aiBoundaryReference: varchar("aiBoundaryReference", { length: 255 }),
+  dataContractStatus: mysqlEnum("dataContractStatus", ["draft", "approved"]).default("draft").notNull(),
+  rosterStatus: mysqlEnum("rosterStatus", ["draft", "approved"]).default("draft").notNull(),
+  allocationPolicyStatus: mysqlEnum("allocationPolicyStatus", ["draft", "approved"]).default("draft").notNull(),
+  dailyCloseOwner: varchar("dailyCloseOwner", { length: 255 }),
+  operationalRecoveryStatus: mysqlEnum("operationalRecoveryStatus", ["not_tested", "passed"]).default("not_tested").notNull(),
+  retentionDays: int("retentionDays").default(90).notNull(),
+  contractStatus: mysqlEnum("contractStatus", ["draft", "approved"]).default("draft").notNull(),
+  dataProcessingStatus: mysqlEnum("dataProcessingStatus", ["draft", "approved"]).default("draft").notNull(),
+  contractReference: varchar("contractReference", { length: 255 }),
+  dataProcessingReference: varchar("dataProcessingReference", { length: 255 }),
+  updatedByUserId: int("updatedByUserId").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_b2b_pilot_state").on(table.pilotState),
+]);
+export type CorporateB2BPilotConfig = typeof corporateB2BPilotConfigs.$inferSelect;
+export type InsertCorporateB2BPilotConfig = typeof corporateB2BPilotConfigs.$inferInsert;
+
+// Metadata only: provider credentials, account data and source-file contents
+// stay with the customer's approved ingestion route rather than this registry.
+export const corporateB2BPilotSources = mysqlTable("corporate_b2b_pilot_sources", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  sourceType: mysqlEnum("sourceType", ["invoice_ar", "bank_statement", "mobile_money", "psp_collection", "erp_export"]).notNull(),
+  displayName: varchar("displayName", { length: 255 }).notNull(),
+  deliveryMethod: mysqlEnum("deliveryMethod", ["manual_export", "sftp", "bucket", "api"]).notNull(),
+  status: mysqlEnum("status", ["draft", "tested", "approved", "active", "suspended"]).default("draft").notNull(),
+  customerOwnedCredentials: boolean("customerOwnedCredentials").default(true).notNull(),
+  controlTotalRequired: boolean("controlTotalRequired").default(true).notNull(),
+  expectedCutoff: varchar("expectedCutoff", { length: 64 }),
+  sourceOwner: varchar("sourceOwner", { length: 255 }),
+  notes: text("notes"),
+  createdByUserId: int("createdByUserId").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_b2b_pilot_sources_org").on(table.organizationId),
+  index("idx_b2b_pilot_sources_status").on(table.status),
+]);
+export type CorporateB2BPilotSource = typeof corporateB2BPilotSources.$inferSelect;
+export type InsertCorporateB2BPilotSource = typeof corporateB2BPilotSources.$inferInsert;
+
 // ─── Super Agent: Action Draft Layer ────────────────────────────────
 export const agentActionDrafts = mysqlTable("agent_action_drafts", {
   id: int("id").autoincrement().primaryKey(),
@@ -2153,7 +2202,6 @@ export const platformAuditLogs = mysqlTable("platform_audit_logs", {
     "org_created",
     "org_segment_updated",
     "org_sso_updated",
-    "org_ai_assistance_updated",
     // Conventional vs non-interest (NIFI). Worth its own event: it changes how
     // the platform characterises an institution's licence basis, and the
     // resulting findings are regulator-facing.

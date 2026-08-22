@@ -46,6 +46,7 @@ import ModuleConfiguration from "./pages/ModuleConfiguration";
 import SuperAgent from "./pages/SuperAgent";
 import DemoDashboard from "./pages/DemoDashboard";
 import DistributorRegistry from "./pages/DistributorRegistry";
+import CorporateB2BPilotControls from "./pages/CorporateB2BPilotControls";
 import CorporateB2BLanding from "./pages/CorporateB2BLanding";
 import BanksLanding from "./pages/BanksLanding";
 import FinTechsLanding from "./pages/FinTechsLanding";
@@ -254,6 +255,7 @@ function Router() {
       <Route path="/exception-intelligence">{() => <DashboardPage component={ExceptionIntelligence} />}</Route>
       <Route path="/age-tracker">{() => <DashboardPage component={AgeTracker} />}</Route>
       <Route path="/distributors">{() => <DashboardPage component={DistributorRegistry} />}</Route>
+      <Route path="/corporate-pilot-controls">{() => <DashboardPage component={CorporateB2BPilotControls} />}</Route>
       <Route path="/demo-dashboard">{() => <DashboardPage component={DemoDashboard} />}</Route>
       <Route path="/woodcore-poc">{() => <PocAccessGate pocKey="woodcore"><WoodcorePOC /></PocAccessGate>}</Route>
       <Route path="/salad-africa-poc">{() => <PocAccessGate pocKey="salad_africa"><SaladAfricaPOC /></PocAccessGate>}</Route>
