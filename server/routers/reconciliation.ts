@@ -193,8 +193,13 @@ export const reconciliationRouter = router({
       }
 
       const multiRunId = crypto.randomUUID();
-      const jobIds: number[] = [];
 
+      // ── Phase 1: persist every child job ────────────────────────────────
+      // Rows first, enqueue second. Creating and enqueueing in one pass meant a
+      // failure on target N left targets 1..N-1 already RUNNING while the error
+      // named only target N — see the partial-failure handling below for why
+      // that combination is the dangerous one.
+      const created: { jobId: number; targetId: number }[] = [];
       for (const target of targets) {
         const jobId = await db.createReconciliationJob({
           userId: ctx.user.id,
@@ -216,27 +221,62 @@ export const reconciliationRouter = router({
           }),
           status: "pending",
         });
-        if (jobId) {
-          jobIds.push(jobId);
-          try {
-            await enqueueReconciliationRun({
-              jobId,
-              sourceChannelId: input.sourceChannelId,
-              targetChannelId: target.id,
-              dateFromIso: dateFrom.toISOString(),
-              dateToIso: dateTo.toISOString(),
-              config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-              userId: ctx.user.id,
-            });
-          } catch (error) {
-            await db.updateReconciliationJob(jobId, { status: "failed", completedAt: new Date() });
-            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to queue multi-channel reconciliation processing.", cause: error });
-          }
-        }
+        if (jobId) created.push({ jobId, targetId: target.id });
       }
 
+      const jobIds = created.map((c) => c.jobId);
+
+      // Audit BEFORE enqueueing: if the fan-out fails halfway, the multi-run
+      // still has to be attributable to whoever started it.
       await logAudit(ctx.user.id, "create_multichannel_reconciliation", "reconciliation_job", jobIds[0] ?? 0,
         { multiRunId, source: sourceChannel.code, targetCount: targets.length }, ip, ua);
+
+      // ── Phase 2: enqueue ────────────────────────────────────────────────
+      const enqueued: number[] = [];
+      for (const { jobId, targetId } of created) {
+        try {
+          await enqueueReconciliationRun({
+            jobId,
+            sourceChannelId: input.sourceChannelId,
+            targetChannelId: targetId,
+            dateFromIso: dateFrom.toISOString(),
+            dateToIso: dateTo.toISOString(),
+            config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+            userId: ctx.user.id,
+          });
+          enqueued.push(jobId);
+        } catch (error) {
+          // PARTIAL FAILURE. Jobs already enqueued are running and cannot be
+          // recalled — the queue owns them now. Two things must happen, and the
+          // previous version did neither:
+          //
+          //   1. Fail every job that was NOT enqueued, not just this one.
+          //      Otherwise the rest sit "pending" for two hours until the boot
+          //      sweep abandons them, looking queued the whole time.
+          //   2. TELL THE CALLER what is still running. The old error carried
+          //      no multiRunId and no job ids, so a client's only recovery was
+          //      to retry — which starts a SECOND fan-out over the same
+          //      channels and date range, overlapping the runs still in flight.
+          //      With the ids in hand the caller can watch the partial run via
+          //      getMultiRun instead of duplicating it.
+          const notEnqueued = created.filter((c) => !enqueued.includes(c.jobId));
+          const failedAt = new Date();
+          for (const c of notEnqueued) {
+            await db.updateReconciliationJob(c.jobId, { status: "failed", completedAt: failedAt });
+          }
+
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message:
+              `Failed to queue multi-channel reconciliation processing. ${enqueued.length} of ` +
+              `${created.length} channel runs were already started and are still in progress — ` +
+              `track them with multiRunId ${multiRunId} (job ids: ${enqueued.join(", ") || "none"}) ` +
+              `rather than retrying, which would run them a second time. ` +
+              `The remaining ${notEnqueued.length} were marked failed.`,
+            cause: error,
+          });
+        }
+      }
 
       return { multiRunId, jobIds, targetCount: targets.length };
     }),

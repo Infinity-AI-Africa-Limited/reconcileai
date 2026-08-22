@@ -246,6 +246,16 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
   excludedItems: json("excludedItems"),
   startedAt: timestamp("startedAt"),
   completedAt: timestamp("completedAt"),
+  /**
+   * Set by recoverStuckReconciliationJobs() when a job stuck in pending/running
+   * past the staleness window is declared dead. It is NOT the same thing as
+   * status "failed": a runner-failed job is eligible for a queue retry, whereas
+   * an abandoned one has already been reported to the user as failed and must
+   * never execute again. A durable BullMQ entry can outlive the sweep, and the
+   * handler resets the job's artifacts before running — so without this marker a
+   * resurrected entry would wipe and re-run work the user already saw finish.
+   */
+  abandonedAt: timestamp("abandonedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_jobs_user").on(table.userId),

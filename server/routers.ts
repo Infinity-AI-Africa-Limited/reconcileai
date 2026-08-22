@@ -17,6 +17,7 @@ import { ugandaRouter } from "./routers/uganda";
 import * as ageTracker from "./ageTracker";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { assertTenantAiAllowed, isTenantAiAllowed, TenantAiDisabledError } from "./aiGate";
 import * as db from "./db";
 import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
 import { storagePut } from "./storage";
@@ -383,6 +384,31 @@ async function assertOrganizationExists(
     .limit(1);
   if (!org) {
     throw new TRPCError({ code: "NOT_FOUND", message: `Organisation ${organizationId} not found` });
+  }
+}
+
+/**
+ * Tenant AI opt-out for request-scoped surfaces (server/aiGate.ts).
+ *
+ * FORBIDDEN, not PRECONDITION_FAILED: the tenant is not missing a setup step,
+ * the institution has withheld consent. The message says so plainly so an
+ * operator does not go hunting for a broken model configuration.
+ */
+async function assertTenantAiAllowedForRequest(
+  organizationId: number | null | undefined,
+  surface: string,
+): Promise<number> {
+  try {
+    return await assertTenantAiAllowed(organizationId, surface);
+  } catch (error) {
+    if (error instanceof TenantAiDisabledError) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "AI assistance is disabled for this organisation. A super admin can re-enable it in organisation settings.",
+        cause: error,
+      });
+    }
+    throw error;
   }
 }
 
@@ -3155,10 +3181,22 @@ export const appRouter = router({
           limit: 1000,
         });
         
+        // Tenant AI opt-out. Only ONE of the five detectors calls a model
+        // (detectSuspiciousDescriptions, which ships transaction descriptions
+        // to the LLM); the other four are pure statistics that send nothing
+        // anywhere. So an opted-out tenant loses the model detector, not the
+        // whole feature — refusing the route would withdraw z-score, IQR,
+        // time-pattern and counterparty detection that the switch never
+        // covered.
+        const anomalyConfig = { ...(input.config as AnomalyDetectionConfig) };
+        if (!(await isTenantAiAllowed(ctx.user.organizationId))) {
+          anomalyConfig.enableLLM = false;
+        }
+
         const anomalies = await detectAnomalies(
           transactions,
           historicalResult.data,
-          input.config as AnomalyDetectionConfig
+          anomalyConfig
         );
         
         // Store anomaly scores
@@ -4066,6 +4104,12 @@ export const appRouter = router({
         const userId = ctx.user.id;
         const orgId = ctx.user.organizationId;
 
+        // Tenant AI opt-out, BEFORE any tenant context is read. This surface
+        // submits the organisation's exceptions, job statistics and learned
+        // resolution history to a model, so the guard has to precede the loads
+        // below — not merely the invokeLLM call at the bottom.
+        await assertTenantAiAllowedForRequest(orgId, "superAgent.query");
+
         // Fetch recent exceptions and stats for context
         const [recentExceptions, recentJobsRaw] = await Promise.all([
           db.getExceptions({ organizationId: ctx.user.organizationId ?? null, status: 'open', limit: 20, offset: 0 }),
@@ -4308,6 +4352,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
       .mutation(async ({ input, ctx }) => {
         const userId = ctx.user.id;
         const orgId = ctx.user.organizationId ?? 0;
+
+        // Same tenant AI opt-out as superAgent.query. This path sends the
+        // transaction plus recalled agent memory to a model, so it is gated on
+        // the same switch and before the reads that build that context.
+        await assertTenantAiAllowedForRequest(ctx.user.organizationId, "superAgent.diagnose");
+
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
 
@@ -6652,7 +6702,9 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
   }
   const tenantId = organizationId;
 
-  if (!(await db.isOrganizationAiAssistanceEnabled(tenantId))) {
+  // Same gate as every request-scoped surface (server/aiGate.ts) — a background
+  // pass skips quietly rather than raising, but the decision is the one rule.
+  if (!(await isTenantAiAllowed(tenantId))) {
     console.info(`[AI pass] tenant ${tenantId} has AI assistance disabled; skipping deferred model analysis`);
     return;
   }

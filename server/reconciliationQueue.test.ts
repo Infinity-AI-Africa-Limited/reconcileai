@@ -17,12 +17,17 @@ const PAYLOAD: ReconciliationRunPayload = {
   userId: 99,
 };
 
-function makeDeps(overrides: Partial<RunHandlerDeps> & { statuses?: string[] } = {}) {
+function makeDeps(
+  overrides: Partial<RunHandlerDeps> & { statuses?: string[]; abandonedAt?: Date | null } = {},
+) {
   const calls = { reset: 0, run: 0, runnerArgs: [] as unknown[] };
   const statuses = overrides.statuses ?? ["pending", "completed"];
+  const abandonedAt = overrides.abandonedAt ?? null;
   let statusIdx = 0;
   const deps: RunHandlerDeps = {
-    loadJobStatus: overrides.loadJobStatus ?? (async () => statuses[Math.min(statusIdx++, statuses.length - 1)]),
+    loadJobState:
+      overrides.loadJobState ??
+      (async () => ({ status: statuses[Math.min(statusIdx++, statuses.length - 1)], abandonedAt })),
     resetArtifacts: overrides.resetArtifacts ?? (async () => { calls.reset += 1; }),
     getRunner: overrides.getRunner ?? (() => async (...args: unknown[]) => {
       calls.run += 1;
@@ -52,7 +57,7 @@ describe("makeRunHandler", () => {
   });
 
   it("skips deleted jobs (status null)", async () => {
-    const { deps, calls } = makeDeps({ loadJobStatus: async () => null });
+    const { deps, calls } = makeDeps({ loadJobState: async () => null });
     await makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 });
     expect(calls.run).toBe(0);
   });
@@ -77,5 +82,40 @@ describe("makeRunHandler", () => {
     await makeRunHandler(deps)({ data: PAYLOAD, attempt: 2 });
     expect(calls.reset).toBe(1);
     expect(calls.run).toBe(1);
+  });
+
+  // ── Abandonment guard (a swept job must not be resurrected) ───────────────
+
+  it("refuses a job the recovery sweep abandoned, without resetting its artifacts", async () => {
+    // The exact shape of the bug: the sweep marked the row failed but could not
+    // delete the durable queue entry, which is then delivered afterwards.
+    const { deps, calls } = makeDeps({
+      statuses: ["failed"],
+      abandonedAt: new Date("2026-08-22T00:00:00.000Z"),
+    });
+    await makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 });
+    expect(calls.reset).toBe(0);
+    expect(calls.run).toBe(0);
+  });
+
+  it("still retries an ordinary runner failure — abandonment must not block the retry contract", async () => {
+    const { deps, calls } = makeDeps({ statuses: ["running", "failed"], abandonedAt: null });
+    await expect(makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 })).rejects.toThrow(/retrying/);
+    expect(calls.run).toBe(1);
+  });
+
+  it("does not raise a retry for a job abandoned while it was running", async () => {
+    // Sweep landed mid-run: the job comes back failed AND abandoned. Retrying
+    // would re-run work already reported as dead, so the handler exits quietly.
+    let call = 0;
+    const { deps } = makeDeps({
+      loadJobState: async () => {
+        call += 1;
+        return call === 1
+          ? { status: "running", abandonedAt: null }
+          : { status: "failed", abandonedAt: new Date("2026-08-22T00:00:00.000Z") };
+      },
+    });
+    await expect(makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 })).resolves.toBeUndefined();
   });
 });

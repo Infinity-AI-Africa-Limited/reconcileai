@@ -34,10 +34,37 @@ describe("Financial Services exception tenancy hardening", () => {
     expect(finservSeed).toContain("Financial Services demo seed requires an owning organizationId");
   });
 
-  it("preserves unattributable legacy exceptions outside tenant-visible operational data", () => {
+  it("preserves unattributable legacy exceptions instead of deleting them on deploy", () => {
+    // The quarantine table is still defined by the migration — it is where the
+    // operator drain writes. What changed is WHO empties it: this migration used
+    // to copy the rows and then issue an unconditional
+    // `DELETE FROM exceptions WHERE organizationId IS NULL`, unattended, as a
+    // Railway pre-deploy step and inside on-premise bank installations. Exceptions
+    // are financial control records; a deploy hook may not destroy them without an
+    // impact assertion or an operator saying so.
     expect(migration).toContain("exception_ownership_quarantine");
-    expect(migration).toContain("INSERT IGNORE INTO `exception_ownership_quarantine`");
-    expect(migration).toContain("DELETE FROM `exceptions` WHERE `organizationId` IS NULL");
+    expect(migration).not.toMatch(/DELETE\s+FROM\s+`exceptions`/i);
+
+    // Instead the migration asserts nothing is left unattributable and fails
+    // closed, stopping the deploy, before the column is tightened.
+    expect(migration).toContain("_migration_0084_ownership_assertion");
     expect(migration).toContain("MODIFY COLUMN `organizationId` int NOT NULL");
+
+    // The destructive half is a deliberate, dry-run-by-default operator step.
+    const drain = fs.readFileSync("scripts/drain-unattributable-exceptions.mjs", "utf8");
+    expect(drain).toContain("INSERT IGNORE INTO");
+    expect(drain).toContain("exception_ownership_quarantine");
+    expect(drain).toContain("--execute");
+    expect(drain).toContain("DRY RUN");
+  });
+
+  it("derives legacy ownership from the reconciliation job, not the transaction", () => {
+    // Runtime exception ownership comes from the parent job, and migration 0078
+    // backfilled the same column the same way. Preferring the transaction files
+    // the row against the wrong tenant wherever the two differ.
+    const jobJoin = migration.indexOf("JOIN `reconciliation_jobs` AS `j`");
+    const txnJoin = migration.indexOf("JOIN `transactions` AS `t`");
+    expect(jobJoin).toBeGreaterThan(-1);
+    expect(txnJoin).toBeGreaterThan(jobJoin);
   });
 });
