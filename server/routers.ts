@@ -218,6 +218,7 @@ import {
   distributorProcedure,
   MAX_NAME_LENGTH,
 } from "./routers/shared";
+import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -4095,6 +4096,7 @@ export const appRouter = router({
   // ─── Super Agent ─────────────────────────────────────────────────────
 
   distributor: distributorRouter,
+  corporateB2BPilot: corporateB2BPilotRouter,
   superAgent: router({
     query: protectedProcedure
       .input(z.object({
@@ -4422,6 +4424,27 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const diagnosingOrg = ctx.user.organizationId
           ? await db.getOrganizationById(ctx.user.organizationId)
           : null;
+
+        // Corporate B2B pilots start with a no-external-AI boundary. A missing
+        // pilot configuration is therefore NOT permission to send transaction
+        // context to a model: it remains disabled until the customer records a
+        // private approved route and the reference that authorised it. This is
+        // intentionally separate from the UI readiness score; the server guard
+        // prevents a deep-link or direct tRPC call from bypassing the policy.
+        if (diagnosingOrg?.segment === "corporate_b2b") {
+          const { corporateB2BPilotConfigs } = await import("../drizzle/schema");
+          const [pilotConfig] = await drizzle
+            .select({ aiAssistanceMode: corporateB2BPilotConfigs.aiAssistanceMode, aiBoundaryReference: corporateB2BPilotConfigs.aiBoundaryReference })
+            .from(corporateB2BPilotConfigs)
+            .where(eq(corporateB2BPilotConfigs.organizationId, ctx.user.organizationId!))
+            .limit(1);
+          if (pilotConfig?.aiAssistanceMode !== "private_approved" || !pilotConfig.aiBoundaryReference) {
+            throw new TRPCError({
+              code: "PRECONDITION_FAILED",
+              message: "AI-assisted diagnosis is disabled for this Corporate B2B pilot until a private approved AI boundary is recorded.",
+            });
+          }
+        }
 
         // Run deep diagnosis
         const diagnosis = await diagnoseException(

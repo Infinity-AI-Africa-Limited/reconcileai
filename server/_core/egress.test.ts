@@ -148,6 +148,30 @@ describe("on-premise deployment-secret guard", () => {
   });
 });
 
+describe("on-premise deployment-secret guard", () => {
+  const localLlm = { DEPLOYMENT_MODE: "on_premise", DIRECT_LLM_API_KEY: "k", DIRECT_LLM_API_URL: "http://localhost:11434" };
+
+  it("refuses to boot when JWT_SECRET is still the shipped placeholder", async () => {
+    const e = await loadEgress({ ...localLlm, JWT_SECRET: "replace-with-a-64-char-random-secret" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/JWT_SECRET still holds a template placeholder/);
+  });
+
+  it("refuses to boot when JWT_SECRET is unset", async () => {
+    const e = await loadEgress({ ...localLlm, JWT_SECRET: "" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/JWT_SECRET is not set/);
+  });
+
+  it("refuses to boot when JWT_SECRET is too short to be a signing key", async () => {
+    const e = await loadEgress({ ...localLlm, JWT_SECRET: "abc123" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/shorter than 32 characters/);
+  });
+
+  it("does not police secrets in cloud mode, where the platform manages them", async () => {
+    const e = await loadEgress({ DEPLOYMENT_MODE: "cloud", JWT_SECRET: "change-me" });
+    expect(() => e.assertResidencyStartupConfig()).not.toThrow();
+  });
+});
+
 describe("describeResidencyPosture", () => {
   it("reports enforced=true and the allowlist in on_premise mode", async () => {
     const e = await loadEgress({ DEPLOYMENT_MODE: "on_premise", EGRESS_ALLOWLIST: "a.com, b.com" });

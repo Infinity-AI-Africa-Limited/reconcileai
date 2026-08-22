@@ -91,6 +91,10 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   resolution_templates: "tenant_nullable",
   module_configurations: "tenant_required",
   module_overrides: "tenant_required",
+  // Corporate B2B pilot controls hold customer-provided operational evidence,
+  // so both tables are tenant-required from their first migration.
+  corporate_b2b_pilot_configs: "tenant_required",
+  corporate_b2b_pilot_sources: "tenant_required",
   distributors: "tenant_nullable",
   agent_action_drafts: "tenant_nullable",
   agent_memory: "tenant_nullable",

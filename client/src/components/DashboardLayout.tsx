@@ -78,6 +78,7 @@ const NAV_ICONS: Record<string, React.ElementType> = {
   "/exception-intelligence": Network,
   "/demo-dashboard": LayoutGrid,
   "/distributors": Building2,
+  "/corporate-pilot-controls": ClipboardCheck,
   "/settlement-monitor": TrendingUp,
   "/shopline/sync-status": Activity,
   "/shopline/connect": Plug,

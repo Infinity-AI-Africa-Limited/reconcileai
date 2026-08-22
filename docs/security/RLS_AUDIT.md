@@ -6,7 +6,7 @@
 > columns. This document is the human-readable half; the test is the enforced half.
 > **Both must be updated together when a table is added.**
 
-*Audited: July 2026 · 84 tables across 6 schema files · Auditor: Claude (acting CTO)*
+*Audited: August 2026 · 86 tables across 6 schema files · Auditor: Claude (acting CTO)*
 
 ## 1. Isolation model
 
@@ -23,7 +23,7 @@ enforced at three layers:
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 15 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 17 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 39 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
 | `derived` | 6 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
@@ -94,3 +94,10 @@ Adding a table? The build fails until it is classified in
 `server/rlsAudit.test.ts`. New tenant-data tables **must** be
 `tenant_required` (`organizationId NOT NULL` + index). Anything else needs a
 justification comment in the classification map and a row in §2/§3 here.
+
+## 6. Corporate B2B controlled-pilot tables (August 2026)
+
+| Table | Class | Notes |
+|---|---|---|
+| `corporate_b2b_pilot_configs` | `tenant_required` | One auditable policy/evidence register per Corporate B2B customer. It records only the customer’s declared no-write scope, source-contract readiness, recovery posture and approval references; it never stores payment authority. |
+| `corporate_b2b_pilot_sources` | `tenant_required` | Metadata-only evidence-source registry. Provider credentials and source-file contents stay in the approved customer-owned ingestion route, never in this table. |

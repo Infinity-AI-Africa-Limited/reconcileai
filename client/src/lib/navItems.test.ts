@@ -16,18 +16,17 @@ import { NAV_ITEMS, navFor, navGroup, type NavEntry } from "./navItems";
 import { canReachPath } from "./routeAccess";
 import type { Segment } from "./segments";
 
-/** Exactly what each portal nav contained before consolidation. */
+/**
+ * Financial Services must retain its established portal surface. Corporate B2B
+ * is intentionally excluded here because its first controlled pilot now has a
+ * separately approved minimal surface below.
+ */
 const BEFORE = {
   financial_services: [
     "/dashboard", "/reconciliation", "/exceptions", "/age-tracker", "/transactions",
     "/channels", "/review", "/reports", "/cbn-compliance", "/audit", "/compliance",
     "/exception-intelligence", "/monitor", "/admin/users", "/modules", "/email-settings",
     "/schedules", "/upload",
-  ],
-  corporate_b2b: [
-    "/dashboard", "/distributors", "/reconciliation", "/exceptions", "/age-tracker",
-    "/transactions", "/reports", "/review", "/audit", "/exception-intelligence",
-    "/monitor", "/admin/users", "/upload", "/schedules",
   ],
 } satisfies Record<string, string[]>;
 
@@ -38,6 +37,26 @@ const APPROVED_RETAIL = [
   "/shopline/connect",
   "/exceptions",
   "/transactions",
+  "/admin/users",
+] as const;
+
+/**
+ * The first Corporate B2B pilot is deliberately no-write and narrow. Operators
+ * import approved evidence, manage distributor identities, reconcile, investigate,
+ * approve and preserve an audit record. Broader automation remains unavailable
+ * until its separate Pilot Controls gate is approved.
+ */
+const APPROVED_CORPORATE_B2B_PILOT = [
+  "/dashboard",
+  "/distributors",
+  "/corporate-pilot-controls",
+  "/upload",
+  "/reconciliation",
+  "/reports",
+  "/exceptions",
+  "/review",
+  "/audit",
+  "/compliance",
   "/admin/users",
 ] as const;
 
@@ -93,6 +112,40 @@ describe("when a real merchant signs in directly", () => {
   it("should offer only the approved merchant controls", () => {
     const merchant = paths(navFor("retail_commerce", "admin"));
     expect(merchant.sort()).toEqual([...APPROVED_RETAIL].sort());
+  });
+});
+
+describe("when a Corporate B2B pilot user signs in", () => {
+  it("should offer only the minimum controlled-pilot operating surface", () => {
+    const pilot = paths(navFor("corporate_b2b", "admin"));
+    expect(pilot.sort()).toEqual([...APPROVED_CORPORATE_B2B_PILOT].sort());
+  });
+
+  it("should refuse surplus features by direct URL as well as in navigation", () => {
+    const excluded = [
+      "/super-agent",
+      "/exception-intelligence",
+      "/schedules",
+      "/monitor",
+      "/channels",
+      "/transactions",
+      "/age-tracker",
+      "/modules",
+      "/api-ingestion",
+      "/sftp-config",
+      "/bucket-config",
+      "/anomalies",
+    ];
+
+    for (const path of excluded) {
+      expect(canReachPath(path, "corporate_b2b", "admin"), `${path} must be unavailable during a B2B pilot`).toBe(false);
+    }
+  });
+
+  it("should preserve direct access to every retained pilot control", () => {
+    for (const path of APPROVED_CORPORATE_B2B_PILOT) {
+      expect(canReachPath(path, "corporate_b2b", "admin"), `${path} must remain reachable for a B2B pilot`).toBe(true);
+    }
   });
 });
 
