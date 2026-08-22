@@ -25,7 +25,7 @@ describe("Corporate B2B pilot readiness", () => {
     expect(() => requirePilotManager("operations")).toThrow(/Only a CFO, administrator, or Infinity AI staff member/);
   });
 
-  it("fails closed until external B6 foundation evidence exists", () => {
+  it("recognises the merged and proven P1–P7 foundation release while retaining all tenant evidence gates", () => {
     const readiness = calculateCorporateB2BPilotReadiness({
       config: approvedConfig,
       sources: [
@@ -34,8 +34,8 @@ describe("Corporate B2B pilot readiness", () => {
       ],
       roster: { total: 10, pending: 0, flagged: 0 },
     });
-    expect(readiness.gates.filter((gate) => !gate.ready).map((gate) => gate.id)).toEqual(["B6"]);
-    expect(readiness.canStartReadOnlyPilot).toBe(false);
+    expect(readiness.gates.filter((gate) => !gate.ready).map((gate) => gate.id)).toEqual([]);
+    expect(readiness.canStartReadOnlyPilot).toBe(true);
   });
 
   it("rejects a source route that lacks a customer-owned credential or control total", () => {
