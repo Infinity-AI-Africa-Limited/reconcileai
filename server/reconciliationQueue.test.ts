@@ -136,7 +136,7 @@ describe("the stale-job sweep", () => {
     // createdAt alone says nothing about whether a worker is active: a job can
     // sit queued for hours and start seconds ago. Sweeping on creation age
     // declares live runs dead, and abandonment is terminal.
-    expect(SOURCE).toContain("COALESCE(${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})");
+    expect(SOURCE).toContain("COALESCE(${reconciliationJobs.heartbeatAt}, ${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})");
     // Both the select and the re-asserting update must use the SAME predicate,
     // or the update stops re-asserting what was actually selected.
     expect(SOURCE.match(/lt\(lastActivity, cutoff\)/g) ?? []).toHaveLength(2);
@@ -215,5 +215,45 @@ describe("when the sweep abandons a run that is still executing", () => {
     const branch = RUNNER.slice(RUNNER.indexOf("if (!finalized) {"), RUNNER.indexOf("if (!finalized) {") + 1200);
     expect(branch).toContain("resetJobArtifacts(jobId)");
     expect(branch).toContain("return;");
+  });
+});
+
+describe("the liveness heartbeat", () => {
+  const RUNNER = fs.readFileSync(path.join(__dirname, "routers.ts"), "utf8");
+  const DB = fs.readFileSync(path.join(__dirname, "db.ts"), "utf8");
+  const QUEUE = fs.readFileSync(path.join(__dirname, "reconciliationQueue.ts"), "utf8");
+
+  it("should beat far more often than the staleness window", () => {
+    // A heartbeat slower than the window would let a live run be declared dead
+    // between beats — the exact failure it exists to prevent.
+    const beat = Number(/RECONCILIATION_HEARTBEAT_MS = (\d+) \* (\d+) \* (\d+)/.exec(RUNNER)!
+      .slice(1).reduce((a, b) => String(Number(a) * Number(b))));
+    const window = Number(/STUCK_JOB_MAX_AGE_MS = (\d+) \* (\d+) \* (\d+) \* (\d+)/.exec(QUEUE)!
+      .slice(1).reduce((a, b) => String(Number(a) * Number(b))));
+    expect(beat).toBeLessThan(window / 10);
+  });
+
+  it("should run for the whole lifetime of the job and be cleared on every exit", () => {
+    // Including the early return when the run was abandoned mid-flight: a
+    // heartbeat outliving its run would keep a dead job looking alive.
+    expect(RUNNER).toContain("const heartbeat = setInterval(");
+    expect(RUNNER).toContain("clearInterval(heartbeat);");
+    expect(RUNNER).toMatch(/finally \{[^}]*clearInterval\(heartbeat\);/s);
+  });
+
+  it("should never hold the process open", () => {
+    expect(RUNNER).toContain('if (typeof heartbeat.unref === "function") heartbeat.unref();');
+  });
+
+  it("should not be able to revive a job the sweep already declared dead", () => {
+    // Guarded on abandonedAt IS NULL, so the marker stays terminal.
+    const fn = DB.slice(DB.indexOf("export async function touchReconciliationJobHeartbeat"));
+    expect(fn.slice(0, 500)).toContain("isNull(reconciliationJobs.abandonedAt)");
+  });
+
+  it("should leave startedAt alone, so run duration stays truthful", () => {
+    const fn = DB.slice(DB.indexOf("export async function touchReconciliationJobHeartbeat"));
+    expect(fn.slice(0, 500)).toContain("heartbeatAt: new Date()");
+    expect(fn.slice(0, 500)).not.toContain("startedAt");
   });
 });

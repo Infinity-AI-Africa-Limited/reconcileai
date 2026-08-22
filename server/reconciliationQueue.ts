@@ -338,16 +338,21 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
   // age therefore declares live runs dead — and because `abandonedAt` is
   // terminal, that is not a cosmetic mistake.
   //
-  // `startedAt` is refreshed on every claim (claimJob above) and again by the
-  // runner, so COALESCE gives "last known activity", falling back to creation
-  // for a job that never started at all.
+  // Three signals, most recent first:
+  //   heartbeatAt — refreshed every 5 minutes WHILE the run executes
+  //                 (RECONCILIATION_HEARTBEAT_MS in routers.ts). This is the
+  //                 one that makes a long but healthy run distinguishable from
+  //                 a wedged one; `startedAt` alone could not, because it is
+  //                 written once and never moves.
+  //   startedAt   — the run began but predates heartbeats, or died before its
+  //                 first beat.
+  //   createdAt   — never started at all.
   //
-  // This is a proxy, not a heartbeat. A run that genuinely exceeds the window
-  // without re-claiming is still swept, which is why the completion path also
-  // refuses to resurrect an abandoned job (see
-  // db.finalizeReconciliationJobIfNotAbandoned). A real worker heartbeat
-  // belongs with the durable-queue work — go-live plan Phase 1 item 2.
-  const lastActivity = sql`COALESCE(${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})`;
+  // The heartbeat is what makes this a liveness test rather than an age test.
+  // A run declared dead here has been silent for the whole window, so it is
+  // genuinely not working — which matters because abandonment is terminal and
+  // the completion path discards the artifacts of an abandoned run.
+  const lastActivity = sql`COALESCE(${reconciliationJobs.heartbeatAt}, ${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})`;
   const stuck = await db
     .select({ id: reconciliationJobs.id })
     .from(reconciliationJobs)

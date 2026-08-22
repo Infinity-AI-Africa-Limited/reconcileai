@@ -6698,6 +6698,16 @@ export type AppRouter = typeof appRouter;
 // ─── Background Reconciliation Runner ────────────────────────────────
 
 /**
+ * How often a running reconciliation refreshes its liveness signal.
+ *
+ * Must stay comfortably below STUCK_JOB_MAX_AGE_MS in reconciliationQueue.ts
+ * (2h) — a heartbeat slower than the staleness window would let a live run be
+ * declared dead between beats, which is the whole failure this prevents. Five
+ * minutes gives a ~24x margin at negligible write cost.
+ */
+const RECONCILIATION_HEARTBEAT_MS = 5 * 60 * 1000;
+
+/**
  * Deferred AI analysis pass — runs OUT of the reconciliation hot path.
  * Re-queries the job's high/critical exceptions whose aiAnalysis is still null,
  * generates a Claude narrative for each, and persists it. Restartable: safe to
@@ -6784,8 +6794,35 @@ async function runReconciliation(
   userId: number
 ) {
   const startTime = Date.now();
+
+  // LIVENESS HEARTBEAT.
+  //
+  // The recovery sweep can only tell a wedged run from a working one by how
+  // recently it showed signs of life. Without this, a reconciliation that
+  // legitimately runs longer than the staleness window is declared dead while
+  // it is still working — and since abandonment is terminal AND its artifacts
+  // are discarded, that destroys real work rather than merely mislabelling it.
+  //
+  // An interval rather than a per-checkpoint touch, because the gap that
+  // matters is INSIDE a single long phase (a large matching pass), where no
+  // progress checkpoint fires for minutes at a time.
+  //
+  // unref() so a stray timer can never hold the process open, and every error
+  // swallowed: a failed heartbeat must not fail the reconciliation.
+  const heartbeat = setInterval(() => {
+    db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
+      console.warn(`[Reconciliation] heartbeat failed for job ${jobId} (non-fatal):`, err),
+    );
+  }, RECONCILIATION_HEARTBEAT_MS);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+
   try {
-    await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
+    await db.updateReconciliationJob(jobId, {
+      status: "running",
+      startedAt: new Date(),
+      // Seed the signal immediately; the first interval tick is minutes away.
+      heartbeatAt: new Date(),
+    });
     await trackProgress(jobId, "queued", { message: "Job queued for processing" });
 
     // The owning tenant for every match and exception this run produces. A
@@ -7037,6 +7074,11 @@ async function runReconciliation(
 
     await trackProgress(jobId, "failed", { message: `Failed: ${String(error)}` });
     dispatchWebhook("reconciliation.failed", { jobId, error: String(error) });
+  } finally {
+    // Every exit path, including the early return when the run was abandoned
+    // mid-flight — a heartbeat outliving its run would keep a dead job looking
+    // alive and defeat the sweep entirely.
+    clearInterval(heartbeat);
   }
 }
 

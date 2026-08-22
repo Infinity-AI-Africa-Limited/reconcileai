@@ -256,6 +256,17 @@ export const reconciliationJobs = mysqlTable("reconciliation_jobs", {
    * resurrected entry would wipe and re-run work the user already saw finish.
    */
   abandonedAt: timestamp("abandonedAt"),
+  /**
+   * Liveness signal, refreshed periodically by the runner while a job executes.
+   *
+   * Distinct from `startedAt`, which records when the run began and must stay
+   * accurate for duration reporting. Without a heartbeat the recovery sweep can
+   * only guess from age, so a reconciliation that legitimately runs longer than
+   * the staleness window gets declared dead while it is still working — and
+   * because abandonment is terminal and its artifacts are discarded, that
+   * destroys real work rather than merely mislabelling it.
+   */
+  heartbeatAt: timestamp("heartbeatAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_jobs_user").on(table.userId),

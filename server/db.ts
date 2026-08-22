@@ -686,6 +686,27 @@ export async function updateReconciliationJob(id: number, data: Partial<InsertRe
 }
 
 /**
+ * Refresh a running job's liveness signal.
+ *
+ * Deliberately NOT keyed on `startedAt`, which records when the run began and
+ * must stay accurate for duration reporting. Guarded on `abandonedAt IS NULL`
+ * so a heartbeat can never revive a job the recovery sweep already declared
+ * dead — the marker stays terminal.
+ *
+ * Best-effort by design: a failed heartbeat must not fail the reconciliation.
+ * The worst case is that the sweep eventually treats the run as stale, which is
+ * exactly the behaviour that existed before heartbeats.
+ */
+export async function touchReconciliationJobHeartbeat(id: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(reconciliationJobs)
+    .set({ heartbeatAt: new Date() })
+    .where(and(eq(reconciliationJobs.id, id), isNull(reconciliationJobs.abandonedAt)));
+}
+
+/**
  * Write a run's terminal result ONLY if the job has not been abandoned.
  *
  * The recovery sweep can declare a job dead while a worker is still executing
