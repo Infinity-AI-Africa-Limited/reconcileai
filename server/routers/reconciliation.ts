@@ -115,7 +115,12 @@ export const reconciliationRouter = router({
           userId: ctx.user.id,
         });
       } catch (error) {
-        await db.updateReconciliationJob(jobId, { status: "failed", completedAt: new Date() });
+        // Terminal, for the same reason as the multi-channel path below: a
+        // rejected enqueue does not prove the entry was not persisted, and a
+        // merely-"failed" job stays retryable, so a late-delivered entry would
+        // run a reconciliation the caller was already told had failed.
+        const failedAt = new Date();
+        await db.updateReconciliationJob(jobId, { status: "failed", completedAt: failedAt, abandonedAt: failedAt });
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to queue reconciliation processing.", cause: error });
       }
 
@@ -262,7 +267,21 @@ export const reconciliationRouter = router({
           const notEnqueued = created.filter((c) => !enqueued.includes(c.jobId));
           const failedAt = new Date();
           for (const c of notEnqueued) {
-            await db.updateReconciliationJob(c.jobId, { status: "failed", completedAt: failedAt });
+            // TERMINAL, not merely "failed".
+            //
+            // A rejected enqueue does NOT prove the job was not accepted: Redis
+            // may have persisted the entry and then the client lost the
+            // response. Marking such a job only "failed" leaves it retryable by
+            // design (the runner-failure retry contract depends on that), so a
+            // BullMQ entry that did land would later execute a reconciliation
+            // the caller was told had failed and which is absent from the
+            // in-flight ids below — the exact overlap this handler exists to
+            // prevent. `abandonedAt` makes the handler refuse it outright.
+            await db.updateReconciliationJob(c.jobId, {
+              status: "failed",
+              completedAt: failedAt,
+              abandonedAt: failedAt,
+            });
           }
 
           throw new TRPCError({

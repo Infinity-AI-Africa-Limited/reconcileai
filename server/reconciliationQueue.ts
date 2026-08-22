@@ -30,7 +30,7 @@
  * and is REGISTERED here at module load — no import cycle. The full extraction
  * to server/reconciliationRunner.ts remains split-plan item 12.
  */
-import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { reconciliationJobs, matches, exceptions as exceptionsTable, transactions } from "../drizzle/schema";
 import { createQueue, type JobQueue } from "./jobQueue";
@@ -276,19 +276,46 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
     ));
   if (stuck.length === 0) return { recovered: 0 };
 
+  const ids = stuck.map((j) => j.id);
   const now = new Date();
   const result = await db
     .update(reconciliationJobs)
     .set({ status: "failed", completedAt: now, abandonedAt: now })
-    .where(inArray(reconciliationJobs.id, stuck.map((j) => j.id)));
-  const recovered = Number((result as any)?.[0]?.affectedRows ?? stuck.length);
+    .where(and(
+      inArray(reconciliationJobs.id, ids),
+      // Re-assert EVERY selection predicate inside the update. Reading the ids
+      // and then updating by id alone is not atomic, and the gap is not
+      // theoretical: a worker that finishes one of these between the two
+      // statements would have its completed run overwritten as failed AND
+      // abandoned — terminal, with its matches and exceptions already written
+      // and the user already shown a success. Re-checking here means such a row
+      // no longer matches and is left exactly as the worker left it.
+      inArray(reconciliationJobs.status, ["pending", "running"]),
+      lt(reconciliationJobs.createdAt, cutoff),
+      isNull(reconciliationJobs.abandonedAt),
+    ));
+  const recovered = Number((result as any)?.[0]?.affectedRows ?? 0);
+
+  if (recovered === 0) return { recovered: 0 };
+
+  // Remove entries only for rows this sweep ACTUALLY abandoned — never for one
+  // that completed in the race window above. The initial select required
+  // `abandonedAt IS NULL`, so any of these ids now carrying it was stamped by
+  // this run (or a concurrent sweep, which reaches the same conclusion).
+  const abandoned = await db
+    .select({ id: reconciliationJobs.id })
+    .from(reconciliationJobs)
+    .where(and(
+      inArray(reconciliationJobs.id, ids),
+      isNotNull(reconciliationJobs.abandonedAt),
+    ));
 
   // Defence in depth (see 2 above) — never let a queue problem block the sweep.
   // The rows are already marked abandoned, which is the guard that matters.
   try {
     const queue = await getQueue();
     if (queue.remove) {
-      for (const j of stuck) {
+      for (const j of abandoned) {
         // Per entry, not per batch: removal throws for an entry that is
         // currently active, and one of those must not stop the rest from being
         // cleaned up.

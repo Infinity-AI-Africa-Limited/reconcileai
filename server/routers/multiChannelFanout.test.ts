@@ -75,4 +75,22 @@ describe("when a multi-channel fan-out fails partway through enqueueing", () => 
     expect(audit).toBeGreaterThan(-1);
     expect(enqueue).toBeGreaterThan(audit);
   });
+
+  it("should make an un-enqueued job TERMINAL, because a rejected enqueue proves nothing", () => {
+    // Redis may persist the entry and then the client lose the response. A job
+    // marked only "failed" stays retryable by design (the runner-failure retry
+    // contract depends on it), so an entry that did land would later execute a
+    // reconciliation the caller was told had failed and which is missing from
+    // the reported in-flight ids. `abandonedAt` makes the handler refuse it.
+    expect(proc).toContain("abandonedAt: failedAt");
+  });
+});
+
+describe("when a single-channel run fails to enqueue", () => {
+  const proc = section("create: operationsProcedure", "createMultiChannel: operationsProcedure");
+
+  it("should also mark the job terminal, not merely failed", () => {
+    // Same ambiguity, same fix — the class, not just the multi-channel instance.
+    expect(proc).toContain("abandonedAt: failedAt");
+  });
 });

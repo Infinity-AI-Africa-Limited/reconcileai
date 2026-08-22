@@ -1,4 +1,4 @@
-import { AXIOS_TIMEOUT_MS, COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
+import { AXIOS_TIMEOUT_MS, COOKIE_NAME } from "@shared/const";
 import { ForbiddenError } from "@shared/_core/errors";
 import axios, { type AxiosInstance } from "axios";
 import { parse as parseCookieHeader } from "cookie";
@@ -188,7 +188,14 @@ class SDKServer {
     options: { expiresInMs?: number } = {}
   ): Promise<string> {
     const issuedAt = Date.now();
-    const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
+    // Bounded by policy, not by the framework default. Every caller currently
+    // passes an explicit lifetime (magic link and SSO use ENV.sessionTtlMs; the
+    // guest demo uses 24h), so this changes no behaviour today — but the old
+    // ONE_YEAR_MS fallback meant a future caller that simply forgot the option
+    // would silently mint a one-year bank session. A year-long default is the
+    // exact posture P4 exists to remove, so it should not survive as a default
+    // anywhere.
+    const expiresInMs = options.expiresInMs ?? ENV.sessionTtlMs;
     const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
     const secretKey = this.getSessionSecret();
 

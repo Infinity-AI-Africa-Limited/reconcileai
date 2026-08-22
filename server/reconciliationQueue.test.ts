@@ -5,6 +5,8 @@
  * the live shared TiDB, so nothing here may touch the real database.
  */
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { makeRunHandler, type RunHandlerDeps, type ReconciliationRunPayload } from "./reconciliationQueue";
 
 const PAYLOAD: ReconciliationRunPayload = {
@@ -117,5 +119,40 @@ describe("makeRunHandler", () => {
       },
     });
     await expect(makeRunHandler(deps)({ data: PAYLOAD, attempt: 1 })).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * Boot-sweep atomicity.
+ *
+ * Asserted against the source: the sweep needs a live database and the local
+ * .env points at the shared production TiDB, which no test may touch.
+ */
+describe("the stale-job sweep", () => {
+  const SOURCE = fs.readFileSync(path.join(__dirname, "reconciliationQueue.ts"), "utf8");
+
+  it("should re-assert its selection predicates inside the UPDATE", () => {
+    // Selecting ids and then updating by id alone is not atomic. A worker that
+    // completes one of those jobs in the gap would have its finished run
+    // overwritten as failed AND abandoned — terminal, with artifacts already
+    // written and success already reported to the user.
+    const update = SOURCE.slice(
+      SOURCE.indexOf(".set({ status: \"failed\", completedAt: now, abandonedAt: now })"),
+      SOURCE.indexOf("const recovered ="),
+    );
+    expect(update).toContain("inArray(reconciliationJobs.status,");
+    expect(update).toContain("lt(reconciliationJobs.createdAt, cutoff)");
+    expect(update).toContain("isNull(reconciliationJobs.abandonedAt)");
+  });
+
+  it("should remove queue entries only for rows it actually abandoned", () => {
+    // Never for one that completed in the race window.
+    expect(SOURCE).toContain("isNotNull(reconciliationJobs.abandonedAt)");
+    expect(SOURCE).toContain("for (const j of abandoned)");
+  });
+
+  it("should report only rows the UPDATE actually touched", () => {
+    // Falling back to the pre-update count would over-report recoveries.
+    expect(SOURCE).toContain("Number((result as any)?.[0]?.affectedRows ?? 0)");
   });
 });
