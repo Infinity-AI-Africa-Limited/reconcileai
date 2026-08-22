@@ -1400,3 +1400,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Fix the confirmed CFO authorization middleware mismatch and readiness-error loading-state ordering in Corporate B2B Pilot Controls, then update both review branches.
 - [x] Verify the merged and proven P1–P7 release evidence, clear Corporate B2B B6 accordingly, and update the existing review branch.
 - [x] Validate and resolve the five reported Corporate B2B Pilot Controls concerns, then update both review PRs with a mergeable, fully tested branch.
+- [x] Safely reconcile obsolete Corporate B2B pilot-foundation PR #97 against already merged production changes without reverting or rewriting production history.
