@@ -2,7 +2,7 @@
 
 **Date:** 22 August 2026  
 **Scope:** First read-only FMCG/distributor reconciliation pilot in Uganda or Nigeria  
-**Status:** Platform-controlled controls implemented on `manus/corporate-b2b-pilot-foundation`; customer evidence and Financial Services foundation deployment remain release gates.
+**Status:** Platform-controlled controls implemented on `manus/corporate-b2b-pilot-foundation`; the P1–P7 foundation release is merged and proven, while customer evidence remains the release gate.
 
 > This is a **reconciliation-control pilot**, not a payment product. ReconcileAI may ingest customer-authorised evidence, match records, route exceptions and produce proposals or exports. It must not initiate or approve payments, access bank accounts, post to an ERP, create a credit note, or send a customer-facing action.
 
@@ -16,7 +16,7 @@
 | **B3** | The existing Distributor Registry is included in the hard gate: readiness refuses a roster with no identities, pending confirmations or flagged records. | Customer imports and signs off the active distributor roster and aliases. | **Customer evidence required** |
 | **B4** | Readiness requires an approved allocation policy and daily close owner. Existing action drafts remain proposals and approval records, not payment execution. | Customer provides allocation / write-off rules, limits, escalation contacts and daily sign-off owner. | **Customer operating evidence required** |
 | **B5** | Corporate B2B AI-assisted diagnosis now fails closed unless a tenant records a `private_approved` AI route and approval reference. The default is disabled. | Customer decides whether AI remains off or validates a private approved deployment and data boundary. | **Platform control ready; customer decision required** |
-| **B6** | The pilot page surfaces this as an explicit blocker rather than implying local readiness equals deployability. | Claude Code approval and merged/proven evidence for Infinity AI PR #96 and mirror PR #26; durable queue / deployment profile evidence where enabled. | **External release gate open** |
+| **B6** | The pilot page records the merged and proven Financial Services foundation release without implying that it substitutes for tenant-level evidence. | P1–P7 foundation release confirmed merged and proven; durable queue / deployment profile evidence remains required where enabled. | **Foundation release closed** |
 | **B7** | Readiness requires a passed recovery/replay status and a positive retention period. New pilot records are RLS-audited as `tenant_required`. | Execute and retain restore, replay, duplicate-file and support-escalation drill evidence with the customer. | **Customer + operations evidence required** |
 | **B8** | Readiness requires recorded commercial and data-processing references; each configuration and source change is audit logged. | Legal teams execute / approve the applicable SOW, DPA or privacy annex and confirm country-specific requirements. | **Customer legal evidence required** |
 
@@ -45,7 +45,7 @@ The Corporate B2B Super Agent diagnosis path rejects direct calls unless the ten
 
 1. No customer has yet supplied a signed data contract, source evidence, roster sign-off, allocation policy, recovery drill record, SOW or DPA. The controls correctly show these as open.
 2. The new workspace does not create a payment connection or a financial action; it records the prerequisites for a safe pilot.
-3. B6 remains blocked until the Financial Services P1–P7 foundation PRs have passed review, merged and been deployed with institution-appropriate evidence.
+3. B6 is closed because the Financial Services P1–P7 foundation release is merged and proven. This does not close B0–B5 or B7–B8, and it does not waive deployment-specific durable-queue evidence where queued processing is enabled.
 4. Nigeria-specific customer legal and privacy acceptance remains necessary before approved Nigerian operational data is ingested.
 
 ## 5. First controlled-pilot activation sequence
