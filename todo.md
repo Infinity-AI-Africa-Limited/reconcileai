@@ -1398,3 +1398,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 ## Financial Services Go-Live — Taj Bank Pilot
 
 - [x] Prepare the Taj Bank-specific read-only parallel-pilot readiness pack, including security, data, integration, operational, and approval requirements.
+
+## Corporate B2B Payments Go-Live
+
+- [x] Complete a detailed Corporate B2B payments go-live readiness assessment and phased FMCG/distributor deployment plan with evidence gates, owners, and rollback controls.
