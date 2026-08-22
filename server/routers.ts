@@ -3693,6 +3693,37 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    // A bank can run deterministic reconciliation and governed exception
+    // handling without exposing exception context to any model provider. This
+    // control is super-admin-only so a bank's approved configuration cannot be
+    // changed by an ordinary tenant user.
+    setOrganizationAiAssistance: superAdminProcedure
+      .input(z.object({
+        organizationId: z.number().int().positive(),
+        aiAssistanceEnabled: z.boolean(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const drizzle = await getDb();
+        if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        const { organizations } = await import("../drizzle/schema");
+        await assertOrganizationExists(drizzle, input.organizationId);
+        await drizzle.update(organizations)
+          .set({ aiAssistanceEnabled: input.aiAssistanceEnabled })
+          .where(eq(organizations.id, input.organizationId));
+        await logAudit(ctx.user.id, "update_org_ai_assistance", "organization", input.organizationId, {
+          aiAssistanceEnabled: input.aiAssistanceEnabled,
+        });
+        await db.logPlatformEvent({
+          actorId: ctx.user.id,
+          actorName: ctx.user.name ?? undefined,
+          eventType: "org_ai_assistance_updated",
+          targetType: "organization",
+          targetId: input.organizationId,
+          newValue: input.aiAssistanceEnabled ? "enabled" : "disabled",
+        });
+        return { success: true };
+      }),
+
     /**
      * Mark an institution as operating on non-interest (NIFI) principles.
      *
@@ -3878,7 +3909,7 @@ export const appRouter = router({
     // Get platform audit logs
     auditLogs: superAdminProcedure
       .input(z.object({
-        eventType: z.enum(["org_created", "org_segment_updated", "user_role_updated", "user_promoted_super_admin"]).optional(),
+        eventType: z.enum(["org_created", "org_segment_updated", "org_sso_updated", "org_ai_assistance_updated", "org_banking_model_updated", "user_role_updated", "user_promoted_super_admin", "tenant_data_imported"]).optional(),
         limit: z.number().int().min(1).max(200).default(50),
         offset: z.number().int().min(0).default(0),
       }))
@@ -6611,7 +6642,22 @@ export type AppRouter = typeof appRouter;
  * re-run since it only touches exceptions that still lack analysis.
  */
 async function runDeferredAiAnalysis(jobId: number): Promise<void> {
-  const pending = await db.getJobExceptionsNeedingAi(jobId);
+  const job = await db.getReconciliationJob(jobId);
+  const organizationId = job?.organizationId;
+  if (organizationId == null) {
+    // Bank-safe default: do not read or send exception context to an AI pass
+    // unless the parent job has a durable tenant boundary.
+    console.error(`[AI pass] job ${jobId} has no owning organization; refusing deferred analysis`);
+    return;
+  }
+  const tenantId = organizationId;
+
+  if (!(await db.isOrganizationAiAssistanceEnabled(tenantId))) {
+    console.info(`[AI pass] tenant ${tenantId} has AI assistance disabled; skipping deferred model analysis`);
+    return;
+  }
+
+  const pending = await db.getJobExceptionsNeedingAi(jobId, tenantId);
   if (pending.length === 0) return;
 
   const txnIds = pending
@@ -6628,18 +6674,15 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
   // org's reciprocal opt-in inside getSharedRecommendations, which also records
   // the consume request/hit that powers the "recommendations informed by
   // cross-institution patterns %" metric. Cached per category per job.
-  const job = await db.getReconciliationJob(jobId);
-  const orgId = job?.organizationId ?? null;
-  const ei = orgId != null ? await import("./exceptionIntelligence") : null;
-  const learning = orgId != null ? await import("./institutionalLearning") : null;
+  const ei = await import("./exceptionIntelligence");
+  const learning = await import("./institutionalLearning");
   const networkGuidanceByCategory = new Map<string, string>();
   async function networkGuidanceFor(category: string): Promise<string> {
-    if (orgId == null || !ei || !learning) return "";
     const cached = networkGuidanceByCategory.get(category);
     if (cached !== undefined) return cached;
     let guidance = "";
     try {
-      const recs = await ei.getSharedRecommendations(orgId, category);
+      const recs = await ei.getSharedRecommendations(tenantId, category);
       guidance = learning.formatNetworkGuidance(recs);
     } catch (err) {
       console.error(`[AI pass] network lookup for "${category}" failed (non-fatal):`, err);
@@ -6658,8 +6701,9 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
         txn as any,
         networkGuidance ? { networkGuidance } : undefined
       );
-      // Background pass — no request context. The tenant is the job's own.
-      await db.updateException(exc.id, orgId, { aiAnalysis: analysis });
+      // Background pass — no request context. The tenant is the job's own and
+      // has already been verified before any exception or AI processing.
+      await db.updateException(exc.id, tenantId, { aiAnalysis: analysis });
     } catch (err) {
       console.error(`[AI pass] exception ${exc.id} failed:`, err);
     }
@@ -6680,10 +6724,14 @@ async function runReconciliation(
     await db.updateReconciliationJob(jobId, { status: "running", startedAt: new Date() });
     await trackProgress(jobId, "queued", { message: "Job queued for processing" });
 
-    // The owning tenant for every match and exception this run produces. Read
-    // once from the job rather than threaded through the signature, so the
-    // rows can never disagree with their parent. Null for legacy/orgless jobs.
-    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId ?? null;
+    // The owning tenant for every match and exception this run produces. A
+    // Financial Services run without an attributable owner is unsafe: it could
+    // create data that cannot be authorized, audited or safely sent to the
+    // deferred AI pass. Legacy/orgless jobs must be remediated, not re-run.
+    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId;
+    if (runOrganizationId == null) {
+      throw new Error(`[Reconciliation] job ${jobId} has no owning organization; refusing to run`);
+    }
 
     await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
     const sourceTxns = await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo);

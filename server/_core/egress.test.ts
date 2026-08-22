@@ -6,16 +6,19 @@ import { describe, it, expect, vi, afterEach } from "vitest";
  */
 /** A JWT_SECRET that satisfies the on-premise boot guard, for the cases not testing it. */
 const STRONG_JWT_SECRET = "b3d1f8c04a7e2951f6a8c0d2e4b6a8901c3e5d7f9a1b3c5d7e9f0a2b4c6d8e0f";
+const DEDICATED_TENANT_MASTER_KEY = "e1c4b7a9d2f5e8c0b3a6d9f1c4e7b0a3d6f9c2e5b8a1d4f7c0e3b6a9d2f5e8c1";
 
 async function loadEgress(env: Record<string, string>) {
   vi.resetModules();
   // Clear the vars these tests care about so ambient env can't leak in.
-  for (const k of ["DEPLOYMENT_MODE", "EGRESS_ALLOWLIST", "BUILT_IN_FORGE_API_KEY", "DIRECT_LLM_API_KEY", "DIRECT_LLM_API_URL"]) {
+  for (const k of ["DEPLOYMENT_MODE", "EGRESS_ALLOWLIST", "BUILT_IN_FORGE_API_KEY", "DIRECT_LLM_API_KEY", "DIRECT_LLM_API_URL", "TENANT_MASTER_KEY", "TENANT_KEY_PROVIDER", "TENANT_KMS_KEY_ID", "AUDIT_IMMUTABILITY_MODE"]) {
     vi.stubEnv(k, "");
   }
   // The on-premise startup check now also validates JWT_SECRET, so pin it
   // rather than letting the developer's ambient .env decide the outcome.
   vi.stubEnv("JWT_SECRET", STRONG_JWT_SECRET);
+  vi.stubEnv("TENANT_MASTER_KEY", DEDICATED_TENANT_MASTER_KEY);
+  vi.stubEnv("AUDIT_IMMUTABILITY_MODE", "db_write_deny");
   for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
   return await import("./egress");
 }
@@ -103,6 +106,21 @@ describe("residency startup check", () => {
       DIRECT_LLM_API_URL: "http://localhost:11434",
     });
     expect(() => e.assertResidencyStartupConfig()).not.toThrow();
+  });
+
+  it("refuses an on-premise deployment that derives tenant encryption from the session secret", async () => {
+    const e = await loadEgress({ DEPLOYMENT_MODE: "on_premise", TENANT_MASTER_KEY: "" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/TENANT_MASTER_KEY/);
+  });
+
+  it("requires a customer-managed key identifier when aws_kms is selected", async () => {
+    const e = await loadEgress({ DEPLOYMENT_MODE: "on_premise", TENANT_KEY_PROVIDER: "aws_kms", TENANT_KMS_KEY_ID: "" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/TENANT_KMS_KEY_ID/);
+  });
+
+  it("refuses an on-premise deployment without an infrastructure-immutable audit posture", async () => {
+    const e = await loadEgress({ DEPLOYMENT_MODE: "on_premise", AUDIT_IMMUTABILITY_MODE: "" });
+    expect(() => e.assertResidencyStartupConfig()).toThrow(/AUDIT_IMMUTABILITY_MODE/);
   });
 });
 

@@ -25,7 +25,7 @@ import {
   MAX_NAME_LENGTH,
 } from "./shared";
 import * as db from "../db";
-import { enqueueReconciliationRun } from "../reconciliationQueue";
+import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
 
 export const reconciliationRouter = router({
   create: operationsProcedure
@@ -66,6 +66,16 @@ export const reconciliationRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
       }
 
+      try {
+        await assertReconciliationQueueAvailable();
+      } catch (error) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Reconciliation processing is unavailable until the required durable queue is healthy.",
+          cause: error,
+        });
+      }
+
       const jobId = await db.createReconciliationJob({
         userId: ctx.user.id,
         name: sanitizeInput(input.name, MAX_NAME_LENGTH),
@@ -94,15 +104,20 @@ export const reconciliationRouter = router({
       // Run asynchronously through the durable queue (BullMQ when REDIS_URL
       // is set, in-process otherwise) — retried with a clean artifact reset
       // per attempt; never lost silently on restart under BullMQ.
-      enqueueReconciliationRun({
-        jobId,
-        sourceChannelId: input.sourceChannelId,
-        targetChannelId: input.targetChannelId,
-        dateFromIso: dateFrom.toISOString(),
-        dateToIso: dateTo.toISOString(),
-        config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-        userId: ctx.user.id,
-      }).catch(err => console.error("[Reconciliation] enqueue failed:", err));
+      try {
+        await enqueueReconciliationRun({
+          jobId,
+          sourceChannelId: input.sourceChannelId,
+          targetChannelId: input.targetChannelId,
+          dateFromIso: dateFrom.toISOString(),
+          dateToIso: dateTo.toISOString(),
+          config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+          userId: ctx.user.id,
+        });
+      } catch (error) {
+        await db.updateReconciliationJob(jobId, { status: "failed", completedAt: new Date() });
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to queue reconciliation processing.", cause: error });
+      }
 
       return { jobId };
     }),
@@ -145,6 +160,16 @@ export const reconciliationRouter = router({
       }
       if (dateFrom > dateTo) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Start date must be before end date" });
+      }
+
+      try {
+        await assertReconciliationQueueAvailable();
+      } catch (error) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Reconciliation processing is unavailable until the required durable queue is healthy.",
+          cause: error,
+        });
       }
 
       // Resolve the target set.
@@ -193,15 +218,20 @@ export const reconciliationRouter = router({
         });
         if (jobId) {
           jobIds.push(jobId);
-          enqueueReconciliationRun({
-            jobId,
-            sourceChannelId: input.sourceChannelId,
-            targetChannelId: target.id,
-            dateFromIso: dateFrom.toISOString(),
-            dateToIso: dateTo.toISOString(),
-            config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
-            userId: ctx.user.id,
-          }).catch((err) => console.error("[Reconciliation] Multi-channel child enqueue failed:", err));
+          try {
+            await enqueueReconciliationRun({
+              jobId,
+              sourceChannelId: input.sourceChannelId,
+              targetChannelId: target.id,
+              dateFromIso: dateFrom.toISOString(),
+              dateToIso: dateTo.toISOString(),
+              config: { amountTolerance: input.amountTolerance, dateWindowDays: input.dateWindowDays },
+              userId: ctx.user.id,
+            });
+          } catch (error) {
+            await db.updateReconciliationJob(jobId, { status: "failed", completedAt: new Date() });
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to queue multi-channel reconciliation processing.", cause: error });
+          }
         }
       }
 
