@@ -1397,4 +1397,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 
 ## Corporate B2B Pilot Controls Follow-up
 
-- [ ] Fix the confirmed CFO authorization middleware mismatch and readiness-error loading-state ordering in Corporate B2B Pilot Controls, then update both review branches.
+- [x] Fix the confirmed CFO authorization middleware mismatch and readiness-error loading-state ordering in Corporate B2B Pilot Controls, then update both review branches.
