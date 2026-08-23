@@ -1402,4 +1402,4 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Validate and resolve the five reported Corporate B2B Pilot Controls concerns, then update both review PRs with a mergeable, fully tested branch.
 - [x] Safely reconcile obsolete Corporate B2B pilot-foundation PR #97 against already merged production changes without reverting or rewriting production history.
 - [x] Compare Corporate B2B pilot evidence against the full SHOPLINE readiness standard and document every remaining closure gate before claiming pilot-ready status.
-- [ ] Fix the Corporate B2B Pilot Controls route so it does not issue its tenant-scoped query while the user is outside the Corporate B2B portal; add regression coverage and submit dual PRs.
+- [x] Fix the Corporate B2B Pilot Controls route so it does not issue its tenant-scoped query while the user is outside the Corporate B2B portal; add regression coverage and submit dual PRs.
