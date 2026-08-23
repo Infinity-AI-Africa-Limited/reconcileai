@@ -1410,6 +1410,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Audit the Financial Services, Retail Commerce, and Corporate B2B workflows against the Ike Eze pain-led, evidence-first product principles.
 - [x] Implement the resulting shared and vertical-specific workflow improvements with regression coverage and submit clean dual-repository PRs.
 - [x] Rebuild the cross-vertical Control Fit Brief change on the mirror repository’s current main so the mirror PR contains only the intended feature commits.
-- [ ] Harden Control Fit Brief audit records with target tenant context and fail-closed audit writes, and prevent refreshes from silently overwriting dirty form state.
+- [x] Harden Control Fit Brief audit records with target tenant context and fail-closed audit writes, and prevent refreshes from silently overwriting dirty form state.
+- [x] Review and improve the YC founder video audio, image quality, and background separation while preserving the required founder-to-camera format.
 - [x] Add an audited, tenant-scoped Control Fit Brief that records one bounded reconciliation workflow, accountable owner, decision deadline, approved evidence sources, baseline, and customer-agreed success measures across all three verticals.
 - [x] Write a factual, conversational 55–60 second YC founder-video script for Richard.
