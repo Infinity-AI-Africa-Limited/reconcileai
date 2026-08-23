@@ -52,6 +52,7 @@ import {
   Building2,
   ShieldCheck,
   ClipboardCheck,
+  Target,
   Globe,
   BarChart3,
   Network,
@@ -74,6 +75,7 @@ type NavItem = NavEntry & { icon: React.ElementType };
 // so a new entry cannot ship without one.
 const NAV_ICONS: Record<string, React.ElementType> = {
   "/dashboard": LayoutDashboard,
+  "/control-fit": Target,
   "/super-agent": Sparkles,
   "/exception-intelligence": Network,
   "/demo-dashboard": LayoutGrid,

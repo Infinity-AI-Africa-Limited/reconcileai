@@ -79,6 +79,7 @@ import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import Support from "./pages/Support";
 import SettlementMonitor from "./pages/SettlementMonitor";
+import ControlFit from "./pages/ControlFit";
 import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
 
 /**
@@ -293,6 +294,7 @@ function Router() {
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
+      <Route path="/control-fit">{() => <DashboardPage component={ControlFit} />}</Route>
       <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
       <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
       {/* Install callbacks: standalone pages, deliberately NOT wrapped in

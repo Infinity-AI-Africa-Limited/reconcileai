@@ -95,6 +95,8 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // so both tables are tenant-required from their first migration.
   corporate_b2b_pilot_configs: "tenant_required",
   corporate_b2b_pilot_sources: "tenant_required",
+  // Shared workflow/pilot evidence is tenant-owned from its first migration.
+  control_fit_briefs: "tenant_required",
   distributors: "tenant_nullable",
   agent_action_drafts: "tenant_nullable",
   agent_memory: "tenant_nullable",
