@@ -18,15 +18,20 @@ export default function ControlFit() {
   const { viewAsOrg } = usePortalContext();
   const scope = { organizationId: viewAsOrg?.id };
   const brief = trpc.controlFit.get.useQuery(scope);
-  const save = trpc.controlFit.save.useMutation({ onSuccess: () => { toast.success("Control Fit Brief saved"); void brief.refetch(); } });
+  const save = trpc.controlFit.save.useMutation({ onSuccess: () => { setDirty(false); toast.success("Control Fit Brief saved"); void brief.refetch(); } });
   const [form, setForm] = useState<Form>(blank);
+  const [dirty, setDirty] = useState(false);
   useEffect(() => {
+    if (dirty) return;
     const saved = brief.data?.brief;
     const source = saved ?? brief.data?.template;
     if (!source) return;
     setForm({ workflowName: source.workflowName, operationalProblem: source.operationalProblem, accountableOwner: source.accountableOwner, decisionDeadline: source.decisionDeadline, approvedEvidence: (source.approvedEvidence as string[]).join("\n"), baseline: source.baseline, successMeasure: source.successMeasure, status: saved?.status ?? "draft" });
-  }, [brief.data]);
-  const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((current) => ({ ...current, [key]: value }));
+  }, [brief.data, dirty]);
+  const set = <K extends keyof Form>(key: K, value: Form[K]) => {
+    setDirty(true);
+    setForm((current) => ({ ...current, [key]: value }));
+  };
   const text = (key: Exclude<keyof Form, "status">) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => set(key, event.target.value);
   const submit = () => save.mutate({ ...form, ...scope, approvedEvidence: form.approvedEvidence.split("\n").map((value) => value.trim()).filter(Boolean) });
   if (brief.isLoading) return <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>;

@@ -6,7 +6,7 @@ import { controlFitBriefs, organizations } from "../../drizzle/schema";
 import { getDb } from "../db";
 import { resolveOrgScope } from "../_core/tenancy";
 import { protectedProcedure, router } from "../_core/trpc";
-import { logAudit } from "./shared";
+import { getClientInfo, logAuditStrict } from "./shared";
 
 const evidence = z.array(z.string().trim().min(2).max(120)).min(1).max(8);
 const briefInput = z.object({
@@ -51,7 +51,13 @@ export const controlFitRouter = router({
     const [existing] = await db.select({ id: controlFitBriefs.id }).from(controlFitBriefs).where(eq(controlFitBriefs.organizationId, organizationId)).limit(1);
     if (existing) await db.update(controlFitBriefs).set(values).where(eq(controlFitBriefs.id, existing.id));
     else await db.insert(controlFitBriefs).values(values);
-    await logAudit(ctx.user.id, "control_fit_brief_saved", "control_fit_brief", existing?.id, { status: input.status, workflowName: input.workflowName, evidenceCount: input.approvedEvidence.length });
+    const { ip, ua } = getClientInfo(ctx);
+    await logAuditStrict(ctx.user.id, "control_fit_brief_saved", "control_fit_brief", existing?.id, {
+      targetOrganizationId: organizationId,
+      status: input.status,
+      workflowName: input.workflowName,
+      evidenceCount: input.approvedEvidence.length,
+    }, ip, ua);
     return load(ctx.user, organizationId);
   }),
 });
