@@ -42,6 +42,32 @@ CREATE TABLE IF NOT EXISTS `corporate_b2b_pilot_sources` (
 	CONSTRAINT `corporate_b2b_pilot_sources_id` PRIMARY KEY(`id`)
 );
 --> statement-breakpoint
-CREATE INDEX `idx_b2b_pilot_state` ON `corporate_b2b_pilot_configs` (`pilotState`);--> statement-breakpoint
-CREATE INDEX `idx_b2b_pilot_sources_org` ON `corporate_b2b_pilot_sources` (`organizationId`);--> statement-breakpoint
-CREATE INDEX `idx_b2b_pilot_sources_status` ON `corporate_b2b_pilot_sources` (`status`);
+SET @idx1 := (SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'corporate_b2b_pilot_configs' AND index_name = 'idx_b2b_pilot_state');
+--> statement-breakpoint
+SET @sql1 := IF(@idx1 = 0, 'CREATE INDEX `idx_b2b_pilot_state` ON `corporate_b2b_pilot_configs` (`pilotState`)', 'SELECT 1');
+--> statement-breakpoint
+PREPARE stmt1 FROM @sql1;
+--> statement-breakpoint
+EXECUTE stmt1;
+--> statement-breakpoint
+DEALLOCATE PREPARE stmt1;
+--> statement-breakpoint
+SET @idx2 := (SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'corporate_b2b_pilot_sources' AND index_name = 'idx_b2b_pilot_sources_org');
+--> statement-breakpoint
+SET @sql2 := IF(@idx2 = 0, 'CREATE INDEX `idx_b2b_pilot_sources_org` ON `corporate_b2b_pilot_sources` (`organizationId`)', 'SELECT 1');
+--> statement-breakpoint
+PREPARE stmt2 FROM @sql2;
+--> statement-breakpoint
+EXECUTE stmt2;
+--> statement-breakpoint
+DEALLOCATE PREPARE stmt2;
+--> statement-breakpoint
+SET @idx3 := (SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'corporate_b2b_pilot_sources' AND index_name = 'idx_b2b_pilot_sources_status');
+--> statement-breakpoint
+SET @sql3 := IF(@idx3 = 0, 'CREATE INDEX `idx_b2b_pilot_sources_status` ON `corporate_b2b_pilot_sources` (`status`)', 'SELECT 1');
+--> statement-breakpoint
+PREPARE stmt3 FROM @sql3;
+--> statement-breakpoint
+EXECUTE stmt3;
+--> statement-breakpoint
+DEALLOCATE PREPARE stmt3;
