@@ -1409,5 +1409,6 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Create a Corporate B2B Payments-specific ReconcileAI client pitch deck for the FMCG/distributor reconciliation entry point.
 - [x] Audit the Financial Services, Retail Commerce, and Corporate B2B workflows against the Ike Eze pain-led, evidence-first product principles.
 - [ ] Implement the resulting shared and vertical-specific workflow improvements with regression coverage and submit clean dual-repository PRs.
+- [x] Rebuild the cross-vertical Control Fit Brief change on the mirror repository’s current main so the mirror PR contains only the intended feature commits.
 - [x] Add an audited, tenant-scoped Control Fit Brief that records one bounded reconciliation workflow, accountable owner, decision deadline, approved evidence sources, baseline, and customer-agreed success measures across all three verticals.
 - [x] Write a factual, conversational 55–60 second YC founder-video script for Richard.
