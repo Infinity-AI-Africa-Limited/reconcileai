@@ -307,12 +307,16 @@ describe("when a tenant user types the URL of a route their ROLE does not have",
 });
 
 describe("when the viewer is Infinity AI staff on their own account", () => {
-  it("should reach every vertical's routes", () => {
+  it("should reach cross-vertical operating routes, except tenant-only Pilot Controls", () => {
     // The operator supports every tenant, and redirecting them off a URL they
-    // typed would be obstruction, not safety.
+    // typed would be obstruction, not safety. Pilot Controls is different: its
+    // server-side evidence register requires an actual Corporate B2B tenant,
+    // so mounting it on the Infinity AI staff organisation can only create a
+    // rejected query rather than a useful operator screen.
     for (const p of ["/distributors", "/settlement-monitor", "/cbn-compliance", "/dashboard/auditor"]) {
       expect(canReachPath(p, "super_admin", "super_admin"), p).toBe(true);
     }
+    expect(canReachPath("/corporate-pilot-controls", "super_admin", "super_admin")).toBe(false);
   });
 });
 
@@ -344,6 +348,7 @@ describe("when staff have entered a tenant's portal", () => {
   it("should apply the viewed tenant's rules, not the operator's", () => {
     // Inside a corporate-B2B portal the registry is the tenant's own screen.
     expect(canReachPath("/distributors", "corporate_b2b", "super_admin", portal)).toBe(true);
+    expect(canReachPath("/corporate-pilot-controls", "corporate_b2b", "super_admin", portal)).toBe(true);
     expect(canReachPath("/settlement-monitor", "corporate_b2b", "super_admin", portal)).toBe(false);
   });
 

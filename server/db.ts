@@ -49,7 +49,6 @@ const BATCH_INSERT_SIZE = 1000;
 // ─── Database Connection ────────────────────────────────────────────
 
 let _db: ReturnType<typeof drizzle> | null = null;
-type AuditDbExecutor = Pick<NonNullable<ReturnType<typeof drizzle>>, "select" | "insert">;
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
@@ -1060,7 +1059,10 @@ export async function getJobExceptionsNeedingAi(jobId: number, organizationId: n
 
 // ─── Audit Logs ──────────────────────────────────────────────────────
 
-async function insertAuditLog(db: AuditDbExecutor, data: InsertAuditLog): Promise<void> {
+export async function createAuditLog(data: InsertAuditLog) {
+  const db = await getDb();
+  if (!db) return;
+
   // Tamper-evident hash chain (per organization). Fetch the latest entry in the
   // same org scope to link against, then compute this record's hash.
   // Note: best-effort under concurrency — see auditChain.ts. For the audit
@@ -1099,21 +1101,6 @@ async function insertAuditLog(db: AuditDbExecutor, data: InsertAuditLog): Promis
     recordHash,
     createdAt,
   });
-}
-
-export async function createAuditLog(data: InsertAuditLog) {
-  const db = await getDb();
-  if (!db) return;
-  await insertAuditLog(db, data);
-}
-
-/**
- * Required audit write for controls whose state must never change without a
- * corresponding audit entry. Call this from the same transaction as the
- * protected write so either both persist or both roll back.
- */
-export async function createAuditLogRequired(db: AuditDbExecutor, data: InsertAuditLog): Promise<void> {
-  await insertAuditLog(db, data);
 }
 
 /**

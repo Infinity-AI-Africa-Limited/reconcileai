@@ -23,9 +23,8 @@ const initialForm: PilotForm = {
   retentionDays: 90, contractStatus: "draft", dataProcessingStatus: "draft", contractReference: "", dataProcessingReference: "",
 };
 
-type SelectProps<T extends string> = { value: T; onChange: (value: T) => void; children: React.ReactNode };
-const Select = <T extends string>({ value, onChange, children }: SelectProps<T>) => (
-  <select value={value} onChange={(event) => onChange(event.target.value as T)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
+const Select = ({ value, onChange, children }: { value: string; onChange: (value: any) => void; children: React.ReactNode }) => (
+  <select value={value} onChange={(event) => onChange(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
     {children}
   </select>
 );
