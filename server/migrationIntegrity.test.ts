@@ -130,3 +130,47 @@ describe("migration 0084 (exception ownership)", () => {
     expect(fs.existsSync(path.join(__dirname, "..", "scripts", "drain-unattributable-exceptions.mjs"))).toBe(true);
   });
 });
+
+/**
+ * Engine portability.
+ *
+ * Migrations run against TWO engines, and they do not accept the same SQL:
+ *   - production is TiDB (8.0.11-TiDB-v8.5.3-serverless)
+ *   - CI is mysql:8.0, via `pnpm db:push` = `drizzle-kit generate && migrate`
+ *
+ * TiDB accepts several extensions MySQL rejects outright. `CREATE INDEX IF NOT
+ * EXISTS` is the one that has already cost time: it is valid TiDB, and MySQL
+ * 8.0 answers `ERROR 1064` — a parse error, so the migration cannot even start.
+ * A migration using it passes against production and fails in CI and on any
+ * MySQL-based on-premise install.
+ *
+ * Verified both ways on real engines (2026-08-22) rather than inferred from
+ * documentation.
+ *
+ * The portable way to make index creation idempotent is the information_schema
+ * + PREPARE guard, which both engines accept.
+ */
+describe("migration SQL portability", () => {
+  /** Constructs TiDB accepts and MySQL 8.0 does not. */
+  const TIDB_ONLY: { pattern: RegExp; why: string }[] = [
+    {
+      pattern: /CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS/i,
+      why: "MySQL 8.0 rejects `CREATE INDEX IF NOT EXISTS` with ERROR 1064. Guard the index with information_schema + PREPARE instead.",
+    },
+    {
+      pattern: /DROP\s+INDEX\s+IF\s+EXISTS/i,
+      why: "MySQL 8.0 rejects `DROP INDEX IF EXISTS`. Guard it with information_schema + PREPARE instead.",
+    },
+  ];
+
+  it("should contain no TiDB-only syntax that MySQL would reject", () => {
+    const offenders: string[] = [];
+    for (const file of fs.readdirSync(DRIZZLE).filter((f) => f.endsWith(".sql"))) {
+      const sql = fs.readFileSync(path.join(DRIZZLE, file), "utf8");
+      for (const { pattern, why } of TIDB_ONLY) {
+        if (pattern.test(sql)) offenders.push(`${file}: ${why}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
