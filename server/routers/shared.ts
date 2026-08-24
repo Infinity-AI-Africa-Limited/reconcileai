@@ -190,31 +190,6 @@ export async function logAudit(
   }
 }
 
-/**
- * Use for control-plane writes where reporting success without its audit record
- * would violate the feature's evidence promise. Unlike logAudit, failures are
- * deliberately propagated to the calling procedure.
- */
-export async function logAuditStrict(
-  userId: number | null,
-  action: string,
-  entityType: string,
-  entityId?: number,
-  details?: unknown,
-  ipAddress?: string,
-  userAgent?: string,
-) {
-  await createAuditLog({
-    userId,
-    action,
-    entityType,
-    entityId,
-    details: details ? JSON.stringify(details) : null,
-    ipAddress: ipAddress || null,
-    userAgent: userAgent ? userAgent.substring(0, 500) : null,
-  });
-}
-
 export function getClientInfo(ctx: any): { ip: string; ua: string } {
   const ip = ctx.req?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
     || ctx.req?.socket?.remoteAddress

@@ -75,27 +75,6 @@ export const organizations = mysqlTable("organizations", {
 export type Organization = typeof organizations.$inferSelect;
 export type InsertOrganization = typeof organizations.$inferInsert;
 
-// ─── Cross-vertical Control Fit Briefs ────────────────────────────────
-// One evidence-led operating brief per tenant. It documents a proposed
-// workflow and pilot measure; it does not grant payment, posting or AI authority.
-export const controlFitBriefs = mysqlTable("control_fit_briefs", {
-  id: int("id").autoincrement().primaryKey(),
-  organizationId: int("organizationId").notNull(),
-  workflowName: varchar("workflowName", { length: 255 }).notNull(),
-  operationalProblem: text("operationalProblem").notNull(),
-  accountableOwner: varchar("accountableOwner", { length: 255 }).notNull(),
-  decisionDeadline: varchar("decisionDeadline", { length: 128 }).notNull(),
-  approvedEvidence: json("approvedEvidence").notNull(),
-  baseline: text("baseline").notNull(),
-  successMeasure: text("successMeasure").notNull(),
-  status: mysqlEnum("status", ["draft", "baseline_confirmed", "parallel_run", "accepted", "stopped"]).default("draft").notNull(),
-  updatedByUserId: int("updatedByUserId").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-}, (table) => [uniqueIndex("uq_control_fit_org").on(table.organizationId)]);
-
-export type ControlFitBrief = typeof controlFitBriefs.$inferSelect;
-
 // ─── Users ───────────────────────────────────────────────────────────
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),

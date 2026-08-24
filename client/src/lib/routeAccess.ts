@@ -221,13 +221,6 @@ export function canReachPath(
   role: string | undefined,
   opts: { portal?: boolean } = {},
 ): boolean {
-  const entry = NAV_ITEMS.find((item) => normalizePath(item.path) === normalizePath(path));
-  // A strict entry is an evidence or tenant-control workspace rather than a
-  // cross-vertical staff diagnostic. Its server procedure requires the declared
-  // customer tenant, so a staff own-account shortcut would only mount a rejected
-  // query. Refuse it before the page mounts; staff can open it in that tenant's
-  // portal, where the real Corporate B2B segment is in scope.
-  if (entry?.strictSegment && !inSegment(entry, segment)) return false;
   if (isStaff(role) && !opts.portal) return true;
   // Past this line the viewer is not staff (or is inside a portal, where the
   // point is to see the TENANT's surface). Either way a staff tool is refused —

@@ -1417,5 +1417,7 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Verify the final YC founder video against duration, file-size, format, codec, resolution, and playback requirements.
 - [x] Review the supplied video and produce an evidence-based analysis of its implications for ReconcileAI’s product, positioning, and three verticals.
 - [x] Verify P1–P7 Financial Services pilot-blocker closure against current code, deployment posture, and bank-specific evidence for raw-data readiness.
+- [ ] Complete ReconcileAI-owned pre-bank readiness work: dependency evidence, session/CSRF design, durable-queue drill harness, storage-policy decision, and bank-pilot evidence-pack templates.
+- [x] Prepare and commit the reusable Financial Services pre-bank evidence pack, including control-fit, data/AI, security, resilience, durable-queue and UAT templates plus a reproducible production SBOM.
 - [x] Add an audited, tenant-scoped Control Fit Brief that records one bounded reconciliation workflow, accountable owner, decision deadline, approved evidence sources, baseline, and customer-agreed success measures across all three verticals.
 - [x] Write a factual, conversational 55–60 second YC founder-video script for Richard.

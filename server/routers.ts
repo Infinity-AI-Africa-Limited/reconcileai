@@ -219,7 +219,6 @@ import {
   MAX_NAME_LENGTH,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
-import { controlFitRouter } from "./routers/controlFit";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -4098,7 +4097,6 @@ export const appRouter = router({
 
   distributor: distributorRouter,
   corporateB2BPilot: corporateB2BPilotRouter,
-  controlFit: controlFitRouter,
   superAgent: router({
     query: protectedProcedure
       .input(z.object({
