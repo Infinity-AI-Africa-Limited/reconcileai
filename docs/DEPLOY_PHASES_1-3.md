@@ -51,15 +51,28 @@ is worth setting now; everything else defaults correctly.
 Run the migration against the production DB. The Railway CLI injects the prod
 `DATABASE_URL` into your local shell (where `drizzle-kit` is installed):
 
+> ⚠️ **Never run `pnpm db:push` against production.** It is
+> `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW
+> migration from whatever `schema.ts` is in your working tree, then applies it.
+> Run it with an unmerged branch checked out and that branch's schema lands in the
+> live database, which is how migrations 0084, 0085 and 0090 reached production
+> before their pull requests merged and left deploys failing on
+> `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
+>
+> Use **`pnpm db:migrate`** — it applies committed migrations and generates
+> nothing. Railway already runs it as `preDeployCommand`, so a manual run should
+> be rare. Check `pnpm db:drift` first.
+
+
 ```bash
 railway link               # select the reconcileai project/service (once)
-railway run pnpm db:push   # drizzle-kit generate && migrate, against prod
+railway run pnpm db:migrate   # applies committed migrations only
 ```
 
 Or, if you have the prod `DATABASE_URL` directly:
 
 ```bash
-DATABASE_URL='mysql://…prod…' pnpm db:push
+DATABASE_URL='mysql://…prod…' pnpm db:migrate
 ```
 
 Applies migration `0041` (3 new tables + ADD COLUMN + a safe `varchar` widening).

@@ -1331,8 +1331,20 @@ The application uses MySQL (Drizzle ORM). In production, use a managed MySQL ser
 
 After setting `DATABASE_URL`, run migrations:
 ```bash
-pnpm db:push
+pnpm db:migrate
 ```
+
+> ⚠️ **Never run `pnpm db:push` against production.** It is
+> `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW
+> migration from whatever `schema.ts` is in your working tree, then applies it.
+> Run it with an unmerged branch checked out and that branch's schema lands in the
+> live database, which is how migrations 0084, 0085 and 0090 reached production
+> before their pull requests merged and left deploys failing on
+> `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
+>
+> Use **`pnpm db:migrate`** — it applies committed migrations and generates
+> nothing. Railway already runs it as `preDeployCommand`, so a manual run should
+> be rare. Check `pnpm db:drift` first.
 
 ### Background Jobs
 The durable job queue is **built** (`server/jobQueue.ts`): reconciliation runs and webhook
@@ -1417,7 +1429,7 @@ Before merging any `manus/*` branch, verify:
 | **No Manus-specific code** | Remove any `BUILT_IN_FORGE_*` references, Manus OAuth calls, or sandbox-only hacks |
 | **Demo/POC code isolation** | POC pages (`/salad-africa-poc`, `/lapo-poc`, `/woodcore-poc`) are intentionally public and demo-only — do not add auth gates unless instructed |
 | **LLM calls** | Confirm all `invokeLLM()` calls will work with `DIRECT_LLM_API_KEY` (Anthropic) in production |
-| **Database migrations** | If new tables/columns were added, confirm migration files exist in `drizzle/` and run `pnpm db:push` |
+| **Database migrations** | If new tables/columns were added, confirm migration files exist in `drizzle/`. Generate them with `drizzle-kit generate` **against a dev database** — never `pnpm db:push` while `DATABASE_URL` points at production (see §12) |
 | **S3 file keys** | Any new file uploads must use `storagePut()` — never store bytes in DB columns |
 | **Secrets** | No hardcoded API keys, tokens, or credentials in any file |
 | **Router size** | If `server/routers.ts` grew, check if it should be split into `server/routers/<feature>.ts` |

@@ -88,8 +88,20 @@ You're keeping **TiDB Cloud**, which already has the schema and data, so normall
 nothing to do. If you point at a fresh DB, sync the schema once:
 
 ```bash
-DATABASE_URL="mysql://..." pnpm db:push
+DATABASE_URL="mysql://..." pnpm db:migrate
 ```
+
+> ⚠️ **Never run `pnpm db:push` against production.** It is
+> `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW
+> migration from whatever `schema.ts` is in your working tree, then applies it.
+> Run it with an unmerged branch checked out and that branch's schema lands in the
+> live database, which is how migrations 0084, 0085 and 0090 reached production
+> before their pull requests merged and left deploys failing on
+> `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
+>
+> Use **`pnpm db:migrate`** — it applies committed migrations and generates
+> nothing. Railway already runs it as `preDeployCommand`, so a manual run should
+> be rare. Check `pnpm db:drift` first.
 
 ---
 

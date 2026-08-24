@@ -60,7 +60,10 @@ pnpm install
 # See docs/env.example.md for all required variables
 # Copy to .env and fill in values
 
-# 4. Push database schema
+# 4. Apply database migrations
+#    NOTE: db:push = "drizzle-kit generate && migrate" — the generate half writes
+#    a NEW migration from your working tree. Only ever point it at a DEV database.
+#    If your .env carries the shared/live DATABASE_URL, use db:migrate instead.
 pnpm db:push
 
 # 5. Start development server
