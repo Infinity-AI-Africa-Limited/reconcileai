@@ -1,3 +1,40 @@
+-- ─── Amended after generation — read this before editing further ──────────────
+--
+-- This migration deviates from the repository's append-only rule (CLAUDE.md §12)
+-- and the deviation is recorded here rather than left to be rediscovered.
+--
+-- WHY IT WAS AMENDED. This migration's tables and all three of its indexes were
+-- created on the production database OUTSIDE the migration runner, so the
+-- objects exist while `__drizzle_migrations` holds no row for 0090 (its newest
+-- entry is 0089). Because drizzle applies by the journal `when` watermark, 0090
+-- is retried on every deploy and dies on the objects that are already there:
+--
+--   as generated   ERROR 1050  Table 'corporate_b2b_pilot_configs' already exists
+--   after the      ERROR 1061  Duplicate key name 'idx_b2b_pilot_state'
+--   table fix                  (reproduced on mysql:8.0 against a production-shaped DB)
+--
+-- WHY REVERTING WOULD BE WRONG. Append-only protects migrations that have been
+-- APPLIED, so that histories cannot diverge. 0090 is recorded as applied in no
+-- environment, so there is no history to protect — and restoring the generated
+-- form would simply re-break every deploy.
+--
+-- WHY THIS IS SAFE FOR FRESH DATABASES. The amended file and the generated file
+-- produce a byte-identical schema on an empty database: same columns, same
+-- types, same defaults, same indexes. Verified by applying both to separate
+-- fresh MySQL 8.0 databases and diffing information_schema. `IF NOT EXISTS` and
+-- the information_schema/PREPARE guards are no-ops when nothing exists yet.
+--
+-- WHY NOT `CREATE INDEX IF NOT EXISTS`. That is a TiDB extension. Production is
+-- TiDB, but CI is mysql:8.0 and `pnpm db:push` executes these files, so MySQL
+-- rejects it with ERROR 1064 — a parse error, before any statement runs. See
+-- PR #102, and the portability guard in server/migrationIntegrity.test.ts.
+--
+-- THE ROOT CAUSE IS NOT THIS FILE. 0084, 0085 and 0090 have all had DDL applied
+-- to production by hand, and each time the migration was rewritten to match the
+-- database. The durable fix is that schema changes go through the runner — or,
+-- when they cannot, that the matching `__drizzle_migrations` row is written in
+-- the same operation so the ledger tells the truth.
+-- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS `corporate_b2b_pilot_configs` (
 	`id` int AUTO_INCREMENT NOT NULL,
 	`organizationId` int NOT NULL,
