@@ -340,7 +340,7 @@ pnpm db:push    # generate + apply — DEV DATABASES ONLY, see caution below
 > working tree and then applies it, so an unmerged branch's schema lands in
 > the live database. Migrations 0084, 0085 and 0090 reached production that
 > way, ahead of their pull requests, and left deploys failing. Use
-> \`pnpm db:migrate\`, and run \`pnpm db:drift\` first.
+> \`pnpm db:migrate\`.
 
 ---
 

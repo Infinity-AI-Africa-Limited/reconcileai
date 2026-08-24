@@ -39,54 +39,50 @@ CBN_SIGNING_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-
 For the standard cloud deployment of reconcileai.vip, only `CBN_SIGNING_PRIVATE_KEY`
 is worth setting now; everything else defaults correctly.
 
-## 2. Run the database migration (DO THIS FIRST)
+## 2. Database migration — no longer a manual step
 
-> ⚠️ **Superseded — `railway.json` now runs migrations on release.** It carries
-> `preDeployCommand: pnpm db:migrate`, so the manual steps in this section are no
-> longer the normal path; they are kept as the record of how release 0041 was
-> applied. Deploying `main` migrates the production schema before the new code
-> starts. Verify with `pnpm db:drift` rather than migrating by hand.
+> ⚠️ **Superseded.** `railway.json` now carries
+> `preDeployCommand: pnpm db:migrate`, so deploying `main` migrates the
+> production schema before the new code starts. **There is nothing to run by
+> hand here.** This section is kept as the record of how release `0041` was
+> applied, back when release did not migrate.
 >
-> When this runbook was written that was not the case. The original warning,
-> kept for the record:
+> If a deploy fails during its pre-deploy step, fix the migration and redeploy.
+> Do not reach for a manual production migration — that is how migrations 0084,
+> 0085 and 0090 ended up in the live database ahead of their pull requests, each
+> leaving the next deploy to fail on `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
 >
-> > Railway auto-deploys from `main`. Because `railway.json` does **not** run
-> > migrations on release, pushing this release builds and starts the new code
-> > while the prod schema is still on the old version. The change is
-> > **additive**, so reads and audit-logged writes keep working (`logAudit`
-> > swallows errors), but the new-column **write** paths (upload
-> > `detectedFormat`, CBN signing, audit chain, `multiRunId`) will error until
-> > the migration runs. **Apply it now.**
+> **Never run `pnpm db:push` against production** in any case. It is
+> `drizzle-kit generate && drizzle-kit migrate`, and the `generate` half writes a
+> NEW migration from whatever `schema.ts` is in your working tree, then applies
+> it — so an unmerged branch's schema lands in production.
 
-Run the migration against the production DB. The Railway CLI injects the prod
-`DATABASE_URL` into your local shell (where `drizzle-kit` is installed):
+<details>
+<summary>Historical record — how release 0041 was applied</summary>
 
-> ⚠️ **Never run `pnpm db:push` against production.** It is
-> `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW
-> migration from whatever `schema.ts` is in your working tree, then applies it.
-> Run it with an unmerged branch checked out and that branch's schema lands in the
-> live database, which is how migrations 0084, 0085 and 0090 reached production
-> before their pull requests merged and left deploys failing on
-> `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
->
-> Use **`pnpm db:migrate`** — it applies committed migrations and generates
-> nothing. Railway already runs it as `preDeployCommand`, so a manual run should
-> be rare. Check `pnpm db:drift` first.
+The original warning read:
 
+> Railway auto-deploys from `main`. Because `railway.json` does **not** run
+> migrations on release, pushing this release builds and starts the new code
+> while the prod schema is still on the old version. The change is
+> **additive**, so reads and audit-logged writes keep working (`logAudit`
+> swallows errors), but the new-column **write** paths (upload
+> `detectedFormat`, CBN signing, audit chain, `multiRunId`) will error until
+> the migration runs. **Apply it now.**
+
+and the migration was applied from a local shell with the Railway CLI injecting
+the production `DATABASE_URL`:
 
 ```bash
-railway link               # select the reconcileai project/service (once)
+railway link                  # select the reconcileai project/service (once)
 railway run pnpm db:migrate   # applies committed migrations only
 ```
 
-Or, if you have the prod `DATABASE_URL` directly:
+Applying migration `0041` (3 new tables + ADD COLUMN + a safe `varchar`
+widening) — additive only, so it was safe on the live database.
 
-```bash
-DATABASE_URL='mysql://…prod…' pnpm db:migrate
-```
+</details>
 
-Applies migration `0041` (3 new tables + ADD COLUMN + a safe `varchar` widening).
-Additive only — safe on the live DB. After it completes, the new features work.
 
 ## 3. Deploy the application code
 

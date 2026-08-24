@@ -101,7 +101,7 @@ DATABASE_URL="mysql://..." pnpm db:migrate
 >
 > Use **`pnpm db:migrate`** — it applies committed migrations and generates
 > nothing. Railway already runs it as `preDeployCommand`, so a manual run should
-> be rare. Check `pnpm db:drift` first.
+> be rare.
 
 ---
 

@@ -1344,7 +1344,7 @@ pnpm db:migrate
 >
 > Use **`pnpm db:migrate`** — it applies committed migrations and generates
 > nothing. Railway already runs it as `preDeployCommand`, so a manual run should
-> be rare. Check `pnpm db:drift` first.
+> be rare.
 
 ### Background Jobs
 The durable job queue is **built** (`server/jobQueue.ts`): reconciliation runs and webhook
