@@ -194,24 +194,42 @@ export async function logAudit(
  * Use for control-plane writes where reporting success without its audit record
  * would violate the feature's evidence promise. Unlike logAudit, failures are
  * deliberately propagated to the calling procedure.
+ *
+ * ── organizationId is REQUIRED, and named ─────────────────────────────────
+ *
+ * Takes an object rather than positional arguments so the tenant scope cannot
+ * be forgotten. It was omittable, and it was duly omitted: `createAuditLog`
+ * scopes the tamper-evident hash chain on `organizationId ?? null`, so an event
+ * without one joins the GLOBAL chain. The tenant it actually concerns then has
+ * no record of it in their audit listing, their export, or their chain
+ * verification — the write looks audited and is not, which is worse than an
+ * obvious gap on a surface a bank examiner reads.
+ *
+ * Passing `null` is a legitimate answer for a genuine platform-level event, but
+ * it now has to be an answer rather than an omission — the same reason writes
+ * use featureStrictlyAppliesTo (§9C): "no organisation" and "I forgot" must not
+ * look identical at the call site.
  */
-export async function logAuditStrict(
-  userId: number | null,
-  action: string,
-  entityType: string,
-  entityId?: number,
-  details?: unknown,
-  ipAddress?: string,
-  userAgent?: string,
-) {
+export async function logAuditStrict(entry: {
+  userId: number | null;
+  /** The tenant this event belongs to. `null` ONLY for true platform events. */
+  organizationId: number | null;
+  action: string;
+  entityType: string;
+  entityId?: number;
+  details?: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+}) {
   await createAuditLog({
-    userId,
-    action,
-    entityType,
-    entityId,
-    details: details ? JSON.stringify(details) : null,
-    ipAddress: ipAddress || null,
-    userAgent: userAgent ? userAgent.substring(0, 500) : null,
+    userId: entry.userId,
+    organizationId: entry.organizationId,
+    action: entry.action,
+    entityType: entry.entityType,
+    entityId: entry.entityId,
+    details: entry.details ? JSON.stringify(entry.details) : null,
+    ipAddress: entry.ipAddress || null,
+    userAgent: entry.userAgent ? entry.userAgent.substring(0, 500) : null,
   });
 }
 

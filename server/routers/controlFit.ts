@@ -52,12 +52,26 @@ export const controlFitRouter = router({
     if (existing) await db.update(controlFitBriefs).set(values).where(eq(controlFitBriefs.id, existing.id));
     else await db.insert(controlFitBriefs).values(values);
     const { ip, ua } = getClientInfo(ctx);
-    await logAuditStrict(ctx.user.id, "control_fit_brief_saved", "control_fit_brief", existing?.id, {
-      targetOrganizationId: organizationId,
-      status: input.status,
-      workflowName: input.workflowName,
-      evidenceCount: input.approvedEvidence.length,
-    }, ip, ua);
+    // Scoped to the tenant the brief belongs to, NOT to the caller's own org —
+    // a super admin saving from inside a portal is acting on that tenant, and
+    // the record has to land in that tenant's chain to be worth anything. The
+    // id stays in `details` too, but details is JSON and cannot be filtered,
+    // exported, or chain-verified.
+    await logAuditStrict({
+      userId: ctx.user.id,
+      organizationId,
+      action: "control_fit_brief_saved",
+      entityType: "control_fit_brief",
+      entityId: existing?.id,
+      details: {
+        targetOrganizationId: organizationId,
+        status: input.status,
+        workflowName: input.workflowName,
+        evidenceCount: input.approvedEvidence.length,
+      },
+      ipAddress: ip,
+      userAgent: ua,
+    });
     return load(ctx.user, organizationId);
   }),
 });
