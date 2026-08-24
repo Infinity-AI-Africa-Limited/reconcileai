@@ -41,12 +41,22 @@ is worth setting now; everything else defaults correctly.
 
 ## 2. Run the database migration (DO THIS FIRST)
 
-> ⚠️ **Railway auto-deploys from `main`.** Because `railway.json` does **not** run
-> migrations on release, pushing this release builds and starts the new code while
-> the prod schema is still on the old version. The change is **additive**, so reads
-> and audit-logged writes keep working (`logAudit` swallows errors), but the
-> new-column **write** paths (upload `detectedFormat`, CBN signing, audit chain,
-> `multiRunId`) will error until the migration runs. **Apply it now.**
+> ⚠️ **Superseded — `railway.json` now runs migrations on release.** It carries
+> `preDeployCommand: pnpm db:migrate`, so the manual steps in this section are no
+> longer the normal path; they are kept as the record of how release 0041 was
+> applied. Deploying `main` migrates the production schema before the new code
+> starts. Verify with `pnpm db:drift` rather than migrating by hand.
+>
+> When this runbook was written that was not the case. The original warning,
+> kept for the record:
+>
+> > Railway auto-deploys from `main`. Because `railway.json` does **not** run
+> > migrations on release, pushing this release builds and starts the new code
+> > while the prod schema is still on the old version. The change is
+> > **additive**, so reads and audit-logged writes keep working (`logAudit`
+> > swallows errors), but the new-column **write** paths (upload
+> > `detectedFormat`, CBN signing, audit chain, `multiRunId`) will error until
+> > the migration runs. **Apply it now.**
 
 Run the migration against the production DB. The Railway CLI injects the prod
 `DATABASE_URL` into your local shell (where `drizzle-kit` is installed):
