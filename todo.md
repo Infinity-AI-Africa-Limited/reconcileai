@@ -1416,5 +1416,6 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Apply a restrained professional colour grade to the polished YC founder video while preserving natural skin tones.
 - [x] Verify the final YC founder video against duration, file-size, format, codec, resolution, and playback requirements.
 - [x] Review the supplied video and produce an evidence-based analysis of its implications for ReconcileAI’s product, positioning, and three verticals.
+- [x] Verify P1–P7 Financial Services pilot-blocker closure against current code, deployment posture, and bank-specific evidence for raw-data readiness.
 - [x] Add an audited, tenant-scoped Control Fit Brief that records one bounded reconciliation workflow, accountable owner, decision deadline, approved evidence sources, baseline, and customer-agreed success measures across all three verticals.
 - [x] Write a factual, conversational 55–60 second YC founder-video script for Richard.
