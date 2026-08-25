@@ -110,8 +110,10 @@ candidate list — commented "no target txns needed for standalone diagnosis". T
 - `bank_fee_deduction` and `fx_variance` are decided by comparing against a candidate, so **two of
   the twelve categories were unreachable** at the only call site.
 
-The procedure now loads counterparty candidates — other channels, same tenant, within the diagnosis
-date window, explicitly org-scoped and capped (`db.getDiagnosisCandidates`).
+The procedure now loads counterparty candidates — same tenant, same currency, restricted to the
+channels this tenant's jobs actually pair this feed with, within the diagnosis date window and
+capped (`db.getDiagnosisCandidates`). The first cut of that pool was too loose and was caught in
+review; see §3A.1.
 
 ### 2.5 Configuration changes were audit-logged where the tenant cannot see them — **fixed**
 
