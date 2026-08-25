@@ -156,18 +156,44 @@ async function startServer() {
       //
       // With nothing registered, durability is a property of CONFIGURATION;
       // once a queue exists, it is a property of what actually got built.
+      // Three states, not two — which is the point. Both booleans are wrong
+      // before a queue exists: claiming durable asserts a Redis connection
+      // nobody has made, and claiming non-durable contradicts the configuration.
+      // So `durable` means CONFIRMED durable and nothing else, and `durability`
+      // carries the distinction the boolean cannot.
+      //
+      //   confirmed             a queue was built and is on BullMQ
+      //   configured_unverified REDIS_URL is set, but nothing has connected yet,
+      //                         so a wrong or unreachable URL still looks like
+      //                         this. Not evidence of durability.
+      //   fallback              in-process; work is lost on restart
+      //
+      // The empty window is not brief: queues are built lazily on first use, and
+      // the boot sweep only builds one when there are stuck jobs to recover. A
+      // healthy idle instance can sit here indefinitely.
       const configuredDurable = !!process.env.REDIS_URL?.trim();
       const anyBroken = names.some((n) => queues[n].error);
-      const durable = names.length === 0 ? configuredDurable : names.every((n) => queues[n].durable);
+      const confirmedDurable = names.length > 0 && names.every((n) => queues[n].durable);
+
+      const durability =
+        names.length === 0
+          ? configuredDurable
+            ? "configured_unverified"
+            : "fallback"
+          : confirmedDurable
+            ? "confirmed"
+            : "fallback";
 
       checks.queue = {
-        status: anyBroken ? "error" : durable ? "ok" : "degraded",
-        durable,
+        status: anyBroken ? "error" : confirmedDurable ? "ok" : "degraded",
+        durable: confirmedDurable,
+        durability,
         ...(names.length === 0
           ? {
-              note: configuredDurable
-                ? "REDIS_URL is set; no queue initialised yet (built on first use)"
-                : "REDIS_URL is not set — the in-process fallback will be used",
+              note:
+                durability === "configured_unverified"
+                  ? "REDIS_URL is set, but no queue has been built yet, so Redis connectivity is unverified — configured, not confirmed."
+                  : "REDIS_URL is not set — the in-process fallback will be used.",
             }
           : { queues }),
       };
