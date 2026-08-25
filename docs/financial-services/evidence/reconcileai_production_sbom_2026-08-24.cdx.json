@@ -23,8 +23,9 @@
     {
       "type": "library",
       "name": "@antfu/install-pkg",
+      "group": "@antfu",
       "version": "1.1.0",
-      "purl": "pkg:npm/@antfu%2Finstall-pkg@1.1.0",
+      "purl": "pkg:npm/%40antfu/install-pkg@1.1.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -35,8 +36,9 @@
     {
       "type": "library",
       "name": "@antfu/utils",
+      "group": "@antfu",
       "version": "9.3.0",
-      "purl": "pkg:npm/@antfu%2Futils@9.3.0",
+      "purl": "pkg:npm/%40antfu/utils@9.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -47,8 +49,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/crc32",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Fcrc32@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/crc32@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -59,8 +62,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/crc32c",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Fcrc32c@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/crc32c@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -71,8 +75,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/sha1-browser",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Fsha1-browser@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/sha1-browser@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -83,8 +88,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/sha256-browser",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Fsha256-browser@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/sha256-browser@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -95,8 +101,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/sha256-js",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Fsha256-js@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/sha256-js@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -107,8 +114,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/supports-web-crypto",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Fsupports-web-crypto@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/supports-web-crypto@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -119,8 +127,9 @@
     {
       "type": "library",
       "name": "@aws-crypto/util",
+      "group": "@aws-crypto",
       "version": "5.2.0",
-      "purl": "pkg:npm/@aws-crypto%2Futil@5.2.0",
+      "purl": "pkg:npm/%40aws-crypto/util@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -131,8 +140,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/client-s3",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fclient-s3@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/client-s3@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -143,8 +153,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/client-sso",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fclient-sso@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/client-sso@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -155,8 +166,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/core",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcore@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/core@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -167,8 +179,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-env",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-env@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-env@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -179,8 +192,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-http",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-http@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-http@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -191,8 +205,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-ini",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-ini@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-ini@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -203,8 +218,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-node",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-node@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-node@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -215,8 +231,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-process",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-process@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-process@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -227,8 +244,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-sso",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-sso@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-sso@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -239,8 +257,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/credential-provider-web-identity",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fcredential-provider-web-identity@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/credential-provider-web-identity@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -251,8 +270,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-bucket-endpoint",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-bucket-endpoint@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-bucket-endpoint@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -263,8 +283,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-expect-continue",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-expect-continue@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-expect-continue@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -275,8 +296,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-flexible-checksums",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-flexible-checksums@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-flexible-checksums@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -287,8 +309,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-host-header",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-host-header@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-host-header@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -299,8 +322,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-location-constraint",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-location-constraint@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-location-constraint@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -311,8 +335,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-logger",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-logger@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-logger@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -323,8 +348,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-recursion-detection",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-recursion-detection@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-recursion-detection@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -335,8 +361,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-sdk-s3",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-sdk-s3@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-sdk-s3@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -347,8 +374,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-ssec",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-ssec@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-ssec@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -359,8 +387,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/middleware-user-agent",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fmiddleware-user-agent@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/middleware-user-agent@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -371,8 +400,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/nested-clients",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fnested-clients@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/nested-clients@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -383,8 +413,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/region-config-resolver",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fregion-config-resolver@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/region-config-resolver@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -395,8 +426,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/s3-request-presigner",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fs3-request-presigner@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/s3-request-presigner@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -407,8 +439,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/signature-v4-multi-region",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Fsignature-v4-multi-region@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/signature-v4-multi-region@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -419,8 +452,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/token-providers",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Ftoken-providers@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/token-providers@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -431,8 +465,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/types",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Ftypes@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/types@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -443,8 +478,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/util-arn-parser",
+      "group": "@aws-sdk",
       "version": "3.893.0",
-      "purl": "pkg:npm/@aws-sdk%2Futil-arn-parser@3.893.0",
+      "purl": "pkg:npm/%40aws-sdk/util-arn-parser@3.893.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -455,8 +491,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/util-endpoints",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Futil-endpoints@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/util-endpoints@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -467,8 +504,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/util-format-url",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Futil-format-url@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/util-format-url@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -479,8 +517,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/util-locate-window",
+      "group": "@aws-sdk",
       "version": "3.893.0",
-      "purl": "pkg:npm/@aws-sdk%2Futil-locate-window@3.893.0",
+      "purl": "pkg:npm/%40aws-sdk/util-locate-window@3.893.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -491,8 +530,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/util-user-agent-browser",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Futil-user-agent-browser@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/util-user-agent-browser@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -503,8 +543,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/util-user-agent-node",
+      "group": "@aws-sdk",
       "version": "3.907.0",
-      "purl": "pkg:npm/@aws-sdk%2Futil-user-agent-node@3.907.0",
+      "purl": "pkg:npm/%40aws-sdk/util-user-agent-node@3.907.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -515,8 +556,9 @@
     {
       "type": "library",
       "name": "@aws-sdk/xml-builder",
+      "group": "@aws-sdk",
       "version": "3.901.0",
-      "purl": "pkg:npm/@aws-sdk%2Fxml-builder@3.901.0",
+      "purl": "pkg:npm/%40aws-sdk/xml-builder@3.901.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -527,8 +569,9 @@
     {
       "type": "library",
       "name": "@aws/lambda-invoke-store",
+      "group": "@aws",
       "version": "0.0.1",
-      "purl": "pkg:npm/@aws%2Flambda-invoke-store@0.0.1",
+      "purl": "pkg:npm/%40aws/lambda-invoke-store@0.0.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -539,8 +582,9 @@
     {
       "type": "library",
       "name": "@babel/runtime",
+      "group": "@babel",
       "version": "7.28.4",
-      "purl": "pkg:npm/@babel%2Fruntime@7.28.4",
+      "purl": "pkg:npm/%40babel/runtime@7.28.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -551,8 +595,9 @@
     {
       "type": "library",
       "name": "@babel/runtime",
+      "group": "@babel",
       "version": "7.29.7",
-      "purl": "pkg:npm/@babel%2Fruntime@7.29.7",
+      "purl": "pkg:npm/%40babel/runtime@7.29.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -563,8 +608,9 @@
     {
       "type": "library",
       "name": "@braintree/sanitize-url",
+      "group": "@braintree",
       "version": "7.1.1",
-      "purl": "pkg:npm/@braintree%2Fsanitize-url@7.1.1",
+      "purl": "pkg:npm/%40braintree/sanitize-url@7.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -575,8 +621,9 @@
     {
       "type": "library",
       "name": "@chevrotain/cst-dts-gen",
+      "group": "@chevrotain",
       "version": "11.0.3",
-      "purl": "pkg:npm/@chevrotain%2Fcst-dts-gen@11.0.3",
+      "purl": "pkg:npm/%40chevrotain/cst-dts-gen@11.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -587,8 +634,9 @@
     {
       "type": "library",
       "name": "@chevrotain/gast",
+      "group": "@chevrotain",
       "version": "11.0.3",
-      "purl": "pkg:npm/@chevrotain%2Fgast@11.0.3",
+      "purl": "pkg:npm/%40chevrotain/gast@11.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -599,8 +647,9 @@
     {
       "type": "library",
       "name": "@chevrotain/regexp-to-ast",
+      "group": "@chevrotain",
       "version": "11.0.3",
-      "purl": "pkg:npm/@chevrotain%2Fregexp-to-ast@11.0.3",
+      "purl": "pkg:npm/%40chevrotain/regexp-to-ast@11.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -611,8 +660,9 @@
     {
       "type": "library",
       "name": "@chevrotain/types",
+      "group": "@chevrotain",
       "version": "11.0.3",
-      "purl": "pkg:npm/@chevrotain%2Ftypes@11.0.3",
+      "purl": "pkg:npm/%40chevrotain/types@11.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -623,8 +673,9 @@
     {
       "type": "library",
       "name": "@chevrotain/utils",
+      "group": "@chevrotain",
       "version": "11.0.3",
-      "purl": "pkg:npm/@chevrotain%2Futils@11.0.3",
+      "purl": "pkg:npm/%40chevrotain/utils@11.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -635,8 +686,9 @@
     {
       "type": "library",
       "name": "@date-fns/tz",
+      "group": "@date-fns",
       "version": "1.4.1",
-      "purl": "pkg:npm/@date-fns%2Ftz@1.4.1",
+      "purl": "pkg:npm/%40date-fns/tz@1.4.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -647,8 +699,9 @@
     {
       "type": "library",
       "name": "@drizzle-team/brocli",
+      "group": "@drizzle-team",
       "version": "0.10.2",
-      "purl": "pkg:npm/@drizzle-team%2Fbrocli@0.10.2",
+      "purl": "pkg:npm/%40drizzle-team/brocli@0.10.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -659,8 +712,9 @@
     {
       "type": "library",
       "name": "@esbuild-kit/core-utils",
+      "group": "@esbuild-kit",
       "version": "3.3.2",
-      "purl": "pkg:npm/@esbuild-kit%2Fcore-utils@3.3.2",
+      "purl": "pkg:npm/%40esbuild-kit/core-utils@3.3.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -671,8 +725,9 @@
     {
       "type": "library",
       "name": "@esbuild-kit/esm-loader",
+      "group": "@esbuild-kit",
       "version": "2.6.5",
-      "purl": "pkg:npm/@esbuild-kit%2Fesm-loader@2.6.5",
+      "purl": "pkg:npm/%40esbuild-kit/esm-loader@2.6.5",
       "externalReferences": [
         {
           "type": "distribution",
@@ -683,8 +738,9 @@
     {
       "type": "library",
       "name": "@esbuild/aix-ppc64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Faix-ppc64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/aix-ppc64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -695,8 +751,9 @@
     {
       "type": "library",
       "name": "@esbuild/android-arm",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fandroid-arm@0.18.20",
+      "purl": "pkg:npm/%40esbuild/android-arm@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -707,8 +764,9 @@
     {
       "type": "library",
       "name": "@esbuild/android-arm",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fandroid-arm@0.25.10",
+      "purl": "pkg:npm/%40esbuild/android-arm@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -719,8 +777,9 @@
     {
       "type": "library",
       "name": "@esbuild/android-arm64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fandroid-arm64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/android-arm64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -731,8 +790,9 @@
     {
       "type": "library",
       "name": "@esbuild/android-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fandroid-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/android-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -743,8 +803,9 @@
     {
       "type": "library",
       "name": "@esbuild/android-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fandroid-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/android-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -755,8 +816,9 @@
     {
       "type": "library",
       "name": "@esbuild/android-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fandroid-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/android-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -767,8 +829,9 @@
     {
       "type": "library",
       "name": "@esbuild/darwin-arm64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fdarwin-arm64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/darwin-arm64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -779,8 +842,9 @@
     {
       "type": "library",
       "name": "@esbuild/darwin-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fdarwin-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/darwin-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -791,8 +855,9 @@
     {
       "type": "library",
       "name": "@esbuild/darwin-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fdarwin-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/darwin-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -803,8 +868,9 @@
     {
       "type": "library",
       "name": "@esbuild/darwin-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fdarwin-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/darwin-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -815,8 +881,9 @@
     {
       "type": "library",
       "name": "@esbuild/freebsd-arm64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Ffreebsd-arm64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/freebsd-arm64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -827,8 +894,9 @@
     {
       "type": "library",
       "name": "@esbuild/freebsd-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Ffreebsd-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/freebsd-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -839,8 +907,9 @@
     {
       "type": "library",
       "name": "@esbuild/freebsd-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Ffreebsd-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/freebsd-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -851,8 +920,9 @@
     {
       "type": "library",
       "name": "@esbuild/freebsd-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Ffreebsd-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/freebsd-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -863,8 +933,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-arm",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-arm@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-arm@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -875,8 +946,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-arm",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-arm@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-arm@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -887,8 +959,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-arm64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-arm64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-arm64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -899,8 +972,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -911,8 +985,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-ia32",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-ia32@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-ia32@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -923,8 +998,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-ia32",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-ia32@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-ia32@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -935,8 +1011,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-loong64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-loong64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-loong64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -947,8 +1024,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-loong64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-loong64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-loong64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -959,8 +1037,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-mips64el",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-mips64el@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-mips64el@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -971,8 +1050,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-mips64el",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-mips64el@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-mips64el@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -983,8 +1063,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-ppc64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-ppc64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-ppc64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -995,8 +1076,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-ppc64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-ppc64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-ppc64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1007,8 +1089,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-riscv64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-riscv64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-riscv64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1019,8 +1102,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-riscv64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-riscv64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-riscv64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1031,8 +1115,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-s390x",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-s390x@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-s390x@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1043,8 +1128,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-s390x",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-s390x@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-s390x@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1055,8 +1141,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Flinux-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/linux-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1067,8 +1154,9 @@
     {
       "type": "library",
       "name": "@esbuild/linux-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Flinux-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/linux-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1079,8 +1167,9 @@
     {
       "type": "library",
       "name": "@esbuild/netbsd-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fnetbsd-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/netbsd-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1091,8 +1180,9 @@
     {
       "type": "library",
       "name": "@esbuild/netbsd-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fnetbsd-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/netbsd-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1103,8 +1193,9 @@
     {
       "type": "library",
       "name": "@esbuild/netbsd-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fnetbsd-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/netbsd-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1115,8 +1206,9 @@
     {
       "type": "library",
       "name": "@esbuild/openbsd-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fopenbsd-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/openbsd-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1127,8 +1219,9 @@
     {
       "type": "library",
       "name": "@esbuild/openbsd-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fopenbsd-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/openbsd-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1139,8 +1232,9 @@
     {
       "type": "library",
       "name": "@esbuild/openbsd-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fopenbsd-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/openbsd-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1151,8 +1245,9 @@
     {
       "type": "library",
       "name": "@esbuild/openharmony-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fopenharmony-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/openharmony-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1163,8 +1258,9 @@
     {
       "type": "library",
       "name": "@esbuild/sunos-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fsunos-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/sunos-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1175,8 +1271,9 @@
     {
       "type": "library",
       "name": "@esbuild/sunos-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fsunos-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/sunos-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1187,8 +1284,9 @@
     {
       "type": "library",
       "name": "@esbuild/win32-arm64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fwin32-arm64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/win32-arm64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1199,8 +1297,9 @@
     {
       "type": "library",
       "name": "@esbuild/win32-arm64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fwin32-arm64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/win32-arm64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1211,8 +1310,9 @@
     {
       "type": "library",
       "name": "@esbuild/win32-ia32",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fwin32-ia32@0.18.20",
+      "purl": "pkg:npm/%40esbuild/win32-ia32@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1223,8 +1323,9 @@
     {
       "type": "library",
       "name": "@esbuild/win32-ia32",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fwin32-ia32@0.25.10",
+      "purl": "pkg:npm/%40esbuild/win32-ia32@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1235,8 +1336,9 @@
     {
       "type": "library",
       "name": "@esbuild/win32-x64",
+      "group": "@esbuild",
       "version": "0.18.20",
-      "purl": "pkg:npm/@esbuild%2Fwin32-x64@0.18.20",
+      "purl": "pkg:npm/%40esbuild/win32-x64@0.18.20",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1247,8 +1349,9 @@
     {
       "type": "library",
       "name": "@esbuild/win32-x64",
+      "group": "@esbuild",
       "version": "0.25.10",
-      "purl": "pkg:npm/@esbuild%2Fwin32-x64@0.25.10",
+      "purl": "pkg:npm/%40esbuild/win32-x64@0.25.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1259,8 +1362,9 @@
     {
       "type": "library",
       "name": "@fast-csv/format",
+      "group": "@fast-csv",
       "version": "4.3.5",
-      "purl": "pkg:npm/@fast-csv%2Fformat@4.3.5",
+      "purl": "pkg:npm/%40fast-csv/format@4.3.5",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1271,8 +1375,9 @@
     {
       "type": "library",
       "name": "@fast-csv/parse",
+      "group": "@fast-csv",
       "version": "4.3.6",
-      "purl": "pkg:npm/@fast-csv%2Fparse@4.3.6",
+      "purl": "pkg:npm/%40fast-csv/parse@4.3.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1283,8 +1388,9 @@
     {
       "type": "library",
       "name": "@floating-ui/core",
+      "group": "@floating-ui",
       "version": "1.7.3",
-      "purl": "pkg:npm/@floating-ui%2Fcore@1.7.3",
+      "purl": "pkg:npm/%40floating-ui/core@1.7.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1295,8 +1401,9 @@
     {
       "type": "library",
       "name": "@floating-ui/dom",
+      "group": "@floating-ui",
       "version": "1.7.4",
-      "purl": "pkg:npm/@floating-ui%2Fdom@1.7.4",
+      "purl": "pkg:npm/%40floating-ui/dom@1.7.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1307,8 +1414,9 @@
     {
       "type": "library",
       "name": "@floating-ui/react-dom",
+      "group": "@floating-ui",
       "version": "2.1.6",
-      "purl": "pkg:npm/@floating-ui%2Freact-dom@2.1.6",
+      "purl": "pkg:npm/%40floating-ui/react-dom@2.1.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1319,8 +1427,9 @@
     {
       "type": "library",
       "name": "@floating-ui/utils",
+      "group": "@floating-ui",
       "version": "0.2.10",
-      "purl": "pkg:npm/@floating-ui%2Futils@0.2.10",
+      "purl": "pkg:npm/%40floating-ui/utils@0.2.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1331,8 +1440,9 @@
     {
       "type": "library",
       "name": "@gilbarbara/deep-equal",
+      "group": "@gilbarbara",
       "version": "0.1.2",
-      "purl": "pkg:npm/@gilbarbara%2Fdeep-equal@0.1.2",
+      "purl": "pkg:npm/%40gilbarbara/deep-equal@0.1.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1343,8 +1453,9 @@
     {
       "type": "library",
       "name": "@gilbarbara/deep-equal",
+      "group": "@gilbarbara",
       "version": "0.3.1",
-      "purl": "pkg:npm/@gilbarbara%2Fdeep-equal@0.3.1",
+      "purl": "pkg:npm/%40gilbarbara/deep-equal@0.3.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1355,8 +1466,9 @@
     {
       "type": "library",
       "name": "@hookform/resolvers",
+      "group": "@hookform",
       "version": "5.2.2",
-      "purl": "pkg:npm/@hookform%2Fresolvers@5.2.2",
+      "purl": "pkg:npm/%40hookform/resolvers@5.2.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1367,8 +1479,9 @@
     {
       "type": "library",
       "name": "@iconify/types",
+      "group": "@iconify",
       "version": "2.0.0",
-      "purl": "pkg:npm/@iconify%2Ftypes@2.0.0",
+      "purl": "pkg:npm/%40iconify/types@2.0.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1379,8 +1492,9 @@
     {
       "type": "library",
       "name": "@iconify/utils",
+      "group": "@iconify",
       "version": "3.0.2",
-      "purl": "pkg:npm/@iconify%2Futils@3.0.2",
+      "purl": "pkg:npm/%40iconify/utils@3.0.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1391,8 +1505,9 @@
     {
       "type": "library",
       "name": "@ioredis/commands",
+      "group": "@ioredis",
       "version": "1.5.1",
-      "purl": "pkg:npm/@ioredis%2Fcommands@1.5.1",
+      "purl": "pkg:npm/%40ioredis/commands@1.5.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1403,8 +1518,9 @@
     {
       "type": "library",
       "name": "@mermaid-js/parser",
+      "group": "@mermaid-js",
       "version": "0.6.3",
-      "purl": "pkg:npm/@mermaid-js%2Fparser@0.6.3",
+      "purl": "pkg:npm/%40mermaid-js/parser@0.6.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1415,8 +1531,9 @@
     {
       "type": "library",
       "name": "@msgpackr-extract/msgpackr-extract-darwin-arm64",
+      "group": "@msgpackr-extract",
       "version": "3.0.4",
-      "purl": "pkg:npm/@msgpackr-extract%2Fmsgpackr-extract-darwin-arm64@3.0.4",
+      "purl": "pkg:npm/%40msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1427,8 +1544,9 @@
     {
       "type": "library",
       "name": "@msgpackr-extract/msgpackr-extract-darwin-x64",
+      "group": "@msgpackr-extract",
       "version": "3.0.4",
-      "purl": "pkg:npm/@msgpackr-extract%2Fmsgpackr-extract-darwin-x64@3.0.4",
+      "purl": "pkg:npm/%40msgpackr-extract/msgpackr-extract-darwin-x64@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1439,8 +1557,9 @@
     {
       "type": "library",
       "name": "@msgpackr-extract/msgpackr-extract-linux-arm",
+      "group": "@msgpackr-extract",
       "version": "3.0.4",
-      "purl": "pkg:npm/@msgpackr-extract%2Fmsgpackr-extract-linux-arm@3.0.4",
+      "purl": "pkg:npm/%40msgpackr-extract/msgpackr-extract-linux-arm@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1451,8 +1570,9 @@
     {
       "type": "library",
       "name": "@msgpackr-extract/msgpackr-extract-linux-arm64",
+      "group": "@msgpackr-extract",
       "version": "3.0.4",
-      "purl": "pkg:npm/@msgpackr-extract%2Fmsgpackr-extract-linux-arm64@3.0.4",
+      "purl": "pkg:npm/%40msgpackr-extract/msgpackr-extract-linux-arm64@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1463,8 +1583,9 @@
     {
       "type": "library",
       "name": "@msgpackr-extract/msgpackr-extract-linux-x64",
+      "group": "@msgpackr-extract",
       "version": "3.0.4",
-      "purl": "pkg:npm/@msgpackr-extract%2Fmsgpackr-extract-linux-x64@3.0.4",
+      "purl": "pkg:npm/%40msgpackr-extract/msgpackr-extract-linux-x64@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1475,8 +1596,9 @@
     {
       "type": "library",
       "name": "@msgpackr-extract/msgpackr-extract-win32-x64",
+      "group": "@msgpackr-extract",
       "version": "3.0.4",
-      "purl": "pkg:npm/@msgpackr-extract%2Fmsgpackr-extract-win32-x64@3.0.4",
+      "purl": "pkg:npm/%40msgpackr-extract/msgpackr-extract-win32-x64@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1487,8 +1609,9 @@
     {
       "type": "library",
       "name": "@nodable/entities",
+      "group": "@nodable",
       "version": "2.2.0",
-      "purl": "pkg:npm/@nodable%2Fentities@2.2.0",
+      "purl": "pkg:npm/%40nodable/entities@2.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1499,8 +1622,9 @@
     {
       "type": "library",
       "name": "@radix-ui/number",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Fnumber@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/number@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1511,8 +1635,9 @@
     {
       "type": "library",
       "name": "@radix-ui/primitive",
+      "group": "@radix-ui",
       "version": "1.1.3",
-      "purl": "pkg:npm/@radix-ui%2Fprimitive@1.1.3",
+      "purl": "pkg:npm/%40radix-ui/primitive@1.1.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1523,8 +1648,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-accordion",
+      "group": "@radix-ui",
       "version": "1.2.12",
-      "purl": "pkg:npm/@radix-ui%2Freact-accordion@1.2.12",
+      "purl": "pkg:npm/%40radix-ui/react-accordion@1.2.12",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1535,8 +1661,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-alert-dialog",
+      "group": "@radix-ui",
       "version": "1.1.15",
-      "purl": "pkg:npm/@radix-ui%2Freact-alert-dialog@1.1.15",
+      "purl": "pkg:npm/%40radix-ui/react-alert-dialog@1.1.15",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1547,8 +1674,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-arrow",
+      "group": "@radix-ui",
       "version": "1.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-arrow@1.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-arrow@1.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1559,8 +1687,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-aspect-ratio",
+      "group": "@radix-ui",
       "version": "1.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-aspect-ratio@1.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-aspect-ratio@1.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1571,8 +1700,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-avatar",
+      "group": "@radix-ui",
       "version": "1.1.10",
-      "purl": "pkg:npm/@radix-ui%2Freact-avatar@1.1.10",
+      "purl": "pkg:npm/%40radix-ui/react-avatar@1.1.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1583,8 +1713,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-checkbox",
+      "group": "@radix-ui",
       "version": "1.3.3",
-      "purl": "pkg:npm/@radix-ui%2Freact-checkbox@1.3.3",
+      "purl": "pkg:npm/%40radix-ui/react-checkbox@1.3.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1595,8 +1726,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-collapsible",
+      "group": "@radix-ui",
       "version": "1.1.12",
-      "purl": "pkg:npm/@radix-ui%2Freact-collapsible@1.1.12",
+      "purl": "pkg:npm/%40radix-ui/react-collapsible@1.1.12",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1607,8 +1739,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-collection",
+      "group": "@radix-ui",
       "version": "1.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-collection@1.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-collection@1.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1619,8 +1752,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-compose-refs",
+      "group": "@radix-ui",
       "version": "1.1.2",
-      "purl": "pkg:npm/@radix-ui%2Freact-compose-refs@1.1.2",
+      "purl": "pkg:npm/%40radix-ui/react-compose-refs@1.1.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1631,8 +1765,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-context-menu",
+      "group": "@radix-ui",
       "version": "2.2.16",
-      "purl": "pkg:npm/@radix-ui%2Freact-context-menu@2.2.16",
+      "purl": "pkg:npm/%40radix-ui/react-context-menu@2.2.16",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1643,8 +1778,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-context",
+      "group": "@radix-ui",
       "version": "1.1.2",
-      "purl": "pkg:npm/@radix-ui%2Freact-context@1.1.2",
+      "purl": "pkg:npm/%40radix-ui/react-context@1.1.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1655,8 +1791,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-dialog",
+      "group": "@radix-ui",
       "version": "1.1.15",
-      "purl": "pkg:npm/@radix-ui%2Freact-dialog@1.1.15",
+      "purl": "pkg:npm/%40radix-ui/react-dialog@1.1.15",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1667,8 +1804,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-direction",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-direction@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-direction@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1679,8 +1817,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-dismissable-layer",
+      "group": "@radix-ui",
       "version": "1.1.11",
-      "purl": "pkg:npm/@radix-ui%2Freact-dismissable-layer@1.1.11",
+      "purl": "pkg:npm/%40radix-ui/react-dismissable-layer@1.1.11",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1691,8 +1830,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-dropdown-menu",
+      "group": "@radix-ui",
       "version": "2.1.16",
-      "purl": "pkg:npm/@radix-ui%2Freact-dropdown-menu@2.1.16",
+      "purl": "pkg:npm/%40radix-ui/react-dropdown-menu@2.1.16",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1703,8 +1843,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-focus-guards",
+      "group": "@radix-ui",
       "version": "1.1.3",
-      "purl": "pkg:npm/@radix-ui%2Freact-focus-guards@1.1.3",
+      "purl": "pkg:npm/%40radix-ui/react-focus-guards@1.1.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1715,8 +1856,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-focus-scope",
+      "group": "@radix-ui",
       "version": "1.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-focus-scope@1.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-focus-scope@1.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1727,8 +1869,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-hover-card",
+      "group": "@radix-ui",
       "version": "1.1.15",
-      "purl": "pkg:npm/@radix-ui%2Freact-hover-card@1.1.15",
+      "purl": "pkg:npm/%40radix-ui/react-hover-card@1.1.15",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1739,8 +1882,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-id",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-id@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-id@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1751,8 +1895,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-label",
+      "group": "@radix-ui",
       "version": "2.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-label@2.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-label@2.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1763,8 +1908,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-menu",
+      "group": "@radix-ui",
       "version": "2.1.16",
-      "purl": "pkg:npm/@radix-ui%2Freact-menu@2.1.16",
+      "purl": "pkg:npm/%40radix-ui/react-menu@2.1.16",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1775,8 +1921,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-menubar",
+      "group": "@radix-ui",
       "version": "1.1.16",
-      "purl": "pkg:npm/@radix-ui%2Freact-menubar@1.1.16",
+      "purl": "pkg:npm/%40radix-ui/react-menubar@1.1.16",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1787,8 +1934,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-navigation-menu",
+      "group": "@radix-ui",
       "version": "1.2.14",
-      "purl": "pkg:npm/@radix-ui%2Freact-navigation-menu@1.2.14",
+      "purl": "pkg:npm/%40radix-ui/react-navigation-menu@1.2.14",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1799,8 +1947,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-popover",
+      "group": "@radix-ui",
       "version": "1.1.15",
-      "purl": "pkg:npm/@radix-ui%2Freact-popover@1.1.15",
+      "purl": "pkg:npm/%40radix-ui/react-popover@1.1.15",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1811,8 +1960,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-popper",
+      "group": "@radix-ui",
       "version": "1.2.8",
-      "purl": "pkg:npm/@radix-ui%2Freact-popper@1.2.8",
+      "purl": "pkg:npm/%40radix-ui/react-popper@1.2.8",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1823,8 +1973,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-portal",
+      "group": "@radix-ui",
       "version": "1.1.9",
-      "purl": "pkg:npm/@radix-ui%2Freact-portal@1.1.9",
+      "purl": "pkg:npm/%40radix-ui/react-portal@1.1.9",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1835,8 +1986,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-presence",
+      "group": "@radix-ui",
       "version": "1.1.5",
-      "purl": "pkg:npm/@radix-ui%2Freact-presence@1.1.5",
+      "purl": "pkg:npm/%40radix-ui/react-presence@1.1.5",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1847,8 +1999,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-primitive",
+      "group": "@radix-ui",
       "version": "2.1.3",
-      "purl": "pkg:npm/@radix-ui%2Freact-primitive@2.1.3",
+      "purl": "pkg:npm/%40radix-ui/react-primitive@2.1.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1859,8 +2012,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-progress",
+      "group": "@radix-ui",
       "version": "1.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-progress@1.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-progress@1.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1871,8 +2025,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-radio-group",
+      "group": "@radix-ui",
       "version": "1.3.8",
-      "purl": "pkg:npm/@radix-ui%2Freact-radio-group@1.3.8",
+      "purl": "pkg:npm/%40radix-ui/react-radio-group@1.3.8",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1883,8 +2038,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-roving-focus",
+      "group": "@radix-ui",
       "version": "1.1.11",
-      "purl": "pkg:npm/@radix-ui%2Freact-roving-focus@1.1.11",
+      "purl": "pkg:npm/%40radix-ui/react-roving-focus@1.1.11",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1895,8 +2051,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-scroll-area",
+      "group": "@radix-ui",
       "version": "1.2.10",
-      "purl": "pkg:npm/@radix-ui%2Freact-scroll-area@1.2.10",
+      "purl": "pkg:npm/%40radix-ui/react-scroll-area@1.2.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1907,8 +2064,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-select",
+      "group": "@radix-ui",
       "version": "2.2.6",
-      "purl": "pkg:npm/@radix-ui%2Freact-select@2.2.6",
+      "purl": "pkg:npm/%40radix-ui/react-select@2.2.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1919,8 +2077,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-separator",
+      "group": "@radix-ui",
       "version": "1.1.7",
-      "purl": "pkg:npm/@radix-ui%2Freact-separator@1.1.7",
+      "purl": "pkg:npm/%40radix-ui/react-separator@1.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1931,8 +2090,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-slider",
+      "group": "@radix-ui",
       "version": "1.3.6",
-      "purl": "pkg:npm/@radix-ui%2Freact-slider@1.3.6",
+      "purl": "pkg:npm/%40radix-ui/react-slider@1.3.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1943,8 +2103,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-slot",
+      "group": "@radix-ui",
       "version": "1.2.3",
-      "purl": "pkg:npm/@radix-ui%2Freact-slot@1.2.3",
+      "purl": "pkg:npm/%40radix-ui/react-slot@1.2.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1955,8 +2116,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-switch",
+      "group": "@radix-ui",
       "version": "1.2.6",
-      "purl": "pkg:npm/@radix-ui%2Freact-switch@1.2.6",
+      "purl": "pkg:npm/%40radix-ui/react-switch@1.2.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1967,8 +2129,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-tabs",
+      "group": "@radix-ui",
       "version": "1.1.13",
-      "purl": "pkg:npm/@radix-ui%2Freact-tabs@1.1.13",
+      "purl": "pkg:npm/%40radix-ui/react-tabs@1.1.13",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1979,8 +2142,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-toggle-group",
+      "group": "@radix-ui",
       "version": "1.1.11",
-      "purl": "pkg:npm/@radix-ui%2Freact-toggle-group@1.1.11",
+      "purl": "pkg:npm/%40radix-ui/react-toggle-group@1.1.11",
       "externalReferences": [
         {
           "type": "distribution",
@@ -1991,8 +2155,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-toggle",
+      "group": "@radix-ui",
       "version": "1.1.10",
-      "purl": "pkg:npm/@radix-ui%2Freact-toggle@1.1.10",
+      "purl": "pkg:npm/%40radix-ui/react-toggle@1.1.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2003,8 +2168,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-tooltip",
+      "group": "@radix-ui",
       "version": "1.2.8",
-      "purl": "pkg:npm/@radix-ui%2Freact-tooltip@1.2.8",
+      "purl": "pkg:npm/%40radix-ui/react-tooltip@1.2.8",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2015,8 +2181,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-callback-ref",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-callback-ref@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-use-callback-ref@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2027,8 +2194,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-controllable-state",
+      "group": "@radix-ui",
       "version": "1.2.2",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-controllable-state@1.2.2",
+      "purl": "pkg:npm/%40radix-ui/react-use-controllable-state@1.2.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2039,8 +2207,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-effect-event",
+      "group": "@radix-ui",
       "version": "0.0.2",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-effect-event@0.0.2",
+      "purl": "pkg:npm/%40radix-ui/react-use-effect-event@0.0.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2051,8 +2220,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-escape-keydown",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-escape-keydown@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-use-escape-keydown@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2063,8 +2233,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-is-hydrated",
+      "group": "@radix-ui",
       "version": "0.1.0",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-is-hydrated@0.1.0",
+      "purl": "pkg:npm/%40radix-ui/react-use-is-hydrated@0.1.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2075,8 +2246,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-layout-effect",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-layout-effect@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-use-layout-effect@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2087,8 +2259,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-previous",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-previous@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-use-previous@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2099,8 +2272,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-rect",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-rect@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-use-rect@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2111,8 +2285,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-use-size",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Freact-use-size@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/react-use-size@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2123,8 +2298,9 @@
     {
       "type": "library",
       "name": "@radix-ui/react-visually-hidden",
+      "group": "@radix-ui",
       "version": "1.2.3",
-      "purl": "pkg:npm/@radix-ui%2Freact-visually-hidden@1.2.3",
+      "purl": "pkg:npm/%40radix-ui/react-visually-hidden@1.2.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2135,8 +2311,9 @@
     {
       "type": "library",
       "name": "@radix-ui/rect",
+      "group": "@radix-ui",
       "version": "1.1.1",
-      "purl": "pkg:npm/@radix-ui%2Frect@1.1.1",
+      "purl": "pkg:npm/%40radix-ui/rect@1.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2147,8 +2324,9 @@
     {
       "type": "library",
       "name": "@shikijs/core",
+      "group": "@shikijs",
       "version": "3.14.0",
-      "purl": "pkg:npm/@shikijs%2Fcore@3.14.0",
+      "purl": "pkg:npm/%40shikijs/core@3.14.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2159,8 +2337,9 @@
     {
       "type": "library",
       "name": "@shikijs/engine-javascript",
+      "group": "@shikijs",
       "version": "3.14.0",
-      "purl": "pkg:npm/@shikijs%2Fengine-javascript@3.14.0",
+      "purl": "pkg:npm/%40shikijs/engine-javascript@3.14.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2171,8 +2350,9 @@
     {
       "type": "library",
       "name": "@shikijs/engine-oniguruma",
+      "group": "@shikijs",
       "version": "3.14.0",
-      "purl": "pkg:npm/@shikijs%2Fengine-oniguruma@3.14.0",
+      "purl": "pkg:npm/%40shikijs/engine-oniguruma@3.14.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2183,8 +2363,9 @@
     {
       "type": "library",
       "name": "@shikijs/langs",
+      "group": "@shikijs",
       "version": "3.14.0",
-      "purl": "pkg:npm/@shikijs%2Flangs@3.14.0",
+      "purl": "pkg:npm/%40shikijs/langs@3.14.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2195,8 +2376,9 @@
     {
       "type": "library",
       "name": "@shikijs/themes",
+      "group": "@shikijs",
       "version": "3.14.0",
-      "purl": "pkg:npm/@shikijs%2Fthemes@3.14.0",
+      "purl": "pkg:npm/%40shikijs/themes@3.14.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2207,8 +2389,9 @@
     {
       "type": "library",
       "name": "@shikijs/types",
+      "group": "@shikijs",
       "version": "3.14.0",
-      "purl": "pkg:npm/@shikijs%2Ftypes@3.14.0",
+      "purl": "pkg:npm/%40shikijs/types@3.14.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2219,8 +2402,9 @@
     {
       "type": "library",
       "name": "@shikijs/vscode-textmate",
+      "group": "@shikijs",
       "version": "10.0.2",
-      "purl": "pkg:npm/@shikijs%2Fvscode-textmate@10.0.2",
+      "purl": "pkg:npm/%40shikijs/vscode-textmate@10.0.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2231,8 +2415,9 @@
     {
       "type": "library",
       "name": "@smithy/abort-controller",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fabort-controller@4.2.0",
+      "purl": "pkg:npm/%40smithy/abort-controller@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2243,8 +2428,9 @@
     {
       "type": "library",
       "name": "@smithy/chunked-blob-reader-native",
+      "group": "@smithy",
       "version": "4.2.1",
-      "purl": "pkg:npm/@smithy%2Fchunked-blob-reader-native@4.2.1",
+      "purl": "pkg:npm/%40smithy/chunked-blob-reader-native@4.2.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2255,8 +2441,9 @@
     {
       "type": "library",
       "name": "@smithy/chunked-blob-reader",
+      "group": "@smithy",
       "version": "5.2.0",
-      "purl": "pkg:npm/@smithy%2Fchunked-blob-reader@5.2.0",
+      "purl": "pkg:npm/%40smithy/chunked-blob-reader@5.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2267,8 +2454,9 @@
     {
       "type": "library",
       "name": "@smithy/config-resolver",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Fconfig-resolver@4.3.0",
+      "purl": "pkg:npm/%40smithy/config-resolver@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2279,8 +2467,9 @@
     {
       "type": "library",
       "name": "@smithy/core",
+      "group": "@smithy",
       "version": "3.15.0",
-      "purl": "pkg:npm/@smithy%2Fcore@3.15.0",
+      "purl": "pkg:npm/%40smithy/core@3.15.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2291,8 +2480,9 @@
     {
       "type": "library",
       "name": "@smithy/credential-provider-imds",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fcredential-provider-imds@4.2.0",
+      "purl": "pkg:npm/%40smithy/credential-provider-imds@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2303,8 +2493,9 @@
     {
       "type": "library",
       "name": "@smithy/eventstream-codec",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Feventstream-codec@4.2.0",
+      "purl": "pkg:npm/%40smithy/eventstream-codec@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2315,8 +2506,9 @@
     {
       "type": "library",
       "name": "@smithy/eventstream-serde-browser",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Feventstream-serde-browser@4.2.0",
+      "purl": "pkg:npm/%40smithy/eventstream-serde-browser@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2327,8 +2519,9 @@
     {
       "type": "library",
       "name": "@smithy/eventstream-serde-config-resolver",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Feventstream-serde-config-resolver@4.3.0",
+      "purl": "pkg:npm/%40smithy/eventstream-serde-config-resolver@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2339,8 +2532,9 @@
     {
       "type": "library",
       "name": "@smithy/eventstream-serde-node",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Feventstream-serde-node@4.2.0",
+      "purl": "pkg:npm/%40smithy/eventstream-serde-node@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2351,8 +2545,9 @@
     {
       "type": "library",
       "name": "@smithy/eventstream-serde-universal",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Feventstream-serde-universal@4.2.0",
+      "purl": "pkg:npm/%40smithy/eventstream-serde-universal@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2363,8 +2558,9 @@
     {
       "type": "library",
       "name": "@smithy/fetch-http-handler",
+      "group": "@smithy",
       "version": "5.3.1",
-      "purl": "pkg:npm/@smithy%2Ffetch-http-handler@5.3.1",
+      "purl": "pkg:npm/%40smithy/fetch-http-handler@5.3.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2375,8 +2571,9 @@
     {
       "type": "library",
       "name": "@smithy/hash-blob-browser",
+      "group": "@smithy",
       "version": "4.2.1",
-      "purl": "pkg:npm/@smithy%2Fhash-blob-browser@4.2.1",
+      "purl": "pkg:npm/%40smithy/hash-blob-browser@4.2.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2387,8 +2584,9 @@
     {
       "type": "library",
       "name": "@smithy/hash-node",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fhash-node@4.2.0",
+      "purl": "pkg:npm/%40smithy/hash-node@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2399,8 +2597,9 @@
     {
       "type": "library",
       "name": "@smithy/hash-stream-node",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fhash-stream-node@4.2.0",
+      "purl": "pkg:npm/%40smithy/hash-stream-node@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2411,8 +2610,9 @@
     {
       "type": "library",
       "name": "@smithy/invalid-dependency",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Finvalid-dependency@4.2.0",
+      "purl": "pkg:npm/%40smithy/invalid-dependency@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2423,8 +2623,9 @@
     {
       "type": "library",
       "name": "@smithy/is-array-buffer",
+      "group": "@smithy",
       "version": "2.2.0",
-      "purl": "pkg:npm/@smithy%2Fis-array-buffer@2.2.0",
+      "purl": "pkg:npm/%40smithy/is-array-buffer@2.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2435,8 +2636,9 @@
     {
       "type": "library",
       "name": "@smithy/is-array-buffer",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fis-array-buffer@4.2.0",
+      "purl": "pkg:npm/%40smithy/is-array-buffer@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2447,8 +2649,9 @@
     {
       "type": "library",
       "name": "@smithy/md5-js",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fmd5-js@4.2.0",
+      "purl": "pkg:npm/%40smithy/md5-js@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2459,8 +2662,9 @@
     {
       "type": "library",
       "name": "@smithy/middleware-content-length",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fmiddleware-content-length@4.2.0",
+      "purl": "pkg:npm/%40smithy/middleware-content-length@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2471,8 +2675,9 @@
     {
       "type": "library",
       "name": "@smithy/middleware-endpoint",
+      "group": "@smithy",
       "version": "4.3.1",
-      "purl": "pkg:npm/@smithy%2Fmiddleware-endpoint@4.3.1",
+      "purl": "pkg:npm/%40smithy/middleware-endpoint@4.3.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2483,8 +2688,9 @@
     {
       "type": "library",
       "name": "@smithy/middleware-retry",
+      "group": "@smithy",
       "version": "4.4.1",
-      "purl": "pkg:npm/@smithy%2Fmiddleware-retry@4.4.1",
+      "purl": "pkg:npm/%40smithy/middleware-retry@4.4.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2495,8 +2701,9 @@
     {
       "type": "library",
       "name": "@smithy/middleware-serde",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fmiddleware-serde@4.2.0",
+      "purl": "pkg:npm/%40smithy/middleware-serde@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2507,8 +2714,9 @@
     {
       "type": "library",
       "name": "@smithy/middleware-stack",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fmiddleware-stack@4.2.0",
+      "purl": "pkg:npm/%40smithy/middleware-stack@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2519,8 +2727,9 @@
     {
       "type": "library",
       "name": "@smithy/node-config-provider",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Fnode-config-provider@4.3.0",
+      "purl": "pkg:npm/%40smithy/node-config-provider@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2531,8 +2740,9 @@
     {
       "type": "library",
       "name": "@smithy/node-http-handler",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Fnode-http-handler@4.3.0",
+      "purl": "pkg:npm/%40smithy/node-http-handler@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2543,8 +2753,9 @@
     {
       "type": "library",
       "name": "@smithy/property-provider",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fproperty-provider@4.2.0",
+      "purl": "pkg:npm/%40smithy/property-provider@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2555,8 +2766,9 @@
     {
       "type": "library",
       "name": "@smithy/protocol-http",
+      "group": "@smithy",
       "version": "5.3.0",
-      "purl": "pkg:npm/@smithy%2Fprotocol-http@5.3.0",
+      "purl": "pkg:npm/%40smithy/protocol-http@5.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2567,8 +2779,9 @@
     {
       "type": "library",
       "name": "@smithy/querystring-builder",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fquerystring-builder@4.2.0",
+      "purl": "pkg:npm/%40smithy/querystring-builder@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2579,8 +2792,9 @@
     {
       "type": "library",
       "name": "@smithy/querystring-parser",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fquerystring-parser@4.2.0",
+      "purl": "pkg:npm/%40smithy/querystring-parser@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2591,8 +2805,9 @@
     {
       "type": "library",
       "name": "@smithy/service-error-classification",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Fservice-error-classification@4.2.0",
+      "purl": "pkg:npm/%40smithy/service-error-classification@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2603,8 +2818,9 @@
     {
       "type": "library",
       "name": "@smithy/shared-ini-file-loader",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Fshared-ini-file-loader@4.3.0",
+      "purl": "pkg:npm/%40smithy/shared-ini-file-loader@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2615,8 +2831,9 @@
     {
       "type": "library",
       "name": "@smithy/signature-v4",
+      "group": "@smithy",
       "version": "5.3.0",
-      "purl": "pkg:npm/@smithy%2Fsignature-v4@5.3.0",
+      "purl": "pkg:npm/%40smithy/signature-v4@5.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2627,8 +2844,9 @@
     {
       "type": "library",
       "name": "@smithy/smithy-client",
+      "group": "@smithy",
       "version": "4.7.1",
-      "purl": "pkg:npm/@smithy%2Fsmithy-client@4.7.1",
+      "purl": "pkg:npm/%40smithy/smithy-client@4.7.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2639,8 +2857,9 @@
     {
       "type": "library",
       "name": "@smithy/types",
+      "group": "@smithy",
       "version": "4.6.0",
-      "purl": "pkg:npm/@smithy%2Ftypes@4.6.0",
+      "purl": "pkg:npm/%40smithy/types@4.6.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2651,8 +2870,9 @@
     {
       "type": "library",
       "name": "@smithy/url-parser",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Furl-parser@4.2.0",
+      "purl": "pkg:npm/%40smithy/url-parser@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2663,8 +2883,9 @@
     {
       "type": "library",
       "name": "@smithy/util-base64",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Futil-base64@4.3.0",
+      "purl": "pkg:npm/%40smithy/util-base64@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2675,8 +2896,9 @@
     {
       "type": "library",
       "name": "@smithy/util-body-length-browser",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-body-length-browser@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-body-length-browser@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2687,8 +2909,9 @@
     {
       "type": "library",
       "name": "@smithy/util-body-length-node",
+      "group": "@smithy",
       "version": "4.2.1",
-      "purl": "pkg:npm/@smithy%2Futil-body-length-node@4.2.1",
+      "purl": "pkg:npm/%40smithy/util-body-length-node@4.2.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2699,8 +2922,9 @@
     {
       "type": "library",
       "name": "@smithy/util-buffer-from",
+      "group": "@smithy",
       "version": "2.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-buffer-from@2.2.0",
+      "purl": "pkg:npm/%40smithy/util-buffer-from@2.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2711,8 +2935,9 @@
     {
       "type": "library",
       "name": "@smithy/util-buffer-from",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-buffer-from@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-buffer-from@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2723,8 +2948,9 @@
     {
       "type": "library",
       "name": "@smithy/util-config-provider",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-config-provider@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-config-provider@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2735,8 +2961,9 @@
     {
       "type": "library",
       "name": "@smithy/util-defaults-mode-browser",
+      "group": "@smithy",
       "version": "4.3.0",
-      "purl": "pkg:npm/@smithy%2Futil-defaults-mode-browser@4.3.0",
+      "purl": "pkg:npm/%40smithy/util-defaults-mode-browser@4.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2747,8 +2974,9 @@
     {
       "type": "library",
       "name": "@smithy/util-defaults-mode-node",
+      "group": "@smithy",
       "version": "4.2.1",
-      "purl": "pkg:npm/@smithy%2Futil-defaults-mode-node@4.2.1",
+      "purl": "pkg:npm/%40smithy/util-defaults-mode-node@4.2.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2759,8 +2987,9 @@
     {
       "type": "library",
       "name": "@smithy/util-endpoints",
+      "group": "@smithy",
       "version": "3.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-endpoints@3.2.0",
+      "purl": "pkg:npm/%40smithy/util-endpoints@3.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2771,8 +3000,9 @@
     {
       "type": "library",
       "name": "@smithy/util-hex-encoding",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-hex-encoding@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-hex-encoding@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2783,8 +3013,9 @@
     {
       "type": "library",
       "name": "@smithy/util-middleware",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-middleware@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-middleware@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2795,8 +3026,9 @@
     {
       "type": "library",
       "name": "@smithy/util-retry",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-retry@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-retry@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2807,8 +3039,9 @@
     {
       "type": "library",
       "name": "@smithy/util-stream",
+      "group": "@smithy",
       "version": "4.5.0",
-      "purl": "pkg:npm/@smithy%2Futil-stream@4.5.0",
+      "purl": "pkg:npm/%40smithy/util-stream@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2819,8 +3052,9 @@
     {
       "type": "library",
       "name": "@smithy/util-uri-escape",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-uri-escape@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-uri-escape@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2831,8 +3065,9 @@
     {
       "type": "library",
       "name": "@smithy/util-utf8",
+      "group": "@smithy",
       "version": "2.3.0",
-      "purl": "pkg:npm/@smithy%2Futil-utf8@2.3.0",
+      "purl": "pkg:npm/%40smithy/util-utf8@2.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2843,8 +3078,9 @@
     {
       "type": "library",
       "name": "@smithy/util-utf8",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-utf8@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-utf8@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2855,8 +3091,9 @@
     {
       "type": "library",
       "name": "@smithy/util-waiter",
+      "group": "@smithy",
       "version": "4.2.0",
-      "purl": "pkg:npm/@smithy%2Futil-waiter@4.2.0",
+      "purl": "pkg:npm/%40smithy/util-waiter@4.2.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2867,8 +3104,9 @@
     {
       "type": "library",
       "name": "@smithy/uuid",
+      "group": "@smithy",
       "version": "1.1.0",
-      "purl": "pkg:npm/@smithy%2Fuuid@1.1.0",
+      "purl": "pkg:npm/%40smithy/uuid@1.1.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2879,8 +3117,9 @@
     {
       "type": "library",
       "name": "@standard-schema/utils",
+      "group": "@standard-schema",
       "version": "0.3.0",
-      "purl": "pkg:npm/@standard-schema%2Futils@0.3.0",
+      "purl": "pkg:npm/%40standard-schema/utils@0.3.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2891,8 +3130,9 @@
     {
       "type": "library",
       "name": "@tanstack/query-core",
+      "group": "@tanstack",
       "version": "5.90.2",
-      "purl": "pkg:npm/@tanstack%2Fquery-core@5.90.2",
+      "purl": "pkg:npm/%40tanstack/query-core@5.90.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2903,8 +3143,9 @@
     {
       "type": "library",
       "name": "@tanstack/react-query",
+      "group": "@tanstack",
       "version": "5.90.2",
-      "purl": "pkg:npm/@tanstack%2Freact-query@5.90.2",
+      "purl": "pkg:npm/%40tanstack/react-query@5.90.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2915,8 +3156,9 @@
     {
       "type": "library",
       "name": "@trpc/client",
+      "group": "@trpc",
       "version": "11.6.0",
-      "purl": "pkg:npm/@trpc%2Fclient@11.6.0",
+      "purl": "pkg:npm/%40trpc/client@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2927,8 +3169,9 @@
     {
       "type": "library",
       "name": "@trpc/react-query",
+      "group": "@trpc",
       "version": "11.6.0",
-      "purl": "pkg:npm/@trpc%2Freact-query@11.6.0",
+      "purl": "pkg:npm/%40trpc/react-query@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2939,8 +3182,9 @@
     {
       "type": "library",
       "name": "@trpc/server",
+      "group": "@trpc",
       "version": "11.6.0",
-      "purl": "pkg:npm/@trpc%2Fserver@11.6.0",
+      "purl": "pkg:npm/%40trpc/server@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2951,8 +3195,9 @@
     {
       "type": "library",
       "name": "@types/d3-array",
+      "group": "@types",
       "version": "3.2.2",
-      "purl": "pkg:npm/@types%2Fd3-array@3.2.2",
+      "purl": "pkg:npm/%40types/d3-array@3.2.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2963,8 +3208,9 @@
     {
       "type": "library",
       "name": "@types/d3-axis",
+      "group": "@types",
       "version": "3.0.6",
-      "purl": "pkg:npm/@types%2Fd3-axis@3.0.6",
+      "purl": "pkg:npm/%40types/d3-axis@3.0.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2975,8 +3221,9 @@
     {
       "type": "library",
       "name": "@types/d3-brush",
+      "group": "@types",
       "version": "3.0.6",
-      "purl": "pkg:npm/@types%2Fd3-brush@3.0.6",
+      "purl": "pkg:npm/%40types/d3-brush@3.0.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2987,8 +3234,9 @@
     {
       "type": "library",
       "name": "@types/d3-chord",
+      "group": "@types",
       "version": "3.0.6",
-      "purl": "pkg:npm/@types%2Fd3-chord@3.0.6",
+      "purl": "pkg:npm/%40types/d3-chord@3.0.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -2999,8 +3247,9 @@
     {
       "type": "library",
       "name": "@types/d3-color",
+      "group": "@types",
       "version": "3.1.3",
-      "purl": "pkg:npm/@types%2Fd3-color@3.1.3",
+      "purl": "pkg:npm/%40types/d3-color@3.1.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3011,8 +3260,9 @@
     {
       "type": "library",
       "name": "@types/d3-contour",
+      "group": "@types",
       "version": "3.0.6",
-      "purl": "pkg:npm/@types%2Fd3-contour@3.0.6",
+      "purl": "pkg:npm/%40types/d3-contour@3.0.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3023,8 +3273,9 @@
     {
       "type": "library",
       "name": "@types/d3-delaunay",
+      "group": "@types",
       "version": "6.0.4",
-      "purl": "pkg:npm/@types%2Fd3-delaunay@6.0.4",
+      "purl": "pkg:npm/%40types/d3-delaunay@6.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3035,8 +3286,9 @@
     {
       "type": "library",
       "name": "@types/d3-dispatch",
+      "group": "@types",
       "version": "3.0.7",
-      "purl": "pkg:npm/@types%2Fd3-dispatch@3.0.7",
+      "purl": "pkg:npm/%40types/d3-dispatch@3.0.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3047,8 +3299,9 @@
     {
       "type": "library",
       "name": "@types/d3-drag",
+      "group": "@types",
       "version": "3.0.7",
-      "purl": "pkg:npm/@types%2Fd3-drag@3.0.7",
+      "purl": "pkg:npm/%40types/d3-drag@3.0.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3059,8 +3312,9 @@
     {
       "type": "library",
       "name": "@types/d3-dsv",
+      "group": "@types",
       "version": "3.0.7",
-      "purl": "pkg:npm/@types%2Fd3-dsv@3.0.7",
+      "purl": "pkg:npm/%40types/d3-dsv@3.0.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3071,8 +3325,9 @@
     {
       "type": "library",
       "name": "@types/d3-ease",
+      "group": "@types",
       "version": "3.0.2",
-      "purl": "pkg:npm/@types%2Fd3-ease@3.0.2",
+      "purl": "pkg:npm/%40types/d3-ease@3.0.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3083,8 +3338,9 @@
     {
       "type": "library",
       "name": "@types/d3-fetch",
+      "group": "@types",
       "version": "3.0.7",
-      "purl": "pkg:npm/@types%2Fd3-fetch@3.0.7",
+      "purl": "pkg:npm/%40types/d3-fetch@3.0.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3095,8 +3351,9 @@
     {
       "type": "library",
       "name": "@types/d3-force",
+      "group": "@types",
       "version": "3.0.10",
-      "purl": "pkg:npm/@types%2Fd3-force@3.0.10",
+      "purl": "pkg:npm/%40types/d3-force@3.0.10",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3107,8 +3364,9 @@
     {
       "type": "library",
       "name": "@types/d3-format",
+      "group": "@types",
       "version": "3.0.4",
-      "purl": "pkg:npm/@types%2Fd3-format@3.0.4",
+      "purl": "pkg:npm/%40types/d3-format@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3119,8 +3377,9 @@
     {
       "type": "library",
       "name": "@types/d3-geo",
+      "group": "@types",
       "version": "3.1.0",
-      "purl": "pkg:npm/@types%2Fd3-geo@3.1.0",
+      "purl": "pkg:npm/%40types/d3-geo@3.1.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3131,8 +3390,9 @@
     {
       "type": "library",
       "name": "@types/d3-hierarchy",
+      "group": "@types",
       "version": "3.1.7",
-      "purl": "pkg:npm/@types%2Fd3-hierarchy@3.1.7",
+      "purl": "pkg:npm/%40types/d3-hierarchy@3.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3143,8 +3403,9 @@
     {
       "type": "library",
       "name": "@types/d3-interpolate",
+      "group": "@types",
       "version": "3.0.4",
-      "purl": "pkg:npm/@types%2Fd3-interpolate@3.0.4",
+      "purl": "pkg:npm/%40types/d3-interpolate@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3155,8 +3416,9 @@
     {
       "type": "library",
       "name": "@types/d3-path",
+      "group": "@types",
       "version": "3.1.1",
-      "purl": "pkg:npm/@types%2Fd3-path@3.1.1",
+      "purl": "pkg:npm/%40types/d3-path@3.1.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3167,8 +3429,9 @@
     {
       "type": "library",
       "name": "@types/d3-polygon",
+      "group": "@types",
       "version": "3.0.2",
-      "purl": "pkg:npm/@types%2Fd3-polygon@3.0.2",
+      "purl": "pkg:npm/%40types/d3-polygon@3.0.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3179,8 +3442,9 @@
     {
       "type": "library",
       "name": "@types/d3-quadtree",
+      "group": "@types",
       "version": "3.0.6",
-      "purl": "pkg:npm/@types%2Fd3-quadtree@3.0.6",
+      "purl": "pkg:npm/%40types/d3-quadtree@3.0.6",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3191,8 +3455,9 @@
     {
       "type": "library",
       "name": "@types/d3-random",
+      "group": "@types",
       "version": "3.0.3",
-      "purl": "pkg:npm/@types%2Fd3-random@3.0.3",
+      "purl": "pkg:npm/%40types/d3-random@3.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3203,8 +3468,9 @@
     {
       "type": "library",
       "name": "@types/d3-scale-chromatic",
+      "group": "@types",
       "version": "3.1.0",
-      "purl": "pkg:npm/@types%2Fd3-scale-chromatic@3.1.0",
+      "purl": "pkg:npm/%40types/d3-scale-chromatic@3.1.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3215,8 +3481,9 @@
     {
       "type": "library",
       "name": "@types/d3-scale",
+      "group": "@types",
       "version": "4.0.9",
-      "purl": "pkg:npm/@types%2Fd3-scale@4.0.9",
+      "purl": "pkg:npm/%40types/d3-scale@4.0.9",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3227,8 +3494,9 @@
     {
       "type": "library",
       "name": "@types/d3-selection",
+      "group": "@types",
       "version": "3.0.11",
-      "purl": "pkg:npm/@types%2Fd3-selection@3.0.11",
+      "purl": "pkg:npm/%40types/d3-selection@3.0.11",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3239,8 +3507,9 @@
     {
       "type": "library",
       "name": "@types/d3-shape",
+      "group": "@types",
       "version": "3.1.7",
-      "purl": "pkg:npm/@types%2Fd3-shape@3.1.7",
+      "purl": "pkg:npm/%40types/d3-shape@3.1.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3251,8 +3520,9 @@
     {
       "type": "library",
       "name": "@types/d3-time-format",
+      "group": "@types",
       "version": "4.0.3",
-      "purl": "pkg:npm/@types%2Fd3-time-format@4.0.3",
+      "purl": "pkg:npm/%40types/d3-time-format@4.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3263,8 +3533,9 @@
     {
       "type": "library",
       "name": "@types/d3-time",
+      "group": "@types",
       "version": "3.0.4",
-      "purl": "pkg:npm/@types%2Fd3-time@3.0.4",
+      "purl": "pkg:npm/%40types/d3-time@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3275,8 +3546,9 @@
     {
       "type": "library",
       "name": "@types/d3-timer",
+      "group": "@types",
       "version": "3.0.2",
-      "purl": "pkg:npm/@types%2Fd3-timer@3.0.2",
+      "purl": "pkg:npm/%40types/d3-timer@3.0.2",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3287,8 +3559,9 @@
     {
       "type": "library",
       "name": "@types/d3-transition",
+      "group": "@types",
       "version": "3.0.9",
-      "purl": "pkg:npm/@types%2Fd3-transition@3.0.9",
+      "purl": "pkg:npm/%40types/d3-transition@3.0.9",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3299,8 +3572,9 @@
     {
       "type": "library",
       "name": "@types/d3-zoom",
+      "group": "@types",
       "version": "3.0.8",
-      "purl": "pkg:npm/@types%2Fd3-zoom@3.0.8",
+      "purl": "pkg:npm/%40types/d3-zoom@3.0.8",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3311,8 +3585,9 @@
     {
       "type": "library",
       "name": "@types/d3",
+      "group": "@types",
       "version": "7.4.3",
-      "purl": "pkg:npm/@types%2Fd3@7.4.3",
+      "purl": "pkg:npm/%40types/d3@7.4.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3323,8 +3598,9 @@
     {
       "type": "library",
       "name": "@types/debug",
+      "group": "@types",
       "version": "4.1.12",
-      "purl": "pkg:npm/@types%2Fdebug@4.1.12",
+      "purl": "pkg:npm/%40types/debug@4.1.12",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3335,8 +3611,9 @@
     {
       "type": "library",
       "name": "@types/estree-jsx",
+      "group": "@types",
       "version": "1.0.5",
-      "purl": "pkg:npm/@types%2Festree-jsx@1.0.5",
+      "purl": "pkg:npm/%40types/estree-jsx@1.0.5",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3347,8 +3624,9 @@
     {
       "type": "library",
       "name": "@types/estree",
+      "group": "@types",
       "version": "1.0.8",
-      "purl": "pkg:npm/@types%2Festree@1.0.8",
+      "purl": "pkg:npm/%40types/estree@1.0.8",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3359,8 +3637,9 @@
     {
       "type": "library",
       "name": "@types/geojson",
+      "group": "@types",
       "version": "7946.0.16",
-      "purl": "pkg:npm/@types%2Fgeojson@7946.0.16",
+      "purl": "pkg:npm/%40types/geojson@7946.0.16",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3371,8 +3650,9 @@
     {
       "type": "library",
       "name": "@types/hast",
+      "group": "@types",
       "version": "3.0.4",
-      "purl": "pkg:npm/@types%2Fhast@3.0.4",
+      "purl": "pkg:npm/%40types/hast@3.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3383,8 +3663,9 @@
     {
       "type": "library",
       "name": "@types/katex",
+      "group": "@types",
       "version": "0.16.7",
-      "purl": "pkg:npm/@types%2Fkatex@0.16.7",
+      "purl": "pkg:npm/%40types/katex@0.16.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3395,8 +3676,9 @@
     {
       "type": "library",
       "name": "@types/mdast",
+      "group": "@types",
       "version": "4.0.4",
-      "purl": "pkg:npm/@types%2Fmdast@4.0.4",
+      "purl": "pkg:npm/%40types/mdast@4.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3407,8 +3689,9 @@
     {
       "type": "library",
       "name": "@types/ms",
+      "group": "@types",
       "version": "2.1.0",
-      "purl": "pkg:npm/@types%2Fms@2.1.0",
+      "purl": "pkg:npm/%40types/ms@2.1.0",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3419,8 +3702,9 @@
     {
       "type": "library",
       "name": "@types/node",
+      "group": "@types",
       "version": "14.18.63",
-      "purl": "pkg:npm/@types%2Fnode@14.18.63",
+      "purl": "pkg:npm/%40types/node@14.18.63",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3431,8 +3715,9 @@
     {
       "type": "library",
       "name": "@types/pako",
+      "group": "@types",
       "version": "2.0.4",
-      "purl": "pkg:npm/@types%2Fpako@2.0.4",
+      "purl": "pkg:npm/%40types/pako@2.0.4",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3443,8 +3728,9 @@
     {
       "type": "library",
       "name": "@types/raf",
+      "group": "@types",
       "version": "3.4.3",
-      "purl": "pkg:npm/@types%2Fraf@3.4.3",
+      "purl": "pkg:npm/%40types/raf@3.4.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3455,8 +3741,9 @@
     {
       "type": "library",
       "name": "@types/react-dom",
+      "group": "@types",
       "version": "19.2.1",
-      "purl": "pkg:npm/@types%2Freact-dom@19.2.1",
+      "purl": "pkg:npm/%40types/react-dom@19.2.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3467,8 +3754,9 @@
     {
       "type": "library",
       "name": "@types/react",
+      "group": "@types",
       "version": "19.2.1",
-      "purl": "pkg:npm/@types%2Freact@19.2.1",
+      "purl": "pkg:npm/%40types/react@19.2.1",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3479,8 +3767,9 @@
     {
       "type": "library",
       "name": "@types/trusted-types",
+      "group": "@types",
       "version": "2.0.7",
-      "purl": "pkg:npm/@types%2Ftrusted-types@2.0.7",
+      "purl": "pkg:npm/%40types/trusted-types@2.0.7",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3491,8 +3780,9 @@
     {
       "type": "library",
       "name": "@types/unist",
+      "group": "@types",
       "version": "2.0.11",
-      "purl": "pkg:npm/@types%2Funist@2.0.11",
+      "purl": "pkg:npm/%40types/unist@2.0.11",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3503,8 +3793,9 @@
     {
       "type": "library",
       "name": "@types/unist",
+      "group": "@types",
       "version": "3.0.3",
-      "purl": "pkg:npm/@types%2Funist@3.0.3",
+      "purl": "pkg:npm/%40types/unist@3.0.3",
       "externalReferences": [
         {
           "type": "distribution",
@@ -3515,8 +3806,9 @@
     {
       "type": "library",
       "name": "@ungap/structured-clone",
+      "group": "@ungap",
       "version": "1.3.0",
-      "purl": "pkg:npm/@ungap%2Fstructured-clone@1.3.0",
+      "purl": "pkg:npm/%40ungap/structured-clone@1.3.0",
       "externalReferences": [
         {
           "type": "distribution",
