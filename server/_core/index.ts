@@ -147,14 +147,29 @@ async function startServer() {
       const { allQueueStats } = await import("../jobQueue");
       const queues = await allQueueStats();
       const names = Object.keys(queues);
+
+      // Queues are built LAZILY, on first use. So a freshly restarted process
+      // has none registered yet, and asking "are all live queues durable?" of an
+      // empty set must not be answered "no" — a Redis-configured instance would
+      // then advertise `durable: false` moments after boot, which is the exact
+      // opposite of the truth on an endpoint an institution reads as evidence.
+      //
+      // With nothing registered, durability is a property of CONFIGURATION;
+      // once a queue exists, it is a property of what actually got built.
+      const configuredDurable = !!process.env.REDIS_URL?.trim();
       const anyBroken = names.some((n) => queues[n].error);
-      const allDurable = names.length > 0 && names.every((n) => queues[n].durable);
+      const durable = names.length === 0 ? configuredDurable : names.every((n) => queues[n].durable);
+
       checks.queue = {
-        status: anyBroken ? "error" : allDurable ? "ok" : "degraded",
-        durable: allDurable,
-        // No queue has been created yet in this process — reconciliation and
-        // webhook delivery both build theirs lazily on first use.
-        ...(names.length === 0 ? { note: "no queue initialised yet" } : { queues }),
+        status: anyBroken ? "error" : durable ? "ok" : "degraded",
+        durable,
+        ...(names.length === 0
+          ? {
+              note: configuredDurable
+                ? "REDIS_URL is set; no queue initialised yet (built on first use)"
+                : "REDIS_URL is not set — the in-process fallback will be used",
+            }
+          : { queues }),
       };
     } catch (err) {
       checks.queue = {

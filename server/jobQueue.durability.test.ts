@@ -56,7 +56,14 @@ describe.skipIf(!REDIS_URL)("durable queue — the contract this platform relies
   const open: JobQueue<unknown>[] = [];
 
   afterAll(async () => {
-    // BullMQ holds Redis connections open; without this vitest hangs.
+    // Two separate obligations, and the first was missing:
+    //
+    //  1. CLOSE what createQueue built. Each BullMQ queue owns a Queue AND a
+    //     Worker, each with its own Redis connection. The Worker's is blocking,
+    //     so leaving it open leaks connections and can stop vitest terminating.
+    //  2. Remove the Redis keys, so a rerun never adopts this run's leftovers.
+    for (const q of open) await q.close().catch(() => {});
+
     const { Queue } = await import("bullmq");
     for (const name of created) {
       const q = new Queue(name, { connection: { url: REDIS_URL } as never });
@@ -202,6 +209,8 @@ describe.skipIf(!REDIS_URL)("durable queue — the contract this platform relies
 
     const a = await createQueue<{ id: number }>(name, async (j) => { runs.push(`a:${j.data.id}`); }, { attempts: 1 });
     const b = await createQueue<{ id: number }>(name, async (j) => { runs.push(`b:${j.data.id}`); }, { attempts: 1 });
+    // BOTH, not just the last: createQueue registers by name, so `b` replaced
+    // `a` in the registry and only `b` would otherwise ever be closed.
     open.push(a as JobQueue<unknown>, b as JobQueue<unknown>);
 
     await a.enqueue("shared-job", { id: 7 });

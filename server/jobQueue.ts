@@ -80,6 +80,15 @@ export interface JobQueue<T> {
    * reclaim capacity, never as the sole guard against a job executing.
    */
   remove?(name: string): Promise<void>;
+  /**
+   * Release the backend's resources and deregister the queue.
+   *
+   * The server never calls this — its queues live as long as the process, which
+   * is the point of them. TESTS must, because a BullMQ queue holds a Queue and a
+   * Worker, each with its own Redis connection, and an unclosed pair keeps the
+   * event loop alive: the run leaks connections and may simply never terminate.
+   */
+  close(): Promise<void>;
   /** Which backend is live — surfaced in health/ops output. */
   readonly backend: "bullmq" | "in-process";
 }
@@ -113,6 +122,12 @@ class InProcessQueue<T> implements JobQueue<T> {
     // No inspectable store: work lives in closures and dies with the process.
     // Reporting `durable: false` is the point — it is the degraded signal.
     return { backend: this.backend, durable: false };
+  }
+
+  async close(): Promise<void> {
+    // Nothing to release — pending work is timers and closures, and the retry
+    // timers are already unref'd so they cannot hold the process open.
+    LIVE_QUEUES.delete(this.queueName);
   }
 
   async enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
@@ -171,7 +186,7 @@ async function createBullMqQueue<T>(
     },
   });
 
-  new Worker(
+  const worker = new Worker(
     queueName,
     async (bullJob) => {
       await handler({
@@ -181,10 +196,18 @@ async function createBullMqQueue<T>(
       });
     },
     { connection },
-  ).on("error", (err) => console.error(`[queue:${queueName}] worker error:`, err.message));
+  );
+  worker.on("error", (err) => console.error(`[queue:${queueName}] worker error:`, err.message));
 
   return {
     backend: "bullmq" as const,
+    async close(): Promise<void> {
+      // Worker first: it holds the blocking connection that keeps the event
+      // loop alive, so closing the Queue alone would still hang a test run.
+      await worker.close().catch(() => {});
+      await queue.close().catch(() => {});
+      LIVE_QUEUES.delete(queueName);
+    },
     async stats(): Promise<QueueStats> {
       try {
         const c = await queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
