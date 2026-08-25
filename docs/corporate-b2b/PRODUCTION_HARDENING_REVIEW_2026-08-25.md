@@ -87,7 +87,7 @@ one-to-many split, and divided by a zero-value receipt when scoring confidence.
 **Done:** the allocator now distinguishes four outcomes — `unique`, `ambiguous`, `indeterminate`
 (search budget exhausted, which is not the same as "no match exists") and `none` — proposes nothing
 for the middle two, and reports them as `unresolvedAmbiguities` so a refusal is distinguishable from
-finding nothing. Non-positive and non-finite amounts are excluded. 10 tests in
+finding nothing. Non-positive and non-finite amounts are excluded. 21 tests in
 `server/m2mAllocation.test.ts`; reverting to first-hit-wins fails the two ambiguity tests, verified.
 
 **Not done — owner decision:** the function is still not wired to any procedure. Wiring it is feature
@@ -311,8 +311,8 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B AI boundary | 11 tests pass; 6 fail when the rule is removed (verified) |
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
-| M2M allocation | 10 tests pass; 2 fail when reverted to first-hit-wins (verified) |
-| Full suite | 2009 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
+| Full suite | 2023 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in
