@@ -224,7 +224,12 @@ made `INV-2847` match `INV-28470`, so a receipt whose real invoice was absent fr
 silently attached to a longer one. Both sides now go through the same identifier extractor and are
 compared identifier-to-identifier.
 
-**The honest summary of §2.4, after four rounds:** the shortfall is no longer structurally null, and
+Fifth round: a reference naming two invoices where only one was still open was read as determined,
+so the whole receipt was diagnosed against that one. A multi-invoice reference is now refused
+outright — a split remittance is an allocation question, and allocation is `runM2MMatching`'s job,
+not a shortfall calculation's.
+
+**The honest summary of §2.4, after five rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.

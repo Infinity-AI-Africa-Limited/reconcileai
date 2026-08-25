@@ -193,6 +193,26 @@ describe("choosing what a diagnosis may compare a receipt against", () => {
     expect(chosen).toEqual([]);
   });
 
+  it("should still refuse a split remittance when only one of its invoices is open", () => {
+    // Finding one of the two does not make the receipt a payment against that
+    // one. Diagnosing the whole 1,500,000 against a 1,000,000 invoice reports a
+    // 500,000 shortfall that does not exist, on a single-invoice action draft.
+    const receipt = txn(1_500_000, "INV-2847 INV-2848", "part settlement");
+    const chosen = determinateCandidates(receipt, [txn(1_000_000, "INV-2847"), txn(900_000, "INV-9000")]);
+    expect(chosen).toEqual([]);
+  });
+
+  it("should treat one invoice named twice as one invoice, not a split", () => {
+    // The control for the rule above: the same number routinely appears in both
+    // the reference and the description, and counting raw hits would read that
+    // as a two-invoice remittance and refuse every ordinary receipt.
+    const receipt = txn(950_000, "INV-2847", "payment for INV-2847");
+    const exact = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const chosen = determinateCandidates(receipt, [exact, txn(955_000, "INV-3100")]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(exact.id);
+  });
+
   it("should not let a longer invoice number swallow a shorter one", () => {
     // Substring matching made INV-2847 match INV-28470, so a receipt whose real
     // invoice is absent from the open pool attached to a longer one and

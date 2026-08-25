@@ -694,21 +694,33 @@ export function determinateCandidates(
 
   const invoiceNumbers = parseReference(txn.transactionRef, txn.description).invoiceNumbers;
   if (invoiceNumbers.length > 0) {
+    // Deduplicated by identifier, because the same invoice number routinely
+    // appears in BOTH the reference and the description ("INV-2847" /
+    // "payment for INV-2847") and counting the raw hits would read one invoice
+    // as two.
+    const wanted = new Set(invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
+
+    // A reference naming SEVERAL invoices is a split remittance, and that is an
+    // allocation question rather than a shortfall one. It stays unresolved here
+    // however many of them are currently open: finding only one of the two in
+    // the pool does not make the receipt a payment against that one, and
+    // diagnosing the whole amount against it produces exactly the wrong
+    // shortfall and a single-invoice action draft. Splits are what
+    // runM2MMatching is for.
+    if (wanted.size > 1) return [];
+
     // Compare EXTRACTED IDENTIFIERS, not substrings. A normalised substring
     // test makes `INV-2847` match `INV-28470`, so a receipt whose real invoice
     // is not in the open pool silently attaches to a longer one and quantifies
     // a shortfall against it. Both sides go through the same extractor, so the
     // comparison is identifier-to-identifier.
-    const wanted = new Set(invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
     const named = candidates.filter((candidate) => {
       const theirs = parseReference(candidate.transactionRef, candidate.description).invoiceNumbers;
       return theirs.some((n) => wanted.has(normalizeStr(n)));
     });
-    // One invoice named and found: determined. Several named and found is a
-    // split remittance, which is an allocation question rather than a
-    // shortfall one, so it is not resolved here either.
+    // Exactly one open invoice carries the named identifier: determined. Two
+    // carrying it is a duplicated invoice — a governance defect, not a target.
     if (named.length === 1) return named;
-    if (named.length > 1) return [];
   }
 
   return [];
