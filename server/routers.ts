@@ -4459,6 +4459,10 @@ Always be specific, reference actual exception IDs and amounts where available, 
           organizationId: orgId,
           counterpartyChannelIds,
           currency: txnRows.currency,
+          // Only this payer's own items are comparable. Currency and channel
+          // narrow the pool; they do not make its members RELATED, and
+          // findNearestTarget then picks by amount alone.
+          counterparty: txnRows.counterparty,
           around: new Date(txnRows.transactionDate),
           windowDays: diagnosisConfig.dateWindowDays,
         });

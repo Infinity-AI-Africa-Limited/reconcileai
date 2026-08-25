@@ -766,6 +766,21 @@ export async function getCounterpartyChannelIds(params: {
  *   - APPROVED CHANNEL PAIRING. Only channels this tenant's jobs actually
  *     reconcile this feed against — see getCounterpartyChannelIds. "Any other
  *     channel" is not a counterparty leg.
+ *   - SAME COUNTERPARTY. Currency and channel narrow the pool; they do not make
+ *     the members of it RELATED. `findNearestTarget` then picks by amount alone,
+ *     so a distributor paying 950,000 against a 1,000,000 invoice is scored
+ *     against whichever open invoice in the window happens to be numerically
+ *     nearest — possibly another distributor's — and a 5,000 shortfall is
+ *     narrated where the real one is 50,000. A receipt is only comparable to
+ *     that payer's own invoices.
+ *
+ * A transaction with NO counterparty yields no candidates, deliberately: the
+ * classifier's `missing_counterparty` branch is the correct diagnosis for it,
+ * and inventing a comparison would produce the exact fabricated figure this
+ * filter exists to prevent. The same applies when the counterparty is recorded
+ * under different spellings on the two feeds — no candidates, no shortfall, and
+ * the alias governance defect is itself a catalogued exception
+ * (b2b_distributor_alias_ambiguity) rather than something to paper over here.
  *   - Explicitly org-scoped, not inferred from the channel: "the channel
  *     implies the tenant" is the reasoning behind the cross-tenant reads in
  *     CLAUDE.md §19.3.
@@ -776,6 +791,8 @@ export async function getDiagnosisCandidates(params: {
   organizationId: number;
   counterpartyChannelIds: number[];
   currency: string;
+  /** The payer/payee whose own items are the only comparable ones. */
+  counterparty: string | null;
   around: Date;
   windowDays: number;
   limit?: number;
@@ -786,6 +803,8 @@ export async function getDiagnosisCandidates(params: {
   // nothing restores the previous (null-shortfall) behaviour for that case,
   // which is the correct answer rather than a fallback worth apologising for.
   if (params.counterpartyChannelIds.length === 0) return [];
+  const counterparty = params.counterparty?.trim();
+  if (!counterparty) return [];
   const windowMs = Math.max(0, params.windowDays) * 24 * 60 * 60 * 1000;
   const from = new Date(params.around.getTime() - windowMs);
   const to = new Date(params.around.getTime() + windowMs);
@@ -797,6 +816,7 @@ export async function getDiagnosisCandidates(params: {
         eq(transactions.organizationId, params.organizationId),
         inArray(transactions.channelId, params.counterpartyChannelIds),
         eq(transactions.currency, params.currency),
+        eq(transactions.counterparty, counterparty),
         gte(transactions.transactionDate, from),
         lte(transactions.transactionDate, to),
         inArray(transactions.status, ["unmatched", "exception"]),

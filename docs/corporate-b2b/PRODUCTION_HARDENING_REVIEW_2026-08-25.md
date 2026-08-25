@@ -183,6 +183,21 @@ The candidate pool is now constrained the same way the engine constrains itself:
 - no pairing on record ⇒ **no candidates**, which restores the null-shortfall answer for that case.
   That is the correct answer, not a fallback.
 
+### 3A.1b …and narrowing it by currency and channel was still not enough
+
+Second review round, same file. Currency and channel pairing narrow the pool; they do not make its
+members **related**. `findNearestTarget` then picks by amount alone, so a distributor paying 950,000
+against a 1,000,000 invoice is scored against whichever open invoice in the window is numerically
+nearest — possibly another distributor's — and a 5,000 shortfall is narrated where the real one is
+50,000.
+
+Candidates are now additionally restricted to the **same counterparty**. A transaction with no
+counterparty yields none, deliberately: `missing_counterparty` is the correct diagnosis for it, and
+inventing a comparison would produce exactly the fabricated figure the filter exists to prevent. The
+same applies when a distributor is spelled differently on the two feeds — no candidates, no
+shortfall, and the alias defect is itself a catalogued exception
+(`b2b_distributor_alias_ambiguity`) rather than something to paper over in a query.
+
 ### 3A.2 The gate check raced the state write
 
 The transition check read readiness *outside* the transaction that wrote the state, so a source or
@@ -192,11 +207,13 @@ contracts and the roster — the only two tables the gates depend on — and onl
 advancing, so an ordinary save does not hold a roster lock.
 
 **Serialising the write does not make the claim permanently true, and pretending otherwise would be
-the same error this review is about.** A distributor flagged the next morning reopens B3 under a
-pilot already recorded as `parallel_run`. That is an operating condition, and the closure register's
-answer to it is a human decision — stop, or stay in parallel. So the readiness output carries
-`stateContradictsGates` and the workspace shows a red banner naming the open gates, instead of
-displaying an operational state over red evidence.
+the same error this review is about.** The lock holds the rows that exist when it runs; production is
+TiDB, which does not gap-lock the way InnoDB does, so a concurrently **inserted** distributor is not
+held back by it either. Neither residual matters much, because they are the same operating condition
+as a distributor flagged the next morning: B3 reopens under a pilot already recorded as
+`parallel_run`, and the closure register's answer is a human decision — stop, or stay in parallel. So
+the readiness output carries `stateContradictsGates` and the workspace shows a red banner naming the
+open gates, instead of displaying an operational state over red evidence.
 
 ---
 

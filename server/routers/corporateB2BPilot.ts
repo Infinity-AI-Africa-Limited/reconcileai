@@ -111,6 +111,20 @@ type GateState = {
  * serialises the advance against exactly the two tables the gates depend on;
  * a pilot roster is 10-30 distributors by design, so the lock is small.
  *
+ * ── What this lock does NOT close, stated rather than implied ─────────────
+ *
+ * It locks the rows that EXIST when it runs. Production is TiDB, which does not
+ * gap-lock the way InnoDB does, so a concurrently INSERTED distributor — a new
+ * duplicate canonical name, say — is not held back by it, and B3 can reopen
+ * moments after the advance commits.
+ *
+ * That is not a hole to keep chasing: no write-time check can keep the claim
+ * true afterwards, because a distributor flagged the next morning reopens B3
+ * just as effectively. The residual case is the same operating condition, and
+ * it is covered by the same control — `stateContradictsGates` on the readiness
+ * output, and the banner it drives. Claiming this lock closes the invariant
+ * would be precisely the overclaiming this whole register exists to prevent.
+ *
  * Only taken when the pilot state is ADVANCING. An ordinary save that leaves
  * the state alone has nothing to serialise against, and should not hold a lock
  * on the roster while it writes.
