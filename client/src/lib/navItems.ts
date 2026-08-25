@@ -93,6 +93,7 @@ export const NAV_ITEMS: NavEntry[] = [
   // which must agree with this ordering.
   { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
   { label: "Dashboard", path: "/dashboard", group: "main", segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
+  { label: "Control Fit Brief", path: "/control-fit", group: "main", roles: ["admin", "cfo", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b"], strictSegment: true },
   // Corporate B2B pilots run no-write and AI-off by default. Their operators use
   // the governed exception and approval queues below; agent-assisted diagnosis is
   // deliberately not offered until the customer has recorded an approved private

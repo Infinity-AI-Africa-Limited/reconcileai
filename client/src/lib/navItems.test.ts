@@ -33,6 +33,7 @@ const BEFORE = {
 const APPROVED_RETAIL = [
   "/settlement-monitor",
   "/dashboard",
+  "/control-fit",
   "/shopline/sync-status",
   "/shopline/connect",
   "/exceptions",
@@ -48,6 +49,7 @@ const APPROVED_RETAIL = [
  */
 const APPROVED_CORPORATE_B2B_PILOT = [
   "/dashboard",
+  "/control-fit",
   "/distributors",
   "/corporate-pilot-controls",
   "/upload",

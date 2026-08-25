@@ -1403,3 +1403,13 @@ Note: Guest access requires significant auth middleware refactoring to bypass OA
 - [x] Safely reconcile obsolete Corporate B2B pilot-foundation PR #97 against already merged production changes without reverting or rewriting production history.
 - [x] Compare Corporate B2B pilot evidence against the full SHOPLINE readiness standard and document every remaining closure gate before claiming pilot-ready status.
 - [x] Fix the Corporate B2B Pilot Controls route so it does not issue its tenant-scoped query while the user is outside the Corporate B2B portal; add regression coverage and submit dual PRs.
+- [x] Review the Ike Eze meeting transcript and produce a prioritised report of strategic, product, fundraising, and founder-development insights for ReconcileAI.
+- [x] Create an updated ReconcileAI client pitch deck using the Taj Bank deck as the visual reference and applying the Ike Eze meeting insights.
+- [x] Create a Financial Services-specific ReconcileAI client pitch deck using the pain-led, evidence-first narrative.
+- [x] Create a Corporate B2B Payments-specific ReconcileAI client pitch deck for the FMCG/distributor reconciliation entry point.
+- [x] Audit the Financial Services, Retail Commerce, and Corporate B2B workflows against the Ike Eze pain-led, evidence-first product principles.
+- [x] Implement the resulting shared and vertical-specific workflow improvements with regression coverage and submit clean dual-repository PRs.
+- [x] Rebuild the cross-vertical Control Fit Brief change on the mirror repository’s current main so the mirror PR contains only the intended feature commits.
+- [x] Harden Control Fit Brief audit records with target tenant context and fail-closed audit writes, and prevent refreshes from silently overwriting dirty form state.
+- [x] Add an audited, tenant-scoped Control Fit Brief that records one bounded reconciliation workflow, accountable owner, decision deadline, approved evidence sources, baseline, and customer-agreed success measures across all three verticals.
+- [x] Write a factual, conversational 55–60 second YC founder-video script for Richard.

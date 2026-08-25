@@ -31,6 +31,7 @@ const RETAIL_APPROVED = [
   // Retail's own surfaces — the reason the vertical exists.
   "/settlement-monitor",
   "/dashboard",
+  "/control-fit",
   "/shopline/sync-status",
   "/shopline/connect",
   // Merchant controls for SHOPLINE orders, payments, and settlement breaks.

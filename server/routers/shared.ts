@@ -12,7 +12,7 @@ import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog, getChannelByIdForOrg } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg, type DbExecutor } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -188,6 +188,59 @@ export async function logAudit(
     // Audit logging should never crash the main operation
     console.error("[Audit] Failed to log:", err);
   }
+}
+
+/**
+ * Use for control-plane writes where reporting success without its audit record
+ * would violate the feature's evidence promise. Unlike logAudit, failures are
+ * deliberately propagated to the calling procedure.
+ *
+ * ── organizationId is REQUIRED, and named ─────────────────────────────────
+ *
+ * Takes an object rather than positional arguments so the tenant scope cannot
+ * be forgotten. It was omittable, and it was duly omitted: `createAuditLog`
+ * scopes the tamper-evident hash chain on `organizationId ?? null`, so an event
+ * without one joins the GLOBAL chain. The tenant it actually concerns then has
+ * no record of it in their audit listing, their export, or their chain
+ * verification — the write looks audited and is not, which is worse than an
+ * obvious gap on a surface a bank examiner reads.
+ *
+ * Passing `null` is a legitimate answer for a genuine platform-level event, but
+ * it now has to be an answer rather than an omission — the same reason writes
+ * use featureStrictlyAppliesTo (§9C): "no organisation" and "I forgot" must not
+ * look identical at the call site.
+ */
+export async function logAuditStrict(entry: {
+  userId: number | null;
+  /** The tenant this event belongs to. `null` ONLY for true platform events. */
+  organizationId: number | null;
+  action: string;
+  entityType: string;
+  entityId?: number;
+  details?: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+  /**
+   * The caller's transaction, so the change and its audit record commit or roll
+   * back together. Propagating the failure is not enough on its own: without
+   * this the row is already committed when the audit insert fails, so the caller
+   * reports failure over a change that did happen and left no trace.
+   */
+  executor?: DbExecutor;
+}) {
+  await createAuditLog(
+    {
+      userId: entry.userId,
+      organizationId: entry.organizationId,
+      action: entry.action,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      details: entry.details ? JSON.stringify(entry.details) : null,
+      ipAddress: entry.ipAddress || null,
+      userAgent: entry.userAgent ? entry.userAgent.substring(0, 500) : null,
+    },
+    entry.executor,
+  );
 }
 
 export function getClientInfo(ctx: any): { ip: string; ua: string } {

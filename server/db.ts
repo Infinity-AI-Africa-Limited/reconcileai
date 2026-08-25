@@ -1059,8 +1059,29 @@ export async function getJobExceptionsNeedingAi(jobId: number, organizationId: n
 
 // ─── Audit Logs ──────────────────────────────────────────────────────
 
-export async function createAuditLog(data: InsertAuditLog) {
-  const db = await getDb();
+/**
+ * A drizzle handle: the pooled connection, or a transaction that must be joined.
+ *
+ * Derived as a union rather than from `getDb()` alone — a transaction is not
+ * assignable to the pooled database type (it has no `$client`), so the wider
+ * type silently excluded the very thing this parameter exists to accept.
+ */
+type DbHandle = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+export type DbExecutor = DbHandle | Parameters<Parameters<DbHandle["transaction"]>[0]>[0];
+
+/**
+ * `executor` lets a caller enrol the audit write in ITS OWN transaction.
+ *
+ * Without it the audit is a separate round trip, so a failed audit insert
+ * leaves the change it was meant to record already committed — the caller
+ * reports failure, the row is different anyway, and the chain has no evidence
+ * either way. Passing the transaction makes the write and its record succeed or
+ * fail together, which is the only version worth calling an evidence trail.
+ *
+ * Optional because most callers use logAudit, which is best-effort by design.
+ */
+export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor) {
+  const db = executor ?? (await getDb());
   if (!db) return;
 
   // Tamper-evident hash chain (per organization). Fetch the latest entry in the
