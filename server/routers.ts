@@ -70,6 +70,7 @@ import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
+  determinateCandidates,
   diagnoseException,
   generateActionDraft,
   buildMemoryEmbeddingText,
@@ -4466,7 +4467,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           around: new Date(txnRows.transactionDate),
           windowDays: diagnosisConfig.dateWindowDays,
         });
-        const candidates: SATransaction[] = candidateRows
+        const candidatePool: SATransaction[] = candidateRows
           .filter((row) => row.id !== txn.id)
           .map((row) => ({
             id: row.id,
@@ -4481,6 +4482,16 @@ Always be specific, reference actual exception IDs and amounts where available, 
             isReversal: row.isReversal,
             originalTransactionRef: row.originalTransactionRef,
           }));
+
+        // Narrowing by currency, channel pairing and counterparty removes the
+        // grossly unrelated comparisons. It cannot remove the last one: among
+        // several of ONE distributor's open invoices, findNearestTarget picks
+        // by amount, which is a guess dressed as a finding. `determinateCandidates`
+        // keeps only what the evidence actually pins down — the invoice the
+        // payment reference names, or a single unambiguous candidate — and
+        // otherwise returns nothing, which is the right answer for a receipt
+        // that needs a remittance advice rather than a quantified shortfall.
+        const candidates = determinateCandidates(txn, candidatePool);
 
         // A Corporate B2B tenant is an FMCG manufacturer, not a bank, and the
         // pilot's recorded country decides which revenue authority and which

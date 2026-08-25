@@ -198,6 +198,32 @@ same applies when a distributor is spelled differently on the two feeds — no c
 shortfall, and the alias defect is itself a catalogued exception
 (`b2b_distributor_alias_ambiguity`) rather than something to paper over in a query.
 
+### 3A.1c …and even one distributor's own invoices needed a determined answer
+
+Third review round, same file, and the sharpest version of the point. Currency, channel pairing and
+counterparty remove the grossly unrelated comparisons. They cannot remove the last one, because every
+remaining candidate is a genuinely plausible invoice for that payer — and `findNearestTarget` still
+chooses among them **by amount**. A receipt of 950,000 against a 1,000,000 invoice lands on a 955,000
+invoice standing next to it, and reports a 5,000 shortfall.
+
+`determinateCandidates` now reduces the pool to what the evidence actually pins down:
+
+1. the invoice(s) the payment reference names — `"INV-2847 less promo"` is not a guess, it is the
+   distributor stating which invoice it paid and why it paid less;
+2. otherwise a single remaining candidate, which is unambiguous by definition;
+3. otherwise **nothing**.
+
+Case 3 is the common one, and returning nothing is the correct answer rather than a capitulation:
+several open invoices with no reference is precisely `b2b_unallocated_receipt` /
+`b2b_aggregated_remittance_no_advice`, whose recommended action is to obtain the remittance advice.
+It is the same discipline as `findSubsetSum` — when the evidence does not determine an answer,
+produce none.
+
+**The honest summary of §2.4, after three rounds:** the shortfall is no longer structurally null, and
+it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
+instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
+shortfall", and it is the one that is actually true.
+
 ### 3A.2 The gate check raced the state write
 
 The transition check read readiness *outside* the transaction that wrote the state, so a source or

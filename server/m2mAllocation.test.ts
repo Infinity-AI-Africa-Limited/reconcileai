@@ -15,7 +15,7 @@
  * as two wrong distributor statements.
  */
 import { describe, it, expect } from "vitest";
-import { runM2MMatching, type SATransaction } from "./superAgentEngine";
+import { runM2MMatching, determinateCandidates, type SATransaction } from "./superAgentEngine";
 
 let nextId = 1;
 function txn(amount: number, ref?: string, description?: string): SATransaction {
@@ -151,5 +151,51 @@ describe("nothing to match", () => {
     expect(result.remainingSourceIds).toHaveLength(2);
     expect(result.remainingTargetIds).toHaveLength(1);
     expect(result.unresolvedAmbiguities).toHaveLength(0);
+  });
+});
+
+describe("choosing what a diagnosis may compare a receipt against", () => {
+  /**
+   * `findNearestTarget` picks by numeric proximity. Among several of ONE
+   * distributor's open invoices that is a guess dressed as a finding — the
+   * receipt lands on whichever invoice is nearest by amount rather than the one
+   * it settles, and the shortfall is persisted onto a credit-note draft.
+   */
+  it("should use the invoice the payment reference names", () => {
+    const receipt = txn(950_000, "INV-2847 less promo", "MOMO COLLECTION less promo allowance");
+    const named = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const decoy = txn(955_000, "INV-3100", "Invoice INV-3100");
+    // The decoy is NEARER by amount, which is exactly the trap.
+    const chosen = determinateCandidates(receipt, [named, decoy]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(named.id);
+  });
+
+  it("should propose no comparison when several invoices are open and nothing names one", () => {
+    const receipt = txn(950_000, null, "MOMO COLLECTION KAMPALA DIST");
+    const chosen = determinateCandidates(receipt, [txn(1_000_000), txn(955_000), txn(900_000)]);
+    expect(chosen).toEqual([]);
+  });
+
+  it("should use a single candidate, which is unambiguous by definition", () => {
+    const receipt = txn(950_000, null, "MOMO COLLECTION");
+    const only = txn(1_000_000);
+    expect(determinateCandidates(receipt, [only])).toEqual([only]);
+  });
+
+  it("should refuse when the reference names several invoices that are all present", () => {
+    // A split remittance is an allocation question, not a shortfall one.
+    const receipt = txn(1_500_000, "INV-2847 INV-2848", "part settlement");
+    const chosen = determinateCandidates(receipt, [
+      txn(1_000_000, "INV-2847"),
+      txn(500_000, "INV-2848"),
+    ]);
+    expect(chosen).toEqual([]);
+  });
+
+  it("should refuse when the named invoice is not among the candidates", () => {
+    const receipt = txn(950_000, "INV-9999", "payment for INV-9999");
+    const chosen = determinateCandidates(receipt, [txn(1_000_000, "INV-2847"), txn(955_000, "INV-3100")]);
+    expect(chosen).toEqual([]);
   });
 });

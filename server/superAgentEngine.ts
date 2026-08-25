@@ -659,6 +659,56 @@ export async function diagnoseException(
   };
 }
 
+/**
+ * Which candidates may a single-transaction diagnosis actually compare against?
+ *
+ * `findNearestTarget` picks by NUMERIC PROXIMITY. Given several of one
+ * distributor's open invoices it will choose the closest by amount, which is a
+ * guess dressed as a finding: a receipt of 950,000 lands on whichever invoice
+ * is nearest rather than the one it settles, and the resulting shortfall is
+ * narrated and persisted onto a credit-note or journal-entry draft. Narrowing
+ * the pool by currency, channel pairing and counterparty removed the grossly
+ * unrelated comparisons; it cannot remove this one, because every remaining
+ * candidate is a genuinely plausible invoice for that payer.
+ *
+ * So the pool is reduced to what is DETERMINED rather than merely nearest:
+ *
+ *   1. If the payment reference names invoice numbers, those pin the target.
+ *      "INV-2847 less promo" is not a guess — it is the distributor telling us
+ *      which invoice it paid and why it paid less.
+ *   2. Otherwise a single remaining candidate is unambiguous and is used.
+ *   3. Otherwise NOTHING is returned. Several open invoices and no reference
+ *      is exactly the case the taxonomy calls `b2b_unallocated_receipt` /
+ *      `b2b_aggregated_remittance_no_advice`, whose recommended action is to
+ *      obtain the remittance advice — not to pick one and quantify against it.
+ *
+ * The same discipline as `findSubsetSum`: when the evidence does not determine
+ * an answer, produce none. An open item a controller closes is cheaper than a
+ * wrong figure a controller has to discover.
+ */
+export function determinateCandidates(
+  txn: SATransaction,
+  candidates: SATransaction[],
+): SATransaction[] {
+  if (candidates.length <= 1) return candidates;
+
+  const invoiceNumbers = parseReference(txn.transactionRef, txn.description).invoiceNumbers;
+  if (invoiceNumbers.length > 0) {
+    const wanted = invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean);
+    const named = candidates.filter((candidate) => {
+      const haystack = normalizeStr(`${candidate.transactionRef ?? ""} ${candidate.description ?? ""}`);
+      return wanted.some((n) => haystack.includes(n));
+    });
+    // One invoice named and found: determined. Several named and found is a
+    // split remittance, which is an allocation question rather than a
+    // shortfall one, so it is not resolved here either.
+    if (named.length === 1) return named;
+    if (named.length > 1) return [];
+  }
+
+  return [];
+}
+
 function ruleBasedClassify(
   txn: SATransaction,
   txnAmt: number,
