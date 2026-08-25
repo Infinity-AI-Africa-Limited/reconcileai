@@ -60,8 +60,12 @@ pnpm install
 # See docs/env.example.md for all required variables
 # Copy to .env and fill in values
 
-# 4. Push database schema
-pnpm db:push
+# 4. Apply database migrations
+#    db:migrate applies the committed migrations and generates nothing, so it is
+#    safe whatever DATABASE_URL points at. Use db:push (= generate + migrate) ONLY
+#    when authoring a schema change, and only against a dev database — its generate
+#    half writes a new migration from your working tree and applies it.
+pnpm db:migrate
 
 # 5. Start development server
 pnpm dev
