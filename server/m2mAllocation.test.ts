@@ -177,6 +177,19 @@ describe("choosing what a diagnosis may compare a receipt against", () => {
     expect(chosen).toEqual([]);
   });
 
+  it("should refuse a split remittance even when only one candidate exists at all", () => {
+    // The pool-size short-circuit used to sit ABOVE the split guard, so a
+    // two-invoice reference against a one-invoice pool returned that invoice —
+    // the same hole, one line above the code closing it.
+    const receipt = txn(1_500_000, "INV-2847 INV-2848", "part settlement");
+    expect(determinateCandidates(receipt, [txn(1_000_000, "INV-2847")])).toEqual([]);
+  });
+
+  it("should refuse a single candidate that is not the invoice the reference names", () => {
+    const receipt = txn(950_000, "INV-9999", "payment for INV-9999");
+    expect(determinateCandidates(receipt, [txn(1_000_000, "INV-2847")])).toEqual([]);
+  });
+
   it("should use a single candidate, which is unambiguous by definition", () => {
     const receipt = txn(950_000, null, "MOMO COLLECTION");
     const only = txn(1_000_000);

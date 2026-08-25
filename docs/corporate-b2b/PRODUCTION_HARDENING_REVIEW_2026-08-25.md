@@ -229,7 +229,11 @@ so the whole receipt was diagnosed against that one. A multi-invoice reference i
 outright — a split remittance is an allocation question, and allocation is `runM2MMatching`'s job,
 not a shortfall calculation's.
 
-**The honest summary of §2.4, after five rounds:** the shortfall is no longer structurally null, and
+Sixth round: a `candidates.length <= 1` short-circuit sat one line **above** the split guard, so a
+two-invoice reference against a one-invoice pool still returned that invoice. The reference is now
+read before any short-circuit on pool size.
+
+**The honest summary of §2.4, after six rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.

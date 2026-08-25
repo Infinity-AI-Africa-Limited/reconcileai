@@ -690,25 +690,29 @@ export function determinateCandidates(
   txn: SATransaction,
   candidates: SATransaction[],
 ): SATransaction[] {
-  if (candidates.length <= 1) return candidates;
+  if (candidates.length === 0) return [];
 
+  // The reference is read FIRST, before any short-circuit on pool size. A
+  // `candidates.length <= 1 -> return candidates` fast path sat above this and
+  // handed back the single open invoice even when the receipt named two,
+  // re-opening the split-remittance hole one line above the guard for it.
   const invoiceNumbers = parseReference(txn.transactionRef, txn.description).invoiceNumbers;
-  if (invoiceNumbers.length > 0) {
-    // Deduplicated by identifier, because the same invoice number routinely
-    // appears in BOTH the reference and the description ("INV-2847" /
-    // "payment for INV-2847") and counting the raw hits would read one invoice
-    // as two.
-    const wanted = new Set(invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
 
-    // A reference naming SEVERAL invoices is a split remittance, and that is an
-    // allocation question rather than a shortfall one. It stays unresolved here
-    // however many of them are currently open: finding only one of the two in
-    // the pool does not make the receipt a payment against that one, and
-    // diagnosing the whole amount against it produces exactly the wrong
-    // shortfall and a single-invoice action draft. Splits are what
-    // runM2MMatching is for.
-    if (wanted.size > 1) return [];
+  // Deduplicated by identifier, because the same invoice number routinely
+  // appears in BOTH the reference and the description ("INV-2847" /
+  // "payment for INV-2847") and counting the raw hits would read one invoice
+  // as two.
+  const wanted = new Set(invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
 
+  // A reference naming SEVERAL invoices is a split remittance, and that is an
+  // allocation question rather than a shortfall one. It stays unresolved here
+  // however many of them are currently open: finding one leg does not make the
+  // receipt a payment against that leg, and diagnosing the whole amount
+  // against it produces exactly the wrong shortfall and a single-invoice
+  // action draft. Splits are what runM2MMatching is for.
+  if (wanted.size > 1) return [];
+
+  if (wanted.size === 1) {
     // Compare EXTRACTED IDENTIFIERS, not substrings. A normalised substring
     // test makes `INV-2847` match `INV-28470`, so a receipt whose real invoice
     // is not in the open pool silently attaches to a longer one and quantifies
@@ -720,10 +724,14 @@ export function determinateCandidates(
     });
     // Exactly one open invoice carries the named identifier: determined. Two
     // carrying it is a duplicated invoice — a governance defect, not a target.
-    if (named.length === 1) return named;
+    // None carrying it means the named invoice is not open, and the nearest
+    // other invoice is not a substitute for it.
+    return named.length === 1 ? named : [];
   }
 
-  return [];
+  // No usable reference. One candidate is unambiguous by definition; several
+  // are a choice this function is not entitled to make.
+  return candidates.length === 1 ? candidates : [];
 }
 
 function ruleBasedClassify(
