@@ -193,6 +193,25 @@ describe("choosing what a diagnosis may compare a receipt against", () => {
     expect(chosen).toEqual([]);
   });
 
+  it("should not let a longer invoice number swallow a shorter one", () => {
+    // Substring matching made INV-2847 match INV-28470, so a receipt whose real
+    // invoice is absent from the open pool attached to a longer one and
+    // quantified a shortfall against it.
+    const receipt = txn(950_000, "INV-2847", "payment for INV-2847");
+    const longer = txn(1_000_000, "INV-28470", "Invoice INV-28470");
+    expect(determinateCandidates(receipt, [longer, txn(900_000, "INV-3100")])).toEqual([]);
+  });
+
+  it("should still match the exact invoice when it is present alongside the longer one", () => {
+    // The control: the rule above must reject a PREFIX, not reject matching.
+    const receipt = txn(950_000, "INV-2847", "payment for INV-2847");
+    const exact = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const longer = txn(955_000, "INV-28470", "Invoice INV-28470");
+    const chosen = determinateCandidates(receipt, [longer, exact]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(exact.id);
+  });
+
   it("should refuse when the named invoice is not among the candidates", () => {
     const receipt = txn(950_000, "INV-9999", "payment for INV-9999");
     const chosen = determinateCandidates(receipt, [txn(1_000_000, "INV-2847"), txn(955_000, "INV-3100")]);

@@ -219,7 +219,12 @@ several open invoices with no reference is precisely `b2b_unallocated_receipt` /
 It is the same discipline as `findSubsetSum` — when the evidence does not determine an answer,
 produce none.
 
-**The honest summary of §2.4, after three rounds:** the shortfall is no longer structurally null, and
+Fourth round caught the matcher itself: identifying the named invoice by normalised **substring**
+made `INV-2847` match `INV-28470`, so a receipt whose real invoice was absent from the open pool
+silently attached to a longer one. Both sides now go through the same identifier extractor and are
+compared identifier-to-identifier.
+
+**The honest summary of §2.4, after four rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.

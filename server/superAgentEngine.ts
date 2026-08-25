@@ -694,10 +694,15 @@ export function determinateCandidates(
 
   const invoiceNumbers = parseReference(txn.transactionRef, txn.description).invoiceNumbers;
   if (invoiceNumbers.length > 0) {
-    const wanted = invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean);
+    // Compare EXTRACTED IDENTIFIERS, not substrings. A normalised substring
+    // test makes `INV-2847` match `INV-28470`, so a receipt whose real invoice
+    // is not in the open pool silently attaches to a longer one and quantifies
+    // a shortfall against it. Both sides go through the same extractor, so the
+    // comparison is identifier-to-identifier.
+    const wanted = new Set(invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
     const named = candidates.filter((candidate) => {
-      const haystack = normalizeStr(`${candidate.transactionRef ?? ""} ${candidate.description ?? ""}`);
-      return wanted.some((n) => haystack.includes(n));
+      const theirs = parseReference(candidate.transactionRef, candidate.description).invoiceNumbers;
+      return theirs.some((n) => wanted.has(normalizeStr(n)));
     });
     // One invoice named and found: determined. Several named and found is a
     // split remittance, which is an allocation question rather than a
