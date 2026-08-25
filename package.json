@@ -13,6 +13,7 @@
     "test": "vitest run",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "db:migrate": "drizzle-kit migrate",
+    "db:drift": "node scripts/check-migration-drift.mjs",
     "bootstrap:admin": "node scripts/bootstrap-admin.mjs",
     "onprem:preflight": "tsx tools/preflightOnPremCli.ts"
   },

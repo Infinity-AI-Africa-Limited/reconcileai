@@ -130,3 +130,85 @@ describe("migration 0084 (exception ownership)", () => {
     expect(fs.existsSync(path.join(__dirname, "..", "scripts", "drain-unattributable-exceptions.mjs"))).toBe(true);
   });
 });
+
+/**
+ * Engine portability.
+ *
+ * Migrations run against TWO engines, and they do not accept the same SQL:
+ *   - production is TiDB (8.0.11-TiDB-v8.5.3-serverless)
+ *   - CI is mysql:8.0, via `pnpm db:push` = `drizzle-kit generate && migrate`
+ *
+ * TiDB accepts several extensions MySQL rejects outright. `CREATE INDEX IF NOT
+ * EXISTS` is the one that has already cost time: it is valid TiDB, and MySQL
+ * 8.0 answers `ERROR 1064` — a parse error, so the migration cannot even start.
+ * A migration using it passes against production and fails in CI and on any
+ * MySQL-based on-premise install.
+ *
+ * Verified both ways on real engines (2026-08-22) rather than inferred from
+ * documentation.
+ *
+ * The portable way to make index creation idempotent is the information_schema
+ * + PREPARE guard, which both engines accept.
+ */
+describe("migration SQL portability", () => {
+  /** Constructs TiDB accepts and MySQL 8.0 does not. */
+  const TIDB_ONLY: { pattern: RegExp; why: string }[] = [
+    {
+      pattern: /CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS/i,
+      why: "MySQL 8.0 rejects `CREATE INDEX IF NOT EXISTS` with ERROR 1064. Guard the index with information_schema + PREPARE instead.",
+    },
+    {
+      pattern: /DROP\s+INDEX\s+IF\s+EXISTS/i,
+      why: "MySQL 8.0 rejects `DROP INDEX IF EXISTS`. Guard it with information_schema + PREPARE instead.",
+    },
+  ];
+
+  /**
+   * Executable SQL only.
+   *
+   * A migration header may legitimately NAME a forbidden construct while
+   * explaining why not to use it. Migration 0090's header does exactly that, and
+   * it tripped this guard in CI — the guard fired on the documentation telling
+   * people not to do the thing. Scanning raw text teaches readers to delete the
+   * explanation rather than fix the SQL.
+   *
+   * Only WHOLE-LINE comments are dropped. A trailing `-- note` after real DDL
+   * leaves that DDL on the line and still scannable, so this narrows what is
+   * examined without creating a place to hide a statement.
+   */
+  const executableSql = (sql: string): string =>
+    sql
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+
+  it("should contain no TiDB-only syntax that MySQL would reject", () => {
+    const offenders: string[] = [];
+    for (const file of fs.readdirSync(DRIZZLE).filter((f) => f.endsWith(".sql"))) {
+      const sql = executableSql(fs.readFileSync(path.join(DRIZZLE, file), "utf8"));
+      for (const { pattern, why } of TIDB_ONLY) {
+        if (pattern.test(sql)) offenders.push(`${file}: ${why}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  const matches = (sql: string) => TIDB_ONLY.filter(({ pattern }) => pattern.test(executableSql(sql)));
+
+  it("should ignore a forbidden construct that appears only in a comment", () => {
+    // 0090's header explains why `CREATE INDEX IF NOT EXISTS` is wrong. That
+    // explanation must not itself read as a violation.
+    expect(matches("-- WHY NOT `CREATE INDEX IF NOT EXISTS`. It is a TiDB extension.")).toEqual([]);
+  });
+
+  it("should still catch the construct when it is REAL SQL", () => {
+    // The pair that makes the test above evidence rather than a loophole: if
+    // dropping comments also hid executable statements, the guard would be
+    // decoration.
+    expect(matches("CREATE INDEX IF NOT EXISTS `idx_x` ON `t` (`c`);")).toHaveLength(1);
+  });
+
+  it("should still catch it when a trailing comment follows the statement", () => {
+    expect(matches("CREATE INDEX IF NOT EXISTS `idx_y` ON `t` (`c`); -- added later")).toHaveLength(1);
+  });
+});
