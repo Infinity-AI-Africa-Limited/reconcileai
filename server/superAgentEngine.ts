@@ -772,13 +772,15 @@ export function isComparableCandidate(txn: SATransaction, candidate: SATransacti
 /**
  * Whether `debitCredit` told us anything about this pool.
  *
- * `discriminating` — the pool holds opposite-direction rows, so direction
- *   identifies the counterpart leg and same-direction rows are excluded.
- * `uninformative` — every comparable row sits on the same side as the
- *   transaction. Direction carries no signal for this feed pair and is ignored.
+ * `consistent` — every comparable row sits opposite the transaction, so
+ *   direction agrees with the platform's model and can be relied on.
+ * `uninformative` — every comparable row sits on the same side. Either the feed
+ *   never recorded a direction, or they are all strays.
+ * `ambiguous` — both present, so some rows carry a real direction and others may
+ *   have been defaulted, with no way to tell which.
  * `none` — nothing comparable at all, direction aside.
  */
-export type DirectionSignal = "discriminating" | "uninformative" | "none";
+export type DirectionSignal = "consistent" | "uninformative" | "ambiguous" | "none";
 
 /**
  * The counterpart legs of `txn`, and what direction was able to tell us.
@@ -803,20 +805,33 @@ export type DirectionSignal = "discriminating" | "uninformative" | "none";
  * column was never populated". So the third state is named instead, the same
  * discipline as the queue-durability states in the pilot register.
  *
- * The rule: direction is applied only where it DISCRIMINATES. If any comparable
- * row sits opposite `txn`, direction is meaningful for this feed pair and only
- * those rows are legs. If none does, the column carries no signal here and it
- * is ignored rather than used to empty the pool.
+ * ── Direction never DISCARDS a row ───────────────────────────────────────
  *
- * ── The residual, stated rather than implied ──────────────────────────────
+ * The first attempt at this kept only the opposite-direction rows whenever any
+ * existed. Review found the hole immediately: in a MIXED pool — a genuine
+ * counterpart whose direction was defaulted to the receipt's, alongside one
+ * explicitly opposite stray — that single stray made the whole pool look
+ * trustworthy and evicted the real leg. The diagnosis then quantified against
+ * the stray.
  *
- * A pool holding ONLY same-direction rows is ambiguous: either the feed does
- * not record direction (keep them) or there is genuinely no counterpart and
- * these are strays (drop them). This cannot be told apart from the rows alone,
- * so `uninformative` keeps them and says so. `determinateCandidates` is the
- * backstop: it uses a candidate only when the payment reference NAMES it or it
- * is the single option, so a stray is reached only when it is the sole
- * candidate or carries the receipt's own invoice number.
+ * The lesson is that a row discarded on direction may be a genuine leg whose
+ * direction was never recorded, and nothing in the row says which. So direction
+ * no longer removes anything. Its only honest job is to report whether it can
+ * be TRUSTED, and that trust gates the one place a stray can be reached without
+ * corroboration — the single-candidate shortcut in `determinateCandidates`.
+ *
+ *   consistent    every comparable row sits opposite `txn`. Direction agrees
+ *                 with the platform's model throughout, so it is trustworthy
+ *                 and "the only candidate" is real evidence.
+ *   uninformative every comparable row sits on the SAME side. Either the feed
+ *                 never recorded a direction, or these are all strays — and the
+ *                 two are indistinguishable from the rows alone.
+ *   ambiguous     both present. Some rows carry a real direction and some may
+ *                 be defaulted; which is which cannot be recovered.
+ *
+ * For the last two, being the only candidate proves nothing, so a naming
+ * reference is required instead. That is the same discipline as everywhere else
+ * here: when the evidence does not determine an answer, produce none.
  */
 export function selectCounterpartLegs(
   txn: SATransaction,
@@ -826,12 +841,35 @@ export function selectCounterpartLegs(
   if (comparable.length === 0) return { legs: [], directionSignal: "none" };
 
   const known = new Set(["debit", "credit"]);
-  const opposite = known.has(txn.debitCredit)
-    ? comparable.filter((c) => known.has(c.debitCredit) && c.debitCredit !== txn.debitCredit)
-    : [];
+  if (!known.has(txn.debitCredit)) {
+    return { legs: comparable, directionSignal: "uninformative" };
+  }
 
-  if (opposite.length > 0) return { legs: opposite, directionSignal: "discriminating" };
-  return { legs: comparable, directionSignal: "uninformative" };
+  let opposite = 0;
+  let same = 0;
+  for (const candidate of comparable) {
+    if (!known.has(candidate.debitCredit)) same++;
+    else if (candidate.debitCredit === txn.debitCredit) same++;
+    else opposite++;
+  }
+
+  // Every row is a leg in all three cases. What changes is how much weight the
+  // caller may put on a candidate that nothing else corroborates.
+  const directionSignal: DirectionSignal =
+    same === 0 ? "consistent" : opposite === 0 ? "uninformative" : "ambiguous";
+  return { legs: comparable, directionSignal };
+}
+
+/**
+ * May "it is the only candidate" stand on its own here?
+ *
+ * Only when direction corroborates that the pool holds counterpart legs. In an
+ * uninformative or mixed pool a lone row is as likely to be a stray receipt as
+ * the invoice, and the two are indistinguishable — so the reference has to name
+ * it instead.
+ */
+export function directionIsTrustworthy(signal: DirectionSignal): boolean {
+  return signal === "consistent";
 }
 
 /**
@@ -864,6 +902,14 @@ export function selectCounterpartLegs(
 export function determinateCandidates(
   txn: SATransaction,
   candidates: SATransaction[],
+  /**
+   * Whether `debitCredit` corroborates that this pool holds counterpart legs.
+   *
+   * Defaults to FALSE — the fail-safe direction. A caller that has not
+   * established trust gets the stricter rule, which costs a shortfall it might
+   * have computed rather than risking one against a stray.
+   */
+  options: { directionTrusted?: boolean } = {},
 ): SATransaction[] {
   if (candidates.length === 0) return [];
 
@@ -911,9 +957,18 @@ export function determinateCandidates(
     return named.length === 1 ? named : [];
   }
 
-  // No usable reference. One candidate is unambiguous by definition; several
-  // are a choice this function is not entitled to make.
-  return candidates.length === 1 ? candidates : [];
+  // No usable reference. Several candidates are a choice this function is not
+  // entitled to make. ONE candidate is unambiguous only if something says the
+  // pool holds counterpart legs at all — and that is exactly what direction
+  // tells us, when it can be trusted.
+  //
+  // Where it cannot, a lone row is as likely to be a stray receipt on the
+  // paired channel as the invoice, and "it was the only one" is not evidence of
+  // which. That is the sole-target case review raised: with no reference and no
+  // trustworthy direction, a stray became the target and a shortfall was
+  // quantified against another payment.
+  if (candidates.length !== 1) return [];
+  return options.directionTrusted ? candidates : [];
 }
 
 function ruleBasedClassify(

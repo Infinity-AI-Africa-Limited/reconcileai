@@ -325,7 +325,44 @@ counterparty, reversal — stay unconditional in `isComparableCandidate`.
 > direction fails the two `discriminating` tests; applying it unconditionally fails the
 > `uninformative` one.
 
-**The honest summary of §2.4, after ten rounds:** the shortfall is no longer structurally null, and
+Eleventh round found round ten still let direction *discard* rows it could not trust. In a **mixed**
+pool — a genuine counterpart whose direction had been defaulted to the receipt's, alongside one
+explicitly opposite stray — that single stray made the whole pool look trustworthy and evicted the
+real leg, so the shortfall was quantified against the stray.
+
+The lesson generalises past the case: **a row discarded on direction may be a genuine leg whose
+direction was never recorded, and nothing in the row says which.** So direction no longer removes
+anything at all. Its only job is to report whether it can be trusted:
+
+| Pool | Signal | Trustworthy? |
+|---|---|---|
+| every comparable row opposite `txn` | `consistent` | yes |
+| every comparable row same side | `uninformative` | no — defaulted feed, or all strays |
+| both present | `ambiguous` | no — some real, some defaulted, no way to tell which |
+| nothing comparable | `none` | n/a |
+
+That trust gates the one place a stray could ever be reached without corroboration: the
+single-candidate shortcut in `determinateCandidates`. "It is the only candidate" is evidence only if
+something says the pool holds counterpart legs at all. Where direction cannot say so, a naming
+reference is required instead — and `directionTrusted` defaults to **false**, so a caller that has
+not established trust gets the stricter rule.
+
+This also closes the sole-target half of the round-nine finding, which neither nine nor ten had
+actually fixed: a lone stray receipt on the paired channel, with no reference, was still becoming the
+target. It is now refused.
+
+> The cost is stated plainly: a feed that records no direction **and** carries no usable invoice
+> reference now yields no shortfall. That is the honest answer — amount proximity alone is the guess
+> this whole section has been removing — but it is a real narrowing, and it lands on exactly the
+> customers whose files are weakest. The durable fix is upstream: `apiIngestionService` defaults a
+> missing direction to `"debit"` rather than recording that it was absent, which is what makes the
+> column untrustworthy in the first place. Making absence representable needs a migration and is
+> **not** bundled here.
+
+> Both new guards are pinned: restore the discard and the two mixed-pool tests fail; ungate the
+> shortcut and the two sole-candidate tests fail.
+
+**The honest summary of §2.4, after eleven rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.
@@ -404,7 +441,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2060 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2063 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in

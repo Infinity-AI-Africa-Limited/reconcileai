@@ -20,6 +20,7 @@ import {
   determinateCandidates,
   isComparableCandidate,
   selectCounterpartLegs,
+  directionIsTrustworthy,
   type SATransaction,
 } from "./superAgentEngine";
 
@@ -201,10 +202,18 @@ describe("choosing what a diagnosis may compare a receipt against", () => {
     expect(determinateCandidates(receipt, [txn(1_000_000, "INV-2847")])).toEqual([]);
   });
 
-  it("should use a single candidate, which is unambiguous by definition", () => {
+  it("should use a single candidate when direction corroborates that it is a leg", () => {
     const receipt = txn(950_000, null, "MOMO COLLECTION");
-    const only = txn(1_000_000);
-    expect(determinateCandidates(receipt, [only])).toEqual([only]);
+    const only = invoice(1_000_000);
+    expect(determinateCandidates(receipt, [only], { directionTrusted: true })).toEqual([only]);
+  });
+
+  it("should NOT use a single candidate when direction cannot be trusted", () => {
+    // The sole-target case: with no reference and no trustworthy direction, a
+    // stray receipt on the paired channel is indistinguishable from the
+    // invoice, and "it was the only one" is not evidence of which it is.
+    const receipt = txn(950_000, null, "MOMO COLLECTION");
+    expect(determinateCandidates(receipt, [invoice(1_000_000)])).toEqual([]);
   });
 
   it("should refuse when the reference names several invoices that are all present", () => {
@@ -363,13 +372,14 @@ describe("what the shorthand guard must NOT refuse", () => {
   });
 
   it("should still use a single candidate when the narration carries stray digits", () => {
+    // (direction trusted, so the sole-candidate branch is available)
     // No invoice identifier was extracted, so "more invoices than I found" is
     // not a claim this rule makes. A phone number in a mobile-money narration
     // must not withdraw the single-candidate branch, which rests on there
     // being one open invoice rather than on reading the reference.
     const receipt = txn(950_000, null, "MOMO COLLECTION 0771234567 KAMPALA");
-    const only = txn(1_000_000);
-    expect(determinateCandidates(receipt, [only])).toEqual([only]);
+    const only = invoice(1_000_000);
+    expect(determinateCandidates(receipt, [only], { directionTrusted: true })).toEqual([only]);
   });
 });
 
@@ -435,24 +445,46 @@ describe("what may be compared against a receipt at all", () => {
  * with neither column lands BOTH legs as `debit`, and those SFTP/bucket/API
  * drops are exactly the pilot's own source contracts (B2).
  */
-describe("when the feeds do record a direction", () => {
+describe("what direction is allowed to decide", () => {
   const receipt = txn(950_000, "INV-2847", "MOMO COLLECTION INV-2847");
 
-  it("should keep the opposite-direction invoice and drop the same-side payment", () => {
+  it("should report a pool of opposite-direction rows as consistent and trustworthy", () => {
+    const { legs, directionSignal } = selectCounterpartLegs(receipt, [invoice(1_000_000), invoice(900_000)]);
+    expect(directionSignal).toBe("consistent");
+    expect(directionIsTrustworthy(directionSignal)).toBe(true);
+    expect(legs).toHaveLength(2);
+  });
+
+  it("should NEVER drop a row on direction, even an obvious same-side stray", () => {
+    // Direction removing rows is what evicted a genuine counterpart whose
+    // direction had been defaulted. Its only job now is to report trust; the
+    // reference decides which row is the leg.
     const realLeg = invoice(1_000_000);
     const strayReceipt = invoice(980_000, { debitCredit: "credit" });
     const { legs, directionSignal } = selectCounterpartLegs(receipt, [realLeg, strayReceipt]);
-    expect(directionSignal).toBe("discriminating");
-    expect(legs.map((l) => l.id)).toEqual([realLeg.id]);
+    expect(directionSignal).toBe("ambiguous");
+    expect(legs.map((l) => l.id).sort()).toEqual([realLeg.id, strayReceipt.id].sort());
   });
 
-  it("should drop a same-side payment even when it is numerically nearer", () => {
-    // The trap: findNearestTarget picks by amount, so the stray wins on
-    // proximity and the gap between two payments becomes a "shortfall".
-    const realLeg = invoice(1_000_000);
-    const nearerStray = invoice(950_500, { debitCredit: "credit" });
-    const { legs } = selectCounterpartLegs(receipt, [nearerStray, realLeg]);
-    expect(legs.map((l) => l.id)).toEqual([realLeg.id]);
+  it("should keep a defaulted counterpart that one opposite stray would otherwise evict", () => {
+    // The reported bug. The receipt and its real invoice both arrived "debit"
+    // because neither file carried a direction column; a single explicitly
+    // opposite stray made the pool look trustworthy and the real leg was
+    // discarded, so the shortfall was quantified against the stray.
+    const defaultedReceipt = txn(950_000, "INV-2847", "COLLECTION INV-2847");
+    defaultedReceipt.debitCredit = "debit";
+    const genuineLeg = invoice(1_000_000, { transactionRef: "INV-2847", description: "Invoice INV-2847" });
+    const oppositeStray = invoice(980_000, { debitCredit: "credit" });
+
+    const { legs, directionSignal } = selectCounterpartLegs(defaultedReceipt, [genuineLeg, oppositeStray]);
+    expect(directionSignal).toBe("ambiguous");
+    expect(legs.map((l) => l.id)).toContain(genuineLeg.id);
+
+    // And the reference — not direction — picks the right one out of the pool.
+    const chosen = determinateCandidates(defaultedReceipt, legs, {
+      directionTrusted: directionIsTrustworthy(directionSignal),
+    });
+    expect(chosen.map((c) => c.id)).toEqual([genuineLeg.id]);
   });
 });
 
@@ -461,7 +493,7 @@ describe("when neither feed recorded a direction", () => {
     // Both legs arrive as "debit" because the CSV had neither column. An
     // unconditional opposite-direction filter removed the real invoice here and
     // the shortfall silently vanished — for the customers whose files are least
-    // well-formed, which is the worst possible population to fail quietly on.
+    // well-formed, which is the worst population to fail quietly on.
     const receipt = txn(950_000, "INV-2847", "COLLECTION INV-2847");
     receipt.debitCredit = "debit";
     const realLeg = invoice(1_000_000);
@@ -470,13 +502,27 @@ describe("when neither feed recorded a direction", () => {
     expect(legs.map((l) => l.id)).toEqual([realLeg.id]);
   });
 
-  it("should report the signal so the caller can say the column was never populated", () => {
-    const receipt = txn(950_000);
+  it("should refuse to treat a lone candidate as determinate", () => {
+    // Neither true nor false is safe for "the column was never populated", so
+    // the sole-candidate shortcut is withdrawn rather than guessed at: a lone
+    // row here is as likely to be a stray receipt as the invoice.
+    const receipt = txn(950_000, null, "COLLECTION");
     receipt.debitCredit = "debit";
-    const { directionSignal } = selectCounterpartLegs(receipt, [invoice(1_000_000), invoice(900_000)]);
-    // Not "discriminating": nothing was discriminated. Saying so is the point —
-    // neither true nor false is a safe answer for "the column is unpopulated".
-    expect(directionSignal).toBe("uninformative");
+    const { legs, directionSignal } = selectCounterpartLegs(receipt, [invoice(1_000_000)]);
+    expect(directionIsTrustworthy(directionSignal)).toBe(false);
+    expect(determinateCandidates(receipt, legs, { directionTrusted: false })).toEqual([]);
+  });
+
+  it("should still resolve it when the reference names the invoice", () => {
+    // The control: withdrawing the shortcut must not withdraw the feature. A
+    // named invoice is corroboration that does not depend on direction at all.
+    const receipt = txn(950_000, "INV-2847", "COLLECTION INV-2847");
+    receipt.debitCredit = "debit";
+    const named = invoice(1_000_000, { transactionRef: "INV-2847", description: "Invoice INV-2847" });
+    const { legs, directionSignal } = selectCounterpartLegs(receipt, [named]);
+    expect(determinateCandidates(receipt, legs, {
+      directionTrusted: directionIsTrustworthy(directionSignal),
+    }).map((c) => c.id)).toEqual([named.id]);
   });
 
   it("should still apply every rule that does NOT depend on direction", () => {

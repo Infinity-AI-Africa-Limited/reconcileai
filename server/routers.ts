@@ -72,6 +72,7 @@ import {
   runM2MMatching,
   determinateCandidates,
   selectCounterpartLegs,
+  directionIsTrustworthy,
   diagnoseException,
   generateActionDraft,
   buildMemoryEmbeddingText,
@@ -4486,16 +4487,16 @@ Always be specific, reference actual exception IDs and amounts where available, 
             isReversal: row.isReversal,
             originalTransactionRef: row.originalTransactionRef,
           }));
-        // Direction is applied only where it DISCRIMINATES. A feed that never
-        // recorded one lands both legs on the same side (apiIngestionService
-        // defaults to "debit"), and an unconditional opposite-direction filter
-        // then deletes the genuine counterpart and silently drops the shortfall.
+        // Direction never removes a candidate — a row discarded on direction may
+        // be a genuine leg whose direction was never recorded (apiIngestionService
+        // defaults to "debit"). It only reports whether it can be TRUSTED, which
+        // gates the single-candidate shortcut below.
         const { legs: candidatePool, directionSignal } = selectCounterpartLegs(txn, candidateRowsMapped);
-        if (directionSignal === "uninformative") {
+        if (directionSignal !== "consistent" && directionSignal !== "none") {
           // Visible rather than silent: this is a source-quality defect in the
           // customer's data contract (pilot gate B1), not a property of the
           // receipt, and it weakens every comparison made below.
-          console.warn(`[SuperAgent] diagnose txn=${txn.id} org=${orgId}: counterpart direction not recorded on either feed — direction ignored for this comparison`);
+          console.warn(`[SuperAgent] diagnose txn=${txn.id} org=${orgId}: debitCredit is ${directionSignal} across the candidate pool — a lone candidate will not be treated as determinate without a naming reference`);
         }
 
         // Narrowing by currency, channel pairing and counterparty removes the
@@ -4506,7 +4507,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
         // payment reference names, or a single unambiguous candidate — and
         // otherwise returns nothing, which is the right answer for a receipt
         // that needs a remittance advice rather than a quantified shortfall.
-        const candidates = determinateCandidates(txn, candidatePool);
+        const candidates = determinateCandidates(txn, candidatePool, {
+          directionTrusted: directionIsTrustworthy(directionSignal),
+        });
 
         // A Corporate B2B tenant is an FMCG manufacturer, not a bank, and the
         // pilot's recorded country decides which revenue authority and which
