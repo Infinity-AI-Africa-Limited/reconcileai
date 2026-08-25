@@ -16,6 +16,32 @@
 import { invokeLLM } from "./_core/llm";
 import { nigerianExceptionsTaxonomyPromptBlock, nonInterestTaxonomyPromptBlock } from "./exceptions/seed";
 import { relevantNigerianChannels } from "./exceptions/channelMapping";
+import {
+  corporateB2BExceptionsTaxonomyPromptBlock,
+  corporateB2BRegulatoryFrame,
+} from "./exceptions/corporate-b2b";
+
+/**
+ * Who the tenant is, as far as diagnosis is concerned.
+ *
+ * Was a bare `bankingModel` string. Diagnosis needs two more facts that the
+ * channel cannot supply, and getting them wrong is visible in the output:
+ *
+ *   `segment` — a corporate_b2b tenant is an FMCG manufacturer, not a bank. It
+ *     was being diagnosed under a persona describing itself as a Nigerian
+ *     payment-systems expert, with the NIP/POS/ATM catalogue and an instruction
+ *     to cite CBN circulars. None of that governs a distributor receivable.
+ *   `country` — the go-live plan's FIRST launch geography is Uganda, where a
+ *     cited CBN circular is not merely irrelevant but wrong.
+ */
+export interface DiagnosingInstitution {
+  /** `organizations.segment`. */
+  segment?: string | null;
+  /** `organizations.bankingModel`; omitted means conventional. */
+  bankingModel?: string | null;
+  /** The pilot's recorded launch country, where one exists. */
+  country?: string | null;
+}
 
 // ─── Shared Transaction type (mirrors drizzle schema) ────────────────
 
@@ -48,6 +74,15 @@ export interface SATransaction {
 
 export interface ParsedReference {
   invoiceNumbers: string[];           // ["INV-2847", "ORD-2847"]
+  /**
+   * The reference appears to name more invoices than `invoiceNumbers` holds,
+   * because it lists or ranges them in shorthand ("INV-1001 and 1002").
+   *
+   * Distinct from `invoiceNumbers.length > 1`, and that is the whole point: the
+   * extractor cannot see the extra legs, so the count alone reads a split
+   * remittance as a single-invoice payment. See referenceMayNameMoreInvoices.
+   */
+  mayNameMoreInvoices: boolean;
   deductionType: "damage" | "promotional" | "bank_fee" | "tax" | "discount" | "none";
   deductionKeywords: string[];        // ["dmg", "promo", "bank charge"]
   deductionAmount: number | null;     // explicit deduction amount if stated
@@ -65,6 +100,69 @@ const DEDUCTION_PATTERNS: Array<{ pattern: RegExp; type: ParsedReference["deduct
 ];
 
 const INVOICE_PATTERN = /\b(INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?(\d{3,10})\b/gi;
+
+/**
+ * Numbers that are ACCOUNTED FOR, and so cannot be an unwritten invoice leg.
+ *
+ * See `referenceMayNameMoreInvoices` below for why the question is posed this way.
+ * Each entry is an explanation the reference itself supplies for a number:
+ *   - a literal written like money — thousands separators or a decimal part;
+ *   - a number introduced by a deduction, balance or currency cue;
+ *   - a date, in the two shapes that appear in remittance narrations.
+ */
+const ACCOUNTED_NUMBER_PATTERNS: RegExp[] = [
+  /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+\.\d+\b/g,
+  /\b(?:less|minus|deduct(?:ion)?|net\s*of|amt|amount|bal(?:ance)?|NGN|UGX|USD|GHS|KES|ZAR|₦)\s*[:=]?\s*\d[\d,]*(?:\.\d+)?/gi,
+  /\b(?:19|20)\d{6}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g,
+];
+
+/**
+ * Does this reference appear to name MORE invoices than the extractor could
+ * pull out of it?
+ *
+ * INVOICE_PATTERN requires a prefix on every identifier, so a remittance written
+ * the way distributors write them — "INV-1001 and 1002", "INV-2001-2005" —
+ * yields ONE identifier and reads as an ordinary single-invoice payment. That
+ * defeats the split guard in `determinateCandidates` in exactly the case it
+ * exists for, and the whole receipt gets diagnosed against the first leg.
+ *
+ * ── Why this is not a list of separators ──────────────────────────────────
+ *
+ * The previous attempt matched an invoice identifier followed by a KNOWN list or
+ * range connector. Review then found `;`, `:` and "or"; `plus`, `|` and a
+ * newline bypass it equally, and the next reader will find another. The set of
+ * characters a human might put between two invoice numbers is not enumerable,
+ * and every omission from that list fails OPEN — straight to a wrong shortfall.
+ *
+ * So the question is inverted. Instead of asking "is there a separator I
+ * recognise?", it asks: **is there an invoice-length number here that nothing
+ * accounts for?** That set IS bounded, because a reference only contains so
+ * many kinds of number: the invoice identifiers themselves, amounts, and dates.
+ * Anything left over may be an invoice leg.
+ *
+ * The direction of failure is the point. ACCOUNTED_NUMBER_PATTERNS is still a
+ * list and still incomplete — but an omission there makes an explained number
+ * look unexplained, which DECLINES a determinate receipt. Losing a shortfall we
+ * could have computed is the cost; reporting one that is wrong is not on the
+ * table. That is the same trade as `findSubsetSum` and the rest of this module.
+ *
+ * Requires at least one extracted identifier, so this reads as "more than the
+ * ones I found" rather than "some digits appeared". A reference with no
+ * recognisable identifier at all — a bare "1001 and 1002" — is not covered:
+ * those digits are indistinguishable from an amount or an account number, and
+ * the single-candidate branch that would handle it rests on a different
+ * argument (one open invoice is unambiguous), not on reading the reference.
+ */
+function referenceMayNameMoreInvoices(raw: string, extracted: string[]): boolean {
+  if (extracted.length === 0) return false;
+  let masked = raw.replace(new RegExp(INVOICE_PATTERN.source, "gi"), " ");
+  for (const pattern of ACCOUNTED_NUMBER_PATTERNS) {
+    masked = masked.replace(new RegExp(pattern.source, pattern.flags), " ");
+  }
+  // Three digits is the shortest thing INVOICE_PATTERN will accept as an
+  // invoice number, so a shorter leftover ("INV-2847-01") cannot be one.
+  return /\b\d{3,10}\b/.test(masked);
+}
 const SPLIT_KEYWORDS = /\b(split|part|partial|installment|instalment|tranche|1\s*of\s*\d|2\s*of\s*\d)\b/i;
 const AMOUNT_IN_REF = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\b/g;
 
@@ -101,6 +199,7 @@ export function parseReference(ref: string | null | undefined, description: stri
 
   return {
     invoiceNumbers,
+    mayNameMoreInvoices: referenceMayNameMoreInvoices(raw, invoiceNumbers),
     deductionType,
     deductionKeywords,
     deductionAmount,
@@ -213,6 +312,18 @@ export interface M2MMatch {
   splitAllocation: SplitAllocation[];
 }
 
+/**
+ * A candidate allocation the engine refused to guess at. Carrying it in the
+ * result is what stops a refusal from being indistinguishable from "nothing
+ * found" — the two need different actions from a controller.
+ */
+export interface M2MAmbiguity {
+  sourceIds: number[];
+  targetIds: number[];
+  reason: "ambiguous" | "indeterminate";
+  detail: string;
+}
+
 export interface SplitAllocation {
   sourceId: number;
   targetId: number;
@@ -244,10 +355,22 @@ export function runM2MMatching(
   unmatchedSources: SATransaction[],
   unmatchedTargets: SATransaction[],
   fxTolerance: number = 0.015
-): { m2mMatches: M2MMatch[]; remainingSourceIds: number[]; remainingTargetIds: number[] } {
+): {
+  m2mMatches: M2MMatch[];
+  remainingSourceIds: number[];
+  remainingTargetIds: number[];
+  /**
+   * Cases the engine could have produced a confident-looking allocation for and
+   * deliberately did not. Reported rather than dropped: "several allocations
+   * are equally valid, here is how many" is actionable for a controller, while
+   * an item that silently stays unmatched looks like the engine found nothing.
+   */
+  unresolvedAmbiguities: M2MAmbiguity[];
+} {
   const matchedSourceIds = new Set<number>();
   const matchedTargetIds = new Set<number>();
   const m2mMatches: M2MMatch[] = [];
+  const unresolvedAmbiguities: M2MAmbiguity[] = [];
 
   // ── Strategy 1: One source → many targets (sum matching) ─────────
   for (const src of unmatchedSources) {
@@ -255,9 +378,24 @@ export function runM2MMatching(
     const srcAmt = parseFloat(String(src.amount));
     const srcParsed = parseReference(src.transactionRef, src.description);
 
-    // Try all combinations of 2–5 unmatched targets that sum to srcAmt
+    // Combinations of 2–5 unmatched targets that sum to srcAmt. `minItems` is
+    // 2 on purpose: a single target within tolerance is a 1:1 near-match, which
+    // the 3-pass engine already handles, and reporting it here dressed it up as
+    // a "one-to-many split allocation" it was not.
     const availableTargets = unmatchedTargets.filter((t) => !matchedTargetIds.has(t.id));
-    const found = findSubsetSum(availableTargets, srcAmt, fxTolerance, 5);
+    const outcome = findSubsetSum(availableTargets, srcAmt, fxTolerance, 5);
+    if (outcome.kind === "ambiguous" || outcome.kind === "indeterminate") {
+      unresolvedAmbiguities.push({
+        sourceIds: [src.id],
+        targetIds: [],
+        reason: outcome.kind,
+        detail: outcome.kind === "ambiguous"
+          ? `More than one combination of open invoices sums to ${src.currency} ${srcAmt.toLocaleString()}. No allocation is proposed: choosing between equally valid splits would be arbitrary.`
+          : `The search for a matching combination exceeded its budget for ${src.currency} ${srcAmt.toLocaleString()}. This is not evidence that no allocation exists.`,
+      });
+      continue;
+    }
+    const found = outcome.kind === "unique" ? outcome.subset : null;
 
     if (found) {
       const targetAmtTotal = found.reduce((s, t) => s + parseFloat(String(t.amount)), 0);
@@ -298,7 +436,19 @@ export function runM2MMatching(
     const tgtAmt = parseFloat(String(tgt.amount));
 
     const availableSources = unmatchedSources.filter((s) => !matchedSourceIds.has(s.id));
-    const found = findSubsetSum(availableSources, tgtAmt, fxTolerance, 5);
+    const outcome = findSubsetSum(availableSources, tgtAmt, fxTolerance, 5);
+    if (outcome.kind === "ambiguous" || outcome.kind === "indeterminate") {
+      unresolvedAmbiguities.push({
+        sourceIds: [],
+        targetIds: [tgt.id],
+        reason: outcome.kind,
+        detail: outcome.kind === "ambiguous"
+          ? `More than one combination of receipts sums to invoice ${tgt.transactionRef ?? tgt.id}. No allocation is proposed.`
+          : `The search for a matching combination exceeded its budget for invoice ${tgt.transactionRef ?? tgt.id}.`,
+      });
+      continue;
+    }
+    const found = outcome.kind === "unique" ? outcome.subset : null;
 
     if (found && found.length > 1) {
       const sourceAmtTotal = found.reduce((s, t) => s + parseFloat(String(t.amount)), 0);
@@ -399,7 +549,7 @@ export function runM2MMatching(
   const remainingSourceIds = unmatchedSources.filter((s) => !matchedSourceIds.has(s.id)).map((s) => s.id);
   const remainingTargetIds = unmatchedTargets.filter((t) => !matchedTargetIds.has(t.id)).map((t) => t.id);
 
-  return { m2mMatches, remainingSourceIds, remainingTargetIds };
+  return { m2mMatches, remainingSourceIds, remainingTargetIds, unresolvedAmbiguities };
 }
 
 /**
@@ -407,66 +557,110 @@ export function runM2MMatching(
  * Uses dynamic programming for small sets (≤ 20), greedy for larger sets.
  * Limited to maxItems to prevent combinatorial explosion.
  */
+/**
+ * The outcome of looking for a set of transactions that sums to a target.
+ *
+ * FOUR states, not a nullable subset, and the distinction is the whole point.
+ * The previous implementation returned the first subset it stumbled on and the
+ * caller published it as an allocation at ~85% confidence. Two of these states
+ * were being reported as `unique`:
+ *
+ *   `ambiguous`     — several DIFFERENT subsets of the open invoices sum to the
+ *                     same receipt. Three invoices of 100 against a payment of
+ *                     200 is the canonical case: any two of them "match". A
+ *                     greedy search picks one by sort order, which is an
+ *                     arbitrary allocation wearing a confidence score. For a
+ *                     receivables ledger that is a fabricated answer, and it is
+ *                     discovered later as two wrong distributor statements.
+ *   `indeterminate` — the search budget was exhausted before the question could
+ *                     be answered. Not the same as "no match exists", and must
+ *                     not be reported as one.
+ *
+ * Both resolve to "propose nothing and say why". An open item a human closes is
+ * cheaper than a wrong allocation a human has to discover.
+ */
+type SubsetSumOutcome =
+  | { kind: "unique"; subset: SATransaction[] }
+  | { kind: "ambiguous"; alternatives: number }
+  | { kind: "indeterminate" }
+  | { kind: "none" };
+
+/**
+ * Bound on combination nodes visited per search. Keeps one diagnosis from
+ * turning into an unbounded scan; exceeding it yields `indeterminate` rather
+ * than a partial answer presented as a complete one.
+ */
+const SUBSET_SEARCH_BUDGET = 200_000;
+
+function amountOf(txn: SATransaction): number {
+  return parseFloat(String(txn.amount));
+}
+
+/**
+ * Find a set of `minItems`..`maxItems` transactions summing to `targetAmount`
+ * within tolerance, and say whether it is the ONLY such set.
+ *
+ * The greedy first pass is gone. It was the source of both defects: it returned
+ * on the first set that reached the lower bound (so it could never see a second
+ * one), and because it accepted a single item it turned a plain 1:1 near-match
+ * into a "one-to-many split allocation" — the 3-pass engine's job, reported as
+ * something it is not.
+ */
 function findSubsetSum(
   txns: SATransaction[],
   targetAmount: number,
   tolerancePct: number,
-  maxItems: number
-): SATransaction[] | null {
-  const tolerance = targetAmount * tolerancePct;
+  maxItems: number,
+  minItems = 2,
+): SubsetSumOutcome {
+  // A non-positive target has no meaningful tolerance band and would divide by
+  // zero downstream when a confidence score is computed from the difference.
+  if (!Number.isFinite(targetAmount) || targetAmount <= 0) return { kind: "none" };
+
+  const tolerance = Math.abs(targetAmount) * tolerancePct;
   const lo = targetAmount - tolerance;
   const hi = targetAmount + tolerance;
 
-  // Sort by amount descending for greedy efficiency
-  const sorted = [...txns].sort((a, b) => parseFloat(String(b.amount)) - parseFloat(String(a.amount)));
+  // Non-positive and non-finite amounts cannot contribute to a sum-match and
+  // break the pruning below, which assumes adding an item only increases it.
+  const sorted = txns
+    .filter((t) => Number.isFinite(amountOf(t)) && amountOf(t) > 0)
+    .sort((a, b) => amountOf(b) - amountOf(a));
 
-  // Greedy first pass: try largest items first
-  let greedySum = 0;
-  const greedySet: SATransaction[] = [];
-  for (const t of sorted) {
-    const amt = parseFloat(String(t.amount));
-    if (greedySum + amt <= hi && greedySet.length < maxItems) {
-      greedySum += amt;
-      greedySet.push(t);
-      if (greedySum >= lo) return greedySet;
+  const found: SATransaction[][] = [];
+  let budget = SUBSET_SEARCH_BUDGET;
+  let exhausted = false;
+
+  const search = (start: number, current: SATransaction[], sum: number): void => {
+    // Stop at TWO hits: a second one already proves ambiguity, and enumerating
+    // the rest buys nothing.
+    if (found.length >= 2 || exhausted) return;
+    if (current.length >= minItems && sum >= lo && sum <= hi) {
+      found.push([...current]);
+      if (found.length >= 2) return;
     }
-  }
-
-  // Exhaustive search for small sets (≤ 15 items, ≤ 4 combinations)
-  if (txns.length <= 15) {
-    for (let size = 2; size <= Math.min(maxItems, 4); size++) {
-      const result = combinationSearch(sorted, targetAmount, lo, hi, size);
-      if (result) return result;
-    }
-  }
-
-  return null;
-}
-
-function combinationSearch(
-  txns: SATransaction[],
-  target: number,
-  lo: number,
-  hi: number,
-  size: number
-): SATransaction[] | null {
-  function search(start: number, current: SATransaction[], currentSum: number): SATransaction[] | null {
-    if (current.length === size) {
-      return currentSum >= lo && currentSum <= hi ? [...current] : null;
-    }
-    for (let i = start; i < txns.length; i++) {
-      const amt = parseFloat(String(txns[i].amount));
-      const newSum = currentSum + amt;
-      if (newSum > hi) continue; // pruning
-      current.push(txns[i]);
-      const result = search(i + 1, current, newSum);
-      if (result) return result;
+    if (current.length >= maxItems) return;
+    for (let i = start; i < sorted.length; i++) {
+      if (budget-- <= 0) { exhausted = true; return; }
+      const next = sum + amountOf(sorted[i]);
+      // Amounts are positive and sorted descending, so once the running sum
+      // passes the upper bound every remaining item at this level does too.
+      if (next > hi) continue;
+      current.push(sorted[i]);
+      search(i + 1, current, next);
       current.pop();
+      if (found.length >= 2 || exhausted) return;
     }
-    return null;
-  }
-  return search(0, [], 0);
+  };
+
+  search(0, [], 0);
+
+  if (found.length >= 2) return { kind: "ambiguous", alternatives: found.length };
+  if (found.length === 1) return { kind: "unique", subset: found[0] };
+  // Budget exhausted without a hit means "we do not know", not "there is none".
+  return exhausted ? { kind: "indeterminate" } : { kind: "none" };
 }
+
 
 // ─── Layer 3: Categorical Exception Classifier ────────────────────────
 
@@ -515,11 +709,11 @@ export async function diagnoseException(
   config: { amountTolerance: number; dateWindowDays: number },
   memoryContext: string = "",
   /**
-   * `organizations.bankingModel` for the owning tenant. Omitted means
-   * conventional — see isNonInterestInstitution for why an unknown value must
-   * NOT be read as non-interest.
+   * The owning tenant. An omitted `bankingModel` means conventional — see
+   * isNonInterestInstitution for why an unknown value must NOT be read as
+   * non-interest.
    */
-  bankingModel?: string | null,
+  institution: DiagnosingInstitution = {},
 ): Promise<ExceptionDiagnosis> {
   const txnAmt = parseFloat(String(txn.amount));
   const parsedRef = parseReference(txn.transactionRef, txn.description);
@@ -528,7 +722,7 @@ export async function diagnoseException(
   const ruleResult = ruleBasedClassify(txn, txnAmt, allTargets, config, parsedRef);
 
   // LLM diagnosis (enriches the rule result with natural language)
-  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext, bankingModel);
+  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext, institution);
 
   return {
     ...ruleResult,
@@ -536,6 +730,88 @@ export async function diagnoseException(
     recommendedAction: llmDiagnosis.recommendedAction || ruleResult.recommendedAction,
     headline: llmDiagnosis.headline || ruleResult.headline,
   };
+}
+
+/**
+ * Which candidates may a single-transaction diagnosis actually compare against?
+ *
+ * `findNearestTarget` picks by NUMERIC PROXIMITY. Given several of one
+ * distributor's open invoices it will choose the closest by amount, which is a
+ * guess dressed as a finding: a receipt of 950,000 lands on whichever invoice
+ * is nearest rather than the one it settles, and the resulting shortfall is
+ * narrated and persisted onto a credit-note or journal-entry draft. Narrowing
+ * the pool by currency, channel pairing and counterparty removed the grossly
+ * unrelated comparisons; it cannot remove this one, because every remaining
+ * candidate is a genuinely plausible invoice for that payer.
+ *
+ * So the pool is reduced to what is DETERMINED rather than merely nearest:
+ *
+ *   1. If the payment reference names invoice numbers, those pin the target.
+ *      "INV-2847 less promo" is not a guess — it is the distributor telling us
+ *      which invoice it paid and why it paid less.
+ *   2. Otherwise a single remaining candidate is unambiguous and is used.
+ *   3. Otherwise NOTHING is returned. Several open invoices and no reference
+ *      is exactly the case the taxonomy calls `b2b_unallocated_receipt` /
+ *      `b2b_aggregated_remittance_no_advice`, whose recommended action is to
+ *      obtain the remittance advice — not to pick one and quantify against it.
+ *
+ * The same discipline as `findSubsetSum`: when the evidence does not determine
+ * an answer, produce none. An open item a controller closes is cheaper than a
+ * wrong figure a controller has to discover.
+ */
+export function determinateCandidates(
+  txn: SATransaction,
+  candidates: SATransaction[],
+): SATransaction[] {
+  if (candidates.length === 0) return [];
+
+  // The reference is read FIRST, before any short-circuit on pool size. A
+  // `candidates.length <= 1 -> return candidates` fast path sat above this and
+  // handed back the single open invoice even when the receipt named two,
+  // re-opening the split-remittance hole one line above the guard for it.
+  const parsed = parseReference(txn.transactionRef, txn.description);
+
+  // Deduplicated by identifier, because the same invoice number routinely
+  // appears in BOTH the reference and the description ("INV-2847" /
+  // "payment for INV-2847") and counting the raw hits would read one invoice
+  // as two.
+  const wanted = new Set(parsed.invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
+
+  // A reference naming SEVERAL invoices is a split remittance, and that is an
+  // allocation question rather than a shortfall one. It stays unresolved here
+  // however many of them are currently open: finding one leg does not make the
+  // receipt a payment against that leg, and diagnosing the whole amount
+  // against it produces exactly the wrong shortfall and a single-invoice
+  // action draft. Splits are what runM2MMatching is for.
+  //
+  // `mayNameMoreInvoices` is checked alongside the count, not instead of it,
+  // because a shorthand list defeats the count itself: only the first leg of
+  // "INV-1001 and 1002" carries a prefix, so the extractor returns ONE
+  // identifier and the size test reads a two-invoice remittance as an ordinary
+  // single-invoice payment. Counting what was extracted cannot see what the
+  // extractor could not extract.
+  if (wanted.size > 1 || parsed.mayNameMoreInvoices) return [];
+
+  if (wanted.size === 1) {
+    // Compare EXTRACTED IDENTIFIERS, not substrings. A normalised substring
+    // test makes `INV-2847` match `INV-28470`, so a receipt whose real invoice
+    // is not in the open pool silently attaches to a longer one and quantifies
+    // a shortfall against it. Both sides go through the same extractor, so the
+    // comparison is identifier-to-identifier.
+    const named = candidates.filter((candidate) => {
+      const theirs = parseReference(candidate.transactionRef, candidate.description).invoiceNumbers;
+      return theirs.some((n) => wanted.has(normalizeStr(n)));
+    });
+    // Exactly one open invoice carries the named identifier: determined. Two
+    // carrying it is a duplicated invoice — a governance defect, not a target.
+    // None carrying it means the named invoice is not open, and the nearest
+    // other invoice is not a substitute for it.
+    return named.length === 1 ? named : [];
+  }
+
+  // No usable reference. One candidate is unambiguous by definition; several
+  // are a choice this function is not entitled to make.
+  return candidates.length === 1 ? candidates : [];
 }
 
 function ruleBasedClassify(
@@ -705,8 +981,9 @@ async function getLLMDiagnosis(
   ruleResult: ExceptionDiagnosis,
   parsedRef: ParsedReference,
   memoryContext: string,
-  bankingModel?: string | null,
+  institution: DiagnosingInstitution = {},
 ): Promise<{ headline: string; rootCause: string; recommendedAction: string }> {
+  const { bankingModel, segment, country } = institution;
   // Inject only the taxonomy channels relevant to this transaction — the
   // catalogued failure modes, regulatory context and diagnosis guidance for the
   // rails it actually touches. An FMCG deduction still gets no channel block.
@@ -719,13 +996,48 @@ async function getLLMDiagnosis(
     .filter(Boolean)
     .join(" ");
   const channels = relevantNigerianChannels({ channelType: txn.channelType, text: channelText });
-  const taxonomyBlock = channels.length > 0 ? nigerianExceptionsTaxonomyPromptBlock(channels) : "";
+
+  // Corporate B2B is an FMCG manufacturer or distributor, not a bank, so it
+  // gets its own taxonomy INSTEAD OF the Nigerian channel catalogue rather than
+  // on top of it. Injecting NIP/POS/ATM failure modes alongside a trade
+  // deduction does not add context — it invites the model to explain a
+  // distributor's promotional claw-back as a switch failure, and to cite a
+  // regulator that does not supervise the tenant.
+  const isCorporateB2B = segment === "corporate_b2b";
+  const corporateB2BBlock = corporateB2BExceptionsTaxonomyPromptBlock(segment);
+  const taxonomyBlock = isCorporateB2B
+    ? ""
+    : channels.length > 0
+      ? nigerianExceptionsTaxonomyPromptBlock(channels)
+      : "";
 
   // Non-interest (NIFI) institutions additionally get the profit-and-sharing
   // taxonomy, which is keyed on the ORGANISATION rather than the channel: it
   // applies across every rail the institution runs. Empty string for a
   // conventional bank, so nothing is injected and no tokens are spent.
   const nonInterestBlock = nonInterestTaxonomyPromptBlock(bankingModel);
+
+  // The persona and the regulatory instruction are BOTH wrong for this vertical
+  // by default: "specialising in Nigerian … payment systems (NIBSS, NIP, POS …)"
+  // and "reference relevant Nigerian banking regulations (CBN circulars, NIBSS
+  // rules)". The go-live plan's first launch geography is Uganda.
+  const persona = isCorporateB2B
+    ? `You are ReconcileAI's Super Agent — a senior receivables and trade-spend controller for FMCG manufacturers and distributors in Africa. You reconcile distributor receipts, remittance advices and trade deductions against approved invoices.
+
+Your job is to diagnose receivable exceptions with the precision of a Big 4 forensic accountant and the clarity of a CFO briefing. You always:
+1. State the root cause in plain English (no jargon)
+2. Quantify the shortfall or variance precisely, in the invoice currency
+3. Recommend a single, specific next action, naming who must approve it
+4. Say what evidence would close the item — a remittance advice, a credit note, a withholding-tax certificate, an approved promotion schedule
+
+${corporateB2BRegulatoryFrame(country)}`
+    : `You are ReconcileAI's Super Agent — a senior financial reconciliation expert specialising in Nigerian and African FMCG payment systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT, trade finance).
+
+Your job is to diagnose payment exceptions with the precision of a Big 4 forensic accountant and the clarity of a CFO briefing. You always:
+1. State the root cause in plain English (no jargon)
+2. Quantify the shortfall or variance precisely
+3. Recommend a single, specific next action
+4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable`;
 
   try {
     const response = await invokeLLM({
@@ -735,15 +1047,9 @@ async function getLLMDiagnosis(
       messages: [
         {
           role: "system",
-          content: `You are ReconcileAI's Super Agent — a senior financial reconciliation expert specialising in Nigerian and African FMCG payment systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT, trade finance).
+          content: `${persona}
 
-Your job is to diagnose payment exceptions with the precision of a Big 4 forensic accountant and the clarity of a CFO briefing. You always:
-1. State the root cause in plain English (no jargon)
-2. Quantify the shortfall or variance precisely
-3. Recommend a single, specific next action
-4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable
-
-${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${nonInterestBlock ? `THIS INSTITUTION IS LICENSED ON NON-INTEREST (NIFI) PRINCIPLES.\nIt runs the same payment rails as any other bank, but income may only arise from a real sale, lease or partnership — never from the passage of time — and investment account holders' funds must stay segregated from shareholders' funds. Treat an entry that accrues purely with time, or a return credited to the wrong pool, as a compliance finding rather than a posting error: it reaches the institution's licence basis and its Advisory Committee of Experts' attestation, so it can be material at an amount that would be immaterial at a conventional bank.\n\nNON-INTEREST EXCEPTION PATTERNS:\n${nonInterestBlock}\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
+${corporateB2BBlock ? `CATALOGUED FMCG DISTRIBUTOR EXCEPTION PATTERNS:\n${corporateB2BBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance.\n` : ""}${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${nonInterestBlock ? `THIS INSTITUTION IS LICENSED ON NON-INTEREST (NIFI) PRINCIPLES.\nIt runs the same payment rails as any other bank, but income may only arise from a real sale, lease or partnership — never from the passage of time — and investment account holders' funds must stay segregated from shareholders' funds. Treat an entry that accrues purely with time, or a return credited to the wrong pool, as a compliance finding rather than a posting error: it reaches the institution's licence basis and its Advisory Committee of Experts' attestation, so it can be material at an amount that would be immaterial at a conventional bank.\n\nNON-INTEREST EXCEPTION PATTERNS:\n${nonInterestBlock}\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
         },
         {
           role: "user",

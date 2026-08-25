@@ -70,6 +70,7 @@ import { isEgressAllowed, assertEgressAllowed, describeResidencyPosture } from "
 import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
+  determinateCandidates,
   diagnoseException,
   generateActionDraft,
   buildMemoryEmbeddingText,
@@ -404,11 +405,10 @@ async function assertTenantAiAllowedForRequest(
     return await assertTenantAiAllowed(organizationId, surface);
   } catch (error) {
     if (error instanceof TenantAiDisabledError) {
-      throw new TRPCError({
-        code: "FORBIDDEN",
-        message: "AI assistance is disabled for this organisation. A super admin can re-enable it in organisation settings.",
-        cause: error,
-      });
+      // The remedy differs by refusal reason — a Corporate B2B pilot with no
+      // recorded private AI route is not fixed by a super admin toggling the
+      // organisation switch, which is already on. See server/aiGate.ts.
+      throw new TRPCError({ code: "FORBIDDEN", message: error.remedy, cause: error });
     }
     throw error;
   }
@@ -4355,12 +4355,18 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }))
       .mutation(async ({ input, ctx }) => {
         const userId = ctx.user.id;
-        const orgId = ctx.user.organizationId ?? 0;
 
         // Same tenant AI opt-out as superAgent.query. This path sends the
         // transaction plus recalled agent memory to a model, so it is gated on
         // the same switch and before the reads that build that context.
-        await assertTenantAiAllowedForRequest(ctx.user.organizationId, "superAgent.diagnose");
+        //
+        // `orgId` is taken from the gate's return value rather than
+        // `ctx.user.organizationId ?? 0`. That fallback filed this tenant's
+        // agent memory and action drafts against organisation 0 — no tenant at
+        // all — for any account without an organisation, which is the pooling
+        // failure CLAUDE.md §9C describes. The gate has already refused such a
+        // caller, so the value here is a real organisation by construction.
+        const orgId = await assertTenantAiAllowedForRequest(ctx.user.organizationId, "superAgent.diagnose");
 
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
@@ -4427,34 +4433,87 @@ Always be specific, reference actual exception IDs and amounts where available, 
           ? await db.getOrganizationById(ctx.user.organizationId)
           : null;
 
-        // Corporate B2B pilots start with a no-external-AI boundary. A missing
-        // pilot configuration is therefore NOT permission to send transaction
-        // context to a model: it remains disabled until the customer records a
-        // private approved route and the reference that authorised it. This is
-        // intentionally separate from the UI readiness score; the server guard
-        // prevents a deep-link or direct tRPC call from bypassing the policy.
-        if (diagnosingOrg?.segment === "corporate_b2b") {
-          const { corporateB2BPilotConfigs } = await import("../drizzle/schema");
-          const [pilotConfig] = await drizzle
-            .select({ aiAssistanceMode: corporateB2BPilotConfigs.aiAssistanceMode, aiBoundaryReference: corporateB2BPilotConfigs.aiBoundaryReference })
-            .from(corporateB2BPilotConfigs)
-            .where(eq(corporateB2BPilotConfigs.organizationId, ctx.user.organizationId!))
-            .limit(1);
-          if (pilotConfig?.aiAssistanceMode !== "private_approved" || !pilotConfig.aiBoundaryReference) {
-            throw new TRPCError({
-              code: "PRECONDITION_FAILED",
-              message: "AI-assisted diagnosis is disabled for this Corporate B2B pilot until a private approved AI boundary is recorded.",
-            });
-          }
-        }
+        // The Corporate B2B no-external-AI boundary (pilot gate B5) used to be
+        // enforced by an inline check right here. It now lives in
+        // server/aiGate.ts alongside the organisation-level switch, and is
+        // applied by the `assertTenantAiAllowedForRequest` call above — before
+        // any of this tenant's data is read, and on every other model entry
+        // point too. One gate, not two that can disagree.
+
+        // Counterparty candidates for the diagnosis. Passing [] here — the
+        // previous behaviour — made `shortfall` structurally null and put the
+        // bank-fee and FX-variance categories out of reach, because both are
+        // decided by comparing against a candidate. See db.getDiagnosisCandidates.
+        const diagnosisConfig = { amountTolerance: 0.015, dateWindowDays: 7 };
+        // Constrained to the SAME currency and to channels this tenant's jobs
+        // actually reconcile this feed against. `findNearestTarget` compares
+        // numbers, so a loose pool produces a confident shortfall against an
+        // unrelated transaction — which is then persisted onto the action draft
+        // and narrated by the model. `jobId`, already on this input and until
+        // now unused, narrows the pairing to the run the caller is looking at.
+        const counterpartyChannelIds = await db.getCounterpartyChannelIds({
+          organizationId: orgId,
+          channelId: txn.channelId,
+          jobId: input.jobId,
+        });
+        const candidateRows = await db.getDiagnosisCandidates({
+          organizationId: orgId,
+          counterpartyChannelIds,
+          currency: txnRows.currency,
+          // Only this payer's own items are comparable. Currency and channel
+          // narrow the pool; they do not make its members RELATED, and
+          // findNearestTarget then picks by amount alone.
+          counterparty: txnRows.counterparty,
+          around: new Date(txnRows.transactionDate),
+          windowDays: diagnosisConfig.dateWindowDays,
+        });
+        const candidatePool: SATransaction[] = candidateRows
+          .filter((row) => row.id !== txn.id)
+          .map((row) => ({
+            id: row.id,
+            transactionRef: row.transactionRef,
+            description: row.description,
+            counterparty: row.counterparty,
+            amount: row.amount,
+            currency: row.currency,
+            transactionDate: row.transactionDate,
+            channelId: row.channelId,
+            debitCredit: row.debitCredit,
+            isReversal: row.isReversal,
+            originalTransactionRef: row.originalTransactionRef,
+          }));
+
+        // Narrowing by currency, channel pairing and counterparty removes the
+        // grossly unrelated comparisons. It cannot remove the last one: among
+        // several of ONE distributor's open invoices, findNearestTarget picks
+        // by amount, which is a guess dressed as a finding. `determinateCandidates`
+        // keeps only what the evidence actually pins down — the invoice the
+        // payment reference names, or a single unambiguous candidate — and
+        // otherwise returns nothing, which is the right answer for a receipt
+        // that needs a remittance advice rather than a quantified shortfall.
+        const candidates = determinateCandidates(txn, candidatePool);
+
+        // A Corporate B2B tenant is an FMCG manufacturer, not a bank, and the
+        // pilot's recorded country decides which revenue authority and which
+        // mobile-money regime the diagnosis may cite. Uganda is the go-live
+        // plan's FIRST launch geography, so defaulting the framing to Nigeria
+        // is not a harmless default — it is a wrong citation on a document a
+        // financial controller takes into a supplier meeting.
+        const pilotCountry = diagnosingOrg?.segment === "corporate_b2b"
+          ? (await db.getCorporateB2BPilotCountry(orgId))
+          : null;
 
         // Run deep diagnosis
         const diagnosis = await diagnoseException(
           txn,
-          [], // no target txns needed for standalone diagnosis
-          { amountTolerance: 0.015, dateWindowDays: 7 },
+          candidates,
+          diagnosisConfig,
           memoryContext,
-          diagnosingOrg?.bankingModel ?? null,
+          {
+            segment: diagnosingOrg?.segment ?? null,
+            bankingModel: diagnosingOrg?.bankingModel ?? null,
+            country: pilotCountry,
+          },
         );
 
         // Generate action draft

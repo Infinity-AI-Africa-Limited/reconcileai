@@ -28,6 +28,7 @@ import {
   resolutionTemplates, InsertResolutionTemplate,
   moduleConfigurations, InsertModuleConfiguration,
   distributors,
+  corporateB2BPilotConfigs,
   dashboardStatsCache,
   cfoReportSchedules, InsertCfoReportSchedule, CfoReportSchedule,
   channelAlertSettings, InsertChannelAlertSetting, ChannelAlertSetting,
@@ -132,6 +133,49 @@ export async function getOrganizationById(id: number) {
 export async function isOrganizationAiAssistanceEnabled(id: number): Promise<boolean> {
   const org = await getOrganizationById(id);
   return org?.aiAssistanceEnabled === true;
+}
+
+/**
+ * The Corporate B2B pilot's recorded external-model boundary (gate B5), or null
+ * when the tenant has never recorded one.
+ *
+ * Read by server/aiGate.ts. Null is NOT permission: a controlled pilot starts
+ * with AI off and stays off until the customer records a private approved route
+ * and the reference that authorised it.
+ */
+/**
+ * The Corporate B2B pilot's recorded launch country, or null when no pilot
+ * register exists yet.
+ *
+ * Read by the Super Agent so its regulatory framing follows the pilot rather
+ * than defaulting to Nigeria. Null means "unknown", and the diagnosis prompt
+ * says so generically rather than naming a revenue authority on a guess.
+ */
+export async function getCorporateB2BPilotCountry(id: number): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [row] = await db
+    .select({ country: corporateB2BPilotConfigs.country })
+    .from(corporateB2BPilotConfigs)
+    .where(eq(corporateB2BPilotConfigs.organizationId, id))
+    .limit(1);
+  return row?.country ?? null;
+}
+
+export async function getCorporateB2BAiBoundary(
+  id: number,
+): Promise<{ aiAssistanceMode: string; aiBoundaryReference: string | null } | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [row] = await db
+    .select({
+      aiAssistanceMode: corporateB2BPilotConfigs.aiAssistanceMode,
+      aiBoundaryReference: corporateB2BPilotConfigs.aiBoundaryReference,
+    })
+    .from(corporateB2BPilotConfigs)
+    .where(eq(corporateB2BPilotConfigs.organizationId, id))
+    .limit(1);
+  return row ?? null;
 }
 
 // ─── Users ───────────────────────────────────────────────────────────
@@ -649,6 +693,137 @@ export async function getTransactionsForReconciliation(channelId: number, dateFr
       eq(transactions.status, "unmatched")
     ))
     .orderBy(asc(transactions.transactionDate));
+}
+
+/**
+ * Which channels are an APPROVED counterparty for `channelId`.
+ *
+ * Derived from the reconciliation jobs this tenant actually runs: a job names
+ * one source channel and one target channel, and that pairing is the customer's
+ * own statement of which two feeds are reconciled against each other. Anything
+ * else is not a counterparty leg, it is a different reconciliation.
+ *
+ * Returns [] when no job has ever paired this channel with another. That is the
+ * honest answer — "we have no basis to pair this feed with anything" — and the
+ * caller passes no candidates rather than reaching for whatever else is nearby.
+ */
+export async function getCounterpartyChannelIds(params: {
+  organizationId: number;
+  channelId: number;
+  /** Restrict to a single job when the caller knows which run this concerns. */
+  jobId?: number;
+}): Promise<number[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const scope = [
+    eq(reconciliationJobs.organizationId, params.organizationId),
+    or(
+      eq(reconciliationJobs.sourceChannelId, params.channelId),
+      eq(reconciliationJobs.targetChannelId, params.channelId),
+    ),
+  ];
+  if (params.jobId) scope.push(eq(reconciliationJobs.id, params.jobId));
+  const rows = await db
+    .select({ source: reconciliationJobs.sourceChannelId, target: reconciliationJobs.targetChannelId })
+    .from(reconciliationJobs)
+    .where(and(...scope))
+    .limit(200);
+  const counterparties = new Set<number>();
+  for (const row of rows) {
+    if (row.source !== params.channelId) counterparties.add(row.source);
+    if (row.target !== params.channelId) counterparties.add(row.target);
+  }
+  return [...counterparties];
+}
+
+/**
+ * Counterparty candidates for a single-transaction Super Agent diagnosis.
+ *
+ * `superAgent.diagnose` used to run its deep diagnosis with an EMPTY candidate
+ * list, commented "no target txns needed for standalone diagnosis". They are
+ * needed, and the omission was not cosmetic: with an empty candidate set
+ * `findNearestTarget` always returns null, so every diagnosis reported
+ * `shortfall: null` and narrated the amount as "approximately NGN unknown",
+ * while the `bank_fee_deduction` and `fx_variance` categories — both reached
+ * only through a comparison against a candidate — became unreachable. The
+ * shortfall is the number a financial controller acts on.
+ *
+ * ── Why the filters are not optional ──────────────────────────────────────
+ *
+ * `findNearestTarget` compares NUMBERS. Hand it a loosely-selected pool and it
+ * will happily pair a UGX receipt with a USD invoice of similar magnitude and
+ * report a confident shortfall, which is then persisted onto an action draft
+ * and narrated by the model. Going from "always null" to "sometimes wrong" is
+ * not an improvement — a wrong figure in a credit-note draft is worse than no
+ * figure (CLAUDE.md §0.4).
+ *
+ * So the pool is constrained exactly as the core engine constrains its own
+ * passes:
+ *   - SAME CURRENCY. `runMatchingEngine` refuses cross-currency comparison at
+ *     every one of its three passes ("within-currency only", WS-6); numeric
+ *     closeness across currencies is meaningless, and a genuine cross-currency
+ *     pair is an FX exception rather than a shortfall.
+ *   - APPROVED CHANNEL PAIRING. Only channels this tenant's jobs actually
+ *     reconcile this feed against — see getCounterpartyChannelIds. "Any other
+ *     channel" is not a counterparty leg.
+ *   - SAME COUNTERPARTY. Currency and channel narrow the pool; they do not make
+ *     the members of it RELATED. `findNearestTarget` then picks by amount alone,
+ *     so a distributor paying 950,000 against a 1,000,000 invoice is scored
+ *     against whichever open invoice in the window happens to be numerically
+ *     nearest — possibly another distributor's — and a 5,000 shortfall is
+ *     narrated where the real one is 50,000. A receipt is only comparable to
+ *     that payer's own invoices.
+ *
+ * A transaction with NO counterparty yields no candidates, deliberately: the
+ * classifier's `missing_counterparty` branch is the correct diagnosis for it,
+ * and inventing a comparison would produce the exact fabricated figure this
+ * filter exists to prevent. The same applies when the counterparty is recorded
+ * under different spellings on the two feeds — no candidates, no shortfall, and
+ * the alias governance defect is itself a catalogued exception
+ * (b2b_distributor_alias_ambiguity) rather than something to paper over here.
+ *   - Explicitly org-scoped, not inferred from the channel: "the channel
+ *     implies the tenant" is the reasoning behind the cross-tenant reads in
+ *     CLAUDE.md §19.3.
+ *
+ * Capped, so a wide window cannot turn one diagnosis into an unbounded scan.
+ */
+export async function getDiagnosisCandidates(params: {
+  organizationId: number;
+  counterpartyChannelIds: number[];
+  currency: string;
+  /** The payer/payee whose own items are the only comparable ones. */
+  counterparty: string | null;
+  around: Date;
+  windowDays: number;
+  limit?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  // No approved counterparty channel means no basis for comparison. Returning
+  // nothing restores the previous (null-shortfall) behaviour for that case,
+  // which is the correct answer rather than a fallback worth apologising for.
+  if (params.counterpartyChannelIds.length === 0) return [];
+  const counterparty = params.counterparty?.trim();
+  if (!counterparty) return [];
+  const windowMs = Math.max(0, params.windowDays) * 24 * 60 * 60 * 1000;
+  const from = new Date(params.around.getTime() - windowMs);
+  const to = new Date(params.around.getTime() + windowMs);
+  return db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.organizationId, params.organizationId),
+        inArray(transactions.channelId, params.counterpartyChannelIds),
+        eq(transactions.currency, params.currency),
+        eq(transactions.counterparty, counterparty),
+        gte(transactions.transactionDate, from),
+        lte(transactions.transactionDate, to),
+        inArray(transactions.status, ["unmatched", "exception"]),
+      ),
+    )
+    .orderBy(asc(transactions.transactionDate))
+    .limit(clampLimit(params.limit ?? 500));
 }
 
 // Check for duplicate transactions within a channel

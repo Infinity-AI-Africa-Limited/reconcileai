@@ -157,8 +157,31 @@ describe("when a tenant has switched AI assistance off", () => {
   it("should fail closed when no owning organisation can be determined", () => {
     // The opposite default to featureAppliesTo (which fails OPEN): this
     // authorises an egress of tenant data, so ambiguity must refuse.
-    expect(aiGate).toContain("if (orgId === null) return false;");
-    expect(aiGate).toContain("if (orgId === null) throw new TenantAiDisabledError(null, surface);");
+    //
+    // Asserted on the ONE place the decision is now made. Both public forms
+    // delegate to `resolveTenantAi`, so a string match against either of them
+    // would prove nothing about the other. The behavioural proof — that a null,
+    // zero or non-integer organizationId is refused without the database even
+    // being consulted — is in aiGateBehaviour.test.ts.
+    expect(aiGate).toContain('return { allowed: false, organizationId: null, reason: "no_tenant" };');
+    expect(aiGate).toContain("resolveTenantAi");
+  });
+
+  /**
+   * The Corporate B2B pilot boundary (gate B5).
+   *
+   * It shipped as an inline check inside `superAgent.diagnose` and nowhere
+   * else, while the B0–B8 status document described it as the tenant's AI
+   * boundary. Folding it into the gate is what makes that description true, so
+   * the ratchet has to notice if it is unfolded again — deleting it from
+   * aiGate.ts would restore the four unguarded surfaces silently.
+   */
+  it("should decide the Corporate B2B external-model boundary in the gate, not in one procedure", () => {
+    expect(aiGate).toContain("getCorporateB2BAiBoundary");
+    expect(aiGate).toContain('reason: "b2b_boundary_unapproved"');
+    // And nowhere else: a second copy in a router is a rule that can disagree
+    // with itself, which is how the original one-door version came about.
+    expect(routers).not.toContain("corporateB2BPilotConfigs");
   });
 });
 
