@@ -48,29 +48,49 @@ export const controlFitRouter = router({
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const values = { ...input, organizationId, updatedByUserId: ctx.user.id };
-    const [existing] = await db.select({ id: controlFitBriefs.id }).from(controlFitBriefs).where(eq(controlFitBriefs.organizationId, organizationId)).limit(1);
-    if (existing) await db.update(controlFitBriefs).set(values).where(eq(controlFitBriefs.id, existing.id));
-    else await db.insert(controlFitBriefs).values(values);
     const { ip, ua } = getClientInfo(ctx);
-    // Scoped to the tenant the brief belongs to, NOT to the caller's own org —
-    // a super admin saving from inside a portal is acting on that tenant, and
-    // the record has to land in that tenant's chain to be worth anything. The
-    // id stays in `details` too, but details is JSON and cannot be filtered,
-    // exported, or chain-verified.
-    await logAuditStrict({
-      userId: ctx.user.id,
-      organizationId,
-      action: "control_fit_brief_saved",
-      entityType: "control_fit_brief",
-      entityId: existing?.id,
-      details: {
-        targetOrganizationId: organizationId,
-        status: input.status,
-        workflowName: input.workflowName,
-        evidenceCount: input.approvedEvidence.length,
-      },
-      ipAddress: ip,
-      userAgent: ua,
+    // The brief and its audit record commit or roll back together.
+    //
+    // Propagating the audit failure is not sufficient on its own: without the
+    // transaction the brief is already committed when the audit insert fails, so
+    // the caller is told the save failed over a change that DID happen and left
+    // no trace of itself. Either outcome alone is defensible; the combination is
+    // the one a bank examiner cannot be shown.
+    await db.transaction(async (tx) => {
+      const [existing] = await tx.select({ id: controlFitBriefs.id }).from(controlFitBriefs).where(eq(controlFitBriefs.organizationId, organizationId)).limit(1);
+      // The FIRST save has no `existing`, so the insert result is the only place
+      // the id exists. Reaching for `existing?.id` there recorded a null entity
+      // id, and an audit row that cannot be found by the entity it describes is
+      // missing from exactly the query an examiner would run.
+      let briefId: number;
+      if (existing) {
+        await tx.update(controlFitBriefs).set(values).where(eq(controlFitBriefs.id, existing.id));
+        briefId = existing.id;
+      } else {
+        const [inserted] = await tx.insert(controlFitBriefs).values(values);
+        briefId = Number(inserted.insertId);
+      }
+      // Scoped to the tenant the brief belongs to, NOT to the caller's own org —
+      // a super admin saving from inside a portal is acting on that tenant, and
+      // the record has to land in that tenant's chain to be worth anything. The
+      // id stays in `details` too, but details is JSON and cannot be filtered,
+      // exported, or chain-verified.
+      await logAuditStrict({
+        userId: ctx.user.id,
+        organizationId,
+        action: "control_fit_brief_saved",
+        entityType: "control_fit_brief",
+        entityId: briefId,
+        details: {
+          targetOrganizationId: organizationId,
+          status: input.status,
+          workflowName: input.workflowName,
+          evidenceCount: input.approvedEvidence.length,
+        },
+        ipAddress: ip,
+        userAgent: ua,
+        executor: tx,
+      });
     });
     return load(ctx.user, organizationId);
   }),

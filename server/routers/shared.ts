@@ -12,7 +12,7 @@ import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog, getChannelByIdForOrg } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg, type DbExecutor } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -220,17 +220,27 @@ export async function logAuditStrict(entry: {
   details?: unknown;
   ipAddress?: string;
   userAgent?: string;
+  /**
+   * The caller's transaction, so the change and its audit record commit or roll
+   * back together. Propagating the failure is not enough on its own: without
+   * this the row is already committed when the audit insert fails, so the caller
+   * reports failure over a change that did happen and left no trace.
+   */
+  executor?: DbExecutor;
 }) {
-  await createAuditLog({
-    userId: entry.userId,
-    organizationId: entry.organizationId,
-    action: entry.action,
-    entityType: entry.entityType,
-    entityId: entry.entityId,
-    details: entry.details ? JSON.stringify(entry.details) : null,
-    ipAddress: entry.ipAddress || null,
-    userAgent: entry.userAgent ? entry.userAgent.substring(0, 500) : null,
-  });
+  await createAuditLog(
+    {
+      userId: entry.userId,
+      organizationId: entry.organizationId,
+      action: entry.action,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      details: entry.details ? JSON.stringify(entry.details) : null,
+      ipAddress: entry.ipAddress || null,
+      userAgent: entry.userAgent ? entry.userAgent.substring(0, 500) : null,
+    },
+    entry.executor,
+  );
 }
 
 export function getClientInfo(ctx: any): { ip: string; ua: string } {
