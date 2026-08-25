@@ -14,7 +14,7 @@ import {
   distributors,
   organizations,
 } from "../../drizzle/schema";
-import { getDb } from "../db";
+import { getDb, type DbExecutor } from "../db";
 import { resolveOrgScope } from "../_core/tenancy";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getClientInfo, logAuditStrict } from "./shared";
@@ -94,53 +94,121 @@ export function requirePilotManager(role: string) {
   }
 }
 
+/** The rows every gate is computed from, read through one executor. */
+type GateState = {
+  config: typeof corporateB2BPilotConfigs.$inferSelect | null;
+  sources: (typeof corporateB2BPilotSources.$inferSelect)[];
+  roster: { total: number; active: number; pending: number; flagged: number; duplicateNames: number };
+};
+
+/**
+ * Read the gate inputs.
+ *
+ * `lock` takes a `FOR UPDATE` read on the source contracts and the roster.
+ * Without it the readiness snapshot races the state write: a source or roster
+ * mutation committing between the check and the upsert lets an advanced pilot
+ * state be persisted against gates that have since reopened. The locking read
+ * serialises the advance against exactly the two tables the gates depend on;
+ * a pilot roster is 10-30 distributors by design, so the lock is small.
+ *
+ * Only taken when the pilot state is ADVANCING. An ordinary save that leaves
+ * the state alone has nothing to serialise against, and should not hold a lock
+ * on the roster while it writes.
+ */
+async function loadGateState(
+  executor: DbExecutor,
+  organizationId: number,
+  lock = false,
+): Promise<GateState> {
+  const configQuery = executor.select().from(corporateB2BPilotConfigs)
+    .where(eq(corporateB2BPilotConfigs.organizationId, organizationId)).limit(1);
+  const [config] = await (lock ? configQuery.for("update") : configQuery);
+
+  const sourcesQuery = executor.select().from(corporateB2BPilotSources)
+    .where(eq(corporateB2BPilotSources.organizationId, organizationId));
+  const sources = await (lock ? sourcesQuery.for("update") : sourcesQuery);
+
+  // A locking read has to be on ROWS, so under `lock` the roster is counted in
+  // application code from the locked rows rather than by an aggregate query —
+  // `SELECT count(*) ... FOR UPDATE` locks nothing useful.
+  let roster: GateState["roster"];
+  if (lock) {
+    const rows = await executor.select({ status: distributors.status, canonicalName: distributors.canonicalName })
+      .from(distributors).where(eq(distributors.organizationId, organizationId)).for("update");
+    const seen = new Map<string, number>();
+    for (const row of rows) seen.set(row.canonicalName, (seen.get(row.canonicalName) ?? 0) + 1);
+    roster = {
+      total: rows.length,
+      active: rows.filter((r: { status: string }) => r.status === "active").length,
+      pending: rows.filter((r: { status: string }) => r.status === "pending_confirmation").length,
+      flagged: rows.filter((r: { status: string }) => r.status === "flagged").length,
+      duplicateNames: [...seen.values()].filter((count) => count > 1).length,
+    };
+  } else {
+    const [counts] = await executor.select({
+      total: sql<number>`count(*)`,
+      // "Active" is counted separately from "not pending and not flagged": a
+      // roster of entirely inactive distributors satisfies both of those and
+      // still has nobody to reconcile against.
+      active: sql<number>`sum(case when ${distributors.status} = 'active' then 1 else 0 end)`,
+      pending: sql<number>`sum(case when ${distributors.status} = 'pending_confirmation' then 1 else 0 end)`,
+      flagged: sql<number>`sum(case when ${distributors.status} = 'flagged' then 1 else 0 end)`,
+    }).from(distributors).where(eq(distributors.organizationId, organizationId));
+
+    // Duplicate canonical names, counted as NAMES rather than rows: two rows
+    // sharing one name is one governance defect, not two. B3 exists because
+    // ungoverned aliases produce false match candidates, and a duplicated
+    // identity is the most direct way to get one.
+    const duplicateNameRows = await executor.select({ name: distributors.canonicalName })
+      .from(distributors)
+      .where(eq(distributors.organizationId, organizationId))
+      .groupBy(distributors.canonicalName)
+      .having(sql`count(*) > 1`);
+
+    roster = {
+      total: Number(counts?.total ?? 0),
+      active: Number(counts?.active ?? 0),
+      pending: Number(counts?.pending ?? 0),
+      flagged: Number(counts?.flagged ?? 0),
+      duplicateNames: duplicateNameRows.length,
+    };
+  }
+
+  return { config: config ?? null, sources, roster };
+}
+
 async function loadReadiness(
   user: { role: string; organizationId?: number | null },
   requestedOrganizationId?: number,
 ) {
   const { db, organizationId } = await requireCorporateB2B(user, requestedOrganizationId);
-  const [config] = await db.select().from(corporateB2BPilotConfigs)
-    .where(eq(corporateB2BPilotConfigs.organizationId, organizationId)).limit(1);
-  const sources = await db.select().from(corporateB2BPilotSources)
-    .where(eq(corporateB2BPilotSources.organizationId, organizationId));
-  const [roster] = await db.select({
-    total: sql<number>`count(*)`,
-    // "Active" is counted separately from "not pending and not flagged": a
-    // roster of entirely inactive distributors satisfies both of those and
-    // still has nobody to reconcile against.
-    active: sql<number>`sum(case when ${distributors.status} = 'active' then 1 else 0 end)`,
-    pending: sql<number>`sum(case when ${distributors.status} = 'pending_confirmation' then 1 else 0 end)`,
-    flagged: sql<number>`sum(case when ${distributors.status} = 'flagged' then 1 else 0 end)`,
-  }).from(distributors).where(eq(distributors.organizationId, organizationId));
-
-  // Duplicate canonical names, counted as NAMES rather than rows: two rows
-  // sharing one name is one governance defect, not two. B3 exists because
-  // ungoverned aliases produce false match candidates, and a duplicated
-  // identity is the most direct way to get one.
-  const duplicateNameRows = await db.select({ name: distributors.canonicalName })
-    .from(distributors)
-    .where(eq(distributors.organizationId, organizationId))
-    .groupBy(distributors.canonicalName)
-    .having(sql`count(*) > 1`);
-
-  const total = Number(roster?.total ?? 0);
-  const active = Number(roster?.active ?? 0);
-  const pending = Number(roster?.pending ?? 0);
-  const flagged = Number(roster?.flagged ?? 0);
-  const rosterCounts = { total, active, pending, flagged, duplicateNames: duplicateNameRows.length };
+  const state = await loadGateState(db, organizationId);
   const readiness = calculateCorporateB2BPilotReadiness({
-    config: config ?? null,
-    sources,
-    roster: rosterCounts,
+    config: state.config,
+    sources: state.sources,
+    roster: state.roster,
     queueDurability: await queueDurability(),
   });
 
   return {
     organizationId,
-    config: config ?? null,
-    sources,
-    roster: rosterCounts,
+    config: state.config,
+    sources: state.sources,
+    roster: state.roster,
     ...readiness,
+    /**
+     * The recorded state claims more than the gates currently support.
+     *
+     * Serialising the write closes the race at the moment of the advance; it
+     * cannot keep the claim true afterwards. A distributor flagged the next
+     * morning reopens B3 under a pilot already recorded as `parallel_run`,
+     * and that is a real operating condition, not a bug to be prevented — the
+     * closure register's answer is to stop or stay in parallel, which is a
+     * human decision. So it is REPORTED rather than silently tolerated.
+     */
+    stateContradictsGates:
+      !readiness.canStartReadOnlyPilot &&
+      (state.config?.pilotState === "parallel_run" || state.config?.pilotState === "limited_control"),
   };
 }
 
@@ -196,36 +264,44 @@ export const corporateB2BPilotRouter = router({
       dataProcessingReference: submitted.dataProcessingReference ?? null,
     };
 
-    // The pilot STATE is the claim a customer, an auditor or a regulator reads
-    // first, and until now it could be set to "parallel run" while eight of the
-    // gates printed directly above it were red. The closure register is explicit
-    // that a live parallel run is not permitted until every gate is closed with
-    // evidence, and that failure "never means silently widen scope".
-    //
-    // Evaluated against the state the save WOULD produce, not the state on
-    // disk: a single save can approve the last outstanding gate and advance the
-    // pilot, and refusing that would force an operator to save twice for no
-    // reason. Read-only sources and roster are unchanged by this mutation.
-    const before = await loadReadiness(ctx.user, input.organizationId);
-    const projected = calculateCorporateB2BPilotReadiness({
-      config: { ...(before.config ?? {}), ...fields } as Parameters<typeof calculateCorporateB2BPilotReadiness>[0]["config"],
-      sources: before.sources,
-      roster: before.roster,
-      queueDurability: before.queueDurability,
-    });
-    const refusal = pilotStateTransitionRefusal(
-      fields.pilotState as PilotState,
-      (before.config?.pilotState ?? null) as PilotState | null,
-      projected,
-    );
-    if (refusal) throw new TRPCError({ code: "PRECONDITION_FAILED", message: refusal });
-
     const values = { ...fields, organizationId, updatedByUserId: ctx.user.id };
     const { ip, ua } = getClientInfo(ctx);
-    // The register change and its audit record commit or roll back together —
-    // the same reason the Control Fit Brief save does. A pilot register whose
-    // last save left no trace is not an evidence register.
+    const durability = await queueDurability();
+    // The register change, its gate check and its audit record all commit or
+    // roll back together — the same reason the Control Fit Brief save does.
+    //
+    // The gate check reads INSIDE this transaction, with a locking read on the
+    // source contracts and the roster. Reading it outside raced the write: a
+    // source or roster mutation committing between the check and the upsert let
+    // an advanced pilot state be persisted against gates that had since
+    // reopened, which is precisely the invariant this check exists to hold.
     await db.transaction(async (tx) => {
+      const before = await loadGateState(tx, organizationId, true);
+
+      // The pilot STATE is the claim a customer, an auditor or a regulator
+      // reads first, and until now it could be set to "parallel run" while
+      // eight of the gates printed directly above it were red. The closure
+      // register is explicit that a live parallel run is not permitted until
+      // every gate is closed with evidence, and that failure "never means
+      // silently widen scope".
+      //
+      // Evaluated against the state the save WOULD produce, not the state on
+      // disk: a single save can approve the last outstanding gate and advance
+      // the pilot, and refusing that would make an operator save twice for no
+      // reason. Sources and roster are not touched by this mutation.
+      const projected = calculateCorporateB2BPilotReadiness({
+        config: { ...(before.config ?? {}), ...fields } as Parameters<typeof calculateCorporateB2BPilotReadiness>[0]["config"],
+        sources: before.sources,
+        roster: before.roster,
+        queueDurability: durability,
+      });
+      const refusal = pilotStateTransitionRefusal(
+        fields.pilotState as PilotState,
+        (before.config?.pilotState ?? null) as PilotState | null,
+        projected,
+      );
+      if (refusal) throw new TRPCError({ code: "PRECONDITION_FAILED", message: refusal });
+
       // One statement rather than select-then-insert-or-update. `organizationId`
       // is UNIQUE on this table, so two concurrent saves through the read-then-
       // write form raced into a duplicate-key 500 for whichever lost. The tenant

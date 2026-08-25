@@ -240,3 +240,38 @@ describe("advancing the pilot state", () => {
     expect(pilotStateTransitionRefusal("data_validation", "data_validation", open)).toBeNull();
   });
 });
+
+describe("when the recorded state outruns the gates", () => {
+  /**
+   * Serialising the write closes the race at the moment of the advance. It
+   * cannot keep the claim true afterwards — a distributor flagged the next
+   * morning reopens B3 under a pilot already recorded as `parallel_run`. That
+   * is an operating condition, not a preventable bug, so the register has to
+   * SAY so rather than display a green-looking state over red gates.
+   *
+   * The rule under test is the one the router applies to build
+   * `stateContradictsGates`; it is asserted here on the same inputs.
+   */
+  const contradicts = (state: string | undefined, ready: boolean) =>
+    !ready && (state === "parallel_run" || state === "limited_control");
+
+  it("should flag a parallel run whose gates have reopened", () => {
+    const reopened = readiness({ roster: { flagged: 1 } });
+    expect(reopened.canStartReadOnlyPilot).toBe(false);
+    expect(contradicts("parallel_run", reopened.canStartReadOnlyPilot)).toBe(true);
+    expect(contradicts("limited_control", reopened.canStartReadOnlyPilot)).toBe(true);
+  });
+
+  it("should not flag a pilot that has not yet claimed an operational state", () => {
+    // The control: an open gate during preparation is the normal condition, not
+    // a contradiction. Flagging it would make the warning meaningless.
+    const reopened = readiness({ roster: { flagged: 1 } });
+    for (const state of ["preparation", "data_validation", "dry_run", "suspended"]) {
+      expect(contradicts(state, reopened.canStartReadOnlyPilot), state).toBe(false);
+    }
+  });
+
+  it("should not flag a parallel run whose gates are all closed", () => {
+    expect(contradicts("parallel_run", readiness().canStartReadOnlyPilot)).toBe(false);
+  });
+});

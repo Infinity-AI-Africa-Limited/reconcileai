@@ -4444,9 +4444,21 @@ Always be specific, reference actual exception IDs and amounts where available, 
         // bank-fee and FX-variance categories out of reach, because both are
         // decided by comparing against a candidate. See db.getDiagnosisCandidates.
         const diagnosisConfig = { amountTolerance: 0.015, dateWindowDays: 7 };
+        // Constrained to the SAME currency and to channels this tenant's jobs
+        // actually reconcile this feed against. `findNearestTarget` compares
+        // numbers, so a loose pool produces a confident shortfall against an
+        // unrelated transaction — which is then persisted onto the action draft
+        // and narrated by the model. `jobId`, already on this input and until
+        // now unused, narrows the pairing to the run the caller is looking at.
+        const counterpartyChannelIds = await db.getCounterpartyChannelIds({
+          organizationId: orgId,
+          channelId: txn.channelId,
+          jobId: input.jobId,
+        });
         const candidateRows = await db.getDiagnosisCandidates({
           organizationId: orgId,
-          excludeChannelId: txn.channelId,
+          counterpartyChannelIds,
+          currency: txnRows.currency,
           around: new Date(txnRows.transactionDate),
           windowDays: diagnosisConfig.dateWindowDays,
         });

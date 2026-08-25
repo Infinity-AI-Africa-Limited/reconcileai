@@ -696,6 +696,47 @@ export async function getTransactionsForReconciliation(channelId: number, dateFr
 }
 
 /**
+ * Which channels are an APPROVED counterparty for `channelId`.
+ *
+ * Derived from the reconciliation jobs this tenant actually runs: a job names
+ * one source channel and one target channel, and that pairing is the customer's
+ * own statement of which two feeds are reconciled against each other. Anything
+ * else is not a counterparty leg, it is a different reconciliation.
+ *
+ * Returns [] when no job has ever paired this channel with another. That is the
+ * honest answer — "we have no basis to pair this feed with anything" — and the
+ * caller passes no candidates rather than reaching for whatever else is nearby.
+ */
+export async function getCounterpartyChannelIds(params: {
+  organizationId: number;
+  channelId: number;
+  /** Restrict to a single job when the caller knows which run this concerns. */
+  jobId?: number;
+}): Promise<number[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const scope = [
+    eq(reconciliationJobs.organizationId, params.organizationId),
+    or(
+      eq(reconciliationJobs.sourceChannelId, params.channelId),
+      eq(reconciliationJobs.targetChannelId, params.channelId),
+    ),
+  ];
+  if (params.jobId) scope.push(eq(reconciliationJobs.id, params.jobId));
+  const rows = await db
+    .select({ source: reconciliationJobs.sourceChannelId, target: reconciliationJobs.targetChannelId })
+    .from(reconciliationJobs)
+    .where(and(...scope))
+    .limit(200);
+  const counterparties = new Set<number>();
+  for (const row of rows) {
+    if (row.source !== params.channelId) counterparties.add(row.source);
+    if (row.target !== params.channelId) counterparties.add(row.target);
+  }
+  return [...counterparties];
+}
+
+/**
  * Counterparty candidates for a single-transaction Super Agent diagnosis.
  *
  * `superAgent.diagnose` used to run its deep diagnosis with an EMPTY candidate
@@ -707,21 +748,44 @@ export async function getTransactionsForReconciliation(channelId: number, dateFr
  * only through a comparison against a candidate — became unreachable. The
  * shortfall is the number a financial controller acts on.
  *
- * Scoped explicitly by organizationId rather than inferred from the channel:
- * "the channel implies the tenant" is exactly the reasoning that produced the
- * cross-tenant reads in CLAUDE.md §19.3. Candidates come from OTHER channels —
- * a row on the same feed is not the counterparty leg — and the result is capped
- * so a wide window cannot turn one diagnosis into an unbounded scan.
+ * ── Why the filters are not optional ──────────────────────────────────────
+ *
+ * `findNearestTarget` compares NUMBERS. Hand it a loosely-selected pool and it
+ * will happily pair a UGX receipt with a USD invoice of similar magnitude and
+ * report a confident shortfall, which is then persisted onto an action draft
+ * and narrated by the model. Going from "always null" to "sometimes wrong" is
+ * not an improvement — a wrong figure in a credit-note draft is worse than no
+ * figure (CLAUDE.md §0.4).
+ *
+ * So the pool is constrained exactly as the core engine constrains its own
+ * passes:
+ *   - SAME CURRENCY. `runMatchingEngine` refuses cross-currency comparison at
+ *     every one of its three passes ("within-currency only", WS-6); numeric
+ *     closeness across currencies is meaningless, and a genuine cross-currency
+ *     pair is an FX exception rather than a shortfall.
+ *   - APPROVED CHANNEL PAIRING. Only channels this tenant's jobs actually
+ *     reconcile this feed against — see getCounterpartyChannelIds. "Any other
+ *     channel" is not a counterparty leg.
+ *   - Explicitly org-scoped, not inferred from the channel: "the channel
+ *     implies the tenant" is the reasoning behind the cross-tenant reads in
+ *     CLAUDE.md §19.3.
+ *
+ * Capped, so a wide window cannot turn one diagnosis into an unbounded scan.
  */
 export async function getDiagnosisCandidates(params: {
   organizationId: number;
-  excludeChannelId: number;
+  counterpartyChannelIds: number[];
+  currency: string;
   around: Date;
   windowDays: number;
   limit?: number;
 }) {
   const db = await getDb();
   if (!db) return [];
+  // No approved counterparty channel means no basis for comparison. Returning
+  // nothing restores the previous (null-shortfall) behaviour for that case,
+  // which is the correct answer rather than a fallback worth apologising for.
+  if (params.counterpartyChannelIds.length === 0) return [];
   const windowMs = Math.max(0, params.windowDays) * 24 * 60 * 60 * 1000;
   const from = new Date(params.around.getTime() - windowMs);
   const to = new Date(params.around.getTime() + windowMs);
@@ -731,7 +795,8 @@ export async function getDiagnosisCandidates(params: {
     .where(
       and(
         eq(transactions.organizationId, params.organizationId),
-        ne(transactions.channelId, params.excludeChannelId),
+        inArray(transactions.channelId, params.counterpartyChannelIds),
+        eq(transactions.currency, params.currency),
         gte(transactions.transactionDate, from),
         lte(transactions.transactionDate, to),
         inArray(transactions.status, ["unmatched", "exception"]),

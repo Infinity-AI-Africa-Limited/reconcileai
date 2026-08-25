@@ -97,6 +97,21 @@ export default function CorporateB2BPilotControls() {
         </span>
       </div>
     ) : null}
+    {/* Serialising the write stops a state being advanced against gates that
+        have reopened. It cannot keep the claim true afterwards: a distributor
+        flagged the next morning reopens B3 under a pilot already recorded as
+        parallel run. That is a real operating condition and the closure
+        register's answer is a human decision — stop, or stay in parallel — so
+        it is stated rather than silently tolerated. */}
+    {data.stateContradictsGates ? (
+      <div className="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>
+          <span className="font-semibold">This pilot is recorded as “{data.config?.pilotState.replace(/_/g, " ")}” while {data.blockedBy.length} gate{data.blockedBy.length === 1 ? " is" : "s are"} open ({data.blockedBy.join(", ")}).</span>{" "}
+          The recorded state claims more than the evidence currently supports. Close the open gates, or move the pilot back to parallel run or suspended — widening scope on an open gate is not an option the closure register allows.
+        </span>
+      </div>
+    ) : null}
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div>
         <p className="text-sm font-semibold text-primary">Corporate B2B · controlled pilot</p>

@@ -158,6 +158,46 @@ ids named in the message:
 
 ---
 
+## 3A. Two defects this review introduced, caught in code review
+
+Recorded rather than quietly fixed (CLAUDE.md §0.6). Both were raised as P1 by Greptile on PR #112
+and both were valid.
+
+### 3A.1 The new candidate pool ignored currency and channel pairing
+
+Restoring candidates to `diagnoseException` (§2.4) moved the shortfall from *always null* to
+*sometimes wrong*, which is the worse failure: `findNearestTarget` compares **numbers**, so a UGX
+receipt could be paired with a USD invoice of similar magnitude and a confident shortfall persisted
+onto a credit-note draft and narrated by the model.
+
+The core engine already had the rule, stated at all three of its passes — *"within-currency only
+(WS-6): numeric closeness across currencies is meaningless"* — and the new helper did not follow it.
+The candidate pool is now constrained the same way the engine constrains itself:
+
+- **same currency**, per WS-6;
+- **approved channel pairing only** — the channels this tenant's reconciliation jobs actually pair
+  this feed with (`db.getCounterpartyChannelIds`), rather than "every other channel". The `jobId`
+  already on the procedure's input, and until now unused, narrows it to a single run;
+- no pairing on record ⇒ **no candidates**, which restores the null-shortfall answer for that case.
+  That is the correct answer, not a fallback.
+
+### 3A.2 The gate check raced the state write
+
+The transition check read readiness *outside* the transaction that wrote the state, so a source or
+roster mutation committing in between let an advanced state be persisted against gates that had
+since reopened. The check now runs **inside** the transaction with a `FOR UPDATE` read on the source
+contracts and the roster — the only two tables the gates depend on — and only when the state is
+advancing, so an ordinary save does not hold a roster lock.
+
+**Serialising the write does not make the claim permanently true, and pretending otherwise would be
+the same error this review is about.** A distributor flagged the next morning reopens B3 under a
+pilot already recorded as `parallel_run`. That is an operating condition, and the closure register's
+answer to it is a human decision — stop, or stay in parallel. So the readiness output carries
+`stateContradictsGates` and the workspace shows a red banner naming the open gates, instead of
+displaying an operational state over red evidence.
+
+---
+
 ## 4. Attestation is not verification — now stated on the screen
 
 Six of the nine gates are green because an authorised customer owner ticked a box. Three report
@@ -208,12 +248,12 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | clean |
-| Corporate B2B pilot readiness | 24 tests pass |
+| Corporate B2B pilot readiness | 27 tests pass |
 | Corporate B2B AI boundary | 11 tests pass; 6 fail when the rule is removed (verified) |
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation | 10 tests pass; 2 fail when reverted to first-hit-wins (verified) |
-| Full suite | see caveat below |
+| Full suite | 2009 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in
