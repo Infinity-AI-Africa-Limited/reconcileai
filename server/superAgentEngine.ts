@@ -750,15 +750,11 @@ export async function diagnoseException(
  *   - a different row (a transaction is not its own counterpart);
  *   - the same currency — two currencies make an FX exception, not a shortfall;
  *   - the same counterparty, so the comparison is to that payer's own items;
- *   - the OPPOSITE direction. Both feeds of a reconciled pair record the
- *     counterpart in the opposite direction in this platform's model, in both
- *     verticals (demoSeedEngine writes every source row `credit` and every
- *     target row `debit`), and `detectReversals` requires the same inequality.
- *     A same-direction row is a different event on the same side of the ledger:
- *     comparing a receipt to another receipt narrates the gap between two
- *     payments as a shortfall against an invoice;
  *   - not a reversal. Reversed money is not an obligation to measure against —
  *     it is the `b2b_receipt_reversed_after_allocation` exception.
+ *
+ * DIRECTION IS DELIBERATELY NOT HERE. It cannot be decided one row at a time —
+ * see `selectCounterpartLegs`.
  */
 export function isComparableCandidate(txn: SATransaction, candidate: SATransaction): boolean {
   if (candidate.id === txn.id) return false;
@@ -770,11 +766,72 @@ export function isComparableCandidate(txn: SATransaction, candidate: SATransacti
   // branch is the right diagnosis; inventing a comparison is the fabricated
   // figure this filter exists to prevent.
   if (!payer || normalizeStr(candidate.counterparty) !== payer) return false;
+  return true;
+}
 
-  // Unrecognised directions compare to nothing rather than to everything.
-  const directions = new Set(["debit", "credit"]);
-  if (!directions.has(txn.debitCredit) || !directions.has(candidate.debitCredit)) return false;
-  return candidate.debitCredit !== txn.debitCredit;
+/**
+ * Whether `debitCredit` told us anything about this pool.
+ *
+ * `discriminating` — the pool holds opposite-direction rows, so direction
+ *   identifies the counterpart leg and same-direction rows are excluded.
+ * `uninformative` — every comparable row sits on the same side as the
+ *   transaction. Direction carries no signal for this feed pair and is ignored.
+ * `none` — nothing comparable at all, direction aside.
+ */
+export type DirectionSignal = "discriminating" | "uninformative" | "none";
+
+/**
+ * The counterpart legs of `txn`, and what direction was able to tell us.
+ *
+ * ── Why direction is not a per-row boolean ────────────────────────────────
+ *
+ * Review found this check wrong in BOTH directions within one round, which is
+ * the signal that the TYPE was wrong rather than the logic:
+ *
+ *   - too permissive — with no direction test, a same-currency receipt or
+ *     refund for the same payer on the paired channel was admitted as a target,
+ *     and the gap between two payments was narrated as a shortfall;
+ *   - too strict — with `candidate.debitCredit !== txn.debitCredit` applied
+ *     unconditionally, feeds that never recorded a direction lost their genuine
+ *     counterpart. `apiIngestionService` stores
+ *     `row.debitCredit || row.type || "debit"`, so a CSV or API delivery with
+ *     neither column lands BOTH legs as `debit` — and the pilot's own source
+ *     contracts (B2) are exactly those SFTP/bucket/API drops. The shortfall
+ *     silently vanished for the customers whose files are least well-formed.
+ *
+ * Both are real, and neither `true` nor `false` is a safe answer for "the
+ * column was never populated". So the third state is named instead, the same
+ * discipline as the queue-durability states in the pilot register.
+ *
+ * The rule: direction is applied only where it DISCRIMINATES. If any comparable
+ * row sits opposite `txn`, direction is meaningful for this feed pair and only
+ * those rows are legs. If none does, the column carries no signal here and it
+ * is ignored rather than used to empty the pool.
+ *
+ * ── The residual, stated rather than implied ──────────────────────────────
+ *
+ * A pool holding ONLY same-direction rows is ambiguous: either the feed does
+ * not record direction (keep them) or there is genuinely no counterpart and
+ * these are strays (drop them). This cannot be told apart from the rows alone,
+ * so `uninformative` keeps them and says so. `determinateCandidates` is the
+ * backstop: it uses a candidate only when the payment reference NAMES it or it
+ * is the single option, so a stray is reached only when it is the sole
+ * candidate or carries the receipt's own invoice number.
+ */
+export function selectCounterpartLegs(
+  txn: SATransaction,
+  candidates: SATransaction[],
+): { legs: SATransaction[]; directionSignal: DirectionSignal } {
+  const comparable = candidates.filter((candidate) => isComparableCandidate(txn, candidate));
+  if (comparable.length === 0) return { legs: [], directionSignal: "none" };
+
+  const known = new Set(["debit", "credit"]);
+  const opposite = known.has(txn.debitCredit)
+    ? comparable.filter((c) => known.has(c.debitCredit) && c.debitCredit !== txn.debitCredit)
+    : [];
+
+  if (opposite.length > 0) return { legs: opposite, directionSignal: "discriminating" };
+  return { legs: comparable, directionSignal: "uninformative" };
 }
 
 /**

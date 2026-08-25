@@ -19,6 +19,7 @@ import {
   runM2MMatching,
   determinateCandidates,
   isComparableCandidate,
+  selectCounterpartLegs,
   type SATransaction,
 } from "./superAgentEngine";
 
@@ -372,30 +373,24 @@ describe("what the shorthand guard must NOT refuse", () => {
   });
 });
 
+
 /**
  * What may enter the candidate pool at all.
  *
- * Every previous round fixed the pool inside the SQL WHERE clause, where no
- * test could reach it — and each round review found another row shape it let
- * through. The rule now lives in `isComparableCandidate`, so it can be asserted
- * directly. Each exclusion is paired with the admitting case, or a test that
- * always returns false would look identical to one that works.
+ * Four rounds of pool defects were fixed inside a SQL `WHERE` clause no test
+ * could reach, which is why the same class kept arriving by a different route.
+ * The rule is now pure and asserted directly. Every exclusion is paired with
+ * its admitting case, or a function that always returned false would look
+ * identical to one that works.
  */
 describe("what may be compared against a receipt at all", () => {
   const receipt = txn(950_000, "INV-2847", "MOMO COLLECTION INV-2847");
 
-  it("should admit an opposite-direction invoice from the same payer", () => {
+  it("should admit an invoice from the same payer", () => {
     expect(isComparableCandidate(receipt, invoice(1_000_000))).toBe(true);
   });
 
-  it("should reject another payment on the same side of the ledger", () => {
-    // A receipt against a receipt: findNearestTarget still returns a number,
-    // and the gap between two payments gets narrated as a shortfall against an
-    // invoice, on a persisted action draft.
-    expect(isComparableCandidate(receipt, invoice(1_000_000, { debitCredit: "credit" }))).toBe(false);
-  });
-
-  it("should reject a reversal even though its direction is right", () => {
+  it("should reject a reversal", () => {
     // Reversed money is not an obligation to measure against; it is the
     // b2b_receipt_reversed_after_allocation exception.
     expect(isComparableCandidate(receipt, invoice(1_000_000, { isReversal: true }))).toBe(false);
@@ -422,14 +417,88 @@ describe("what may be compared against a receipt at all", () => {
     expect(isComparableCandidate(receipt, invoice(1_000_000, { counterparty: null }))).toBe(false);
   });
 
-  it("should compare against nothing when a direction is not recognised", () => {
-    expect(isComparableCandidate(receipt, invoice(1_000_000, { debitCredit: "" }))).toBe(false);
-  });
-
   it("should tolerate the payer being spelled with different punctuation", () => {
     // The control for the counterparty rule: it must reject a DIFFERENT payer,
     // not reject matching. Feeds routinely differ in case and punctuation.
-    const spelled = invoice(1_000_000, { counterparty: "kampala distributors, ltd." });
-    expect(isComparableCandidate(receipt, spelled)).toBe(true);
+    expect(isComparableCandidate(receipt, invoice(1_000_000, { counterparty: "kampala distributors, ltd." }))).toBe(true);
+  });
+});
+
+/**
+ * Direction, which review found wrong in BOTH directions in one round — the
+ * signal that the type was wrong rather than the logic.
+ *
+ * Too permissive: a same-side receipt was scored against the receipt being
+ * diagnosed. Too strict: an unconditional opposite-direction test deleted the
+ * genuine counterpart for feeds that never recorded a direction, because
+ * `apiIngestionService` stores `row.debitCredit || row.type || "debit"` — a CSV
+ * with neither column lands BOTH legs as `debit`, and those SFTP/bucket/API
+ * drops are exactly the pilot's own source contracts (B2).
+ */
+describe("when the feeds do record a direction", () => {
+  const receipt = txn(950_000, "INV-2847", "MOMO COLLECTION INV-2847");
+
+  it("should keep the opposite-direction invoice and drop the same-side payment", () => {
+    const realLeg = invoice(1_000_000);
+    const strayReceipt = invoice(980_000, { debitCredit: "credit" });
+    const { legs, directionSignal } = selectCounterpartLegs(receipt, [realLeg, strayReceipt]);
+    expect(directionSignal).toBe("discriminating");
+    expect(legs.map((l) => l.id)).toEqual([realLeg.id]);
+  });
+
+  it("should drop a same-side payment even when it is numerically nearer", () => {
+    // The trap: findNearestTarget picks by amount, so the stray wins on
+    // proximity and the gap between two payments becomes a "shortfall".
+    const realLeg = invoice(1_000_000);
+    const nearerStray = invoice(950_500, { debitCredit: "credit" });
+    const { legs } = selectCounterpartLegs(receipt, [nearerStray, realLeg]);
+    expect(legs.map((l) => l.id)).toEqual([realLeg.id]);
+  });
+});
+
+describe("when neither feed recorded a direction", () => {
+  it("should keep the counterpart rather than emptying the pool", () => {
+    // Both legs arrive as "debit" because the CSV had neither column. An
+    // unconditional opposite-direction filter removed the real invoice here and
+    // the shortfall silently vanished — for the customers whose files are least
+    // well-formed, which is the worst possible population to fail quietly on.
+    const receipt = txn(950_000, "INV-2847", "COLLECTION INV-2847");
+    receipt.debitCredit = "debit";
+    const realLeg = invoice(1_000_000);
+    const { legs, directionSignal } = selectCounterpartLegs(receipt, [realLeg]);
+    expect(directionSignal).toBe("uninformative");
+    expect(legs.map((l) => l.id)).toEqual([realLeg.id]);
+  });
+
+  it("should report the signal so the caller can say the column was never populated", () => {
+    const receipt = txn(950_000);
+    receipt.debitCredit = "debit";
+    const { directionSignal } = selectCounterpartLegs(receipt, [invoice(1_000_000), invoice(900_000)]);
+    // Not "discriminating": nothing was discriminated. Saying so is the point —
+    // neither true nor false is a safe answer for "the column is unpopulated".
+    expect(directionSignal).toBe("uninformative");
+  });
+
+  it("should still apply every rule that does NOT depend on direction", () => {
+    // The control: ignoring direction must not become ignoring everything.
+    const receipt = txn(950_000);
+    receipt.debitCredit = "debit";
+    const { legs } = selectCounterpartLegs(receipt, [
+      invoice(1_000_000, { isReversal: true }),
+      invoice(1_000_000, { counterparty: "Jinja Traders Ltd" }),
+      invoice(1_000_000, { currency: "NGN" }),
+    ]);
+    expect(legs).toEqual([]);
+  });
+});
+
+describe("when there is nothing to compare against", () => {
+  it("should report none rather than uninformative", () => {
+    // An empty pool is not a direction problem, and conflating the two would
+    // make a missing counterparty look like a data-quality defect.
+    const receipt = txn(950_000);
+    const { legs, directionSignal } = selectCounterpartLegs(receipt, []);
+    expect(legs).toEqual([]);
+    expect(directionSignal).toBe("none");
   });
 });

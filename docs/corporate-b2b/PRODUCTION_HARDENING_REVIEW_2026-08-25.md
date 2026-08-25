@@ -293,7 +293,39 @@ pure function holding the whole rule, the caller applies it to whatever the quer
 SQL is a cost narrowing rather than the definition of correctness. Nine tests cover it, each
 exclusion paired with its admitting case.
 
-**The honest summary of §2.4, after nine rounds:** the shortfall is no longer structurally null, and
+Tenth round found the direction filter wrong in the OTHER direction, in the same review. Round nine
+had applied `candidate.debitCredit !== txn.debitCredit` unconditionally; but
+`apiIngestionService` stores `row.debitCredit || row.type || "debit"`, so a CSV or API delivery
+carrying neither column lands **both** legs as `debit` — and those SFTP/bucket/API drops are exactly
+the pilot's own source contracts under B2. The predicate then deleted the genuine counterpart and the
+shortfall vanished **silently**, for precisely the customers whose files are least well-formed.
+
+Two findings pointing opposite ways in one round is the signal that the TYPE was wrong, not the
+logic — the same lesson as the queue-durability states. Neither `true` nor `false` is a safe answer
+to "the direction column was never populated", so the third state is named instead.
+`selectCounterpartLegs` now decides direction **over the pool** rather than per row:
+
+| Pool | Signal | Behaviour |
+|---|---|---|
+| holds opposite-direction rows | `discriminating` | direction identifies the leg; same-side rows dropped |
+| every comparable row on the same side | `uninformative` | the column carries no signal here; direction ignored |
+| nothing comparable at all | `none` | not a direction problem, and not reported as one |
+
+Direction is applied only where it *discriminates*. The remaining per-row rules — self, currency,
+counterparty, reversal — stay unconditional in `isComparableCandidate`.
+
+> **Residual, stated rather than implied.** A pool holding only same-direction rows is genuinely
+> ambiguous: either the feed does not record direction (keep them) or there is no counterpart and
+> these are strays (drop them). That cannot be told apart from the rows alone, so `uninformative`
+> keeps them and *says so* — the procedure logs it as a source-quality defect against gate B1 rather
+> than letting it pass as a normal comparison. `determinateCandidates` is the backstop: a stray is
+> reached only when it is the sole candidate or carries the receipt's own invoice number.
+
+> Both failure directions are pinned, because this check has now been wrong each way: never applying
+> direction fails the two `discriminating` tests; applying it unconditionally fails the
+> `uninformative` one.
+
+**The honest summary of §2.4, after ten rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.
@@ -372,7 +404,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2056 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2060 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in

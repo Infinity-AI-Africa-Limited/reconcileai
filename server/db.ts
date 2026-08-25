@@ -781,27 +781,17 @@ export async function getCounterpartyChannelIds(params: {
  * under different spellings on the two feeds — no candidates, no shortfall, and
  * the alias governance defect is itself a catalogued exception
  * (b2b_distributor_alias_ambiguity) rather than something to paper over here.
- *   - OPPOSITE DIRECTION, and NOT A REVERSAL. Currency, channel and counterparty
- *     still admitted rows on the same side of the ledger: another receipt, a
- *     refund, or a reversal for the same payer. `findNearestTarget` picks by
- *     amount, so a receipt could be scored against a second receipt and the
- *     difference between two payments narrated as a shortfall against an
- *     invoice — with an action draft persisted on it.
- *
- *     Both feeds of a reconciled pair record the counterpart leg in the
- *     opposite direction in this platform's model, in BOTH verticals: the
- *     seeder writes every source row `credit` and every target row `debit`
- *     (demoSeedEngine, FMCG and financial-services alike), and the engine's own
- *     reversal pairing requires `candidate.debitCredit !== txn.debitCredit`.
- *     A same-direction row is therefore a different event, not this one's leg.
- *
- *     Reversals are excluded outright. `detectReversals` treats them as a class
- *     to be paired with the item they reverse, never as a match target, and
- *     quantifying a shortfall against withdrawn money is the `b2b_receipt_
- *     reversed_after_allocation` exception rather than a comparison.
+ *   - NOT A REVERSAL. `detectReversals` treats reversals as a class to be paired
+ *     with the item they reverse, never as a match target, and quantifying a
+ *     shortfall against withdrawn money is the `b2b_receipt_reversed_after_
+ *     allocation` exception rather than a comparison.
  *   - Explicitly org-scoped, not inferred from the channel: "the channel
  *     implies the tenant" is the reasoning behind the cross-tenant reads in
  *     CLAUDE.md §19.3.
+ *
+ * DIRECTION is deliberately not filtered here. Deciding it per row was wrong in
+ * both directions — see `selectCounterpartLegs`, which decides it over the pool
+ * and is where that rule is tested.
  *
  * Capped, so a wide window cannot turn one diagnosis into an unbounded scan.
  */
@@ -811,11 +801,6 @@ export async function getDiagnosisCandidates(params: {
   currency: string;
   /** The payer/payee whose own items are the only comparable ones. */
   counterparty: string | null;
-  /**
-   * The direction of the transaction being diagnosed. Only the OPPOSITE
-   * direction is a counterpart leg — see the note on direction above.
-   */
-  debitCredit: string;
   around: Date;
   windowDays: number;
   limit?: number;
@@ -828,9 +813,6 @@ export async function getDiagnosisCandidates(params: {
   if (params.counterpartyChannelIds.length === 0) return [];
   const counterparty = params.counterparty?.trim();
   if (!counterparty) return [];
-  const direction = params.debitCredit === "credit" ? "credit" : params.debitCredit === "debit" ? "debit" : null;
-  // An unrecognised direction is not a licence to compare against everything.
-  if (direction === null) return [];
   const windowMs = Math.max(0, params.windowDays) * 24 * 60 * 60 * 1000;
   const from = new Date(params.around.getTime() - windowMs);
   const to = new Date(params.around.getTime() + windowMs);
@@ -843,9 +825,10 @@ export async function getDiagnosisCandidates(params: {
         inArray(transactions.channelId, params.counterpartyChannelIds),
         eq(transactions.currency, params.currency),
         eq(transactions.counterparty, counterparty),
-        // OPPOSITE direction only. Same-direction rows on a paired channel are
-        // another event on the same side of the ledger, not this one's leg.
-        ne(transactions.debitCredit, direction),
+        // Direction is NOT filtered here. It is decided over the whole pool by
+        // `selectCounterpartLegs`, because a feed that never recorded a
+        // direction lands both legs on the same side and an unconditional
+        // opposite-direction predicate then deletes the genuine counterpart.
         // A reversal is not a live obligation. The engine treats reversals as a
         // class to be paired with the item they reverse (detectReversals), never
         // as a match target, and comparing a receipt against one quantifies a

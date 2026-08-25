@@ -71,7 +71,7 @@ import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
   determinateCandidates,
-  isComparableCandidate,
+  selectCounterpartLegs,
   diagnoseException,
   generateActionDraft,
   buildMemoryEmbeddingText,
@@ -4465,18 +4465,14 @@ Always be specific, reference actual exception IDs and amounts where available, 
           // narrow the pool; they do not make its members RELATED, and
           // findNearestTarget then picks by amount alone.
           counterparty: txnRows.counterparty,
-          // Only the opposite direction is a counterpart leg. Without this a
-          // receipt could be compared against another receipt on the paired
-          // channel and the gap between two payments narrated as a shortfall.
-          debitCredit: txnRows.debitCredit,
           around: new Date(txnRows.transactionDate),
           windowDays: diagnosisConfig.dateWindowDays,
         });
-        // The query narrows the pool for cost; `isComparableCandidate` decides
+        // The query narrows the pool for cost; `selectCounterpartLegs` decides
         // what is actually comparable. Keeping the rule in one tested pure
         // function is why the pool's composition is no longer only asserted by
         // a WHERE clause that nothing exercises.
-        const candidatePool: SATransaction[] = candidateRows
+        const candidateRowsMapped: SATransaction[] = candidateRows
           .map((row) => ({
             id: row.id,
             transactionRef: row.transactionRef,
@@ -4489,8 +4485,18 @@ Always be specific, reference actual exception IDs and amounts where available, 
             debitCredit: row.debitCredit,
             isReversal: row.isReversal,
             originalTransactionRef: row.originalTransactionRef,
-          }))
-          .filter((candidate) => isComparableCandidate(txn, candidate));
+          }));
+        // Direction is applied only where it DISCRIMINATES. A feed that never
+        // recorded one lands both legs on the same side (apiIngestionService
+        // defaults to "debit"), and an unconditional opposite-direction filter
+        // then deletes the genuine counterpart and silently drops the shortfall.
+        const { legs: candidatePool, directionSignal } = selectCounterpartLegs(txn, candidateRowsMapped);
+        if (directionSignal === "uninformative") {
+          // Visible rather than silent: this is a source-quality defect in the
+          // customer's data contract (pilot gate B1), not a property of the
+          // receipt, and it weakens every comparison made below.
+          console.warn(`[SuperAgent] diagnose txn=${txn.id} org=${orgId}: counterpart direction not recorded on either feed — direction ignored for this comparison`);
+        }
 
         // Narrowing by currency, channel pairing and counterparty removes the
         // grossly unrelated comparisons. It cannot remove the last one: among
