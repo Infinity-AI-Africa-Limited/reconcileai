@@ -16,6 +16,32 @@
 import { invokeLLM } from "./_core/llm";
 import { nigerianExceptionsTaxonomyPromptBlock, nonInterestTaxonomyPromptBlock } from "./exceptions/seed";
 import { relevantNigerianChannels } from "./exceptions/channelMapping";
+import {
+  corporateB2BExceptionsTaxonomyPromptBlock,
+  corporateB2BRegulatoryFrame,
+} from "./exceptions/corporate-b2b";
+
+/**
+ * Who the tenant is, as far as diagnosis is concerned.
+ *
+ * Was a bare `bankingModel` string. Diagnosis needs two more facts that the
+ * channel cannot supply, and getting them wrong is visible in the output:
+ *
+ *   `segment` — a corporate_b2b tenant is an FMCG manufacturer, not a bank. It
+ *     was being diagnosed under a persona describing itself as a Nigerian
+ *     payment-systems expert, with the NIP/POS/ATM catalogue and an instruction
+ *     to cite CBN circulars. None of that governs a distributor receivable.
+ *   `country` — the go-live plan's FIRST launch geography is Uganda, where a
+ *     cited CBN circular is not merely irrelevant but wrong.
+ */
+export interface DiagnosingInstitution {
+  /** `organizations.segment`. */
+  segment?: string | null;
+  /** `organizations.bankingModel`; omitted means conventional. */
+  bankingModel?: string | null;
+  /** The pilot's recorded launch country, where one exists. */
+  country?: string | null;
+}
 
 // ─── Shared Transaction type (mirrors drizzle schema) ────────────────
 
@@ -213,6 +239,18 @@ export interface M2MMatch {
   splitAllocation: SplitAllocation[];
 }
 
+/**
+ * A candidate allocation the engine refused to guess at. Carrying it in the
+ * result is what stops a refusal from being indistinguishable from "nothing
+ * found" — the two need different actions from a controller.
+ */
+export interface M2MAmbiguity {
+  sourceIds: number[];
+  targetIds: number[];
+  reason: "ambiguous" | "indeterminate";
+  detail: string;
+}
+
 export interface SplitAllocation {
   sourceId: number;
   targetId: number;
@@ -244,10 +282,22 @@ export function runM2MMatching(
   unmatchedSources: SATransaction[],
   unmatchedTargets: SATransaction[],
   fxTolerance: number = 0.015
-): { m2mMatches: M2MMatch[]; remainingSourceIds: number[]; remainingTargetIds: number[] } {
+): {
+  m2mMatches: M2MMatch[];
+  remainingSourceIds: number[];
+  remainingTargetIds: number[];
+  /**
+   * Cases the engine could have produced a confident-looking allocation for and
+   * deliberately did not. Reported rather than dropped: "several allocations
+   * are equally valid, here is how many" is actionable for a controller, while
+   * an item that silently stays unmatched looks like the engine found nothing.
+   */
+  unresolvedAmbiguities: M2MAmbiguity[];
+} {
   const matchedSourceIds = new Set<number>();
   const matchedTargetIds = new Set<number>();
   const m2mMatches: M2MMatch[] = [];
+  const unresolvedAmbiguities: M2MAmbiguity[] = [];
 
   // ── Strategy 1: One source → many targets (sum matching) ─────────
   for (const src of unmatchedSources) {
@@ -255,9 +305,24 @@ export function runM2MMatching(
     const srcAmt = parseFloat(String(src.amount));
     const srcParsed = parseReference(src.transactionRef, src.description);
 
-    // Try all combinations of 2–5 unmatched targets that sum to srcAmt
+    // Combinations of 2–5 unmatched targets that sum to srcAmt. `minItems` is
+    // 2 on purpose: a single target within tolerance is a 1:1 near-match, which
+    // the 3-pass engine already handles, and reporting it here dressed it up as
+    // a "one-to-many split allocation" it was not.
     const availableTargets = unmatchedTargets.filter((t) => !matchedTargetIds.has(t.id));
-    const found = findSubsetSum(availableTargets, srcAmt, fxTolerance, 5);
+    const outcome = findSubsetSum(availableTargets, srcAmt, fxTolerance, 5);
+    if (outcome.kind === "ambiguous" || outcome.kind === "indeterminate") {
+      unresolvedAmbiguities.push({
+        sourceIds: [src.id],
+        targetIds: [],
+        reason: outcome.kind,
+        detail: outcome.kind === "ambiguous"
+          ? `More than one combination of open invoices sums to ${src.currency} ${srcAmt.toLocaleString()}. No allocation is proposed: choosing between equally valid splits would be arbitrary.`
+          : `The search for a matching combination exceeded its budget for ${src.currency} ${srcAmt.toLocaleString()}. This is not evidence that no allocation exists.`,
+      });
+      continue;
+    }
+    const found = outcome.kind === "unique" ? outcome.subset : null;
 
     if (found) {
       const targetAmtTotal = found.reduce((s, t) => s + parseFloat(String(t.amount)), 0);
@@ -298,7 +363,19 @@ export function runM2MMatching(
     const tgtAmt = parseFloat(String(tgt.amount));
 
     const availableSources = unmatchedSources.filter((s) => !matchedSourceIds.has(s.id));
-    const found = findSubsetSum(availableSources, tgtAmt, fxTolerance, 5);
+    const outcome = findSubsetSum(availableSources, tgtAmt, fxTolerance, 5);
+    if (outcome.kind === "ambiguous" || outcome.kind === "indeterminate") {
+      unresolvedAmbiguities.push({
+        sourceIds: [],
+        targetIds: [tgt.id],
+        reason: outcome.kind,
+        detail: outcome.kind === "ambiguous"
+          ? `More than one combination of receipts sums to invoice ${tgt.transactionRef ?? tgt.id}. No allocation is proposed.`
+          : `The search for a matching combination exceeded its budget for invoice ${tgt.transactionRef ?? tgt.id}.`,
+      });
+      continue;
+    }
+    const found = outcome.kind === "unique" ? outcome.subset : null;
 
     if (found && found.length > 1) {
       const sourceAmtTotal = found.reduce((s, t) => s + parseFloat(String(t.amount)), 0);
@@ -399,7 +476,7 @@ export function runM2MMatching(
   const remainingSourceIds = unmatchedSources.filter((s) => !matchedSourceIds.has(s.id)).map((s) => s.id);
   const remainingTargetIds = unmatchedTargets.filter((t) => !matchedTargetIds.has(t.id)).map((t) => t.id);
 
-  return { m2mMatches, remainingSourceIds, remainingTargetIds };
+  return { m2mMatches, remainingSourceIds, remainingTargetIds, unresolvedAmbiguities };
 }
 
 /**
@@ -407,66 +484,110 @@ export function runM2MMatching(
  * Uses dynamic programming for small sets (≤ 20), greedy for larger sets.
  * Limited to maxItems to prevent combinatorial explosion.
  */
+/**
+ * The outcome of looking for a set of transactions that sums to a target.
+ *
+ * FOUR states, not a nullable subset, and the distinction is the whole point.
+ * The previous implementation returned the first subset it stumbled on and the
+ * caller published it as an allocation at ~85% confidence. Two of these states
+ * were being reported as `unique`:
+ *
+ *   `ambiguous`     — several DIFFERENT subsets of the open invoices sum to the
+ *                     same receipt. Three invoices of 100 against a payment of
+ *                     200 is the canonical case: any two of them "match". A
+ *                     greedy search picks one by sort order, which is an
+ *                     arbitrary allocation wearing a confidence score. For a
+ *                     receivables ledger that is a fabricated answer, and it is
+ *                     discovered later as two wrong distributor statements.
+ *   `indeterminate` — the search budget was exhausted before the question could
+ *                     be answered. Not the same as "no match exists", and must
+ *                     not be reported as one.
+ *
+ * Both resolve to "propose nothing and say why". An open item a human closes is
+ * cheaper than a wrong allocation a human has to discover.
+ */
+type SubsetSumOutcome =
+  | { kind: "unique"; subset: SATransaction[] }
+  | { kind: "ambiguous"; alternatives: number }
+  | { kind: "indeterminate" }
+  | { kind: "none" };
+
+/**
+ * Bound on combination nodes visited per search. Keeps one diagnosis from
+ * turning into an unbounded scan; exceeding it yields `indeterminate` rather
+ * than a partial answer presented as a complete one.
+ */
+const SUBSET_SEARCH_BUDGET = 200_000;
+
+function amountOf(txn: SATransaction): number {
+  return parseFloat(String(txn.amount));
+}
+
+/**
+ * Find a set of `minItems`..`maxItems` transactions summing to `targetAmount`
+ * within tolerance, and say whether it is the ONLY such set.
+ *
+ * The greedy first pass is gone. It was the source of both defects: it returned
+ * on the first set that reached the lower bound (so it could never see a second
+ * one), and because it accepted a single item it turned a plain 1:1 near-match
+ * into a "one-to-many split allocation" — the 3-pass engine's job, reported as
+ * something it is not.
+ */
 function findSubsetSum(
   txns: SATransaction[],
   targetAmount: number,
   tolerancePct: number,
-  maxItems: number
-): SATransaction[] | null {
-  const tolerance = targetAmount * tolerancePct;
+  maxItems: number,
+  minItems = 2,
+): SubsetSumOutcome {
+  // A non-positive target has no meaningful tolerance band and would divide by
+  // zero downstream when a confidence score is computed from the difference.
+  if (!Number.isFinite(targetAmount) || targetAmount <= 0) return { kind: "none" };
+
+  const tolerance = Math.abs(targetAmount) * tolerancePct;
   const lo = targetAmount - tolerance;
   const hi = targetAmount + tolerance;
 
-  // Sort by amount descending for greedy efficiency
-  const sorted = [...txns].sort((a, b) => parseFloat(String(b.amount)) - parseFloat(String(a.amount)));
+  // Non-positive and non-finite amounts cannot contribute to a sum-match and
+  // break the pruning below, which assumes adding an item only increases it.
+  const sorted = txns
+    .filter((t) => Number.isFinite(amountOf(t)) && amountOf(t) > 0)
+    .sort((a, b) => amountOf(b) - amountOf(a));
 
-  // Greedy first pass: try largest items first
-  let greedySum = 0;
-  const greedySet: SATransaction[] = [];
-  for (const t of sorted) {
-    const amt = parseFloat(String(t.amount));
-    if (greedySum + amt <= hi && greedySet.length < maxItems) {
-      greedySum += amt;
-      greedySet.push(t);
-      if (greedySum >= lo) return greedySet;
+  const found: SATransaction[][] = [];
+  let budget = SUBSET_SEARCH_BUDGET;
+  let exhausted = false;
+
+  const search = (start: number, current: SATransaction[], sum: number): void => {
+    // Stop at TWO hits: a second one already proves ambiguity, and enumerating
+    // the rest buys nothing.
+    if (found.length >= 2 || exhausted) return;
+    if (current.length >= minItems && sum >= lo && sum <= hi) {
+      found.push([...current]);
+      if (found.length >= 2) return;
     }
-  }
-
-  // Exhaustive search for small sets (≤ 15 items, ≤ 4 combinations)
-  if (txns.length <= 15) {
-    for (let size = 2; size <= Math.min(maxItems, 4); size++) {
-      const result = combinationSearch(sorted, targetAmount, lo, hi, size);
-      if (result) return result;
-    }
-  }
-
-  return null;
-}
-
-function combinationSearch(
-  txns: SATransaction[],
-  target: number,
-  lo: number,
-  hi: number,
-  size: number
-): SATransaction[] | null {
-  function search(start: number, current: SATransaction[], currentSum: number): SATransaction[] | null {
-    if (current.length === size) {
-      return currentSum >= lo && currentSum <= hi ? [...current] : null;
-    }
-    for (let i = start; i < txns.length; i++) {
-      const amt = parseFloat(String(txns[i].amount));
-      const newSum = currentSum + amt;
-      if (newSum > hi) continue; // pruning
-      current.push(txns[i]);
-      const result = search(i + 1, current, newSum);
-      if (result) return result;
+    if (current.length >= maxItems) return;
+    for (let i = start; i < sorted.length; i++) {
+      if (budget-- <= 0) { exhausted = true; return; }
+      const next = sum + amountOf(sorted[i]);
+      // Amounts are positive and sorted descending, so once the running sum
+      // passes the upper bound every remaining item at this level does too.
+      if (next > hi) continue;
+      current.push(sorted[i]);
+      search(i + 1, current, next);
       current.pop();
+      if (found.length >= 2 || exhausted) return;
     }
-    return null;
-  }
-  return search(0, [], 0);
+  };
+
+  search(0, [], 0);
+
+  if (found.length >= 2) return { kind: "ambiguous", alternatives: found.length };
+  if (found.length === 1) return { kind: "unique", subset: found[0] };
+  // Budget exhausted without a hit means "we do not know", not "there is none".
+  return exhausted ? { kind: "indeterminate" } : { kind: "none" };
 }
+
 
 // ─── Layer 3: Categorical Exception Classifier ────────────────────────
 
@@ -515,11 +636,11 @@ export async function diagnoseException(
   config: { amountTolerance: number; dateWindowDays: number },
   memoryContext: string = "",
   /**
-   * `organizations.bankingModel` for the owning tenant. Omitted means
-   * conventional — see isNonInterestInstitution for why an unknown value must
-   * NOT be read as non-interest.
+   * The owning tenant. An omitted `bankingModel` means conventional — see
+   * isNonInterestInstitution for why an unknown value must NOT be read as
+   * non-interest.
    */
-  bankingModel?: string | null,
+  institution: DiagnosingInstitution = {},
 ): Promise<ExceptionDiagnosis> {
   const txnAmt = parseFloat(String(txn.amount));
   const parsedRef = parseReference(txn.transactionRef, txn.description);
@@ -528,7 +649,7 @@ export async function diagnoseException(
   const ruleResult = ruleBasedClassify(txn, txnAmt, allTargets, config, parsedRef);
 
   // LLM diagnosis (enriches the rule result with natural language)
-  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext, bankingModel);
+  const llmDiagnosis = await getLLMDiagnosis(txn, ruleResult, parsedRef, memoryContext, institution);
 
   return {
     ...ruleResult,
@@ -705,8 +826,9 @@ async function getLLMDiagnosis(
   ruleResult: ExceptionDiagnosis,
   parsedRef: ParsedReference,
   memoryContext: string,
-  bankingModel?: string | null,
+  institution: DiagnosingInstitution = {},
 ): Promise<{ headline: string; rootCause: string; recommendedAction: string }> {
+  const { bankingModel, segment, country } = institution;
   // Inject only the taxonomy channels relevant to this transaction — the
   // catalogued failure modes, regulatory context and diagnosis guidance for the
   // rails it actually touches. An FMCG deduction still gets no channel block.
@@ -719,13 +841,48 @@ async function getLLMDiagnosis(
     .filter(Boolean)
     .join(" ");
   const channels = relevantNigerianChannels({ channelType: txn.channelType, text: channelText });
-  const taxonomyBlock = channels.length > 0 ? nigerianExceptionsTaxonomyPromptBlock(channels) : "";
+
+  // Corporate B2B is an FMCG manufacturer or distributor, not a bank, so it
+  // gets its own taxonomy INSTEAD OF the Nigerian channel catalogue rather than
+  // on top of it. Injecting NIP/POS/ATM failure modes alongside a trade
+  // deduction does not add context — it invites the model to explain a
+  // distributor's promotional claw-back as a switch failure, and to cite a
+  // regulator that does not supervise the tenant.
+  const isCorporateB2B = segment === "corporate_b2b";
+  const corporateB2BBlock = corporateB2BExceptionsTaxonomyPromptBlock(segment);
+  const taxonomyBlock = isCorporateB2B
+    ? ""
+    : channels.length > 0
+      ? nigerianExceptionsTaxonomyPromptBlock(channels)
+      : "";
 
   // Non-interest (NIFI) institutions additionally get the profit-and-sharing
   // taxonomy, which is keyed on the ORGANISATION rather than the channel: it
   // applies across every rail the institution runs. Empty string for a
   // conventional bank, so nothing is injected and no tokens are spent.
   const nonInterestBlock = nonInterestTaxonomyPromptBlock(bankingModel);
+
+  // The persona and the regulatory instruction are BOTH wrong for this vertical
+  // by default: "specialising in Nigerian … payment systems (NIBSS, NIP, POS …)"
+  // and "reference relevant Nigerian banking regulations (CBN circulars, NIBSS
+  // rules)". The go-live plan's first launch geography is Uganda.
+  const persona = isCorporateB2B
+    ? `You are ReconcileAI's Super Agent — a senior receivables and trade-spend controller for FMCG manufacturers and distributors in Africa. You reconcile distributor receipts, remittance advices and trade deductions against approved invoices.
+
+Your job is to diagnose receivable exceptions with the precision of a Big 4 forensic accountant and the clarity of a CFO briefing. You always:
+1. State the root cause in plain English (no jargon)
+2. Quantify the shortfall or variance precisely, in the invoice currency
+3. Recommend a single, specific next action, naming who must approve it
+4. Say what evidence would close the item — a remittance advice, a credit note, a withholding-tax certificate, an approved promotion schedule
+
+${corporateB2BRegulatoryFrame(country)}`
+    : `You are ReconcileAI's Super Agent — a senior financial reconciliation expert specialising in Nigerian and African FMCG payment systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT, trade finance).
+
+Your job is to diagnose payment exceptions with the precision of a Big 4 forensic accountant and the clarity of a CFO briefing. You always:
+1. State the root cause in plain English (no jargon)
+2. Quantify the shortfall or variance precisely
+3. Recommend a single, specific next action
+4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable`;
 
   try {
     const response = await invokeLLM({
@@ -735,15 +892,9 @@ async function getLLMDiagnosis(
       messages: [
         {
           role: "system",
-          content: `You are ReconcileAI's Super Agent — a senior financial reconciliation expert specialising in Nigerian and African FMCG payment systems (NIBSS, NIP, POS, mobile money, RTGS, SWIFT, trade finance).
+          content: `${persona}
 
-Your job is to diagnose payment exceptions with the precision of a Big 4 forensic accountant and the clarity of a CFO briefing. You always:
-1. State the root cause in plain English (no jargon)
-2. Quantify the shortfall or variance precisely
-3. Recommend a single, specific next action
-4. Reference relevant Nigerian banking regulations (CBN circulars, NIBSS rules) where applicable
-
-${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${nonInterestBlock ? `THIS INSTITUTION IS LICENSED ON NON-INTEREST (NIFI) PRINCIPLES.\nIt runs the same payment rails as any other bank, but income may only arise from a real sale, lease or partnership — never from the passage of time — and investment account holders' funds must stay segregated from shareholders' funds. Treat an entry that accrues purely with time, or a return credited to the wrong pool, as a compliance finding rather than a posting error: it reaches the institution's licence basis and its Advisory Committee of Experts' attestation, so it can be material at an amount that would be immaterial at a conventional bank.\n\nNON-INTEREST EXCEPTION PATTERNS:\n${nonInterestBlock}\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
+${corporateB2BBlock ? `CATALOGUED FMCG DISTRIBUTOR EXCEPTION PATTERNS:\n${corporateB2BBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance.\n` : ""}${taxonomyBlock ? `CATALOGUED NIGERIAN CHANNEL EXCEPTION PATTERNS (relevant to this transaction):\n${taxonomyBlock}\n\nWhen the exception matches one of these catalogued patterns, ground your root cause and recommended action in that pattern's diagnosis guidance and regulatory context.\n` : ""}${nonInterestBlock ? `THIS INSTITUTION IS LICENSED ON NON-INTEREST (NIFI) PRINCIPLES.\nIt runs the same payment rails as any other bank, but income may only arise from a real sale, lease or partnership — never from the passage of time — and investment account holders' funds must stay segregated from shareholders' funds. Treat an entry that accrues purely with time, or a return credited to the wrong pool, as a compliance finding rather than a posting error: it reaches the institution's licence basis and its Advisory Committee of Experts' attestation, so it can be material at an amount that would be immaterial at a conventional bank.\n\nNON-INTEREST EXCEPTION PATTERNS:\n${nonInterestBlock}\n` : ""}${memoryContext ? `RELEVANT PAST CASES:\n${memoryContext}\n` : ""}`,
         },
         {
           role: "user",

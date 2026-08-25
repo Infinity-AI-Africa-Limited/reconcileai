@@ -28,6 +28,7 @@ import {
   resolutionTemplates, InsertResolutionTemplate,
   moduleConfigurations, InsertModuleConfiguration,
   distributors,
+  corporateB2BPilotConfigs,
   dashboardStatsCache,
   cfoReportSchedules, InsertCfoReportSchedule, CfoReportSchedule,
   channelAlertSettings, InsertChannelAlertSetting, ChannelAlertSetting,
@@ -132,6 +133,49 @@ export async function getOrganizationById(id: number) {
 export async function isOrganizationAiAssistanceEnabled(id: number): Promise<boolean> {
   const org = await getOrganizationById(id);
   return org?.aiAssistanceEnabled === true;
+}
+
+/**
+ * The Corporate B2B pilot's recorded external-model boundary (gate B5), or null
+ * when the tenant has never recorded one.
+ *
+ * Read by server/aiGate.ts. Null is NOT permission: a controlled pilot starts
+ * with AI off and stays off until the customer records a private approved route
+ * and the reference that authorised it.
+ */
+/**
+ * The Corporate B2B pilot's recorded launch country, or null when no pilot
+ * register exists yet.
+ *
+ * Read by the Super Agent so its regulatory framing follows the pilot rather
+ * than defaulting to Nigeria. Null means "unknown", and the diagnosis prompt
+ * says so generically rather than naming a revenue authority on a guess.
+ */
+export async function getCorporateB2BPilotCountry(id: number): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [row] = await db
+    .select({ country: corporateB2BPilotConfigs.country })
+    .from(corporateB2BPilotConfigs)
+    .where(eq(corporateB2BPilotConfigs.organizationId, id))
+    .limit(1);
+  return row?.country ?? null;
+}
+
+export async function getCorporateB2BAiBoundary(
+  id: number,
+): Promise<{ aiAssistanceMode: string; aiBoundaryReference: string | null } | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [row] = await db
+    .select({
+      aiAssistanceMode: corporateB2BPilotConfigs.aiAssistanceMode,
+      aiBoundaryReference: corporateB2BPilotConfigs.aiBoundaryReference,
+    })
+    .from(corporateB2BPilotConfigs)
+    .where(eq(corporateB2BPilotConfigs.organizationId, id))
+    .limit(1);
+  return row ?? null;
 }
 
 // ─── Users ───────────────────────────────────────────────────────────
@@ -649,6 +693,52 @@ export async function getTransactionsForReconciliation(channelId: number, dateFr
       eq(transactions.status, "unmatched")
     ))
     .orderBy(asc(transactions.transactionDate));
+}
+
+/**
+ * Counterparty candidates for a single-transaction Super Agent diagnosis.
+ *
+ * `superAgent.diagnose` used to run its deep diagnosis with an EMPTY candidate
+ * list, commented "no target txns needed for standalone diagnosis". They are
+ * needed, and the omission was not cosmetic: with an empty candidate set
+ * `findNearestTarget` always returns null, so every diagnosis reported
+ * `shortfall: null` and narrated the amount as "approximately NGN unknown",
+ * while the `bank_fee_deduction` and `fx_variance` categories — both reached
+ * only through a comparison against a candidate — became unreachable. The
+ * shortfall is the number a financial controller acts on.
+ *
+ * Scoped explicitly by organizationId rather than inferred from the channel:
+ * "the channel implies the tenant" is exactly the reasoning that produced the
+ * cross-tenant reads in CLAUDE.md §19.3. Candidates come from OTHER channels —
+ * a row on the same feed is not the counterparty leg — and the result is capped
+ * so a wide window cannot turn one diagnosis into an unbounded scan.
+ */
+export async function getDiagnosisCandidates(params: {
+  organizationId: number;
+  excludeChannelId: number;
+  around: Date;
+  windowDays: number;
+  limit?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  const windowMs = Math.max(0, params.windowDays) * 24 * 60 * 60 * 1000;
+  const from = new Date(params.around.getTime() - windowMs);
+  const to = new Date(params.around.getTime() + windowMs);
+  return db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.organizationId, params.organizationId),
+        ne(transactions.channelId, params.excludeChannelId),
+        gte(transactions.transactionDate, from),
+        lte(transactions.transactionDate, to),
+        inArray(transactions.status, ["unmatched", "exception"]),
+      ),
+    )
+    .orderBy(asc(transactions.transactionDate))
+    .limit(clampLimit(params.limit ?? 500));
 }
 
 // Check for duplicate transactions within a channel

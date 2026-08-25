@@ -54,6 +54,7 @@ import { CARD_DISPUTE_EXCEPTIONS } from "./card-disputes";
 import { CHEQUE_EXCEPTIONS } from "./cheque";
 import { NON_INTEREST_EXCEPTIONS } from "./non-interest";
 import { RETAIL_COMMERCE_EXCEPTIONS } from "./retail-commerce";
+import { CORPORATE_B2B_EXCEPTIONS } from "./corporate-b2b";
 import { UGANDA_EXCEPTIONS } from "./uganda";
 import type { NigerianChannelException } from "./types";
 
@@ -126,26 +127,32 @@ export const ALL_NIGERIAN_EXCEPTION_KEYS = ALL_NIGERIAN_EXCEPTIONS.map((e) => e.
 export const EXCEPTION_REGISTRY = new Map<string, TaxonomyExceptionEntry>([
   ...ALL_NIGERIAN_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
   ...RETAIL_COMMERCE_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
+  ...CORPORATE_B2B_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
   ...UGANDA_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
   ...NON_INTEREST_EXCEPTIONS.map((e) => [e.key, e] as [string, TaxonomyExceptionEntry]),
 ]);
 
 /**
- * Every exception across all markets/verticals (Nigeria + retail + Uganda +
- * non-interest).
+ * Every exception across all markets/verticals (Nigeria + retail + corporate
+ * B2B + Uganda + non-interest).
  *
- * NON_INTEREST_EXCEPTIONS are included here and in the registry, but NOT in
- * CHANNEL_EXCEPTION_GROUPS, and that asymmetry is deliberate. They belong to an
- * INSTITUTION, not to a rail: a non-interest bank runs the same NIP, POS and
- * cheque clearing as anyone else, and what differs is how income may be earned
- * and shared across all of them. They are selected by
- * `organizations.bankingModel` — see nonInterestTaxonomyPromptBlock in ./seed —
- * so putting them in the channel map would inject them for a conventional bank
- * on the strength of a channel type, which is exactly wrong.
+ * NON_INTEREST_EXCEPTIONS and CORPORATE_B2B_EXCEPTIONS are included here and in
+ * the registry, but NOT in CHANNEL_EXCEPTION_GROUPS, and that asymmetry is
+ * deliberate. Both belong to an INSTITUTION, not to a rail.
+ *
+ * A non-interest bank runs the same NIP, POS and cheque clearing as anyone
+ * else, and what differs is how income may be earned and shared across all of
+ * them; they are selected by `organizations.bankingModel` — see
+ * nonInterestTaxonomyPromptBlock in ./seed. An FMCG manufacturer's distributor
+ * receipts likewise arrive on bank, mobile-money and PSP rails, but the
+ * exception it is facing is a trade deduction rather than a rail failure; those
+ * are selected by `organizations.segment`. Putting either in the channel map
+ * would inject them on the strength of a channel type, which is exactly wrong.
  */
 export const ALL_EXCEPTIONS: TaxonomyExceptionEntry[] = [
   ...ALL_NIGERIAN_EXCEPTIONS,
   ...RETAIL_COMMERCE_EXCEPTIONS,
+  ...CORPORATE_B2B_EXCEPTIONS,
   ...UGANDA_EXCEPTIONS,
   ...NON_INTEREST_EXCEPTIONS,
 ];
@@ -177,6 +184,21 @@ export const EXCEPTION_CHANNELS = {
 // Retail / E-Commerce (SHOPLINE vertical)
 export { RETAIL_COMMERCE_EXCEPTIONS, RETAIL_COMMERCE_EXCEPTION_KEYS } from "./retail-commerce";
 export type { RetailCommerceException, RetailChannelSource } from "./retail-commerce";
+
+// Corporate B2B / FMCG distributor — SEGMENT-scoped, like non-interest and
+// unlike the channel taxonomies. An FMCG manufacturer's receipts arrive on
+// bank, mobile-money and PSP rails, but the exception it faces is a trade
+// deduction, so the taxonomy is selected by `organizations.segment` rather
+// than by the rail a row happened to arrive on. Deliberately absent from
+// CHANNEL_EXCEPTION_GROUPS for that reason.
+export {
+  CORPORATE_B2B_EXCEPTIONS,
+  CORPORATE_B2B_EXCEPTION_KEYS,
+  corporateB2BExceptionFor,
+  corporateB2BExceptionsTaxonomyPromptBlock,
+  corporateB2BRegulatoryFrame,
+} from "./corporate-b2b";
+export type { CorporateB2BException, CorporateB2BSource } from "./corporate-b2b";
 
 // Uganda market pack (BoU NPS framework)
 export { UGANDA_EXCEPTIONS, UGANDA_EXCEPTION_KEYS } from "./uganda";

@@ -31,9 +31,22 @@ const Select = ({ value, onChange, children }: { value: string; onChange: (value
 
 export default function CorporateB2BPilotControls() {
   const readiness = trpc.corporateB2BPilot.readiness.useQuery();
-  const updateConfig = trpc.corporateB2BPilot.updateConfig.useMutation({ onSuccess: () => { toast.success("Pilot controls saved and audited"); readiness.refetch(); } });
-  const createSource = trpc.corporateB2BPilot.createSource.useMutation({ onSuccess: () => { toast.success("Source contract added"); readiness.refetch(); } });
-  const updateSource = trpc.corporateB2BPilot.updateSourceStatus.useMutation({ onSuccess: () => readiness.refetch() });
+  // Failures are surfaced, not swallowed. The server now refuses a pilot-state
+  // advance that the gates do not authorise, and its reason names the open
+  // gates — silently leaving the form on the rejected state would read as a
+  // successful save of a state the register never accepted.
+  const updateConfig = trpc.corporateB2BPilot.updateConfig.useMutation({
+    onSuccess: () => { toast.success("Pilot controls saved and audited"); readiness.refetch(); },
+    onError: (error) => toast.error(error.message),
+  });
+  const createSource = trpc.corporateB2BPilot.createSource.useMutation({
+    onSuccess: () => { toast.success("Source contract added"); readiness.refetch(); },
+    onError: (error) => toast.error(error.message),
+  });
+  const updateSource = trpc.corporateB2BPilot.updateSourceStatus.useMutation({
+    onSuccess: () => readiness.refetch(),
+    onError: (error) => toast.error(error.message),
+  });
   const [form, setForm] = useState<PilotForm>(initialForm);
   const [sourceName, setSourceName] = useState("");
   const [sourceType, setSourceType] = useState<"invoice_ar" | "bank_statement" | "mobile_money" | "psp_collection" | "erp_export">("invoice_ar");
@@ -97,12 +110,23 @@ export default function CorporateB2BPilotControls() {
     </div>
 
     <div className="grid gap-3 md:grid-cols-3">
-      <Card><CardHeader className="pb-2"><CardDescription>Roster</CardDescription><CardTitle className="text-2xl">{data.roster.total}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{data.roster.pending} pending · {data.roster.flagged} flagged</CardContent></Card>
+      <Card><CardHeader className="pb-2"><CardDescription>Roster</CardDescription><CardTitle className="text-2xl">{data.roster.total}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{data.roster.active} active · {data.roster.pending} pending · {data.roster.flagged} flagged{data.roster.duplicateNames > 0 ? ` · ${data.roster.duplicateNames} duplicated name${data.roster.duplicateNames === 1 ? "" : "s"}` : ""}</CardContent></Card>
       <Card><CardHeader className="pb-2"><CardDescription>Source contracts</CardDescription><CardTitle className="text-2xl">{data.sourceCount}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{data.approvedSources} approved · {data.testedSources} tested</CardContent></Card>
       <Card><CardHeader className="pb-2"><CardDescription>Non-negotiable boundary</CardDescription><CardTitle className="text-lg">No-write</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">Export and review only; customer systems remain authoritative.</CardContent></Card>
     </div>
 
-    <Card><CardHeader><div className="flex items-center gap-2"><ClipboardCheck className="h-5 w-5 text-primary" /><CardTitle>B0–B8 release gates</CardTitle></div><CardDescription>Each green gate is evidence recorded in this tenant. B6 reflects the merged and proven P1–P7 foundation release; deployment-specific durable-queue controls still apply where enabled.</CardDescription></CardHeader><CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{data.gates.map((gate) => <div key={gate.id} className={`rounded-lg border p-3 ${gate.ready ? "border-emerald-200 bg-emerald-50/70" : "border-amber-200 bg-amber-50/70"}`}><div className="flex items-center gap-2 text-sm font-semibold">{gate.ready ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 text-amber-600" />}{gate.id} · {gate.label}</div><p className="mt-1 text-xs text-muted-foreground">{gate.detail}</p></div>)}</CardContent></Card>
+    <Card><CardHeader><div className="flex items-center gap-2"><ClipboardCheck className="h-5 w-5 text-primary" /><CardTitle>B0–B8 release gates</CardTitle></div>
+      <CardDescription>
+        Two different claims are shown here, and they are not interchangeable.
+        A <span className="font-semibold">verified</span> gate reports something this platform read — roster rows, the live AI boundary, the live job-queue backend.
+        An <span className="font-semibold">attested</span> gate is a claim an authorised customer owner recorded on this screen: auditable, but not proof the underlying drill, contract or control total exists.
+        {data.attestedGatesGreen > 0 ? <> <span className="font-semibold">{data.attestedGatesGreen} of the closed gates below rest on an attestation alone.</span></> : null}
+      </CardDescription>
+    </CardHeader><CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{data.gates.map((gate) => <div key={gate.id} className={`rounded-lg border p-3 ${gate.ready ? "border-emerald-200 bg-emerald-50/70" : "border-amber-200 bg-amber-50/70"}`}>
+      <div className="flex items-center gap-2 text-sm font-semibold">{gate.ready ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 text-amber-600" />}{gate.id} · {gate.label}</div>
+      <span className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${gate.basis === "platform_verified" ? "bg-sky-100 text-sky-800" : "bg-slate-100 text-slate-700"}`}>{gate.basis === "platform_verified" ? "Platform verified" : "Customer attested"}</span>
+      <p className="mt-1 text-xs text-muted-foreground">{gate.detail}</p>
+    </div>)}</CardContent></Card>
 
     <div className="grid gap-6 xl:grid-cols-2">
       <Card><CardHeader><div className="flex items-center gap-2"><LockKeyhole className="h-5 w-5 text-primary" /><CardTitle>Pilot policy and attestations</CardTitle></div><CardDescription>Only an authorised customer owner may mark these items approved. Saving creates an audit event; it does not replace legal, security or operational evidence.</CardDescription></CardHeader><CardContent className="space-y-4">
@@ -117,7 +141,13 @@ export default function CorporateB2BPilotControls() {
         <div className="flex justify-end"><Button onClick={save} disabled={updateConfig.isPending}>{updateConfig.isPending ? <RefreshCcw className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}Save audited pilot policy</Button></div>
       </CardContent></Card>
 
-      <Card><CardHeader><CardTitle>Source contracts</CardTitle><CardDescription>Register the metadata for authorised evidence sources. Do not paste provider credentials, account numbers, statements or customer files here.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="grid gap-3 md:grid-cols-3"><Input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="e.g., AR invoice export" /><Select value={sourceType} onChange={setSourceType}><option value="invoice_ar">Invoice / AR</option><option value="bank_statement">Bank statement</option><option value="mobile_money">Mobile money</option><option value="psp_collection">PSP collection</option><option value="erp_export">ERP export</option></Select><Select value={deliveryMethod} onChange={setDeliveryMethod}><option value="manual_export">Manual export</option><option value="sftp">SFTP</option><option value="bucket">Bucket</option><option value="api">API</option></Select></div><Button variant="outline" onClick={addSource} disabled={createSource.isPending}><Plus className="mr-2 h-4 w-4" />Add source contract</Button><div className="space-y-2">{data.sources.length === 0 ? <p className="text-sm text-muted-foreground">No source contracts recorded.</p> : data.sources.map((source) => <div key={source.id} className="flex flex-col gap-2 rounded-md border p-3 md:flex-row md:items-center md:justify-between"><div><p className="text-sm font-medium">{source.displayName}</p><p className="text-xs text-muted-foreground">{source.sourceType.replace(/_/g, " ")} · {source.deliveryMethod} · credentials customer-owned · control total required</p></div><Select value={source.status} onChange={(status) => updateSource.mutate({ id: source.id, status, customerOwnedCredentials: source.customerOwnedCredentials, controlTotalRequired: source.controlTotalRequired })}><option value="draft">Draft</option><option value="tested">Tested</option><option value="approved">Approved</option><option value="active">Active</option><option value="suspended">Suspended</option></Select></div>)}</div></CardContent></Card>
+      <Card><CardHeader><CardTitle>Source contracts</CardTitle><CardDescription>Register the metadata for authorised evidence sources. Do not paste provider credentials, account numbers, statements or customer files here.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="grid gap-3 md:grid-cols-3"><Input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="e.g., AR invoice export" /><Select value={sourceType} onChange={setSourceType}><option value="invoice_ar">Invoice / AR</option><option value="bank_statement">Bank statement</option><option value="mobile_money">Mobile money</option><option value="psp_collection">PSP collection</option><option value="erp_export">ERP export</option></Select><Select value={deliveryMethod} onChange={setDeliveryMethod}><option value="manual_export">Manual export</option><option value="sftp">SFTP</option><option value="bucket">Bucket</option><option value="api">API</option></Select></div><Button variant="outline" onClick={addSource} disabled={createSource.isPending}><Plus className="mr-2 h-4 w-4" />Add source contract</Button><div className="space-y-2">{data.sources.length === 0 ? <p className="text-sm text-muted-foreground">No source contracts recorded.</p> : data.sources.map((source) => <div key={source.id} className="flex flex-col gap-2 rounded-md border p-3 md:flex-row md:items-center md:justify-between"><div><p className="text-sm font-medium">{source.displayName}</p>
+      {/* These two were printed as fixed text — "credentials customer-owned ·
+          control total required" — regardless of what was stored. Gate B2 is
+          decided by exactly these flags, so a source that failed it displayed
+          the words that describe passing it, and the operator had no way to see
+          why the gate was amber. */}
+      <p className="text-xs text-muted-foreground">{source.sourceType.replace(/_/g, " ")} · {source.deliveryMethod} · credentials {source.customerOwnedCredentials ? "customer-owned" : <span className="font-semibold text-amber-700">NOT customer-owned</span>} · control total {source.controlTotalRequired ? "required" : <span className="font-semibold text-amber-700">not required</span>}</p></div><Select value={source.status} onChange={(status) => updateSource.mutate({ id: source.id, status, customerOwnedCredentials: source.customerOwnedCredentials, controlTotalRequired: source.controlTotalRequired })}><option value="draft">Draft</option><option value="tested">Tested</option><option value="approved">Approved</option><option value="active">Active</option><option value="suspended">Suspended</option></Select></div>)}</div></CardContent></Card>
     </div>
   </div>;
 }
