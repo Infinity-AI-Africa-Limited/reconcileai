@@ -163,14 +163,52 @@ describe("migration SQL portability", () => {
     },
   ];
 
+  /**
+   * Executable SQL only.
+   *
+   * A migration header may legitimately NAME a forbidden construct while
+   * explaining why not to use it. Migration 0090's header does exactly that, and
+   * it tripped this guard in CI — the guard fired on the documentation telling
+   * people not to do the thing. Scanning raw text teaches readers to delete the
+   * explanation rather than fix the SQL.
+   *
+   * Only WHOLE-LINE comments are dropped. A trailing `-- note` after real DDL
+   * leaves that DDL on the line and still scannable, so this narrows what is
+   * examined without creating a place to hide a statement.
+   */
+  const executableSql = (sql: string): string =>
+    sql
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+
   it("should contain no TiDB-only syntax that MySQL would reject", () => {
     const offenders: string[] = [];
     for (const file of fs.readdirSync(DRIZZLE).filter((f) => f.endsWith(".sql"))) {
-      const sql = fs.readFileSync(path.join(DRIZZLE, file), "utf8");
+      const sql = executableSql(fs.readFileSync(path.join(DRIZZLE, file), "utf8"));
       for (const { pattern, why } of TIDB_ONLY) {
         if (pattern.test(sql)) offenders.push(`${file}: ${why}`);
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  const matches = (sql: string) => TIDB_ONLY.filter(({ pattern }) => pattern.test(executableSql(sql)));
+
+  it("should ignore a forbidden construct that appears only in a comment", () => {
+    // 0090's header explains why `CREATE INDEX IF NOT EXISTS` is wrong. That
+    // explanation must not itself read as a violation.
+    expect(matches("-- WHY NOT `CREATE INDEX IF NOT EXISTS`. It is a TiDB extension.")).toEqual([]);
+  });
+
+  it("should still catch the construct when it is REAL SQL", () => {
+    // The pair that makes the test above evidence rather than a loophole: if
+    // dropping comments also hid executable statements, the guard would be
+    // decoration.
+    expect(matches("CREATE INDEX IF NOT EXISTS `idx_x` ON `t` (`c`);")).toHaveLength(1);
+  });
+
+  it("should still catch it when a trailing comment follows the statement", () => {
+    expect(matches("CREATE INDEX IF NOT EXISTS `idx_y` ON `t` (`c`); -- added later")).toHaveLength(1);
   });
 });
