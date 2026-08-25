@@ -322,12 +322,21 @@ pnpm check      # TypeScript type-check (must be 0 errors)
 pnpm test       # run the full Vitest suite
 pnpm build      # production build (frontend + backend)
 pnpm start      # run the production build
-pnpm db:push    # generate + apply database migrations
+pnpm db:migrate # apply committed migrations (safe against any DB)
+pnpm db:push    # generate + apply — DEV DATABASES ONLY, see caution below
 ```
 
 > **Local environment caution:** the local `.env` may contain the **live**
 > shared database URL. Database-touching tests snapshot/restore, but be
 > deliberate before running anything destructive locally.
+>
+> In particular, **never run `pnpm db:push` while `DATABASE_URL` points at
+> production.** It is `drizzle-kit generate && drizzle-kit migrate`: the
+> generate half writes a new migration from whatever `schema.ts` is in your
+> working tree and then applies it, so an unmerged branch's schema lands in
+> the live database. Migrations 0084, 0085 and 0090 reached production that
+> way, ahead of their pull requests, and left deploys failing. Use
+> `pnpm db:migrate`.
 
 ---
 
