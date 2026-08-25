@@ -224,7 +224,20 @@ describe.skipIf(!REDIS_URL)("durable queue — the contract this platform relies
 describe.skipIf(!REDIS_URL)("BullMQ behaviour the reconciliation recovery design assumes", () => {
   const created2: string[] = [];
 
+  /**
+   * Raw BullMQ objects this block constructs directly, registered AT CREATION.
+   *
+   * Closing them inline at the end of a test only covers the happy path: if an
+   * assertion or a `until()` timeout throws first, the Queue and Workers are
+   * never released, their Redis connections leak, and the Worker's blocking
+   * connection can stop the run terminating at all — so a failing test would
+   * also hang the suite, hiding the failure it was meant to report.
+   */
+  const raw: { close(force?: boolean): Promise<void> }[] = [];
+
   afterAll(async () => {
+    for (const r of raw) await r.close().catch(() => {});
+
     const { Queue } = await import("bullmq");
     for (const name of created2) {
       const q = new Queue(name, { connection: { url: REDIS_URL } as never });
@@ -256,6 +269,7 @@ describe.skipIf(!REDIS_URL)("BullMQ behaviour the reconciliation recovery design
     created2.push(name);
 
     const queue = new Queue(name, { connection });
+    raw.push(queue);
     await queue.add("long-job", { v: 1 }, { attempts: 2, jobId: "long-job" });
 
     // Worker 1 picks the job up and then dies without finishing it.
@@ -264,6 +278,7 @@ describe.skipIf(!REDIS_URL)("BullMQ behaviour the reconciliation recovery design
       firstSaw = true;
       await new Promise((r) => setTimeout(r, 60_000)); // never completes
     }, { connection, stalledInterval: 500, lockDuration: 2000, maxStalledCount: 3 });
+    raw.push(w1);
 
     await until(() => firstSaw, 8000, "worker 1 to take the job");
     await w1.close(true); // hard close: drops the lock without completing
@@ -272,11 +287,12 @@ describe.skipIf(!REDIS_URL)("BullMQ behaviour the reconciliation recovery design
     let secondSaw = false;
     const w2 = new Worker(name, async () => { secondSaw = true; },
       { connection, stalledInterval: 500, lockDuration: 2000, maxStalledCount: 3 });
+    raw.push(w2);
 
     await until(() => secondSaw, 30000, "redelivery to worker 2");
-    await w2.close();
-    await queue.close();
 
+    // Teardown is afterAll's job, not this line's — closing here as well is
+    // harmless (close is idempotent) but must never be the ONLY path.
     expect(firstSaw).toBe(true);
     expect(secondSaw).toBe(true);
   }, 60000);
