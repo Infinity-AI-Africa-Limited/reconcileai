@@ -17,6 +17,12 @@ import {
 import { getDb } from "../db";
 import { protectedProcedure, router } from "../_core/trpc";
 import { logAudit } from "./shared";
+import { calculateCorporateB2BPilotReadiness } from "../corporateB2BPilotReadiness";
+
+// The B0-B8 gate rule is business logic, not routing: it decides whether a
+// regulated pilot may start, so it lives on its own and is tested without a
+// database or a tRPC context. Re-exported because it is imported from here.
+export { calculateCorporateB2BPilotReadiness } from "../corporateB2BPilotReadiness";
 
 const SOURCE_TYPES = ["invoice_ar", "bank_statement", "mobile_money", "psp_collection", "erp_export"] as const;
 const DELIVERY_METHODS = ["manual_export", "sftp", "bucket", "api"] as const;
@@ -51,33 +57,6 @@ export function requirePilotManager(role: string) {
   }
 }
 
-export function calculateCorporateB2BPilotReadiness(input: {
-  config: any | null;
-  sources: Array<any>;
-  roster: { total: number; pending: number; flagged: number };
-}) {
-  const { config, sources } = input;
-  const { total, pending, flagged } = input.roster;
-  const sourceCount = sources.length;
-  const testedSources = sources.filter((source) => source.status === "tested" || source.status === "approved" || source.status === "active");
-  const approvedSources = sources.filter((source) => source.status === "approved" || source.status === "active");
-  const safeSources = sources.every((source) => source.customerOwnedCredentials && source.controlTotalRequired);
-  const hasInvoiceEvidence = approvedSources.some((source) => source.sourceType === "invoice_ar");
-  const hasReceiptEvidence = approvedSources.some((source) => ["bank_statement", "mobile_money", "psp_collection"].includes(source.sourceType));
-  const gates = [
-    { id: "B0", label: "Read-only launch boundary", ready: Boolean(config?.noWriteAcknowledged && config?.pilotScope), detail: "No payment initiation, account access, ERP posting, customer messaging, or credit-note action." },
-    { id: "B1", label: "Canonical data contract", ready: config?.dataContractStatus === "approved" && hasInvoiceEvidence && hasReceiptEvidence, detail: "Approved invoice/AR and receipt evidence with a documented source hierarchy." },
-    { id: "B2", label: "Customer-authorised source route", ready: testedSources.length >= 2 && safeSources, detail: "At least two tested customer-controlled sources, each with a control total." },
-    { id: "B3", label: "Distributor master-data governance", ready: config?.rosterStatus === "approved" && total > 0 && pending === 0 && flagged === 0, detail: "An approved roster with no unconfirmed or flagged distributor identities." },
-    { id: "B4", label: "Allocation and daily-close policy", ready: config?.allocationPolicyStatus === "approved" && Boolean(config?.dailyCloseOwner), detail: "Human-approved allocation proposals and a named daily finance-close owner." },
-    { id: "B5", label: "AI and external-data boundary", ready: config?.aiAssistanceMode === "disabled" || (config?.aiAssistanceMode === "private_approved" && Boolean(config?.aiBoundaryReference)), detail: "AI is disabled by default; a private approved route requires a recorded sign-off reference." },
-    { id: "B6", label: "Foundation hardening deployment", ready: true, detail: "The P1–P7 foundation release is merged and proven. Durable queue configuration remains mandatory where the selected deployment enables queued processing." },
-    { id: "B7", label: "Recovery and retention evidence", ready: config?.operationalRecoveryStatus === "passed" && Number(config?.retentionDays ?? 0) > 0, detail: "Successful replay/recovery evidence and a time-bound retention policy." },
-    { id: "B8", label: "Commercial and data-processing terms", ready: config?.contractStatus === "approved" && config?.dataProcessingStatus === "approved" && Boolean(config?.contractReference) && Boolean(config?.dataProcessingReference), detail: "Recorded contract and data-processing references; the customer remains responsible for legal validity." },
-  ];
-  return { gates, sourceCount, testedSources: testedSources.length, approvedSources: approvedSources.length, canStartReadOnlyPilot: gates.every((gate) => gate.ready), blockedBy: gates.filter((gate) => !gate.ready).map((gate) => gate.id) };
-}
-
 async function loadReadiness(user: { organizationId?: number | null }) {
   const { db, organizationId } = await requireCorporateB2B(user);
   const [config] = await db.select().from(corporateB2BPilotConfigs)
@@ -106,20 +85,20 @@ async function loadReadiness(user: { organizationId?: number | null }) {
 const configInput = z.object({
   country: z.enum(["uganda", "nigeria"]),
   pilotState: z.enum(["preparation", "data_validation", "dry_run", "parallel_run", "limited_control", "suspended"]),
-  pilotScope: z.string().max(500).optional(),
+  pilotScope: z.string().trim().max(500).optional(),
   noWriteAcknowledged: z.boolean(),
   aiAssistanceMode: z.enum(["disabled", "private_approved"]),
-  aiBoundaryReference: z.string().max(255).optional(),
+  aiBoundaryReference: z.string().trim().max(255).optional(),
   dataContractStatus: z.enum(["draft", "approved"]),
   rosterStatus: z.enum(["draft", "approved"]),
   allocationPolicyStatus: z.enum(["draft", "approved"]),
-  dailyCloseOwner: z.string().max(255).optional(),
+  dailyCloseOwner: z.string().trim().max(255).optional(),
   operationalRecoveryStatus: z.enum(["not_tested", "passed"]),
   retentionDays: z.number().int().min(1).max(3650),
   contractStatus: z.enum(["draft", "approved"]),
   dataProcessingStatus: z.enum(["draft", "approved"]),
-  contractReference: z.string().max(255).optional(),
-  dataProcessingReference: z.string().max(255).optional(),
+  contractReference: z.string().trim().max(255).optional(),
+  dataProcessingReference: z.string().trim().max(255).optional(),
 });
 
 export const corporateB2BPilotRouter = router({
@@ -147,9 +126,9 @@ export const corporateB2BPilotRouter = router({
   }),
 
   createSource: protectedProcedure.input(z.object({
-    sourceType: z.enum(SOURCE_TYPES), displayName: z.string().min(1).max(255),
-    deliveryMethod: z.enum(DELIVERY_METHODS), expectedCutoff: z.string().max(64).optional(),
-    sourceOwner: z.string().max(255).optional(), notes: z.string().max(2000).optional(),
+    sourceType: z.enum(SOURCE_TYPES), displayName: z.string().trim().min(1).max(255),
+    deliveryMethod: z.enum(DELIVERY_METHODS), expectedCutoff: z.string().trim().max(64).optional(),
+    sourceOwner: z.string().trim().max(255).optional(), notes: z.string().max(2000).optional(),
   })).mutation(async ({ ctx, input }) => {
     requirePilotManager(ctx.user.role);
     const { db, organizationId } = await requireCorporateB2B(ctx.user);

@@ -131,9 +131,90 @@ async function startServer() {
       };
     }
 
-    // 3. App metadata
+    // 4. Job queue — WHICH backend is actually live, and its depth.
+    //
+    // Durable processing is a pilot blocker (go-live plan Phase 1 item 2), and
+    // its exit criterion asks for "Redis/BullMQ health evidence". Without this
+    // an instance running the in-process fallback and one running BullMQ look
+    // identical from outside — so nobody could tell whether reconciliation runs
+    // survive a restart.
+    //
+    // "degraded", not "error", when the fallback is live: the platform works,
+    // it is simply single-instance and loses queued work on restart. That is a
+    // correct state for a demo deployment and a blocking one for a bank, and
+    // the distinction belongs to the reader, not to this endpoint.
+    try {
+      const { allQueueStats } = await import("../jobQueue");
+      const queues = await allQueueStats();
+      const names = Object.keys(queues);
+
+      // Queues are built LAZILY, on first use. So a freshly restarted process
+      // has none registered yet, and asking "are all live queues durable?" of an
+      // empty set must not be answered "no" — a Redis-configured instance would
+      // then advertise `durable: false` moments after boot, which is the exact
+      // opposite of the truth on an endpoint an institution reads as evidence.
+      //
+      // With nothing registered, durability is a property of CONFIGURATION;
+      // once a queue exists, it is a property of what actually got built.
+      // Three states, not two — which is the point. Both booleans are wrong
+      // before a queue exists: claiming durable asserts a Redis connection
+      // nobody has made, and claiming non-durable contradicts the configuration.
+      // So `durable` means CONFIRMED durable and nothing else, and `durability`
+      // carries the distinction the boolean cannot.
+      //
+      //   confirmed             a queue was built and is on BullMQ
+      //   configured_unverified REDIS_URL is set, but nothing has connected yet,
+      //                         so a wrong or unreachable URL still looks like
+      //                         this. Not evidence of durability.
+      //   fallback              in-process; work is lost on restart
+      //
+      // The empty window is not brief: queues are built lazily on first use, and
+      // the boot sweep only builds one when there are stuck jobs to recover. A
+      // healthy idle instance can sit here indefinitely.
+      const configuredDurable = !!process.env.REDIS_URL?.trim();
+      const anyBroken = names.some((n) => queues[n].error);
+      const confirmedDurable = names.length > 0 && names.every((n) => queues[n].durable);
+
+      const durability =
+        names.length === 0
+          ? configuredDurable
+            ? "configured_unverified"
+            : "fallback"
+          : confirmedDurable
+            ? "confirmed"
+            : "fallback";
+
+      checks.queue = {
+        status: anyBroken ? "error" : confirmedDurable ? "ok" : "degraded",
+        durable: confirmedDurable,
+        durability,
+        ...(names.length === 0
+          ? {
+              note:
+                durability === "configured_unverified"
+                  ? "REDIS_URL is set, but no queue has been built yet, so Redis connectivity is unverified — configured, not confirmed."
+                  : "REDIS_URL is not set — the in-process fallback will be used.",
+            }
+          : { queues }),
+      };
+    } catch (err) {
+      checks.queue = {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // 5. App metadata
+    // "degraded" is reported, not alarmed on. Production runs the in-process
+    // queue today, so treating degraded as failure would flip this endpoint to
+    // 503 the moment the queue check shipped — turning a known, accepted state
+    // into a page. The durability evidence is in `checks.queue.durable` for
+    // whoever needs it; only a genuine error (a broken dependency) is fatal.
+    //
+    // Existing checks emit only "ok" or "error", so their behaviour is
+    // unchanged. Railway's own probe is /api/healthz, which is untouched.
     const allOk = Object.values(checks).every(
-      (c) => (c as { status: string }).status === "ok"
+      (c) => (c as { status: string }).status !== "error"
     );
 
     const body = {
