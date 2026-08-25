@@ -733,6 +733,51 @@ export async function diagnoseException(
 }
 
 /**
+ * Could this candidate be the counterpart leg of `txn` at all?
+ *
+ * The SQL in `db.getDiagnosisCandidates` narrows the pool for efficiency, and
+ * every round of review so far has found a row shape it let through: a
+ * different currency, an unpaired channel, another distributor's invoice, then
+ * a same-direction receipt and a reversal. Each was fixed in the WHERE clause,
+ * where nothing could test it — the pool's composition had no unit test at all,
+ * which is why the same class of defect kept arriving.
+ *
+ * So the RULE lives here, in one pure function that is tested, and the caller
+ * applies it to whatever the query returns. The SQL stays as a narrowing for
+ * cost; correctness no longer depends on it being complete.
+ *
+ * A candidate is comparable only when it is:
+ *   - a different row (a transaction is not its own counterpart);
+ *   - the same currency — two currencies make an FX exception, not a shortfall;
+ *   - the same counterparty, so the comparison is to that payer's own items;
+ *   - the OPPOSITE direction. Both feeds of a reconciled pair record the
+ *     counterpart in the opposite direction in this platform's model, in both
+ *     verticals (demoSeedEngine writes every source row `credit` and every
+ *     target row `debit`), and `detectReversals` requires the same inequality.
+ *     A same-direction row is a different event on the same side of the ledger:
+ *     comparing a receipt to another receipt narrates the gap between two
+ *     payments as a shortfall against an invoice;
+ *   - not a reversal. Reversed money is not an obligation to measure against —
+ *     it is the `b2b_receipt_reversed_after_allocation` exception.
+ */
+export function isComparableCandidate(txn: SATransaction, candidate: SATransaction): boolean {
+  if (candidate.id === txn.id) return false;
+  if (candidate.currency !== txn.currency) return false;
+  if (candidate.isReversal) return false;
+
+  const payer = normalizeStr(txn.counterparty);
+  // No counterparty is not a wildcard. The classifier's `missing_counterparty`
+  // branch is the right diagnosis; inventing a comparison is the fabricated
+  // figure this filter exists to prevent.
+  if (!payer || normalizeStr(candidate.counterparty) !== payer) return false;
+
+  // Unrecognised directions compare to nothing rather than to everything.
+  const directions = new Set(["debit", "credit"]);
+  if (!directions.has(txn.debitCredit) || !directions.has(candidate.debitCredit)) return false;
+  return candidate.debitCredit !== txn.debitCredit;
+}
+
+/**
  * Which candidates may a single-transaction diagnosis actually compare against?
  *
  * `findNearestTarget` picks by NUMERIC PROXIMITY. Given several of one

@@ -271,7 +271,29 @@ Establishing that more than one invoice may be named is all a function whose job
 > because its leg was absent from the pool rather than by the guard, and would have passed with the
 > guard deleted; each case now carries its own first leg.
 
-**The honest summary of §2.4, after eight rounds:** the shortfall is no longer structurally null, and
+Ninth round moved the problem one layer down. Every previous fix narrowed the pool inside the SQL
+`WHERE` clause of `getDiagnosisCandidates` — currency, then approved channel pairing, then
+counterparty — and review found the next row shape it admitted each time: a same-currency receipt,
+refund or reversal for the same payer, on the paired channel. `findNearestTarget` compares numbers,
+so a receipt could be scored against **another receipt** and the gap between two payments narrated
+as a shortfall against an invoice, on a persisted action draft.
+
+Two filters were missing and both are now applied: **opposite direction only**, and **not a
+reversal**. The direction rule is not a guess about accounting convention — it is this platform's
+model, in both verticals: the seeder writes every source row `credit` and every target row `debit`
+(FMCG and financial-services alike), and the engine's own reversal pairing already requires
+`candidate.debitCredit !== txn.debitCredit`. A same-direction row is a different event on the same
+side of the ledger. Reversed money is not an obligation to measure against; it is the
+`b2b_receipt_reversed_after_allocation` exception.
+
+The more important change is where the rule now lives. Four rounds of pool defects were all fixed in
+a `WHERE` clause that **no test could reach** — the pool's composition had no unit test at all,
+which is why the same class kept arriving by a different route. `isComparableCandidate` is now a
+pure function holding the whole rule, the caller applies it to whatever the query returns, and the
+SQL is a cost narrowing rather than the definition of correctness. Nine tests cover it, each
+exclusion paired with its admitting case.
+
+**The honest summary of §2.4, after nine rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.
@@ -350,7 +372,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2047 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2056 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in

@@ -71,6 +71,7 @@ import { woodcoreQuery, SAVINGS_TXN_TYPE, LOAN_TXN_TYPE } from "./woodcoreDb";
 import {
   runM2MMatching,
   determinateCandidates,
+  isComparableCandidate,
   diagnoseException,
   generateActionDraft,
   buildMemoryEmbeddingText,
@@ -4464,11 +4465,18 @@ Always be specific, reference actual exception IDs and amounts where available, 
           // narrow the pool; they do not make its members RELATED, and
           // findNearestTarget then picks by amount alone.
           counterparty: txnRows.counterparty,
+          // Only the opposite direction is a counterpart leg. Without this a
+          // receipt could be compared against another receipt on the paired
+          // channel and the gap between two payments narrated as a shortfall.
+          debitCredit: txnRows.debitCredit,
           around: new Date(txnRows.transactionDate),
           windowDays: diagnosisConfig.dateWindowDays,
         });
+        // The query narrows the pool for cost; `isComparableCandidate` decides
+        // what is actually comparable. Keeping the rule in one tested pure
+        // function is why the pool's composition is no longer only asserted by
+        // a WHERE clause that nothing exercises.
         const candidatePool: SATransaction[] = candidateRows
-          .filter((row) => row.id !== txn.id)
           .map((row) => ({
             id: row.id,
             transactionRef: row.transactionRef,
@@ -4481,7 +4489,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
             debitCredit: row.debitCredit,
             isReversal: row.isReversal,
             originalTransactionRef: row.originalTransactionRef,
-          }));
+          }))
+          .filter((candidate) => isComparableCandidate(txn, candidate));
 
         // Narrowing by currency, channel pairing and counterparty removes the
         // grossly unrelated comparisons. It cannot remove the last one: among
