@@ -74,6 +74,15 @@ export interface SATransaction {
 
 export interface ParsedReference {
   invoiceNumbers: string[];           // ["INV-2847", "ORD-2847"]
+  /**
+   * The reference appears to name more invoices than `invoiceNumbers` holds,
+   * because it lists or ranges them in shorthand ("INV-1001 and 1002").
+   *
+   * Distinct from `invoiceNumbers.length > 1`, and that is the whole point: the
+   * extractor cannot see the extra legs, so the count alone reads a split
+   * remittance as a single-invoice payment. See INVOICE_LIST_SHORTHAND.
+   */
+  mayNameMoreInvoices: boolean;
   deductionType: "damage" | "promotional" | "bank_fee" | "tax" | "discount" | "none";
   deductionKeywords: string[];        // ["dmg", "promo", "bank charge"]
   deductionAmount: number | null;     // explicit deduction amount if stated
@@ -91,6 +100,33 @@ const DEDUCTION_PATTERNS: Array<{ pattern: RegExp; type: ParsedReference["deduct
 ];
 
 const INVOICE_PATTERN = /\b(INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?(\d{3,10})\b/gi;
+
+/**
+ * A reference naming invoices in SHORTHAND — listed or ranged rather than
+ * written out in full: "INV-1001 and 1002", "INV-1001, 1002, 1003",
+ * "INV-2001-2005".
+ *
+ * INVOICE_PATTERN requires a prefix on every identifier, so it extracts only the
+ * FIRST of these and the reference reads as naming a single invoice. That
+ * defeats the split-remittance guard in `determinateCandidates` in exactly the
+ * case it exists for: the whole receipt is diagnosed against one leg, and the
+ * reported shortfall is the size of the legs that were never seen.
+ *
+ * This deliberately does NOT expand the shorthand into the full set.
+ * "INV-2001-2005" is a range of five invoices under one customer's numbering and
+ * a single invoice numbered 2001-2005 under another's, and choosing between them
+ * would replace one wrong answer with a differently wrong one. It establishes
+ * only that MORE than one invoice may be named — which is all a function whose
+ * job is to decline when the evidence is indeterminate needs to know.
+ *
+ * Anchored to a recognised invoice prefix, and requiring an explicit list or
+ * range connector, so an amount cannot trip it: "INV-2847 less 1500" has no
+ * connector, and a bare "1,500 and 2,000" is not anchored to an identifier.
+ * A two-digit suffix cannot trip it either — "INV-2847-01" needs three digits
+ * on the right of the connector to read as another invoice number.
+ */
+const INVOICE_LIST_SHORTHAND =
+  /\b(?:INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?\d{3,10}\s*(?:[,&+/–—-]|\band\b|\bto\b|\bthru\b|\bthrough\b)\s*\d{3,10}\b/i;
 const SPLIT_KEYWORDS = /\b(split|part|partial|installment|instalment|tranche|1\s*of\s*\d|2\s*of\s*\d)\b/i;
 const AMOUNT_IN_REF = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\b/g;
 
@@ -127,6 +163,7 @@ export function parseReference(ref: string | null | undefined, description: stri
 
   return {
     invoiceNumbers,
+    mayNameMoreInvoices: INVOICE_LIST_SHORTHAND.test(raw),
     deductionType,
     deductionKeywords,
     deductionAmount,
@@ -696,13 +733,13 @@ export function determinateCandidates(
   // `candidates.length <= 1 -> return candidates` fast path sat above this and
   // handed back the single open invoice even when the receipt named two,
   // re-opening the split-remittance hole one line above the guard for it.
-  const invoiceNumbers = parseReference(txn.transactionRef, txn.description).invoiceNumbers;
+  const parsed = parseReference(txn.transactionRef, txn.description);
 
   // Deduplicated by identifier, because the same invoice number routinely
   // appears in BOTH the reference and the description ("INV-2847" /
   // "payment for INV-2847") and counting the raw hits would read one invoice
   // as two.
-  const wanted = new Set(invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
+  const wanted = new Set(parsed.invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
 
   // A reference naming SEVERAL invoices is a split remittance, and that is an
   // allocation question rather than a shortfall one. It stays unresolved here
@@ -710,7 +747,14 @@ export function determinateCandidates(
   // receipt a payment against that leg, and diagnosing the whole amount
   // against it produces exactly the wrong shortfall and a single-invoice
   // action draft. Splits are what runM2MMatching is for.
-  if (wanted.size > 1) return [];
+  //
+  // `mayNameMoreInvoices` is checked alongside the count, not instead of it,
+  // because a shorthand list defeats the count itself: only the first leg of
+  // "INV-1001 and 1002" carries a prefix, so the extractor returns ONE
+  // identifier and the size test reads a two-invoice remittance as an ordinary
+  // single-invoice payment. Counting what was extracted cannot see what the
+  // extractor could not extract.
+  if (wanted.size > 1 || parsed.mayNameMoreInvoices) return [];
 
   if (wanted.size === 1) {
     // Compare EXTRACTED IDENTIFIERS, not substrings. A normalised substring

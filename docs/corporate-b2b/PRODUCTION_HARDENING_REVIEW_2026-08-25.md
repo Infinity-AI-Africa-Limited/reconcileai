@@ -233,7 +233,25 @@ Sixth round: a `candidates.length <= 1` short-circuit sat one line **above** the
 two-invoice reference against a one-invoice pool still returned that invoice. The reference is now
 read before any short-circuit on pool size.
 
-**The honest summary of §2.4, after six rounds:** the shortfall is no longer structurally null, and
+Seventh round found the split guard could be walked straight past. It counts the invoice identifiers
+the extractor returned, and the extractor requires a prefix on **every** identifier — so a remittance
+written the way distributors actually write them, `"INV-1001 and 1002"` or `"INV-2001-2005"`,
+yielded one identifier and read as an ordinary single-invoice payment. The whole receipt was then
+diagnosed against the first leg, reporting a shortfall the size of the legs nobody had seen.
+Counting what was extracted cannot see what the extractor could not extract, so `parseReference` now
+also reports `mayNameMoreInvoices` — an explicit list or range connector joining an invoice
+identifier to another invoice-length number — and the guard consults it alongside the count. It does
+**not** try to expand the shorthand: `INV-2001-2005` is five invoices under one customer's numbering
+and one invoice under another's, and guessing between them would trade one wrong answer for another.
+Establishing that more than one invoice may be named is all a function whose job is to decline needs.
+
+> A fixture in the first cut of those tests reused one candidate pool for every reference, so the
+> range case was refused because its leg was absent from the pool rather than by the new guard, and
+> would have passed with the guard deleted. Each case now carries its own first leg; all seven fail
+> without the guard, and the three controls — a stated deduction amount, a short line suffix, a plain
+> single-invoice reference — pass in both directions.
+
+**The honest summary of §2.4, after seven rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.
@@ -312,7 +330,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2023 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2033 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in

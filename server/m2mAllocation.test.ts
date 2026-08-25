@@ -251,3 +251,73 @@ describe("choosing what a diagnosis may compare a receipt against", () => {
     expect(chosen).toEqual([]);
   });
 });
+
+describe("when a split remittance names its invoices in shorthand", () => {
+  /**
+   * The prefix is written once and the remaining legs are left bare, which is
+   * how distributors actually write a batch remittance. INVOICE_PATTERN needs a
+   * prefix on every identifier, so it extracted only the first and the
+   * split-remittance guard — which counts extracted identifiers — saw a
+   * single-invoice payment. The whole receipt was then diagnosed against one
+   * leg, reporting a shortfall the size of the legs nobody had seen.
+   */
+  // Each case carries the invoice ref its OWN first leg names. Reusing one
+  // fixture across every reference made the range case pass vacuously — its leg
+  // was absent from the pool, so it was refused by the "named invoice is not
+  // among the candidates" rule and would have passed with the shorthand guard
+  // deleted. A test that cannot fail is not evidence.
+  it.each([
+    ["INV-1001 and 1002", "INV-1001", "a bare second leg joined by 'and'"],
+    ["INV-1001, 1002, 1003", "INV-1001", "a comma-separated list"],
+    ["INV-2001-2005", "INV-2001", "a hyphenated range"],
+    ["INV-1001 & 1002", "INV-1001", "an ampersand list"],
+    ["INV-1001 to 1005", "INV-1001", "a spelled-out range"],
+    ["INV-1001/1002", "INV-1001", "a slash-separated pair"],
+  ])("should refuse %s (%s)", (reference, firstLeg) => {
+    // The first leg IS open and IS the nearest by amount — the trap. Returning
+    // it quantifies the unseen legs as a shortfall against this one.
+    const receipt = txn(1_500_000, reference, `remittance ${reference}`);
+    expect(determinateCandidates(receipt, [txn(1_000_000, firstLeg)])).toEqual([]);
+    expect(determinateCandidates(receipt, [txn(1_000_000, firstLeg), txn(500_000, "INV-7777")])).toEqual([]);
+  });
+
+  it("should still refuse when the shorthand list is the only thing in the reference", () => {
+    // No pool-size escape either: a single candidate is not made unambiguous by
+    // being alone when the reference names more than one invoice.
+    const receipt = txn(1_500_000, "INV-2001-2005", null);
+    expect(determinateCandidates(receipt, [txn(1_000_000, "INV-2001")])).toEqual([]);
+  });
+});
+
+describe("what the shorthand guard must NOT refuse", () => {
+  // The control for the block above. A guard that declines everything is
+  // indistinguishable from deleting the feature, and these are the ordinary
+  // references it has to keep resolving.
+  it("should still resolve a single invoice carrying a stated deduction amount", () => {
+    // "less 1500" is a deduction, not a second invoice. The connector list is
+    // what separates the two, and it does not contain "less".
+    const receipt = txn(998_500, "INV-2847 less 1500", "payment INV-2847 less 1500 bank charge");
+    const exact = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const chosen = determinateCandidates(receipt, [exact, txn(955_000, "INV-3100")]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(exact.id);
+  });
+
+  it("should still resolve an invoice number carrying a short line suffix", () => {
+    // "INV-2847-01" is one invoice with a line/sequence suffix. Two digits
+    // cannot be an invoice number, so the range reading is not available.
+    const receipt = txn(950_000, "INV-2847-01", "payment for INV-2847-01");
+    const exact = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const chosen = determinateCandidates(receipt, [exact, txn(955_000, "INV-3100")]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(exact.id);
+  });
+
+  it("should still resolve a plain single-invoice reference", () => {
+    const receipt = txn(950_000, "INV-2847 less promo", "MOMO COLLECTION less promo allowance");
+    const exact = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const chosen = determinateCandidates(receipt, [exact, txn(955_000, "INV-3100")]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(exact.id);
+  });
+});
