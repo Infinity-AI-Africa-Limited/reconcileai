@@ -273,6 +273,16 @@ describe("when a split remittance names its invoices in shorthand", () => {
     ["INV-1001 & 1002", "INV-1001", "an ampersand list"],
     ["INV-1001 to 1005", "INV-1001", "a spelled-out range"],
     ["INV-1001/1002", "INV-1001", "a slash-separated pair"],
+    // The separators that broke the previous, allowlist-based guard. They are
+    // listed for the record, not because the rule enumerates them — it asks
+    // whether an invoice-length number is left unaccounted for, which is why
+    // the last three (never named in review) pass without being anticipated.
+    ["INV-1001; 1002", "INV-1001", "a semicolon"],
+    ["INV-1001: 1002", "INV-1001", "a colon"],
+    ["INV-1001 or 1002", "INV-1001", "'or'"],
+    ["INV-1001 plus 1002", "INV-1001", "'plus'"],
+    ["INV-1001|1002", "INV-1001", "a pipe"],
+    ["INV-1001\n1002", "INV-1001", "a newline"],
   ])("should refuse %s (%s)", (reference, firstLeg) => {
     // The first leg IS open and IS the nearest by amount — the trap. Returning
     // it quantifies the unseen legs as a shortfall against this one.
@@ -319,5 +329,35 @@ describe("what the shorthand guard must NOT refuse", () => {
     const chosen = determinateCandidates(receipt, [exact, txn(955_000, "INV-3100")]);
     expect(chosen).toHaveLength(1);
     expect(chosen[0].id).toBe(exact.id);
+  });
+
+  // Inverting the rule to "any invoice-length number nothing accounts for"
+  // widens what can trip it, so the numbers a remittance ordinarily carries
+  // have to stay accounted for. Each of these WOULD decline without its entry
+  // in ACCOUNTED_NUMBER_PATTERNS.
+  it.each([
+    ["INV-2847 less 1,500 bank charge", "a thousands-separated amount"],
+    ["INV-2847 less 2500.00", "a decimal amount"],
+    ["INV-2847 NGN 950000", "a currency-cued amount"],
+    ["INV-2847 amount 950000", "an amount cue"],
+    ["INV-2847 balance 50000", "a balance cue"],
+    ["INV-2847 20260812", "a yyyymmdd value date"],
+    ["INV-2847 12/08/2026", "a slash date"],
+  ])("should still resolve %s (%s)", (reference) => {
+    const receipt = txn(950_000, reference, `payment ${reference}`);
+    const exact = txn(1_000_000, "INV-2847", "Invoice INV-2847");
+    const chosen = determinateCandidates(receipt, [exact, txn(955_000, "INV-3100")]);
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].id).toBe(exact.id);
+  });
+
+  it("should still use a single candidate when the narration carries stray digits", () => {
+    // No invoice identifier was extracted, so "more invoices than I found" is
+    // not a claim this rule makes. A phone number in a mobile-money narration
+    // must not withdraw the single-candidate branch, which rests on there
+    // being one open invoice rather than on reading the reference.
+    const receipt = txn(950_000, null, "MOMO COLLECTION 0771234567 KAMPALA");
+    const only = txn(1_000_000);
+    expect(determinateCandidates(receipt, [only])).toEqual([only]);
   });
 });

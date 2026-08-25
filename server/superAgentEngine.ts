@@ -80,7 +80,7 @@ export interface ParsedReference {
    *
    * Distinct from `invoiceNumbers.length > 1`, and that is the whole point: the
    * extractor cannot see the extra legs, so the count alone reads a split
-   * remittance as a single-invoice payment. See INVOICE_LIST_SHORTHAND.
+   * remittance as a single-invoice payment. See referenceMayNameMoreInvoices.
    */
   mayNameMoreInvoices: boolean;
   deductionType: "damage" | "promotional" | "bank_fee" | "tax" | "discount" | "none";
@@ -102,31 +102,67 @@ const DEDUCTION_PATTERNS: Array<{ pattern: RegExp; type: ParsedReference["deduct
 const INVOICE_PATTERN = /\b(INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?(\d{3,10})\b/gi;
 
 /**
- * A reference naming invoices in SHORTHAND — listed or ranged rather than
- * written out in full: "INV-1001 and 1002", "INV-1001, 1002, 1003",
- * "INV-2001-2005".
+ * Numbers that are ACCOUNTED FOR, and so cannot be an unwritten invoice leg.
  *
- * INVOICE_PATTERN requires a prefix on every identifier, so it extracts only the
- * FIRST of these and the reference reads as naming a single invoice. That
- * defeats the split-remittance guard in `determinateCandidates` in exactly the
- * case it exists for: the whole receipt is diagnosed against one leg, and the
- * reported shortfall is the size of the legs that were never seen.
- *
- * This deliberately does NOT expand the shorthand into the full set.
- * "INV-2001-2005" is a range of five invoices under one customer's numbering and
- * a single invoice numbered 2001-2005 under another's, and choosing between them
- * would replace one wrong answer with a differently wrong one. It establishes
- * only that MORE than one invoice may be named — which is all a function whose
- * job is to decline when the evidence is indeterminate needs to know.
- *
- * Anchored to a recognised invoice prefix, and requiring an explicit list or
- * range connector, so an amount cannot trip it: "INV-2847 less 1500" has no
- * connector, and a bare "1,500 and 2,000" is not anchored to an identifier.
- * A two-digit suffix cannot trip it either — "INV-2847-01" needs three digits
- * on the right of the connector to read as another invoice number.
+ * See `referenceMayNameMoreInvoices` below for why the question is posed this way.
+ * Each entry is an explanation the reference itself supplies for a number:
+ *   - a literal written like money — thousands separators or a decimal part;
+ *   - a number introduced by a deduction, balance or currency cue;
+ *   - a date, in the two shapes that appear in remittance narrations.
  */
-const INVOICE_LIST_SHORTHAND =
-  /\b(?:INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?\d{3,10}\s*(?:[,&+/–—-]|\band\b|\bto\b|\bthru\b|\bthrough\b)\s*\d{3,10}\b/i;
+const ACCOUNTED_NUMBER_PATTERNS: RegExp[] = [
+  /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+\.\d+\b/g,
+  /\b(?:less|minus|deduct(?:ion)?|net\s*of|amt|amount|bal(?:ance)?|NGN|UGX|USD|GHS|KES|ZAR|₦)\s*[:=]?\s*\d[\d,]*(?:\.\d+)?/gi,
+  /\b(?:19|20)\d{6}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g,
+];
+
+/**
+ * Does this reference appear to name MORE invoices than the extractor could
+ * pull out of it?
+ *
+ * INVOICE_PATTERN requires a prefix on every identifier, so a remittance written
+ * the way distributors write them — "INV-1001 and 1002", "INV-2001-2005" —
+ * yields ONE identifier and reads as an ordinary single-invoice payment. That
+ * defeats the split guard in `determinateCandidates` in exactly the case it
+ * exists for, and the whole receipt gets diagnosed against the first leg.
+ *
+ * ── Why this is not a list of separators ──────────────────────────────────
+ *
+ * The previous attempt matched an invoice identifier followed by a KNOWN list or
+ * range connector. Review then found `;`, `:` and "or"; `plus`, `|` and a
+ * newline bypass it equally, and the next reader will find another. The set of
+ * characters a human might put between two invoice numbers is not enumerable,
+ * and every omission from that list fails OPEN — straight to a wrong shortfall.
+ *
+ * So the question is inverted. Instead of asking "is there a separator I
+ * recognise?", it asks: **is there an invoice-length number here that nothing
+ * accounts for?** That set IS bounded, because a reference only contains so
+ * many kinds of number: the invoice identifiers themselves, amounts, and dates.
+ * Anything left over may be an invoice leg.
+ *
+ * The direction of failure is the point. ACCOUNTED_NUMBER_PATTERNS is still a
+ * list and still incomplete — but an omission there makes an explained number
+ * look unexplained, which DECLINES a determinate receipt. Losing a shortfall we
+ * could have computed is the cost; reporting one that is wrong is not on the
+ * table. That is the same trade as `findSubsetSum` and the rest of this module.
+ *
+ * Requires at least one extracted identifier, so this reads as "more than the
+ * ones I found" rather than "some digits appeared". A reference with no
+ * recognisable identifier at all — a bare "1001 and 1002" — is not covered:
+ * those digits are indistinguishable from an amount or an account number, and
+ * the single-candidate branch that would handle it rests on a different
+ * argument (one open invoice is unambiguous), not on reading the reference.
+ */
+function referenceMayNameMoreInvoices(raw: string, extracted: string[]): boolean {
+  if (extracted.length === 0) return false;
+  let masked = raw.replace(new RegExp(INVOICE_PATTERN.source, "gi"), " ");
+  for (const pattern of ACCOUNTED_NUMBER_PATTERNS) {
+    masked = masked.replace(new RegExp(pattern.source, pattern.flags), " ");
+  }
+  // Three digits is the shortest thing INVOICE_PATTERN will accept as an
+  // invoice number, so a shorter leftover ("INV-2847-01") cannot be one.
+  return /\b\d{3,10}\b/.test(masked);
+}
 const SPLIT_KEYWORDS = /\b(split|part|partial|installment|instalment|tranche|1\s*of\s*\d|2\s*of\s*\d)\b/i;
 const AMOUNT_IN_REF = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\b/g;
 
@@ -163,7 +199,7 @@ export function parseReference(ref: string | null | undefined, description: stri
 
   return {
     invoiceNumbers,
-    mayNameMoreInvoices: INVOICE_LIST_SHORTHAND.test(raw),
+    mayNameMoreInvoices: referenceMayNameMoreInvoices(raw, invoiceNumbers),
     deductionType,
     deductionKeywords,
     deductionAmount,
