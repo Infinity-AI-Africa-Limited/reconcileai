@@ -1211,6 +1211,31 @@ Cloud Run, or a self-managed VPS) — Railway is simply the current production c
 > **Migration safety (learned the hard way):** migrations are **append-only**. Never
 > re-number an already-applied migration — doing so has broken a Railway deploy before
 > (`ER_TABLE_EXISTS`). Add a new migration file; never renumber an old one.
+>
+> **The one narrow exception: an UNAPPLIED migration whose objects already exist.**
+> Hit three times now (0090, 0091). DDL reaches production outside the runner, so the
+> table is there while `__drizzle_migrations` holds no row for it. Drizzle applies by
+> the journal `when` watermark, so that migration is retried on *every* deploy and dies
+> on its own objects — a permanently broken deploy that adding a new migration cannot
+> fix, because the failing one still runs first.
+>
+> Amending it is then legitimate, because append-only protects migrations that have
+> been **applied** so histories cannot diverge — and this one is applied nowhere, so
+> there is no history to protect. Only under all three conditions:
+>
+> 1. **Verify it is recorded in no environment** before touching it. Query the target:
+>    `SELECT created_at FROM __drizzle_migrations ORDER BY created_at DESC LIMIT 5` and
+>    confirm the migration's `when` is absent. Do not infer this from the error text.
+> 2. **Guard idempotently, not destructively.** `CREATE TABLE IF NOT EXISTS`; for
+>    separate `CREATE INDEX` statements use the information_schema + `PREPARE` guard —
+>    never `CREATE INDEX IF NOT EXISTS`, a TiDB extension MySQL 8.0 rejects with
+>    `ERROR 1064` (guarded by `server/migrationIntegrity.test.ts`). A fresh database
+>    must receive byte-identical DDL; diff it with the guard stripped to prove that.
+> 3. **Record the deviation in the migration file itself**, with the evidence, so the
+>    next reader finds the reasoning rather than an unexplained rewrite.
+>
+> This is remediation, not licence. The real fix is upstream — DDL should never reach
+> production outside `pnpm db:migrate` (see the `db:push` warning below).
 
 ### Application Build
 
