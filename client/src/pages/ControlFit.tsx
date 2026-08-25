@@ -25,6 +25,8 @@ export default function ControlFit() {
   // request — on a form whose whole purpose is recording agreed evidence.
   const editSeq = useRef(0);
   const submittedSeq = useRef(-1);
+  /** Which tenant the draft on screen belongs to, so a portal switch cannot carry it across. */
+  const hydratedOrgId = useRef<number | undefined>(undefined);
   const save = trpc.controlFit.save.useMutation({
     onSuccess: () => {
       // Only stop protecting the form if it has not moved since we submitted.
@@ -38,12 +40,30 @@ export default function ControlFit() {
   const [form, setForm] = useState<Form>(blank);
   const [dirty, setDirty] = useState(false);
   useEffect(() => {
-    if (dirty) return;
+    // A draft belongs to ONE tenant, so the dirty guard has to be scoped to one
+    // too. Guarding globally meant a super admin who edited tenant A and then
+    // switched portals kept A's values on screen while `submit` targeted B —
+    // writing A's workflow, evidence and baseline into B's brief. A protection
+    // against losing work became a way to move it across a tenant boundary.
+    //
+    // Switching therefore abandons the draft rather than carrying it: the form
+    // is blanked immediately so nothing of A's is visible or submittable under
+    // B, even in the moment before B's own data arrives.
+    const orgId = viewAsOrg?.id;
+    const switchedTenant = hydratedOrgId.current !== orgId;
+    if (switchedTenant) {
+      hydratedOrgId.current = orgId;
+      editSeq.current = 0;
+      submittedSeq.current = -1;
+      setDirty(false);
+      setForm(blank);
+    }
+    if (dirty && !switchedTenant) return;
     const saved = brief.data?.brief;
     const source = saved ?? brief.data?.template;
     if (!source) return;
     setForm({ workflowName: source.workflowName, operationalProblem: source.operationalProblem, accountableOwner: source.accountableOwner, decisionDeadline: source.decisionDeadline, approvedEvidence: (source.approvedEvidence as string[]).join("\n"), baseline: source.baseline, successMeasure: source.successMeasure, status: saved?.status ?? "draft" });
-  }, [brief.data, dirty]);
+  }, [brief.data, dirty, viewAsOrg?.id]);
   const set = <K extends keyof Form>(key: K, value: Form[K]) => {
     editSeq.current += 1;
     setDirty(true);
