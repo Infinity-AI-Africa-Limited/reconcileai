@@ -47,10 +47,11 @@ is worth setting now; everything else defaults correctly.
 > hand here.** This section is kept as the record of how release `0041` was
 > applied, back when release did not migrate.
 >
-> If a deploy fails during its pre-deploy step, fix the migration and redeploy.
-> Do not reach for a manual production migration — that is how migrations 0084,
-> 0085 and 0090 ended up in the live database ahead of their pull requests, each
-> leaving the next deploy to fail on `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
+> If a deploy fails during its pre-deploy step, run `pnpm db:drift` to see which
+> statement will collide, fix the migration, and redeploy. Do not reach for a
+> manual production migration — that is how migrations 0084, 0085 and 0090 ended
+> up in the live database ahead of their pull requests, each leaving the next
+> deploy to fail on `ER_TABLE_EXISTS` / `ER_DUP_KEYNAME`.
 >
 > **Never run `pnpm db:push` against production** in any case. It is
 > `drizzle-kit generate && drizzle-kit migrate`, and the `generate` half writes a
