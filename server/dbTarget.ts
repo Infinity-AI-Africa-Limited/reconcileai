@@ -40,12 +40,31 @@ const LOCAL_HOSTS = new Set([
   "db", // docker-compose service name
 ]);
 
+/**
+ * Hosts that are the live product. `db:push` against these is never legitimate
+ * and is NOT overridable — see `classifyDatabaseTarget`.
+ *
+ * A hostname is not a secret (the password in the URL is), and naming it here is
+ * what lets the refusal be unconditional rather than advisory. Extendable with
+ * PRODUCTION_DB_HOSTS for another deployment of this codebase.
+ */
+export function productionHosts(extra?: string | null): Set<string> {
+  const configured = (extra ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(["gateway02.us-east-1.prod.aws.tidbcloud.com", ...configured]);
+}
+
 export type DbTargetVerdict =
   | { local: true; host: string }
-  | { local: false; host: string; reason: "remote_host" }
+  | { local: false; host: string; reason: "production" | "remote_host" }
   | { local: false; host: null; reason: "unset" | "unparseable" };
 
-export function classifyDatabaseTarget(url: string | undefined | null): DbTargetVerdict {
+export function classifyDatabaseTarget(
+  url: string | undefined | null,
+  extraProductionHosts?: string | null,
+): DbTargetVerdict {
   if (!url || !url.trim()) return { local: false, host: null, reason: "unset" };
   let host: string;
   try {
@@ -54,9 +73,17 @@ export function classifyDatabaseTarget(url: string | undefined | null): DbTarget
     return { local: false, host: null, reason: "unparseable" };
   }
   if (!host) return { local: false, host: null, reason: "unparseable" };
-  return LOCAL_HOSTS.has(host.toLowerCase())
-    ? { local: true, host }
-    : { local: false, host, reason: "remote_host" };
+  const lower = host.toLowerCase();
+  if (LOCAL_HOSTS.has(lower)) return { local: true, host };
+  // Production is separated from "some other remote host" deliberately. The two
+  // are not the same decision: pushing to a colleague's staging box is a choice
+  // someone may legitimately make, and pushing an unreviewed working-tree
+  // migration to the live product is the thing that broke three deploys. One
+  // gets an escape hatch; the other does not.
+  if (productionHosts(extraProductionHosts).has(lower)) {
+    return { local: false, host, reason: "production" };
+  }
+  return { local: false, host, reason: "remote_host" };
 }
 
 /**
@@ -71,8 +98,11 @@ export function describeDbTargetRefusal(
   verdict: Extract<DbTargetVerdict, { local: false }>,
   override: string,
 ): string {
+  const isProduction = verdict.reason === "production";
   const lines = [
-    "Refusing to run `db:push` against a database that is not local.",
+    isProduction
+      ? "Refusing to run `db:push` against PRODUCTION. This cannot be overridden."
+      : "Refusing to run `db:push` against a database that is not local.",
     "",
     "`db:push` is `drizzle-kit generate && drizzle-kit migrate`: it writes a NEW",
     "migration from your working tree's schema.ts and applies it immediately. Against",
@@ -88,8 +118,24 @@ export function describeDbTargetRefusal(
     "What you probably want instead:",
     "  • to APPLY committed migrations      → pnpm db:migrate",
     "  • to WRITE a migration from schema.ts → npx drizzle-kit generate (then commit it)",
-    "",
-    `If you genuinely mean to do this, set ${override}=1 for the single command.`,
   );
+  if (isProduction) {
+    // No escape hatch is offered, and none exists. There is no task that needs
+    // generate-and-apply against the live product: db:migrate applies what is
+    // committed and reviewed, drizzle-kit generate authors locally. Offering an
+    // override here would preserve the exact operation that broke 0084, 0085
+    // and 0090 — a guard with a documented way around it is a speed bump.
+    lines.push(
+      "",
+      "There is deliberately no override for production. Migrations reach it only",
+      "through the Railway pre-deploy step, which runs db:migrate on merged commits.",
+    );
+  } else {
+    lines.push(
+      "",
+      `If you genuinely mean this, set ${override}=${verdict.host ?? "<host>"} for the single command.`,
+      "(Naming the host is required, so a stale =1 in a shell profile cannot authorise it.)",
+    );
+  }
   return lines.join("\n");
 }

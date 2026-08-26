@@ -36,7 +36,7 @@ describe("when db:push points at the real production database", () => {
     if (verdict.local) throw new Error("expected production to be refused");
     const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
     expect(text).toContain("pnpm db:migrate");
-    expect(text).toContain("ALLOW_REMOTE_DB_PUSH=1");
+    expect(text).toContain("drizzle-kit generate");
   });
 });
 
@@ -75,5 +75,43 @@ describe("when the host is simply unfamiliar", () => {
     for (const host of ["staging.example.com", "10.0.0.5", "my-tunnel.ngrok.io"]) {
       expect(classifyDatabaseTarget(`mysql://u:p@${host}:3306/db`).local, `${host}`).toBe(false);
     }
+  });
+});
+
+describe("when the target is production", () => {
+  it("should be classified apart from any other remote host", () => {
+    // Not the same decision: pushing to a colleague's staging box is a choice
+    // someone may legitimately make; pushing an unreviewed working-tree
+    // migration to the live product is what broke 0084, 0085 and 0090.
+    expect(classifyDatabaseTarget(PRODUCTION)).toMatchObject({ local: false, reason: "production" });
+    expect(classifyDatabaseTarget("mysql://u:p@staging.example.com:3306/db")).toMatchObject({
+      local: false,
+      reason: "remote_host",
+    });
+  });
+
+  it("should say plainly that it cannot be overridden, and offer no escape hatch", () => {
+    const verdict = classifyDatabaseTarget(PRODUCTION);
+    if (verdict.local) throw new Error("expected production to be refused");
+    const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
+    expect(text).toContain("cannot be overridden");
+    expect(text).toContain("no override for production");
+    // The refusal must not hand over the very lever it is refusing to provide.
+    expect(text).not.toMatch(/set ALLOW_REMOTE_DB_PUSH=/);
+  });
+
+  it("should still offer the named override for an ordinary remote host", () => {
+    const verdict = classifyDatabaseTarget("mysql://u:p@staging.example.com:3306/db");
+    if (verdict.local) throw new Error("expected a refusal");
+    const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
+    // Named, not `=1`, so a stale value in a shell profile cannot authorise a
+    // host it was never meant for.
+    expect(text).toContain("ALLOW_REMOTE_DB_PUSH=staging.example.com");
+  });
+
+  it("should let another deployment name its own production host", () => {
+    expect(
+      classifyDatabaseTarget("mysql://u:p@db.acme.internal:3306/x", "db.acme.internal"),
+    ).toMatchObject({ reason: "production" });
   });
 });
