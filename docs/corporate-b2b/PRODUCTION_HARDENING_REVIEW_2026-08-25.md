@@ -271,7 +271,98 @@ Establishing that more than one invoice may be named is all a function whose job
 > because its leg was absent from the pool rather than by the guard, and would have passed with the
 > guard deleted; each case now carries its own first leg.
 
-**The honest summary of §2.4, after eight rounds:** the shortfall is no longer structurally null, and
+Ninth round moved the problem one layer down. Every previous fix narrowed the pool inside the SQL
+`WHERE` clause of `getDiagnosisCandidates` — currency, then approved channel pairing, then
+counterparty — and review found the next row shape it admitted each time: a same-currency receipt,
+refund or reversal for the same payer, on the paired channel. `findNearestTarget` compares numbers,
+so a receipt could be scored against **another receipt** and the gap between two payments narrated
+as a shortfall against an invoice, on a persisted action draft.
+
+Two filters were missing and both are now applied: **opposite direction only**, and **not a
+reversal**. The direction rule is not a guess about accounting convention — it is this platform's
+model, in both verticals: the seeder writes every source row `credit` and every target row `debit`
+(FMCG and financial-services alike), and the engine's own reversal pairing already requires
+`candidate.debitCredit !== txn.debitCredit`. A same-direction row is a different event on the same
+side of the ledger. Reversed money is not an obligation to measure against; it is the
+`b2b_receipt_reversed_after_allocation` exception.
+
+The more important change is where the rule now lives. Four rounds of pool defects were all fixed in
+a `WHERE` clause that **no test could reach** — the pool's composition had no unit test at all,
+which is why the same class kept arriving by a different route. `isComparableCandidate` is now a
+pure function holding the whole rule, the caller applies it to whatever the query returns, and the
+SQL is a cost narrowing rather than the definition of correctness. Nine tests cover it, each
+exclusion paired with its admitting case.
+
+Tenth round found the direction filter wrong in the OTHER direction, in the same review. Round nine
+had applied `candidate.debitCredit !== txn.debitCredit` unconditionally; but
+`apiIngestionService` stores `row.debitCredit || row.type || "debit"`, so a CSV or API delivery
+carrying neither column lands **both** legs as `debit` — and those SFTP/bucket/API drops are exactly
+the pilot's own source contracts under B2. The predicate then deleted the genuine counterpart and the
+shortfall vanished **silently**, for precisely the customers whose files are least well-formed.
+
+Two findings pointing opposite ways in one round is the signal that the TYPE was wrong, not the
+logic — the same lesson as the queue-durability states. Neither `true` nor `false` is a safe answer
+to "the direction column was never populated", so the third state is named instead.
+`selectCounterpartLegs` now decides direction **over the pool** rather than per row:
+
+| Pool | Signal | Behaviour |
+|---|---|---|
+| holds opposite-direction rows | `discriminating` | direction identifies the leg; same-side rows dropped |
+| every comparable row on the same side | `uninformative` | the column carries no signal here; direction ignored |
+| nothing comparable at all | `none` | not a direction problem, and not reported as one |
+
+Direction is applied only where it *discriminates*. The remaining per-row rules — self, currency,
+counterparty, reversal — stay unconditional in `isComparableCandidate`.
+
+> **Residual, stated rather than implied.** A pool holding only same-direction rows is genuinely
+> ambiguous: either the feed does not record direction (keep them) or there is no counterpart and
+> these are strays (drop them). That cannot be told apart from the rows alone, so `uninformative`
+> keeps them and *says so* — the procedure logs it as a source-quality defect against gate B1 rather
+> than letting it pass as a normal comparison. `determinateCandidates` is the backstop: a stray is
+> reached only when it is the sole candidate or carries the receipt's own invoice number.
+
+> Both failure directions are pinned, because this check has now been wrong each way: never applying
+> direction fails the two `discriminating` tests; applying it unconditionally fails the
+> `uninformative` one.
+
+Eleventh round found round ten still let direction *discard* rows it could not trust. In a **mixed**
+pool — a genuine counterpart whose direction had been defaulted to the receipt's, alongside one
+explicitly opposite stray — that single stray made the whole pool look trustworthy and evicted the
+real leg, so the shortfall was quantified against the stray.
+
+The lesson generalises past the case: **a row discarded on direction may be a genuine leg whose
+direction was never recorded, and nothing in the row says which.** So direction no longer removes
+anything at all. Its only job is to report whether it can be trusted:
+
+| Pool | Signal | Trustworthy? |
+|---|---|---|
+| every comparable row opposite `txn` | `consistent` | yes |
+| every comparable row same side | `uninformative` | no — defaulted feed, or all strays |
+| both present | `ambiguous` | no — some real, some defaulted, no way to tell which |
+| nothing comparable | `none` | n/a |
+
+That trust gates the one place a stray could ever be reached without corroboration: the
+single-candidate shortcut in `determinateCandidates`. "It is the only candidate" is evidence only if
+something says the pool holds counterpart legs at all. Where direction cannot say so, a naming
+reference is required instead — and `directionTrusted` defaults to **false**, so a caller that has
+not established trust gets the stricter rule.
+
+This also closes the sole-target half of the round-nine finding, which neither nine nor ten had
+actually fixed: a lone stray receipt on the paired channel, with no reference, was still becoming the
+target. It is now refused.
+
+> The cost is stated plainly: a feed that records no direction **and** carries no usable invoice
+> reference now yields no shortfall. That is the honest answer — amount proximity alone is the guess
+> this whole section has been removing — but it is a real narrowing, and it lands on exactly the
+> customers whose files are weakest. The durable fix is upstream: `apiIngestionService` defaults a
+> missing direction to `"debit"` rather than recording that it was absent, which is what makes the
+> column untrustworthy in the first place. Making absence representable needs a migration and is
+> **not** bundled here.
+
+> Both new guards are pinned: restore the discard and the two mixed-pool tests fail; ungate the
+> shortcut and the two sole-candidate tests fail.
+
+**The honest summary of §2.4, after eleven rounds:** the shortfall is no longer structurally null, and
 it is now computed only where the invoice is determined. Where it is not, the diagnosis says so
 instead of quantifying a guess. That is a narrower capability than "the Super Agent quantifies the
 shortfall", and it is the one that is actually true.
@@ -350,7 +441,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2047 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2063 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in

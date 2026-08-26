@@ -781,9 +781,17 @@ export async function getCounterpartyChannelIds(params: {
  * under different spellings on the two feeds — no candidates, no shortfall, and
  * the alias governance defect is itself a catalogued exception
  * (b2b_distributor_alias_ambiguity) rather than something to paper over here.
+ *   - NOT A REVERSAL. `detectReversals` treats reversals as a class to be paired
+ *     with the item they reverse, never as a match target, and quantifying a
+ *     shortfall against withdrawn money is the `b2b_receipt_reversed_after_
+ *     allocation` exception rather than a comparison.
  *   - Explicitly org-scoped, not inferred from the channel: "the channel
  *     implies the tenant" is the reasoning behind the cross-tenant reads in
  *     CLAUDE.md §19.3.
+ *
+ * DIRECTION is deliberately not filtered here. Deciding it per row was wrong in
+ * both directions — see `selectCounterpartLegs`, which decides it over the pool
+ * and is where that rule is tested.
  *
  * Capped, so a wide window cannot turn one diagnosis into an unbounded scan.
  */
@@ -817,6 +825,15 @@ export async function getDiagnosisCandidates(params: {
         inArray(transactions.channelId, params.counterpartyChannelIds),
         eq(transactions.currency, params.currency),
         eq(transactions.counterparty, counterparty),
+        // Direction is NOT filtered here. It is decided over the whole pool by
+        // `selectCounterpartLegs`, because a feed that never recorded a
+        // direction lands both legs on the same side and an unconditional
+        // opposite-direction predicate then deletes the genuine counterpart.
+        // A reversal is not a live obligation. The engine treats reversals as a
+        // class to be paired with the item they reverse (detectReversals), never
+        // as a match target, and comparing a receipt against one quantifies a
+        // shortfall against money that was withdrawn.
+        eq(transactions.isReversal, false),
         gte(transactions.transactionDate, from),
         lte(transactions.transactionDate, to),
         inArray(transactions.status, ["unmatched", "exception"]),
