@@ -81,6 +81,7 @@ import Support from "./pages/Support";
 import SettlementMonitor from "./pages/SettlementMonitor";
 import ControlFit from "./pages/ControlFit";
 import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
+import ShoplineReviewWorkspace from "./pages/ShoplineReviewWorkspace";
 
 /**
  * Send a viewer to the page their vertical actually starts from.
@@ -296,6 +297,7 @@ function Router() {
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
       <Route path="/control-fit">{() => <DashboardPage component={ControlFit} />}</Route>
       <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
+      <Route path="/shopline-review">{() => <PocAccessGate pocKey="shopline_review" title="ReconcileAI Dev Store review" subtitle="This read-only review workspace is accessed with the code in SHOPLINE’s test instructions."><ShoplineReviewWorkspace /></PocAccessGate>}</Route>
       <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
       {/* Install callbacks: standalone pages, deliberately NOT wrapped in
           DashboardPage. SHOPLINE redirects here without a session, so the
