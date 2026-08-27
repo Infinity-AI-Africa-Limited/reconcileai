@@ -15,16 +15,23 @@ describe("SHOPLINE review workspace", () => {
     ]);
   });
 
-  it("does not claim a current sync after OAuth was refreshed following a failed attempt", () => {
+  it("does not claim a current sync after a failed attempt, whatever the credential did", () => {
+    // Kept from the original, with the assertion moved from "reauthorized_pending"
+    // to "attention". The intent is unchanged and still holds: a failed attempt
+    // must not be reported as health. What changed is the reason given for it.
+    //
+    // The old state claimed the store had been REAUTHORIZED, inferred from
+    // slConnectorTokens.refreshedAt. That timestamp advances on every rotation,
+    // and the connector rotates proactively at ~9h against a 10h TTL, so it
+    // cannot distinguish a fresh OAuth grant from routine housekeeping. The
+    // failure itself is the thing actually known, and "attention" says it.
     const priorAttempt = new Date("2026-08-27T14:19:28.000Z");
-    const reauthorized = new Date("2026-08-27T15:38:33.000Z");
 
     expect(reviewSyncStatus({
       lastSyncAt: new Date("2026-08-27T13:40:30.000Z"),
       lastSyncAttemptAt: priorAttempt,
       lastSyncError: "prior failure",
-      tokenRefreshedAt: reauthorized,
-    })).toMatchObject({ code: "reauthorized_pending" });
+    })).toMatchObject({ code: "attention" });
   });
 
   it("shows attention rather than hiding a newer failed synchronisation", () => {
@@ -43,22 +50,33 @@ describe("when the connector rotates a token during normal operation", () => {
   // routinely newer than the last sync attempt. Treating that alone as
   // reauthorization labelled a working connection "verification pending" as a
   // matter of course — a fault reported to a reviewer that does not exist.
-  it("should not report a healthy connection as awaiting verification", () => {
+  it("should report a healthy connection as current", () => {
     expect(reviewSyncStatus({
       lastSyncAt: new Date("2026-08-27T13:40:30.000Z"),
       lastSyncAttemptAt: new Date("2026-08-27T13:40:30.000Z"),
       lastSyncError: null,
-      tokenRefreshedAt: new Date("2026-08-27T22:40:30.000Z"), // routine 9h rotation
     })).toMatchObject({ code: "current" });
   });
 
-  it("should still report pending verification when nothing has ever synced", () => {
+  it("should report a never-synced connection as pending", () => {
     expect(reviewSyncStatus({
       lastSyncAt: null,
       lastSyncAttemptAt: null,
       lastSyncError: null,
-      tokenRefreshedAt: new Date("2026-08-27T22:40:30.000Z"),
-    })).toMatchObject({ code: "reauthorized_pending" });
+    })).toMatchObject({ code: "pending" });
+  });
+
+  it("should take no credential timestamp as an input at all", () => {
+    // The structural half. Two narrowings failed before the state was removed:
+    // keying on "credential newer than the last attempt" flagged every healthy
+    // store, and adding "and the last attempt failed" still flagged the routine
+    // rotation that happens to follow a failure. Neither could work, because
+    // refreshedAt advances on every rotation and nothing marks a real re-grant.
+    // Reintroducing a token field is how the false alarm would come back.
+    const ROUTER = fs.readFileSync(path.join(__dirname, "shoplineReview.ts"), "utf8");
+    const inputs = ROUTER.slice(ROUTER.indexOf("type SyncInputs"), ROUTER.indexOf("export function reviewSyncStatus"));
+    expect(inputs).not.toMatch(/token/i);
+    expect(inputs).not.toMatch(/refreshedAt/);
   });
 });
 
@@ -71,11 +89,23 @@ describe("when records exist but no sync has completed", () => {
     // cycle can persist records then fail. Everything then sits at `unmatched`,
     // and showing that under "Reconciliation evidence" tells a reviewer the
     // engine ran and matched nothing, when it never finished.
-    expect(ROUTER).toMatch(/const hasCompletedSync = store\.lastSyncAt !== null/);
-    expect(ROUTER).toMatch(/canShowReconciliation = hasChannelPair && hasCompletedSync/);
+    // The gate is the LATEST attempt succeeding, not a sync having succeeded
+    // once. `lastSyncAt !== null` was too weak: a success followed by a cycle
+    // that persists rows and then fails leaves the old timestamp in place, so
+    // the gate stayed open and the aggregate swept in the newly unreconciled
+    // rows — reporting them under a success that predates them.
+    expect(ROUTER).toMatch(/canShowReconciliation = hasChannelPair && syncStatus\.code === "current"/);
+    expect(ROUTER).not.toMatch(/hasCompletedSync/);
     // And the gate must be the one the response actually consults.
     expect(ROUTER).toMatch(/reconciliationEvidence: canShowReconciliation && recordCounts/);
     expect(ROUTER).not.toMatch(/reconciliationEvidence: hasChannelPair && recordCounts/);
+  });
+
+  it("should show the same health signal it gates on", () => {
+    // One computation, used for both. Two rules could disagree, and the page
+    // would then say "needs attention" beside figures implying all is well.
+    expect(ROUTER).toMatch(/const syncStatus = reviewSyncStatus\(store\)/);
+    expect(ROUTER).toMatch(/statusDetail: syncStatus,/);
   });
 });
 

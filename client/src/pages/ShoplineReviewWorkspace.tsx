@@ -28,7 +28,12 @@ export default function ShoplineReviewWorkspace() {
 
   const { workspace, connection, webhookEvidence, reconciliationEvidence } = snapshot.data;
   const needsAttention = connection.statusDetail.code === "attention";
-  const pendingVerification = connection.statusDetail.code === "reauthorized_pending";
+  // Amber now means "no successful sync has ever been recorded". The state it
+  // replaces, "reauthorized_pending", inferred a fresh OAuth grant from a token
+  // rotation the schema cannot tell apart from the connector's routine ~9h
+  // refresh — so a healthy store wore an amber "verification pending" badge as a
+  // matter of course. Same signal, drawn from something the data knows.
+  const awaitingFirstSync = connection.statusDetail.code === "pending";
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-950">
@@ -50,8 +55,8 @@ export default function ShoplineReviewWorkspace() {
         <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6" aria-labelledby="connection-heading">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div><p className="text-sm font-medium text-slate-500">CONNECTION EVIDENCE</p><h2 id="connection-heading" className="mt-1 text-xl font-semibold">SHOPLINE Dev Store: {connection.storeHandle}</h2></div>
-            <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium ${needsAttention ? "bg-rose-100 text-rose-800" : pendingVerification ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
-              {needsAttention ? <TriangleAlert className="h-4 w-4" aria-hidden="true" /> : pendingVerification ? <Clock3 className="h-4 w-4" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
+            <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium ${needsAttention ? "bg-rose-100 text-rose-800" : awaitingFirstSync ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+              {needsAttention ? <TriangleAlert className="h-4 w-4" aria-hidden="true" /> : awaitingFirstSync ? <Clock3 className="h-4 w-4" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
               {connection.statusDetail.label}
             </span>
           </div>

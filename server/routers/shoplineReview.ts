@@ -10,7 +10,7 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { channels, exceptions, organizations, transactions } from "../../drizzle/schema";
-import { slConnectorStores, slConnectorTokens, slConnectorWebhookEvents } from "../../drizzle/connector_schema";
+import { slConnectorStores, slConnectorWebhookEvents } from "../../drizzle/connector_schema";
 import { shoplineOrdersChannelCode, shoplinePaymentsChannelCode } from "../connectors/shopline/onboarding";
 import { getDb } from "../db";
 import { assertPocAccess, tokenFromCtx } from "../pocAccess";
@@ -36,45 +36,38 @@ export function reviewerChannelCodes(storeHandle: string) {
   return [shoplineOrdersChannelCode(storeHandle), shoplinePaymentsChannelCode(storeHandle)] as const;
 }
 
+/**
+ * Note the absence of a token timestamp.
+ *
+ * This used to report a "reauthorized — verification pending" state derived from
+ * `slConnectorTokens.refreshedAt`, and the state has been removed rather than
+ * narrowed a third time, because the data cannot support the claim it makes.
+ * `refreshedAt` advances on EVERY rotation — tokenStore writes it on each one,
+ * and the connector rotates proactively at ~9h against a 10h TTL — while a real
+ * reauthorization is a fresh OAuth grant. Nothing in the schema separates the
+ * two.
+ *
+ * Two successive narrowings each removed some false positives and left the class
+ * intact: gating on "newer than the last attempt" still fired for the routine
+ * rotation that follows a failure, which is a normal event being reported to an
+ * App Store reviewer as a credential problem.
+ *
+ * Nothing is lost by dropping it. Its purpose was to avoid claiming health that
+ * had not been verified, and `attention` already covers exactly that from a
+ * signal that means what it says: the last attempt failed. A state that asserts
+ * something the data does not know is worse than one fewer state.
+ */
 type SyncInputs = {
   lastSyncAt: Date | null;
   lastSyncAttemptAt: Date | null;
   lastSyncError: string | null;
-  tokenRefreshedAt: Date | null;
 };
 
 export function reviewSyncStatus({
   lastSyncAt,
   lastSyncAttemptAt,
   lastSyncError,
-  tokenRefreshedAt,
 }: SyncInputs) {
-  // A newer token is NOT on its own evidence of reauthorization.
-  //
-  // tokenStore writes `refreshedAt` on every rotation, and the connector rotates
-  // proactively at ~9h against a 10h TTL — so on a perfectly healthy store the
-  // token is routinely newer than the last sync attempt. Keyed on that alone,
-  // this branch labelled a working connection "Reauthorized — verification
-  // pending" as a matter of course, which on a page built to demonstrate the
-  // integration reads as a fault that is not there. The schema has no field
-  // separating a re-grant from a routine refresh, so the credential timestamp
-  // cannot carry that meaning by itself.
-  //
-  // What the state is actually for: there is no successful sync we can point to
-  // since something went wrong. So it needs an unverified sync as well as a
-  // newer credential — which is exactly the case the tests describe, a refresh
-  // following a failed attempt.
-  const noVerifiedSyncSinceFailure =
-    Boolean(lastSyncError) && (!lastSyncAt || (lastSyncAttemptAt !== null && lastSyncAttemptAt > lastSyncAt));
-  const credentialNewerThanAttempt = Boolean(tokenRefreshedAt) && (!lastSyncAttemptAt || tokenRefreshedAt! > lastSyncAttemptAt);
-
-  if (credentialNewerThanAttempt && (noVerifiedSyncSinceFailure || !lastSyncAt)) {
-    return {
-      code: "reauthorized_pending" as const,
-      label: "Reauthorized — synchronisation verification pending",
-      detail: "The SHOPLINE OAuth connection was refreshed after the prior attempt. A new successful sync is required before health is shown as current.",
-    };
-  }
   if (lastSyncError && lastSyncAttemptAt && (!lastSyncAt || lastSyncAttemptAt > lastSyncAt)) {
     return {
       code: "attention" as const,
@@ -119,11 +112,9 @@ export const shoplineReviewRouter = router({
           lastSyncAt: slConnectorStores.lastSyncAt,
           lastSyncAttemptAt: slConnectorStores.lastSyncAttemptAt,
           lastSyncError: slConnectorStores.lastSyncError,
-          tokenRefreshedAt: slConnectorTokens.refreshedAt,
         })
         .from(slConnectorStores)
         .innerJoin(organizations, eq(organizations.id, slConnectorStores.organizationId))
-        .leftJoin(slConnectorTokens, eq(slConnectorTokens.slStoreId, slConnectorStores.id))
         .where(and(
           eq(organizations.code, REVIEW_ORG_CODE),
           // Pinned to the canonical handle. Without it, a super admin
@@ -186,13 +177,19 @@ export const shoplineReviewRouter = router({
       // tells a reviewer the engine ran and matched nothing — when it did not
       // run to completion at all.
       //
-      // `lastSyncAt` is the right gate because syncOrchestrator advances it only
-      // on a fully successful cycle (`{ lastSyncAt: now, lastSyncError: null }`);
-      // a failure writes lastSyncAttemptAt and the error instead. A later failure
-      // after an earlier success still shows that success, which is honest — the
-      // failure itself is disclosed in `connection.statusDetail`.
-      const hasCompletedSync = store.lastSyncAt !== null;
-      const canShowReconciliation = hasChannelPair && hasCompletedSync;
+      // The gate is "the LATEST attempt succeeded", not "a sync succeeded once".
+      //
+      // `lastSyncAt !== null` was too weak: a successful sync followed by a cycle
+      // that persists transactions and then fails leaves the old timestamp in
+      // place, so the gate stayed open and the aggregate swept in the newly
+      // unreconciled rows — reporting them as reconciliation results under a
+      // success that predates them.
+      //
+      // Reusing the status the reviewer is shown, rather than a second rule that
+      // could disagree with it: the page can no longer display "needs attention"
+      // beside a set of reconciliation figures implying everything is fine.
+      const syncStatus = reviewSyncStatus(store);
+      const canShowReconciliation = hasChannelPair && syncStatus.code === "current";
       const [recordCounts] = canShowReconciliation
         ? await db
         .select({
@@ -225,7 +222,7 @@ export const shoplineReviewRouter = router({
           installedAt: store.installedAt,
           scopes: store.grantedScopes?.split(",").map((scope) => scope.trim()).filter(Boolean) ?? [],
           lastSyncAt: store.lastSyncAt,
-          statusDetail: reviewSyncStatus(store),
+          statusDetail: syncStatus,
         },
         webhookEvidence: {
           total: Number(webhookCounts?.total ?? 0),
