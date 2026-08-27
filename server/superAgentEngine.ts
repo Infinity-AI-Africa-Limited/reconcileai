@@ -177,12 +177,31 @@ export function parseReference(ref: string | null | undefined, description: stri
     invoiceNumbers.push(m[0].toUpperCase().replace(/\s/, "-"));
   }
 
-  // Detect deduction type
+  // Detect deduction type.
+  //
+  // FIRST match wins, and DEDUCTION_PATTERNS is ordered most-specific first
+  // (damage, promotional, bank_fee, tax) with the generic `discount` — "less",
+  // "minus", "net of" — last. Reassigning on every match instead let that
+  // generic pattern overwrite the specific one, and "less" is the most common
+  // way a remittance states a deduction at all:
+  //
+  //   "INV-2847 less promo allowance"  -> discount, not promotional
+  //   "PAYMENT INV-3100 less dmg claim" -> discount, not damage
+  //   "TRANSFER less bank charge"       -> discount, not bank_fee
+  //
+  // `ruleBasedClassify` has no branch for `discount`, so all three fell through
+  // to `unmatched` with a null shortfall — the FMCG deduction interpretation
+  // the go-live plan cites as an evidenced capability, unreachable for the
+  // phrasing this file's own docstring uses as its example.
+  //
+  // Every matching keyword is still collected: the specific pattern always did
+  // match, which is why `deductionKeywords` read "promo,deduction" while the
+  // type said `discount`. Only the TYPE is now decided by specificity.
   let deductionType: ParsedReference["deductionType"] = "none";
   const deductionKeywords: string[] = [];
   for (const dp of DEDUCTION_PATTERNS) {
     if (dp.pattern.test(raw)) {
-      deductionType = dp.type;
+      if (deductionType === "none") deductionType = dp.type;
       deductionKeywords.push(...dp.keywords);
     }
   }
@@ -670,6 +689,8 @@ export type ExceptionCategory =
   | "damage_deduction"
   | "bank_fee_deduction"
   | "tax_deduction"
+  /** A deduction was announced with no reason given — see ruleBasedClassify. */
+  | "unspecified_deduction"
   | "split_payment"
   | "fx_variance"
   | "timing_difference"
@@ -1033,6 +1054,69 @@ function ruleBasedClassify(
         fxVariance: fxCheck.fxResult,
       };
     }
+  }
+
+  // Withholding tax.
+  //
+  // `tax_deduction` was a DECLARED ExceptionCategory that nothing produced: the
+  // type asserted the platform classifies withholding tax while every "less
+  // WHT" remittance fell through to `unmatched` with a null shortfall. That is
+  // the wrong answer in both launch geographies — WHT is one of the commonest
+  // deductions an FMCG distributor takes, and it is the one where the shortfall
+  // is NOT collectible from the distributor.
+  //
+  // Severity high, per the b2b_withholding_tax_deduction taxonomy entry: absent
+  // the certificate the amount is neither recoverable from the payer nor
+  // claimable against the tax liability, so it is a real loss sitting in
+  // receivables. The action is to obtain the evidence, not to write it off.
+  if (parsedRef.deductionType === "tax") {
+    const nearMatch = findNearestTarget(txnAmt, allTargets, 0.3);
+    const shortfall = nearMatch ? Math.abs(txnAmt - parseFloat(String(nearMatch.amount))) : null;
+    return {
+      category: "tax_deduction",
+      severity: "high",
+      confidence: 80,
+      headline: `Withholding tax deducted on ${txn.transactionRef || "payment"}`,
+      rootCause: `The remittance states a tax deduction (${parsedRef.deductionKeywords.join(", ")}). The shortfall of ${shortfall === null ? "an amount that could not be determined" : `${txn.currency} ${shortfall.toLocaleString()}`} is only a legitimate reduction of the receivable against a withholding-tax credit note or certificate from the revenue authority. Without that evidence it is neither collectible from the distributor nor claimable against the tax liability.`,
+      shortfall,
+      deductionType: "tax",
+      recommendedAction: "Confirm the shortfall matches the applicable withholding rate on the invoice value, then request the WHT credit note or certificate and record the request date. Track it to receipt — an unreceived certificate stays an ageing exception rather than a closed item.",
+      autoResolvable: false,
+      suggestedActionType: "vendor_email",
+      parsedRef,
+      fxVariance: null,
+    };
+  }
+
+  // A deduction with no stated reason.
+  //
+  // The generic pattern ("less", "minus", "net of") had no branch either, so a
+  // remittance that plainly announced a deduction was reported as `unmatched` —
+  // which reads as "we could not find this payment" rather than "the payer took
+  // money off and did not say why". Those need different work from a finance
+  // team, and the second is the one that belongs in the deduction dispute
+  // process.
+  //
+  // Deliberately NOT guessed into a specific category. The reason is what
+  // decides whether it is approved trade spend or an unauthorised shortfall,
+  // and inventing one here is the fabrication this module keeps refusing to do.
+  if (parsedRef.deductionType === "discount") {
+    const nearMatch = findNearestTarget(txnAmt, allTargets, 0.3);
+    const shortfall = nearMatch ? Math.abs(txnAmt - parseFloat(String(nearMatch.amount))) : null;
+    return {
+      category: "unspecified_deduction",
+      severity: "medium",
+      confidence: 70,
+      headline: `Deduction taken with no stated reason on ${txn.transactionRef || "payment"}`,
+      rootCause: `The remittance announces a deduction (${parsedRef.deductionKeywords.join(", ")}) but gives no reason for it. The shortfall of ${shortfall === null ? "an amount that could not be determined" : `${txn.currency} ${shortfall.toLocaleString()}`} cannot be assessed against the approved deduction catalogue until the distributor states what it is for.`,
+      shortfall,
+      deductionType: "discount",
+      recommendedAction: "Ask the distributor for the deduction reason and its supporting evidence, then route it to the matching deduction type so the right evidence is demanded. Keep the invoice balance open meanwhile — an unexplained deduction is not an approved one.",
+      autoResolvable: false,
+      suggestedActionType: "vendor_email",
+      parsedRef,
+      fxVariance: null,
+    };
   }
 
   // Partial payment
