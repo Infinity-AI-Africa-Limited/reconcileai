@@ -36,16 +36,28 @@
  * which runs `db:migrate` (no generate) rather than `db:push`.
  */
 
-/** Hosts that can only be a throwaway database on the developer's own machine. */
+/**
+ * Hosts that name the machine the developer is sitting at, and cannot name
+ * anything else.
+ *
+ * Every entry is a loopback address or a reserved alias for the local host. That
+ * property is the whole allow-list — a name only qualifies if the network cannot
+ * redefine it.
+ *
+ * `mysql` and `db` were here as docker-compose service names and have been
+ * removed. A bare single-label host resolves to whatever DNS, `/etc/hosts` or a
+ * container network says it does, so allow-listing one lets any shared database
+ * be spelled as local. Nothing is lost: the sole caller of `db:push` is CI, on
+ * `127.0.0.1`. The on-prem stack does use `@db:3306`, but it runs `db:migrate`
+ * (`drizzle-kit migrate`, no generate), which never passes through this guard.
+ */
 const LOCAL_HOSTS = new Set([
   "localhost",
   "127.0.0.1",
   "::1",
   "[::1]",
   "0.0.0.0",
-  "host.docker.internal",
-  "mysql", // docker-compose service name
-  "db", // docker-compose service name
+  "host.docker.internal", // reserved by Docker for the host machine
 ]);
 
 /**

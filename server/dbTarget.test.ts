@@ -50,10 +50,27 @@ describe("when db:push points at a throwaway database", () => {
     expect(classifyDatabaseTarget(CI)).toMatchObject({ local: true, host: "127.0.0.1" });
   });
 
-  it("should allow the usual local and container hosts", () => {
-    for (const host of ["localhost", "127.0.0.1", "::1", "host.docker.internal", "mysql", "db"]) {
+  it("should allow the loopback and local-host aliases", () => {
+    for (const host of ["localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"]) {
       const url = `mysql://root:root@${host === "::1" ? "[::1]" : host}:3306/test`;
       expect(classifyDatabaseTarget(url).local, `${host} should be treated as local`).toBe(true);
+    }
+  });
+
+  it("should NOT treat a bare service name as local", () => {
+    // `db` and `mysql` were allow-listed as docker-compose service names. A
+    // single-label host resolves to whatever DNS, /etc/hosts or a container
+    // network says, so allow-listing one lets a shared database be spelled as
+    // local — the same alias hole as a trailing dot, on the other side.
+    //
+    // Nothing depends on them: the only caller of `db:push` is CI, on 127.0.0.1.
+    // The on-prem stack does use `@db:3306`, but runs `db:migrate` (no generate),
+    // which never reaches this guard.
+    for (const host of ["db", "mysql", "database", "postgres"]) {
+      expect(
+        classifyDatabaseTarget(`mysql://root:root@${host}:3306/test`).local,
+        `${host} must not be treated as local`,
+      ).toBe(false);
     }
   });
 
