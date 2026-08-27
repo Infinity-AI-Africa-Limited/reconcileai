@@ -469,3 +469,28 @@ describe("an instalment whose reference carries figures", () => {
     expect(diagnosis.shortfall).toBeNull();
   });
 });
+
+describe("a shorthand split that is also being paid in part", () => {
+  it("should be an allocation question, not a payment reminder", async () => {
+    // "INV-1001 and 1002 partial settlement" is a split remittance being paid
+    // in part. Gating the split branch on partial-payment wording alone made it
+    // a partial_payment, so finance got "send a payment reminder" for what is
+    // actually an allocation problem. The connector adjacency says 1002 IS an
+    // invoice, and that outranks the partial wording.
+    const txn = receipt(1_200_000, "INV-1001 and 1002", "remittance INV-1001 and 1002 partial settlement");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-1001"), invoice(500_000, "INV-1002")]);
+
+    expect(diagnosis.category).toBe("split_payment");
+    expect(diagnosis.suggestedActionType).toBe("payment_allocation");
+    expect(diagnosis.recommendedAction).toMatch(/remittance advice/i);
+  });
+
+  it("should still leave an instalment with figures as a partial payment", async () => {
+    // The control for the rule above: the strong signal must require CONNECTOR
+    // adjacency, not merely the presence of other numbers, or the instalment
+    // case regresses.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 installment 600000 of 1000000");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("partial_payment");
+  });
+});

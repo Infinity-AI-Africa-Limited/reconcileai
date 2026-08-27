@@ -551,7 +551,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2141 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2143 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in
