@@ -177,12 +177,31 @@ export function parseReference(ref: string | null | undefined, description: stri
     invoiceNumbers.push(m[0].toUpperCase().replace(/\s/, "-"));
   }
 
-  // Detect deduction type
+  // Detect deduction type.
+  //
+  // FIRST match wins, and DEDUCTION_PATTERNS is ordered most-specific first
+  // (damage, promotional, bank_fee, tax) with the generic `discount` — "less",
+  // "minus", "net of" — last. Reassigning on every match instead let that
+  // generic pattern overwrite the specific one, and "less" is the most common
+  // way a remittance states a deduction at all:
+  //
+  //   "INV-2847 less promo allowance"  -> discount, not promotional
+  //   "PAYMENT INV-3100 less dmg claim" -> discount, not damage
+  //   "TRANSFER less bank charge"       -> discount, not bank_fee
+  //
+  // `ruleBasedClassify` has no branch for `discount`, so all three fell through
+  // to `unmatched` with a null shortfall — the FMCG deduction interpretation
+  // the go-live plan cites as an evidenced capability, unreachable for the
+  // phrasing this file's own docstring uses as its example.
+  //
+  // Every matching keyword is still collected: the specific pattern always did
+  // match, which is why `deductionKeywords` read "promo,deduction" while the
+  // type said `discount`. Only the TYPE is now decided by specificity.
   let deductionType: ParsedReference["deductionType"] = "none";
   const deductionKeywords: string[] = [];
   for (const dp of DEDUCTION_PATTERNS) {
     if (dp.pattern.test(raw)) {
-      deductionType = dp.type;
+      if (deductionType === "none") deductionType = dp.type;
       deductionKeywords.push(...dp.keywords);
     }
   }

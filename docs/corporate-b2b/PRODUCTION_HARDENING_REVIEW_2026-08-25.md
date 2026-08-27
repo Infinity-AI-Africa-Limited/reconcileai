@@ -147,6 +147,58 @@ ids named in the message:
 
 ---
 
+### 2.7 The FMCG deduction classifier missed the phrasing remittances actually use — **fixed**
+
+Found by running the pipeline instead of unit-testing its parts. `DEDUCTION_PATTERNS` is ordered
+most-specific first, but the loop reassigned `deductionType` on **every** match, so the generic
+`discount` pattern — "less", "minus", "net of" — overwrote whatever specific type had already
+matched. `ruleBasedClassify` has no `discount` branch, so these fell through to `unmatched` with a
+null shortfall:
+
+| Narration | Classified as | Should be |
+|---|---|---|
+| `INV-2847 less promo allowance` | `discount` | `promotional` |
+| `PAYMENT INV-3100 less dmg claim` | `discount` | `damage` |
+| `TRANSFER less bank charge` | `discount` | `bank_fee` |
+| `INV-3 less WHT` | `discount` | `tax` |
+
+`promo` and `dmg` on their own classified correctly, which is why nothing caught it. "less" is the
+most common way a remittance states a deduction at all — and `"INV-2847 less promo"` is the example
+in the module's own docstring. So the FMCG deduction interpretation the go-live plan cites as an
+evidenced capability was unreachable for its own canonical phrasing.
+
+First match now wins; every matched keyword is still collected. Restoring the reassignment fails four
+of the end-to-end tests.
+
+### 2.8 The pipeline had never once been executed — measured, and it changes what can be claimed
+
+Eleven review rounds hardened §2.4 and every one was checked by a unit test of a single function.
+Nothing exercised the chain. A read-only measurement against production (no writes, no model calls):
+
+| Finding | Number |
+|---|---|
+| Open transactions sampled on the only tenant with data (Globus Bank demo, org 1) | 300 |
+| Produced a determinate candidate | **0 (0%)** |
+| Direction signal `none` — no comparable candidate at all | 300 (100%) |
+| Rows on the paired channel carrying that counterparty, any status | **0** |
+
+The empty pool is **correct**: those transactions genuinely have no counterpart on the paired feed
+(the target channel holds 39,078 rows, all `matched`). The pipeline declined honestly rather than
+fabricating a comparison — a real, if partial, validation.
+
+But it also means **no production dataset can demonstrate that the shortfall path works**, so the
+proof now lives in `server/diagnosisPipeline.test.ts`: the full chain on fixtures shaped like the
+ones `demoSeedEngine` writes, asserting the shortfall is numerically correct rather than merely
+non-null, that `bank_fee_deduction` and `fx_variance` are reachable, and that the chain still refuses
+when the evidence is indeterminate.
+
+> ⚠️ **The Corporate B2B tenant is empty.** BrightGoods Nigeria Ltd (Demo), org 30001, the only
+> `corporate_b2b` organisation, holds **0 transactions, 0 distributors, 0 channels**. The closure
+> register lists "demonstrate the Corporate B2B portal with controlled/synthetic data" as the one
+> thing permitted today — and it cannot be done. `demoSeedEngine` has an FMCG seed for exactly this
+> tenant that has never been run against it. Seeding writes to production, so it is **not** done
+> here; it needs the owner's go-ahead.
+
 ## 3. Other production hardening in this change
 
 | Area | Finding | Change |
@@ -441,7 +493,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2063 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2100 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in
