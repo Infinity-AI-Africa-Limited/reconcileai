@@ -297,21 +297,200 @@ describe("every deduction reason produces a quantified diagnosis", () => {
  * the rest are pinned here so the gap is a stated open item instead of a type
  * that quietly overstates what the platform does.
  */
-describe("the declared category union versus what is produced", () => {
-  it("should record the categories no code path produces", async () => {
+describe("a reversed receipt", () => {
+  it("should outrank every deduction reason and report the exposure, not a deduction", async () => {
+    // The money went back. Checked before the deduction branches because it is
+    // not a deduction question — and critical because the credit-limit test
+    // passes on money that never arrived, so stock can be released to a
+    // distributor that has already failed to pay.
+    const txn = receipt(950_000, "INV-2847", "REVERSAL of INV-2847 less promo");
+    txn.isReversal = true;
+    txn.originalTransactionRef = "BANK-INV-2847";
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("unmatched_reversal");
+    expect(diagnosis.severity).toBe("critical");
+    // The exposure is the whole reversed amount, not a difference against an invoice.
+    expect(diagnosis.shortfall).toBeCloseTo(950_000, 2);
+    expect(diagnosis.rootCause).toMatch(/BANK-INV-2847/);
+    expect(diagnosis.recommendedAction).toMatch(/credit controller/i);
+  });
+
+  it("should not claim a reversal when the row is an ordinary receipt", async () => {
+    // The control: `isReversal` must drive this, not the word "reversal"
+    // appearing somewhere in a narration.
+    const txn = receipt(950_000, "INV-2847", "PAYMENT INV-2847 less promo");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("promotional_deduction");
+  });
+});
+
+describe("a split remittance", () => {
+  it.each([
+    ["INV-2847 INV-2848", "two invoices named in full"],
+    ["INV-2847 and 2848", "a shorthand list"],
+  ])("should be reported as an allocation question: %s (%s)", async (ref) => {
+    const txn = receipt(1_500_000, ref, `remittance ${ref}`);
+    const { diagnosis } = await diagnose(txn, [
+      invoice(1_000_000, "INV-2847"),
+      invoice(500_000, "INV-2848"),
+    ]);
+
+    expect(diagnosis.category).toBe("split_payment");
+    // No shortfall: against one leg it would be the size of the other.
+    expect(diagnosis.shortfall).toBeNull();
+    expect(diagnosis.suggestedActionType).toBe("payment_allocation");
+    expect(diagnosis.recommendedAction).toMatch(/remittance advice/i);
+  });
+
+  it("should not report a single-invoice deduction as a split", async () => {
+    // The control: one invoice with a deduction is a shortfall question, and
+    // must still be quantified.
+    const txn = receipt(950_000, "INV-2847", "PAYMENT INV-2847 less promo");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("promotional_deduction");
+    expect(diagnosis.shortfall).toBeCloseTo(50_000, 2);
+  });
+});
+
+describe("an instalment against a single invoice", () => {
+  it("should stay a partial payment with the balance quantified", async () => {
+    // SPLIT_KEYWORDS and isPartialPayment overlap on "partial", "instalment"
+    // and "installment". Keying the split branch on split-sounding WORDING sent
+    // a genuine part-payment of one invoice down it, discarding the outstanding
+    // balance as null and handing finance an allocation workflow when the work
+    // is to chase the remainder. Only the invoice references show a split.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 partial payment 1 of 3");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("partial_payment");
+    expect(diagnosis.shortfall).toBeCloseTo(400_000, 2);
+  });
+});
+
+/**
+ * Every declared category is reachable — proved by REACHING it.
+ *
+ * The first version of this scanned `superAgentEngine.ts` for `category: "..."`
+ * literals, which review rightly called out: a source literal is not an
+ * executable path. A dead branch would satisfy it, an assignment through a
+ * variable would evade it, and a producer in another file needed a hand-written
+ * exemption that could go stale silently.
+ *
+ * So it now DRIVES the classifier. Each fixture is a case a finance team would
+ * recognise, run through the same chain as production, and the categories that
+ * actually come out are compared against the declared union. A category with no
+ * fixture that produces it fails here, which is the invariant that matters:
+ * the union must not claim more than the platform can conclude.
+ */
+describe("the declared category union", () => {
+  /** One fixture per category the rule-based classifier owns. */
+  const cases: Array<[string, () => Promise<string>]> = [
+    ["promotional_deduction", async () => (await diagnose(receipt(950_000, "INV-1001", "PAY INV-1001 less promo"), [invoice(1_000_000, "INV-1001")])).diagnosis.category],
+    ["damage_deduction", async () => (await diagnose(receipt(880_000, "INV-1002", "PAY INV-1002 less dmg"), [invoice(1_000_000, "INV-1002")])).diagnosis.category],
+    ["bank_fee_deduction", async () => (await diagnose(receipt(199_000, "INV-1003", "PAY INV-1003 less bank charge"), [invoice(200_000, "INV-1003")])).diagnosis.category],
+    ["tax_deduction", async () => (await diagnose(receipt(950_000, "INV-1004", "PAY INV-1004 less WHT"), [invoice(1_000_000, "INV-1004")])).diagnosis.category],
+    ["unspecified_deduction", async () => (await diagnose(receipt(950_000, "INV-1005", "PAY INV-1005 less 5,000"), [invoice(1_000_000, "INV-1005")])).diagnosis.category],
+    ["partial_payment", async () => (await diagnose(receipt(600_000, "INV-1006", "PAY INV-1006 partial payment"), [invoice(1_000_000, "INV-1006")])).diagnosis.category],
+    ["split_payment", async () => (await diagnose(receipt(1_500_000, "INV-1007 INV-1008", "remittance"), [invoice(1_000_000, "INV-1007"), invoice(500_000, "INV-1008")])).diagnosis.category],
+    ["fx_variance", async () => (await diagnose(receipt(999_500, "INV-1009", "SETTLEMENT INV-1009"), [invoice(1_000_000, "INV-1009")])).diagnosis.category],
+    ["unmatched_reversal", async () => {
+      const txn = receipt(950_000, "INV-1010", "REVERSAL INV-1010");
+      txn.isReversal = true;
+      return (await diagnose(txn, [invoice(1_000_000, "INV-1010")])).diagnosis.category;
+    }],
+    ["missing_counterparty", async () => {
+      const txn = receipt(950_000, "INV-1011", "PAY INV-1011");
+      txn.counterparty = null;
+      return (await diagnose(txn, [invoice(1_000_000, "INV-1011")])).diagnosis.category;
+    }],
+    ["unmatched", async () => (await diagnose(receipt(950_000, "INV-1012", "PAY INV-1012"), [])).diagnosis.category],
+  ];
+
+  it.each(cases)("should actually produce %s", async (expected, run) => {
+    expect(await run()).toBe(expected);
+  });
+
+  it("should leave no declared category without a case that reaches it", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync(new URL("./superAgentEngine.ts", import.meta.url), "utf8");
-    const produced = new Set([...src.matchAll(/category: "([a-z_]+)"/g)].map((m) => m[1]));
+    const union = src.slice(src.indexOf("export type ExceptionCategory ="));
+    const declared = [...union.slice(0, union.indexOf(";")).matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
 
-    // Declared, produced by NOTHING anywhere in the server. Each needs a
-    // classifier branch or removal from the union — a product decision, not a
-    // hardening one. `timing_difference` and `currency_mismatch` are produced
-    // elsewhere in the platform and are deliberately absent from this list.
-    for (const key of ["split_payment", "duplicate_invoice", "contra_entry", "unmatched_reversal"]) {
-      expect(produced.has(key), `${key} is newly produced — remove it from the orphaned list`).toBe(false);
-    }
-    // The two the fix above added must now be produced, or this test is stale.
-    expect(produced.has("tax_deduction")).toBe(true);
-    expect(produced.has("unspecified_deduction")).toBe(true);
+    // Produced by other engines rather than this classifier. Named so the
+    // exemption is a statement someone can check, not a silent omission.
+    const producedByOtherEngines = new Set(["timing_difference", "currency_mismatch"]);
+    const reached = new Set(cases.map(([category]) => category));
+
+    const unreachable = declared.filter((c) => !reached.has(c) && !producedByOtherEngines.has(c));
+    expect(unreachable, `declared with no case that reaches it: ${unreachable.join(", ")}`).toEqual([]);
+    expect(declared.length).toBeGreaterThan(8);
+  });
+});
+
+describe("an instalment whose reference carries figures", () => {
+  it("should not be read as a split just because unaccounted numbers appear", async () => {
+    // `mayNameMoreInvoices` looks for invoice-length numbers nothing accounts
+    // for, so the instalment figures trip it while exactly one invoice is
+    // named. It was built for determinateCandidates, where firing
+    // conservatively means "decline to pick a target" — safe. Choosing a
+    // category inverts the consequence: the balance would be discarded.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 installment 600000 of 1000000");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("partial_payment");
+    // The BALANCE is still not quantified, and that is correct rather than a
+    // half-fix: `determinateCandidates` independently declines on the same
+    // ambiguous digits, and declining is ITS safe direction. Relaxing it there
+    // would reopen the split-remittance hole — a receipt naming two invoices
+    // plus partial wording would attach to one leg and report a shortfall the
+    // size of the other. The category is the part that was wrong, and the
+    // finance workflow follows the category.
+    expect(diagnosis.shortfall).toBeNull();
+  });
+
+  it("should quantify the balance when the reference carries no stray figures", async () => {
+    // The control: the null above is caused by the ambiguous digits, not by
+    // partial payments having lost their shortfall.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 partial payment");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("partial_payment");
+    expect(diagnosis.shortfall).toBeCloseTo(400_000, 2);
+  });
+
+  it("should still read a genuine shorthand split as a split", async () => {
+    // The control: `isPartialPayment` is the discriminator, so the shorthand
+    // signal must keep working where no instalment wording is present.
+    const txn = receipt(1_500_000, "INV-1001 and 1002", "remittance INV-1001 and 1002");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-1001"), invoice(500_000, "INV-1002")]);
+
+    expect(diagnosis.category).toBe("split_payment");
+    expect(diagnosis.shortfall).toBeNull();
+  });
+});
+
+describe("a shorthand split that is also being paid in part", () => {
+  it("should be an allocation question, not a payment reminder", async () => {
+    // "INV-1001 and 1002 partial settlement" is a split remittance being paid
+    // in part. Gating the split branch on partial-payment wording alone made it
+    // a partial_payment, so finance got "send a payment reminder" for what is
+    // actually an allocation problem. The connector adjacency says 1002 IS an
+    // invoice, and that outranks the partial wording.
+    const txn = receipt(1_200_000, "INV-1001 and 1002", "remittance INV-1001 and 1002 partial settlement");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-1001"), invoice(500_000, "INV-1002")]);
+
+    expect(diagnosis.category).toBe("split_payment");
+    expect(diagnosis.suggestedActionType).toBe("payment_allocation");
+    expect(diagnosis.recommendedAction).toMatch(/remittance advice/i);
+  });
+
+  it("should still leave an instalment with figures as a partial payment", async () => {
+    // The control for the rule above: the strong signal must require CONNECTOR
+    // adjacency, not merely the presence of other numbers, or the instalment
+    // case regresses.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 installment 600000 of 1000000");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("partial_payment");
   });
 });
