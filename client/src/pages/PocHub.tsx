@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Database, Sparkles, ExternalLink, FlaskConical, CreditCard,
   FileSpreadsheet, FileText, File as FileIcon, Download, RefreshCw,
-  Clock, User, HardDrive, AlertCircle, Copy, Check, History,
+  Clock, User, HardDrive, AlertCircle, Copy, Check, History, ShieldCheck,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import PocRunHistory from "@/components/PocRunHistory";
@@ -74,6 +74,15 @@ const POCS: Poc[] = [
     icon: FileText,
     accent: "from-[#1B365D] to-[#F47458]",
     status: "Live",
+  },
+  {
+    name: "SHOPLINE App Review Workspace",
+    pocKey: "shopline_review",
+    blurb: "Read-only, revocable evidence view for SHOPLINE App Store review. It shows controlled Dev Store connection, webhook and reconciliation evidence without a reviewer account or write controls.",
+    path: "/shopline-review",
+    icon: ShieldCheck,
+    accent: "from-sky-700 to-cyan-500",
+    status: "Active",
   },
 ];
 

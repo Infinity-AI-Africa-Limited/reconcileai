@@ -12,6 +12,7 @@ import { reconciliationRouter } from "./routers/reconciliation";
 import { modulesRouter } from "./routers/modules";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { shoplineConnectorRouter } from "./routers/shoplineConnector";
+import { shoplineReviewRouter } from "./routers/shoplineReview";
 import { lapoRouter } from "./routers/lapo";
 import { ugandaRouter } from "./routers/uganda";
 import * as ageTracker from "./ageTracker";
@@ -6311,6 +6312,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // T24, Mambu, FLEXCUBE and LAPO. Prefer `cbsConnector` in new client code.
   cbsConnector: woodcoreConnectorRouter,
   shoplineConnector: shoplineConnectorRouter,
+  shoplineReview: shoplineReviewRouter,
   bucketIngestion: bucketIngestionRouter,
   emailIngestion: emailIngestionRouter,
   // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
