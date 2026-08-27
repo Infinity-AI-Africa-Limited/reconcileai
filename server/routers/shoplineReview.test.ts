@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { REVIEW_STORE_HANDLE, reviewerChannelCodes, SHOPLINE_REVIEW_POC_KEY, reviewSyncStatus } from "./shoplineReview";
+import { isPublicShoplineReviewEnabled, REVIEW_STORE_HANDLE, reviewerChannelCodes, SHOPLINE_REVIEW_POC_KEY, reviewSyncStatus } from "./shoplineReview";
 
 describe("SHOPLINE review workspace", () => {
-  it("uses a dedicated, revocable POC access key", () => {
+  it("uses a dedicated administrator-controlled public review key", () => {
     expect(SHOPLINE_REVIEW_POC_KEY).toBe("shopline_review");
+  });
+
+  it("opens the public portal only when its administrator kill switch is intentionally enabled", () => {
+    expect(isPublicShoplineReviewEnabled(null)).toBe(false);
+    expect(isPublicShoplineReviewEnabled({ enabled: true })).toBe(false);
+    expect(isPublicShoplineReviewEnabled({ enabled: false })).toBe(true);
   });
 
   it("derives reconciliation evidence only from the Dev Store's canonical SHOPLINE channel pair", () => {

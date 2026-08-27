@@ -78,7 +78,7 @@ const POCS: Poc[] = [
   {
     name: "SHOPLINE App Review Workspace",
     pocKey: "shopline_review",
-    blurb: "Read-only, revocable evidence view for SHOPLINE App Store review. It shows controlled Dev Store connection, webhook and reconciliation evidence without a reviewer account or write controls.",
+    blurb: "No-login, read-only Dev Store portal for SHOPLINE App Store review. The super-admin public-review switch is the immediate kill switch; no credentials or write controls are exposed.",
     path: "/shopline-review",
     icon: ShieldCheck,
     accent: "from-sky-700 to-cyan-500",
@@ -117,6 +117,38 @@ function PocAccessLink({ pocKey, path }: { pocKey: string; path: string }) {
           title="Invalidate the current link and create a new one"
         >
           <RefreshCw className={`h-3 w-3 ${regen.isPending ? "animate-spin" : ""}`} /> Regenerate
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ShoplinePublicReviewControl({ pocKey, path }: { pocKey: string; path: string }) {
+  const utils = trpc.useUtils();
+  const cfg = trpc.poc.getAccessConfig.useQuery({ pocKey });
+  const setProtection = trpc.poc.setAccessEnabled.useMutation({
+    onSuccess: () => utils.poc.getAccessConfig.invalidate({ pocKey }),
+  });
+  const isPublic = cfg.data?.enabled === false;
+  const toggle = () => {
+    const prompt = isPublic
+      ? "Disable public no-login access to the SHOPLINE review portal?"
+      : "Enable public no-login access to the SHOPLINE review portal?";
+    if (confirm(prompt)) setProtection.mutate({ pocKey, enabled: isPublic });
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border bg-muted/30 p-2.5">
+      <p className="text-[11px] font-medium text-muted-foreground">Public reviewer access</p>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        {cfg.isLoading ? "Checking portal state…" : isPublic ? "Enabled — no sign-in or URL token required." : "Disabled — public reviewers cannot read Dev Store evidence."}
+      </p>
+      <div className="mt-2 flex items-center gap-2">
+        <a href={path} target="_blank" rel="noopener noreferrer">
+          <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"><ExternalLink className="h-3 w-3" /> Open portal</Button>
+        </a>
+        <Button size="sm" variant={isPublic ? "destructive" : "outline"} className="h-7 text-xs" onClick={toggle} disabled={cfg.isLoading || setProtection.isPending}>
+          {isPublic ? "Disable public access" : "Enable public access"}
         </Button>
       </div>
     </div>
@@ -494,8 +526,11 @@ export default function PocHub() {
                       </a>
                       <code className="text-xs text-muted-foreground">{poc.path}</code>
                     </div>
-                    <PocAccessLink pocKey={poc.pocKey} path={poc.path} />
-                    <RecipientInvites pocKey={poc.pocKey} path={poc.path} />
+                    {poc.pocKey === "shopline_review" ? (
+                      <ShoplinePublicReviewControl pocKey={poc.pocKey} path={poc.path} />
+                    ) : (
+                      <><PocAccessLink pocKey={poc.pocKey} path={poc.path} /><RecipientInvites pocKey={poc.pocKey} path={poc.path} /></>
+                    )}
                   </CardContent>
                 </Card>
               );
