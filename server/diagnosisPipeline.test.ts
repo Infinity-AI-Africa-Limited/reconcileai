@@ -329,7 +329,6 @@ describe("a split remittance", () => {
   it.each([
     ["INV-2847 INV-2848", "two invoices named in full"],
     ["INV-2847 and 2848", "a shorthand list"],
-    ["INV-2847 part payment 1 of 3", "an explicit split keyword"],
   ])("should be reported as an allocation question: %s (%s)", async (ref) => {
     const txn = receipt(1_500_000, ref, `remittance ${ref}`);
     const { diagnosis } = await diagnose(txn, [
@@ -354,36 +353,77 @@ describe("a split remittance", () => {
   });
 });
 
+describe("an instalment against a single invoice", () => {
+  it("should stay a partial payment with the balance quantified", async () => {
+    // SPLIT_KEYWORDS and isPartialPayment overlap on "partial", "instalment"
+    // and "installment". Keying the split branch on split-sounding WORDING sent
+    // a genuine part-payment of one invoice down it, discarding the outstanding
+    // balance as null and handing finance an allocation workflow when the work
+    // is to chase the remainder. Only the invoice references show a split.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 partial payment 1 of 3");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("partial_payment");
+    expect(diagnosis.shortfall).toBeCloseTo(400_000, 2);
+  });
+});
+
 /**
- * Every declared category is now reachable.
+ * Every declared category is reachable — proved by REACHING it.
  *
- * `ExceptionCategory` used to declare members that no code path produced, which
- * is the type overstating what the platform does. `tax_deduction`,
- * `unspecified_deduction`, `split_payment` and `unmatched_reversal` were given
- * branches; `duplicate_invoice` and `contra_entry` were REMOVED, because the
- * classifier is handed counterpart legs — not same-side siblings or credit
- * notes — and cannot decide either, while duplicate detection already lives
- * upstream in ingestion and the core engine.
+ * The first version of this scanned `superAgentEngine.ts` for `category: "..."`
+ * literals, which review rightly called out: a source literal is not an
+ * executable path. A dead branch would satisfy it, an assignment through a
+ * variable would evade it, and a producer in another file needed a hand-written
+ * exemption that could go stale silently.
  *
- * This asserts the invariant rather than a list of exceptions to it: adding a
- * member without a code path that emits it fails here.
+ * So it now DRIVES the classifier. Each fixture is a case a finance team would
+ * recognise, run through the same chain as production, and the categories that
+ * actually come out are compared against the declared union. A category with no
+ * fixture that produces it fails here, which is the invariant that matters:
+ * the union must not claim more than the platform can conclude.
  */
 describe("the declared category union", () => {
-  it("should contain no member that nothing produces", async () => {
+  /** One fixture per category the rule-based classifier owns. */
+  const cases: Array<[string, () => Promise<string>]> = [
+    ["promotional_deduction", async () => (await diagnose(receipt(950_000, "INV-1001", "PAY INV-1001 less promo"), [invoice(1_000_000, "INV-1001")])).diagnosis.category],
+    ["damage_deduction", async () => (await diagnose(receipt(880_000, "INV-1002", "PAY INV-1002 less dmg"), [invoice(1_000_000, "INV-1002")])).diagnosis.category],
+    ["bank_fee_deduction", async () => (await diagnose(receipt(199_000, "INV-1003", "PAY INV-1003 less bank charge"), [invoice(200_000, "INV-1003")])).diagnosis.category],
+    ["tax_deduction", async () => (await diagnose(receipt(950_000, "INV-1004", "PAY INV-1004 less WHT"), [invoice(1_000_000, "INV-1004")])).diagnosis.category],
+    ["unspecified_deduction", async () => (await diagnose(receipt(950_000, "INV-1005", "PAY INV-1005 less 5,000"), [invoice(1_000_000, "INV-1005")])).diagnosis.category],
+    ["partial_payment", async () => (await diagnose(receipt(600_000, "INV-1006", "PAY INV-1006 partial payment"), [invoice(1_000_000, "INV-1006")])).diagnosis.category],
+    ["split_payment", async () => (await diagnose(receipt(1_500_000, "INV-1007 INV-1008", "remittance"), [invoice(1_000_000, "INV-1007"), invoice(500_000, "INV-1008")])).diagnosis.category],
+    ["fx_variance", async () => (await diagnose(receipt(999_500, "INV-1009", "SETTLEMENT INV-1009"), [invoice(1_000_000, "INV-1009")])).diagnosis.category],
+    ["unmatched_reversal", async () => {
+      const txn = receipt(950_000, "INV-1010", "REVERSAL INV-1010");
+      txn.isReversal = true;
+      return (await diagnose(txn, [invoice(1_000_000, "INV-1010")])).diagnosis.category;
+    }],
+    ["missing_counterparty", async () => {
+      const txn = receipt(950_000, "INV-1011", "PAY INV-1011");
+      txn.counterparty = null;
+      return (await diagnose(txn, [invoice(1_000_000, "INV-1011")])).diagnosis.category;
+    }],
+    ["unmatched", async () => (await diagnose(receipt(950_000, "INV-1012", "PAY INV-1012"), [])).diagnosis.category],
+  ];
+
+  it.each(cases)("should actually produce %s", async (expected, run) => {
+    expect(await run()).toBe(expected);
+  });
+
+  it("should leave no declared category without a case that reaches it", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync(new URL("./superAgentEngine.ts", import.meta.url), "utf8");
-
     const union = src.slice(src.indexOf("export type ExceptionCategory ="));
     const declared = [...union.slice(0, union.indexOf(";")).matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
-    const produced = new Set([...src.matchAll(/category: "([a-z_]+)"/g)].map((m) => m[1]));
 
-    // Produced elsewhere in the platform rather than by this classifier, and
-    // named so the exemption is a statement rather than a silent gap.
-    const producedElsewhere = new Set(["timing_difference", "currency_mismatch"]);
+    // Produced by other engines rather than this classifier. Named so the
+    // exemption is a statement someone can check, not a silent omission.
+    const producedByOtherEngines = new Set(["timing_difference", "currency_mismatch"]);
+    const reached = new Set(cases.map(([category]) => category));
 
-    const orphaned = declared.filter((c) => !produced.has(c) && !producedElsewhere.has(c));
-    expect(orphaned, `declared but produced by nothing: ${orphaned.join(", ")}`).toEqual([]);
-    // Guard against the union being emptied or the slice failing to parse.
+    const unreachable = declared.filter((c) => !reached.has(c) && !producedByOtherEngines.has(c));
+    expect(unreachable, `declared with no case that reaches it: ${unreachable.join(", ")}`).toEqual([]);
     expect(declared.length).toBeGreaterThan(8);
   });
 });

@@ -1058,7 +1058,16 @@ function ruleBasedClassify(
   // two-invoice remittance — the same trap `determinateCandidates` documents,
   // and the reason it deduplicates through `normalizeStr` before deciding.
   const distinctInvoices = new Set(parsedRef.invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
-  if (parsedRef.isSplitPayment || distinctInvoices.size > 1 || parsedRef.mayNameMoreInvoices) {
+  // Requires evidence of MORE THAN ONE INVOICE, not split-sounding wording.
+  //
+  // `isSplitPayment` is deliberately NOT a trigger. Its keyword set overlaps
+  // `isPartialPayment` on "partial", "instalment" and "installment", so keying
+  // on it sent a genuine part-payment of a SINGLE invoice down this branch —
+  // discarding the outstanding balance as null and handing finance an
+  // allocation workflow when the work is to chase the remainder. Those words
+  // describe a sequence of payments against one invoice; a split remittance is
+  // one payment across several, and only the invoice references show that.
+  if (distinctInvoices.size > 1 || parsedRef.mayNameMoreInvoices) {
     return {
       category: "split_payment",
       severity: "medium",
