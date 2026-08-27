@@ -68,7 +68,17 @@ export function reviewSyncStatus({
   lastSyncAttemptAt,
   lastSyncError,
 }: SyncInputs) {
-  if (lastSyncError && lastSyncAttemptAt && (!lastSyncAt || lastSyncAttemptAt > lastSyncAt)) {
+  // `>=`, not `>`. These columns are second-granularity timestamps, and a
+  // success writes lastSyncAt and lastSyncAttemptAt from the same instant. A
+  // failure landing in the SAME second as the preceding success therefore
+  // compares equal, and a strict `>` let it fall through to "current" — hiding a
+  // failure on the one page whose stated purpose is not concealing them, and
+  // opening the evidence gate that keys off this status.
+  //
+  // Safe in the other direction because a successful cycle clears lastSyncError
+  // (`{ lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null }`), so
+  // reaching this branch at all means the stored error is the latest word.
+  if (lastSyncError && lastSyncAttemptAt && (!lastSyncAt || lastSyncAttemptAt >= lastSyncAt)) {
     return {
       code: "attention" as const,
       label: "Synchronisation needs attention",
@@ -231,8 +241,24 @@ export const shoplineReviewRouter = router({
           attention: Number(webhookCounts?.attention ?? 0),
           recentTopics: recentTopics.map((event) => ({ topic: event.topic, receivedAt: event.receivedAt })),
         },
+        // Reported as the CURRENT STATE of the controlled data set, not as the
+        // output of the last cycle — and `asOf` is what makes that difference
+        // visible rather than implied.
+        //
+        // The counts cover every record in the two connector channels, and a
+        // cycle that persisted transactions and then failed leaves rows no
+        // reconciliation pass has examined. A later successful sync, whose date
+        // window may not reach back over them, does not change that: those rows
+        // still sit at `unmatched`, which is the column default and so is
+        // indistinguishable from "examined and not matched".
+        //
+        // Since the two cannot be told apart from the data, the honest move is to
+        // stop implying the stronger one. "Of N records held, M are matched" is
+        // true whichever cycle wrote them; "the last run processed N records and
+        // matched M" would not be.
         reconciliationEvidence: canShowReconciliation && recordCounts
           ? {
+              asOf: store.lastSyncAt,
               transactionCount: Number(recordCounts.transactions ?? 0),
               matchedCount: Number(recordCounts.matchedTransactions ?? 0),
               exceptionCount: Number(recordCounts.openExceptions ?? 0),

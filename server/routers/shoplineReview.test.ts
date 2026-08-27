@@ -58,6 +58,20 @@ describe("when the connector rotates a token during normal operation", () => {
     })).toMatchObject({ code: "current" });
   });
 
+  it("should not hide a failure recorded in the same second as the last success", () => {
+    // These are second-granularity timestamps, and a successful cycle writes
+    // lastSyncAt and lastSyncAttemptAt from the same instant. A failure landing
+    // in that same second compares EQUAL, and a strict `>` let it fall through
+    // to "current" — concealing a failure on the page whose stated purpose is
+    // not concealing them, and opening the evidence gate that keys off this.
+    const sameSecond = new Date("2026-08-27T13:40:30.000Z");
+    expect(reviewSyncStatus({
+      lastSyncAt: sameSecond,
+      lastSyncAttemptAt: sameSecond,
+      lastSyncError: "failed in the same second",
+    })).toMatchObject({ code: "attention" });
+  });
+
   it("should report a never-synced connection as pending", () => {
     expect(reviewSyncStatus({
       lastSyncAt: null,
@@ -99,6 +113,18 @@ describe("when records exist but no sync has completed", () => {
     // And the gate must be the one the response actually consults.
     expect(ROUTER).toMatch(/reconciliationEvidence: canShowReconciliation && recordCounts/);
     expect(ROUTER).not.toMatch(/reconciliationEvidence: hasChannelPair && recordCounts/);
+  });
+
+  it("should present the counts as a current position, not as one run's output", () => {
+    // A cycle can persist records and then fail before reconciling them. A later
+    // successful sync, whose window may not reach back over those rows, leaves
+    // them at `unmatched` — the column default, indistinguishable from
+    // "examined and not matched". Since the data cannot tell the two apart, the
+    // page must not assert the stronger reading.
+    const PAGE = fs.readFileSync(path.join(__dirname, "..", "..", "client", "src", "pages", "ShoplineReviewWorkspace.tsx"), "utf8");
+    expect(ROUTER).toMatch(/asOf: store\.lastSyncAt/);
+    expect(PAGE).toMatch(/Current position of the controlled data set/);
+    expect(PAGE).toMatch(/not yet examined by a reconciliation pass/);
   });
 
   it("should show the same health signal it gates on", () => {
