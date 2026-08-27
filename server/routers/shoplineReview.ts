@@ -1,10 +1,11 @@
 /**
- * Read-only, token-gated evidence view for SHOPLINE App Store reviewers.
+ * Read-only public evidence view for SHOPLINE App Store reviewers.
  *
  * This is not a merchant installation or OAuth substitute. It exposes no raw
- * order/payment data, no credentials, and no mutation procedures. The shared
- * POC access token makes the link revocable without relying on a reviewer
- * account, inbox, or password.
+ * order/payment data, no credentials, and no mutation procedures. A
+ * super-admin-controlled POC flag is an immediate kill switch: reviewers need
+ * no account or token, but public access is denied until an administrator
+ * explicitly enables this one controlled Dev Store view.
  */
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
@@ -13,11 +14,37 @@ import { channels, exceptions, organizations, transactions } from "../../drizzle
 import { slConnectorStores, slConnectorWebhookEvents } from "../../drizzle/connector_schema";
 import { shoplineOrdersChannelCode, shoplinePaymentsChannelCode } from "../connectors/shopline/onboarding";
 import { getDb } from "../db";
-import { assertPocAccess, tokenFromCtx } from "../pocAccess";
+import { getAccess } from "../pocAccess";
+import { createRateLimiter } from "../rateLimiter";
+import { getClientInfo } from "./shared";
 import { publicProcedure, router } from "../_core/trpc";
 
 export const SHOPLINE_REVIEW_POC_KEY = "shopline_review";
 const REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
+
+/**
+ * Per-IP ceiling on the only anonymous, database-backed surface we expose.
+ *
+ * While this portal was token-gated, its cost was bounded by who held the link.
+ * Public access removes that bound: one unauthenticated snapshot fans out to
+ * eight queries, including two aggregate joins across `transactions` and
+ * `exceptions` — the same tables serving live tenants on the shared TiDB
+ * instance. An open evidence page and a production database are reachable
+ * through one URL, so the ceiling belongs here rather than in front of it.
+ *
+ * 30/minute is far above real use (the page issues ONE query per load; the
+ * section tabs are client-side and refetch nothing) and far below what would
+ * trouble the database.
+ */
+export const REVIEW_PORTAL_RATE_LIMIT = { windowMs: 60_000, max: 30 } as const;
+export const reviewPortalLimiter = createRateLimiter(REVIEW_PORTAL_RATE_LIMIT);
+
+export function isPublicShoplineReviewEnabled(access: { enabled: boolean } | null | undefined): boolean {
+  // In the established POC model, `enabled=false` means token protection is
+  // intentionally off. Only this bounded Dev Store portal treats that state as
+  // public access; every query remains server-pinned to REVIEW_STORE_HANDLE.
+  return access?.enabled === false;
+}
 
 /**
  * The canonical dev store this workspace speaks for (CLAUDE.md §2B.10B).
@@ -100,7 +127,25 @@ export function reviewSyncStatus({
 }
 
 const reviewProcedure = publicProcedure.use(async ({ ctx, next }) => {
-  await assertPocAccess(SHOPLINE_REVIEW_POC_KEY, tokenFromCtx(ctx));
+  // Rate limit BEFORE the access lookup, which is itself a query. Checking
+  // permission first would leave a flood costing one database round-trip per
+  // request even while every one of them is refused — the limiter would be
+  // guarding the expensive half of a request whose cheap half was already
+  // unbounded. This check is in-memory and holds whether the portal is open
+  // or closed.
+  const { ip } = getClientInfo(ctx);
+  const limit = reviewPortalLimiter.check(`shopline-review:${ip}`);
+  if (!limit.allowed) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: `Too many review portal requests. Please retry in ${limit.retryAfterSec}s.`,
+    });
+  }
+
+  const access = await getAccess(SHOPLINE_REVIEW_POC_KEY);
+  if (!isPublicShoplineReviewEnabled(access)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "The public SHOPLINE review portal is currently unavailable." });
+  }
   return next({ ctx });
 });
 
@@ -219,9 +264,39 @@ export const shoplineReviewRouter = router({
         ))
         : [];
 
+      const recentRecords = canShowReconciliation
+        ? await db
+            .select({ channel: channels.name, status: transactions.status, occurredAt: transactions.transactionDate })
+            .from(transactions)
+            .innerJoin(channels, eq(channels.id, transactions.channelId))
+            .where(and(
+              eq(transactions.organizationId, store.organizationId),
+              inArray(transactions.channelId, channelIds),
+            ))
+            .orderBy(desc(transactions.transactionDate))
+            .limit(6)
+        : [];
+
+      const openExceptions = canShowReconciliation
+        ? await db
+            .select({ category: exceptions.category, severity: exceptions.severity, status: exceptions.status, raisedAt: exceptions.createdAt })
+            .from(exceptions)
+            .innerJoin(transactions, and(
+              eq(transactions.id, exceptions.transactionId),
+              eq(transactions.organizationId, store.organizationId),
+            ))
+            .where(and(
+              eq(exceptions.organizationId, store.organizationId),
+              inArray(transactions.channelId, channelIds),
+              inArray(exceptions.status, ["open", "in_review", "escalated"]),
+            ))
+            .orderBy(desc(exceptions.createdAt))
+            .limit(5)
+        : [];
+
       return {
         workspace: {
-          title: "ReconcileAI Dev Store review workspace",
+          title: "ReconcileAI Dev Store review portal",
           accountRequired: false,
           writeAccess: false,
           dataNotice: "All figures in this workspace are controlled development-store evidence. They are not production-merchant results.",
@@ -265,6 +340,17 @@ export const shoplineReviewRouter = router({
               unmatchedCount: Number(recordCounts.unmatchedTransactions ?? 0),
             }
           : null,
+        recentRecords: recentRecords.map((record) => ({
+          channel: record.channel,
+          status: record.status,
+          occurredAt: record.occurredAt,
+        })),
+        openExceptions: openExceptions.map((exception) => ({
+          category: exception.category,
+          severity: exception.severity,
+          status: exception.status,
+          raisedAt: exception.raisedAt,
+        })),
       };
     }),
 });

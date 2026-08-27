@@ -297,7 +297,18 @@ function Router() {
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
       <Route path="/control-fit">{() => <DashboardPage component={ControlFit} />}</Route>
       <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
-      <Route path="/shopline-review">{() => <PocAccessGate pocKey="shopline_review" title="ReconcileAI Dev Store review" subtitle="This read-only review workspace is accessed with the code in SHOPLINE’s test instructions."><ShoplineReviewWorkspace /></PocAccessGate>}</Route>
+      {/*
+        Deliberately NOT wrapped in PocAccessGate. This portal's access model is
+        now public-or-closed, and the gate can only express invite-or-closed: it
+        answers a closed portal with "enter the access code from your invitation
+        link". No such code is obtainable any more — the hub replaced this POC's
+        token controls with the public switch — so the gate would send a SHOPLINE
+        reviewer to a prompt nobody can satisfy, on the page whose submission
+        claim is that no credential is needed. The workspace renders the server's
+        own "portal unavailable" card instead, and `reviewProcedure` remains the
+        boundary; the gate was never one (see PocAccessGate's header).
+      */}
+      <Route path="/shopline-review">{() => <ShoplineReviewWorkspace />}</Route>
       <Route path="/shopline/connect">{() => <DashboardPage component={ShoplineWelcome} />}</Route>
       {/* Install callbacks: standalone pages, deliberately NOT wrapped in
           DashboardPage. SHOPLINE redirects here without a session, so the

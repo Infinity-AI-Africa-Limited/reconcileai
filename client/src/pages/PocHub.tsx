@@ -12,6 +12,10 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Database, Sparkles, ExternalLink, FlaskConical, CreditCard,
   FileSpreadsheet, FileText, File as FileIcon, Download, RefreshCw,
   Clock, User, HardDrive, AlertCircle, Copy, Check, History, ShieldCheck,
@@ -78,7 +82,7 @@ const POCS: Poc[] = [
   {
     name: "SHOPLINE App Review Workspace",
     pocKey: "shopline_review",
-    blurb: "Read-only, revocable evidence view for SHOPLINE App Store review. It shows controlled Dev Store connection, webhook and reconciliation evidence without a reviewer account or write controls.",
+    blurb: "No-login, read-only Dev Store portal for SHOPLINE App Store review. The super-admin public-review switch is the immediate kill switch; no credentials or write controls are exposed.",
     path: "/shopline-review",
     icon: ShieldCheck,
     accent: "from-sky-700 to-cyan-500",
@@ -119,6 +123,93 @@ function PocAccessLink({ pocKey, path }: { pocKey: string; path: string }) {
           <RefreshCw className={`h-3 w-3 ${regen.isPending ? "animate-spin" : ""}`} /> Regenerate
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Public-access kill switch for the SHOPLINE review portal.
+ *
+ * Four states, not a boolean. A read can fail, and for a control whose whole
+ * job is answering "is this open to the internet right now?", reporting a
+ * failed read as "Disabled" is the one wrong answer — an operator checking
+ * whether the portal is closed would be told yes on no evidence. So `unknown`
+ * is named and shown.
+ *
+ * From `unknown` only the CLOSING action is offered. Closing on a stale reading
+ * costs a reviewer a page load; opening on one publishes Dev Store evidence
+ * while nobody can see the current state. When the two error directions are not
+ * symmetric, only the recoverable one should be reachable in the dark.
+ */
+type ReviewPortalState = "loading" | "unknown" | "public" | "closed";
+
+function ShoplinePublicReviewControl({ pocKey, path }: { pocKey: string; path: string }) {
+  const utils = trpc.useUtils();
+  const cfg = trpc.poc.getAccessConfig.useQuery({ pocKey });
+  const setProtection = trpc.poc.setAccessEnabled.useMutation({
+    onSuccess: () => utils.poc.getAccessConfig.invalidate({ pocKey }),
+  });
+  const [confirming, setConfirming] = useState(false);
+
+  const state: ReviewPortalState = cfg.isLoading
+    ? "loading"
+    : cfg.isError || !cfg.data
+      ? "unknown"
+      : cfg.data.enabled === false
+        ? "public"
+        : "closed";
+
+  // `enabled` is the POC token-protection flag, so protection OFF is what makes
+  // this portal public — closing it means turning protection back ON.
+  const willOpen = state === "closed";
+  const description: Record<ReviewPortalState, string> = {
+    loading: "Checking portal state…",
+    unknown: "Unknown — the portal state could not be read. Closing public access is still available.",
+    public: "Enabled — no sign-in or URL token required.",
+    closed: "Disabled — public reviewers cannot read Dev Store evidence.",
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border bg-muted/30 p-2.5">
+      <p className="text-[11px] font-medium text-muted-foreground">Public reviewer access</p>
+      <p className={`mt-1 text-[11px] ${state === "unknown" ? "text-amber-600" : "text-muted-foreground"}`}>
+        {description[state]}
+      </p>
+      <div className="mt-2 flex items-center gap-2">
+        <a href={path} target="_blank" rel="noopener noreferrer">
+          <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"><ExternalLink className="h-3 w-3" /> Open portal</Button>
+        </a>
+        <Button
+          size="sm"
+          variant={willOpen ? "outline" : "destructive"}
+          className="h-7 text-xs"
+          onClick={() => setConfirming(true)}
+          disabled={state === "loading" || setProtection.isPending}
+        >
+          {willOpen ? "Enable public access" : "Disable public access"}
+        </Button>
+      </div>
+
+      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {willOpen ? "Open the SHOPLINE review portal to the public?" : "Close public access to the SHOPLINE review portal?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {willOpen
+                ? "Anyone with the link will be able to read ReconcileAI Dev Store connection, webhook and reconciliation evidence without signing in. No credentials, raw records or write controls are exposed, and you can close it again here at any time."
+                : "Reviewers will immediately stop being able to read Dev Store evidence, and the portal will report itself unavailable."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => setProtection.mutate({ pocKey, enabled: !willOpen })}>
+              {willOpen ? "Enable public access" : "Disable public access"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -494,8 +585,11 @@ export default function PocHub() {
                       </a>
                       <code className="text-xs text-muted-foreground">{poc.path}</code>
                     </div>
-                    <PocAccessLink pocKey={poc.pocKey} path={poc.path} />
-                    <RecipientInvites pocKey={poc.pocKey} path={poc.path} />
+                    {poc.pocKey === "shopline_review" ? (
+                      <ShoplinePublicReviewControl pocKey={poc.pocKey} path={poc.path} />
+                    ) : (
+                      <><PocAccessLink pocKey={poc.pocKey} path={poc.path} /><RecipientInvites pocKey={poc.pocKey} path={poc.path} /></>
+                    )}
                   </CardContent>
                 </Card>
               );

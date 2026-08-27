@@ -1,92 +1,83 @@
-import { CheckCircle2, Clock3, Database, LockKeyhole, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CheckCircle2, Clock3, Database, Eye, LockKeyhole, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 import { trpc } from "@/lib/trpc";
+
+type Section = "overview" | "connection" | "activity" | "reconciliation" | "exceptions";
 
 function dateTime(value: Date | null | undefined) {
   return value ? new Date(value).toLocaleString() : "Not yet recorded";
 }
 
-export default function ShoplineReviewWorkspace() {
-  const snapshot = trpc.shoplineReview.snapshot.useQuery(undefined, {
-    retry: false,
-    refetchOnWindowFocus: false,
-  });
+/** Underscore-separated enum → readable text. `replaceAll`, because `manually_matched` and `retail_gateway_fee_variance` have more than one. */
+function humanise(value: string) {
+  return value.replaceAll("_", " ");
+}
 
-  if (snapshot.isLoading) {
-    return <main className="min-h-screen bg-slate-50 p-6 text-slate-700">Loading the review workspace…</main>;
-  }
-  if (snapshot.error || !snapshot.data) {
-    return (
-      <main className="min-h-screen bg-slate-50 p-6">
-        <div className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-white p-8 text-center">
-          <TriangleAlert className="mx-auto h-9 w-9 text-rose-600" aria-hidden="true" />
-          <h1 className="mt-4 text-xl font-semibold text-slate-950">Review workspace unavailable</h1>
-          <p className="mt-2 text-sm text-slate-600">{snapshot.error?.message ?? "Please use the review link supplied in the test instructions."}</p>
-        </div>
-      </main>
-    );
-  }
+/**
+ * Keep the portal out of search results for as long as it is public.
+ *
+ * Everything here is controlled Dev Store evidence, but it is evidence about a
+ * named integration on a public URL with no login in front of it — exactly what
+ * a crawler indexes and then keeps serving from cache long after the switch is
+ * turned off. The kill switch controls the origin; it cannot recall a search
+ * result. Scoped to this route and removed on unmount, so it never leaks onto
+ * the rest of the SPA.
+ */
+function useNoIndex() {
+  useEffect(() => {
+    const meta = document.createElement("meta");
+    meta.name = "robots";
+    meta.content = "noindex, nofollow";
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }, []);
+}
 
-  const { workspace, connection, webhookEvidence, reconciliationEvidence } = snapshot.data;
-  const needsAttention = connection.statusDetail.code === "attention";
-  // Amber now means "no successful sync has ever been recorded". The state it
-  // replaces, "reauthorized_pending", inferred a fresh OAuth grant from a token
-  // rotation the schema cannot tell apart from the connector's routine ~9h
-  // refresh — so a healthy store wore an amber "verification pending" badge as a
-  // matter of course. Same signal, drawn from something the data knows.
-  const awaitingFirstSync = connection.statusDetail.code === "pending";
-
-  return (
-    <main className="min-h-screen bg-slate-50 text-slate-950">
-      <header className="border-b border-slate-200 bg-slate-950 px-6 py-8 text-white">
-        <div className="mx-auto max-w-6xl">
-          <p className="text-sm font-medium tracking-wide text-cyan-300">SHOPLINE APP REVIEW</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight">{workspace.title}</h1>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">A constrained evidence view for evaluating the current ReconcileAI Dev Store integration. No account, write controls, merchant credentials, or raw customer/payment records are available here.</p>
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-6xl px-6 py-8">
-        <section aria-label="Reviewer controls" className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-xl border border-slate-200 bg-white p-5"><LockKeyhole className="h-5 w-5 text-slate-700" aria-hidden="true" /><p className="mt-3 text-sm font-medium">No account required</p><p className="mt-1 text-sm text-slate-600">The review link is server-validated and revocable.</p></div>
-          <div className="rounded-xl border border-slate-200 bg-white p-5"><ShieldCheck className="h-5 w-5 text-emerald-700" aria-hidden="true" /><p className="mt-3 text-sm font-medium">Read-only evidence</p><p className="mt-1 text-sm text-slate-600">No payment, order, settlement or app configuration can be changed.</p></div>
-          <div className="rounded-xl border border-slate-200 bg-white p-5"><Database className="h-5 w-5 text-sky-700" aria-hidden="true" /><p className="mt-3 text-sm font-medium">Controlled data only</p><p className="mt-1 text-sm text-slate-600">{workspace.dataNotice}</p></div>
-        </section>
-
-        <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6" aria-labelledby="connection-heading">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div><p className="text-sm font-medium text-slate-500">CONNECTION EVIDENCE</p><h2 id="connection-heading" className="mt-1 text-xl font-semibold">SHOPLINE Dev Store: {connection.storeHandle}</h2></div>
-            <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium ${needsAttention ? "bg-rose-100 text-rose-800" : awaitingFirstSync ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
-              {needsAttention ? <TriangleAlert className="h-4 w-4" aria-hidden="true" /> : awaitingFirstSync ? <Clock3 className="h-4 w-4" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
-              {connection.statusDetail.label}
-            </span>
-          </div>
-          <p className="mt-4 text-sm leading-6 text-slate-600">{connection.statusDetail.detail}</p>
-          <dl className="mt-6 grid gap-4 border-t border-slate-100 pt-5 sm:grid-cols-3">
-            <div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Connection status</dt><dd className="mt-1 text-sm font-medium capitalize">{connection.status}</dd></div>
-            <div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Installed</dt><dd className="mt-1 text-sm font-medium">{dateTime(connection.installedAt)}</dd></div>
-            <div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Last successful sync</dt><dd className="mt-1 text-sm font-medium">{dateTime(connection.lastSyncAt)}</dd></div>
-          </dl>
-          <div className="mt-5"><p className="text-xs font-medium uppercase tracking-wide text-slate-500">Granted read-only scopes</p><p className="mt-2 text-sm text-slate-700">{connection.scopes.length ? connection.scopes.join(", ") : "No scopes recorded"}</p></div>
-        </section>
-
-        <section className="mt-8 grid gap-6 lg:grid-cols-2" aria-label="Operational evidence">
-          <div className="rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><RefreshCw className="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Webhook evidence</h2></div><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Received" value={webhookEvidence.total} /><Metric label="Processed" value={webhookEvidence.processed} /><Metric label="Pending" value={webhookEvidence.pending} /><Metric label="Needs attention" value={webhookEvidence.attention} /></div><p className="mt-5 text-sm text-slate-600">Recent authorised webhook topics: {webhookEvidence.recentTopics.length ? webhookEvidence.recentTopics.map((event) => event.topic).join(", ") : "None recorded"}.</p></div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-emerald-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Reconciliation evidence</h2></div>{reconciliationEvidence ? <><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Controlled records" value={reconciliationEvidence.transactionCount} /><Metric label="Matched" value={reconciliationEvidence.matchedCount} /><Metric label="Open exceptions" value={reconciliationEvidence.exceptionCount} /><Metric label="Unmatched" value={reconciliationEvidence.unmatchedCount} /></div>{/* States what the figures ARE — the current position of the data set as of
-    the last successful sync — rather than implying they are one cycle's
-    output. A cycle can persist records and then fail before reconciling
-    them; those rows stay at `unmatched`, which is the column default and so
-    cannot be told apart from "examined and not matched". Saying "of N held,
-    M are matched" is true either way; "the last run matched M of N" would
-    not be. */}
-<p className="mt-5 text-sm text-slate-600">Current position of the controlled data set{reconciliationEvidence.asOf ? ` as of the last successful synchronisation on ${new Date(reconciliationEvidence.asOf).toLocaleString()}` : ""}, derived only from this Dev Store’s SHOPLINE order and payment channels. No generic settlement job is presented as SHOPLINE evidence. Unmatched counts every held record without a match, which includes any not yet examined by a reconciliation pass.</p></> : <p className="mt-5 text-sm text-slate-600">The controlled Dev Store channel pair is not yet available for reconciliation evidence.</p>}</div>
-        </section>
-
-        <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6" aria-labelledby="boundary-heading"><h2 id="boundary-heading" className="text-lg font-semibold">Review boundary</h2><p className="mt-3 max-w-4xl text-sm leading-6 text-slate-600">This workspace demonstrates the Tier 1 redirected, read-only reconciliation evidence flow. It does not initiate payments, approve transactions, post to merchant systems, create customer-facing actions, expose a production merchant outcome, or demonstrate the future subscription/billing lifecycle.</p></section>
-      </div>
-    </main>
-  );
+function ReviewTab({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) {
+  return <button type="button" onClick={onClick} className={`rounded-full px-4 py-2 text-sm font-medium ${active ? "bg-slate-950 text-white" : "bg-white text-slate-700 ring-1 ring-slate-200"}`}>{children}</button>;
 }
 
 function Metric({ label, value }: { label: string; value: number | string }) {
   return <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p><p className="mt-1 text-lg font-semibold text-slate-950">{value}</p></div>;
+}
+
+export default function ShoplineReviewWorkspace() {
+  const [section, setSection] = useState<Section>("overview");
+  useNoIndex();
+  const snapshot = trpc.shoplineReview.snapshot.useQuery(undefined, { retry: false, refetchOnWindowFocus: false });
+
+  if (snapshot.isLoading) return <main className="min-h-screen bg-slate-50 p-6 text-slate-700">Loading the SHOPLINE review portal…</main>;
+  if (snapshot.error || !snapshot.data) {
+    return <main className="min-h-screen bg-slate-50 p-6"><div className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-white p-8 text-center"><TriangleAlert className="mx-auto h-9 w-9 text-rose-600" aria-hidden="true" /><h1 className="mt-4 text-xl font-semibold text-slate-950">Review portal unavailable</h1><p className="mt-2 text-sm text-slate-600">{snapshot.error?.message ?? "The reviewer portal is temporarily unavailable."}</p></div></main>;
+  }
+
+  const { workspace, connection, webhookEvidence, reconciliationEvidence, recentRecords, openExceptions } = snapshot.data;
+  const needsAttention = connection.statusDetail.code === "attention";
+  const awaitingFirstSync = connection.statusDetail.code === "pending";
+
+  return <main className="min-h-screen bg-slate-50 text-slate-950">
+    <header className="border-b border-slate-200 bg-slate-950 px-6 py-8 text-white"><div className="mx-auto max-w-6xl"><p className="text-sm font-medium tracking-wide text-cyan-300">SHOPLINE APP REVIEW</p><h1 className="mt-2 text-3xl font-semibold tracking-tight">{workspace.title}</h1><p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">A no-login, read-only Retail Commerce portal for reviewing the current ReconcileAI Dev Store integration. It exposes controlled evidence only; merchant credentials, raw customer/payment records, and write controls are excluded.</p></div></header>
+
+    <div className="mx-auto max-w-6xl px-6 py-8">
+      <section aria-label="Reviewer controls" className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-5"><LockKeyhole className="h-5 w-5 text-slate-700" aria-hidden="true" /><p className="mt-3 text-sm font-medium">No sign-in required</p><p className="mt-1 text-sm text-slate-600">Public access is enabled only while the super-admin review switch remains on.</p></div>
+        <div className="rounded-xl border border-slate-200 bg-white p-5"><ShieldCheck className="h-5 w-5 text-emerald-700" aria-hidden="true" /><p className="mt-3 text-sm font-medium">Read-only evidence</p><p className="mt-1 text-sm text-slate-600">No payment, order, settlement or app configuration can be changed.</p></div>
+        <div className="rounded-xl border border-slate-200 bg-white p-5"><Database className="h-5 w-5 text-sky-700" aria-hidden="true" /><p className="mt-3 text-sm font-medium">Controlled data only</p><p className="mt-1 text-sm text-slate-600">{workspace.dataNotice}</p></div>
+      </section>
+
+      <nav className="mt-8 flex flex-wrap gap-2 border-b border-slate-200 pb-4" aria-label="SHOPLINE review sections">
+        <ReviewTab active={section === "overview"} onClick={() => setSection("overview")}>Overview</ReviewTab><ReviewTab active={section === "connection"} onClick={() => setSection("connection")}>Connection</ReviewTab><ReviewTab active={section === "activity"} onClick={() => setSection("activity")}>Sync activity</ReviewTab><ReviewTab active={section === "reconciliation"} onClick={() => setSection("reconciliation")}>Reconciliation</ReviewTab><ReviewTab active={section === "exceptions"} onClick={() => setSection("exceptions")}>Exceptions</ReviewTab>
+      </nav>
+
+      {section === "overview" && <section className="mt-6 grid gap-6 lg:grid-cols-[1.35fr_1fr]"><div className="rounded-2xl border border-slate-200 bg-white p-7"><div className="flex items-center gap-2"><Eye className="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 className="text-xl font-semibold">A controlled SHOPLINE reconciliation journey</h2></div><p className="mt-4 max-w-2xl text-sm leading-6 text-slate-600">Use the sections above to inspect the live Dev Store connection, authorised SHOPLINE activity, deterministic order-to-payment reconciliation position and controlled exception state. The experience is isolated from the broader ReconcileAI production portal.</p><div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Webhooks processed" value={webhookEvidence.processed} /><Metric label="Controlled records" value={reconciliationEvidence?.transactionCount ?? "—"} /><Metric label="Matched" value={reconciliationEvidence?.matchedCount ?? "—"} /><Metric label="Open exceptions" value={reconciliationEvidence?.exceptionCount ?? "—"} /></div></div><div className="rounded-2xl bg-slate-950 p-7 text-white"><p className="text-xs font-medium tracking-[0.16em] text-cyan-300">REVIEW BOUNDARY</p><h2 className="mt-3 text-xl font-semibold">What this portal does—and does not—demonstrate</h2><p className="mt-4 text-sm leading-6 text-slate-300">It demonstrates the Tier 1 redirected, read-only integration using controlled Dev Store evidence. It does not process a production merchant, initiate payments, post to merchant systems, create customer actions, or prove a subscription/billing lifecycle.</p></div></section>}
+
+      {section === "connection" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-medium text-slate-500">CONNECTION EVIDENCE</p><h2 className="mt-1 text-xl font-semibold">SHOPLINE Dev Store: {connection.storeHandle}</h2></div><span className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium ${needsAttention ? "bg-rose-100 text-rose-800" : awaitingFirstSync ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>{needsAttention ? <TriangleAlert className="h-4 w-4" aria-hidden="true" /> : awaitingFirstSync ? <Clock3 className="h-4 w-4" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}{connection.statusDetail.label}</span></div><p className="mt-4 text-sm leading-6 text-slate-600">{connection.statusDetail.detail}</p><dl className="mt-6 grid gap-4 border-t border-slate-100 pt-5 sm:grid-cols-3"><div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Connection status</dt><dd className="mt-1 text-sm font-medium capitalize">{connection.status}</dd></div><div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Installed</dt><dd className="mt-1 text-sm font-medium">{dateTime(connection.installedAt)}</dd></div><div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Last successful sync</dt><dd className="mt-1 text-sm font-medium">{dateTime(connection.lastSyncAt)}</dd></div></dl><div className="mt-5"><p className="text-xs font-medium uppercase tracking-wide text-slate-500">Granted read-only scopes</p><p className="mt-2 text-sm text-slate-700">{connection.scopes.length ? connection.scopes.join(", ") : "No scopes recorded"}</p></div></section>}
+
+      {section === "activity" && <section className="mt-6 grid gap-6 lg:grid-cols-2"><div className="rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><RefreshCw className="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Webhook evidence</h2></div><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Received" value={webhookEvidence.total} /><Metric label="Processed" value={webhookEvidence.processed} /><Metric label="Pending" value={webhookEvidence.pending} /><Metric label="Needs attention" value={webhookEvidence.attention} /></div><p className="mt-5 text-sm text-slate-600">Recent authorised webhook topics: {webhookEvidence.recentTopics.length ? webhookEvidence.recentTopics.map((event) => event.topic).join(", ") : "None recorded"}.</p></div><div className="rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold">Recent controlled records</h2><p className="mt-2 text-sm text-slate-600">Record references, values, counterparties and raw event payloads are intentionally excluded.</p><div className="mt-5 space-y-2">{recentRecords.length ? recentRecords.map((record, index) => <div key={`${record.channel}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm"><span>{record.channel}</span><span className="capitalize text-slate-600">{humanise(record.status)} · {dateTime(record.occurredAt)}</span></div>) : <p className="text-sm text-slate-600">No controlled records are available while the current sync evidence is pending.</p>}</div></div></section>}
+
+      {section === "reconciliation" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-emerald-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Reconciliation position</h2></div>{reconciliationEvidence ? <><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Controlled records" value={reconciliationEvidence.transactionCount} /><Metric label="Matched" value={reconciliationEvidence.matchedCount} /><Metric label="Open exceptions" value={reconciliationEvidence.exceptionCount} /><Metric label="Unmatched" value={reconciliationEvidence.unmatchedCount} /></div><p className="mt-5 text-sm text-slate-600">Current position of the controlled data set{reconciliationEvidence.asOf ? ` as of the last successful synchronisation on ${new Date(reconciliationEvidence.asOf).toLocaleString()}` : ""}, derived only from this Dev Store’s SHOPLINE order and payment channels. No generic settlement job is presented as SHOPLINE evidence. Unmatched counts every held record without a match, including any not yet examined by a reconciliation pass.</p></> : <p className="mt-5 text-sm text-slate-600">Reconciliation evidence is withheld until the current Dev Store synchronisation has completed successfully.</p>}</section>}
+
+      {section === "exceptions" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold">Controlled exception queue</h2><p className="mt-2 text-sm text-slate-600">These de-identified exception states are drawn only from the Dev Store channel pair. Human review remains required; no resolution action is available from this portal.</p><div className="mt-5 space-y-2">{openExceptions.length ? openExceptions.map((exception, index) => <div key={`${exception.category}-${index}`} className="grid gap-2 rounded-lg bg-slate-50 px-3 py-3 text-sm sm:grid-cols-4"><span className="capitalize font-medium">{humanise(exception.category)}</span><span className="capitalize text-slate-600">{exception.severity}</span><span className="capitalize text-slate-600">{humanise(exception.status)}</span><span className="text-slate-600">Raised {dateTime(exception.raisedAt)}</span></div>) : <p className="text-sm text-slate-600">No open controlled exceptions are available while the current sync evidence is pending.</p>}</div></section>}
+    </div>
+  </main>;
 }
