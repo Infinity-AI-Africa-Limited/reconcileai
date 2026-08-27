@@ -75,6 +75,20 @@ export interface SATransaction {
 export interface ParsedReference {
   invoiceNumbers: string[];           // ["INV-2847", "ORD-2847"]
   /**
+   * The reference joins an invoice identifier to another invoice-length number
+   * with an explicit list or range connector — "INV-1001 and 1002".
+   *
+   * The STRONG form of the split signal, and distinct from
+   * `mayNameMoreInvoices` because the two answer different questions and fail
+   * in opposite directions. This one says "that number IS another invoice",
+   * which is enough to CHOOSE the split category even over partial-payment
+   * wording. Its connector list is necessarily incomplete, and an omission
+   * makes a split read as a partial payment — a wrong label, but never a wrong
+   * number, because the weak signal below still stops the shortfall being
+   * quantified against one leg.
+   */
+  namesInvoiceList: boolean;
+  /**
    * The reference appears to name more invoices than `invoiceNumbers` holds,
    * because it lists or ranges them in shorthand ("INV-1001 and 1002").
    *
@@ -100,6 +114,26 @@ const DEDUCTION_PATTERNS: Array<{ pattern: RegExp; type: ParsedReference["deduct
 ];
 
 const INVOICE_PATTERN = /\b(INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?(\d{3,10})\b/gi;
+
+/**
+ * An invoice identifier joined to another invoice-length number by an explicit
+ * list or range connector: "INV-1001 and 1002", "INV-1001, 1002", "INV-2001-2005".
+ *
+ * The STRONG split signal. Adjacency through a connector is what says the second
+ * number IS another invoice rather than an amount or a date, and that is enough
+ * to choose `split_payment` even when partial-payment wording is also present —
+ * "INV-1001 and 1002 partial settlement" is a split remittance being paid in
+ * part, and the allocation question comes first.
+ *
+ * The connector set is necessarily incomplete, as review established. Here that
+ * fails SAFE: a missed connector makes a split read as a partial payment, which
+ * is a wrong label but never a wrong number — `mayNameMoreInvoices` still stops
+ * `determinateCandidates` quantifying a shortfall against one leg. That is the
+ * opposite direction from where this shape failed before, and the reason both
+ * signals exist instead of one.
+ */
+const INVOICE_LIST_CONNECTOR =
+  /\b(?:INV|ORD|PO|REF|TXN|PMT|REC|SIN|SINV|PINV)[-\s]?\d{3,10}\s*(?:[,&+\/–—;:|-]|\band\b|\bor\b|\bplus\b|\bto\b|\bthru\b|\bthrough\b)\s*\d{3,10}\b/i;
 
 /**
  * Numbers that are ACCOUNTED FOR, and so cannot be an unwritten invoice leg.
@@ -218,6 +252,7 @@ export function parseReference(ref: string | null | undefined, description: stri
 
   return {
     invoiceNumbers,
+    namesInvoiceList: INVOICE_LIST_CONNECTOR.test(raw),
     mayNameMoreInvoices: referenceMayNameMoreInvoices(raw, invoiceNumbers),
     deductionType,
     deductionKeywords,
@@ -683,6 +718,17 @@ function findSubsetSum(
 
 // ─── Layer 3: Categorical Exception Classifier ────────────────────────
 
+/**
+ * What the rule-based classifier can conclude.
+ *
+ * Every member is produced by a code path. Two were removed rather than given a
+ * branch: `duplicate_invoice` and `contra_entry` are not decidable from what
+ * this function receives — it is handed the COUNTERPART legs, not same-side
+ * siblings or credit notes — and duplicate detection already lives upstream in
+ * ingestion (content hashing) and in the core engine. Declaring a category the
+ * platform cannot reach is the type overstating what it does, which is the
+ * defect this whole review has been closing.
+ */
 export type ExceptionCategory =
   | "partial_payment"
   | "promotional_deduction"
@@ -695,8 +741,6 @@ export type ExceptionCategory =
   | "fx_variance"
   | "timing_difference"
   | "missing_counterparty"
-  | "duplicate_invoice"
-  | "contra_entry"
   | "unmatched_reversal"
   | "currency_mismatch"
   | "unmatched";
@@ -999,6 +1043,115 @@ function ruleBasedClassify(
   config: { amountTolerance: number; dateWindowDays: number },
   parsedRef: ParsedReference
 ): ExceptionDiagnosis {
+  // A reversal that reached diagnosis is one the engine could not pair.
+  //
+  // Checked FIRST, and ahead of every deduction branch, because it is not a
+  // deduction question at all: the money went back. `detectReversals` pairs a
+  // reversal with the item it reverses inside its own channel, so anything
+  // arriving here is unpaired — and until it is posted, the invoice still reads
+  // as settled while the cash is absent.
+  //
+  // Critical per the b2b_receipt_reversed_after_allocation taxonomy entry, and
+  // the reason is not the reconciliation break: the credit-limit test passes on
+  // money that never arrived, so further stock can be released to a distributor
+  // that has already failed to pay. That is the exposure, and it is why this
+  // outranks quantifying a shortfall.
+  if (txn.isReversal === true) {
+    return {
+      category: "unmatched_reversal",
+      severity: "critical",
+      confidence: 88,
+      headline: `Reversed receipt not yet paired — ${txn.transactionRef || `TXN-${txn.id}`}`,
+      rootCause: `This entry reverses an earlier receipt${txn.originalTransactionRef ? ` (${txn.originalTransactionRef})` : ""} and has not been matched to it. Any allocation made against the original still stands, so the invoice reads as settled while the cash is absent, and the distributor's credit position is overstated by ${txn.currency} ${txnAmt.toLocaleString()}.`,
+      shortfall: txnAmt,
+      deductionType: null,
+      recommendedAction: "Identify the original receipt and every allocation made against it, propose reversal of each, and notify the credit controller immediately — the credit-limit position is wrong until this is posted. Record the reversal reason from the bank or provider advice.",
+      autoResolvable: false,
+      suggestedActionType: "escalate_to_manager",
+      parsedRef,
+      fxVariance: null,
+    };
+  }
+
+  // A remittance covering several invoices is an ALLOCATION question, not a
+  // shortfall one.
+  //
+  // Ahead of the deduction branches deliberately. `determinateCandidates`
+  // refuses a split remittance, so `allTargets` is empty by the time a deduction
+  // branch would run and the shortfall it reported would be null anyway — but
+  // the category would read `unmatched`, i.e. "we could not find this payment",
+  // when in fact we found it and know exactly what makes it hard. Those are
+  // different pieces of work for a finance team, and only one of them is a
+  // request for the remittance advice.
+  //
+  // Split detection is the parser's, not a guess from the amount: an explicit
+  // split keyword, or a reference naming more than one invoice (including the
+  // shorthand forms, which is why `mayNameMoreInvoices` is consulted here too).
+  // Counted as DISTINCT identifiers, not raw hits. The same invoice number
+  // routinely appears in both the reference and the description ("INV-2847" /
+  // "payment for INV-2847"), so counting hits reads every ordinary receipt as a
+  // two-invoice remittance — the same trap `determinateCandidates` documents,
+  // and the reason it deduplicates through `normalizeStr` before deciding.
+  const distinctInvoices = new Set(parsedRef.invoiceNumbers.map((n) => normalizeStr(n)).filter(Boolean));
+  // Requires evidence of MORE THAN ONE INVOICE, not split-sounding wording.
+  //
+  // `isSplitPayment` is deliberately NOT a trigger. Its keyword set overlaps
+  // `isPartialPayment` on "partial", "instalment" and "installment", so keying
+  // on it sent a genuine part-payment of a SINGLE invoice down this branch —
+  // discarding the outstanding balance as null and handing finance an
+  // allocation workflow when the work is to chase the remainder. Those words
+  // describe a sequence of payments against one invoice; a split remittance is
+  // one payment across several, and only the invoice references show that.
+  // `mayNameMoreInvoices` is a WEAK signal here, and only usable against an
+  // explicit partial-payment reading.
+  //
+  // It was built for `determinateCandidates`, where firing conservatively means
+  // "decline to pick a target" — the safe direction. Choosing a CATEGORY
+  // inverts that: a false positive discards the outstanding balance and sends
+  // finance the wrong workflow. Same signal, opposite consequence, which is why
+  // it cannot simply be reused.
+  //
+  // It works by looking for invoice-length numbers nothing accounts for, so
+  // "INV-2847 installment 1000 of 5000" trips it on the instalment figures
+  // while naming exactly one invoice. `isPartialPayment` is the discriminator:
+  // true there, false on a genuine shorthand split like "INV-1001 and 1002".
+  // Two full references need no such help and stand on their own.
+  // Two signals, because they answer different questions and fail in opposite
+  // directions — using one for both jobs is what produced three rounds of
+  // findings here.
+  //
+  //   namesInvoiceList     STRONG. A connector joins the identifier to another
+  //                        invoice-length number, so that number IS another
+  //                        invoice. Enough to choose split even over partial
+  //                        wording: "INV-1001 and 1002 partial settlement" is a
+  //                        split being paid in part, and allocation comes first.
+  //   mayNameMoreInvoices  WEAK. Some invoice-length number is unaccounted for.
+  //                        Enough for determinateCandidates to decline a target,
+  //                        NOT enough to choose a category — the instalment
+  //                        figures in "installment 600000 of 1000000" trip it.
+  if (
+    distinctInvoices.size > 1 ||
+    parsedRef.namesInvoiceList ||
+    (parsedRef.mayNameMoreInvoices && !parsedRef.isPartialPayment)
+  ) {
+    return {
+      category: "split_payment",
+      severity: "medium",
+      confidence: 76,
+      headline: `Split remittance — ${txn.currency} ${txnAmt.toLocaleString()} across multiple invoices`,
+      rootCause: `The remittance covers more than one invoice${parsedRef.invoiceNumbers.length > 0 ? ` (${parsedRef.invoiceNumbers.join(", ")})` : ""}. Its total cannot be compared against any single invoice, so no shortfall is reported here: the open question is how the receipt divides, not whether it is short.`,
+      // Deliberately null. A shortfall against one leg would be the size of the
+      // other legs — the precise wrong number this module exists to avoid.
+      shortfall: null,
+      deductionType: parsedRef.deductionType === "none" ? null : parsedRef.deductionType,
+      recommendedAction: "Obtain the remittance advice and use it as the authoritative allocation. Where none exists, propose a split that sums exactly to the receipt and flag it as unconfirmed — and if several combinations of open invoices reach the same total, report the ambiguity rather than choosing one. Every allocation stays a proposal until a named human approves it.",
+      autoResolvable: false,
+      suggestedActionType: "payment_allocation",
+      parsedRef,
+      fxVariance: null,
+    };
+  }
+
   // Deduction-based categories (from parsed reference)
   if (parsedRef.deductionType === "damage") {
     const nearMatch = findNearestTarget(txnAmt, allTargets, 0.3);

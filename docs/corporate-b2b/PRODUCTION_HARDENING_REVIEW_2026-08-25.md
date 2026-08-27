@@ -199,7 +199,7 @@ when the evidence is indeterminate.
 > tenant that has never been run against it. Seeding writes to production, so it is **not** done
 > here; it needs the owner's go-ahead.
 
-### 2.9 Five declared exception categories were produced by nothing — **two fixed, three recorded**
+### 2.9 Five declared exception categories were produced by nothing — **resolved**
 
 `ExceptionCategory` declared fourteen members. Review flagged that `tax_deduction` had no branch in
 `ruleBasedClassify`; checking the rest found it was not alone:
@@ -223,8 +223,21 @@ is now `unspecified_deduction`: quantified, and routed to ask what it was for ra
 "we could not find this payment". The reason is deliberately **not** guessed; it is what decides
 whether the deduction is approved trade spend or an unauthorised shortfall.
 
-The four still produced by nothing need a classifier branch or removal from the union — a product
-decision, not a hardening one. A test pins them so the gap stays visible.
+The remaining four were resolved rather than deferred, each on whether the classifier has a signal
+for it at all:
+
+| Category | Decision | Why |
+|---|---|---|
+| `unmatched_reversal` | **branch added** | `txn.isReversal` is already on the record. Critical: until it is posted the invoice reads as settled while the cash is absent, so the credit-limit test passes on money that never arrived and further stock can be released to a distributor that has already failed to pay. That exposure, not the reconciliation break, is the reason it outranks every deduction branch |
+| `split_payment` | **branch added** | `isSplitPayment` plus the distinct-invoice count. It is the exact case `determinateCandidates` refuses, so it was reaching the queue as `unmatched` — "we could not find this payment" — when in fact we found it and know precisely what makes it hard. Reported with a **null shortfall**: against one leg it would be the size of the others |
+| `duplicate_invoice` | **removed** | Not decidable here. The classifier is handed COUNTERPART legs, not same-side siblings, and duplicate detection already lives upstream in ingestion (content hashing) and the core engine |
+| `contra_entry` | **removed** | Not decidable here either — it needs credit notes, which this function never receives |
+
+Declaring a category the platform cannot reach is the type overstating what it does, which is the
+defect this whole review has been closing; removing two of them is the same correction as fixing the
+other two. The test no longer pins a list of known gaps — it asserts the **invariant**, that no
+declared member is produced by nothing, and names any offender. Adding a member without a code path
+that emits it now fails.
 
 ### 2.10 Super Agent memory was filed against a non-existent organisation — **fixed and purged**
 
@@ -538,7 +551,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2107 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2143 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in
