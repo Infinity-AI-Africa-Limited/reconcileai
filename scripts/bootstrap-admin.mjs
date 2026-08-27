@@ -38,6 +38,52 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+// ── Guard: on-premise deployments only ──────────────────────────────────────
+//
+// This script mints a super_admin and prints a working sign-in link, and it is
+// idempotent — an existing user with the same address is RE-PROMOTED to
+// super_admin. Its only condition was DATABASE_URL being set: it would grant
+// platform-wide admin against whatever database that named, and print the
+// credential to use it.
+//
+// It does NOT read .env (deliberately — the slim runtime has no dotenv), so
+// this is not a bare-checkout accident. The realistic path is an operator doing
+// production maintenance, who already has DATABASE_URL exported or is in a
+// Railway shell where it is injected, running this to make an on-prem admin.
+// Nothing then distinguished that from the intended use.
+//
+// It exists for one situation, named in the header: an air-gapped box where
+// magic-link email cannot leave the network. That situation has a signal —
+// DEPLOYMENT_MODE=on_premise, which both compose stacks set on the app service
+// and every documented invocation inherits by running `docker compose exec app`.
+// The cloud deployment has working email, so admins are created in-app there and
+// this script is never needed.
+//
+// Allow-listed on that signal rather than blocked by target, because a hostname
+// denylist can always be re-spelled. DEPLOYMENT_MODE defaults to "cloud" when
+// unset (server/_core/env.ts), so the refusal is what happens by default.
+//
+// Deliberately BEFORE the connection: a refusal must not open a socket to a
+// production database, and scripts/bootstrapAdminGuard.test.ts proves it doesn't.
+if ((process.env.DEPLOYMENT_MODE ?? "cloud").toLowerCase() !== "on_premise") {
+  console.error(
+    [
+      "REFUSING: bootstrap-admin creates a super_admin and prints a sign-in link.",
+      "",
+      "It runs only on an on-premise deployment, where magic-link email cannot",
+      "leave the network. Set DEPLOYMENT_MODE=on_premise — both on-prem compose",
+      "stacks already do, so run it the documented way:",
+      "",
+      "  docker compose -f docker-compose.cpu.yml exec app \\",
+      "    node scripts/bootstrap-admin.mjs --email you@bank.com --name 'Ada Admin'",
+      "",
+      "On the cloud deployment, admins are invited from the app — email works there.",
+      "No database connection was opened.",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
+
 const conn = await mysql.createConnection(process.env.DATABASE_URL);
 try {
   // 1. Find or create the operator org (segment = super_admin).

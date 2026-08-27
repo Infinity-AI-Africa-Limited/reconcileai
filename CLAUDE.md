@@ -1370,6 +1370,48 @@ pnpm db:migrate
 > Use **`pnpm db:migrate`** — it applies committed migrations and generates
 > nothing. Railway already runs it as `preDeployCommand`, so a manual run should
 > be rare.
+>
+> ✅ **This is now a control, not a warning (PR #115).** `db:push` runs
+> `scripts/guardLocalDb.ts` first, which refuses unless `DATABASE_URL` names a
+> host that is *provably* local — loopback or `host.docker.internal`. There is
+> **no override**, for production or anything else. CI is unaffected
+> (`127.0.0.1`); Railway and on-prem are unaffected (both use `db:migrate`).
+>
+> The rule the guard follows is worth reusing: **enumerate what is provably
+> safe and refuse the rest.** Three review rounds each found the same bug in a
+> different disguise, because every earlier version classified what was
+> *dangerous* — an override, then a production hostname list that a trailing
+> dot walked past, then `db`/`mysql` sitting in the allow-list where any DNS
+> entry could claim them. A dangerous set can always be re-spelled; a safe set
+> cannot.
+
+> ⚠️ **`scripts/` inherits the same hazard, and how badly depends on whether
+> the script reads `.env`.** The local `.env` holds the production
+> `DATABASE_URL`, so anything that loads it targets the live database *by
+> default* — `archive-orgless-legacy.mjs`, `drain-unattributable-exceptions.mjs`
+> and `check-migration-drift.mjs` via `import "dotenv/config"`, and
+> `seed-fs-demo.mjs` by reading the file directly. The rest need
+> `DATABASE_URL` already exported, which is normal during production
+> maintenance and automatic in a Railway shell — quieter, not safe.
+>
+> Before adding a script that writes, decide which of these it is and say so in
+> its header:
+>
+> | | Control | Example |
+> |---|---|---|
+> | Never legitimate against a real tenant | refuse on a proven property | `seed-fs-demo.mjs` — requires segment `financial_services` **and** a name containing `(Demo)`; dry-run unless `--commit` |
+> | Only legitimate in one deployment | allow-list that deployment's signal | `bootstrap-admin.mjs` — refuses unless `DEPLOYMENT_MODE=on_premise`, **before** it opens a connection |
+> | Deliberate production maintenance | refuse to repeat itself | `archive-orgless-legacy.mjs` — aborts if its archive table already exists |
+>
+> `bootstrap-admin.mjs` mints a **super_admin** and prints a working sign-in
+> link, and re-promotes an existing user with the same address. Until it was
+> gated, its only condition was `DATABASE_URL` being set — so an operator with
+> production credentials already exported, creating an on-prem admin, had
+> nothing distinguishing that from granting platform-wide admin on the live
+> product. Tests in
+> `scripts/bootstrapAdminGuard.test.ts` run the real script and assert it
+> refuses *without opening a socket*. `scripts/**/*.test.ts` is in the vitest
+> `include` list — check a new test is actually collected, or it is decoration.
 
 ### Background Jobs
 The durable job queue is **built** (`server/jobQueue.ts`): reconciliation runs and webhook

@@ -23,6 +23,10 @@ export default defineConfig({
       // outside client/src precisely because they import Node-only tooling —
       // a parser in client source is one careless import away from the bundle.
       "tools/**/*.test.ts",
+      // Operational scripts. Their guards are the tested part — a script that
+      // can write to production is only as safe as the check that stops it, and
+      // an uncollected test is the same as no test.
+      "scripts/**/*.test.ts",
     ],
   },
 });
