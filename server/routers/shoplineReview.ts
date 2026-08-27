@@ -15,10 +15,29 @@ import { slConnectorStores, slConnectorWebhookEvents } from "../../drizzle/conne
 import { shoplineOrdersChannelCode, shoplinePaymentsChannelCode } from "../connectors/shopline/onboarding";
 import { getDb } from "../db";
 import { getAccess } from "../pocAccess";
+import { createRateLimiter } from "../rateLimiter";
+import { getClientInfo } from "./shared";
 import { publicProcedure, router } from "../_core/trpc";
 
 export const SHOPLINE_REVIEW_POC_KEY = "shopline_review";
 const REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
+
+/**
+ * Per-IP ceiling on the only anonymous, database-backed surface we expose.
+ *
+ * While this portal was token-gated, its cost was bounded by who held the link.
+ * Public access removes that bound: one unauthenticated snapshot fans out to
+ * eight queries, including two aggregate joins across `transactions` and
+ * `exceptions` — the same tables serving live tenants on the shared TiDB
+ * instance. An open evidence page and a production database are reachable
+ * through one URL, so the ceiling belongs here rather than in front of it.
+ *
+ * 30/minute is far above real use (the page issues ONE query per load; the
+ * section tabs are client-side and refetch nothing) and far below what would
+ * trouble the database.
+ */
+export const REVIEW_PORTAL_RATE_LIMIT = { windowMs: 60_000, max: 30 } as const;
+export const reviewPortalLimiter = createRateLimiter(REVIEW_PORTAL_RATE_LIMIT);
 
 export function isPublicShoplineReviewEnabled(access: { enabled: boolean } | null | undefined): boolean {
   // In the established POC model, `enabled=false` means token protection is
@@ -108,6 +127,21 @@ export function reviewSyncStatus({
 }
 
 const reviewProcedure = publicProcedure.use(async ({ ctx, next }) => {
+  // Rate limit BEFORE the access lookup, which is itself a query. Checking
+  // permission first would leave a flood costing one database round-trip per
+  // request even while every one of them is refused — the limiter would be
+  // guarding the expensive half of a request whose cheap half was already
+  // unbounded. This check is in-memory and holds whether the portal is open
+  // or closed.
+  const { ip } = getClientInfo(ctx);
+  const limit = reviewPortalLimiter.check(`shopline-review:${ip}`);
+  if (!limit.allowed) {
+    throw new TRPCError({
+      code: "TOO_MANY_REQUESTS",
+      message: `Too many review portal requests. Please retry in ${limit.retryAfterSec}s.`,
+    });
+  }
+
   const access = await getAccess(SHOPLINE_REVIEW_POC_KEY);
   if (!isPublicShoplineReviewEnabled(access)) {
     throw new TRPCError({ code: "FORBIDDEN", message: "The public SHOPLINE review portal is currently unavailable." });

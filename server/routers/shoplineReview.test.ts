@@ -1,7 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { isPublicShoplineReviewEnabled, REVIEW_STORE_HANDLE, reviewerChannelCodes, SHOPLINE_REVIEW_POC_KEY, reviewSyncStatus } from "./shoplineReview";
+import {
+  isPublicShoplineReviewEnabled,
+  REVIEW_PORTAL_RATE_LIMIT,
+  REVIEW_STORE_HANDLE,
+  reviewerChannelCodes,
+  reviewPortalLimiter,
+  SHOPLINE_REVIEW_POC_KEY,
+  reviewSyncStatus,
+} from "./shoplineReview";
 
 describe("SHOPLINE review workspace", () => {
   it("uses a dedicated administrator-controlled public review key", () => {
@@ -162,7 +170,7 @@ describe("when the workspace picks which store to report on", () => {
     ]);
   });
 
-  it("should order before limiting", () => {
+  it("should order before limiting the store lookup", () => {
     // `limit(1)` alone takes whatever row the engine returns first, which is not
     // a defined choice. A second active install under the review org would make
     // this page alternate between two stores' figures across refreshes, with
@@ -173,5 +181,94 @@ describe("when the workspace picks which store to report on", () => {
       ROUTER.indexOf(".limit(1)", ROUTER.indexOf(".from(slConnectorStores)")),
     );
     expect(storeQuery).toMatch(/orderBy\(desc\(slConnectorStores\.installedAt\)\)/);
+  });
+});
+
+describe("when the portal is reachable without a credential", () => {
+  const ROUTER = fs.readFileSync(path.join(__dirname, "shoplineReview.ts"), "utf8");
+
+  beforeEach(() => reviewPortalLimiter.reset());
+
+  it("should allow ordinary reviewer use and refuse a flood from one address", () => {
+    const ip = "203.0.113.10";
+    for (let i = 0; i < REVIEW_PORTAL_RATE_LIMIT.max; i += 1) {
+      expect(reviewPortalLimiter.check(`shopline-review:${ip}`).allowed).toBe(true);
+    }
+    const blocked = reviewPortalLimiter.check(`shopline-review:${ip}`);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it("should not let one blocked address lock everyone else out", () => {
+    const noisy = "shopline-review:203.0.113.10";
+    for (let i = 0; i <= REVIEW_PORTAL_RATE_LIMIT.max; i += 1) reviewPortalLimiter.check(noisy);
+    expect(reviewPortalLimiter.check(noisy).allowed).toBe(false);
+    expect(reviewPortalLimiter.check("shopline-review:198.51.100.7").allowed).toBe(true);
+  });
+
+  it("should rate limit before it reads the access row", () => {
+    // Order is the whole point. The access lookup is itself a query, so checking
+    // permission first leaves a flood costing one database round-trip per
+    // request even while every one is refused — the limiter would be guarding
+    // the expensive half of a request whose cheap half stayed unbounded.
+    const guard = ROUTER.slice(ROUTER.indexOf("const reviewProcedure"), ROUTER.indexOf("export const shoplineReviewRouter"));
+    const limitAt = guard.indexOf("reviewPortalLimiter.check");
+    const accessAt = guard.indexOf("getAccess(SHOPLINE_REVIEW_POC_KEY)");
+    expect(limitAt).toBeGreaterThan(-1);
+    expect(accessAt).toBeGreaterThan(-1);
+    expect(limitAt).toBeLessThan(accessAt);
+  });
+
+  it("should not send a reviewer to an access-code prompt no one can satisfy", () => {
+    // This portal is public-or-closed; PocAccessGate can only express
+    // invite-or-closed, and answers a closed portal by asking for the code from
+    // an invitation link. The hub replaced this POC's token controls with the
+    // public switch, so no such code is obtainable any more — the gate would
+    // block a SHOPLINE reviewer on the very page whose submission claim is that
+    // no credential is needed. The server guard is the boundary; the gate never
+    // was one.
+    const APP = fs.readFileSync(path.join(__dirname, "..", "..", "client", "src", "App.tsx"), "utf8");
+    const route = APP.slice(APP.indexOf('<Route path="/shopline-review">'), APP.indexOf('<Route path="/shopline/connect">'));
+    expect(route).toMatch(/<ShoplineReviewWorkspace \/>/);
+    expect(route).not.toMatch(/PocAccessGate/);
+  });
+
+  it("should keep the public evidence page out of search indexes", () => {
+    // The kill switch controls the origin; it cannot recall a search result
+    // already cached against a named integration on a credential-free URL.
+    const PAGE = fs.readFileSync(path.join(__dirname, "..", "..", "client", "src", "pages", "ShoplineReviewWorkspace.tsx"), "utf8");
+    expect(PAGE).toMatch(/meta\.name = "robots"/);
+    expect(PAGE).toMatch(/noindex, nofollow/);
+    expect(PAGE).toMatch(/useNoIndex\(\);/);
+  });
+});
+
+describe("when an administrator reads the public-access kill switch", () => {
+  const HUB = fs.readFileSync(path.join(__dirname, "..", "..", "client", "src", "pages", "PocHub.tsx"), "utf8");
+
+  it("should name the unknown state rather than reporting a failed read as closed", () => {
+    // For a control whose job is answering "is this open to the internet right
+    // now?", showing a failed read as "Disabled" is the one wrong answer: an
+    // operator checking that the portal is shut would be told yes on no
+    // evidence.
+    expect(HUB).toMatch(/cfg\.isError \|\| !cfg\.data/);
+    expect(HUB).toMatch(/Unknown — the portal state could not be read/);
+  });
+
+  it("should offer only the closing action while the state is unknown", () => {
+    // The error directions are not symmetric. Closing on a stale reading costs a
+    // reviewer a page load; opening on one publishes Dev Store evidence while
+    // nobody can see the current state. `willOpen` is true only for a state read
+    // as closed, so `unknown` presents "Disable public access".
+    expect(HUB).toMatch(/const willOpen = state === "closed";/);
+  });
+
+  it("should confirm a public-exposure change with the app's own dialog", () => {
+    // Native confirm() is suppressible ("prevent this page from creating
+    // additional dialogs"), unstyled, and untestable — a poor fit for the
+    // control that decides whether this data is on the open internet.
+    const control = HUB.slice(HUB.indexOf("function ShoplinePublicReviewControl"), HUB.indexOf("// Per-recipient invite links"));
+    expect(control).not.toMatch(/\bconfirm\(/);
+    expect(control).toMatch(/<AlertDialog\b/);
   });
 });

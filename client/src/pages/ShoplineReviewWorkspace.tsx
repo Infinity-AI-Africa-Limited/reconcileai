@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2, Clock3, Database, Eye, LockKeyhole, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 
@@ -6,6 +6,31 @@ type Section = "overview" | "connection" | "activity" | "reconciliation" | "exce
 
 function dateTime(value: Date | null | undefined) {
   return value ? new Date(value).toLocaleString() : "Not yet recorded";
+}
+
+/** Underscore-separated enum → readable text. `replaceAll`, because `manually_matched` and `retail_gateway_fee_variance` have more than one. */
+function humanise(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+/**
+ * Keep the portal out of search results for as long as it is public.
+ *
+ * Everything here is controlled Dev Store evidence, but it is evidence about a
+ * named integration on a public URL with no login in front of it — exactly what
+ * a crawler indexes and then keeps serving from cache long after the switch is
+ * turned off. The kill switch controls the origin; it cannot recall a search
+ * result. Scoped to this route and removed on unmount, so it never leaks onto
+ * the rest of the SPA.
+ */
+function useNoIndex() {
+  useEffect(() => {
+    const meta = document.createElement("meta");
+    meta.name = "robots";
+    meta.content = "noindex, nofollow";
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }, []);
 }
 
 function ReviewTab({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) {
@@ -18,6 +43,7 @@ function Metric({ label, value }: { label: string; value: number | string }) {
 
 export default function ShoplineReviewWorkspace() {
   const [section, setSection] = useState<Section>("overview");
+  useNoIndex();
   const snapshot = trpc.shoplineReview.snapshot.useQuery(undefined, { retry: false, refetchOnWindowFocus: false });
 
   if (snapshot.isLoading) return <main className="min-h-screen bg-slate-50 p-6 text-slate-700">Loading the SHOPLINE review portal…</main>;
@@ -47,11 +73,11 @@ export default function ShoplineReviewWorkspace() {
 
       {section === "connection" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-medium text-slate-500">CONNECTION EVIDENCE</p><h2 className="mt-1 text-xl font-semibold">SHOPLINE Dev Store: {connection.storeHandle}</h2></div><span className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium ${needsAttention ? "bg-rose-100 text-rose-800" : awaitingFirstSync ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>{needsAttention ? <TriangleAlert className="h-4 w-4" aria-hidden="true" /> : awaitingFirstSync ? <Clock3 className="h-4 w-4" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}{connection.statusDetail.label}</span></div><p className="mt-4 text-sm leading-6 text-slate-600">{connection.statusDetail.detail}</p><dl className="mt-6 grid gap-4 border-t border-slate-100 pt-5 sm:grid-cols-3"><div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Connection status</dt><dd className="mt-1 text-sm font-medium capitalize">{connection.status}</dd></div><div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Installed</dt><dd className="mt-1 text-sm font-medium">{dateTime(connection.installedAt)}</dd></div><div><dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Last successful sync</dt><dd className="mt-1 text-sm font-medium">{dateTime(connection.lastSyncAt)}</dd></div></dl><div className="mt-5"><p className="text-xs font-medium uppercase tracking-wide text-slate-500">Granted read-only scopes</p><p className="mt-2 text-sm text-slate-700">{connection.scopes.length ? connection.scopes.join(", ") : "No scopes recorded"}</p></div></section>}
 
-      {section === "activity" && <section className="mt-6 grid gap-6 lg:grid-cols-2"><div className="rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><RefreshCw className="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Webhook evidence</h2></div><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Received" value={webhookEvidence.total} /><Metric label="Processed" value={webhookEvidence.processed} /><Metric label="Pending" value={webhookEvidence.pending} /><Metric label="Needs attention" value={webhookEvidence.attention} /></div><p className="mt-5 text-sm text-slate-600">Recent authorised webhook topics: {webhookEvidence.recentTopics.length ? webhookEvidence.recentTopics.map((event) => event.topic).join(", ") : "None recorded"}.</p></div><div className="rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold">Recent controlled records</h2><p className="mt-2 text-sm text-slate-600">Record references, values, counterparties and raw event payloads are intentionally excluded.</p><div className="mt-5 space-y-2">{recentRecords.length ? recentRecords.map((record, index) => <div key={`${record.channel}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm"><span>{record.channel}</span><span className="capitalize text-slate-600">{record.status.replace("_", " ")} · {dateTime(record.occurredAt)}</span></div>) : <p className="text-sm text-slate-600">No controlled records are available while the current sync evidence is pending.</p>}</div></div></section>}
+      {section === "activity" && <section className="mt-6 grid gap-6 lg:grid-cols-2"><div className="rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><RefreshCw className="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Webhook evidence</h2></div><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Received" value={webhookEvidence.total} /><Metric label="Processed" value={webhookEvidence.processed} /><Metric label="Pending" value={webhookEvidence.pending} /><Metric label="Needs attention" value={webhookEvidence.attention} /></div><p className="mt-5 text-sm text-slate-600">Recent authorised webhook topics: {webhookEvidence.recentTopics.length ? webhookEvidence.recentTopics.map((event) => event.topic).join(", ") : "None recorded"}.</p></div><div className="rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold">Recent controlled records</h2><p className="mt-2 text-sm text-slate-600">Record references, values, counterparties and raw event payloads are intentionally excluded.</p><div className="mt-5 space-y-2">{recentRecords.length ? recentRecords.map((record, index) => <div key={`${record.channel}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm"><span>{record.channel}</span><span className="capitalize text-slate-600">{humanise(record.status)} · {dateTime(record.occurredAt)}</span></div>) : <p className="text-sm text-slate-600">No controlled records are available while the current sync evidence is pending.</p>}</div></div></section>}
 
       {section === "reconciliation" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><div className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-emerald-700" aria-hidden="true" /><h2 className="text-lg font-semibold">Reconciliation position</h2></div>{reconciliationEvidence ? <><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Controlled records" value={reconciliationEvidence.transactionCount} /><Metric label="Matched" value={reconciliationEvidence.matchedCount} /><Metric label="Open exceptions" value={reconciliationEvidence.exceptionCount} /><Metric label="Unmatched" value={reconciliationEvidence.unmatchedCount} /></div><p className="mt-5 text-sm text-slate-600">Current position of the controlled data set{reconciliationEvidence.asOf ? ` as of the last successful synchronisation on ${new Date(reconciliationEvidence.asOf).toLocaleString()}` : ""}, derived only from this Dev Store’s SHOPLINE order and payment channels. No generic settlement job is presented as SHOPLINE evidence. Unmatched counts every held record without a match, including any not yet examined by a reconciliation pass.</p></> : <p className="mt-5 text-sm text-slate-600">Reconciliation evidence is withheld until the current Dev Store synchronisation has completed successfully.</p>}</section>}
 
-      {section === "exceptions" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold">Controlled exception queue</h2><p className="mt-2 text-sm text-slate-600">These de-identified exception states are drawn only from the Dev Store channel pair. Human review remains required; no resolution action is available from this portal.</p><div className="mt-5 space-y-2">{openExceptions.length ? openExceptions.map((exception, index) => <div key={`${exception.category}-${index}`} className="grid gap-2 rounded-lg bg-slate-50 px-3 py-3 text-sm sm:grid-cols-4"><span className="capitalize font-medium">{exception.category.replaceAll("_", " ")}</span><span className="capitalize text-slate-600">{exception.severity}</span><span className="capitalize text-slate-600">{exception.status.replace("_", " ")}</span><span className="text-slate-600">Raised {dateTime(exception.raisedAt)}</span></div>) : <p className="text-sm text-slate-600">No open controlled exceptions are available while the current sync evidence is pending.</p>}</div></section>}
+      {section === "exceptions" && <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold">Controlled exception queue</h2><p className="mt-2 text-sm text-slate-600">These de-identified exception states are drawn only from the Dev Store channel pair. Human review remains required; no resolution action is available from this portal.</p><div className="mt-5 space-y-2">{openExceptions.length ? openExceptions.map((exception, index) => <div key={`${exception.category}-${index}`} className="grid gap-2 rounded-lg bg-slate-50 px-3 py-3 text-sm sm:grid-cols-4"><span className="capitalize font-medium">{humanise(exception.category)}</span><span className="capitalize text-slate-600">{exception.severity}</span><span className="capitalize text-slate-600">{humanise(exception.status)}</span><span className="text-slate-600">Raised {dateTime(exception.raisedAt)}</span></div>) : <p className="text-sm text-slate-600">No open controlled exceptions are available while the current sync evidence is pending.</p>}</div></section>}
     </div>
   </main>;
 }
