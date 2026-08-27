@@ -93,6 +93,14 @@ export const shoplineReviewRouter = router({
         .innerJoin(organizations, eq(organizations.id, slConnectorStores.organizationId))
         .leftJoin(slConnectorTokens, eq(slConnectorTokens.slStoreId, slConnectorStores.id))
         .where(and(eq(organizations.code, REVIEW_ORG_CODE), eq(slConnectorStores.status, "active")))
+        // Ordered before limiting. `limit(1)` on its own takes whatever row the
+        // engine returns first, which is not a defined choice — so a second
+        // active install under the review org (a reinstall that left the prior
+        // row active, say) would make this page alternate between two stores'
+        // figures across refreshes, with nothing on screen to indicate it. The
+        // reviewer would be reading numbers that changed for no visible reason.
+        // Newest install wins, and the same store is reported every time.
+        .orderBy(desc(slConnectorStores.installedAt))
         .limit(1);
 
       if (!store) throw new TRPCError({ code: "NOT_FOUND", message: "The ReconcileAI Dev Store review connection is not active." });

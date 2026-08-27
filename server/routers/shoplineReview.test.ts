@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { reviewerChannelCodes, SHOPLINE_REVIEW_POC_KEY, reviewSyncStatus } from "./shoplineReview";
 
 describe("SHOPLINE review workspace", () => {
@@ -32,5 +34,22 @@ describe("SHOPLINE review workspace", () => {
       lastSyncError: "prior failure",
       tokenRefreshedAt: null,
     })).toMatchObject({ code: "attention" });
+  });
+});
+
+describe("when the workspace picks which store to report on", () => {
+  const ROUTER = fs.readFileSync(path.join(__dirname, "shoplineReview.ts"), "utf8");
+
+  it("should order before limiting", () => {
+    // `limit(1)` alone takes whatever row the engine returns first, which is not
+    // a defined choice. A second active install under the review org would make
+    // this page alternate between two stores' figures across refreshes, with
+    // nothing on screen to say so — a reviewer reading numbers that change for
+    // no visible reason.
+    const storeQuery = ROUTER.slice(
+      ROUTER.indexOf(".from(slConnectorStores)"),
+      ROUTER.indexOf(".limit(1)", ROUTER.indexOf(".from(slConnectorStores)")),
+    );
+    expect(storeQuery).toMatch(/orderBy\(desc\(slConnectorStores\.installedAt\)\)/);
   });
 });
