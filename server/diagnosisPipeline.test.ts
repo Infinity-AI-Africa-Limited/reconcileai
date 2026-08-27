@@ -297,21 +297,93 @@ describe("every deduction reason produces a quantified diagnosis", () => {
  * the rest are pinned here so the gap is a stated open item instead of a type
  * that quietly overstates what the platform does.
  */
-describe("the declared category union versus what is produced", () => {
-  it("should record the categories no code path produces", async () => {
+describe("a reversed receipt", () => {
+  it("should outrank every deduction reason and report the exposure, not a deduction", async () => {
+    // The money went back. Checked before the deduction branches because it is
+    // not a deduction question — and critical because the credit-limit test
+    // passes on money that never arrived, so stock can be released to a
+    // distributor that has already failed to pay.
+    const txn = receipt(950_000, "INV-2847", "REVERSAL of INV-2847 less promo");
+    txn.isReversal = true;
+    txn.originalTransactionRef = "BANK-INV-2847";
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("unmatched_reversal");
+    expect(diagnosis.severity).toBe("critical");
+    // The exposure is the whole reversed amount, not a difference against an invoice.
+    expect(diagnosis.shortfall).toBeCloseTo(950_000, 2);
+    expect(diagnosis.rootCause).toMatch(/BANK-INV-2847/);
+    expect(diagnosis.recommendedAction).toMatch(/credit controller/i);
+  });
+
+  it("should not claim a reversal when the row is an ordinary receipt", async () => {
+    // The control: `isReversal` must drive this, not the word "reversal"
+    // appearing somewhere in a narration.
+    const txn = receipt(950_000, "INV-2847", "PAYMENT INV-2847 less promo");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("promotional_deduction");
+  });
+});
+
+describe("a split remittance", () => {
+  it.each([
+    ["INV-2847 INV-2848", "two invoices named in full"],
+    ["INV-2847 and 2848", "a shorthand list"],
+    ["INV-2847 part payment 1 of 3", "an explicit split keyword"],
+  ])("should be reported as an allocation question: %s (%s)", async (ref) => {
+    const txn = receipt(1_500_000, ref, `remittance ${ref}`);
+    const { diagnosis } = await diagnose(txn, [
+      invoice(1_000_000, "INV-2847"),
+      invoice(500_000, "INV-2848"),
+    ]);
+
+    expect(diagnosis.category).toBe("split_payment");
+    // No shortfall: against one leg it would be the size of the other.
+    expect(diagnosis.shortfall).toBeNull();
+    expect(diagnosis.suggestedActionType).toBe("payment_allocation");
+    expect(diagnosis.recommendedAction).toMatch(/remittance advice/i);
+  });
+
+  it("should not report a single-invoice deduction as a split", async () => {
+    // The control: one invoice with a deduction is a shortfall question, and
+    // must still be quantified.
+    const txn = receipt(950_000, "INV-2847", "PAYMENT INV-2847 less promo");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("promotional_deduction");
+    expect(diagnosis.shortfall).toBeCloseTo(50_000, 2);
+  });
+});
+
+/**
+ * Every declared category is now reachable.
+ *
+ * `ExceptionCategory` used to declare members that no code path produced, which
+ * is the type overstating what the platform does. `tax_deduction`,
+ * `unspecified_deduction`, `split_payment` and `unmatched_reversal` were given
+ * branches; `duplicate_invoice` and `contra_entry` were REMOVED, because the
+ * classifier is handed counterpart legs — not same-side siblings or credit
+ * notes — and cannot decide either, while duplicate detection already lives
+ * upstream in ingestion and the core engine.
+ *
+ * This asserts the invariant rather than a list of exceptions to it: adding a
+ * member without a code path that emits it fails here.
+ */
+describe("the declared category union", () => {
+  it("should contain no member that nothing produces", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync(new URL("./superAgentEngine.ts", import.meta.url), "utf8");
+
+    const union = src.slice(src.indexOf("export type ExceptionCategory ="));
+    const declared = [...union.slice(0, union.indexOf(";")).matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
     const produced = new Set([...src.matchAll(/category: "([a-z_]+)"/g)].map((m) => m[1]));
 
-    // Declared, produced by NOTHING anywhere in the server. Each needs a
-    // classifier branch or removal from the union — a product decision, not a
-    // hardening one. `timing_difference` and `currency_mismatch` are produced
-    // elsewhere in the platform and are deliberately absent from this list.
-    for (const key of ["split_payment", "duplicate_invoice", "contra_entry", "unmatched_reversal"]) {
-      expect(produced.has(key), `${key} is newly produced — remove it from the orphaned list`).toBe(false);
-    }
-    // The two the fix above added must now be produced, or this test is stale.
-    expect(produced.has("tax_deduction")).toBe(true);
-    expect(produced.has("unspecified_deduction")).toBe(true);
+    // Produced elsewhere in the platform rather than by this classifier, and
+    // named so the exemption is a statement rather than a silent gap.
+    const producedElsewhere = new Set(["timing_difference", "currency_mismatch"]);
+
+    const orphaned = declared.filter((c) => !produced.has(c) && !producedElsewhere.has(c));
+    expect(orphaned, `declared but produced by nothing: ${orphaned.join(", ")}`).toEqual([]);
+    // Guard against the union being emptied or the slice failing to parse.
+    expect(declared.length).toBeGreaterThan(8);
   });
 });
