@@ -1,8 +1,16 @@
 /**
  * Seed the Corporate B2B demo tenant (BrightGoods Nigeria Ltd (Demo)).
  *
- *   node scripts/seed-b2b-demo.mjs             # dry run — reports, writes nothing
- *   node scripts/seed-b2b-demo.mjs --commit    # actually writes
+ *   node scripts/seed-b2b-demo.mjs                  # dry run — reports, writes nothing
+ *   npx tsx scripts/seed-b2b-demo.mjs --commit      # actually writes
+ *   npx tsx scripts/seed-b2b-demo.mjs --memory-only --commit
+ *
+ * The writing modes MUST run under `tsx`. They import the seeder from
+ * `server/`, whose module graph is TypeScript with extensionless imports and a
+ * tsconfig path alias, and plain Node cannot resolve any of that — it aborts
+ * with ERR_UNKNOWN_FILE_EXTENSION before touching the database. The dry run
+ * needs none of it and runs under either. The guard below turns that failure
+ * into the command to use instead of a module-resolution stack trace.
  *
  * ── Why this script exists ────────────────────────────────────────────────
  *
@@ -95,19 +103,45 @@ if (!COMMIT) {
   process.exit(0);
 }
 
+/**
+ * Load the seeder, or explain how to.
+ *
+ * Nothing has been written at this point, so failing here is safe — the guards
+ * and the dry run have already done their work.
+ */
+async function loadSeeder(specifier) {
+  try {
+    return await import(specifier);
+  } catch (err) {
+    if (err?.code === "ERR_UNKNOWN_FILE_EXTENSION" || err?.code === "ERR_MODULE_NOT_FOUND") {
+      console.error(
+        `
+REFUSING: the writing modes need TypeScript module resolution, which plain Node does not provide.` +
+        `
+Nothing was written. Re-run with tsx:
+
+  npx tsx ${process.argv.slice(1).join(" ")}
+`,
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
 let result;
 if (MEMORY_ONLY) {
   console.log("\nSeeding memory layer only...");
   const [{ getDb }, { seedMemoryLayer }] = await Promise.all([
-    import("../server/db.ts"),
-    import("../server/demoSeedEngine.ts"),
+    loadSeeder("../server/db.ts"),
+    loadSeeder("../server/demoSeedEngine.ts"),
   ]);
   const orm = await getDb();
   if (!orm) throw new Error("Database not available");
   result = { memoryIds: await seedMemoryLayer(orm, TARGET_ORG) };
 } else {
   console.log("\nSeeding full FMCG demo dataset...");
-  const { seedFmcgDemoData } = await import("../server/demoSeedEngine.ts");
+  const { seedFmcgDemoData } = await loadSeeder("../server/demoSeedEngine.ts");
   result = await seedFmcgDemoData(owner.id, TARGET_ORG);
 }
 
