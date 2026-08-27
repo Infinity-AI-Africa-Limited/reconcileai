@@ -7,16 +7,21 @@
  * account, inbox, or password.
  */
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { exceptions, organizations, reconciliationJobs, transactions } from "../../drizzle/schema";
+import { channels, exceptions, organizations, transactions } from "../../drizzle/schema";
 import { slConnectorStores, slConnectorTokens, slConnectorWebhookEvents } from "../../drizzle/connector_schema";
+import { shoplineOrdersChannelCode, shoplinePaymentsChannelCode } from "../connectors/shopline/onboarding";
 import { getDb } from "../db";
 import { assertPocAccess, tokenFromCtx } from "../pocAccess";
 import { publicProcedure, router } from "../_core/trpc";
 
 export const SHOPLINE_REVIEW_POC_KEY = "shopline_review";
 const REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
+
+export function reviewerChannelCodes(storeHandle: string) {
+  return [shoplineOrdersChannelCode(storeHandle), shoplinePaymentsChannelCode(storeHandle)] as const;
+}
 
 type SyncInputs = {
   lastSyncAt: Date | null;
@@ -109,29 +114,38 @@ export const shoplineReviewRouter = router({
         .orderBy(desc(slConnectorWebhookEvents.receivedAt))
         .limit(5);
 
-      const [latestRun] = await db
+      const channelCodes = reviewerChannelCodes(store.storeHandle);
+      const reviewChannels = await db
         .select({
-          status: reconciliationJobs.status,
-          completedAt: reconciliationJobs.completedAt,
-          sourceCount: reconciliationJobs.totalSourceTxns,
-          targetCount: reconciliationJobs.totalTargetTxns,
-          matchedCount: reconciliationJobs.matchedCount,
-          exceptionCount: reconciliationJobs.exceptionCount,
-          unmatchedCount: reconciliationJobs.unmatchedCount,
+          id: channels.id,
+          code: channels.code,
         })
-        .from(reconciliationJobs)
-        .where(and(eq(reconciliationJobs.organizationId, store.organizationId), eq(reconciliationJobs.moduleType, "settlement")))
-        .orderBy(desc(reconciliationJobs.completedAt))
-        .limit(1);
+        .from(channels)
+        .where(and(
+          eq(channels.organizationId, store.organizationId),
+          inArray(channels.code, [...channelCodes]),
+        ));
 
-      const [recordCounts] = await db
+      const channelIds = reviewChannels.map((channel) => channel.id);
+      const hasChannelPair = channelCodes.every((code) => reviewChannels.some((channel) => channel.code === code));
+      const [recordCounts] = hasChannelPair
+        ? await db
         .select({
           transactions: sql<number>`count(distinct ${transactions.id})`,
+          matchedTransactions: sql<number>`count(distinct case when ${transactions.status} in ('matched', 'manually_matched') then ${transactions.id} end)`,
+          unmatchedTransactions: sql<number>`count(distinct case when ${transactions.status} = 'unmatched' then ${transactions.id} end)`,
           openExceptions: sql<number>`count(distinct case when ${exceptions.status} in ('open', 'in_review', 'escalated') then ${exceptions.id} end)`,
         })
         .from(transactions)
-        .leftJoin(exceptions, eq(exceptions.transactionId, transactions.id))
-        .where(eq(transactions.organizationId, store.organizationId));
+        .leftJoin(exceptions, and(
+          eq(exceptions.transactionId, transactions.id),
+          eq(exceptions.organizationId, store.organizationId),
+        ))
+        .where(and(
+          eq(transactions.organizationId, store.organizationId),
+          inArray(transactions.channelId, channelIds),
+        ))
+        : [];
 
       return {
         workspace: {
@@ -155,21 +169,14 @@ export const shoplineReviewRouter = router({
           attention: Number(webhookCounts?.attention ?? 0),
           recentTopics: recentTopics.map((event) => ({ topic: event.topic, receivedAt: event.receivedAt })),
         },
-        reconciliationEvidence: latestRun
+        reconciliationEvidence: hasChannelPair && recordCounts
           ? {
-              status: latestRun.status,
-              completedAt: latestRun.completedAt,
-              sourceCount: latestRun.sourceCount,
-              targetCount: latestRun.targetCount,
-              matchedCount: latestRun.matchedCount,
-              exceptionCount: latestRun.exceptionCount,
-              unmatchedCount: latestRun.unmatchedCount,
+              transactionCount: Number(recordCounts.transactions ?? 0),
+              matchedCount: Number(recordCounts.matchedTransactions ?? 0),
+              exceptionCount: Number(recordCounts.openExceptions ?? 0),
+              unmatchedCount: Number(recordCounts.unmatchedTransactions ?? 0),
             }
           : null,
-        controlledDataCounts: {
-          transactions: Number(recordCounts?.transactions ?? 0),
-          openExceptions: Number(recordCounts?.openExceptions ?? 0),
-        },
       };
     }),
 });

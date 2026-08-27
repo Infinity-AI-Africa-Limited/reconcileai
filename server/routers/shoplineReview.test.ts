@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { SHOPLINE_REVIEW_POC_KEY, reviewSyncStatus } from "./shoplineReview";
+import { reviewerChannelCodes, SHOPLINE_REVIEW_POC_KEY, reviewSyncStatus } from "./shoplineReview";
 
 describe("SHOPLINE review workspace", () => {
   it("uses a dedicated, revocable POC access key", () => {
     expect(SHOPLINE_REVIEW_POC_KEY).toBe("shopline_review");
+  });
+
+  it("derives reconciliation evidence only from the Dev Store's canonical SHOPLINE channel pair", () => {
+    expect(reviewerChannelCodes("reconcileai-dev")).toEqual([
+      "sl_orders_reconcileai-dev",
+      "sl_payments_reconcileai-dev",
+    ]);
   });
 
   it("does not claim a current sync after OAuth was refreshed following a failed attempt", () => {
