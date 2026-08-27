@@ -1067,7 +1067,21 @@ function ruleBasedClassify(
   // allocation workflow when the work is to chase the remainder. Those words
   // describe a sequence of payments against one invoice; a split remittance is
   // one payment across several, and only the invoice references show that.
-  if (distinctInvoices.size > 1 || parsedRef.mayNameMoreInvoices) {
+  // `mayNameMoreInvoices` is a WEAK signal here, and only usable against an
+  // explicit partial-payment reading.
+  //
+  // It was built for `determinateCandidates`, where firing conservatively means
+  // "decline to pick a target" — the safe direction. Choosing a CATEGORY
+  // inverts that: a false positive discards the outstanding balance and sends
+  // finance the wrong workflow. Same signal, opposite consequence, which is why
+  // it cannot simply be reused.
+  //
+  // It works by looking for invoice-length numbers nothing accounts for, so
+  // "INV-2847 installment 1000 of 5000" trips it on the instalment figures
+  // while naming exactly one invoice. `isPartialPayment` is the discriminator:
+  // true there, false on a genuine shorthand split like "INV-1001 and 1002".
+  // Two full references need no such help and stand on their own.
+  if (distinctInvoices.size > 1 || (parsedRef.mayNameMoreInvoices && !parsedRef.isPartialPayment)) {
     return {
       category: "split_payment",
       severity: "medium",

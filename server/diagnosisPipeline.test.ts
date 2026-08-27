@@ -427,3 +427,45 @@ describe("the declared category union", () => {
     expect(declared.length).toBeGreaterThan(8);
   });
 });
+
+describe("an instalment whose reference carries figures", () => {
+  it("should not be read as a split just because unaccounted numbers appear", async () => {
+    // `mayNameMoreInvoices` looks for invoice-length numbers nothing accounts
+    // for, so the instalment figures trip it while exactly one invoice is
+    // named. It was built for determinateCandidates, where firing
+    // conservatively means "decline to pick a target" — safe. Choosing a
+    // category inverts the consequence: the balance would be discarded.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 installment 600000 of 1000000");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("partial_payment");
+    // The BALANCE is still not quantified, and that is correct rather than a
+    // half-fix: `determinateCandidates` independently declines on the same
+    // ambiguous digits, and declining is ITS safe direction. Relaxing it there
+    // would reopen the split-remittance hole — a receipt naming two invoices
+    // plus partial wording would attach to one leg and report a shortfall the
+    // size of the other. The category is the part that was wrong, and the
+    // finance workflow follows the category.
+    expect(diagnosis.shortfall).toBeNull();
+  });
+
+  it("should quantify the balance when the reference carries no stray figures", async () => {
+    // The control: the null above is caused by the ambiguous digits, not by
+    // partial payments having lost their shortfall.
+    const txn = receipt(600_000, "INV-2847", "PAYMENT INV-2847 partial payment");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe("partial_payment");
+    expect(diagnosis.shortfall).toBeCloseTo(400_000, 2);
+  });
+
+  it("should still read a genuine shorthand split as a split", async () => {
+    // The control: `isPartialPayment` is the discriminator, so the shorthand
+    // signal must keep working where no instalment wording is present.
+    const txn = receipt(1_500_000, "INV-1001 and 1002", "remittance INV-1001 and 1002");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-1001"), invoice(500_000, "INV-1002")]);
+
+    expect(diagnosis.category).toBe("split_payment");
+    expect(diagnosis.shortfall).toBeNull();
+  });
+});
