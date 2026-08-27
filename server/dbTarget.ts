@@ -18,11 +18,19 @@
  *
  * ── Fails closed ──────────────────────────────────────────────────────────
  *
- * Only clearly-local hosts are allowed. Anything else is refused, including
- * hosts nobody has thought about yet: a new staging box or a colleague's tunnel
- * should have to be named deliberately rather than inherit permission from a
- * pattern. The failure mode of the opposite default is a shared database with an
- * unreviewed schema on it, which is exactly what this exists to stop.
+ * Only clearly-local hosts are allowed. Everything else is refused, and there is
+ * no override — not for production, and not for a staging box either.
+ *
+ * The override existed briefly and was removed, because it could not be made
+ * safe. It was gated on a host NOT being in the production list, and a list of
+ * hostnames is a denylist: `prod.example.com.` with its DNS root dot, the same
+ * cluster's IP, or a CNAME in front of it all miss the entry and would have been
+ * waved through as ordinary remote hosts. Allow-listing what is local is the
+ * only direction that fails closed, so the allow-list is all there is.
+ *
+ * Nothing legitimate is lost. `db:migrate` applies committed migrations, and
+ * `drizzle-kit generate` authors one locally; generate-and-apply against a
+ * shared database is the operation with no honest use.
  *
  * CI is unaffected — it runs against `127.0.0.1` — and so is the Railway deploy,
  * which runs `db:migrate` (no generate) rather than `db:push`.
@@ -41,19 +49,28 @@ const LOCAL_HOSTS = new Set([
 ]);
 
 /**
- * Hosts that are the live product. `db:push` against these is never legitimate
- * and is NOT overridable — see `classifyDatabaseTarget`.
+ * Hosts known to be the live product.
  *
- * A hostname is not a secret (the password in the URL is), and naming it here is
- * what lets the refusal be unconditional rather than advisory. Extendable with
- * PRODUCTION_DB_HOSTS for another deployment of this codebase.
+ * This is a LABEL, not a control — it decides which refusal a developer reads,
+ * not whether they are refused. Every non-local host is refused either way, so
+ * an alias missing from this set costs a clearer message and nothing more.
+ * Extendable with PRODUCTION_DB_HOSTS for another deployment of this codebase;
+ * a hostname is not a secret (the password in the URL is).
  */
 export function productionHosts(extra?: string | null): Set<string> {
-  const configured = (extra ?? "")
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter(Boolean);
+  const configured = (extra ?? "").split(",").map(normaliseHost).filter(Boolean);
   return new Set(["gateway02.us-east-1.prod.aws.tidbcloud.com", ...configured]);
+}
+
+/**
+ * Fold a hostname to one spelling before ANY comparison.
+ *
+ * A trailing dot is the DNS root form of the same name — `example.com.` and
+ * `example.com` reach the same machine, but they are different strings, and that
+ * was enough to walk past an exact match. Case folds for the same reason.
+ */
+function normaliseHost(host: string): string {
+  return host.trim().toLowerCase().replace(/\.+$/, "");
 }
 
 export type DbTargetVerdict =
@@ -73,13 +90,14 @@ export function classifyDatabaseTarget(
     return { local: false, host: null, reason: "unparseable" };
   }
   if (!host) return { local: false, host: null, reason: "unparseable" };
-  const lower = host.toLowerCase();
+  const lower = normaliseHost(host);
   if (LOCAL_HOSTS.has(lower)) return { local: true, host };
-  // Production is separated from "some other remote host" deliberately. The two
-  // are not the same decision: pushing to a colleague's staging box is a choice
-  // someone may legitimately make, and pushing an unreviewed working-tree
-  // migration to the live product is the thing that broke three deploys. One
-  // gets an escape hatch; the other does not.
+  // Production is still labelled separately, but only so the refusal can say
+  // which mistake was made. Nothing hangs on the distinction any more: both
+  // reasons refuse, unconditionally. It used to gate an override, and that was
+  // the bug — an alias of production (a trailing dot, an IP, a CNAME) is not in
+  // this set, would have been labelled an ordinary remote host, and would have
+  // been overridable. A denylist cannot be the thing a control depends on.
   if (productionHosts(extraProductionHosts).has(lower)) {
     return { local: false, host, reason: "production" };
   }
@@ -96,7 +114,6 @@ export function describeDbTargetRefusal(
   // a branch for "explain why the allowed thing was refused", which is not a
   // state that exists.
   verdict: Extract<DbTargetVerdict, { local: false }>,
-  override: string,
 ): string {
   const isProduction = verdict.reason === "production";
   const lines = [
@@ -133,8 +150,11 @@ export function describeDbTargetRefusal(
   } else {
     lines.push(
       "",
-      `If you genuinely mean this, set ${override}=${verdict.host ?? "<host>"} for the single command.`,
-      "(Naming the host is required, so a stale =1 in a shell profile cannot authorise it.)",
+      "There is no override for any host. An earlier revision offered one for",
+      "non-production targets, which quietly reopened the same hole: an alias of",
+      "production — a trailing dot, an IP, a CNAME — is not in the production list,",
+      "so it would have been treated as an ordinary remote host and let through.",
+      "Point DATABASE_URL at a local database instead.",
     );
   }
   return lines.join("\n");

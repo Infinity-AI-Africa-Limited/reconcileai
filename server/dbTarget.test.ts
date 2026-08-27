@@ -12,6 +12,13 @@ import { classifyDatabaseTarget, describeDbTargetRefusal } from "./dbTarget";
 const PRODUCTION = "mysql://user:pw@gateway02.us-east-1.prod.aws.tidbcloud.com:4000/reconcileai";
 const CI = "mysql://root:root@127.0.0.1:3306/reconcileai_test";
 
+/** Every refusal, so a new spelling of "allowed" has to be added here on purpose. */
+function refusalFor(url: string, extraProductionHosts?: string): string {
+  const verdict = classifyDatabaseTarget(url, extraProductionHosts);
+  if (verdict.local) throw new Error(`expected ${url} to be refused, but it was allowed`);
+  return describeDbTargetRefusal(verdict);
+}
+
 describe("when db:push points at the real production database", () => {
   it("should refuse it", () => {
     // The exact host this repo's local .env carries, which is how 0084, 0085 and
@@ -23,18 +30,14 @@ describe("when db:push points at the real production database", () => {
 
   it("should name the host in the refusal, and never the URL", () => {
     // The host makes the mistake obvious; the URL carries the password.
-    const verdict = classifyDatabaseTarget(PRODUCTION);
-    if (verdict.local) throw new Error("expected production to be refused");
-    const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
+    const text = refusalFor(PRODUCTION);
     expect(text).toContain("gateway02.us-east-1.prod.aws.tidbcloud.com");
     expect(text).not.toContain("pw");
     expect(text).not.toContain(PRODUCTION);
   });
 
   it("should point at the command the developer probably wanted", () => {
-    const verdict = classifyDatabaseTarget(PRODUCTION);
-    if (verdict.local) throw new Error("expected production to be refused");
-    const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
+    const text = refusalFor(PRODUCTION);
     expect(text).toContain("pnpm db:migrate");
     expect(text).toContain("drizzle-kit generate");
   });
@@ -63,55 +66,72 @@ describe("when DATABASE_URL is missing or malformed", () => {
   it("should refuse rather than assume it is safe", () => {
     // Fails closed: an unreadable target is not evidence of a harmless one.
     for (const value of [undefined, null, "", "   ", "not a url"]) {
-      expect(classifyDatabaseTarget(value).local, `${JSON.stringify(value)} must not pass`).toBe(false);
+      expect(classifyDatabaseTarget(value).local, `${JSON.stringify(value)} must not pass`).toBe(
+        false,
+      );
     }
   });
 });
 
 describe("when the host is simply unfamiliar", () => {
   it("should refuse a staging or tunnelled host rather than guess", () => {
-    // Deliberate: a new environment should be named on purpose, not inherit
-    // permission from a pattern that happens to match.
+    // Deliberate: an unrecognised host is refused outright. It used to be
+    // refused-unless-named, which is what the alias hole exploited.
     for (const host of ["staging.example.com", "10.0.0.5", "my-tunnel.ngrok.io"]) {
       expect(classifyDatabaseTarget(`mysql://u:p@${host}:3306/db`).local, `${host}`).toBe(false);
     }
   });
 });
 
-describe("when the target is production", () => {
-  it("should be classified apart from any other remote host", () => {
-    // Not the same decision: pushing to a colleague's staging box is a choice
-    // someone may legitimately make; pushing an unreviewed working-tree
-    // migration to the live product is what broke 0084, 0085 and 0090.
-    expect(classifyDatabaseTarget(PRODUCTION)).toMatchObject({ local: false, reason: "production" });
-    expect(classifyDatabaseTarget("mysql://u:p@staging.example.com:3306/db")).toMatchObject({
-      local: false,
-      reason: "remote_host",
-    });
-  });
-
-  it("should say plainly that it cannot be overridden, and offer no escape hatch", () => {
-    const verdict = classifyDatabaseTarget(PRODUCTION);
-    if (verdict.local) throw new Error("expected production to be refused");
-    const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
-    expect(text).toContain("cannot be overridden");
-    expect(text).toContain("no override for production");
-    // The refusal must not hand over the very lever it is refusing to provide.
-    expect(text).not.toMatch(/set ALLOW_REMOTE_DB_PUSH=/);
-  });
-
-  it("should still offer the named override for an ordinary remote host", () => {
-    const verdict = classifyDatabaseTarget("mysql://u:p@staging.example.com:3306/db");
-    if (verdict.local) throw new Error("expected a refusal");
-    const text = describeDbTargetRefusal(verdict, "ALLOW_REMOTE_DB_PUSH");
-    // Named, not `=1`, so a stale value in a shell profile cannot authorise a
-    // host it was never meant for.
-    expect(text).toContain("ALLOW_REMOTE_DB_PUSH=staging.example.com");
-  });
-
-  it("should let another deployment name its own production host", () => {
+describe("when production is spelled a different way", () => {
+  it("should still recognise the DNS root form with its trailing dot", () => {
+    // `host.` and `host` reach the same cluster. As different strings they used
+    // to land on opposite sides of an exact match, and the non-production side
+    // was the overridable one — so the trailing dot WAS the bypass.
     expect(
-      classifyDatabaseTarget("mysql://u:p@db.acme.internal:3306/x", "db.acme.internal"),
+      classifyDatabaseTarget(
+        "mysql://u:p@gateway02.us-east-1.prod.aws.tidbcloud.com.:4000/reconcileai",
+      ),
+    ).toMatchObject({ local: false, reason: "production" });
+  });
+
+  it("should recognise it whatever the casing", () => {
+    expect(
+      classifyDatabaseTarget("mysql://u:p@GATEWAY02.US-EAST-1.PROD.AWS.TIDBCLOUD.COM:4000/x"),
+    ).toMatchObject({ local: false, reason: "production" });
+  });
+
+  it("should normalise a configured production host the same way", () => {
+    // Otherwise PRODUCTION_DB_HOSTS="Db.Acme.Internal." would never match anything.
+    expect(
+      classifyDatabaseTarget("mysql://u:p@db.acme.internal:3306/x", " Db.Acme.Internal. "),
     ).toMatchObject({ reason: "production" });
+  });
+
+  it("should refuse an alias it does not recognise at all", () => {
+    // The point of removing the override: an unlisted alias of production — an
+    // IP, a CNAME — is refused anyway. Being un-labelled costs a clearer
+    // message, not the protection.
+    expect(classifyDatabaseTarget("mysql://u:p@10.20.30.40:4000/reconcileai").local).toBe(false);
+  });
+});
+
+describe("when a developer looks for a way around the refusal", () => {
+  it("should offer none, for production or for any other host", () => {
+    // A guard with a documented way around it is a speed bump. This asserts the
+    // absence of a lever, so reintroducing one fails here rather than in prod.
+    for (const url of [
+      PRODUCTION,
+      "mysql://u:p@staging.example.com:3306/db",
+      "mysql://u:p@10.20.30.40:4000/x",
+    ]) {
+      const text = refusalFor(url);
+      expect(text, url).not.toMatch(/ALLOW_REMOTE_DB_PUSH/);
+      expect(text, url).toContain("no override");
+    }
+  });
+
+  it("should say plainly that production cannot be overridden", () => {
+    expect(refusalFor(PRODUCTION)).toContain("cannot be overridden");
   });
 });
