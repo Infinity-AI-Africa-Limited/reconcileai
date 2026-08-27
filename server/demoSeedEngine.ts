@@ -629,7 +629,7 @@ export async function seedFinservDemoData(userId: number, orgId: number | null):
 
 // ── Shared Memory Layer Seed ───────────────────────────────────────────
 
-async function seedMemoryLayer(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId: number | null): Promise<number[]> {
+export async function seedMemoryLayer(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId: number | null): Promise<number[]> {
   const memorySeeds = [
     { category: "amount_mismatch", transactionRef: "INV-2701", amountRange: "1m+" as const, deductionType: "promotional_deduction", resolution: "Issued credit note for ₦450,000 promotional deduction. Posted to Promotional Allowances GL.", outcome: "resolved" as const, reasoning: "Distributor provided promotional claim form signed by Area Sales Manager. Deduction was within approved promotional budget for Q3.", embeddingText: "partial payment promotional deduction kola ventures invoice amount mismatch credit note" },
     { category: "amount_mismatch", transactionRef: "INV-2712", amountRange: "1m+" as const, deductionType: "fx_bank_fee", resolution: "Auto-approved match. Posted ₦1,200 bank charge to Bank Charges GL.", outcome: "resolved" as const, reasoning: "Variance of ₦1,200 (0.05%) is consistent with standard inter-bank transfer fee. Below 0.5% tolerance threshold.", embeddingText: "fx bank fee deduction amount mismatch tolerance inter-bank transfer charge auto-approve" },
@@ -649,15 +649,35 @@ async function seedMemoryLayer(db: NonNullable<Awaited<ReturnType<typeof getDb>>
     { category: "missing_counterparty", transactionRef: "NIP-TRUNC-00389", amountRange: "1m+" as const, deductionType: undefined, resolution: "NIP sender name truncated by NIBSS gateway. Account number match confirmed. Posted to correct account.", outcome: "resolved" as const, reasoning: "NIBSS gateway truncated sender name to 12 characters. Account number (10 digits) used as primary identifier. Match confirmed.", embeddingText: "nip nibss gateway truncated sender name account number match inter-bank transfer settlement" },
   ];
 
+  // Memory is the Super Agent's institutional-learning layer (CLAUDE.md §9A),
+  // so it is tenant data and a seed with no owning tenant has nowhere to put it.
+  // `orgId ?? 0` filed it against organisation 0 — no tenant at all — which is
+  // the phantom-tenant failure §9C describes and is where 40 rows from earlier
+  // runs still sit. Writes take the strict reading: no organisation, no rows.
+  if (orgId == null) {
+    console.log("[DemoSeed] Skipping memory seed — no owning organizationId. Memory is tenant data.");
+    return [];
+  }
+
   const memoryIds: number[] = [];
   for (const m of memorySeeds) {
-    // Check if already exists to avoid duplicates
+    // Check if already exists to avoid duplicates — WITHIN THIS TENANT.
+    //
+    // Unscoped, this matched another organisation's row with the same seeded
+    // reference and pushed ITS id, skipping the insert. The caller was handed a
+    // list of ids belonging to a different tenant and the target org received no
+    // memory at all: seeding BrightGoods returned 15 ids while leaving it with
+    // zero rows. Same class as the cross-tenant reads in readScopeRatchet — an
+    // id from one tenant used to make a decision about another.
     const existing = await db.select().from(agentMemory)
-      .where(eq(agentMemory.transactionRef, m.transactionRef))
+      .where(and(
+        eq(agentMemory.organizationId, orgId),
+        eq(agentMemory.transactionRef, m.transactionRef),
+      ))
       .limit(1);
     if (existing[0]) { memoryIds.push(existing[0].id); continue; }
     await db.insert(agentMemory).values({
-      organizationId: orgId ?? 0,
+      organizationId: orgId,
       exceptionCategory: m.category,
       transactionRef: m.transactionRef,
       amountRange: m.amountRange,
@@ -668,8 +688,13 @@ async function seedMemoryLayer(db: NonNullable<Awaited<ReturnType<typeof getDb>>
       reasoning: m.reasoning,
       embeddingText: m.embeddingText,
     });
+    // Scoped for the same reason as the check above: reading back by reference
+    // alone can return another tenant's row.
     const allMemory = await db.select().from(agentMemory)
-      .where(eq(agentMemory.transactionRef, m.transactionRef))
+      .where(and(
+        eq(agentMemory.organizationId, orgId),
+        eq(agentMemory.transactionRef, m.transactionRef),
+      ))
       .limit(1);
     if (allMemory[0]) memoryIds.push(allMemory[0].id);
   }
