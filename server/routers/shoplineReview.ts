@@ -19,6 +19,19 @@ import { publicProcedure, router } from "../_core/trpc";
 export const SHOPLINE_REVIEW_POC_KEY = "shopline_review";
 const REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
 
+/**
+ * The canonical dev store this workspace speaks for (CLAUDE.md §2B.10B).
+ *
+ * Pinned by HANDLE, not by whichever install happens to be newest. Two
+ * development stores exist under the partner account — `reconcileai-dev` and the
+ * secondary `reconcileai` — so "newest active install in the org" can silently
+ * become a different store than the one every other piece of evidence, and the
+ * page's own title, refers to. The handle also drives `reviewerChannelCodes`,
+ * so pinning it keeps the connection, the channels and the counts describing one
+ * store rather than three possibly-different ones.
+ */
+export const REVIEW_STORE_HANDLE = "reconcileai-dev";
+
 export function reviewerChannelCodes(storeHandle: string) {
   return [shoplineOrdersChannelCode(storeHandle), shoplinePaymentsChannelCode(storeHandle)] as const;
 }
@@ -36,7 +49,26 @@ export function reviewSyncStatus({
   lastSyncError,
   tokenRefreshedAt,
 }: SyncInputs) {
-  if (tokenRefreshedAt && (!lastSyncAttemptAt || tokenRefreshedAt > lastSyncAttemptAt)) {
+  // A newer token is NOT on its own evidence of reauthorization.
+  //
+  // tokenStore writes `refreshedAt` on every rotation, and the connector rotates
+  // proactively at ~9h against a 10h TTL — so on a perfectly healthy store the
+  // token is routinely newer than the last sync attempt. Keyed on that alone,
+  // this branch labelled a working connection "Reauthorized — verification
+  // pending" as a matter of course, which on a page built to demonstrate the
+  // integration reads as a fault that is not there. The schema has no field
+  // separating a re-grant from a routine refresh, so the credential timestamp
+  // cannot carry that meaning by itself.
+  //
+  // What the state is actually for: there is no successful sync we can point to
+  // since something went wrong. So it needs an unverified sync as well as a
+  // newer credential — which is exactly the case the tests describe, a refresh
+  // following a failed attempt.
+  const noVerifiedSyncSinceFailure =
+    Boolean(lastSyncError) && (!lastSyncAt || (lastSyncAttemptAt !== null && lastSyncAttemptAt > lastSyncAt));
+  const credentialNewerThanAttempt = Boolean(tokenRefreshedAt) && (!lastSyncAttemptAt || tokenRefreshedAt! > lastSyncAttemptAt);
+
+  if (credentialNewerThanAttempt && (noVerifiedSyncSinceFailure || !lastSyncAt)) {
     return {
       code: "reauthorized_pending" as const,
       label: "Reauthorized — synchronisation verification pending",
@@ -92,7 +124,14 @@ export const shoplineReviewRouter = router({
         .from(slConnectorStores)
         .innerJoin(organizations, eq(organizations.id, slConnectorStores.organizationId))
         .leftJoin(slConnectorTokens, eq(slConnectorTokens.slStoreId, slConnectorStores.id))
-        .where(and(eq(organizations.code, REVIEW_ORG_CODE), eq(slConnectorStores.status, "active")))
+        .where(and(
+          eq(organizations.code, REVIEW_ORG_CODE),
+          // Pinned to the canonical handle. Without it, a super admin
+          // provisioning a second SHOPLINE store under this org would have its
+          // connection, webhooks and counts presented as the Dev Store's.
+          eq(slConnectorStores.storeHandle, REVIEW_STORE_HANDLE),
+          eq(slConnectorStores.status, "active"),
+        ))
         // Ordered before limiting. `limit(1)` on its own takes whatever row the
         // engine returns first, which is not a defined choice — so a second
         // active install under the review org (a reinstall that left the prior
@@ -136,7 +175,25 @@ export const shoplineReviewRouter = router({
 
       const channelIds = reviewChannels.map((channel) => channel.id);
       const hasChannelPair = channelCodes.every((code) => reviewChannels.some((channel) => channel.code === code));
-      const [recordCounts] = hasChannelPair
+
+      // Reconciliation evidence requires a sync that actually FINISHED, not just
+      // channels that exist.
+      //
+      // Rows can be present without any reconciliation having completed: the
+      // settlement-file import writes transactions without touching lastSyncAt,
+      // and a cycle can persist records and then fail. In both cases everything
+      // sits at `unmatched`, and reporting that under "Reconciliation evidence"
+      // tells a reviewer the engine ran and matched nothing — when it did not
+      // run to completion at all.
+      //
+      // `lastSyncAt` is the right gate because syncOrchestrator advances it only
+      // on a fully successful cycle (`{ lastSyncAt: now, lastSyncError: null }`);
+      // a failure writes lastSyncAttemptAt and the error instead. A later failure
+      // after an earlier success still shows that success, which is honest — the
+      // failure itself is disclosed in `connection.statusDetail`.
+      const hasCompletedSync = store.lastSyncAt !== null;
+      const canShowReconciliation = hasChannelPair && hasCompletedSync;
+      const [recordCounts] = canShowReconciliation
         ? await db
         .select({
           transactions: sql<number>`count(distinct ${transactions.id})`,
@@ -177,7 +234,7 @@ export const shoplineReviewRouter = router({
           attention: Number(webhookCounts?.attention ?? 0),
           recentTopics: recentTopics.map((event) => ({ topic: event.topic, receivedAt: event.receivedAt })),
         },
-        reconciliationEvidence: hasChannelPair && recordCounts
+        reconciliationEvidence: canShowReconciliation && recordCounts
           ? {
               transactionCount: Number(recordCounts.transactions ?? 0),
               matchedCount: Number(recordCounts.matchedTransactions ?? 0),
