@@ -239,3 +239,79 @@ describe("a deduction stated the way remittances actually state it", () => {
     expect(parsed.deductionKeywords).toContain("deduction");
   });
 });
+
+/**
+ * Every deduction reason the parser can return must produce a quantified
+ * diagnosis, not fall through to `unmatched`.
+ *
+ * `tax_deduction` was a DECLARED `ExceptionCategory` that nothing produced: the
+ * type asserted the platform classifies withholding tax while every "less WHT"
+ * remittance fell through with a null shortfall. The generic `discount` reason
+ * had no branch either. Both matter for an FMCG pilot — WHT is one of the
+ * commonest deductions in both launch geographies, and it is the one whose
+ * shortfall is NOT collectible from the distributor.
+ */
+describe("every deduction reason produces a quantified diagnosis", () => {
+  it.each([
+    ["less dmg claim", "damage", "damage_deduction"],
+    ["less promo allowance", "promotional", "promotional_deduction"],
+    ["less WHT deducted at source", "tax", "tax_deduction"],
+    ["less 5,000", "discount", "unspecified_deduction"],
+  ])("%s (%s) should be classified as %s with the shortfall quantified", async (narration, reason, category) => {
+    const txn = receipt(950_000, "INV-2847", `PAYMENT INV-2847 ${narration}`);
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+
+    expect(diagnosis.category).toBe(category);
+    expect(diagnosis.deductionType).toBe(reason);
+    expect(diagnosis.shortfall).toBeCloseTo(50_000, 2);
+    // None of these may be closed by the agent: a deduction is a proposal for a
+    // named human until its evidence exists (gate B4).
+    expect(diagnosis.autoResolvable).toBe(false);
+  });
+
+  it("should treat an unevidenced withholding-tax deduction as high severity", async () => {
+    // Not a filing nicety: without the certificate the amount is neither
+    // recoverable from the payer nor claimable against the tax liability, so it
+    // is a real loss sitting in receivables.
+    const txn = receipt(950_000, "INV-2847", "PAYMENT INV-2847 less WHT");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.severity).toBe("high");
+    expect(diagnosis.recommendedAction).toMatch(/certificate|credit note/i);
+  });
+
+  it("should not invent a reason for a deduction that gave none", async () => {
+    // The reason decides whether it is approved trade spend or an unauthorised
+    // shortfall. Guessing one is the fabrication this module keeps refusing.
+    const txn = receipt(950_000, "INV-2847", "PAYMENT INV-2847 less 5,000");
+    const { diagnosis } = await diagnose(txn, [invoice(1_000_000, "INV-2847")]);
+    expect(diagnosis.category).toBe("unspecified_deduction");
+    expect(diagnosis.recommendedAction).toMatch(/reason/i);
+  });
+});
+
+/**
+ * Which categories the rule-based classifier can actually produce.
+ *
+ * Recorded rather than implied, because `ExceptionCategory` declares fifteen and
+ * a third of them were reachable from nowhere. `tax_deduction` is fixed above;
+ * the rest are pinned here so the gap is a stated open item instead of a type
+ * that quietly overstates what the platform does.
+ */
+describe("the declared category union versus what is produced", () => {
+  it("should record the categories no code path produces", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(new URL("./superAgentEngine.ts", import.meta.url), "utf8");
+    const produced = new Set([...src.matchAll(/category: "([a-z_]+)"/g)].map((m) => m[1]));
+
+    // Declared, produced by NOTHING anywhere in the server. Each needs a
+    // classifier branch or removal from the union — a product decision, not a
+    // hardening one. `timing_difference` and `currency_mismatch` are produced
+    // elsewhere in the platform and are deliberately absent from this list.
+    for (const key of ["split_payment", "duplicate_invoice", "contra_entry", "unmatched_reversal"]) {
+      expect(produced.has(key), `${key} is newly produced — remove it from the orphaned list`).toBe(false);
+    }
+    // The two the fix above added must now be produced, or this test is stale.
+    expect(produced.has("tax_deduction")).toBe(true);
+    expect(produced.has("unspecified_deduction")).toBe(true);
+  });
+});

@@ -199,6 +199,51 @@ when the evidence is indeterminate.
 > tenant that has never been run against it. Seeding writes to production, so it is **not** done
 > here; it needs the owner's go-ahead.
 
+### 2.9 Five declared exception categories were produced by nothing — **two fixed, three recorded**
+
+`ExceptionCategory` declared fourteen members. Review flagged that `tax_deduction` had no branch in
+`ruleBasedClassify`; checking the rest found it was not alone:
+
+| Category | Produced by |
+|---|---|
+| `tax_deduction` | **nothing** — now fixed |
+| `split_payment`, `duplicate_invoice`, `contra_entry`, `unmatched_reversal` | **nothing** — recorded, not built |
+| `timing_difference`, `currency_mismatch` | elsewhere in the platform |
+
+So the type asserted the platform classifies withholding tax while every `"less WHT"` remittance fell
+through to `unmatched` with a null shortfall. That is the wrong answer in both launch geographies:
+WHT is one of the commonest deductions an FMCG distributor takes, and it is the one whose shortfall
+is **not collectible from the distributor** — absent the certificate it is neither recoverable from
+the payer nor claimable against the tax liability, so it is a real loss sitting in receivables.
+Severity `high`, per the `b2b_withholding_tax_deduction` taxonomy entry.
+
+The generic `discount` reason ("less", "minus", "net of") had no branch either — fixing only the
+flagged one would have left the identical hole a line away — so a deduction stated without a reason
+is now `unspecified_deduction`: quantified, and routed to ask what it was for rather than reported as
+"we could not find this payment". The reason is deliberately **not** guessed; it is what decides
+whether the deduction is approved trade spend or an unauthorised shortfall.
+
+The four still produced by nothing need a classifier branch or removal from the union — a product
+decision, not a hardening one. A test pins them so the gap stays visible.
+
+### 2.10 Super Agent memory was filed against a non-existent organisation — **fixed and purged**
+
+`seedMemoryLayer` wrote `organizationId: orgId ?? 0` and deduped on `transactionRef` with no tenant
+predicate. Two consequences, both found by seeding the Corporate B2B tenant:
+
+- the unscoped dedupe matched **another organisation's** row and pushed its id, skipping the insert —
+  seeding BrightGoods reported 15 memory ids while leaving the tenant with zero rows;
+- rows written without an owning tenant landed on organisation 0, which has no `organizations` row
+  at all — the phantom tenant of §9C, and the same shape as the misfiled distributors in §19.2.
+
+Both are fixed: the dedupe and read-back are tenant-scoped, and a seed with no organisation now
+writes nothing rather than inventing a tenant for the rows.
+
+**55 orphaned rows were purged** (`scripts/purge-orgless-agent-memory.mjs`, backed up first). All 55
+carried `exceptionId IS NULL` — seed rows, not learned outcomes from real resolutions — so no
+institutional learning was lost, and the cross-organisation pattern pool that fed on them is no
+longer diluted by demo content. `agent_memory` now contains only rows belonging to a real tenant.
+
 ## 3. Other production hardening in this change
 
 | Area | Finding | Change |
@@ -493,7 +538,7 @@ record, executed DPA or parallel-run evidence exists. **This review does not mov
 | Corporate B2B taxonomy | 16 tests pass |
 | Super Agent segment prompt | 6 tests pass; 4 fail when the segment wiring is disabled (verified) |
 | M2M allocation + candidate selection | 21 tests pass; every guard was reverted and confirmed to fail (verified) |
-| Full suite | 2100 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
+| Full suite | 2107 passing (was 1977); CI green on Tests, Typecheck & Build, Greptile Review |
 
 > **Local-run caveat, stated rather than glossed.** `vitest` loads no `.env` and the config sets no
 > `setupFiles`, so `DATABASE_URL` is unset in a local run and `getDb()` returns null. Five tests in
