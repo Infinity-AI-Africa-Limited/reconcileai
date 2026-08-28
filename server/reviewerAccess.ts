@@ -101,17 +101,49 @@ export const REVIEWER_ROLE = REVIEWER_ROLES.tenant;
  * org is excluded — it holds no tenant data and is never `isDemo`.
  */
 export async function platformScopeIsSafe(): Promise<boolean> {
+  return (await blockingRealTenants(1)).length === 0;
+}
+
+/**
+ * WHICH organisations are holding the gate shut.
+ *
+ * Shipped after the gate refused in production and the operator had a greyed-out
+ * option, a sentence saying a non-demo organisation existed, and no way to find
+ * out which one — so the only route forward was to ask an engineer. A control
+ * that cannot be acted on is only half a control; naming the row turns a
+ * dead end into one click on the organisation list.
+ *
+ * The cause was benign and will recur: a SHOPLINE App Store reviewer installing
+ * the app auto-provisions a tenant, and onboarding does not mark it a demo. Over
+ * a review that runs weeks, that will happen again.
+ */
+const UNREADABLE = { id: -1, code: null, name: "unknown — the database could not be read" };
+
+export async function blockingRealTenants(limit = 10): Promise<Array<{ id: number; code: string | null; name: string }>> {
   const db = await getDb();
-  if (!db) return false; // fail closed
-  const [realTenant] = await db
-    .select({ id: organizations.id })
-    .from(organizations)
-    .where(and(
-      eq(organizations.isDemo, false),
-      ne(organizations.segment, "super_admin"),
-    ))
-    .limit(1);
-  return !realTenant;
+  // Fail closed: unknown is not safe, and an empty list would read as "all clear".
+  if (!db) return [UNREADABLE];
+  try {
+    // One more than asked for, so the caller can tell a full page from a
+    // truncated one. Reporting a partial list as complete would understate what
+    // is blocking, and the operator would mark one tenant a demo and wonder why
+    // nothing changed.
+    return await db
+      .select({ id: organizations.id, code: organizations.code, name: organizations.name })
+      .from(organizations)
+      .where(and(
+        eq(organizations.isDemo, false),
+        ne(organizations.segment, "super_admin"),
+      ))
+      .limit(limit);
+  } catch (err) {
+    // A connection that opened and then failed mid-query is exactly as unknown
+    // as one that never opened. Throwing here would surface as an errored query
+    // whose absent data reads as "no blockers" downstream — an outage opening
+    // the gate.
+    console.error("[reviewerAccess] could not read blocking tenants:", err);
+    return [UNREADABLE];
+  }
 }
 
 /*
