@@ -198,6 +198,39 @@ describe("when a link is revoked after it has been used", () => {
   });
 });
 
+describe("when the reviewer row's read-only flag is cleared", () => {
+  // `users.isReadOnly` is an ordinary editable column. As the only source of the
+  // write ban it was one admin edit — or any future code path that rewrites a
+  // user row without preserving the flag — away from turning a LIVE reviewer
+  // session write-capable, with nothing looking wrong: valid link, successful
+  // authentication, and a downstream guard that simply stops matching.
+  const writableOnPaper = userLike({
+    id: 79, openId: "rvw_xyz", role: REVIEWER_ROLE, isReadOnly: false, loginMethod: REVIEWER_LOGIN_METHOD,
+  });
+
+  it("should still hand back a read-only session", async () => {
+    liveness.mockResolvedValue(true);
+    getUserByOpenId.mockResolvedValue(writableOnPaper);
+    const token = await sdk.createSessionToken("rvw_xyz", { name: "Reviewer" });
+    const req = { headers: { cookie: `${COOKIE_NAME}=${token}` } } as never;
+
+    const authed = await sdk.authenticateRequest(req);
+    expect(authed.isReadOnly).toBe(true);
+  });
+
+  it("should still refuse that session's writes", async () => {
+    // The end the previous assertion exists to serve: derived read-only has to
+    // reach the guard, not merely be set on an object.
+    liveness.mockResolvedValue(true);
+    getUserByOpenId.mockResolvedValue(writableOnPaper);
+    const token = await sdk.createSessionToken("rvw_xyz", { name: "Reviewer" });
+    const authed = await sdk.authenticateRequest({ headers: { cookie: `${COOKIE_NAME}=${token}` } } as never);
+
+    await expect(caller(authed as unknown as AnyUser).protectedWrite())
+      .rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
 describe("when the reviewer identity is created", () => {
   const SERVICE = fs.readFileSync(path.join(__dirname, "reviewerAccess.ts"), "utf8");
 

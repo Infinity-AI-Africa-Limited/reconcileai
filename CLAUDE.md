@@ -768,6 +768,12 @@ one tenant — `SL_RECONCILEAI_DEV` by default. Containment is structural:
   closed, and is keyed on `loginMethod === "reviewer_link"` rather than on
   `isReadOnly` — an operator may mark an ordinary user read-only, and that user
   has no link behind them.
+- **Read-only is DERIVED from the login method, not read from the column.**
+  `authenticateRequest` forces `isReadOnly` on any reviewer-link identity, so
+  `users.isReadOnly` is an optimisation rather than the control. As the only
+  source of the ban it was one admin edit — or any future code path rewriting a
+  user row without preserving the flag — away from making a LIVE reviewer session
+  write-capable, with nothing looking wrong.
 - **`auth.logout` is exempt from the write ban.** It is a `publicProcedure`
   mutation, so the blanket ban refused it and a reviewer pressing "Sign out" kept
   a live session on the device. Ending access must never be the thing access

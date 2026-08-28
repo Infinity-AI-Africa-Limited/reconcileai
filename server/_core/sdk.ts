@@ -332,6 +332,23 @@ class SDKServer {
       if (!(await isReviewerSessionLive(user.id))) {
         throw ForbiddenError("This review link has been revoked or has expired");
       }
+      /**
+       * Read-only is derived from HOW this identity signs in, not read from a
+       * column.
+       *
+       * `users.isReadOnly` is an ordinary editable column, so as the only source
+       * of the write ban it was a single admin edit — or any future code path
+       * that rewrites a user row without preserving the flag — away from turning
+       * a live reviewer session write-capable. Nothing would have looked wrong:
+       * the link is valid, the session authenticates, and the guard downstream
+       * simply stops matching.
+       *
+       * Deriving it here makes the column an optimisation rather than the
+       * control. An identity that signed in through a reviewer link is read-only
+       * for the life of that session, whatever the row says, on every surface
+       * that authenticates.
+       */
+      user = { ...user, isReadOnly: true };
     }
 
     await db.upsertUser({
