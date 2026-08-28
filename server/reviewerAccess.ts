@@ -39,7 +39,7 @@
  *     otherwise unanswerable while a submission is pending.
  */
 import crypto from "node:crypto";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "./db";
 import { organizations, reviewerAccessLinks, users } from "../drizzle/schema";
@@ -90,19 +90,42 @@ async function requireDb() {
 }
 
 /**
- * The one read-only user a tenant's reviewer links sign in as.
+ * Marks an identity as existing only to back a reviewer link.
  *
- * Stable per organisation (`reviewer_org_<id>`), so revoking a link never
- * orphans a user and issuing a second link never creates a second identity —
- * the audit trail stays about one reviewer rather than a growing pile of them.
- *
- * Re-asserts `isReadOnly` and the role on every call. A user row can be edited
- * from the admin screens, and this identity must not be able to drift into a
- * writable one by an unrelated edit.
+ * The liveness check below keys off this rather than off `isReadOnly`, because
+ * the two are not the same thing: an operator may legitimately mark an ordinary
+ * user read-only, and such a user has no link behind them. Keying liveness on
+ * `isReadOnly` would lock those people out of reads entirely.
  */
-export async function ensureReviewerUser(organizationId: number): Promise<number> {
+export const REVIEWER_LOGIN_METHOD = "reviewer_link";
+
+/**
+ * The identity a link signs in as — ONE PER LINK, not one per organisation.
+ *
+ * Per-link is what makes revocation mean something. The session cookie is a
+ * stateless JWT carrying only an openId, so the only way a later request can
+ * discover that its link was revoked is for that openId to identify the link.
+ * A shared per-tenant identity cannot: revoking one of two links would either
+ * cut off both reviewers or neither, and there would be no way to tell which
+ * link a live session came from.
+ *
+ * The openId is derived from the token by hash, so it can be computed before
+ * the link row exists (the row needs the userId) — and the token itself never
+ * lands in the users table, where it would be a standing credential sitting in
+ * a second place.
+ *
+ * Re-asserts `isReadOnly` and the role on every call: a user row is editable
+ * from the admin screens, and this identity must not be able to drift into a
+ * writable one through an unrelated edit.
+ */
+function reviewerOpenId(token: string): string {
+  // 4 + 40 = 44 chars, inside the 64-char column.
+  return `rvw_${crypto.createHash("sha256").update(token).digest("hex").slice(0, 40)}`;
+}
+
+export async function ensureReviewerUser(organizationId: number, token: string): Promise<number> {
   const db = await requireDb();
-  const openId = `reviewer_org_${organizationId}`;
+  const openId = reviewerOpenId(token);
 
   const [existing] = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
   if (existing) {
@@ -118,18 +141,46 @@ export async function ensureReviewerUser(organizationId: number): Promise<number
     name: "App Store Reviewer",
     // Not a deliverable address, and deliberately so: this identity must never
     // be reachable by a password reset or magic link. The link is the only way in.
-    email: `reviewer+org${organizationId}@reviewer.invalid`,
+    email: `${openId}@reviewer.invalid`,
     role: REVIEWER_ROLE,
     organizationId,
     isReadOnly: true,
     isGuest: false,
     isActive: true,
-    loginMethod: "reviewer_link",
+    loginMethod: REVIEWER_LOGIN_METHOD,
   });
 
   const [created] = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
   if (!created) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Could not create the reviewer identity" });
   return created.id;
+}
+
+/**
+ * Is the link behind an already-signed-in reviewer still good?
+ *
+ * Checked on EVERY request from a reviewer identity, reads included, because
+ * the session is a stateless JWT: without this, revoking a link stops new
+ * sign-ins and does nothing to the sessions already minted from it, which would
+ * keep working for the full session TTL. "Revoke" that leaves the reviewer
+ * inside for hours is not revocation, and an operator hitting that button
+ * during an incident would believe otherwise.
+ *
+ * One indexed lookup per reviewer request. Reviewers are few; correctness here
+ * is worth more than the round-trip.
+ */
+export async function isReviewerSessionLive(userId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false; // fail closed
+  const [link] = await db
+    .select({ id: reviewerAccessLinks.id })
+    .from(reviewerAccessLinks)
+    .where(and(
+      eq(reviewerAccessLinks.userId, userId),
+      isNull(reviewerAccessLinks.revokedAt),
+      gt(reviewerAccessLinks.expiresAt, new Date()),
+    ))
+    .limit(1);
+  return Boolean(link);
 }
 
 /** Resolve an organisation by code, for the SHOPLINE dev-store default. */
@@ -156,8 +207,10 @@ export async function issueReviewerLink(params: {
     .limit(1);
   if (!org) throw new TRPCError({ code: "NOT_FOUND", message: "That organisation does not exist." });
 
-  const userId = await ensureReviewerUser(params.organizationId);
+  // Token first: the identity is derived from it, so that it is one-per-link and
+  // revocation can therefore reach an already-minted session.
   const token = newToken();
+  const userId = await ensureReviewerUser(params.organizationId, token);
   const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
 
   await db.insert(reviewerAccessLinks).values({

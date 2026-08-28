@@ -756,8 +756,26 @@ one tenant — `SL_RECONCILEAI_DEV` by default. Containment is structural:
   settings. Operations sees the whole retail journey and no administrative surface.
 - The identity's address is `@reviewer.invalid` so no password reset or magic link
   can become a second way in that bypasses revocation.
+- **One identity PER LINK** (`rvw_<sha256(token)[0:40]>`), not one per tenant, and
+  **every reviewer request re-checks that its link is still live** — reads
+  included. The session cookie is a stateless JWT, so without both of these
+  "revoke" only stops NEW sign-ins and leaves sessions already minted working for
+  the full TTL (up to 24h). Revocation that leaves the reviewer inside for hours
+  is not revocation. The check fails closed, and is keyed on
+  `loginMethod === "reviewer_link"` rather than on `isReadOnly` — an operator may
+  mark an ordinary user read-only, and that user has no link behind them.
+- **`auth.logout` is exempt from the write ban.** It is a `publicProcedure`
+  mutation, so the blanket ban refused it and a reviewer pressing "Sign out" kept
+  a live session on the device. Ending access must never be the thing access
+  control prevents. Exempt even when the link is already revoked, or a revoked
+  reviewer is left holding a cookie they cannot clear.
 - `lastUsedAt`/`useCount` answer "did the reviewer ever open it?" — otherwise
   unanswerable while a submission is pending.
+
+> Both of the last two were caught by Greptile review, not by me. They are the
+> two ways this feature could have shipped looking correct while failing at the
+> exact moment it mattered: an operator revoking during an incident, and a
+> reviewer trying to leave.
 
 ---
 

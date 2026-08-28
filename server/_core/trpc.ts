@@ -27,14 +27,55 @@ export const router = t.router;
  *
  * `isReadOnly` is a distinct flag from `isGuest` on purpose; see users.isReadOnly.
  */
-const refuseReadOnlyWrites = t.middleware(async opts => {
-  const { ctx, type, next } = opts;
+/**
+ * Mutations a read-only session may still call.
+ *
+ * Only operations that END a session belong here. Logout is a `publicProcedure`
+ * mutation, so the blanket ban reached it first and a reviewer pressing "Sign
+ * out" was refused — leaving the session alive on the device, which is the
+ * opposite of what the control is for. Ending access can never be the thing
+ * access control prevents.
+ */
+const READ_ONLY_ALLOWED_MUTATIONS = new Set<string>(["auth.logout"]);
 
-  if (ctx.user?.isReadOnly && type !== "query") {
+const refuseReadOnlyWrites = t.middleware(async opts => {
+  const { ctx, type, path, next } = opts;
+
+  if (!ctx.user?.isReadOnly) return next();
+
+  // Before anything else, including the liveness check below: a reviewer whose
+  // link was just revoked must still be able to clear their own cookie.
+  if (READ_ONLY_ALLOWED_MUTATIONS.has(path)) return next();
+
+  if (type !== "query") {
     throw new TRPCError({
       code: "FORBIDDEN",
       message: "This is a read-only review session. Viewing is permitted; changes are not.",
     });
+  }
+
+  /**
+   * Revocation has to reach a session that already exists.
+   *
+   * The session cookie is a stateless JWT: nothing in it is consulted against
+   * the link after sign-in, so revoking only stopped NEW exchanges and left
+   * every session minted from that link working until its TTL expired — hours.
+   * An operator revoking during an incident would reasonably believe access had
+   * stopped. So reviewer identities are re-checked on every request, reads
+   * included, and the check fails closed.
+   *
+   * Keyed on the reviewer login method rather than on `isReadOnly`: an operator
+   * may mark an ordinary user read-only, and such a user has no link behind
+   * them. Keying this on `isReadOnly` would lock those people out of reads.
+   */
+  if (ctx.user.loginMethod === "reviewer_link") {
+    const { isReviewerSessionLive } = await import("../reviewerAccess");
+    if (!(await isReviewerSessionLive(ctx.user.id))) {
+      throw new TRPCError({
+        code: "UNAUTHORIZED",
+        message: "This review link has been revoked or has expired.",
+      });
+    }
   }
 
   return next();

@@ -6,12 +6,21 @@
  * behaviour — a procedure is actually called and actually refused — rather than
  * by reading the middleware and trusting it.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { TRPCError } from "@trpc/server";
+
+// Only the liveness probe is replaced; every other export stays real, so the
+// constants asserted below are the shipped values rather than the mock's.
+const liveness = vi.hoisted(() => vi.fn(async () => true));
+vi.mock("./reviewerAccess", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./reviewerAccess")>()),
+  isReviewerSessionLive: liveness,
+}));
+
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./_core/trpc";
-import { REVIEWER_ROLE, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
+import { REVIEWER_ROLE, REVIEWER_LOGIN_METHOD, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
 
 /**
  * A stand-in router built from the REAL exported builders.
@@ -26,6 +35,13 @@ const probe = router({
   protectedRead: protectedProcedure.query(() => "read"),
   protectedWrite: protectedProcedure.mutation(() => "written"),
   adminWrite: adminProcedure.mutation(() => "written"),
+  // Named to match the real procedure path the guard allows through.
+  auth: router({ logout: publicProcedure.mutation(() => "logged out") }),
+});
+
+beforeEach(() => {
+  liveness.mockReset();
+  liveness.mockResolvedValue(true);
 });
 
 type AnyUser = Parameters<typeof probe.createCaller>[0]["user"];
@@ -92,6 +108,57 @@ describe("when the session is an ordinary one", () => {
   });
 });
 
+describe("when a reviewer signs out", () => {
+  const reviewer = userLike({ role: REVIEWER_ROLE, isReadOnly: true, loginMethod: REVIEWER_LOGIN_METHOD });
+
+  // Found in review. Logout is a publicProcedure MUTATION, so the blanket write
+  // ban reached it first and refused it — leaving the session alive on the
+  // device, the exact opposite of the control's purpose.
+  it("should be allowed to end its own session", async () => {
+    await expect(caller(reviewer).auth.logout()).resolves.toBe("logged out");
+  });
+
+  it("should still be allowed to sign out after the link is revoked", async () => {
+    // Otherwise a revoked reviewer is stuck holding a cookie they cannot clear.
+    liveness.mockResolvedValue(false);
+    await expect(caller(reviewer).auth.logout()).resolves.toBe("logged out");
+  });
+});
+
+describe("when a link is revoked after it has been used", () => {
+  const reviewer = userLike({ role: REVIEWER_ROLE, isReadOnly: true, loginMethod: REVIEWER_LOGIN_METHOD });
+
+  // Also found in review. The session cookie is a stateless JWT, so revocation
+  // stopped new exchanges and did nothing to sessions already minted — they kept
+  // working for the full TTL. An operator revoking during an incident would
+  // reasonably believe access had stopped.
+  it("should cut off reads immediately, not at session expiry", async () => {
+    liveness.mockResolvedValue(false);
+    await expect(caller(reviewer).protectedRead()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("should let a live link keep reading", async () => {
+    liveness.mockResolvedValue(true);
+    await expect(caller(reviewer).protectedRead()).resolves.toBe("read");
+  });
+
+  it("should fail closed when liveness cannot be determined", async () => {
+    liveness.mockRejectedValue(new Error("database unavailable"));
+    await expect(caller(reviewer).protectedRead()).rejects.toThrow();
+  });
+
+  // The liveness probe keys on the reviewer login method, NOT on isReadOnly.
+  // An operator may legitimately mark an ordinary user read-only; such a user
+  // has no link behind them, and keying on isReadOnly would lock them out of
+  // reads entirely.
+  it("should not demand a link from a read-only user who never had one", async () => {
+    const readOnlyStaff = userLike({ role: "compliance", isReadOnly: true, loginMethod: "magic_link" });
+    liveness.mockResolvedValue(false);
+    await expect(caller(readOnlyStaff).protectedRead()).resolves.toBe("read");
+    expect(liveness).not.toHaveBeenCalled();
+  });
+});
+
 describe("when the reviewer identity is created", () => {
   const SERVICE = fs.readFileSync(path.join(__dirname, "reviewerAccess.ts"), "utf8");
 
@@ -116,6 +183,20 @@ describe("when the reviewer identity is created", () => {
     // A reachable address would be a second way in — a password reset or magic
     // link that bypasses revocation entirely.
     expect(SERVICE).toMatch(/@reviewer\.invalid/);
+  });
+
+  it("should mint one identity PER LINK, so revocation can reach a live session", () => {
+    // Per-tenant identities cannot support revocation: the session JWT carries
+    // only an openId, so with a shared identity there is no way to tell which
+    // link a live session came from — revoking one of two would cut off both
+    // reviewers or neither.
+    expect(SERVICE).toMatch(/function reviewerOpenId\(token: string\)/);
+    expect(SERVICE).toMatch(/ensureReviewerUser\(params\.organizationId, token\)/);
+    expect(SERVICE).not.toMatch(/reviewer_org_\$\{organizationId\}/);
+  });
+
+  it("should derive the identity from a hash, keeping the token out of the users table", () => {
+    expect(SERVICE).toMatch(/createHash\("sha256"\)\.update\(token\)/);
   });
 });
 
