@@ -23,6 +23,7 @@ import {
   listReviewerLinks,
   organizationIdByCode,
   platformHomeOrganizationId,
+  blockingRealTenants,
   platformScopeIsSafe,
   revokeReviewerLink,
   reviewerLinkUrl,
@@ -104,12 +105,15 @@ export const reviewerAccessRouter = router({
    * gate, not a malfunction.
    */
   platformScopeStatus: superAdminProcedure.query(async () => {
-    const safe = await platformScopeIsSafe();
+    const blocking = await blockingRealTenants();
     return {
-      available: safe,
-      reason: safe
+      available: blocking.length === 0,
+      // Named, not just counted. The operator has to be able to act on this
+      // without asking an engineer which row it means.
+      blocking: blocking.map((o) => ({ id: o.id, code: o.code, name: o.name })),
+      reason: blocking.length === 0
         ? null
-        : "A non-demo organisation exists. Platform-wide links are withheld so a real tenant's data cannot be exposed.",
+        : "Platform-wide links are withheld while an organisation is not marked as a demo, so a real tenant's data cannot be exposed.",
     };
   }),
 

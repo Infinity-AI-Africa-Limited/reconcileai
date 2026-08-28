@@ -62,7 +62,7 @@ function fakeDbSequence(results: unknown[][]) {
 import { COOKIE_NAME } from "@shared/const";
 import { sdk } from "./_core/sdk";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./_core/trpc";
-import { REVIEWER_ROLE, REVIEWER_ROLES, REVIEWER_LOGIN_METHOD, platformScopeIsSafe, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
+import { REVIEWER_ROLE, REVIEWER_ROLES, REVIEWER_LOGIN_METHOD, platformScopeIsSafe, blockingRealTenants, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
 
 /**
  * A stand-in router built from the REAL exported builders.
@@ -338,17 +338,37 @@ describe("when the link is scoped to the whole platform", () => {
     await expect(platformScopeIsSafe()).resolves.toBe(false);
   });
 
+  // Shipped after the gate refused in production and left the operator with a
+  // greyed-out option, one sentence, and no way to discover which row meant it —
+  // so the only route forward was to ask an engineer. A control that cannot be
+  // acted on is half a control.
+  it("should name the organisations holding it shut", async () => {
+    getDb.mockResolvedValue(fakeDb([{ id: 150001, code: "SL_SLAPPTEST", name: "SHOPLINE App Test" }]));
+    await expect(blockingRealTenants()).resolves.toEqual([
+      { id: 150001, code: "SL_SLAPPTEST", name: "SHOPLINE App Test" },
+    ]);
+  });
+
+  it("should report an unreadable database as blocking, never as all clear", async () => {
+    // An empty list is the "safe" answer, so returning one on failure would
+    // open the gate at precisely the moment nothing can be verified.
+    getDb.mockResolvedValue(null);
+    const blocking = await blockingRealTenants();
+    expect(blocking).toHaveLength(1);
+    expect(blocking[0].name).toMatch(/could not be read/i);
+  });
+
   it("should count a real tenant even when it has been deactivated", async () => {
     // Deactivating an organisation stops its members signing in; it does not
     // delete its rows, and allOrganizations / getOrgContext / dashboard.stats do
     // not filter on isActive either. Treating an inactive real tenant as absent
     // would report the platform safe with that customer's data one click away.
     const SERVICE_NOW = fs.readFileSync(path.join(__dirname, "reviewerAccess.ts"), "utf8");
-    const predicate = SERVICE_NOW.slice(
-      SERVICE_NOW.indexOf("export async function platformScopeIsSafe"),
-      SERVICE_NOW.indexOf("return !realTenant;"),
-    );
-    expect(predicate).not.toMatch(/isActive/);
+    const start = SERVICE_NOW.indexOf("export async function blockingRealTenants");
+    const end = SERVICE_NOW.indexOf(".limit(limit);", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(SERVICE_NOW.slice(start, end)).not.toMatch(/isActive/);
   });
 
   it("should ask the question in terms of isDemo, excluding the operator's own org", () => {

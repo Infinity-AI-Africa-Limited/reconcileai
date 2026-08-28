@@ -317,7 +317,28 @@ function ReviewerPortalLinks() {
         changes the answer, and nobody will connect that event to an old link.
       */}
       {platformStatus.data && !platformStatus.data.available ? (
-        <p className="mt-2 text-[11px] text-amber-600">{platformStatus.data.reason}</p>
+        <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2">
+          <p className="text-[11px] text-amber-900">{platformStatus.data.reason}</p>
+          {/*
+            Naming the rows is the whole point. The first version said only that
+            "a non-demo organisation exists", which left the operator with a
+            greyed-out option and no way to find out which one — the only route
+            forward was to ask an engineer.
+          */}
+          <ul className="mt-1.5 space-y-0.5">
+            {platformStatus.data.blocking.map((org) => (
+              <li key={org.id} className="text-[11px] text-amber-900">
+                <span className="font-medium">{org.name}</span>
+                {org.code ? <span className="text-amber-700"> ({org.code})</span> : null}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[11px] text-amber-800">
+            If that is a test or demo tenant rather than a paying client, mark it as a demo in{" "}
+            <a href="/admin/super-admin/orgs" className="underline">All Organisations</a> and this option opens.
+            A SHOPLINE App Store reviewer installing the app creates one of these each time.
+          </p>
+        </div>
       ) : null}
 
       {issue.error ? (
