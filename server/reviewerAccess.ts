@@ -109,11 +109,21 @@ export async function platformScopeIsSafe(): Promise<boolean> {
     .where(and(
       eq(organizations.isDemo, false),
       ne(organizations.segment, "super_admin"),
-      eq(organizations.isActive, true),
     ))
     .limit(1);
   return !realTenant;
 }
+
+/*
+ * Deliberately NOT filtered on `isActive`.
+ *
+ * Deactivating an organisation stops its members signing in; it does not delete
+ * its rows, and the super-admin surfaces a platform reviewer actually uses —
+ * `allOrganizations`, `getOrgContext`, `dashboard.stats` — do not filter on it
+ * either. An inactive real tenant is therefore still fully readable, so counting
+ * it as absent would report the platform safe while its customer data sat one
+ * click away. "Not signed in" is not "not present".
+ */
 
 /** The operator's own organisation — the home org for a platform-scope session. */
 export async function platformHomeOrganizationId(): Promise<number | null> {
@@ -245,7 +255,7 @@ export async function isReviewerSessionLive(userId: number): Promise<boolean> {
   const db = await getDb();
   if (!db) return false; // fail closed
   const [link] = await db
-    .select({ id: reviewerAccessLinks.id })
+    .select({ id: reviewerAccessLinks.id, scope: reviewerAccessLinks.scope })
     .from(reviewerAccessLinks)
     .where(and(
       eq(reviewerAccessLinks.userId, userId),
@@ -253,7 +263,24 @@ export async function isReviewerSessionLive(userId: number): Promise<boolean> {
       gt(reviewerAccessLinks.expiresAt, new Date()),
     ))
     .limit(1);
-  return Boolean(link);
+  if (!link) return false;
+
+  /*
+   * The first-customer condition is part of LIVENESS, not just of sign-in.
+   *
+   * Checking it only when the link is exchanged leaves a reviewer who signed in
+   * the day before onboarding reading the new tenant's data for the rest of the
+   * session TTL — the same shape as the revocation bug this function was written
+   * to fix, one condition further along. Onboarding a customer is exactly the
+   * moment nobody is thinking about a link issued months earlier.
+   *
+   * Folded in here rather than added beside it in authenticateRequest so there
+   * is ONE predicate for "may this session continue". Two would eventually
+   * disagree, and the one that got missed would be the one that mattered.
+   */
+  if (link.scope === "platform" && !(await platformScopeIsSafe())) return false;
+
+  return true;
 }
 
 /** Resolve an organisation by code, for the SHOPLINE dev-store default. */

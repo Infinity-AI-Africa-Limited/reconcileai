@@ -50,6 +50,15 @@ function fakeDb(rows: unknown[]) {
   return chain;
 }
 
+/** Answers successive queries with successive result sets, in call order. */
+function fakeDbSequence(results: unknown[][]) {
+  const queue = [...results];
+  const chain: Record<string, unknown> = {};
+  for (const method of ["select", "from", "where", "orderBy"]) chain[method] = () => chain;
+  chain.limit = async () => queue.shift() ?? [];
+  return chain;
+}
+
 import { COOKIE_NAME } from "@shared/const";
 import { sdk } from "./_core/sdk";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./_core/trpc";
@@ -329,6 +338,19 @@ describe("when the link is scoped to the whole platform", () => {
     await expect(platformScopeIsSafe()).resolves.toBe(false);
   });
 
+  it("should count a real tenant even when it has been deactivated", async () => {
+    // Deactivating an organisation stops its members signing in; it does not
+    // delete its rows, and allOrganizations / getOrgContext / dashboard.stats do
+    // not filter on isActive either. Treating an inactive real tenant as absent
+    // would report the platform safe with that customer's data one click away.
+    const SERVICE_NOW = fs.readFileSync(path.join(__dirname, "reviewerAccess.ts"), "utf8");
+    const predicate = SERVICE_NOW.slice(
+      SERVICE_NOW.indexOf("export async function platformScopeIsSafe"),
+      SERVICE_NOW.indexOf("return !realTenant;"),
+    );
+    expect(predicate).not.toMatch(/isActive/);
+  });
+
   it("should ask the question in terms of isDemo, excluding the operator's own org", () => {
     // The operator's super_admin org is never isDemo and holds no tenant data,
     // so counting it would withhold every platform link permanently.
@@ -356,6 +378,48 @@ describe("when the link is scoped to the whole platform", () => {
     // arbitrary for someone here to see the whole platform.
     const INDEX = fs.readFileSync(path.join(__dirname, "_core", "index.ts"), "utf8");
     expect(INDEX).toMatch(/resolved\.scope === "platform" \? "\/admin\/super-admin" : "\/home"/);
+  });
+});
+
+/**
+ * The first-customer condition is part of LIVENESS, not only of sign-in.
+ *
+ * These use the REAL `isReviewerSessionLive` (the rest of the file mocks it), so
+ * they prove the composition rather than a stand-in for it.
+ */
+describe("when a real tenant appears after a platform reviewer has signed in", () => {
+  let realLiveness: typeof import("./reviewerAccess").isReviewerSessionLive;
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import("./reviewerAccess")>("./reviewerAccess");
+    realLiveness = actual.isReviewerSessionLive;
+  });
+
+  const liveLink = (scope: string) => [{ id: 5, scope }];
+
+  it("should end the session on the next request, not at session expiry", async () => {
+    // Checking only at sign-in leaves a reviewer who signed in the day before
+    // onboarding reading the new tenant's data for the rest of the TTL — the
+    // revocation bug again, one condition further along.
+    getDb.mockResolvedValue(fakeDbSequence([liveLink("platform"), [{ id: 99 }]]));
+    await expect(realLiveness(77)).resolves.toBe(false);
+  });
+
+  it("should keep the session while every organisation is still a demo", async () => {
+    getDb.mockResolvedValue(fakeDbSequence([liveLink("platform"), []]));
+    await expect(realLiveness(77)).resolves.toBe(true);
+  });
+
+  it("should not impose the platform condition on a tenant-scoped session", async () => {
+    // A tenant link is pinned to one organisation and is unaffected by what else
+    // the platform holds. Only the link row is consulted.
+    getDb.mockResolvedValue(fakeDbSequence([liveLink("tenant"), [{ id: 99 }]]));
+    await expect(realLiveness(77)).resolves.toBe(true);
+  });
+
+  it("should still refuse a revoked or expired link before any of that", async () => {
+    getDb.mockResolvedValue(fakeDbSequence([[], []]));
+    await expect(realLiveness(77)).resolves.toBe(false);
   });
 });
 
