@@ -124,6 +124,11 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   channel_alert_settings: "tenant_nullable",
   s3_csv_exports: "tenant_nullable",
   magic_link_tokens: "token",
+  // Token-keyed like magic_link_tokens, but classified tenant_required rather
+  // than "token" because it carries organizationId NOT NULL and that column is
+  // load-bearing: it is the single tenant the issued session may ever see. The
+  // stricter class is the accurate one, and keeps the column under the ratchet.
+  reviewer_access_links: "tenant_required",
   platform_audit_logs: "global",
 
   // Woodcore Fineract mirror (POC) — single-tenant by design; multi-tenant

@@ -107,6 +107,16 @@ export const users = mysqlTable("users", {
   role: mysqlEnum("role", ["super_admin", "admin", "cfo", "operations", "compliance", "user"]).default("user").notNull(),
   organizationId: int("organizationId"),
   isGuest: boolean("isGuest").default(false).notNull(),
+  /**
+   * Refuses every write this user could otherwise make, enforced globally in
+   * _core/trpc.ts rather than per procedure.
+   *
+   * Deliberately NOT `isGuest`, which already means something else: a demo
+   * guest is write-blocked on the procedures built from guestProtectedProcedure
+   * but still legitimately calls `demo.activate` to switch segments. Overloading
+   * it would have broken the demo the moment the ban became global.
+   */
+  isReadOnly: boolean("isReadOnly").default(false).notNull(),
   isActive: boolean("isActive").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -2236,6 +2246,44 @@ export const magicLinkTokens = mysqlTable("magic_link_tokens", {
   index("idx_magic_link_user").on(table.userId),
   index("idx_magic_link_expires").on(table.expiresAt),
 ]);
+
+/**
+ * Standing, revocable sign-in links for external reviewers.
+ *
+ * A magic link cannot do this job: single-use and 72 hours, against an App Store
+ * review that runs for weeks, across several people and devices. And the
+ * reviewer has no reachable inbox — an app installed from the store provisions
+ * its admin at `<handle>@shopline.merchant`, a domain that does not exist, so
+ * nothing we email can ever arrive.
+ *
+ * Each row is one issued link: multi-use by design, pinned to a single tenant
+ * and a single read-only user, with a hard expiry and an explicit revocation.
+ * `lastUsedAt` and `useCount` are the observability half — whether the reviewer
+ * ever opened it is otherwise unanswerable, and that is exactly the question
+ * asked while a submission is pending.
+ */
+export const reviewerAccessLinks = mysqlTable("reviewer_access_links", {
+  id: int("id").autoincrement().primaryKey(),
+  token: varchar("token", { length: 64 }).notNull(),
+  /** Who the link was issued to, for attribution when one leaks. */
+  label: varchar("label", { length: 120 }).notNull(),
+  /** The single tenant this link's session may ever see. */
+  organizationId: int("organizationId").notNull(),
+  /** The read-only user the session is minted as. */
+  userId: int("userId").notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  revokedAt: timestamp("revokedAt"),
+  lastUsedAt: timestamp("lastUsedAt"),
+  useCount: int("useCount").default(0).notNull(),
+  createdBy: int("createdBy"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_reviewer_access_token").on(table.token),
+  index("idx_reviewer_access_org").on(table.organizationId),
+  index("idx_reviewer_access_expires").on(table.expiresAt),
+]);
+export type ReviewerAccessLink = typeof reviewerAccessLinks.$inferSelect;
+export type InsertReviewerAccessLink = typeof reviewerAccessLinks.$inferInsert;
 export type MagicLinkToken = typeof magicLinkTokens.$inferSelect;
 export type InsertMagicLinkToken = typeof magicLinkTokens.$inferInsert;
 

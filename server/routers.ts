@@ -46,6 +46,7 @@ import {
 import { publicApiRouter } from "./publicApiRouter";
 import { bucketIngestionRouter } from "./routers/bucketIngestion";
 import { emailIngestionRouter } from "./routers/emailIngestion";
+import { reviewerAccessRouter } from "./routers/reviewerAccess";
 import {
   encryptCredential,
   testSftpConnection,
@@ -6315,6 +6316,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   shoplineReview: shoplineReviewRouter,
   bucketIngestion: bucketIngestionRouter,
   emailIngestion: emailIngestionRouter,
+  reviewerAccess: reviewerAccessRouter,
   // LAPO MFB multi-source channel integration (ETL, completeness, taxonomy)
   lapo: lapoRouter,
   uganda: ugandaRouter,

@@ -706,8 +706,86 @@ deploy via `pnpm db:migrate`). What remains is external go-live, not engineering
 7. ⬜ Test the full OAuth flow on `reconcileai-dev.myshopline.com` (canonical dev store — see §2B.10B)
    - In Partner Portal: Test App → select "ReconcileAI Dev Store" → verify redirect to install URL
    - Confirm welcome screen at `https://www.reconcileaiafrica.com/shopline/welcome`
-8. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
+8. ✅ Owner submitted for review in the SHOPLINE Partner Portal (2026-08-28)
 9. ⬜ Address any App Store review feedback
+
+> ⚠️ **Items 6 and 7 are still open, and nobody has walked the retail portal's
+> user journeys end to end.** Static verification — code review, the test suite,
+> typecheck — is not journey certification, and must not be described as it.
+
+### 2B.13 Reviewer access — how an App Store reviewer actually gets in
+
+**The reviewer could not reach the retail portal at all, and neither can a real
+merchant.** Four separate walls, none of them the missing-email one people reach
+for first:
+
+1. The OAuth callback provisions the tenant and establishes **no session** — it
+   redirects to `/shopline/welcome` and stops (`routes.ts`).
+2. The admin user it creates is `<handle>@shopline.merchant` when SHOPLINE
+   returns no contact address (`onboarding.ts`). That domain does not exist, so
+   nothing emailed can ever arrive.
+3. The welcome screen's portal hand-off is restricted to a super-admin support
+   session.
+4. Magic links are single-use and expire in 72 hours — against a review running
+   for weeks across several people and devices.
+
+`ShoplineConnect.tsx` names the underlying gap itself: *"Production merchant
+identity hand-off remains a separate P0 release gate."*
+
+**Two surfaces now exist, and they answer different questions:**
+
+| Surface | What it is | Who opens it |
+|---|---|---|
+| `/shopline-review` (§2B, PR #121) | Public, no-login, **read-only evidence about** the integration — connection, webhook and reconciliation figures | Anyone, while the POC Hub public switch is on |
+| **Reviewer sign-in link** | A real session **inside** the retail merchant portal, to walk the actual journeys | Whoever holds the issued URL |
+
+**The reviewer link** (`server/reviewerAccess.ts`, issued from POC Hub → SHOPLINE
+card): multi-use, long-lived (90 days default, 180 max), revocable, and pinned to
+one tenant — `SL_RECONCILEAI_DEV` by default. Containment is structural:
+
+- **`users.isReadOnly` refuses every non-query operation globally**, in
+  `_core/trpc.ts` on the BASE procedure. Not per-procedure: `guestProtectedProcedure`
+  is opt-in, and "safe unless someone remembered" is not a boundary for a link
+  handed to an outside party. The rule is an allow-list — `query` passes,
+  everything else is refused.
+- **`isReadOnly` is deliberately NOT `isGuest`.** A demo guest is write-blocked on
+  guarded procedures but still legitimately calls `demo.activate`; overloading
+  `isGuest` would have broken the demo the moment the ban went global.
+- **Role is `operations`, never `admin`.** Read-only stops writes; it does nothing
+  about reads, and an admin session can query team membership and integration
+  settings. Operations sees the whole retail journey and no administrative surface.
+- The identity's address is `@reviewer.invalid` so no password reset or magic link
+  can become a second way in that bypasses revocation.
+- **One identity PER LINK** (`rvw_<sha256(token)[0:40]>`), not one per tenant, and
+  **every reviewer request re-checks that its link is still live** — reads
+  included. The session cookie is a stateless JWT, so without both of these
+  "revoke" only stops NEW sign-ins and leaves sessions already minted working for
+  the full TTL (up to 24h). Revocation that leaves the reviewer inside for hours
+  is not revocation. **The check lives in `sdk.authenticateRequest`** — the one
+  gate every surface passes through — **not in the tRPC middleware**: the
+  monitoring stream and the storage proxy authenticate the same cookie without
+  touching tRPC, so a tRPC-only check was the instance, not the class. It fails
+  closed, and is keyed on `loginMethod === "reviewer_link"` rather than on
+  `isReadOnly` — an operator may mark an ordinary user read-only, and that user
+  has no link behind them.
+- **Read-only is DERIVED from the login method, not read from the column.**
+  `authenticateRequest` forces `isReadOnly` on any reviewer-link identity, so
+  `users.isReadOnly` is an optimisation rather than the control. As the only
+  source of the ban it was one admin edit — or any future code path rewriting a
+  user row without preserving the flag — away from making a LIVE reviewer session
+  write-capable, with nothing looking wrong.
+- **`auth.logout` is exempt from the write ban.** It is a `publicProcedure`
+  mutation, so the blanket ban refused it and a reviewer pressing "Sign out" kept
+  a live session on the device. Ending access must never be the thing access
+  control prevents. Exempt even when the link is already revoked, or a revoked
+  reviewer is left holding a cookie they cannot clear.
+- `lastUsedAt`/`useCount` answer "did the reviewer ever open it?" — otherwise
+  unanswerable while a submission is pending.
+
+> Both of the last two were caught by Greptile review, not by me. They are the
+> two ways this feature could have shipped looking correct while failing at the
+> exact moment it mattered: an operator revoking during an incident, and a
+> reviewer trying to leave.
 
 ---
 

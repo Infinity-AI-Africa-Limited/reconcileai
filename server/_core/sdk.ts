@@ -309,6 +309,48 @@ class SDKServer {
       throw ForbiddenError("User not found");
     }
 
+    /**
+     * A revoked reviewer link must stop working everywhere, not just in tRPC.
+     *
+     * The session cookie is a stateless JWT, so revocation can only bite if
+     * something re-consults the link on each request. That check first went into
+     * the tRPC middleware, which was the instance rather than the class: the
+     * monitoring stream and the storage proxy authenticate this same cookie
+     * directly and would have kept serving a revoked reviewer until the session
+     * expired — hours. Putting it here covers every surface that authenticates,
+     * including ones added later.
+     *
+     * Scoped to reviewer-link identities. An operator may legitimately mark an
+     * ordinary user read-only, and such a user has no link behind them; keying
+     * this on `isReadOnly` would refuse them everything.
+     *
+     * Fails closed, and deliberately AFTER the user lookup so it costs a query
+     * only for the few identities it applies to.
+     */
+    if (user.loginMethod === "reviewer_link") {
+      const { isReviewerSessionLive } = await import("../reviewerAccess");
+      if (!(await isReviewerSessionLive(user.id))) {
+        throw ForbiddenError("This review link has been revoked or has expired");
+      }
+      /**
+       * Read-only is derived from HOW this identity signs in, not read from a
+       * column.
+       *
+       * `users.isReadOnly` is an ordinary editable column, so as the only source
+       * of the write ban it was a single admin edit — or any future code path
+       * that rewrites a user row without preserving the flag — away from turning
+       * a live reviewer session write-capable. Nothing would have looked wrong:
+       * the link is valid, the session authenticates, and the guard downstream
+       * simply stops matching.
+       *
+       * Deriving it here makes the column an optimisation rather than the
+       * control. An identity that signed in through a reviewer link is read-only
+       * for the life of that session, whatever the row says, on every surface
+       * that authenticates.
+       */
+      user = { ...user, isReadOnly: true };
+    }
+
     await db.upsertUser({
       openId: user.openId,
       lastSignedIn: signedInAt,
