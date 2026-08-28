@@ -95,6 +95,24 @@ function withoutComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
+/**
+ * `wipeDemoData`'s body alone.
+ *
+ * Every assertion about it is scoped here rather than to the file, because the
+ * same predicate text lives in other functions: `seedMemoryLayer` carries two
+ * copies of `eq(agentMemory.organizationId, orgId)`. A file-wide `toContain`
+ * was therefore satisfied by a DIFFERENT function's correctness, and deleting
+ * wipeDemoData's tenant scoping left the whole suite green — a ratchet passing
+ * on evidence from the wrong place.
+ */
+function wipeDemoDataBody(): string {
+  const src = fs.readFileSync(path.join(SERVER, "demoSeedEngine.ts"), "utf8");
+  const start = src.indexOf("export async function wipeDemoData");
+  expect(start, "wipeDemoData not found — update this ratchet").toBeGreaterThan(-1);
+  const nextExport = src.indexOf(String.fromCharCode(10) + "export ", start + 1);
+  return src.slice(start, nextExport === -1 ? undefined : nextExport);
+}
+
 type Site = { file: string; line: number; table: string; stmt: string; key: string };
 
 function deleteSites(): Site[] {
@@ -152,13 +170,15 @@ describe("every destructive statement on a tenant table is confined to one tenan
    * assertion after the fix itself had been removed.
    */
   it("builds every wipeDemoData row set from a tenant-scoped read", () => {
-    const src = fs.readFileSync(path.join(SERVER, "demoSeedEngine.ts"), "utf8");
-    const start = src.indexOf("export async function wipeDemoData");
-    expect(start, "wipeDemoData not found — update this ratchet").toBeGreaterThan(-1);
-    const nextExport = src.indexOf(String.fromCharCode(10) + "export ", start + 1);
-    const body = src.slice(start, nextExport === -1 ? undefined : nextExport);
+    const body = wipeDemoDataBody();
 
-    for (const table of ["uploadBatches", "reconciliationJobs", "distributors"]) {
+    // agentMemory is in this list even though it was already correct, because
+    // the main ratchet EXEMPTS its delete (derived row ids), so this assertion
+    // is the only thing guarding it. Checked the same way as the rest rather
+    // than by a file-wide `toContain`, which is what made the earlier version
+    // vacuous — `seedMemoryLayer` holds two copies of the same predicate text,
+    // so deleting wipeDemoData's left every test green.
+    for (const table of ["uploadBatches", "reconciliationJobs", "distributors", "agentMemory"]) {
       const at = body.indexOf("from(" + table + ")");
       expect(at, `wipeDemoData no longer reads ${table} — update this ratchet`).toBeGreaterThan(-1);
       const end = body.indexOf(";", at);
@@ -172,9 +192,12 @@ describe("every destructive statement on a tenant table is confined to one tenan
     }
   });
 
-  it("still scopes the two that were already correct, so the fix did not trade one for another", () => {
-    const src = withoutComments(fs.readFileSync(path.join(SERVER, "demoSeedEngine.ts"), "utf8"));
-    expect(src).toContain("eq(agentMemory.organizationId, orgId)");
-    expect(src).toContain("_ORG${orgId}");
+  it("scopes both channel deletes inside wipeDemoData, not merely somewhere in the file", () => {
+    // Same trap as agentMemory: a file-wide search would be satisfied by the
+    // seeder's own channel codes. Both deletes must scope WHERE THEY ARE — one
+    // by embedding the tenant in the code, one by restricting to org-less rails.
+    const body = withoutComments(wipeDemoDataBody());
+    expect(body).toContain("_ORG${orgId}");
+    expect(body).toContain("isNull(channels.organizationId)");
   });
 });
