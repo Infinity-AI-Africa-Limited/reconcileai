@@ -706,8 +706,58 @@ deploy via `pnpm db:migrate`). What remains is external go-live, not engineering
 7. ⬜ Test the full OAuth flow on `reconcileai-dev.myshopline.com` (canonical dev store — see §2B.10B)
    - In Partner Portal: Test App → select "ReconcileAI Dev Store" → verify redirect to install URL
    - Confirm welcome screen at `https://www.reconcileaiafrica.com/shopline/welcome`
-8. ⬜ Owner clicks "Submit for Review" in the SHOPLINE Partner Portal
+8. ✅ Owner submitted for review in the SHOPLINE Partner Portal (2026-08-28)
 9. ⬜ Address any App Store review feedback
+
+> ⚠️ **Items 6 and 7 are still open, and nobody has walked the retail portal's
+> user journeys end to end.** Static verification — code review, the test suite,
+> typecheck — is not journey certification, and must not be described as it.
+
+### 2B.13 Reviewer access — how an App Store reviewer actually gets in
+
+**The reviewer could not reach the retail portal at all, and neither can a real
+merchant.** Four separate walls, none of them the missing-email one people reach
+for first:
+
+1. The OAuth callback provisions the tenant and establishes **no session** — it
+   redirects to `/shopline/welcome` and stops (`routes.ts`).
+2. The admin user it creates is `<handle>@shopline.merchant` when SHOPLINE
+   returns no contact address (`onboarding.ts`). That domain does not exist, so
+   nothing emailed can ever arrive.
+3. The welcome screen's portal hand-off is restricted to a super-admin support
+   session.
+4. Magic links are single-use and expire in 72 hours — against a review running
+   for weeks across several people and devices.
+
+`ShoplineConnect.tsx` names the underlying gap itself: *"Production merchant
+identity hand-off remains a separate P0 release gate."*
+
+**Two surfaces now exist, and they answer different questions:**
+
+| Surface | What it is | Who opens it |
+|---|---|---|
+| `/shopline-review` (§2B, PR #121) | Public, no-login, **read-only evidence about** the integration — connection, webhook and reconciliation figures | Anyone, while the POC Hub public switch is on |
+| **Reviewer sign-in link** | A real session **inside** the retail merchant portal, to walk the actual journeys | Whoever holds the issued URL |
+
+**The reviewer link** (`server/reviewerAccess.ts`, issued from POC Hub → SHOPLINE
+card): multi-use, long-lived (90 days default, 180 max), revocable, and pinned to
+one tenant — `SL_RECONCILEAI_DEV` by default. Containment is structural:
+
+- **`users.isReadOnly` refuses every non-query operation globally**, in
+  `_core/trpc.ts` on the BASE procedure. Not per-procedure: `guestProtectedProcedure`
+  is opt-in, and "safe unless someone remembered" is not a boundary for a link
+  handed to an outside party. The rule is an allow-list — `query` passes,
+  everything else is refused.
+- **`isReadOnly` is deliberately NOT `isGuest`.** A demo guest is write-blocked on
+  guarded procedures but still legitimately calls `demo.activate`; overloading
+  `isGuest` would have broken the demo the moment the ban went global.
+- **Role is `operations`, never `admin`.** Read-only stops writes; it does nothing
+  about reads, and an admin session can query team membership and integration
+  settings. Operations sees the whole retail journey and no administrative surface.
+- The identity's address is `@reviewer.invalid` so no password reset or magic link
+  can become a second way in that bypasses revocation.
+- `lastUsedAt`/`useCount` answer "did the reviewer ever open it?" — otherwise
+  unanswerable while a submission is pending.
 
 ---
 

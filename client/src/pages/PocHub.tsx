@@ -9,6 +9,7 @@ import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -210,6 +211,131 @@ function ShoplinePublicReviewControl({ pocKey, path }: { pocKey: string; path: s
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  );
+}
+
+/**
+ * Standing sign-in links for an external reviewer.
+ *
+ * Distinct from the public evidence portal above, and solving a different
+ * problem. That portal shows a reviewer *about* the integration; this signs them
+ * INTO the retail merchant portal to walk the real journeys — the thing an App
+ * Store reviewer is actually asked to assess, and the thing nobody can currently
+ * do because install mints no session and the provisioned admin address
+ * (`<handle>@shopline.merchant`) does not exist.
+ *
+ * The URL is shown exactly once, on issue. It is a credential: storing it so it
+ * could be re-displayed would put a standing production session key in a table
+ * for the convenience of not re-issuing, and re-issuing is free.
+ */
+function ReviewerPortalLinks() {
+  const utils = trpc.useUtils();
+  const links = trpc.reviewerAccess.list.useQuery();
+  const [label, setLabel] = useState("SHOPLINE App Store review");
+  const [issued, setIssued] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const issue = trpc.reviewerAccess.issue.useMutation({
+    onSuccess: (link) => {
+      setIssued(link.url ?? null);
+      utils.reviewerAccess.list.invalidate();
+    },
+  });
+  const revoke = trpc.reviewerAccess.revoke.useMutation({
+    onSuccess: () => utils.reviewerAccess.list.invalidate(),
+  });
+
+  const copy = async () => {
+    if (!issued) return;
+    try {
+      await navigator.clipboard.writeText(issued);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard can be blocked; the URL is selectable on screen regardless */
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border bg-muted/30 p-2.5">
+      <p className="text-[11px] font-medium text-muted-foreground">Reviewer portal sign-in links</p>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Signs a reviewer into the retail portal as a read-only user. Writes are refused
+        server-side for the whole session, and the link can be revoked at any time.
+      </p>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Who is this for?"
+          className="h-7 w-56 text-xs"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs"
+          disabled={!label.trim() || issue.isPending}
+          onClick={() => issue.mutate({ label: label.trim() })}
+        >
+          {issue.isPending ? "Issuing…" : "Issue link"}
+        </Button>
+      </div>
+
+      {issue.error ? (
+        <p className="mt-2 text-[11px] text-destructive">{issue.error.message}</p>
+      ) : null}
+
+      {issued ? (
+        <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2">
+          <p className="text-[11px] font-medium text-amber-900">
+            Copy this now — it is shown once and cannot be retrieved later.
+          </p>
+          <div className="mt-1.5 flex items-center gap-2">
+            <code className="flex-1 break-all rounded bg-white px-2 py-1 text-[10px]">{issued}</code>
+            <Button size="sm" variant="outline" className="h-7 shrink-0 gap-1 text-xs" onClick={copy}>
+              {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-2 space-y-1">
+        {links.isLoading ? (
+          <p className="text-[11px] text-muted-foreground">Loading links…</p>
+        ) : links.data && links.data.length > 0 ? (
+          links.data.map((link) => (
+            <div key={link.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-background px-2 py-1.5 text-[11px]">
+              <span className="font-medium">{link.label}</span>
+              <span className="flex items-center gap-2 text-muted-foreground">
+                <Badge variant={link.isActive ? "secondary" : "outline"} className="text-[10px]">
+                  {link.revokedAt ? "Revoked" : link.isActive ? "Active" : "Expired"}
+                </Badge>
+                <span>
+                  {link.useCount === 0 ? "never opened" : `opened ${link.useCount}×`}
+                  {" · expires "}
+                  {new Date(link.expiresAt).toLocaleDateString()}
+                </span>
+                {link.isActive ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-[11px] text-destructive"
+                    disabled={revoke.isPending}
+                    onClick={() => revoke.mutate({ id: link.id })}
+                  >
+                    Revoke
+                  </Button>
+                ) : null}
+              </span>
+            </div>
+          ))
+        ) : (
+          <p className="text-[11px] text-muted-foreground">No reviewer links issued yet.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -586,7 +712,7 @@ export default function PocHub() {
                       <code className="text-xs text-muted-foreground">{poc.path}</code>
                     </div>
                     {poc.pocKey === "shopline_review" ? (
-                      <ShoplinePublicReviewControl pocKey={poc.pocKey} path={poc.path} />
+                      <><ShoplinePublicReviewControl pocKey={poc.pocKey} path={poc.path} /><ReviewerPortalLinks /></>
                     ) : (
                       <><PocAccessLink pocKey={poc.pocKey} path={poc.path} /><RecipientInvites pocKey={poc.pocKey} path={poc.path} /></>
                     )}

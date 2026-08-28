@@ -63,7 +63,7 @@ import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock, Map } from "lucide-react";
+import { FlaskConical, X, Share2, Check, LayoutGrid, Database, ChevronDown, FileBarChart2, LogIn, LogOut as ExitIcon, Clock, Map, Eye } from "lucide-react";
 import { usePortalContext, SEGMENT_LABELS, SEGMENT_COLORS, type OrgSegment } from "@/contexts/PortalContext";
 
 type NavItem = NavEntry & { icon: React.ElementType };
@@ -315,6 +315,9 @@ function DashboardLayoutContent({
   // so demo.status returns active:true immediately — no polling needed.
   // We keep a short poll (3 attempts) as a safety net for the rare cold-start fallback path.
   const isGuest = (user as { isGuest?: boolean } | null)?.isGuest === true;
+  // Named for what it COMPARES, per the house rule: the session is read-only,
+  // and the banner below is one thing that follows from it.
+  const isReadOnlySession = (user as { isReadOnly?: boolean } | null)?.isReadOnly === true;
   const [seedingComplete, setSeedingComplete] = useState(false);
   const [pollCount, setPollCount] = useState(0);
   const MAX_POLL_ATTEMPTS = 3; // safety net for cold-start fallback only
@@ -757,6 +760,21 @@ function DashboardLayoutContent({
             <RoleSwitcher location={location} setLocation={setLocation} />
           </div>
         )}
+        {/*
+          Read-only review session.
+          Persistent and unmissable on purpose: writes are refused server-side
+          for this session, so without saying why, a reviewer clicking Resolve
+          or Run and getting an error would reasonably record it as a broken
+          product rather than a deliberate boundary.
+        */}
+        {isReadOnlySession ? (
+          <div className="sticky top-14 z-30 flex items-center gap-3 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 px-6 py-2.5">
+            <Eye className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
+            <p className="text-xs text-amber-800 dark:text-amber-300 flex-1">
+              <span className="font-semibold">Read-only review session.</span> You can open every page and see live figures. Actions that would change data are disabled for this session.
+            </p>
+          </div>
+        ) : null}
         {isGuest && !isDemoActive && !seedingComplete && (
           <div className="sticky top-14 z-30 flex items-center gap-3 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-200 dark:border-blue-800 px-6 py-2.5">
             <div className="h-4 w-4 rounded-full border-2 border-blue-500 border-t-transparent animate-spin shrink-0" />

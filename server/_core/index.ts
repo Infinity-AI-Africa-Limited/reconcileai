@@ -440,6 +440,71 @@ async function startServer() {
     }
   });
 
+  // GET /api/reviewer-access?key=<token>
+  //
+  // Signs an external reviewer into ONE tenant as a read-only user. This is the
+  // narrow form of the merchant identity hand-off that ShoplineConnect.tsx flags
+  // as a P0 gate: an App Store reviewer (and today, a real merchant) completes
+  // the OAuth install and lands on a welcome page with no session, holding an
+  // admin identity at `<handle>@shopline.merchant` that no email can reach.
+  //
+  // Unlike a magic link this is multi-use and long-lived, because a review runs
+  // for weeks across several people. Everything that makes that safe lives in
+  // reviewerAccess.ts: read-only enforced globally in _core/trpc.ts, the
+  // operations role, one pinned organisation, a hard expiry, and revocation.
+  const reviewerAccessLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
+  app.get("/api/reviewer-access", async (req, res) => {
+    const reqIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+    if (!reviewerAccessLimiter.check(`ip:${reqIp}`).allowed) {
+      return res.status(429).send("Too many attempts. Please try again in a few minutes.");
+    }
+    const key = typeof req.query.key === "string" ? req.query.key.trim() : "";
+    try {
+      const { resolveReviewerLink } = await import("../reviewerAccess");
+      const { createAuditLog } = await import("../db");
+      const { COOKIE_NAME } = await import("@shared/const");
+
+      const resolved = await resolveReviewerLink(key);
+      if (!resolved.ok) {
+        // One message for every rejection. Which of "no such token", "revoked"
+        // and "expired" applies is the operator's business, on their list — not
+        // something this endpoint will confirm to whoever holds the URL.
+        console.warn(`[reviewer-access] refused (${resolved.reason})`);
+        return res.redirect(302, "/login?error=reviewer_link_invalid");
+      }
+
+      const { isOrgLoginAllowed } = await import("./tenancy");
+      if (!(await isOrgLoginAllowed(resolved.organizationId))) {
+        return res.redirect(302, "/login?error=org_suspended");
+      }
+
+      const sessionToken = await sdk.createSessionToken(resolved.openId, {
+        name: resolved.name,
+        expiresInMs: ENV.sessionTtlMs,
+      });
+
+      try {
+        await createAuditLog({
+          userId: resolved.userId,
+          organizationId: resolved.organizationId,
+          action: "reviewer_link_login",
+          entityType: "user_session",
+          details: JSON.stringify({ linkId: resolved.linkId }),
+          ipAddress: reqIp,
+          userAgent: (req.headers["user-agent"] || "unknown").substring(0, 500),
+        });
+      } catch (_) { /* audit logging must never crash the login flow */ }
+
+      const { getSessionCookieOptions } = await import("./cookies");
+      const cookieOptions = getSessionCookieOptions(req);
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ENV.sessionTtlMs });
+      return res.redirect(302, "/home");
+    } catch (err) {
+      console.error("[reviewer-access] error:", err);
+      return res.redirect(302, "/login?error=reviewer_link_invalid");
+    }
+  });
+
   // ── Woodcore live → mirror sync ────────────────────────────────────────────
   // POST /api/woodcore/sync  — start a full mirror refresh (async; poll GET for progress)
   // GET  /api/woodcore/sync  — current sync state
