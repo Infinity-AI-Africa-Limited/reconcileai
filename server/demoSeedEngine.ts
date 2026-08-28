@@ -7,7 +7,7 @@
  * All demo records are tagged with isDemoData: true so they can be cleanly wiped.
  */
 
-import { getDb } from "./db";
+import { getDb, orgFilter } from "./db";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 import {
   transactions,
@@ -715,12 +715,29 @@ export async function wipeDemoData(userId: number, orgId: number | null): Promis
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
+  // ── Everything below is scoped to ONE tenant ──────────────────────────
+  //
+  // The batch and job lookups filtered on `userId` alone, and the distributor
+  // sweep on nothing at all. So a wipe run by any user destroyed THEIR demo
+  // data in every organisation they had ever seeded, and every distributor in
+  // the entire database whose notes said "DEMO DATA".
+  //
+  // That is not theoretical: a wipe run against one tenant deleted the freshly
+  // seeded Corporate B2B dataset — 2,000 transactions, 15 distributors, 50
+  // exceptions — out of a different organisation entirely. The agent-memory and
+  // channel deletes below were already org-scoped, and their rows survived,
+  // which is what made the cause legible.
+  //
+  // `orgFilter` gives the null case the right meaning too: no organisation
+  // means ORG-LESS rows only, never every row (the same rule as channelScope).
   // Find demo batches
-  const allBatches = await db.select().from(uploadBatches).where(eq(uploadBatches.userId, userId));
+  const allBatches = await db.select().from(uploadBatches)
+    .where(and(eq(uploadBatches.userId, userId), orgFilter(uploadBatches.organizationId, orgId)));
   const demoBatchIds = allBatches.filter(b => b.fileName?.includes("Demo")).map(b => b.id);
 
   // Find demo jobs
-  const allJobs = await db.select().from(reconciliationJobs).where(eq(reconciliationJobs.userId, userId));
+  const allJobs = await db.select().from(reconciliationJobs)
+    .where(and(eq(reconciliationJobs.userId, userId), orgFilter(reconciliationJobs.organizationId, orgId)));
   const demoJobIds = allJobs.filter(j => {
     const raw = j.engineConfig as Record<string, unknown> | null;
     return raw?.isDemoData === true || j.name?.includes("Demo");
@@ -747,8 +764,13 @@ export async function wipeDemoData(userId: number, orgId: number | null): Promis
     await db.delete(uploadBatches).where(eq(uploadBatches.id, batchId));
   }
 
-  // Delete demo distributors
-  const allDistributors = await db.select().from(distributors);
+  // Delete demo distributors — THIS TENANT'S only.
+  //
+  // This read had no predicate whatsoever: it returned every distributor row in
+  // the database and deleted any whose notes mentioned "DEMO DATA", so one
+  // tenant's wipe emptied every other tenant's registry.
+  const allDistributors = await db.select().from(distributors)
+    .where(orgFilter(distributors.organizationId, orgId));
   for (const d of allDistributors) {
     if (d.notes?.includes("DEMO DATA")) await db.delete(distributors).where(eq(distributors.id, d.id));
   }
