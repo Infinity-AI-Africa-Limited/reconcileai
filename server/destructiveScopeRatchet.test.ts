@@ -1,15 +1,16 @@
 /**
- * A destructive statement on a tenant table must be scoped to ONE tenant.
+ * A destructive statement on a tenant table must be confined to ONE tenant.
  *
- * `readScopeRatchet` exists for exactly this class and did not catch it, for two
- * reasons worth stating rather than quietly fixing:
+ * `readScopeRatchet` exists for exactly this class and did not catch the defect
+ * this file was written for, for two reasons worth stating rather than quietly
+ * fixing:
  *
  *   1. It scans `db.ts` ONLY. `wipeDemoData` lives in `demoSeedEngine.ts`, so
  *      its unfiltered `db.select().from(distributors)` — every distributor row
  *      in the database — was invisible to it.
  *   2. It asks whether a statement has a `.where()`, not whether that WHERE
- *      scopes to a tenant. `where(eq(uploadBatches.userId, userId))` passes,
- *      and that predicate spans every organisation the user ever seeded.
+ *      scopes to a tenant. `where(eq(uploadBatches.userId, userId))` passes, and
+ *      that predicate spans every organisation the user ever seeded.
  *
  * The cost was real: a wipe run against one tenant deleted a freshly seeded
  * Corporate B2B dataset — 2,000 transactions, 15 distributors, 50 exceptions —
@@ -17,16 +18,16 @@
  * same function were already org-scoped and their rows survived, which is what
  * made the cause legible.
  *
- * So this ratchet asks the harder question, across the whole server: for every
- * DELETE on a tenant-scoped table, is the row set it removes provably confined
- * to one tenant?
- *
- * A delete by a DERIVED id (`jobId`, `batchId`, a row id) is legitimate — that
- * is how `matches` and `exceptions` are reached at all, since neither carries an
+ * A delete by a DERIVED id (`jobId`, `batchId`, a row id) is legitimate — it is
+ * how `matches` and `exceptions` are reached at all, since neither carries an
  * organizationId (CLAUDE.md §19.3). But it is only safe if the id set came from
- * a tenant-scoped query, which a regex cannot see. So each such site is listed
- * here with the derivation that makes it safe, and adding one is a decision
- * somebody writes down.
+ * a tenant-scoped query, which no regex can see, so each such SITE is listed
+ * with the derivation that makes it safe.
+ *
+ * Exemptions are keyed by file AND table, not by file. Keyed by file alone, an
+ * unrelated unscoped delete added to an already-listed file would be exempt
+ * automatically and this ratchet would stay green through the next regression —
+ * which is the failure it exists to prevent, one level up.
  */
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
@@ -43,14 +44,31 @@ const TENANT_TABLES = [
 ];
 
 /**
- * Deletes whose row set is confined to one tenant by a DERIVED id rather than by
- * an `organizationId` predicate in the statement itself. The value is the
- * derivation that makes it safe — check it, do not take it on trust.
+ * Sites whose row set is confined to one tenant by a DERIVED id rather than by
+ * an `organizationId` predicate in the statement itself.
+ *
+ * Keyed `file::table`. The value is the derivation that makes it safe — check
+ * it, do not take it on trust.
  */
 const DERIVED_ID_DELETES: Record<string, string> = {
-  "demoSeedEngine.ts": "jobId/batchId/row ids derived from selects that now carry orgFilter(...); agentMemory and channels scope in-statement",
-  "demoSeedFinServ.ts": "exceptionIds/jobIds/batchIds derived from selects carrying orgFilter(uploadBatches.organizationId, organizationId)",
-  "reconciliationQueue.ts": "matches.jobId for the job being re-run; the job is loaded tenant-scoped before the reset",
+  "demoSeedEngine.ts::exceptions": "exceptions.jobId from demoJobIds — jobs read with orgFilter(reconciliationJobs.organizationId, orgId)",
+  "demoSeedEngine.ts::matches": "matches.jobId from the same orgFilter-scoped job read",
+  "demoSeedEngine.ts::reconciliationJobs": "row ids from the same orgFilter-scoped job read",
+  "demoSeedEngine.ts::transactions": "transactions.batchId from demoBatchIds — batches read with orgFilter(uploadBatches.organizationId, orgId)",
+  "demoSeedEngine.ts::uploadBatches": "row ids from the same orgFilter-scoped batch read",
+  "demoSeedEngine.ts::distributors": "row ids from a read carrying orgFilter(distributors.organizationId, orgId)",
+  "demoSeedEngine.ts::agentMemory": "row ids from a read carrying eq(agentMemory.organizationId, orgId)",
+  // Two sites, both scoped, neither by the literal word: one deletes the code
+  // `<CODE>_ORG${orgId}`, which embeds the tenant; the other deletes only the
+  // bare code where `isNull(channels.organizationId)`, i.e. org-less shared
+  // rails, so one tenant still cannot remove another's.
+  "demoSeedEngine.ts::channels": "channel code embeds _ORG${orgId}, or the delete is restricted to isNull(channels.organizationId)",
+  "demoSeedFinServ.ts::exceptions": "exceptionIds derived from selects carrying orgFilter(...)",
+  "demoSeedFinServ.ts::matches": "matches.jobId from jobIds derived with orgFilter(reconciliationJobs.organizationId, organizationId)",
+  "demoSeedFinServ.ts::transactions": "transactions.batchId from batchIds derived with orgFilter(uploadBatches.organizationId, organizationId)",
+  "demoSeedFinServ.ts::uploadBatches": "the same orgFilter-scoped batch ids",
+  "demoSeedFinServ.ts::reconciliationJobs": "the same orgFilter-scoped job ids",
+  "reconciliationQueue.ts::matches": "matches.jobId for the job being re-run; the job is loaded tenant-scoped before the reset",
 };
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -65,22 +83,36 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-type Site = { file: string; line: number; table: string; stmt: string };
+/**
+ * Strip comments before any predicate check.
+ *
+ * Without this, the prose explaining a tenancy fix satisfies the assertion that
+ * the fix is present — so removing the predicate and leaving the comment would
+ * keep this green. The comments in `wipeDemoData` say "organizationId" many
+ * times over.
+ */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+}
+
+type Site = { file: string; line: number; table: string; stmt: string; key: string };
 
 function deleteSites(): Site[] {
   const out: Site[] = [];
   for (const file of walk(SERVER)) {
     const src = fs.readFileSync(file, "utf8");
+    const rel = path.relative(SERVER, file).split(path.sep).join("/");
     for (const m of src.matchAll(/\b(?:db|tx|executor)\s*\.\s*delete\s*\(\s*(\w+)\s*\)/g)) {
       const table = m[1];
       if (!TENANT_TABLES.includes(table)) continue;
       const at = m.index ?? 0;
       const end = src.indexOf(";", at);
       out.push({
-        file: path.relative(SERVER, file).split(path.sep).join("/"),
+        file: rel,
         line: src.slice(0, at).split("\n").length,
         table,
-        stmt: src.slice(at, end === -1 ? at + 400 : end),
+        stmt: withoutComments(src.slice(at, end === -1 ? at + 400 : end)),
+        key: `${path.basename(rel)}::${table}`,
       });
     }
   }
@@ -88,52 +120,61 @@ function deleteSites(): Site[] {
 }
 
 describe("every destructive statement on a tenant table is confined to one tenant", () => {
-  it("scopes in the statement, or is listed with the derivation that makes it safe", () => {
+  it("scopes in the statement, or is listed per SITE with the derivation that makes it safe", () => {
     const offenders = deleteSites()
       .filter((s) => !/organizationId/.test(s.stmt))
-      .filter((s) => !(s.file in DERIVED_ID_DELETES))
-      .map((s) => `${s.file}:${s.line} deletes ${s.table} with no organizationId predicate`);
+      .filter((s) => !(s.key in DERIVED_ID_DELETES))
+      .map((s) => `${s.file}:${s.line} deletes ${s.table} with no organizationId predicate (key ${s.key})`);
 
     expect(
       offenders,
       "A delete on a tenant-scoped table must either carry an organizationId " +
-        "predicate, or be listed in DERIVED_ID_DELETES with the derivation that " +
-        "confines its id set to one tenant.",
+        "predicate, or be listed in DERIVED_ID_DELETES under its own file::table " +
+        "key with the derivation that confines its id set to one tenant.",
     ).toEqual([]);
+  });
+
+  it("carries no exemption for a site that no longer exists", () => {
+    // A stale entry is a hole: it exempts a key a future delete could reoccupy
+    // without anyone re-checking the derivation.
+    const live = new Set(deleteSites().map((s) => s.key));
+    const stale = Object.keys(DERIVED_ID_DELETES).filter((key) => !live.has(key));
+    expect(stale, "remove these — the delete they exempted is gone").toEqual([]);
   });
 
   /**
    * The specific regression. `wipeDemoData` reads three row sets before deleting
-   * them, and all three were unscoped; two filtered on `userId`, which spans
-   * every organisation that user seeded, and one filtered on nothing at all.
+   * them; all three were unscoped — two filtered on `userId`, which spans every
+   * organisation that user seeded, and one filtered on nothing at all.
+   *
+   * The predicate is required in the STATEMENT, comments stripped. A byte window
+   * around the read would let the prose explaining this very fix satisfy the
+   * assertion after the fix itself had been removed.
    */
   it("builds every wipeDemoData row set from a tenant-scoped read", () => {
     const src = fs.readFileSync(path.join(SERVER, "demoSeedEngine.ts"), "utf8");
     const start = src.indexOf("export async function wipeDemoData");
     expect(start, "wipeDemoData not found — update this ratchet").toBeGreaterThan(-1);
-    // To the next top-level export, or end of file. Slicing at the first nested
-    // closing brace stops before the reads this checks.
     const nextExport = src.indexOf(String.fromCharCode(10) + "export ", start + 1);
     const body = src.slice(start, nextExport === -1 ? undefined : nextExport);
 
     for (const table of ["uploadBatches", "reconciliationJobs", "distributors"]) {
-      // indexOf, not a regex: a backslash-escaped pattern written through a
-      // heredoc collapses inside a template literal, and the silently-broken
-      // regex then matches nothing and the ratchet passes vacuously.
       const at = body.indexOf("from(" + table + ")");
       expect(at, `wipeDemoData no longer reads ${table} — update this ratchet`).toBeGreaterThan(-1);
-      const read = body.slice(at, at + 240);
+      const end = body.indexOf(";", at);
+      expect(end, `unterminated read of ${table}`).toBeGreaterThan(at);
+      const statement = withoutComments(body.slice(at, end));
       expect(
-        read.includes("orgFilter") || read.includes("organizationId"),
+        statement.includes("orgFilter(") || statement.includes("organizationId"),
         `wipeDemoData reads ${table} without a tenant predicate, so a wipe in one ` +
-          `organisation deletes another's rows`,
+          `organisation deletes another's rows. Statement: ${statement.trim()}`,
       ).toBe(true);
     }
   });
 
   it("still scopes the two that were already correct, so the fix did not trade one for another", () => {
-    const src = fs.readFileSync(path.join(SERVER, "demoSeedEngine.ts"), "utf8");
+    const src = withoutComments(fs.readFileSync(path.join(SERVER, "demoSeedEngine.ts"), "utf8"));
     expect(src).toContain("eq(agentMemory.organizationId, orgId)");
-    expect(src).toContain("`${code}_ORG${orgId}`");
+    expect(src).toContain("_ORG${orgId}");
   });
 });
