@@ -11,6 +11,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { TRPCError } from "@trpc/server";
 
+// JWT_SECRET must exist before _core/env is first imported: ENV is a frozen
+// snapshot, so setting it later would leave every signed session unverifiable
+// and these tests would fail for entirely the wrong reason.
+vi.hoisted(() => {
+  process.env.JWT_SECRET = process.env.JWT_SECRET || "reviewer-access-test-secret-value-0123456789";
+});
+
 // Only the liveness probe is replaced; every other export stays real, so the
 // constants asserted below are the shipped values rather than the mock's.
 const liveness = vi.hoisted(() => vi.fn(async () => true));
@@ -19,6 +26,16 @@ vi.mock("./reviewerAccess", async (importOriginal) => ({
   isReviewerSessionLive: liveness,
 }));
 
+// The database is not the subject here; the gate is.
+const getUserByOpenId = vi.hoisted(() => vi.fn());
+vi.mock("./db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./db")>()),
+  getUserByOpenId,
+  upsertUser: vi.fn(async () => undefined),
+}));
+
+import { COOKIE_NAME } from "@shared/const";
+import { sdk } from "./_core/sdk";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./_core/trpc";
 import { REVIEWER_ROLE, REVIEWER_LOGIN_METHOD, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
 
@@ -42,6 +59,7 @@ const probe = router({
 beforeEach(() => {
   liveness.mockReset();
   liveness.mockResolvedValue(true);
+  getUserByOpenId.mockReset();
 });
 
 type AnyUser = Parameters<typeof probe.createCaller>[0]["user"];
@@ -118,43 +136,64 @@ describe("when a reviewer signs out", () => {
     await expect(caller(reviewer).auth.logout()).resolves.toBe("logged out");
   });
 
-  it("should still be allowed to sign out after the link is revoked", async () => {
-    // Otherwise a revoked reviewer is stuck holding a cookie they cannot clear.
-    liveness.mockResolvedValue(false);
-    await expect(caller(reviewer).auth.logout()).resolves.toBe("logged out");
+  it("should still be able to sign out once the link is revoked", async () => {
+    // A revoked reviewer no longer authenticates at all, so they arrive with no
+    // user. Logout must still clear their cookie rather than leaving them stuck
+    // holding one — which is why it is a publicProcedure and why the write ban
+    // exempts it.
+    await expect(caller(null).auth.logout()).resolves.toBe("logged out");
   });
 });
 
+/**
+ * Revocation is enforced at AUTHENTICATION, not in the tRPC middleware.
+ *
+ * The first fix put it in tRPC, which was the instance rather than the class:
+ * the monitoring stream and the storage proxy authenticate the same cookie
+ * without passing through tRPC, and would have kept serving a revoked reviewer
+ * until the session expired. So these exercise `sdk.authenticateRequest` — the
+ * one gate every surface goes through — with a REAL signed session cookie.
+ */
 describe("when a link is revoked after it has been used", () => {
-  const reviewer = userLike({ role: REVIEWER_ROLE, isReadOnly: true, loginMethod: REVIEWER_LOGIN_METHOD });
-
-  // Also found in review. The session cookie is a stateless JWT, so revocation
-  // stopped new exchanges and did nothing to sessions already minted — they kept
-  // working for the full TTL. An operator revoking during an incident would
-  // reasonably believe access had stopped.
-  it("should cut off reads immediately, not at session expiry", async () => {
-    liveness.mockResolvedValue(false);
-    await expect(caller(reviewer).protectedRead()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  const reviewerUser = userLike({
+    id: 77, openId: "rvw_abc", role: REVIEWER_ROLE, isReadOnly: true, loginMethod: REVIEWER_LOGIN_METHOD,
   });
 
-  it("should let a live link keep reading", async () => {
+  async function requestWithSessionFor(user: AnyUser) {
+    const u = user as unknown as { openId: string };
+    const token = await sdk.createSessionToken(u.openId, { name: "Reviewer" });
+    getUserByOpenId.mockResolvedValue(user);
+    return { headers: { cookie: `${COOKIE_NAME}=${token}` } } as never;
+  }
+
+  it("should refuse the session everywhere once the link is revoked", async () => {
+    liveness.mockResolvedValue(false);
+    const req = await requestWithSessionFor(reviewerUser);
+    await expect(sdk.authenticateRequest(req)).rejects.toThrow(/revoked or has expired/i);
+  });
+
+  it("should admit the session while the link is live", async () => {
     liveness.mockResolvedValue(true);
-    await expect(caller(reviewer).protectedRead()).resolves.toBe("read");
+    const req = await requestWithSessionFor(reviewerUser);
+    await expect(sdk.authenticateRequest(req)).resolves.toMatchObject({ id: 77 });
   });
 
   it("should fail closed when liveness cannot be determined", async () => {
     liveness.mockRejectedValue(new Error("database unavailable"));
-    await expect(caller(reviewer).protectedRead()).rejects.toThrow();
+    const req = await requestWithSessionFor(reviewerUser);
+    await expect(sdk.authenticateRequest(req)).rejects.toThrow();
   });
 
-  // The liveness probe keys on the reviewer login method, NOT on isReadOnly.
-  // An operator may legitimately mark an ordinary user read-only; such a user
-  // has no link behind them, and keying on isReadOnly would lock them out of
-  // reads entirely.
+  // Keyed on the reviewer login method, NOT on isReadOnly. An operator may
+  // legitimately mark an ordinary user read-only; such a user has no link behind
+  // them, and keying on isReadOnly would refuse them everything.
   it("should not demand a link from a read-only user who never had one", async () => {
-    const readOnlyStaff = userLike({ role: "compliance", isReadOnly: true, loginMethod: "magic_link" });
+    const readOnlyStaff = userLike({
+      id: 78, openId: "staff_1", role: "compliance", isReadOnly: true, loginMethod: "magic_link",
+    });
     liveness.mockResolvedValue(false);
-    await expect(caller(readOnlyStaff).protectedRead()).resolves.toBe("read");
+    const req = await requestWithSessionFor(readOnlyStaff);
+    await expect(sdk.authenticateRequest(req)).resolves.toMatchObject({ id: 78 });
     expect(liveness).not.toHaveBeenCalled();
   });
 });

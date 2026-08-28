@@ -761,9 +761,13 @@ one tenant — `SL_RECONCILEAI_DEV` by default. Containment is structural:
   included. The session cookie is a stateless JWT, so without both of these
   "revoke" only stops NEW sign-ins and leaves sessions already minted working for
   the full TTL (up to 24h). Revocation that leaves the reviewer inside for hours
-  is not revocation. The check fails closed, and is keyed on
-  `loginMethod === "reviewer_link"` rather than on `isReadOnly` — an operator may
-  mark an ordinary user read-only, and that user has no link behind them.
+  is not revocation. **The check lives in `sdk.authenticateRequest`** — the one
+  gate every surface passes through — **not in the tRPC middleware**: the
+  monitoring stream and the storage proxy authenticate the same cookie without
+  touching tRPC, so a tRPC-only check was the instance, not the class. It fails
+  closed, and is keyed on `loginMethod === "reviewer_link"` rather than on
+  `isReadOnly` — an operator may mark an ordinary user read-only, and that user
+  has no link behind them.
 - **`auth.logout` is exempt from the write ban.** It is a `publicProcedure`
   mutation, so the blanket ban refused it and a reviewer pressing "Sign out" kept
   a live session on the device. Ending access must never be the thing access

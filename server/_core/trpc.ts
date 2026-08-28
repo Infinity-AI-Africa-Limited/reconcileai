@@ -54,30 +54,12 @@ const refuseReadOnlyWrites = t.middleware(async opts => {
     });
   }
 
-  /**
-   * Revocation has to reach a session that already exists.
-   *
-   * The session cookie is a stateless JWT: nothing in it is consulted against
-   * the link after sign-in, so revoking only stopped NEW exchanges and left
-   * every session minted from that link working until its TTL expired — hours.
-   * An operator revoking during an incident would reasonably believe access had
-   * stopped. So reviewer identities are re-checked on every request, reads
-   * included, and the check fails closed.
-   *
-   * Keyed on the reviewer login method rather than on `isReadOnly`: an operator
-   * may mark an ordinary user read-only, and such a user has no link behind
-   * them. Keying this on `isReadOnly` would lock those people out of reads.
-   */
-  if (ctx.user.loginMethod === "reviewer_link") {
-    const { isReviewerSessionLive } = await import("../reviewerAccess");
-    if (!(await isReviewerSessionLive(ctx.user.id))) {
-      throw new TRPCError({
-        code: "UNAUTHORIZED",
-        message: "This review link has been revoked or has expired.",
-      });
-    }
-  }
-
+  // Note: whether a reviewer's LINK is still live is not checked here. That
+  // moved into sdk.authenticateRequest, because the monitoring stream and the
+  // storage proxy authenticate the same cookie without passing through tRPC and
+  // would otherwise have kept serving a revoked reviewer. Checking it in both
+  // places would leave this branch unreachable — by then `ctx.user` is already
+  // null — and an unreachable guard is one that quietly stops being tested.
   return next();
 });
 
