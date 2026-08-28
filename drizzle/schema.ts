@@ -2267,7 +2267,19 @@ export const reviewerAccessLinks = mysqlTable("reviewer_access_links", {
   token: varchar("token", { length: 64 }).notNull(),
   /** Who the link was issued to, for attribution when one leaks. */
   label: varchar("label", { length: 120 }).notNull(),
-  /** The single tenant this link's session may ever see. */
+  /**
+   * How much the link can see.
+   *
+   *   "tenant"   — one organisation, role `operations` (a SHOPLINE App Store
+   *                reviewer looking at the merchant portal).
+   *   "platform" — cross-tenant, role `super_admin` (a YC reviewer who needs the
+   *                operator view and all three verticals).
+   *
+   * Varchar rather than an enum: a new reviewer audience should be a new value,
+   * not a migration.
+   */
+  scope: varchar("scope", { length: 16 }).default("tenant").notNull(),
+  /** The tenant a "tenant"-scope session may see; the operator org for "platform". */
   organizationId: int("organizationId").notNull(),
   /** The read-only user the session is minted as. */
   userId: int("userId").notNull(),

@@ -28,16 +28,32 @@ vi.mock("./reviewerAccess", async (importOriginal) => ({
 
 // The database is not the subject here; the gate is.
 const getUserByOpenId = vi.hoisted(() => vi.fn());
+const getDb = vi.hoisted(() => vi.fn());
 vi.mock("./db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./db")>()),
   getUserByOpenId,
+  getDb,
   upsertUser: vi.fn(async () => undefined),
 }));
+
+/**
+ * A drizzle chain that answers with fixed rows.
+ *
+ * `platformScopeIsSafe` reaches the database through `./db`, which is a
+ * cross-module import and therefore genuinely interceptable here — unlike a
+ * module calling its own export, which module mocking cannot reach.
+ */
+function fakeDb(rows: unknown[]) {
+  const chain: Record<string, unknown> = {};
+  for (const method of ["select", "from", "where", "orderBy"]) chain[method] = () => chain;
+  chain.limit = async () => rows;
+  return chain;
+}
 
 import { COOKIE_NAME } from "@shared/const";
 import { sdk } from "./_core/sdk";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./_core/trpc";
-import { REVIEWER_ROLE, REVIEWER_LOGIN_METHOD, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
+import { REVIEWER_ROLE, REVIEWER_ROLES, REVIEWER_LOGIN_METHOD, platformScopeIsSafe, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
 
 /**
  * A stand-in router built from the REAL exported builders.
@@ -60,6 +76,7 @@ beforeEach(() => {
   liveness.mockReset();
   liveness.mockResolvedValue(true);
   getUserByOpenId.mockReset();
+  getDb.mockReset();
 });
 
 type AnyUser = Parameters<typeof probe.createCaller>[0]["user"];
@@ -244,7 +261,7 @@ describe("when the reviewer identity is created", () => {
   it("should re-assert read-only on every issue rather than trusting the stored row", () => {
     // The user row is editable from the admin screens. This identity must not be
     // able to drift into a writable one through an unrelated edit.
-    expect(SERVICE).toMatch(/\.set\(\{ isReadOnly: true, isActive: true, role: REVIEWER_ROLE, organizationId \}\)/);
+    expect(SERVICE).toMatch(/\.set\(\{ isReadOnly: true, isActive: true, role, organizationId \}\)/);
   });
 
   it("should re-check read-only again at sign-in, not just at issue time", () => {
@@ -263,12 +280,82 @@ describe("when the reviewer identity is created", () => {
     // link a live session came from — revoking one of two would cut off both
     // reviewers or neither.
     expect(SERVICE).toMatch(/function reviewerOpenId\(token: string\)/);
-    expect(SERVICE).toMatch(/ensureReviewerUser\(params\.organizationId, token\)/);
+    expect(SERVICE).toMatch(/ensureReviewerUser\(params\.organizationId, token, scope\)/);
     expect(SERVICE).not.toMatch(/reviewer_org_\$\{organizationId\}/);
   });
 
   it("should derive the identity from a hash, keeping the token out of the users table", () => {
     expect(SERVICE).toMatch(/createHash\("sha256"\)\.update\(token\)/);
+  });
+});
+
+describe("when the link is scoped to the whole platform", () => {
+  const SERVICE = fs.readFileSync(path.join(__dirname, "reviewerAccess.ts"), "utf8");
+
+  it("should use super_admin for platform and operations for one tenant", () => {
+    // A YC-style reviewer needs the operator view and all three verticals, which
+    // is cross-tenant by definition. A SHOPLINE reviewer needs one merchant
+    // portal and must not get more.
+    expect(REVIEWER_ROLES.platform).toBe("super_admin");
+    expect(REVIEWER_ROLES.tenant).toBe("operations");
+    expect(REVIEWER_ROLE).toBe(REVIEWER_ROLES.tenant);
+  });
+
+  it("should still be read-only, super_admin or not", () => {
+    // The role decides what a session may SEE. The write ban is separate,
+    // global, and derived from the login method — so widening the role does not
+    // widen what the session can do.
+    expect(SERVICE).toMatch(/isReadOnly: true/);
+  });
+
+  // BEHAVIOURAL, not a source regex. The structural versions of these passed
+  // while the function was mutated to `return true` — they asserted that the
+  // right predicates appear in the file, never that the answer depends on them.
+  it("should allow a platform link when every organisation is a demo", async () => {
+    getDb.mockResolvedValue(fakeDb([])); // no real tenant found
+    await expect(platformScopeIsSafe()).resolves.toBe(true);
+  });
+
+  it("should withhold it the moment one real tenant exists", async () => {
+    // Every organisation in production is a demo today, which is the only reason
+    // a cross-tenant link is acceptable at all. Onboard one real bank and an
+    // outstanding link becomes a disclosure of that bank's data.
+    getDb.mockResolvedValue(fakeDb([{ id: 1 }]));
+    await expect(platformScopeIsSafe()).resolves.toBe(false);
+  });
+
+  it("should fail closed when the database cannot answer", async () => {
+    getDb.mockResolvedValue(null);
+    await expect(platformScopeIsSafe()).resolves.toBe(false);
+  });
+
+  it("should ask the question in terms of isDemo, excluding the operator's own org", () => {
+    // The operator's super_admin org is never isDemo and holds no tenant data,
+    // so counting it would withhold every platform link permanently.
+    expect(SERVICE).toMatch(/eq\(organizations\.isDemo, false\)/);
+    expect(SERVICE).toMatch(/ne\(organizations\.segment, "super_admin"\)/);
+  });
+
+  it("should re-check that condition at SIGN-IN, not only when the link was issued", () => {
+    // Issue-time alone would be meaningless: the link outlives the moment it was
+    // created, and the condition it depends on is exactly the one that changes
+    // when the business succeeds. Nobody will connect "we signed our first bank"
+    // to "an old reviewer link is still live".
+    const resolve = SERVICE.slice(SERVICE.indexOf("export async function resolveReviewerLink"));
+    expect(resolve).toMatch(/scope === "platform" && !\(await platformScopeIsSafe\(\)\)/);
+    expect(resolve).toMatch(/reason: "platform_scope_withdrawn"/);
+  });
+
+  it("should refuse to issue one under the same condition", () => {
+    const issue = SERVICE.slice(SERVICE.indexOf("export async function issueReviewerLink"), SERVICE.indexOf("function toView"));
+    expect(issue).toMatch(/scope === "platform" && !\(await platformScopeIsSafe\(\)\)/);
+  });
+
+  it("should land a platform reviewer on the operator view, not a vertical's home page", () => {
+    // /home resolves a starting page per vertical — right for a tenant reviewer,
+    // arbitrary for someone here to see the whole platform.
+    const INDEX = fs.readFileSync(path.join(__dirname, "_core", "index.ts"), "utf8");
+    expect(INDEX).toMatch(/resolved\.scope === "platform" \? "\/admin\/super-admin" : "\/home"/);
   });
 });
 

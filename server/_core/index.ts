@@ -498,7 +498,11 @@ async function startServer() {
       const { getSessionCookieOptions } = await import("./cookies");
       const cookieOptions = getSessionCookieOptions(req);
       res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ENV.sessionTtlMs });
-      return res.redirect(302, "/home");
+      // A platform reviewer is here for the operator view — the organisation
+      // list is where the three verticals are reachable from. /home resolves a
+      // starting page per vertical, which is right for a tenant reviewer and
+      // would drop a platform one somewhere arbitrary.
+      return res.redirect(302, resolved.scope === "platform" ? "/admin/super-admin" : "/home");
     } catch (err) {
       console.error("[reviewer-access] error:", err);
       return res.redirect(302, "/login?error=reviewer_link_invalid");

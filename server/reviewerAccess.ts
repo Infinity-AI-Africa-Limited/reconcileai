@@ -39,7 +39,7 @@
  *     otherwise unanswerable while a submission is pending.
  */
 import crypto from "node:crypto";
-import { and, desc, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, ne } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "./db";
 import { organizations, reviewerAccessLinks, users } from "../drizzle/schema";
@@ -47,23 +47,91 @@ import { organizations, reviewerAccessLinks, users } from "../drizzle/schema";
 /** The retail tenant a SHOPLINE reviewer is shown: the canonical dev store. */
 export const SHOPLINE_REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
 
+/**
+ * How much of the platform a link opens.
+ *
+ *   tenant   — one organisation, role `operations`. A SHOPLINE App Store
+ *              reviewer assessing the merchant portal.
+ *   platform — cross-tenant, role `super_admin`. An investor or accelerator
+ *              reviewer (YC) who needs the operator view and all three verticals,
+ *              and has no email address we could provision an account against.
+ */
+export type ReviewerScope = "tenant" | "platform";
+
+/**
+ * Roles by scope. Read-only is enforced separately and globally, so these decide
+ * only what the session may SEE.
+ */
+export const REVIEWER_ROLES: Record<ReviewerScope, "operations" | "super_admin"> = {
+  tenant: "operations",
+  platform: "super_admin",
+};
+
 /** Long enough to outlast an App Store review without becoming permanent. */
 export const DEFAULT_REVIEWER_LINK_TTL_DAYS = 90;
 export const MAX_REVIEWER_LINK_TTL_DAYS = 180;
 
 /**
- * Read-only reviewers get `operations`, never `admin`.
+ * Tenant-scope reviewers get `operations`, never `admin`.
  *
  * The global write ban makes any role safe to WRITE with; it does nothing about
  * what a role may READ. Admin-scoped queries reach team membership and
- * integration configuration, which is not a reviewer's business and not part of
- * the journey under review.
+ * integration configuration, which is not a merchant reviewer's business and not
+ * part of the journey under review.
  */
-export const REVIEWER_ROLE = "operations" as const;
+export const REVIEWER_ROLE = REVIEWER_ROLES.tenant;
+
+/**
+ * A platform-scope link is refused while ANY real tenant exists.
+ *
+ * `super_admin` is cross-tenant by definition, so this link's exposure is not
+ * fixed at issue time — it is whatever the platform holds when the reviewer
+ * happens to open it. Every organisation is a demo today (verified against
+ * production), which is the only reason a platform link is acceptable at all.
+ * Onboard one real bank and an outstanding link silently becomes a disclosure of
+ * that bank's data to whoever still has the URL.
+ *
+ * So the condition is checked at every sign-in rather than assumed from the day
+ * the link was issued, and it fails closed. This is CLAUDE.md §19's
+ * first-customer gate made structural instead of a note somebody has to
+ * remember: the link stops working by itself.
+ *
+ * `isDemo` is the signal because it is the one an operator already sets
+ * deliberately, from the super-admin screens. The operator's own `super_admin`
+ * org is excluded — it holds no tenant data and is never `isDemo`.
+ */
+export async function platformScopeIsSafe(): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false; // fail closed
+  const [realTenant] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(and(
+      eq(organizations.isDemo, false),
+      ne(organizations.segment, "super_admin"),
+      eq(organizations.isActive, true),
+    ))
+    .limit(1);
+  return !realTenant;
+}
+
+/** The operator's own organisation — the home org for a platform-scope session. */
+export async function platformHomeOrganizationId(): Promise<number | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [org] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.segment, "super_admin"))
+    .orderBy(organizations.id)
+    .limit(1);
+  return org?.id ?? null;
+}
 
 export interface ReviewerLinkView {
   id: number;
   label: string;
+  scope: ReviewerScope;
   organizationId: number;
   expiresAt: Date;
   revokedAt: Date | null;
@@ -123,26 +191,31 @@ function reviewerOpenId(token: string): string {
   return `rvw_${crypto.createHash("sha256").update(token).digest("hex").slice(0, 40)}`;
 }
 
-export async function ensureReviewerUser(organizationId: number, token: string): Promise<number> {
+export async function ensureReviewerUser(
+  organizationId: number,
+  token: string,
+  scope: ReviewerScope = "tenant",
+): Promise<number> {
   const db = await requireDb();
   const openId = reviewerOpenId(token);
+  const role = REVIEWER_ROLES[scope];
 
   const [existing] = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
   if (existing) {
     await db
       .update(users)
-      .set({ isReadOnly: true, isActive: true, role: REVIEWER_ROLE, organizationId })
+      .set({ isReadOnly: true, isActive: true, role, organizationId })
       .where(eq(users.id, existing.id));
     return existing.id;
   }
 
   await db.insert(users).values({
     openId,
-    name: "App Store Reviewer",
+    name: scope === "platform" ? "Platform Reviewer" : "App Store Reviewer",
     // Not a deliverable address, and deliberately so: this identity must never
     // be reachable by a password reset or magic link. The link is the only way in.
     email: `${openId}@reviewer.invalid`,
-    role: REVIEWER_ROLE,
+    role,
     organizationId,
     isReadOnly: true,
     isGuest: false,
@@ -193,11 +266,13 @@ export async function organizationIdByCode(code: string): Promise<number | null>
 export async function issueReviewerLink(params: {
   label: string;
   organizationId: number;
+  scope?: ReviewerScope;
   ttlDays?: number;
   createdBy?: number | null;
   appUrl: string;
 }): Promise<ReviewerLinkView> {
   const db = await requireDb();
+  const scope: ReviewerScope = params.scope ?? "tenant";
   const ttlDays = Math.min(Math.max(params.ttlDays ?? DEFAULT_REVIEWER_LINK_TTL_DAYS, 1), MAX_REVIEWER_LINK_TTL_DAYS);
 
   const [org] = await db
@@ -207,15 +282,27 @@ export async function issueReviewerLink(params: {
     .limit(1);
   if (!org) throw new TRPCError({ code: "NOT_FOUND", message: "That organisation does not exist." });
 
+  // Refused at issue AND re-checked at sign-in. Issue-time alone would be
+  // meaningless: the link outlives the moment it was created, and the condition
+  // it depends on is exactly the one that changes when the business succeeds.
+  if (scope === "platform" && !(await platformScopeIsSafe())) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message:
+        "A platform-wide reviewer link cannot be issued while a non-demo organisation exists — it would expose that tenant's data. Mark it as a demo, or issue a tenant-scoped link instead.",
+    });
+  }
+
   // Token first: the identity is derived from it, so that it is one-per-link and
   // revocation can therefore reach an already-minted session.
   const token = newToken();
-  const userId = await ensureReviewerUser(params.organizationId, token);
+  const userId = await ensureReviewerUser(params.organizationId, token, scope);
   const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
 
   await db.insert(reviewerAccessLinks).values({
     token,
     label: params.label.slice(0, 120),
+    scope,
     organizationId: params.organizationId,
     userId,
     expiresAt,
@@ -232,6 +319,7 @@ function toView(row: typeof reviewerAccessLinks.$inferSelect): ReviewerLinkView 
   return {
     id: row.id,
     label: row.label,
+    scope: (row.scope === "platform" ? "platform" : "tenant") as ReviewerScope,
     organizationId: row.organizationId,
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -248,10 +336,16 @@ function toView(row: typeof reviewerAccessLinks.$inferSelect): ReviewerLinkView 
  * the reviewer get in?" needs the reason, and the three causes call for three
  * different actions: reissue, un-revoke by reissuing, or check the URL.
  */
-export type ReviewerLinkRejection = "unknown_token" | "revoked" | "expired" | "user_unavailable";
+export type ReviewerLinkRejection =
+  | "unknown_token"
+  | "revoked"
+  | "expired"
+  | "user_unavailable"
+  /** A platform link met a real tenant. Withdrawn rather than exposing it. */
+  | "platform_scope_withdrawn";
 
 export type ReviewerLinkResolution =
-  | { ok: true; userId: number; openId: string; name: string; organizationId: number; linkId: number }
+  | { ok: true; userId: number; openId: string; name: string; organizationId: number; linkId: number; scope: ReviewerScope }
   | { ok: false; reason: ReviewerLinkRejection };
 
 /**
@@ -269,6 +363,17 @@ export async function resolveReviewerLink(token: string | null | undefined): Pro
   if (!link) return { ok: false, reason: "unknown_token" };
   if (link.revokedAt) return { ok: false, reason: "revoked" };
   if (link.expiresAt.getTime() <= Date.now()) return { ok: false, reason: "expired" };
+
+  const scope: ReviewerScope = link.scope === "platform" ? "platform" : "tenant";
+
+  // Re-checked HERE, not trusted from issue time. A platform link is
+  // cross-tenant, so what it exposes is decided by what the platform holds the
+  // moment it is opened — not by what it held when it was created. The first
+  // real customer is precisely the event that changes the answer, and it is not
+  // an event anyone will remember to connect to an old link.
+  if (scope === "platform" && !(await platformScopeIsSafe())) {
+    return { ok: false, reason: "platform_scope_withdrawn" };
+  }
 
   const [user] = await db.select().from(users).where(eq(users.id, link.userId)).limit(1);
   // isReadOnly is re-checked here, not assumed from issue time. If this identity
@@ -288,6 +393,7 @@ export async function resolveReviewerLink(token: string | null | undefined): Pro
     name: user.name || "App Store Reviewer",
     organizationId: link.organizationId,
     linkId: link.id,
+    scope,
   };
 }
 
