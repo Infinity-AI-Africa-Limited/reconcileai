@@ -237,6 +237,14 @@ function ReviewerPortalLinks() {
   const [scope, setScope] = useState<"tenant" | "platform">("tenant");
   const [issued, setIssued] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [markingDemo, setMarkingDemo] = useState<{ id: number; name: string } | null>(null);
+
+  const markDemo = trpc.superAdmin.setOrganizationIsDemo.useMutation({
+    onSuccess: () => {
+      setMarkingDemo(null);
+      utils.reviewerAccess.platformScopeStatus.invalidate();
+    },
+  });
 
   const issue = trpc.reviewerAccess.issue.useMutation({
     onSuccess: (link) => {
@@ -316,30 +324,80 @@ function ReviewerPortalLinks() {
         when it is OPENED — the first real customer is exactly the event that
         changes the answer, and nobody will connect that event to an old link.
       */}
-      {platformStatus.data && !platformStatus.data.available ? (
+      {/*
+        Three states, not two. `platformStatus.data` is undefined while the query
+        is in flight OR when it has failed, and reading that as "available" would
+        show the option enabled precisely when nothing could be verified — the
+        same mistake as the SHOPLINE kill switch, which reported a failed read as
+        "Disabled". Unknown is named.
+      */}
+      {platformStatus.isError ? (
+        <p className="mt-2 text-[11px] text-amber-600">
+          The platform-link condition could not be read, so this option stays closed. Reload to try again.
+        </p>
+      ) : platformStatus.data && !platformStatus.data.available ? (
         <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2">
           <p className="text-[11px] text-amber-900">{platformStatus.data.reason}</p>
           {/*
-            Naming the rows is the whole point. The first version said only that
-            "a non-demo organisation exists", which left the operator with a
-            greyed-out option and no way to find out which one — the only route
-            forward was to ask an engineer.
+            Named AND actionable. The first version said only that "a non-demo
+            organisation exists", leaving a greyed-out option and no way to find
+            out which row meant it. Naming them was still not enough: there is no
+            isDemo control anywhere else in the app, so the remediation had to
+            live here or it did not exist at all.
           */}
-          <ul className="mt-1.5 space-y-0.5">
+          <ul className="mt-1.5 space-y-1">
             {platformStatus.data.blocking.map((org) => (
-              <li key={org.id} className="text-[11px] text-amber-900">
-                <span className="font-medium">{org.name}</span>
-                {org.code ? <span className="text-amber-700"> ({org.code})</span> : null}
+              <li key={org.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-900">
+                <span>
+                  <span className="font-medium">{org.name}</span>
+                  {org.code ? <span className="text-amber-700"> ({org.code})</span> : null}
+                </span>
+                {org.id > 0 ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 px-2 text-[11px]"
+                    disabled={markDemo.isPending}
+                    onClick={() => setMarkingDemo(org)}
+                  >
+                    Mark as demo
+                  </Button>
+                ) : null}
               </li>
             ))}
           </ul>
           <p className="mt-1.5 text-[11px] text-amber-800">
-            If that is a test or demo tenant rather than a paying client, mark it as a demo in{" "}
-            <a href="/admin/super-admin/orgs" className="underline">All Organisations</a> and this option opens.
-            A SHOPLINE App Store reviewer installing the app creates one of these each time.
+            A SHOPLINE App Store reviewer installing the app provisions one of these each time, so
+            expect it to recur while a review is running. Mark it a demo only if it is genuinely a
+            test tenant and not a paying client.
           </p>
+          {platformStatus.data.truncated ? (
+            <p className="mt-1.5 text-[11px] text-amber-800">
+              More organisations are blocking than are listed here.
+            </p>
+          ) : null}
         </div>
       ) : null}
+
+      <AlertDialog open={markingDemo !== null} onOpenChange={(o) => !o && setMarkingDemo(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Mark &ldquo;{markingDemo?.name}&rdquo; as a demo tenant?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Its data becomes visible to anyone holding a platform-wide reviewer link. Do this only
+              for a test tenant — never for a paying client, whose data the gate exists to protect.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => markingDemo && markDemo.mutate({ organizationId: markingDemo.id, isDemo: true })}
+            >
+              Mark as demo
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {issue.error ? (
         <p className="mt-2 text-[11px] text-destructive">{issue.error.message}</p>

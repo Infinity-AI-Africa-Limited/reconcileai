@@ -117,18 +117,33 @@ export async function platformScopeIsSafe(): Promise<boolean> {
  * the app auto-provisions a tenant, and onboarding does not mark it a demo. Over
  * a review that runs weeks, that will happen again.
  */
+const UNREADABLE = { id: -1, code: null, name: "unknown — the database could not be read" };
+
 export async function blockingRealTenants(limit = 10): Promise<Array<{ id: number; code: string | null; name: string }>> {
   const db = await getDb();
   // Fail closed: unknown is not safe, and an empty list would read as "all clear".
-  if (!db) return [{ id: -1, code: null, name: "unknown — the database could not be read" }];
-  return db
-    .select({ id: organizations.id, code: organizations.code, name: organizations.name })
-    .from(organizations)
-    .where(and(
-      eq(organizations.isDemo, false),
-      ne(organizations.segment, "super_admin"),
-    ))
-    .limit(limit);
+  if (!db) return [UNREADABLE];
+  try {
+    // One more than asked for, so the caller can tell a full page from a
+    // truncated one. Reporting a partial list as complete would understate what
+    // is blocking, and the operator would mark one tenant a demo and wonder why
+    // nothing changed.
+    return await db
+      .select({ id: organizations.id, code: organizations.code, name: organizations.name })
+      .from(organizations)
+      .where(and(
+        eq(organizations.isDemo, false),
+        ne(organizations.segment, "super_admin"),
+      ))
+      .limit(limit);
+  } catch (err) {
+    // A connection that opened and then failed mid-query is exactly as unknown
+    // as one that never opened. Throwing here would surface as an errored query
+    // whose absent data reads as "no blockers" downstream — an outage opening
+    // the gate.
+    console.error("[reviewerAccess] could not read blocking tenants:", err);
+    return [UNREADABLE];
+  }
 }
 
 /*

@@ -358,6 +358,22 @@ describe("when the link is scoped to the whole platform", () => {
     expect(blocking[0].name).toMatch(/could not be read/i);
   });
 
+  it("should treat a connection that fails MID-QUERY the same as one that never opened", async () => {
+    // The distinction is invisible to the caller and irrelevant to safety: both
+    // mean "unknown". Letting this one throw instead would surface as an errored
+    // query whose absent data reads as "no blockers" in the UI — an outage
+    // opening the gate.
+    const exploding: Record<string, unknown> = {};
+    for (const m of ["select", "from", "where", "orderBy"]) exploding[m] = () => exploding;
+    exploding.limit = async () => { throw new Error("connection lost"); };
+    getDb.mockResolvedValue(exploding);
+
+    const blocking = await blockingRealTenants();
+    expect(blocking).toHaveLength(1);
+    expect(blocking[0].name).toMatch(/could not be read/i);
+    await expect(platformScopeIsSafe()).resolves.toBe(false);
+  });
+
   it("should count a real tenant even when it has been deactivated", async () => {
     // Deactivating an organisation stops its members signing in; it does not
     // delete its rows, and allOrganizations / getOrgContext / dashboard.stats do
