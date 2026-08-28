@@ -244,7 +244,22 @@ function ReviewerPortalLinks() {
       setMarkingDemo(null);
       utils.reviewerAccess.platformScopeStatus.invalidate();
     },
+    // Closing the dialog on failure too, so the error is visible in the panel
+    // rather than behind a modal the operator has to dismiss to read it. A
+    // silent failure here looks identical to success until the gate stays shut.
+    onError: () => setMarkingDemo(null),
   });
+
+  /**
+   * Only an affirmative answer counts as available.
+   *
+   * `platformStatus.data` is undefined while the query is in flight AND when it
+   * has failed, so testing `available === false` left the option ENABLED at
+   * precisely the moment nothing could be verified. The server refuses anyway,
+   * but a UI that offers an action it knows may not be permitted is the same
+   * "unknown read as safe" mistake in a different place.
+   */
+  const platformAvailable = platformStatus.data?.available === true;
 
   const issue = trpc.reviewerAccess.issue.useMutation({
     onSuccess: (link) => {
@@ -295,7 +310,7 @@ function ReviewerPortalLinks() {
           <SelectTrigger className="h-7 w-56 text-xs"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="tenant">One merchant portal (SHOPLINE Dev Store)</SelectItem>
-            <SelectItem value="platform" disabled={platformStatus.data?.available === false}>
+            <SelectItem value="platform" disabled={!platformAvailable}>
               Whole platform — super admin + all verticals
             </SelectItem>
           </SelectContent>
@@ -304,7 +319,7 @@ function ReviewerPortalLinks() {
           size="sm"
           variant="outline"
           className="h-7 text-xs"
-          disabled={!label.trim() || issue.isPending || (scope === "platform" && platformStatus.data?.available === false)}
+          disabled={!label.trim() || issue.isPending || (scope === "platform" && !platformAvailable)}
           onClick={() => issue.mutate({ label: label.trim(), scope })}
         >
           {issue.isPending ? "Issuing…" : "Issue link"}
@@ -401,6 +416,12 @@ function ReviewerPortalLinks() {
 
       {issue.error ? (
         <p className="mt-2 text-[11px] text-destructive">{issue.error.message}</p>
+      ) : null}
+
+      {markDemo.error ? (
+        <p className="mt-2 text-[11px] text-destructive">
+          Could not mark that organisation as a demo: {markDemo.error.message}
+        </p>
       ) : null}
 
       {issued ? (
