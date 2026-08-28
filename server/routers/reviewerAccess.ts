@@ -22,6 +22,8 @@ import {
   issueReviewerLink,
   listReviewerLinks,
   organizationIdByCode,
+  platformHomeOrganizationId,
+  platformScopeIsSafe,
   revokeReviewerLink,
   reviewerLinkUrl,
 } from "../reviewerAccess";
@@ -59,15 +61,25 @@ export const reviewerAccessRouter = router({
   issue: superAdminProcedure
     .input(z.object({
       label: z.string().min(1).max(120),
+      scope: z.enum(["tenant", "platform"]).default("tenant"),
       organizationId: z.number().int().positive().optional(),
       ttlDays: z.number().int().min(1).max(MAX_REVIEWER_LINK_TTL_DAYS).default(DEFAULT_REVIEWER_LINK_TTL_DAYS),
     }))
     .mutation(async ({ ctx, input }) => {
-      const organizationId = input.organizationId ?? (await organizationIdByCode(SHOPLINE_REVIEW_ORG_CODE));
+      // A platform link is cross-tenant, so it has no tenant of its own; it is
+      // filed against the operator's organisation purely so the identity has a
+      // home. A tenant link defaults to the SHOPLINE dev store.
+      const organizationId = input.organizationId
+        ?? (input.scope === "platform"
+          ? await platformHomeOrganizationId()
+          : await organizationIdByCode(SHOPLINE_REVIEW_ORG_CODE));
+
       if (!organizationId) {
         throw new TRPCError({
           code: "NOT_FOUND",
-          message: `No organisation "${SHOPLINE_REVIEW_ORG_CODE}" exists yet. Install the app on the dev store first, or name an organisation explicitly.`,
+          message: input.scope === "platform"
+            ? "No super-admin organisation exists to anchor a platform reviewer link."
+            : `No organisation "${SHOPLINE_REVIEW_ORG_CODE}" exists yet. Install the app on the dev store first, or name an organisation explicitly.`,
         });
       }
       const appUrl = resolveAppUrl(ctx);
@@ -76,12 +88,30 @@ export const reviewerAccessRouter = router({
       }
       return issueReviewerLink({
         label: input.label,
+        scope: input.scope,
         organizationId,
         ttlDays: input.ttlDays,
         createdBy: ctx.user.id,
         appUrl,
       });
     }),
+
+  /**
+   * Whether a platform-wide link could be issued right now, and why not.
+   *
+   * Surfaced so the operator sees the condition before clicking rather than as a
+   * refusal afterwards — and so the reason is legible: this is the first-customer
+   * gate, not a malfunction.
+   */
+  platformScopeStatus: superAdminProcedure.query(async () => {
+    const safe = await platformScopeIsSafe();
+    return {
+      available: safe,
+      reason: safe
+        ? null
+        : "A non-demo organisation exists. Platform-wide links are withheld so a real tenant's data cannot be exposed.",
+    };
+  }),
 
   revoke: superAdminProcedure
     .input(z.object({ id: z.number().int().positive() }))

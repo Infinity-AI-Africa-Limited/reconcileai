@@ -1,0 +1,1 @@
+ALTER TABLE `reviewer_access_links` ADD `scope` varchar(16) DEFAULT 'tenant' NOT NULL;

@@ -232,7 +232,9 @@ function ShoplinePublicReviewControl({ pocKey, path }: { pocKey: string; path: s
 function ReviewerPortalLinks() {
   const utils = trpc.useUtils();
   const links = trpc.reviewerAccess.list.useQuery();
+  const platformStatus = trpc.reviewerAccess.platformScopeStatus.useQuery();
   const [label, setLabel] = useState("SHOPLINE App Store review");
+  const [scope, setScope] = useState<"tenant" | "platform">("tenant");
   const [issued, setIssued] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -272,16 +274,51 @@ function ReviewerPortalLinks() {
           placeholder="Who is this for?"
           className="h-7 w-56 text-xs"
         />
+        <Select
+          value={scope}
+          onValueChange={(v) => {
+            const next = v as "tenant" | "platform";
+            setScope(next);
+            // The label is the thing an operator forgets to change, and it is
+            // what identifies the link when one has to be revoked.
+            setLabel(next === "platform" ? "Y Combinator review" : "SHOPLINE App Store review");
+          }}
+        >
+          <SelectTrigger className="h-7 w-56 text-xs"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="tenant">One merchant portal (SHOPLINE Dev Store)</SelectItem>
+            <SelectItem value="platform" disabled={platformStatus.data?.available === false}>
+              Whole platform — super admin + all verticals
+            </SelectItem>
+          </SelectContent>
+        </Select>
         <Button
           size="sm"
           variant="outline"
           className="h-7 text-xs"
-          disabled={!label.trim() || issue.isPending}
-          onClick={() => issue.mutate({ label: label.trim() })}
+          disabled={!label.trim() || issue.isPending || (scope === "platform" && platformStatus.data?.available === false)}
+          onClick={() => issue.mutate({ label: label.trim(), scope })}
         >
           {issue.isPending ? "Issuing…" : "Issue link"}
         </Button>
       </div>
+
+      {scope === "platform" ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Opens on the super-admin organisation list. The reviewer can enter any tenant&rsquo;s portal
+          from there to see all three verticals. Everything is read-only.
+        </p>
+      ) : null}
+
+      {/*
+        The first-customer gate, shown rather than sprung. A platform link is
+        cross-tenant, so what it exposes is decided by what the platform holds
+        when it is OPENED — the first real customer is exactly the event that
+        changes the answer, and nobody will connect that event to an old link.
+      */}
+      {platformStatus.data && !platformStatus.data.available ? (
+        <p className="mt-2 text-[11px] text-amber-600">{platformStatus.data.reason}</p>
+      ) : null}
 
       {issue.error ? (
         <p className="mt-2 text-[11px] text-destructive">{issue.error.message}</p>
@@ -308,7 +345,12 @@ function ReviewerPortalLinks() {
         ) : links.data && links.data.length > 0 ? (
           links.data.map((link) => (
             <div key={link.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-background px-2 py-1.5 text-[11px]">
-              <span className="font-medium">{link.label}</span>
+              <span className="font-medium">
+                {link.label}
+                <Badge variant="outline" className="ml-2 text-[10px] font-normal">
+                  {link.scope === "platform" ? "whole platform" : "one portal"}
+                </Badge>
+              </span>
               <span className="flex items-center gap-2 text-muted-foreground">
                 <Badge variant={link.isActive ? "secondary" : "outline"} className="text-[10px]">
                   {link.revokedAt ? "Revoked" : link.isActive ? "Active" : "Expired"}
@@ -686,6 +728,27 @@ export default function PocHub() {
 
         {/* POC index tab */}
         <TabsContent value="pocs" className="mt-4">
+          {/*
+            Above the POC grid, not inside the SHOPLINE card, because these links
+            are no longer a SHOPLINE concern: a platform-scope link is how an
+            investor or accelerator reviewer (YC) sees the operator view and all
+            three verticals without an account we could provision.
+          */}
+          <Card className="mb-4 overflow-hidden">
+            <div className="h-1.5 bg-gradient-to-r from-violet-700 to-fuchsia-500" />
+            <CardContent className="pt-5">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-violet-700" />
+                <h2 className="text-sm font-semibold">Reviewer access links</h2>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Sign an external reviewer into the product without an account. Read-only for the
+                whole session, revocable at any time.
+              </p>
+              <ReviewerPortalLinks />
+            </CardContent>
+          </Card>
+
           <div className="grid gap-4 md:grid-cols-2">
             {POCS.map((poc) => {
               const Icon = poc.icon;
@@ -712,7 +775,7 @@ export default function PocHub() {
                       <code className="text-xs text-muted-foreground">{poc.path}</code>
                     </div>
                     {poc.pocKey === "shopline_review" ? (
-                      <><ShoplinePublicReviewControl pocKey={poc.pocKey} path={poc.path} /><ReviewerPortalLinks /></>
+                      <ShoplinePublicReviewControl pocKey={poc.pocKey} path={poc.path} />
                     ) : (
                       <><PocAccessLink pocKey={poc.pocKey} path={poc.path} /><RecipientInvites pocKey={poc.pocKey} path={poc.path} /></>
                     )}

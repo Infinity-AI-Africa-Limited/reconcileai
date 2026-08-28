@@ -739,9 +739,27 @@ identity hand-off remains a separate P0 release gate."*
 | `/shopline-review` (§2B, PR #121) | Public, no-login, **read-only evidence about** the integration — connection, webhook and reconciliation figures | Anyone, while the POC Hub public switch is on |
 | **Reviewer sign-in link** | A real session **inside** the retail merchant portal, to walk the actual journeys | Whoever holds the issued URL |
 
-**The reviewer link** (`server/reviewerAccess.ts`, issued from POC Hub → SHOPLINE
-card): multi-use, long-lived (90 days default, 180 max), revocable, and pinned to
-one tenant — `SL_RECONCILEAI_DEV` by default. Containment is structural:
+**The reviewer link** (`server/reviewerAccess.ts`, issued from POC Hub →
+"Reviewer access links"): multi-use, long-lived (90 days default, 180 max) and
+revocable. Two scopes:
+
+| Scope | Role | Sees | Lands on | For |
+|---|---|---|---|---|
+| `tenant` | `operations` | one pinned organisation (`SL_RECONCILEAI_DEV` by default) | `/home` | SHOPLINE App Store reviewer |
+| `platform` | `super_admin` | cross-tenant: the operator view, and every vertical via Enter Portal | `/admin/super-admin` | investor / accelerator reviewer (YC) |
+
+> ⚠️ **A `platform` link is refused while ANY non-demo organisation exists**
+> (`platformScopeIsSafe()` — `isDemo = false` and segment ≠ `super_admin`),
+> checked BOTH at issue and **at every sign-in**, failing closed. Cross-tenant
+> exposure is decided by what the platform holds when the link is *opened*, not
+> when it was created, and the first real customer is exactly the event that
+> changes the answer — an event nobody will connect to a link issued months
+> earlier. This makes §19's first-customer gate structural for this surface: the
+> link stops working by itself. Verified 2026-08-28: all five tenant orgs are
+> `isDemo = 1`; only `INFINITY_AI` (the operator's own, holding no tenant data)
+> is not, and it is excluded by segment.
+
+Containment is structural:
 
 - **`users.isReadOnly` refuses every non-query operation globally**, in
   `_core/trpc.ts` on the BASE procedure. Not per-procedure: `guestProtectedProcedure`
