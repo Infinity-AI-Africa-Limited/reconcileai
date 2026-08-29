@@ -83,6 +83,26 @@ describe("the allocation surface is scoped to one tenant", () => {
   });
 });
 
+describe("the pool is the job's own window", () => {
+  it("reads BOTH sides within the job's date range", () => {
+    // A reconciliation job IS its date range. Without this, opening a
+    // historical job proposed allocations against transactions the channel had
+    // acquired long after that run finished — items that were never part of it.
+    //
+    // Counted, not merely found: the first cut asserted presence, and removing
+    // the window from ONE of the two sides left it green. Both sides or
+    // neither — a job window applied to half the comparison is not a window.
+    //
+    // The binding guard is the TYPE: `getOpenTransactionsForChannel` requires
+    // dateFrom and dateTo, so omitting either is a compile error. This test
+    // exists to catch them being passed something other than the job's own.
+    const from = CODE.split("dateFrom: job.dateFrom").length - 1;
+    const to = CODE.split("dateTo: job.dateTo").length - 1;
+    expect(from, "both the source and target reads must use the job's dateFrom").toBe(2);
+    expect(to, "both the source and target reads must use the job's dateTo").toBe(2);
+  });
+});
+
 describe("the pool is bounded, and says when it was", () => {
   it("caps each side and reports truncation instead of absorbing it", () => {
     // A truncated pool silently changes which allocations exist. The engine

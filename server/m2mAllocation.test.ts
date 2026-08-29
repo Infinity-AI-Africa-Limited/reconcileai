@@ -661,3 +661,39 @@ describe("a transaction cannot be counted twice in one allocation", () => {
     }
   });
 });
+
+describe("a receipt is only allocated against invoices in its own currency", () => {
+  /**
+   * Partitioning on counterparty alone still let one payer's NGN and USD open
+   * records be summed together. That "total" denominates nothing, and
+   * `checkFXVariance` would then explain the gap between two currencies as a
+   * bank fee. Two currencies for one payer is an FX exception — which is what
+   * the diagnosis path calls it — never an allocation.
+   */
+  function inCurrency(currency: string, amount: number): SATransaction {
+    return { ...txn(amount), currency } as SATransaction;
+  }
+
+  it("should not build an allocation spanning two currencies", () => {
+    const receipt = inCurrency("NGN", 300);
+    const result = runM2MMatching([receipt], [inCurrency("USD", 200), inCurrency("USD", 100)]);
+    expect(result.m2mMatches).toHaveLength(0);
+    expect(result.remainingSourceIds).toContain(receipt.id);
+  });
+
+  it("should not mix currencies within one payer's own invoices", () => {
+    // Same payer, same amounts — only the denomination differs.
+    const receipt = inCurrency("NGN", 300);
+    const result = runM2MMatching([receipt], [inCurrency("NGN", 200), inCurrency("USD", 100)]);
+    expect(result.m2mMatches).toHaveLength(0);
+  });
+
+  it("should still allocate when every leg shares the currency", () => {
+    // The control: the currency key must reject a DIFFERENT currency, not
+    // reject matching.
+    const receipt = inCurrency("NGN", 300);
+    const result = runM2MMatching([receipt], [inCurrency("NGN", 200), inCurrency("NGN", 100)]);
+    expect(result.m2mMatches).toHaveLength(1);
+    expect(result.m2mMatches[0].targetIds).toHaveLength(2);
+  });
+});

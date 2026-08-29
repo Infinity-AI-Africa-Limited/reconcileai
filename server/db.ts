@@ -753,6 +753,14 @@ export async function getOpenTransactionsForChannel(params: {
   organizationId: number;
   channelId: number;
   statuses: readonly ("unmatched" | "exception")[];
+  /**
+   * The run's own window. REQUIRED, because a reconciliation job IS its date
+   * range: without it, opening a historical job pulled in every open
+   * transaction the channel had acquired since, and proposed allocations
+   * against items that were never part of that run.
+   */
+  dateFrom: Date;
+  dateTo: Date;
   limit?: number;
 }) {
   const db = await getDb();
@@ -764,6 +772,8 @@ export async function getOpenTransactionsForChannel(params: {
       and(
         eq(transactions.organizationId, params.organizationId),
         eq(transactions.channelId, params.channelId),
+        gte(transactions.transactionDate, params.dateFrom),
+        lte(transactions.transactionDate, params.dateTo),
         inArray(transactions.status, [...params.statuses]),
       ),
     )

@@ -116,12 +116,19 @@ export const allocationsRouter = router({
           organizationId,
           channelId: job.sourceChannelId,
           statuses: openStatuses,
+          // The run's own window. A job IS its date range; without this, opening a
+          // historical job proposed allocations against transactions the channel
+          // acquired long after that run finished.
+          dateFrom: job.dateFrom,
+          dateTo: job.dateTo,
           limit: SIDE_LIMIT,
         }),
         db.getOpenTransactionsForChannel({
           organizationId,
           channelId: job.targetChannelId,
           statuses: openStatuses,
+          dateFrom: job.dateFrom,
+          dateTo: job.dateTo,
           limit: SIDE_LIMIT,
         }),
       ]);

@@ -411,10 +411,18 @@ function amtKey(n: number): string {
  * a fabricated allocation, and it is the same failure the diagnosis pool was
  * hardened against: numeric proximity is not a relationship.
  *
- * So a receipt is only ever allocated against ITS OWN payer's invoices. The
- * constraint lives here rather than in the caller because it is a property of
- * what an allocation MEANS, and a second caller must not be able to opt out of
- * it. Rows with no counterparty are unallocatable for the same reason they are
+ * So a receipt is only ever allocated against ITS OWN payer's invoices, IN THE
+ * SAME CURRENCY. The constraint lives here rather than in the caller because it
+ * is a property of what an allocation MEANS, and a second caller must not be
+ * able to opt out of it.
+ *
+ * Currency is part of the key, not an afterthought: summing a payer's NGN and
+ * USD records reaches a "total" that denominates nothing, and `checkFXVariance`
+ * would then explain the gap between two currencies as a bank fee. Two
+ * currencies for one payer is an FX exception, which is what the diagnosis path
+ * calls it — never an allocation.
+ *
+ * Rows with no counterparty are unallocatable for the same reason they are
  * undiagnosable — an unidentified payer is the exception, not a wildcard.
  */
 export function runM2MMatching(
@@ -433,13 +441,15 @@ export function runM2MMatching(
 
   const bucket = (txn: SATransaction, side: "sources" | "targets") => {
     const payer = normalizeStr(txn.counterparty);
-    if (!payer) {
+    const currency = (txn.currency ?? "").trim().toUpperCase();
+    if (!payer || !currency) {
       (side === "sources" ? unallocatableSources : unallocatableTargets).push(txn.id);
       return;
     }
-    const group = groups.get(payer) ?? { sources: [], targets: [] };
+    const key = `${payer}::${currency}`;
+    const group = groups.get(key) ?? { sources: [], targets: [] };
     group[side].push(txn);
-    groups.set(payer, group);
+    groups.set(key, group);
   };
   for (const src of unmatchedSources) bucket(src, "sources");
   for (const tgt of unmatchedTargets) bucket(tgt, "targets");
