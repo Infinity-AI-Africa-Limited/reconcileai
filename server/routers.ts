@@ -224,6 +224,7 @@ import {
   MAX_NAME_LENGTH,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
+import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
@@ -4102,6 +4103,7 @@ export const appRouter = router({
 
   distributor: distributorRouter,
   corporateB2BPilot: corporateB2BPilotRouter,
+  allocations: allocationsRouter,
   controlFit: controlFitRouter,
   superAgent: router({
     query: protectedProcedure

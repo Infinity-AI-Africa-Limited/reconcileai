@@ -737,6 +737,41 @@ export async function getCounterpartyChannelIds(params: {
 }
 
 /**
+ * Open transactions on ONE channel, for allocation proposals.
+ *
+ * `getTransactionsForReconciliation` exists and is deliberately not reused: it
+ * filters by channelId alone, on the reasoning that a channel implies its
+ * tenant. That is the inference behind the cross-tenant reads in CLAUDE.md
+ * §19.3, so this takes the organisation explicitly and passes it to the query
+ * rather than trusting the channel to carry it.
+ *
+ * Capped by the caller, because a truncated pool silently changes which
+ * allocations the engine can find — the caller reports the truncation instead
+ * of absorbing it.
+ */
+export async function getOpenTransactionsForChannel(params: {
+  organizationId: number;
+  channelId: number;
+  statuses: readonly ("unmatched" | "exception")[];
+  limit?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.organizationId, params.organizationId),
+        eq(transactions.channelId, params.channelId),
+        inArray(transactions.status, [...params.statuses]),
+      ),
+    )
+    .orderBy(asc(transactions.transactionDate))
+    .limit(clampLimit(params.limit ?? 500));
+}
+
+/**
  * Counterparty candidates for a single-transaction Super Agent diagnosis.
  *
  * `superAgent.diagnose` used to run its deep diagnosis with an EMPTY candidate

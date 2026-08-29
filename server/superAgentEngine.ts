@@ -396,6 +396,71 @@ function amtKey(n: number): string {
 }
 
 /**
+ * Pass 4 entry point — partitioned by COUNTERPARTY.
+ *
+ * The matcher underneath works on amounts: it finds combinations that sum to a
+ * receipt within tolerance. Run across a whole job that is not a match, it is
+ * arithmetic. Against the seeded FMCG dataset it proposed, at 95% confidence,
+ * that a receipt from Eko Traders International settled invoices belonging to
+ * Calabar Coastal Distributors and Northern Supplies Ltd — three different
+ * companies — because the numbers happened to add up. Five of thirty-two
+ * proposals spanned more than one distributor.
+ *
+ * A controller acting on that would credit two other distributors' invoices
+ * from a third's money. On a receivables ledger that is not a near miss, it is
+ * a fabricated allocation, and it is the same failure the diagnosis pool was
+ * hardened against: numeric proximity is not a relationship.
+ *
+ * So a receipt is only ever allocated against ITS OWN payer's invoices. The
+ * constraint lives here rather than in the caller because it is a property of
+ * what an allocation MEANS, and a second caller must not be able to opt out of
+ * it. Rows with no counterparty are unallocatable for the same reason they are
+ * undiagnosable — an unidentified payer is the exception, not a wildcard.
+ */
+export function runM2MMatching(
+  unmatchedSources: SATransaction[],
+  unmatchedTargets: SATransaction[],
+  fxTolerance: number = 0.015,
+): {
+  m2mMatches: M2MMatch[];
+  remainingSourceIds: number[];
+  remainingTargetIds: number[];
+  unresolvedAmbiguities: M2MAmbiguity[];
+} {
+  const groups = new Map<string, { sources: SATransaction[]; targets: SATransaction[] }>();
+  const unallocatableSources: number[] = [];
+  const unallocatableTargets: number[] = [];
+
+  const bucket = (txn: SATransaction, side: "sources" | "targets") => {
+    const payer = normalizeStr(txn.counterparty);
+    if (!payer) {
+      (side === "sources" ? unallocatableSources : unallocatableTargets).push(txn.id);
+      return;
+    }
+    const group = groups.get(payer) ?? { sources: [], targets: [] };
+    group[side].push(txn);
+    groups.set(payer, group);
+  };
+  for (const src of unmatchedSources) bucket(src, "sources");
+  for (const tgt of unmatchedTargets) bucket(tgt, "targets");
+
+  const m2mMatches: M2MMatch[] = [];
+  const unresolvedAmbiguities: M2MAmbiguity[] = [];
+  const remainingSourceIds: number[] = [...unallocatableSources];
+  const remainingTargetIds: number[] = [...unallocatableTargets];
+
+  for (const { sources, targets } of groups.values()) {
+    const result = matchWithinCounterparty(sources, targets, fxTolerance);
+    m2mMatches.push(...result.m2mMatches);
+    unresolvedAmbiguities.push(...result.unresolvedAmbiguities);
+    remainingSourceIds.push(...result.remainingSourceIds);
+    remainingTargetIds.push(...result.remainingTargetIds);
+  }
+
+  return { m2mMatches, remainingSourceIds, remainingTargetIds, unresolvedAmbiguities };
+}
+
+/**
  * Pass 4: Many-to-Many Matching
  *
  * Strategy:
@@ -405,7 +470,7 @@ function amtKey(n: number): string {
  *
  * This runs AFTER the existing 3-pass engine, on the remaining unmatched transactions.
  */
-export function runM2MMatching(
+function matchWithinCounterparty(
   unmatchedSources: SATransaction[],
   unmatchedTargets: SATransaction[],
   fxTolerance: number = 0.015
@@ -538,27 +603,42 @@ export function runM2MMatching(
   }
 
   // ── Strategy 3: Invoice-number grouping ───────────────────────────
-  // Group sources and targets by shared invoice number in reference
+  //
+  // Grouped by DISTINCT invoice number per transaction. `parseReference` scans
+  // the reference and the description together, so a row whose invoice appears
+  // in both — "BANK-INV-2855" plus "Payment … INV-2855", which is how a bank
+  // feed normally reads — returned that number TWICE. Iterating the raw list
+  // pushed the same transaction into the group once per occurrence, and its
+  // amount was then counted twice: a 2,398,500 receipt was reported as a
+  // 4,797,000 allocation. Thirty-five of thirty-six proposals against the
+  // seeded dataset carried a repeated leg.
+  //
+  // Same trap as `determinateCandidates` and the split branch, which is why
+  // both normalise through `normalizeStr` before counting. A membership guard
+  // backs it up, so a transaction cannot enter one group twice by any route.
   const invoiceGroups = new Map<string, { sources: SATransaction[]; targets: SATransaction[] }>();
+
+  const addToGroups = (txn: SATransaction, side: "sources" | "targets") => {
+    const distinct = new Set(
+      parseReference(txn.transactionRef, txn.description).invoiceNumbers
+        .map((inv) => normalizeStr(inv))
+        .filter(Boolean),
+    );
+    for (const inv of distinct) {
+      const group = invoiceGroups.get(inv) ?? { sources: [], targets: [] };
+      if (!group[side].some((existing) => existing.id === txn.id)) group[side].push(txn);
+      invoiceGroups.set(inv, group);
+    }
+  };
 
   for (const src of unmatchedSources) {
     if (matchedSourceIds.has(src.id)) continue;
-    const parsed = parseReference(src.transactionRef, src.description);
-    for (const inv of parsed.invoiceNumbers) {
-      const g = invoiceGroups.get(inv) || { sources: [], targets: [] };
-      g.sources.push(src);
-      invoiceGroups.set(inv, g);
-    }
+    addToGroups(src, "sources");
   }
 
   for (const tgt of unmatchedTargets) {
     if (matchedTargetIds.has(tgt.id)) continue;
-    const parsed = parseReference(tgt.transactionRef, tgt.description);
-    for (const inv of parsed.invoiceNumbers) {
-      const g = invoiceGroups.get(inv) || { sources: [], targets: [] };
-      g.targets.push(tgt);
-      invoiceGroups.set(inv, g);
-    }
+    addToGroups(tgt, "targets");
   }
 
   invoiceGroups.forEach((group, invNum) => {
@@ -566,6 +646,13 @@ export function runM2MMatching(
     const srcIds: number[] = group.sources.map((s: SATransaction) => s.id).filter((id: number) => !matchedSourceIds.has(id));
     const tgtIds: number[] = group.targets.map((t: SATransaction) => t.id).filter((id: number) => !matchedTargetIds.has(id));
     if (srcIds.length === 0 || tgtIds.length === 0) return;
+    // An ALLOCATION spans several items. One receipt against one invoice is a
+    // 1:1 near-match — the 3-pass engine's job, and already quantified by the
+    // diagnosis path, which uses the same named-reference rule to compute the
+    // shortfall. Reporting it here as "many-to-many" is the overstatement
+    // Strategy 1 refuses with its minItems of 2, and this strategy had no such
+    // guard: 35 of 36 proposals against the seeded dataset were 1:1 pairs.
+    if (srcIds.length + tgtIds.length < 3) return;
 
     const srcTotal = group.sources.filter((s: SATransaction) => srcIds.includes(s.id)).reduce((sum: number, s: SATransaction) => sum + parseFloat(String(s.amount)), 0);
     const tgtTotal = group.targets.filter((t: SATransaction) => tgtIds.includes(t.id)).reduce((sum: number, t: SATransaction) => sum + parseFloat(String(t.amount)), 0);
