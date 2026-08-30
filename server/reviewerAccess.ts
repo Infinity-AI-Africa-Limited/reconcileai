@@ -39,10 +39,11 @@
  *     otherwise unanswerable while a submission is pending.
  */
 import crypto from "node:crypto";
-import { and, desc, eq, gt, isNull, ne } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, ne, or } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "./db";
 import { organizations, reviewerAccessLinks, users } from "../drizzle/schema";
+import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
 
 /** The retail tenant a SHOPLINE reviewer is shown: the canonical dev store. */
 export const SHOPLINE_REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
@@ -97,8 +98,9 @@ export const REVIEWER_ROLE = REVIEWER_ROLES.tenant;
  * remember: the link stops working by itself.
  *
  * `isDemo` is the signal because it is the one an operator already sets
- * deliberately, from the super-admin screens. The operator's own `super_admin`
- * org is excluded — it holds no tenant data and is never `isDemo`.
+ * deliberately, from the super-admin screens. The operator's own organisation is
+ * excluded — it is never `isDemo`, so counting it would withhold every platform
+ * link permanently.
  */
 export async function platformScopeIsSafe(): Promise<boolean> {
   return (await blockingRealTenants(1)).length === 0;
@@ -133,7 +135,17 @@ export async function blockingRealTenants(limit = 10): Promise<Array<{ id: numbe
       .from(organizations)
       .where(and(
         eq(organizations.isDemo, false),
-        ne(organizations.segment, "super_admin"),
+        // The operator's own organisation, named by its CODE. This was
+        // `ne(segment, "super_admin")`, which asked a mutable question: an admin
+        // retyping a customer's segment would have stopped that customer holding
+        // the gate shut, leaving an outstanding cross-tenant link live over their
+        // data. See shared/operatorOrg.ts.
+        //
+        // `or(isNull(...))` is load-bearing, not defensive noise. SQL `<>` against
+        // NULL yields NULL rather than TRUE, so a bare `ne(code, ...)` would drop
+        // every organisation with no code from this result — a non-demo tenant
+        // would stop blocking because a field was empty. Fail-open, and invisible.
+        or(isNull(organizations.code), ne(organizations.code, OPERATOR_ORG_CODE)),
       ))
       .limit(limit);
   } catch (err) {
@@ -157,15 +169,22 @@ export async function blockingRealTenants(limit = 10): Promise<Array<{ id: numbe
  * click away. "Not signed in" is not "not present".
  */
 
-/** The operator's own organisation — the home org for a platform-scope session. */
+/**
+ * The operator's own organisation — the home org for a platform-scope session.
+ *
+ * By code, for the same reason as above, and here it also removes an ordering
+ * accident: the old query took the LOWEST-id `super_admin`-segment org, so
+ * retyping any organisation with a smaller id than the operator's would have
+ * quietly re-anchored the reviewer identity onto that tenant. The code matches
+ * exactly one row.
+ */
 export async function platformHomeOrganizationId(): Promise<number | null> {
   const db = await getDb();
   if (!db) return null;
   const [org] = await db
     .select({ id: organizations.id })
     .from(organizations)
-    .where(eq(organizations.segment, "super_admin"))
-    .orderBy(organizations.id)
+    .where(eq(organizations.code, OPERATOR_ORG_CODE))
     .limit(1);
   return org?.id ?? null;
 }

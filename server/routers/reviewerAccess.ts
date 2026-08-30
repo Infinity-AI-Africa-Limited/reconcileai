@@ -28,6 +28,7 @@ import {
   revokeReviewerLink,
   reviewerLinkUrl,
 } from "../reviewerAccess";
+import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
 
 /**
  * The origin the link is built on.
@@ -79,7 +80,7 @@ export const reviewerAccessRouter = router({
         throw new TRPCError({
           code: "NOT_FOUND",
           message: input.scope === "platform"
-            ? "No super-admin organisation exists to anchor a platform reviewer link."
+            ? `No organisation with code "${OPERATOR_ORG_CODE}" exists to anchor a platform reviewer link.`
             : `No organisation "${SHOPLINE_REVIEW_ORG_CODE}" exists yet. Install the app on the dev store first, or name an organisation explicitly.`,
         });
       }

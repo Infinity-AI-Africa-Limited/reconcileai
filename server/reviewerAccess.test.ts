@@ -50,6 +50,30 @@ function fakeDb(rows: unknown[]) {
   return chain;
 }
 
+/**
+ * A drizzle chain that also RECORDS the predicate it was handed.
+ *
+ * The tests that pin which column decides a gate used to be source regexes, and
+ * a source regex cannot fail for the reason that matters: it asserts the right
+ * text appears in the file, never that the answer depends on it. Rendering the
+ * captured expression through drizzle's own MySQL dialect gives the actual SQL
+ * the database would run, so swapping the column changes the assertion's input.
+ */
+function capturingDb(rows: unknown[]) {
+  const wheres: unknown[] = [];
+  const chain: Record<string, unknown> = {};
+  for (const method of ["select", "from", "orderBy"]) chain[method] = () => chain;
+  chain.where = (expr: unknown) => { wheres.push(expr); return chain; };
+  chain.limit = async () => rows;
+  return { chain, wheres };
+}
+
+/** The SQL a captured predicate would actually run, params included. */
+function renderSql(expr: unknown): { sql: string; params: unknown[] } {
+  const { sql, params } = new MySqlDialect().sqlToQuery(expr as never);
+  return { sql, params };
+}
+
 /** Answers successive queries with successive result sets, in call order. */
 function fakeDbSequence(results: unknown[][]) {
   const queue = [...results];
@@ -62,7 +86,9 @@ function fakeDbSequence(results: unknown[][]) {
 import { COOKIE_NAME } from "@shared/const";
 import { sdk } from "./_core/sdk";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./_core/trpc";
-import { REVIEWER_ROLE, REVIEWER_ROLES, REVIEWER_LOGIN_METHOD, platformScopeIsSafe, blockingRealTenants, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
+import { MySqlDialect } from "drizzle-orm/mysql-core";
+import { OPERATOR_ORG_CODE, isOperatorOrg } from "@shared/operatorOrg";
+import { REVIEWER_ROLE, REVIEWER_ROLES, REVIEWER_LOGIN_METHOD, platformScopeIsSafe, blockingRealTenants, platformHomeOrganizationId, reviewerLinkUrl, DEFAULT_REVIEWER_LINK_TTL_DAYS, MAX_REVIEWER_LINK_TTL_DAYS } from "./reviewerAccess";
 
 /**
  * A stand-in router built from the REAL exported builders.
@@ -387,11 +413,72 @@ describe("when the link is scoped to the whole platform", () => {
     expect(SERVICE_NOW.slice(start, end)).not.toMatch(/isActive/);
   });
 
-  it("should ask the question in terms of isDemo, excluding the operator's own org", () => {
-    // The operator's super_admin org is never isDemo and holds no tenant data,
-    // so counting it would withhold every platform link permanently.
-    expect(SERVICE).toMatch(/eq\(organizations\.isDemo, false\)/);
-    expect(SERVICE).toMatch(/ne\(organizations\.segment, "super_admin"\)/);
+  it("should ask the question in terms of isDemo, excluding the operator's own org", async () => {
+    // The operator's own org is never isDemo, so counting it would withhold
+    // every platform link permanently. Asserted on the SQL that would actually
+    // run, not on the source text.
+    const { chain, wheres } = capturingDb([]);
+    getDb.mockResolvedValue(chain);
+    await blockingRealTenants();
+
+    expect(wheres).toHaveLength(1);
+    const { sql, params } = renderSql(wheres[0]);
+    expect(sql).toContain("`isDemo`");
+    expect(params).toContain(false);
+  });
+
+  it("should identify the operator by CODE, never by its segment", async () => {
+    // The defect this replaces: `ne(segment, "super_admin")`. A segment is
+    // mutable — `superAdmin.updateOrganizationSegment` can retype ANY org — so a
+    // customer retyped that way would have stopped holding this gate shut, and an
+    // outstanding cross-tenant reviewer link would have stayed live over their
+    // data. Nothing on screen would have said so.
+    const { chain, wheres } = capturingDb([]);
+    getDb.mockResolvedValue(chain);
+    await blockingRealTenants();
+
+    const { sql, params } = renderSql(wheres[0]);
+    expect(sql).toContain("`code`");
+    expect(params).toContain(OPERATOR_ORG_CODE);
+    expect(sql, "a mutable segment must not decide who is a tenant").not.toContain("`segment`");
+  });
+
+  it("should keep blocking a non-demo organisation that has no code at all", async () => {
+    // SQL three-valued logic, and it runs the WRONG way here: `code <> 'X'`
+    // against NULL evaluates to NULL, not TRUE, so a bare inequality would drop
+    // every code-less organisation from this result — a real tenant would stop
+    // blocking the gate because a field was empty. The `IS NULL` arm is the fix,
+    // and this pins it.
+    const { chain, wheres } = capturingDb([]);
+    getDb.mockResolvedValue(chain);
+    await blockingRealTenants();
+
+    const { sql } = renderSql(wheres[0]);
+    expect(sql).toMatch(/`code`\s+is null/i);
+  });
+
+  it("should treat a missing code as NOT the operator", () => {
+    // Same direction, stated on the shared predicate: "we could not tell" has to
+    // land on "this is a tenant", because the alternative excludes an
+    // organisation from a control because a field happened to be empty.
+    expect(isOperatorOrg({ code: OPERATOR_ORG_CODE })).toBe(true);
+    expect(isOperatorOrg({ code: null })).toBe(false);
+    expect(isOperatorOrg({ code: undefined })).toBe(false);
+    expect(isOperatorOrg({ code: "GLOBUS_DEMO" })).toBe(false);
+  });
+
+  it("should anchor a platform link to the operator by code, not the lowest id", async () => {
+    // The old query took the lowest-id `super_admin`-segment org, so retyping any
+    // organisation with a smaller id than the operator's would have quietly
+    // re-anchored the reviewer identity onto that tenant.
+    const { chain, wheres } = capturingDb([{ id: 30002 }]);
+    getDb.mockResolvedValue(chain);
+    await expect(platformHomeOrganizationId()).resolves.toBe(30002);
+
+    const { sql, params } = renderSql(wheres[0]);
+    expect(sql).toContain("`code`");
+    expect(params).toEqual([OPERATOR_ORG_CODE]);
+    expect(sql).not.toContain("`segment`");
   });
 
   it("should re-check that condition at SIGN-IN, not only when the link was issued", () => {
