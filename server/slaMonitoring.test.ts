@@ -20,17 +20,17 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { realOrganizations } from "./slaMonitoringService";
+import { OPERATOR_ORG_CODE, realOrganizations } from "./slaMonitoringService";
 
-const org = (id: number, name: string, isDemo: boolean, segment: string | null = "financial_services") =>
-  ({ id, name, isDemo, segment });
+const org = (id: number, name: string, isDemo: boolean, code: string | null = null) =>
+  ({ id, name, isDemo, code });
 
 describe("when deciding which organisations SLA alerts cover", () => {
   const ORGS = [
     org(1, "Globus Bank Nigeria (Demo)", true),
-    org(30001, "BrightGoods Nigeria Ltd (Demo)", true, "corporate_b2b"),
-    org(60001, "ReconcileAI Dev Store", true, "retail_commerce"),
-    org(30002, "Infinity AI Africa Limited", false, "super_admin"),
+    org(30001, "BrightGoods Nigeria Ltd (Demo)", true, "BRIGHTGOODS_DEMO"),
+    org(60001, "ReconcileAI Dev Store", true, "SL_RECONCILEAI_DEV"),
+    org(30002, "Infinity AI Africa Limited", false, OPERATOR_ORG_CODE),
     org(70001, "TAJBank Limited", false),
     org(70002, "Globus Bank Plc", false),
   ];
@@ -82,22 +82,40 @@ describe("when deciding which organisations SLA alerts cover", () => {
     // Infinity AI is genuinely not a demo tenant, so isDemo cannot carry this —
     // and marking it demo to make the alert stop would be a lie that quietly
     // changes every other rule reading that flag.
-    const operator = org(30002, "Infinity AI Africa Limited", false, "super_admin");
+    const operator = org(30002, "Infinity AI Africa Limited", false, OPERATOR_ORG_CODE);
     expect(operator.isDemo).toBe(false);
     expect(realOrganizations([operator]).size).toBe(0);
   });
 
   it("should alert on nobody when the operator is the only non-demo org", () => {
     // Today's actual state, and why any stray row on that org pages the owner.
-    const todaysOrgs = ORGS.filter((o) => o.isDemo || o.segment === "super_admin");
+    const todaysOrgs = ORGS.filter((o) => o.isDemo || o.code === OPERATOR_ORG_CODE);
     expect(realOrganizations(todaysOrgs).size).toBe(0);
+  });
+
+  it("should keep monitoring a customer whose segment was set to super_admin", () => {
+    // The hazard in keying this on segment: `superAdmin.updateOrganizationSegment`
+    // can retype ANY organisation, so one mis-set field would silently drop a
+    // paying client out of SLA monitoring and their real breaches would go
+    // unreported — worse than the false alert this exclusion exists to stop,
+    // because nothing on screen would say so. Identity is the org CODE, so the
+    // segment can be whatever it likes.
+    const miscategorised = { id: 70003, name: "Taj Bank Limited", isDemo: false, code: "TAJ_BANK" };
+    expect(realOrganizations([miscategorised]).get(70003)).toBe("Taj Bank Limited");
+  });
+
+  it("should exclude the operator by code even if its segment changes", () => {
+    // The same mutability, pointed the other way: retyping Infinity AI does not
+    // turn it into a client.
+    const operator = { id: 30002, name: "Infinity AI Africa Limited", isDemo: false, code: OPERATOR_ORG_CODE };
+    expect(realOrganizations([operator]).size).toBe(0);
   });
 
   it("should still cover a real client that happens to be alongside the operator", () => {
     // The exclusion must not become "stop alerting". A paying tenant is exactly
     // who this monitor exists for.
     const real = realOrganizations([
-      org(30002, "Infinity AI Africa Limited", false, "super_admin"),
+      org(30002, "Infinity AI Africa Limited", false, OPERATOR_ORG_CODE),
       org(70001, "TAJBank Limited", false),
     ]);
     expect(real.get(70001)).toBe("TAJBank Limited");
