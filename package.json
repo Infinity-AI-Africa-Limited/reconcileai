@@ -15,7 +15,9 @@
     "db:migrate": "drizzle-kit migrate",
     "db:drift": "node scripts/check-migration-drift.mjs",
     "bootstrap:admin": "node scripts/bootstrap-admin.mjs",
-    "onprem:preflight": "tsx tools/preflightOnPremCli.ts"
+    "onprem:preflight": "tsx tools/preflightOnPremCli.ts",
+    "demo:finserv:verify": "tsx scripts/verify-finserv-demo.ts",
+    "demo:finserv:activate": "tsx scripts/verify-finserv-demo.ts --activate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.693.0",
