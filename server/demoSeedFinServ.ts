@@ -8,6 +8,7 @@
  * Queue, Age Tracker, Dashboard, Multi-Channel, Super Agent and Audit views.
  */
 
+import { createHash } from "node:crypto";
 import { and, eq, inArray, like, or } from "drizzle-orm";
 import {
   agentMemory,
@@ -43,6 +44,7 @@ type ExceptionCategory =
   | "format_error";
 
 const DEMO_MARKER = "finserv-operational-demo-v1";
+
 
 /**
  * The organisation id earlier seeders used when the caller had none.
@@ -113,6 +115,22 @@ const PAYMENT_RAILS: Array<{
     description: "Agent collection and float-settlement control feed",
   },
 ];
+/**
+ * The rails that act as a settlement SOURCE.
+ *
+ * CORE_BANKING is the reconciliation TARGET — the ledger every other rail is
+ * matched against — so it never gets a source batch.
+ *
+ * Derived once and shared, because encoding "all rails except the ledger" twice
+ * is what broke activation. Batch creation skipped CORE_BANKING by name, while
+ * the match loop selected rails with `PAYMENT_RAILS[index % (length - 1)]` —
+ * which walks indices 0..6 of the FULL array, and CORE_BANKING sits at index 4.
+ * Every seventh match asked for a source batch that had deliberately never been
+ * created ("Missing source batch for CORE_BANKING"), while AGENT_BANKING at
+ * index 7 was never selected at all.
+ */
+const SOURCE_RAILS = PAYMENT_RAILS.filter((rail) => rail.code !== "CORE_BANKING");
+
 
 export type FinServOperationalCase = {
   id: string;
@@ -528,6 +546,32 @@ async function ensureFinServChannel(
   return created.id;
 }
 
+/**
+ * The idempotency key for one controlled-demo upload batch.
+ *
+ * `upload_batches.fileHash` is `varchar(64)`, sized for a SHA-256 digest. The
+ * previous value concatenated the demo marker and the file name, which overflows
+ * for eight of the nine demo batches — `finserv-operational-demo-v1:` is 28
+ * characters before the file name even starts, and
+ * `FinServ_Demo_NIBSS_NIP_Settlement.csv` takes the total to 65. That batch is
+ * the FIRST one created, so activation failed before a single demo record
+ * existed and the whole controlled dataset was unreachable.
+ *
+ * This is an identifier for fabricated demo data, NOT a hash of any bank or
+ * customer file. Real uploads keep hashing their own bytes through
+ * server/ingest — nothing here touches that path.
+ *
+ * The organisation is inside the digest so two tenants seeding the same rail get
+ * distinct keys. The old value omitted it entirely, so the demo batches of every
+ * tenant collided on one idempotency key; the fix is not only about length.
+ * Deterministic, so re-activation still overwrites rather than duplicating.
+ */
+export function buildFinServDemoBatchHash(fileName: string, organizationId: number | null): string {
+  return createHash("sha256")
+    .update(`${DEMO_MARKER}|org:${organizationId ?? "none"}|${fileName}`)
+    .digest("hex");
+}
+
 async function createBatch(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   userId: number,
@@ -541,7 +585,7 @@ async function createBatch(
     organizationId,
     channelId,
     fileName,
-    fileHash: `${DEMO_MARKER}:${fileName}`,
+    fileHash: buildFinServDemoBatchHash(fileName, organizationId),
     totalRows: count,
     validRows: count,
     invalidRows: 0,
@@ -608,9 +652,8 @@ export async function seedFinServDemoData(
   if (!coreChannelId || !nipChannelId) throw new Error("Financial-services demo rails were not created");
 
   const sourceBatchIds = new Map<FinServRailCode, number>();
-  for (const rail of PAYMENT_RAILS) {
-    if (rail.code === "CORE_BANKING") continue;
-    const count = Math.ceil(plan.settlementItems / (PAYMENT_RAILS.length - 1));
+  for (const rail of SOURCE_RAILS) {
+    const count = Math.ceil(plan.settlementItems / SOURCE_RAILS.length);
     sourceBatchIds.set(
       rail.code,
       await createBatch(db, userId, organizationId, channelIds.get(rail.code)!, `FinServ_Demo_${rail.code}_Settlement.csv`, count),
@@ -654,7 +697,7 @@ export async function seedFinServDemoData(
 
   const matchRows: Array<typeof matches.$inferInsert> = [];
   for (let index = 0; index < plan.matchedPairs; index += 1) {
-    const rail = PAYMENT_RAILS[index % (PAYMENT_RAILS.length - 1)];
+    const rail = SOURCE_RAILS[index % SOURCE_RAILS.length];
     const sequence = String(index + 1).padStart(4, "0");
     const amount = (25000 + ((index * 1375) % 475000)).toFixed(2);
     const transactionDate = dateDaysAgo(now, index % 10);
