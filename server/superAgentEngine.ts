@@ -626,7 +626,12 @@ function matchWithinCounterparty(
   // Same trap as `determinateCandidates` and the split branch, which is why
   // both normalise through `normalizeStr` before counting. A membership guard
   // backs it up, so a transaction cannot enter one group twice by any route.
-  const invoiceGroups = new Map<string, { sources: SATransaction[]; targets: SATransaction[] }>();
+  // Keyed on the NORMALISED invoice number so "INV-2847" and "inv 2847" group
+  // together, but carrying the readable form alongside. The key is what the
+  // engine compares; `label` is what a person reads, and putting the key on
+  // screen showed a controller "reference inv2847" and stamped that on every
+  // allocation leg.
+  const invoiceGroups = new Map<string, { label: string; sources: SATransaction[]; targets: SATransaction[] }>();
 
   const addToGroups = (txn: SATransaction, side: "sources" | "targets") => {
     const distinct = new Set(
@@ -634,8 +639,13 @@ function matchWithinCounterparty(
         .map((inv) => normalizeStr(inv))
         .filter(Boolean),
     );
+    const raw = parseReference(txn.transactionRef, txn.description).invoiceNumbers;
     for (const inv of distinct) {
-      const group = invoiceGroups.get(inv) ?? { sources: [], targets: [] };
+      const group = invoiceGroups.get(inv) ?? {
+        label: raw.find((candidate) => normalizeStr(candidate) === inv) ?? inv,
+        sources: [],
+        targets: [],
+      };
       if (!group[side].some((existing) => existing.id === txn.id)) group[side].push(txn);
       invoiceGroups.set(inv, group);
     }
@@ -651,7 +661,8 @@ function matchWithinCounterparty(
     addToGroups(tgt, "targets");
   }
 
-  invoiceGroups.forEach((group, invNum) => {
+  invoiceGroups.forEach((group) => {
+    const invNum = group.label;
     if (group.sources.length === 0 || group.targets.length === 0) return;
     const srcIds: number[] = group.sources.map((s: SATransaction) => s.id).filter((id: number) => !matchedSourceIds.has(id));
     const tgtIds: number[] = group.targets.map((t: SATransaction) => t.id).filter((id: number) => !matchedTargetIds.has(id));
@@ -670,13 +681,52 @@ function matchWithinCounterparty(
     const diffPct = diff / Math.max(srcTotal, tgtTotal);
 
     if (diffPct <= fxTolerance * 2) {
-      const allocation: SplitAllocation[] = srcIds.map((sid: number) => ({
-        sourceId: sid,
-        targetId: tgtIds[0],
-        allocatedAmount: parseFloat(String(group.sources.find((s: SATransaction) => s.id === sid)?.amount || 0)),
-        allocationPercent: Math.round((parseFloat(String(group.sources.find((s: SATransaction) => s.id === sid)?.amount || 0)) / srcTotal) * 10000) / 100,
-        invoiceRef: invNum,
-      }));
+      // MANY sources against MANY targets has no determined pairing.
+      //
+      // Sharing one invoice reference says these records belong together; it
+      // does not say which receipt settles which invoice, and with more than one
+      // on each side there is no way to read that off the data. The previous
+      // code mapped every source to `tgtIds[0]` while `targetIds` and
+      // `totalTargetAmount` covered them all, so the proposal claimed to cover N
+      // invoices and the table a controller approves from showed exactly one.
+      // An allocation that omits the invoices it is allocating against is worse
+      // than no allocation.
+      //
+      // So it is refused and reported, the same as any other ambiguity here:
+      // both sides stay open, and the detail says what would resolve it.
+      if (srcIds.length > 1 && tgtIds.length > 1) {
+        unresolvedAmbiguities.push({
+          sourceIds: srcIds,
+          targetIds: tgtIds,
+          reason: "ambiguous",
+          detail:
+            `${srcIds.length} receipts and ${tgtIds.length} invoices share reference ${invNum} and their totals agree, ` +
+            `but which receipt settles which invoice is not determined. Obtain the remittance advice.`,
+        });
+        return;
+      }
+
+      // One side is singular, so every leg is determined:
+      //   M receipts → 1 invoice   one leg per receipt
+      //   1 receipt  → N invoices  one leg per invoice, so none is omitted
+      const amountOf = (rows: SATransaction[], id: number) =>
+        parseFloat(String(rows.find((r) => r.id === id)?.amount ?? 0));
+      const allocation: SplitAllocation[] =
+        tgtIds.length === 1
+          ? srcIds.map((sid: number) => ({
+              sourceId: sid,
+              targetId: tgtIds[0],
+              allocatedAmount: amountOf(group.sources, sid),
+              allocationPercent: srcTotal > 0 ? Math.round((amountOf(group.sources, sid) / srcTotal) * 10000) / 100 : 0,
+              invoiceRef: invNum,
+            }))
+          : tgtIds.map((tid: number) => ({
+              sourceId: srcIds[0],
+              targetId: tid,
+              allocatedAmount: amountOf(group.targets, tid),
+              allocationPercent: tgtTotal > 0 ? Math.round((amountOf(group.targets, tid) / tgtTotal) * 10000) / 100 : 0,
+              invoiceRef: invNum,
+            }));
 
       m2mMatches.push({
         sourceIds: srcIds,
