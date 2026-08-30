@@ -144,13 +144,80 @@ describe("amounts that would corrupt the arithmetic", () => {
 });
 
 describe("invoice-reference grouping", () => {
-  it("should group a receipt and an invoice that share an invoice number", () => {
+  it("should NOT report a 1:1 reference pair as an allocation", () => {
+    // An allocation spans several items. One receipt against one invoice is a
+    // 1:1 near-match — the 3-pass engine's job, and already quantified by the
+    // diagnosis path from the same named reference. Reporting it here as
+    // "many-to-many" is the overstatement Strategy 1 refuses with its minItems
+    // of 2, and this strategy had no such guard: 35 of 36 proposals against the
+    // seeded FMCG dataset were 1:1 pairs wearing that label.
     const receipt = txn(1000, "INV-2847", "payment for INV-2847");
     const invoice = txn(1000, "INV-2847", "INV-2847 goods");
     const result = runM2MMatching([receipt], [invoice]);
-    const grouped = result.m2mMatches.find((m) => m.matchType === "many_to_many");
+    expect(result.m2mMatches).toHaveLength(0);
+    expect(result.remainingSourceIds).toContain(receipt.id);
+  });
+
+  it("should group a receipt against SEVERAL invoices sharing its reference", () => {
+    // The control: excluding 1:1 must not become excluding the strategy.
+    const receipt = txn(1000, "INV-2847", "payment for INV-2847");
+    const first = txn(600, "INV-2847", "INV-2847 goods part A");
+    const second = txn(400, "INV-2847", "INV-2847 goods part B");
+    const result = runM2MMatching([receipt], [first, second]);
+    const grouped = result.m2mMatches.find((m) => m.sourceIds.length + m.targetIds.length >= 3);
     expect(grouped).toBeDefined();
-    expect(grouped!.matchReason).toMatch(/INV-2847/);
+    // Which strategy claims it is not the point and is not asserted: the
+    // subset-sum pass reaches 600 + 400 first and reports it as one-to-many.
+    // What matters is that a genuine MULTI-ITEM allocation is still proposed.
+    expect(grouped!.targetIds).toHaveLength(2);
+  });
+});
+
+describe("a receipt is only ever allocated against its own payer's invoices", () => {
+  /**
+   * The matcher works on amounts. Run across a whole job it is arithmetic, and
+   * against the seeded FMCG dataset it proposed at 95% confidence that a receipt
+   * from Eko Traders International settled invoices belonging to Calabar Coastal
+   * Distributors and Northern Supplies Ltd — three different companies — because
+   * the numbers added up. A controller acting on that would credit two other
+   * distributors' invoices from a third's money.
+   */
+  function payer(name: string, amount: number, ref?: string): SATransaction {
+    return { ...txn(amount, ref), counterparty: name } as SATransaction;
+  }
+
+  it("should not build an allocation that spans two distributors", () => {
+    const receipt = payer("Eko Traders International", 300);
+    const result = runM2MMatching(
+      [receipt],
+      [payer("Calabar Coastal Distributors", 200), payer("Northern Supplies Ltd", 100)],
+    );
+    expect(result.m2mMatches).toHaveLength(0);
+    expect(result.remainingSourceIds).toContain(receipt.id);
+  });
+
+  it("should still allocate when the invoices are that payer's own", () => {
+    // The control: the partition must reject a DIFFERENT payer, not reject
+    // matching. Same amounts, one distributor.
+    const receipt = payer("Eko Traders International", 300);
+    const result = runM2MMatching(
+      [receipt],
+      [payer("Eko Traders International", 200), payer("Eko Traders International", 100)],
+    );
+    expect(result.m2mMatches).toHaveLength(1);
+    expect(result.m2mMatches[0].targetIds).toHaveLength(2);
+  });
+
+  it("should refuse to allocate a receipt whose payer is unknown", () => {
+    // An unidentified payer is the exception, not a wildcard — the same rule
+    // the diagnosis pool applies.
+    const anonymous = { ...txn(300), counterparty: null } as SATransaction;
+    const result = runM2MMatching(
+      [anonymous],
+      [payer("Eko Traders International", 200), payer("Eko Traders International", 100)],
+    );
+    expect(result.m2mMatches).toHaveLength(0);
+    expect(result.remainingSourceIds).toContain(anonymous.id);
   });
 });
 
@@ -546,5 +613,171 @@ describe("when there is nothing to compare against", () => {
     const { legs, directionSignal } = selectCounterpartLegs(receipt, []);
     expect(legs).toEqual([]);
     expect(directionSignal).toBe("none");
+  });
+});
+
+describe("a transaction cannot be counted twice in one allocation", () => {
+  /**
+   * `parseReference` scans the reference and the description together, so a row
+   * whose invoice appears in both — "BANK-INV-2855" plus "Payment … INV-2855",
+   * which is how a bank feed normally reads — returned that number TWICE. The
+   * invoice-grouping strategy iterated the raw list and pushed the same
+   * transaction into the group once per occurrence, so its amount was counted
+   * twice: against the seeded FMCG dataset a 2,398,500 receipt was reported as
+   * a 4,797,000 allocation, and 35 of 36 proposals carried a repeated leg.
+   *
+   * Found by running the engine on real data. No unit test had the shape,
+   * because the fixtures named their invoice once.
+   */
+  function bankRow(amount: number, inv: string): SATransaction {
+    return txn(amount, `BANK-${inv}`, `Payment Sunrise Distribution Co. ${inv} bank fee`);
+  }
+
+  it("should not repeat a transaction whose invoice appears in both ref and description", () => {
+    const receipt = bankRow(600, "INV-2855");
+    const first = txn(400, "INV-2855", "Order INV-2855 part A");
+    const second = txn(200, "INV-2855", "Order INV-2855 part B");
+    const result = runM2MMatching([receipt], [first, second]);
+
+    for (const match of result.m2mMatches) {
+      expect(new Set(match.sourceIds).size, "a source appears twice in one allocation").toBe(match.sourceIds.length);
+      expect(new Set(match.targetIds).size, "a target appears twice in one allocation").toBe(match.targetIds.length);
+    }
+  });
+
+  it("should report totals that equal the sum of the rows it names", () => {
+    // The consequence of the duplicate, and the number a controller would post.
+    const receipt = bankRow(600, "INV-2855");
+    const first = txn(400, "INV-2855", "Order INV-2855 part A");
+    const second = txn(200, "INV-2855", "Order INV-2855 part B");
+    const rows = new Map([receipt, first, second].map((r) => [r.id, parseFloat(String(r.amount))]));
+    const result = runM2MMatching([receipt], [first, second]);
+
+    for (const match of result.m2mMatches) {
+      const src = match.sourceIds.reduce((sum, id) => sum + (rows.get(id) ?? 0), 0);
+      const tgt = match.targetIds.reduce((sum, id) => sum + (rows.get(id) ?? 0), 0);
+      expect(match.totalSourceAmount).toBeCloseTo(src, 2);
+      expect(match.totalTargetAmount).toBeCloseTo(tgt, 2);
+    }
+  });
+});
+
+describe("a receipt is only allocated against invoices in its own currency", () => {
+  /**
+   * Partitioning on counterparty alone still let one payer's NGN and USD open
+   * records be summed together. That "total" denominates nothing, and
+   * `checkFXVariance` would then explain the gap between two currencies as a
+   * bank fee. Two currencies for one payer is an FX exception — which is what
+   * the diagnosis path calls it — never an allocation.
+   */
+  function inCurrency(currency: string, amount: number): SATransaction {
+    return { ...txn(amount), currency } as SATransaction;
+  }
+
+  it("should not build an allocation spanning two currencies", () => {
+    const receipt = inCurrency("NGN", 300);
+    const result = runM2MMatching([receipt], [inCurrency("USD", 200), inCurrency("USD", 100)]);
+    expect(result.m2mMatches).toHaveLength(0);
+    expect(result.remainingSourceIds).toContain(receipt.id);
+  });
+
+  it("should not mix currencies within one payer's own invoices", () => {
+    // Same payer, same amounts — only the denomination differs.
+    const receipt = inCurrency("NGN", 300);
+    const result = runM2MMatching([receipt], [inCurrency("NGN", 200), inCurrency("USD", 100)]);
+    expect(result.m2mMatches).toHaveLength(0);
+  });
+
+  it("should still allocate when every leg shares the currency", () => {
+    // The control: the currency key must reject a DIFFERENT currency, not
+    // reject matching.
+    const receipt = inCurrency("NGN", 300);
+    const result = runM2MMatching([receipt], [inCurrency("NGN", 200), inCurrency("NGN", 100)]);
+    expect(result.m2mMatches).toHaveLength(1);
+    expect(result.m2mMatches[0].targetIds).toHaveLength(2);
+  });
+});
+
+describe("an allocation names every invoice it allocates against", () => {
+  /**
+   * The grouping strategy mapped every source to `tgtIds[0]` while `targetIds`
+   * and `totalTargetAmount` covered them all. So a proposal claimed to cover N
+   * invoices and the table a controller approves from listed exactly one — an
+   * allocation that omits the invoices it is allocating against.
+   */
+  function ref(amount: number, inv: string, note: string): SATransaction {
+    return txn(amount, inv, `${note} ${inv}`);
+  }
+
+  it("should give one leg per invoice when a single receipt covers several", () => {
+    // 1 receipt → 3 invoices sharing INV-9100. Every invoice must appear.
+    const receipt = ref(900, "INV-9100", "payment for");
+    // 300 + 620 = 920, which is 2.17% from 900 — outside the subset-sum pass's
+    // 1.5% and inside the grouping pass's 3%, so this reaches the branch under
+    // test instead of being claimed by Strategy 1.
+    const targets = [ref(300, "INV-9100", "goods A"), ref(620, "INV-9100", "goods B")];
+    const result = runM2MMatching([receipt], targets);
+
+    const match = result.m2mMatches.find((m) => m.targetIds.length > 1);
+    expect(match, "a 1:N reference group should still be proposed").toBeDefined();
+    const named = new Set(match!.splitAllocation.map((a) => a.targetId));
+    expect(named.size, "every target must appear in the allocation table").toBe(match!.targetIds.length);
+    for (const id of match!.targetIds) expect(named.has(id)).toBe(true);
+  });
+
+  it("should account for the whole invoiced total across those legs", () => {
+    // The number a controller posts. Legs that omit invoices also under-total.
+    const receipt = ref(900, "INV-9200", "payment for");
+    const targets = [ref(300, "INV-9200", "goods A"), ref(620, "INV-9200", "goods B")];
+    const result = runM2MMatching([receipt], targets);
+    const match = result.m2mMatches.find((m) => m.targetIds.length > 1);
+    expect(match).toBeDefined();
+    const allocated = match!.splitAllocation.reduce((sum, a) => sum + a.allocatedAmount, 0);
+    expect(allocated).toBeCloseTo(match!.totalTargetAmount, 2);
+  });
+
+  it("should still give one leg per receipt when several settle one invoice", () => {
+    // The control for the branch above: M:1 keeps its per-receipt legs.
+    const targets = [ref(900, "INV-9300", "goods")];
+    const sources = [ref(300, "INV-9300", "payment A"), ref(620, "INV-9300", "payment B")];
+    const result = runM2MMatching(sources, targets);
+    const match = result.m2mMatches.find((m) => m.sourceIds.length > 1);
+    expect(match).toBeDefined();
+    expect(new Set(match!.splitAllocation.map((a) => a.sourceId)).size).toBe(match!.sourceIds.length);
+  });
+
+  it("should refuse a many-to-many group rather than show a partial table", () => {
+    // Sharing a reference says these belong together; it does not say which
+    // receipt settles which invoice, and with more than one on each side that
+    // cannot be read off the data.
+    const sources = [ref(300, "INV-9400", "payment A"), ref(300, "INV-9400", "payment B")];
+    const targets = [ref(300, "INV-9400", "goods A"), ref(300, "INV-9400", "goods B")];
+    const result = runM2MMatching(sources, targets);
+
+    const grouped = result.m2mMatches.find((m) => m.matchType === "many_to_many");
+    expect(grouped, "an undetermined M:N pairing must not be proposed").toBeUndefined();
+    const refusal = result.unresolvedAmbiguities.find((a) => a.detail.includes("INV-9400"));
+    expect(refusal, "the refusal must be reported, not silent").toBeDefined();
+    expect(refusal!.detail).toMatch(/remittance advice/i);
+    // Both sides stay open for the controller to resolve.
+    for (const s of sources) expect(result.remainingSourceIds).toContain(s.id);
+    for (const t of targets) expect(result.remainingTargetIds).toContain(t.id);
+  });
+});
+
+describe("what a controller reads on an allocation", () => {
+  it("should show the invoice reference as written, not the normalised key", () => {
+    // The group is keyed on a normalised form so "INV-2847" and "inv 2847"
+    // group together. Putting that key on screen showed "reference inv2847" and
+    // stamped it on every allocation leg — a reference a controller cannot look
+    // up in their ledger.
+    const receipt = txn(900, "INV-9500", "payment for INV-9500");
+    const targets = [txn(300, "INV-9500", "goods A INV-9500"), txn(620, "INV-9500", "goods B INV-9500")];
+    const result = runM2MMatching([receipt], targets);
+
+    const match = result.m2mMatches.find((m) => m.targetIds.length > 1);
+    expect(match).toBeDefined();
+    expect(match!.matchReason).toContain("INV-9500");
+    for (const leg of match!.splitAllocation) expect(leg.invoiceRef).toBe("INV-9500");
   });
 });

@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
+import AllocationProposals from "@/components/AllocationProposals";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -427,6 +428,11 @@ export default function ReconciliationPage() {
                     </div>
                   );
                 })()}
+
+                {/* Allocation proposals for what did NOT match. Read-only by
+                    construction (gate B4): proposals for a named approver to
+                    post in the customer's own system, never written here. */}
+                <AllocationProposals jobId={jobDetail.job.id} />
 
                 {jobDetail.matches.length > 0 && (
                   <div>
