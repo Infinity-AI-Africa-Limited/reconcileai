@@ -29,6 +29,7 @@ import { notifyOwner } from "./_core/notification";
 import { getDb, getAllUsers } from "./db";
 import { and, eq, or, inArray } from "drizzle-orm";
 import { exceptions, organizations } from "../drizzle/schema";
+import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
 
 // SLA thresholds in hours
 const SLA_WARNING_THRESHOLD = 20; // Yellow alert
@@ -59,10 +60,12 @@ interface SLABreach {
  * customer's breached SLA is invisible until they raise it. So the exclusion
  * names ONE organisation, and anything else stays monitored.
  *
- * navItems.ts reached the same conclusion for `staffOnly` and for the same
- * reason. This is that rule applied to alerting.
+ * Now imported rather than declared here: the reviewer-access gate had the same
+ * defect and needed the same answer, and two constants holding one value is the
+ * drift surface, not the fix. Re-exported so this module's existing importers
+ * keep working. The rationale in full lives in shared/operatorOrg.ts.
  */
-export const OPERATOR_ORG_CODE = "INFINITY_AI";
+export { OPERATOR_ORG_CODE };
 
 /**
  * Which organisations are real CLIENTS, keyed by id.
