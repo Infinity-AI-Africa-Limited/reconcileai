@@ -8,6 +8,7 @@
  * Queue, Age Tracker, Dashboard, Multi-Channel, Super Agent and Audit views.
  */
 
+import { createHash } from "node:crypto";
 import { and, eq, inArray, like, or } from "drizzle-orm";
 import {
   agentMemory,
@@ -528,6 +529,32 @@ async function ensureFinServChannel(
   return created.id;
 }
 
+/**
+ * The idempotency key for one controlled-demo upload batch.
+ *
+ * `upload_batches.fileHash` is `varchar(64)`, sized for a SHA-256 digest. The
+ * previous value concatenated the demo marker and the file name, which overflows
+ * for eight of the nine demo batches — `finserv-operational-demo-v1:` is 28
+ * characters before the file name even starts, and
+ * `FinServ_Demo_NIBSS_NIP_Settlement.csv` takes the total to 65. That batch is
+ * the FIRST one created, so activation failed before a single demo record
+ * existed and the whole controlled dataset was unreachable.
+ *
+ * This is an identifier for fabricated demo data, NOT a hash of any bank or
+ * customer file. Real uploads keep hashing their own bytes through
+ * server/ingest — nothing here touches that path.
+ *
+ * The organisation is inside the digest so two tenants seeding the same rail get
+ * distinct keys. The old value omitted it entirely, so the demo batches of every
+ * tenant collided on one idempotency key; the fix is not only about length.
+ * Deterministic, so re-activation still overwrites rather than duplicating.
+ */
+export function buildFinServDemoBatchHash(fileName: string, organizationId: number | null): string {
+  return createHash("sha256")
+    .update(`${DEMO_MARKER}|org:${organizationId ?? "none"}|${fileName}`)
+    .digest("hex");
+}
+
 async function createBatch(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   userId: number,
@@ -541,7 +568,7 @@ async function createBatch(
     organizationId,
     channelId,
     fileName,
-    fileHash: `${DEMO_MARKER}:${fileName}`,
+    fileHash: buildFinServDemoBatchHash(fileName, organizationId),
     totalRows: count,
     validRows: count,
     invalidRows: 0,

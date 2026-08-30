@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildFinServDemoPlan, FINSERV_OPERATIONAL_CASES } from "./demoSeedFinServ";
+import { buildFinServDemoBatchHash, buildFinServDemoPlan, FINSERV_OPERATIONAL_CASES } from "./demoSeedFinServ";
 
 describe("financial-services operational demo plan", () => {
   it("keeps displayed transaction, match and exception counts internally consistent", () => {
@@ -174,5 +174,80 @@ describe("guest fallback seeds the shared demo tenant only once", () => {
     // is by definition outside the lock.
     const callers = [...PREWARM.matchAll(/await seedDemoData\(/g)].length;
     expect(callers, "seedDemoData should be called only from inside ensureGuestDemoSeeded").toBe(1);
+  });
+});
+
+// ─── Demo batch idempotency keys must fit the column ─────────────────────────
+//
+// `upload_batches.fileHash` is varchar(64). The previous value concatenated the
+// demo marker with the file name — `finserv-operational-demo-v1:` is 28
+// characters before the name even begins — so eight of the nine demo batches
+// overflowed. The first batch created, NIBSS_NIP at 65 characters, was among
+// them, so Financial Services demo activation failed before a single record
+// existed and the whole controlled dataset was unreachable.
+describe("financial-services demo batch hashes", () => {
+  const FILE_HASH_LIMIT = 64;
+  const SEED = readFileSync(join(__dirname, "demoSeedFinServ.ts"), "utf8");
+  // The names the seeder actually generates, derived from the rail codes rather
+  // than retyped — a hard-coded list would stop tracking the seeder.
+  const railCodes = [...SEED.matchAll(/^\s*code: "(\w+)",/gm)].map((m) => m[1]);
+  const batchFileNames = [
+    ...railCodes.map((c) => `FinServ_Demo_${c}_Settlement.csv`),
+    "FinServ_Demo_Core_Banking_Ledger.csv",
+  ];
+
+  it("should generate names that would have overflowed, so this is not vacuous", () => {
+    // Pins the defect: with the old scheme most of these exceed the column.
+    const marker = "finserv-operational-demo-v1";
+    const overflowing = batchFileNames.filter((n) => `${marker}:${n}`.length > FILE_HASH_LIMIT);
+    expect(railCodes.length).toBeGreaterThan(5);
+    expect(overflowing.length).toBeGreaterThan(0);
+  });
+
+  it("should fit varchar(64) for every batch the seeder creates", () => {
+    for (const name of batchFileNames) {
+      const hash = buildFinServDemoBatchHash(name, 1);
+      expect(hash.length, `${name} hash length`).toBe(FILE_HASH_LIMIT);
+    }
+  });
+
+  it("should be a lowercase SHA-256 hex digest", () => {
+    expect(buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 1)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("should be deterministic, so re-activation overwrites rather than duplicating", () => {
+    const a = buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 1);
+    const b = buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 1);
+    expect(a).toBe(b);
+  });
+
+  it("should give different tenants different keys for the same rail", () => {
+    // The old value omitted the organisation entirely, so every tenant's demo
+    // batches collided on one idempotency key. Length was not the only defect.
+    const orgA = buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 1);
+    const orgB = buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 30001);
+    expect(orgA).not.toBe(orgB);
+  });
+
+  it("should distinguish an org-less caller from a real tenant", () => {
+    expect(buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", null))
+      .not.toBe(buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 1));
+  });
+
+  it("should give different rails different keys within one tenant", () => {
+    const nip = buildFinServDemoBatchHash("FinServ_Demo_NIBSS_NIP_Settlement.csv", 1);
+    const pos = buildFinServDemoBatchHash("FinServ_Demo_POS_TERMINAL_Settlement.csv", 1);
+    expect(nip).not.toBe(pos);
+  });
+
+  it("should not leave the concatenated form anywhere in the seeder", () => {
+    expect(SEED).not.toMatch(/fileHash: `\$\{DEMO_MARKER\}:/);
+  });
+
+  it("should not change how real uploads are hashed", () => {
+    // This is an identifier for fabricated demo data, not a file digest. The
+    // ingestion path must be untouched.
+    const INGEST = readFileSync(join(__dirname, "ingest", "fileParser.ts"), "utf8");
+    expect(INGEST).not.toMatch(/buildFinServDemoBatchHash/);
   });
 });
