@@ -20,15 +20,17 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { realOrganizations } from "./slaMonitoringService";
+import { OPERATOR_ORG_CODE, realOrganizations } from "./slaMonitoringService";
 
-const org = (id: number, name: string, isDemo: boolean) => ({ id, name, isDemo });
+const org = (id: number, name: string, isDemo: boolean, code: string | null = null) =>
+  ({ id, name, isDemo, code });
 
 describe("when deciding which organisations SLA alerts cover", () => {
   const ORGS = [
     org(1, "Globus Bank Nigeria (Demo)", true),
-    org(30001, "BrightGoods Nigeria Ltd (Demo)", true),
-    org(60001, "ReconcileAI Dev Store", true),
+    org(30001, "BrightGoods Nigeria Ltd (Demo)", true, "BRIGHTGOODS_DEMO"),
+    org(60001, "ReconcileAI Dev Store", true, "SL_RECONCILEAI_DEV"),
+    org(30002, "Infinity AI Africa Limited", false, OPERATOR_ORG_CODE),
     org(70001, "TAJBank Limited", false),
     org(70002, "Globus Bank Plc", false),
   ];
@@ -62,6 +64,91 @@ describe("when deciding which organisations SLA alerts cover", () => {
   it("should treat a demo tenant as demo regardless of what its jobs are called", () => {
     // The regression, stated directly: the job name is now irrelevant.
     expect(realOrganizations([org(1, "Anything At All", true)]).size).toBe(0);
+  });
+
+  it("should exclude the platform operator's own organisation", () => {
+    // An SLA is a promise to a customer, and Infinity AI has none with itself,
+    // so a breach there is a breach of nothing. It reached the owner as a real
+    // alert: a demo seed run by a super admin filed 66 FMCG exceptions against
+    // Infinity AI, and the 24-hour timer emailed "CRITICAL — 6 exceptions
+    // breached" naming that organisation as the affected client.
+    const real = realOrganizations(ORGS);
+    expect(real.has(30002)).toBe(false);
+    expect([...real.values()]).not.toContain("Infinity AI Africa Limited");
+  });
+
+  it("should exclude the operator even though it is not flagged as demo", () => {
+    // The two conditions are separate, and only one of them is true here.
+    // Infinity AI is genuinely not a demo tenant, so isDemo cannot carry this —
+    // and marking it demo to make the alert stop would be a lie that quietly
+    // changes every other rule reading that flag.
+    const operator = org(30002, "Infinity AI Africa Limited", false, OPERATOR_ORG_CODE);
+    expect(operator.isDemo).toBe(false);
+    expect(realOrganizations([operator]).size).toBe(0);
+  });
+
+  it("should alert on nobody when the operator is the only non-demo org", () => {
+    // Today's actual state, and why any stray row on that org pages the owner.
+    const todaysOrgs = ORGS.filter((o) => o.isDemo || o.code === OPERATOR_ORG_CODE);
+    expect(realOrganizations(todaysOrgs).size).toBe(0);
+  });
+
+  it("should keep monitoring a customer whose segment was set to super_admin", () => {
+    // The hazard in keying this on segment: `superAdmin.updateOrganizationSegment`
+    // can retype ANY organisation, so one mis-set field would silently drop a
+    // paying client out of SLA monitoring and their real breaches would go
+    // unreported — worse than the false alert this exclusion exists to stop,
+    // because nothing on screen would say so. Identity is the org CODE, so the
+    // segment can be whatever it likes.
+    const miscategorised = { id: 70003, name: "Taj Bank Limited", isDemo: false, code: "TAJ_BANK" };
+    expect(realOrganizations([miscategorised]).get(70003)).toBe("Taj Bank Limited");
+  });
+
+  it("should exclude the operator by code even if its segment changes", () => {
+    // The same mutability, pointed the other way: retyping Infinity AI does not
+    // turn it into a client.
+    const operator = { id: 30002, name: "Infinity AI Africa Limited", isDemo: false, code: OPERATOR_ORG_CODE };
+    expect(realOrganizations([operator]).size).toBe(0);
+  });
+
+  it("should still cover a real client that happens to be alongside the operator", () => {
+    // The exclusion must not become "stop alerting". A paying tenant is exactly
+    // who this monitor exists for.
+    const real = realOrganizations([
+      org(30002, "Infinity AI Africa Limited", false, OPERATOR_ORG_CODE),
+      org(70001, "TAJBank Limited", false),
+    ]);
+    expect(real.get(70001)).toBe("TAJBank Limited");
+    expect(real.size).toBe(1);
+  });
+});
+
+describe("when demo data is seeded", () => {
+  const SEED = fs.readFileSync(path.join(__dirname, "demoSeedEngine.ts"), "utf8");
+  const FINSERV = fs.readFileSync(path.join(__dirname, "demoSeedFinServ.ts"), "utf8");
+
+  it("should refuse to write into an organisation that is not a demo tenant", () => {
+    // The cause, not the symptom. The seed runs with whatever organisation the
+    // CALLER is in, so a super admin running it wrote 2,640 transactions, 66
+    // exceptions and 10 channels into Infinity AI's own org.
+    expect(SEED).toMatch(/async function assertDemoTenant/);
+    expect(SEED).toMatch(/if \(!org\.isDemo\)/);
+  });
+
+  it("should guard every seed entry point, not just the one that failed", () => {
+    // Guarding one door and leaving its sibling open is how this class recurs.
+    const fmcg = SEED.slice(SEED.indexOf("export async function seedFmcgDemoData"), SEED.indexOf("export async function seedFinservDemoData"));
+    const finserv = SEED.slice(SEED.indexOf("export async function seedFinservDemoData"));
+    expect(fmcg).toMatch(/await assertDemoTenant\(db, orgId\)/);
+    expect(finserv).toMatch(/await assertDemoTenant\(db, orgId\)/);
+    expect(FINSERV).toMatch(/is not a demo tenant \(isDemo = 0\)/);
+  });
+
+  it("should refuse when the organisation cannot be read at all", () => {
+    // "Cannot confirm this is a demo tenant" has to mean no — the same rule that
+    // keeps org-less callers out of tenant-scoped writes elsewhere.
+    expect(SEED).toMatch(/does not exist/);
+    expect(FINSERV).toMatch(/does not exist/);
   });
 });
 

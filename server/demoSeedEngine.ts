@@ -367,12 +367,47 @@ async function segmentOfOrg(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, 
   return org?.segment ?? null;
 }
 
+/**
+ * Refuse to write fabricated data into an organisation that is not a demo tenant.
+ *
+ * The seed runs with whatever organisation the CALLER happens to be in, which is
+ * how a super admin running it filed 2,640 transactions, 66 exceptions and 10
+ * channels against Infinity AI's own organisation. That is not merely untidy: the
+ * operator org was the only one with isDemo = 0, so the 24-hour SLA timer then
+ * emailed a CRITICAL breach alert naming "Infinity AI Africa Limited" as an
+ * affected client.
+ *
+ * The rule that matters more than today's cleanup: the next organisation with
+ * isDemo = 0 will be a paying customer, and fabricated reconciliation rows landing
+ * in their tenant would be indistinguishable from their own data. Checked against
+ * the ORG RECORD rather than trusting the caller, and refusing on a missing or
+ * unreadable org, because "cannot confirm this is a demo tenant" has to mean no.
+ */
+async function assertDemoTenant(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId: number): Promise<void> {
+  const [org] = await db
+    .select({ id: organizations.id, code: organizations.code, isDemo: organizations.isDemo })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  if (!org) {
+    throw new Error(`Demo seed refused: organization ${orgId} does not exist`);
+  }
+  if (!org.isDemo) {
+    throw new Error(
+      `Demo seed refused: ${org.code ?? orgId} is not a demo tenant (isDemo = 0). ` +
+        "Demo data must never be written into a real or operator organisation.",
+    );
+  }
+}
+
 export async function seedFmcgDemoData(userId: number, orgId: number | null): Promise<DemoSeedResult> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   if (orgId == null) {
     throw new Error("Corporate B2B demo seed requires an owning organizationId");
   }
+  await assertDemoTenant(db, orgId);
 
   // 1. Seed distributors — corporate B2B tenants only.
   //
@@ -526,6 +561,9 @@ export async function seedFinservDemoData(userId: number, orgId: number | null):
   if (orgId == null) {
     throw new Error("Financial Services demo seed requires an owning organizationId");
   }
+  // Same gate as the FMCG seed. Guarding one entry point and not its siblings
+  // leaves the hole open through the other door.
+  await assertDemoTenant(db, orgId);
 
   // 1. Channels — all Nigerian payment rails
   const channelIds: Record<string, number> = {};
