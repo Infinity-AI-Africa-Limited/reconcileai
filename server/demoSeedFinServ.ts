@@ -15,6 +15,7 @@ import {
   channels,
   exceptions,
   matches,
+  organizations,
   reconciliationJobs,
   transactions,
   uploadBatches,
@@ -617,6 +618,27 @@ export async function seedFinServDemoData(
   if (!db) throw new Error("Database not available");
   if (organizationId == null) {
     throw new Error("Financial Services demo seed requires an owning organizationId");
+  }
+
+  // Never write fabricated data into a non-demo organisation. A super admin
+  // running a seed from inside their own org filed 2,640 transactions and 66
+  // exceptions against Infinity AI, which the SLA monitor then reported as a
+  // client's CRITICAL breach. The next isDemo = 0 organisation will be a paying
+  // customer, where seeded rows would be indistinguishable from their own data.
+  // Refuses on a missing org too: "cannot confirm this is a demo tenant" means no.
+  const [seedTarget] = await db
+    .select({ code: organizations.code, isDemo: organizations.isDemo })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  if (!seedTarget) {
+    throw new Error(`Demo seed refused: organization ${organizationId} does not exist`);
+  }
+  if (!seedTarget.isDemo) {
+    throw new Error(
+      `Demo seed refused: ${seedTarget.code ?? organizationId} is not a demo tenant (isDemo = 0). ` +
+        "Demo data must never be written into a real or operator organisation.",
+    );
   }
 
   /**

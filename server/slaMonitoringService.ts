@@ -45,17 +45,52 @@ interface SLABreach {
 }
 
 /**
- * Which organisations are real clients, keyed by id.
+ * The platform operator's own organisation, identified by its stable code.
  *
- * Returns only non-demo organisations. An exception whose organizationId is not
- * in this map — a demo tenant, or an org-less legacy row — is never alerted on.
- * Exported for the test, which is the point: the rule is a pure lookup rather
- * than a pattern buried in a filter.
+ * Deliberately NOT `segment === "super_admin"`, which is how this was first
+ * written. A segment is a mutable property of an organisation —
+ * `superAdmin.updateOrganizationSegment` can retype any org, including a real
+ * customer's — and using it here would mean one mis-set field silently removes a
+ * paying client from SLA monitoring. Their genuine breaches would then go
+ * unreported, with nothing on screen to say so.
+ *
+ * That failure is strictly worse than the one this exclusion exists to fix. A
+ * false alert about Infinity AI is noise the owner can see; silence about a
+ * customer's breached SLA is invisible until they raise it. So the exclusion
+ * names ONE organisation, and anything else stays monitored.
+ *
+ * navItems.ts reached the same conclusion for `staffOnly` and for the same
+ * reason. This is that rule applied to alerting.
+ */
+export const OPERATOR_ORG_CODE = "INFINITY_AI";
+
+/**
+ * Which organisations are real CLIENTS, keyed by id.
+ *
+ * Excludes demo tenants, and excludes the platform operator itself. An exception
+ * whose organizationId is not in this map — a demo tenant, Infinity AI, or an
+ * org-less legacy row — is never alerted on. Exported for the test, which is the
+ * point: the rule is a pure lookup rather than a pattern buried in a filter.
+ *
+ * The operator exclusion is not tidiness. An SLA is a promise to a customer, and
+ * Infinity AI has none with itself, so a breach there is not a breach of
+ * anything. It also happens to be the ONLY organisation with isDemo = 0 today,
+ * which made it the single point where any stray row pages the owner: a demo
+ * seed run by a super admin filed 66 FMCG exceptions against it, and the 24-hour
+ * timer then produced a CRITICAL alert naming "Infinity AI Africa Limited" as
+ * the affected client.
+ *
+ * Not solved by marking Infinity AI as a demo tenant either: that would be false,
+ * and would quietly change every other rule that reads `isDemo`.
  */
 export function realOrganizations(
-  orgs: Array<{ id: number; name: string; isDemo: boolean }>,
+  orgs: Array<{ id: number; name: string; isDemo: boolean; code: string | null }>,
 ): Map<number, string> {
-  return new Map(orgs.filter((o) => !o.isDemo).map((o) => [o.id, o.name]));
+  return new Map(
+    orgs
+      .filter((o) => !o.isDemo && o.code !== OPERATOR_ORG_CODE)
+      .map((o) => [o.id, o.name]),
+  );
 }
 
 /**
@@ -72,12 +107,17 @@ export async function checkSLABreaches(): Promise<void> {
     // 1. Real (non-demo) organisations. Everything else is out of scope before a
     //    single exception is examined.
     const orgs = await db
-      .select({ id: organizations.id, name: organizations.name, isDemo: organizations.isDemo })
+      .select({
+        id: organizations.id,
+        name: organizations.name,
+        isDemo: organizations.isDemo,
+        code: organizations.code,
+      })
       .from(organizations);
     const real = realOrganizations(orgs);
 
     if (real.size === 0) {
-      console.log('[SLA Monitor] No non-demo organisations — nothing to check.');
+      console.log('[SLA Monitor] No client organisations (demo and operator excluded) — nothing to check.');
       return;
     }
 
