@@ -45,6 +45,7 @@ type ExceptionCategory =
 
 const DEMO_MARKER = "finserv-operational-demo-v1";
 
+
 /**
  * The organisation id earlier seeders used when the caller had none.
  *
@@ -114,6 +115,22 @@ const PAYMENT_RAILS: Array<{
     description: "Agent collection and float-settlement control feed",
   },
 ];
+/**
+ * The rails that act as a settlement SOURCE.
+ *
+ * CORE_BANKING is the reconciliation TARGET — the ledger every other rail is
+ * matched against — so it never gets a source batch.
+ *
+ * Derived once and shared, because encoding "all rails except the ledger" twice
+ * is what broke activation. Batch creation skipped CORE_BANKING by name, while
+ * the match loop selected rails with `PAYMENT_RAILS[index % (length - 1)]` —
+ * which walks indices 0..6 of the FULL array, and CORE_BANKING sits at index 4.
+ * Every seventh match asked for a source batch that had deliberately never been
+ * created ("Missing source batch for CORE_BANKING"), while AGENT_BANKING at
+ * index 7 was never selected at all.
+ */
+const SOURCE_RAILS = PAYMENT_RAILS.filter((rail) => rail.code !== "CORE_BANKING");
+
 
 export type FinServOperationalCase = {
   id: string;
@@ -635,9 +652,8 @@ export async function seedFinServDemoData(
   if (!coreChannelId || !nipChannelId) throw new Error("Financial-services demo rails were not created");
 
   const sourceBatchIds = new Map<FinServRailCode, number>();
-  for (const rail of PAYMENT_RAILS) {
-    if (rail.code === "CORE_BANKING") continue;
-    const count = Math.ceil(plan.settlementItems / (PAYMENT_RAILS.length - 1));
+  for (const rail of SOURCE_RAILS) {
+    const count = Math.ceil(plan.settlementItems / SOURCE_RAILS.length);
     sourceBatchIds.set(
       rail.code,
       await createBatch(db, userId, organizationId, channelIds.get(rail.code)!, `FinServ_Demo_${rail.code}_Settlement.csv`, count),
@@ -681,7 +697,7 @@ export async function seedFinServDemoData(
 
   const matchRows: Array<typeof matches.$inferInsert> = [];
   for (let index = 0; index < plan.matchedPairs; index += 1) {
-    const rail = PAYMENT_RAILS[index % (PAYMENT_RAILS.length - 1)];
+    const rail = SOURCE_RAILS[index % SOURCE_RAILS.length];
     const sequence = String(index + 1).padStart(4, "0");
     const amount = (25000 + ((index * 1375) % 475000)).toFixed(2);
     const transactionDate = dateDaysAgo(now, index % 10);

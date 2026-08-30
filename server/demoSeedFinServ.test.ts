@@ -251,3 +251,52 @@ describe("financial-services demo batch hashes", () => {
     expect(INGEST).not.toMatch(/buildFinServDemoBatchHash/);
   });
 });
+
+// ─── Source rails vs the reconciliation target ───────────────────────────────
+//
+// Found by actually activating the demo against production after the batch-hash
+// fix merged: activation still failed, with "Missing source batch for
+// CORE_BANKING".
+//
+// CORE_BANKING is the ledger every other rail is matched AGAINST, so it never
+// gets a source batch. Batch creation skipped it by name, but the match loop
+// picked rails with `PAYMENT_RAILS[index % (length - 1)]` — which walks indices
+// 0..6 of the FULL array, and CORE_BANKING sits at index 4. Every seventh match
+// asked for a batch that had deliberately never been created, and AGENT_BANKING
+// at index 7 was never selected at all.
+//
+// Two places encoded "all rails except the ledger" and disagreed. There is now
+// one list.
+describe("financial-services demo source rails", () => {
+  const SEED = readFileSync(join(__dirname, "demoSeedFinServ.ts"), "utf8");
+
+  it("derives the source rails once instead of encoding the rule twice", () => {
+    expect(SEED).toMatch(/const SOURCE_RAILS = PAYMENT_RAILS\.filter\(\(rail\) => rail\.code !== "CORE_BANKING"\)/);
+  });
+
+  it("selects match rails from SOURCE_RAILS, never from the full list", () => {
+    // The exact shape of the bug: indexing the full array by a modulus that
+    // assumes the ledger is not in it.
+    expect(SEED).toMatch(/const rail = SOURCE_RAILS\[index % SOURCE_RAILS\.length\]/);
+    expect(SEED, "must not index PAYMENT_RAILS by (length - 1)").not.toMatch(
+      /PAYMENT_RAILS\[index % \(PAYMENT_RAILS\.length - 1\)\]/,
+    );
+  });
+
+  it("creates source batches by iterating the same list", () => {
+    expect(SEED).toMatch(/for \(const rail of SOURCE_RAILS\)/);
+    // The name-based skip is gone; the list is the rule now.
+    expect(SEED).not.toMatch(/if \(rail\.code === "CORE_BANKING"\) continue;/);
+  });
+
+  it("splits the settlement items across the source rails, not all rails", () => {
+    expect(SEED).toMatch(/plan\.settlementItems \/ SOURCE_RAILS\.length/);
+  });
+
+  it("keeps the ledger in PAYMENT_RAILS, since it still needs a channel", () => {
+    // SOURCE_RAILS must not be achieved by deleting CORE_BANKING outright — the
+    // target channel and its 320 ledger postings still come from PAYMENT_RAILS.
+    expect(SEED).toMatch(/code: "CORE_BANKING"/);
+    expect(SEED).toMatch(/FinServ_Demo_Core_Banking_Ledger\.csv/);
+  });
+});
