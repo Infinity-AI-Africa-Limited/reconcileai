@@ -45,17 +45,35 @@ interface SLABreach {
 }
 
 /**
- * Which organisations are real clients, keyed by id.
+ * Which organisations are real CLIENTS, keyed by id.
  *
- * Returns only non-demo organisations. An exception whose organizationId is not
- * in this map — a demo tenant, or an org-less legacy row — is never alerted on.
- * Exported for the test, which is the point: the rule is a pure lookup rather
- * than a pattern buried in a filter.
+ * Excludes demo tenants, and excludes the platform operator's own organisation.
+ * An exception whose organizationId is not in this map — a demo tenant, Infinity
+ * AI itself, or an org-less legacy row — is never alerted on. Exported for the
+ * test, which is the point: the rule is a pure lookup rather than a pattern
+ * buried in a filter.
+ *
+ * The operator exclusion is not tidiness. An SLA is a promise to a customer, and
+ * Infinity AI has none with itself, so a breach there is not a breach of
+ * anything. It also happens to be the ONLY organisation with isDemo = 0 today,
+ * which made it the single point where any stray row pages the owner: a demo
+ * seed run by a super admin filed 66 FMCG exceptions against it, and the 24-hour
+ * timer then produced a CRITICAL alert naming "Infinity AI Africa Limited" as
+ * the affected client.
+ *
+ * Keyed on `segment`, matching how the rest of the platform identifies the
+ * operator (shared/verticalFeatures, shared/moduleScope). Not on isDemo: marking
+ * Infinity AI as a demo tenant would be false, and would quietly change every
+ * other rule that reads that flag.
  */
 export function realOrganizations(
-  orgs: Array<{ id: number; name: string; isDemo: boolean }>,
+  orgs: Array<{ id: number; name: string; isDemo: boolean; segment: string | null }>,
 ): Map<number, string> {
-  return new Map(orgs.filter((o) => !o.isDemo).map((o) => [o.id, o.name]));
+  return new Map(
+    orgs
+      .filter((o) => !o.isDemo && o.segment !== "super_admin")
+      .map((o) => [o.id, o.name]),
+  );
 }
 
 /**
@@ -72,12 +90,17 @@ export async function checkSLABreaches(): Promise<void> {
     // 1. Real (non-demo) organisations. Everything else is out of scope before a
     //    single exception is examined.
     const orgs = await db
-      .select({ id: organizations.id, name: organizations.name, isDemo: organizations.isDemo })
+      .select({
+        id: organizations.id,
+        name: organizations.name,
+        isDemo: organizations.isDemo,
+        segment: organizations.segment,
+      })
       .from(organizations);
     const real = realOrganizations(orgs);
 
     if (real.size === 0) {
-      console.log('[SLA Monitor] No non-demo organisations — nothing to check.');
+      console.log('[SLA Monitor] No client organisations (demo and operator excluded) — nothing to check.');
       return;
     }
 
