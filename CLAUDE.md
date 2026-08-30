@@ -749,15 +749,38 @@ revocable. Two scopes:
 | `platform` | `super_admin` | cross-tenant: the operator view, and every vertical via Enter Portal | `/admin/super-admin` | investor / accelerator reviewer (YC) |
 
 > ⚠️ **A `platform` link is refused while ANY non-demo organisation exists**
-> (`platformScopeIsSafe()` — `isDemo = false` and segment ≠ `super_admin`),
+> (`platformScopeIsSafe()` — `isDemo = false` and `code` ≠ `INFINITY_AI`),
 > checked BOTH at issue and **at every sign-in**, failing closed. Cross-tenant
 > exposure is decided by what the platform holds when the link is *opened*, not
 > when it was created, and the first real customer is exactly the event that
 > changes the answer — an event nobody will connect to a link issued months
 > earlier. This makes §19's first-customer gate structural for this surface: the
-> link stops working by itself. Verified 2026-08-28: all five tenant orgs are
-> `isDemo = 1`; only `INFINITY_AI` (the operator's own, holding no tenant data)
-> is not, and it is excluded by segment.
+> link stops working by itself. Re-verified 2026-08-30: all **six** tenant orgs
+> are `isDemo = 1` (`GLOBUS_DEMO`, `BRIGHTGOODS_DEMO`, `SL_RECONCILEAI_DEV`,
+> `SL_RECONCILEAI`, `RECONCILEAI_GUEST_DEMO`, `SL_SLAPPTEST`); only `INFINITY_AI`
+> — the operator's own — is not, and it is the one row the gate excludes.
+>
+> **The operator is identified by CODE, not by `segment === "super_admin"`.**
+> Corrected 2026-08-30 after the same mistake surfaced in SLA alerting. A segment
+> is mutable — `superAdmin.updateOrganizationSegment` retypes any org, a
+> customer's included — so the old predicate meant one mis-set field would stop a
+> real tenant holding this gate shut, leaving an outstanding cross-tenant link
+> live over their data. The single source is `shared/operatorOrg.ts`.
+>
+> Also note the SQL: the exclusion is
+> `or(isNull(code), ne(code, OPERATOR_ORG_CODE))`, and the `IS NULL` arm is
+> load-bearing. `code <> 'X'` against NULL yields NULL rather than TRUE, so a
+> bare inequality would drop every code-less organisation from the blocking set —
+> a real tenant would stop blocking because a field was empty.
+>
+> ⚠️ **Correction to an earlier claim in this section:** `INFINITY_AI` was
+> described as "holding no tenant data". That is no longer true — a demo seed run
+> by a super admin filed 2,640 transactions, 66 exceptions and 10 channels
+> against it (the same incident behind the SLA alert fix; the seeders now refuse
+> a non-demo org). Those rows are seeded FMCG demo data, not customer data, so
+> the gate's safety argument stands — but do not repeat the "no tenant data"
+> claim as though it were still verified. **The rows themselves are an open
+> owner decision: delete, or move to `BRIGHTGOODS_DEMO`.**
 
 Containment is structural:
 
