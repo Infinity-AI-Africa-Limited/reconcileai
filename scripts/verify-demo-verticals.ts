@@ -50,9 +50,18 @@ const EXPECTATIONS: Record<Vertical, {
   retail: { label: "Retail Commerce",    orgId: 60001,  heroScreen: "Settlement Monitor", minTransactions: 200, minChannels: 2, minExceptions: 5,  minJobs: 1 },
 };
 
+const ALL_VERTICALS: Vertical[] = ["fs", "b2b", "retail"];
+
+// `--vertical typo` (or a bare `--vertical` with nothing after it) would
+// otherwise index EXPECTATIONS with undefined and die on "Cannot read
+// properties of undefined" — an internal error where a usage message belongs.
 const vFlag = process.argv.indexOf("--vertical");
-const only = vFlag !== -1 ? (process.argv[vFlag + 1] as Vertical) : null;
-const targets: Vertical[] = only ? [only] : ["fs", "b2b", "retail"];
+const vArg = vFlag !== -1 ? process.argv[vFlag + 1] : undefined;
+if (vFlag !== -1 && !ALL_VERTICALS.includes(vArg as Vertical)) {
+  console.error(`\n--vertical must be one of: ${ALL_VERTICALS.join(", ")}${vArg ? ` (got "${vArg}")` : " (no value given)"}\n`);
+  process.exit(2);
+}
+const targets: Vertical[] = vArg ? [vArg as Vertical] : ALL_VERTICALS;
 
 let notReady = 0;
 

@@ -50,7 +50,15 @@ That is the whole argument. Every shot exists to evidence one clause of it.
 | 0:55 | `SHOT-03` Exceptions (Last 7 days) | Category, severity, description, suggested resolution |
 
 > ⚠️ **Set the Exceptions filter to "Last 7 days" before recording.** It defaults
-> to Today and the seeded cases are aged 0–23 days, so the default view is empty.
+> to **Today**, and only 7 of the 16 cases are same-day, so the default view
+> understates the queue badly.
+>
+> **Capture straight after activation.** Measured ages are 0, 0, 0, 0, 0, 0, 0,
+> 1, 1, 1, 1, 2, 2, 3, 4, **7** days. The oldest sits exactly on the boundary of
+> the widest preset the page offers, so a capture run a day later shows fifteen
+> while the narration says sixteen. `capture-shots.ts` asserts the count and
+> fails the run rather than saving that frame — but re-activating first avoids
+> the situation entirely.
 
 ---
 
