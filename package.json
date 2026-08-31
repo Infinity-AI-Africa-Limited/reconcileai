@@ -17,7 +17,8 @@
     "bootstrap:admin": "node scripts/bootstrap-admin.mjs",
     "onprem:preflight": "tsx tools/preflightOnPremCli.ts",
     "demo:finserv:verify": "tsx scripts/verify-finserv-demo.ts",
-    "demo:finserv:activate": "tsx scripts/verify-finserv-demo.ts --activate"
+    "demo:finserv:activate": "tsx scripts/verify-finserv-demo.ts --activate",
+    "demo:verify": "tsx scripts/verify-demo-verticals.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.693.0",

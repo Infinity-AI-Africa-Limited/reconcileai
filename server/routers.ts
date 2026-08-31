@@ -4862,6 +4862,29 @@ Always be specific, reference actual exception IDs and amounts where available, 
     activate: superAdminProcedure
       .input(z.object({ segment: z.enum(["fmcg", "finserv"]).default("fmcg") }))
       .mutation(async ({ ctx, input }) => {
+        // Fabricated data may only land in a tenant marked as a demo.
+        //
+        // This seeds the CALLER'S OWN organisation, and a super admin sits in
+        // Infinity AI Africa Limited — the operator's real org, correctly not
+        // flagged isDemo. So pressing Activate filled it with demo exceptions,
+        // and the SLA monitor duly reported them as genuine breaches to the
+        // owner. Observed twice: 13 cases, then 63.
+        //
+        // isDemo already governs whether alerting treats a tenant's data as
+        // real. Seeding must answer to the same flag, or the two disagree and
+        // the alert is the thing that finds out.
+        const target = ctx.user.organizationId ?? null;
+        const activatingOrg = target === null ? null : await db.getOrganizationById(target);
+        if (!activatingOrg?.isDemo) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message:
+              `Demo data can only be activated inside an organisation flagged as a demo tenant. ` +
+              `${activatingOrg ? `"${activatingOrg.name}"` : "This account's organisation"} is not one — ` +
+              `seeding it would make fabricated exceptions indistinguishable from real ones and page the ` +
+              `on-call owner. Enter a demo organisation's portal, or mark this one as a demo first.`,
+          });
+        }
         if (input.segment === "finserv") {
           const { seedFinServDemoData } = await import("./demoSeedFinServ");
           const result = await seedFinServDemoData(ctx.user.id, ctx.user.organizationId ?? null, "both");
