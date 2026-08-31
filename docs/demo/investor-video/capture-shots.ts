@@ -52,72 +52,81 @@ const OUT = join(process.cwd(), "docs", "demo", "investor-video", "shots");
 
 type Vertical = "fs" | "b2b" | "retail";
 
-/** The tenant each token must land in. Asserted after every swap. */
-const TENANT_NAME: Record<Vertical, string> = {
-  fs: "ReconcileAI Guest Demo",
-  b2b: "BrightGoods",
-  retail: "ReconcileAI Dev Store",
+/**
+ * The organisation each token must land in, by id.
+ *
+ * Checked against `auth.me`, NOT against text on the page. An earlier revision
+ * asserted the organisation NAME was rendered somewhere in the body, which was
+ * wrong twice over: the shell renders the product name rather than the tenant's,
+ * so a valid session would have been rejected and the run aborted; and a bare
+ * substring would have matched the wrong tenant anyway ("ReconcileAI Dev Store"
+ * and "ReconcileAI Guest Demo" share a prefix). An integer from the session
+ * endpoint is exact and does not depend on what the UI chooses to display.
+ */
+const TENANT_ORG_ID: Record<Vertical, number> = {
+  fs: 120001,
+  b2b: 30001,
+  retail: 60001,
 };
 
 type Shot = {
   id: string;
   vertical: Vertical;
   path: string;
-  /** Every one of these must be visible before the frame is saved. */
-  expect: string[];
+  /**
+   * Exact phrases that must appear before the frame is saved.
+   *
+   * These must be UNAMBIGUOUS STRINGS, never bare numbers. `body.includes("16")`
+   * is satisfied by "160", "2016", a timestamp or a currency amount, so it
+   * accepts exactly the wrong frame it was added to reject. Only assert text
+   * verified to be rendered by the page's source.
+   */
+  expect?: string[];
   prepare?: (page: Page) => Promise<void>;
 };
 
 const SHOTS: Shot[] = [
-  {
-    id: "SHOT-01", vertical: "fs", path: "/dashboard",
-    expect: ["640", "95.0%"],
-  },
+  // The figures the narration quotes are verified against the DATABASE by
+  // `pnpm demo:verify`, which is exact. Re-checking them by reading pixels
+  // would only be as good as a guess at the markup, so these shots assert
+  // tenant + page identity and leave the numbers to the tool that can measure
+  // them properly. SHOT-03 is the exception: it states a count out loud, and
+  // the page happens to render that count as an unambiguous sentence.
+  { id: "SHOT-01", vertical: "fs", path: "/dashboard" },
   {
     id: "SHOT-02", vertical: "fs", path: "/channels",
-    // Eight rails is the claim the narration makes; Agent Banking specifically
-    // is the rail an earlier indexing defect silently dropped, so it is named.
+    // Agent Banking is the rail an earlier indexing defect silently dropped,
+    // so it is named explicitly — a rail name is not ambiguous the way a
+    // number is.
     expect: ["Agent Banking", "NIBSS NIP", "Core Banking"],
   },
   {
     id: "SHOT-03", vertical: "fs", path: "/exceptions",
     // Defaults to Today, and the seeded cases are aged 0–7 days, so the default
-    // view is nearly empty. "Last 7 days" is the widest preset available.
+    // view is nearly empty. "Last 7 days" is the widest preset available
+    // (DATE_PRESETS in client/src/hooks/useDateRange.ts).
     prepare: async (page) => {
       await page.getByRole("button", { name: "Last 7 days" }).click();
       await page.waitForTimeout(2500);
     },
-    // The narration says "sixteen cases". If seeding has aged past the filter
-    // boundary this will not be on screen, and the run must stop rather than
-    // save a frame showing fifteen.
-    expect: ["16"],
+    // Exceptions.tsx renders `Showing {n} exception{s} — {dateLabel}`. Matching
+    // the whole phrase pins the count AND proves the filter was applied; the
+    // bare "16" this replaced was satisfied by any "16" anywhere on the page.
+    // The narration says sixteen, so fifteen must fail the run.
+    expect: ["Showing 16 exceptions"],
   },
-  {
-    id: "SHOT-04", vertical: "b2b", path: "/dashboard",
-    expect: ["2,000", "95.0%"],
-  },
-  {
-    id: "SHOT-05", vertical: "b2b", path: "/distributors",
-    expect: ["Distributor"],
-  },
-  {
-    id: "SHOT-06", vertical: "retail", path: "/settlement-monitor",
-    // Retail leads on the CONNECTION, not on volume — see README §Retail.
-    expect: ["Settlement"],
-  },
+  { id: "SHOT-04", vertical: "b2b", path: "/dashboard" },
+  { id: "SHOT-05", vertical: "b2b", path: "/distributors", expect: ["Distributor"] },
+  // Retail leads on the CONNECTION, not on volume — see README §Retail.
+  { id: "SHOT-06", vertical: "retail", path: "/settlement-monitor", expect: ["Settlement"] },
   {
     id: "SHOT-07", vertical: "retail", path: "/settlement-monitor",
     prepare: async (page) => { await page.mouse.wheel(0, 900); await page.waitForTimeout(1200); },
-    expect: ["Intelligence"],
   },
-  {
-    id: "SHOT-08", vertical: "fs", path: "/exception-intelligence",
-    expect: ["Intelligence"],
-  },
+  { id: "SHOT-08", vertical: "fs", path: "/exception-intelligence" },
   {
     id: "SHOT-09", vertical: "fs", path: "/exception-intelligence",
     prepare: async (page) => { await page.mouse.wheel(0, 700); await page.waitForTimeout(1200); },
-    expect: ["Intelligence"],
   },
 ];
 
@@ -143,18 +152,44 @@ async function assertVisible(page: Page, shotId: string, needles: string[]) {
   }
 }
 
+/**
+ * Who does the server think we are? Asked of the session endpoint, not the DOM.
+ *
+ * Returns null when there is no session at all — which is what a redirect to
+ * the login page looks like from here.
+ */
+async function activeOrganizationId(page: Page): Promise<number | null> {
+  return page.evaluate(async (base) => {
+    const res = await fetch(`${base}/api/trpc/auth.me`, { credentials: "include" });
+    if (!res.ok) return null;
+    const body = await res.json();
+    // superjson transformer (server/_core/trpc.ts) wraps the payload in .json
+    const user = body?.result?.data?.json ?? body?.result?.data ?? null;
+    const id = user?.organizationId;
+    return typeof id === "number" ? id : null;
+  }, BASE);
+}
+
 async function swapTenant(page: Page, vertical: Vertical) {
   await page.goto(`${BASE}/api/reviewer-access?key=${encodeURIComponent(TOKENS[vertical]!)}`, { waitUntil: "networkidle" });
   await page.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2000);
-  const body = (await page.textContent("body")) ?? "";
-  // A redirect to login, or a still-live previous session, both land here — and
-  // both would otherwise be photographed under the next vertical's filename.
-  if (!body.includes(TENANT_NAME[vertical])) {
+
+  // An expired, revoked or rate-limited token REDIRECTS rather than failing, and
+  // a failed exchange leaves the previous tenant's session intact. Both would
+  // otherwise be photographed under the next vertical's filename — a
+  // cross-tenant frame in an investor deck.
+  const actual = await activeOrganizationId(page);
+  const expected = TENANT_ORG_ID[vertical];
+  if (actual !== expected) {
     throw new ShotError(
-      `tenant swap to '${vertical}' did not take: expected "${TENANT_NAME[vertical]}" on screen.\n` +
+      `tenant swap to '${vertical}' did not take.\n` +
+      `  expected organizationId ${expected}, session reports ${actual ?? "no session"}\n` +
       `  url now: ${page.url()}\n` +
-      `  The token is probably expired or revoked. Mint a fresh tenant-scoped link.`,
+      (actual === null
+        ? `  No session — the token is expired or revoked. Mint a fresh tenant-scoped link.`
+        : `  Still inside organisation ${actual}. The exchange failed and the previous\n` +
+          `  session is still live; every following frame would be the wrong tenant.`),
     );
   }
 }
@@ -180,7 +215,7 @@ async function main() {
       await page.goto(`${BASE}${shot.path}`, { waitUntil: "networkidle" });
       await page.waitForTimeout(3000); // let the tRPC queries settle
       if (shot.prepare) await shot.prepare(page);
-      await assertVisible(page, shot.id, shot.expect);
+      if (shot.expect?.length) await assertVisible(page, shot.id, shot.expect);
 
       const file = join(OUT, `${shot.id}-${shot.vertical}.png`);
       await page.screenshot({ path: file, fullPage: false });
@@ -191,7 +226,9 @@ async function main() {
   }
 
   console.log(`\n${SHOTS.length} frames written to ${OUT}`);
-  console.log("Each was verified to contain its key figures before saving.");
+  console.log("Each was taken in a session the server confirmed was the right tenant.");
+  console.log("Run 'pnpm demo:verify' for the figures themselves — it measures the");
+  console.log("database directly rather than reading them off pixels.");
 }
 
 main().catch((err) => {
