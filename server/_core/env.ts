@@ -150,4 +150,9 @@ export const ENV = {
    * material. Off unless explicitly set to "true"/"1".
    */
   shoplineSigDebug: /^(1|true)$/i.test(process.env.SHOPLINE_SIG_DEBUG ?? ""),
+  // ── Shopify public App Store connector ────────────────────────────────────
+  // Keep these only in the deployment secret manager. Public apps use expiring
+  // offline tokens; credentials and OAuth tokens must never be browser-visible.
+  shopifyClientId: cleanSecret(process.env.SHOPIFY_CLIENT_ID),
+  shopifyClientSecret: cleanSecret(process.env.SHOPIFY_CLIENT_SECRET),
 };

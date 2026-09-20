@@ -12,6 +12,7 @@ import { reconciliationRouter } from "./routers/reconciliation";
 import { modulesRouter } from "./routers/modules";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { shoplineConnectorRouter } from "./routers/shoplineConnector";
+import { shopifyConnectorRouter } from "./routers/shopifyConnector";
 import { shoplineReviewRouter } from "./routers/shoplineReview";
 import { lapoRouter } from "./routers/lapo";
 import { ugandaRouter } from "./routers/uganda";
@@ -6316,6 +6317,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // T24, Mambu, FLEXCUBE and LAPO. Prefer `cbsConnector` in new client code.
   cbsConnector: woodcoreConnectorRouter,
   shoplineConnector: shoplineConnectorRouter,
+  shopifyConnector: shopifyConnectorRouter,
   shoplineReview: shoplineReviewRouter,
   bucketIngestion: bucketIngestionRouter,
   emailIngestion: emailIngestionRouter,
