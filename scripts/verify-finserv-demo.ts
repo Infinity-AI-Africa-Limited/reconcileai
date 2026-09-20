@@ -4,7 +4,14 @@
  *
  *   pnpm demo:finserv:verify              # check current state, write nothing
  *   pnpm demo:finserv:activate            # activate, then check
- *   pnpm demo:finserv:verify --org 30002  # target a specific demo tenant
+ *   pnpm demo:finserv:verify --org 1      # target a specific demo tenant
+ *
+ * The no-argument form targets ReconcileAI Guest Demo (120001), the tenant these
+ * expectations are calibrated against. Pass --org to aim elsewhere: Globus Bank
+ * Nigeria (Demo) is org 1, and because it ALSO carries the older FSDEMO-v2
+ * dataset, the exact-count checks here (16 cases, 8 rails) report a mismatch
+ * against it even when the operational seed landed correctly. That is the check
+ * describing a tenant it was not written for, not a fault in the data.
  *
  * WHY THIS EXISTS
  *
@@ -50,7 +57,22 @@ import { seedFinServDemoData } from "../server/demoSeedFinServ";
 
 const ACTIVATE = process.argv.includes("--activate");
 const orgFlagIndex = process.argv.indexOf("--org");
-const TARGET_ORG = orgFlagIndex !== -1 ? Number(process.argv[orgFlagIndex + 1]) : 30002;
+/**
+ * ReconcileAI Guest Demo — the financial-services demo tenant this script's
+ * expectations are calibrated against, and the one `verify-demo-verticals.ts`
+ * also treats as the FS vertical.
+ *
+ * The default used to be 30002, which is Infinity AI Africa Limited — the
+ * OPERATOR organisation, `isDemo = 0`. Running the documented no-argument
+ * command therefore aimed the seeder at the operator's own tenant. The isDemo
+ * refusal below stops it, so nothing was ever written; but a demo seed has
+ * already once filed 2,640 transactions and 66 exceptions against that exact
+ * organisation (CLAUDE.md §2B.13), and a default pointing there is how that
+ * happens again the moment a guard is relaxed or bypassed. A default should
+ * name the thing you meant.
+ */
+const DEFAULT_TARGET_ORG = 120001;
+const TARGET_ORG = orgFlagIndex !== -1 ? Number(process.argv[orgFlagIndex + 1]) : DEFAULT_TARGET_ORG;
 const FILE_HASH_LIMIT = 64;
 
 let step = 0;

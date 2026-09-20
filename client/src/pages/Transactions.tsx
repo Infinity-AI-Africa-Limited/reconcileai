@@ -5,8 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, Search, ChevronLeft, ChevronRight } from "lucide-react";
+import { useOrgSegment } from "@/hooks/useOrgSegment";
+import { labelForPath } from "@/lib/navItems";
 
 export default function TransactionsPage() {
+  const segment = useOrgSegment();
+  // The same source the sidebar reads, so a merchant who clicks
+  // "Orders & Payments" does not land on a page headed "Transactions".
+  const heading = labelForPath("/transactions", segment) ?? "Transactions";
   const { data: channels } = trpc.channels.list.useQuery();
   const [filters, setFilters] = useState({
     channelId: "",
@@ -48,8 +54,10 @@ export default function TransactionsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-primary">Transactions</h1>
-        <p className="text-muted-foreground mt-1">Search and filter transactions across all channels</p>
+        <h1 className="text-2xl font-bold tracking-tight text-primary">{heading}</h1>
+        <p className="text-muted-foreground mt-1">
+          Search and filter {heading.toLowerCase()} across all channels
+        </p>
       </div>
 
       {/* Filters */}

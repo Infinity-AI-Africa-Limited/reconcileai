@@ -17,10 +17,12 @@ import {
   matches,
   organizations,
   reconciliationJobs,
+  reconciliationReports,
   transactions,
   uploadBatches,
 } from "../drizzle/schema";
 import { getDb, invalidateDashboardStatsCache, orgFilter } from "./db";
+import { createReportForJob } from "./demoReportSeed";
 
 type FinServRailCode =
   | "NIBSS_NIP"
@@ -600,6 +602,8 @@ async function createBatch(
 export interface FinServSeedResult {
   segment: "finserv";
   jobId: number;
+  /** The report generated against `jobId`; null if the job could not be read back. */
+  reportId: number | null;
   totalTransactions: number;
   matchedCount: number;
   exceptionCount: number;
@@ -878,11 +882,25 @@ export async function seedFinServDemoData(
     }
   }
 
+  // The Reports screen had nothing to show for either demo tenant, because a
+  // report is only ever created when someone presses Generate and nobody ever
+  // had — the completed job was sitting there unreported. Built through the same
+  // summary builder as that button, so this report is not a special demo shape.
+  const reportId = await createReportForJob(db, {
+    jobId,
+    organizationId,
+    userId,
+    reportType: "daily",
+    title: "FinServ — Multi-Rail Operations Control Run",
+    generatedBy: "ReconcileAI demo seed",
+  });
+
   await invalidateDashboardStatsCache(organizationId);
 
   return {
     segment: "finserv",
     jobId,
+    reportId,
     totalTransactions: plan.transactionLegs,
     matchedCount: plan.matchedPairs,
     exceptionCount: plan.exceptionCases,
@@ -963,6 +981,21 @@ export async function wipeFinServDemoData(userId: number, organizationId: number
     await db.delete(transactions).where(inArray(transactions.batchId, batchIds));
     await db.delete(uploadBatches).where(inArray(uploadBatches.id, batchIds));
   }
-  if (jobIds.length) await db.delete(reconciliationJobs).where(inArray(reconciliationJobs.id, jobIds));
+  if (jobIds.length) {
+    // Reports BEFORE their jobs. A report outlives the job it summarises only as
+    // a row on the Reports screen that opens onto nothing, and re-seeding would
+    // stack a second report beside it rather than replace it.
+    //
+    // Scoped by tenant AS WELL as by job id. The ids are already tenant-derived,
+    // so the predicate is redundant today — but `reconciliationReports` carries
+    // an organizationId, and a destructive statement on a tenant table that
+    // relies on the caller having derived its ids correctly is exactly what the
+    // destructive-scope ratchet exists to refuse. Cheaper to scope than to argue.
+    await db.delete(reconciliationReports).where(and(
+      inArray(reconciliationReports.jobId, jobIds),
+      orgFilter(reconciliationReports.organizationId, organizationId),
+    ));
+    await db.delete(reconciliationJobs).where(inArray(reconciliationJobs.id, jobIds));
+  }
   await invalidateDashboardStatsCache(organizationId);
 }
