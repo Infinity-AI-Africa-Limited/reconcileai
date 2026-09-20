@@ -8,11 +8,13 @@
  */
 
 import { getDb, orgFilter } from "./db";
+import { createReportForJob } from "./demoReportSeed";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 import {
   transactions,
   uploadBatches,
   reconciliationJobs,
+  reconciliationReports,
   matches,
   exceptions,
   distributors,
@@ -261,6 +263,8 @@ export interface DemoSeedResult {
   sourceTransactionIds: number[];
   targetTransactionIds: number[];
   jobId: number;
+  /** The report generated against `jobId`; null if the job could not be read back. */
+  reportId?: number | null;
   matchIds: number[];
   exceptionIds: number[];
   memoryIds: number[];
@@ -550,7 +554,20 @@ export async function seedFmcgDemoData(userId: number, orgId: number | null): Pr
   // 9. Memory layer
   const memoryIds = await seedMemoryLayer(db, orgId);
 
-  return { distributorIds, sourceChannelId, targetChannelId, sourceBatchId: sourceBatch.id, targetBatchId: targetBatch.id, sourceTransactionIds, targetTransactionIds, jobId: job.id, matchIds, exceptionIds, memoryIds, matchRate: "95.00", totalTransactions: 1000, segment: "fmcg" };
+  // Same reason as the financial-services seed: the Reports screen was empty
+  // because nobody had ever pressed Generate against this completed job, not
+  // because there was nothing to report. Built through the shared summary
+  // builder so it matches a user-generated report exactly.
+  const reportId = await createReportForJob(db, {
+    jobId: job.id,
+    organizationId: orgId,
+    userId,
+    reportType: "daily",
+    title: "BrightGoods FMCG — Distributor Settlement Reconciliation",
+    generatedBy: "ReconcileAI demo seed",
+  });
+
+  return { distributorIds, sourceChannelId, targetChannelId, sourceBatchId: sourceBatch.id, targetBatchId: targetBatch.id, sourceTransactionIds, targetTransactionIds, jobId: job.id, reportId, matchIds, exceptionIds, memoryIds, matchRate: "95.00", totalTransactions: 1000, segment: "fmcg" };
 }
 
 // ── Financial Services Seed ────────────────────────────────────────────
@@ -789,8 +806,17 @@ export async function wipeDemoData(userId: number, orgId: number | null): Promis
     }
   }
 
-  // Delete exceptions, matches, jobs
+  // Delete reports, exceptions, matches, jobs — reports FIRST, because a report
+  // that outlives its job is a row on the Reports screen that opens onto
+  // nothing, and re-seeding would stack a second one beside it.
   for (const jobId of demoJobIds) {
+    // Tenant-scoped as well as job-scoped: the id is already tenant-derived, but
+    // a destructive statement on a tenant table should not depend on the caller
+    // having derived it correctly. See the destructive-scope ratchet.
+    await db.delete(reconciliationReports).where(and(
+      eq(reconciliationReports.jobId, jobId),
+      orgFilter(reconciliationReports.organizationId, orgId),
+    ));
     await db.delete(exceptions).where(eq(exceptions.jobId, jobId));
     await db.delete(matches).where(eq(matches.jobId, jobId));
     await db.delete(reconciliationJobs).where(eq(reconciliationJobs.id, jobId));

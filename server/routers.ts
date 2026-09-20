@@ -226,6 +226,7 @@ import {
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
+import { buildReportSummary } from "./reportSummary";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -1778,37 +1779,14 @@ export const appRouter = router({
           jobId: input.jobId,
         });
 
-        const summary = {
-          jobName: job.name,
-          dateRange: `${job.dateFrom} - ${job.dateTo}`,
-          totalSource: job.totalSourceTxns,
-          totalTarget: job.totalTargetTxns,
-          matched: job.matchedCount,
-          exceptions: job.exceptionCount,
-          unmatched: job.unmatchedCount,
-          matchRate: job.matchRate,
-          processingTimeMs: job.processingTimeMs,
-          matchBreakdown: {
-            exact: jobMatches.filter((m) => m.matchType === "exact").length,
-            fuzzy: jobMatches.filter((m) => m.matchType === "fuzzy").length,
-            amountTolerance: jobMatches.filter((m) => m.matchType === "amount_tolerance").length,
-            dateWindow: jobMatches.filter((m) => m.matchType === "date_window").length,
-            aiSuggested: jobMatches.filter((m) => m.matchType === "ai_suggested").length,
-            manual: jobMatches.filter((m) => m.matchType === "manual").length,
-            reversal: jobMatches.filter((m) => m.matchType === "reversal").length,
-          },
-          exceptionBreakdown: {
-            missingCounterparty: jobExceptions.filter((e) => e.category === "missing_counterparty").length,
-            amountMismatch: jobExceptions.filter((e) => e.category === "amount_mismatch").length,
-            timingDifference: jobExceptions.filter((e) => e.category === "timing_difference").length,
-            duplicate: jobExceptions.filter((e) => e.category === "duplicate_transaction").length,
-            unmatched: jobExceptions.filter((e) => e.category === "unmatched").length,
-            reversalUnmatched: jobExceptions.filter((e) => e.category === "reversal_unmatched").length,
-            currencyMismatch: jobExceptions.filter((e) => e.category === "currency_mismatch").length,
-          },
-          generatedAt: new Date().toISOString(),
+        // Shape lives in server/reportSummary.ts so the demo seeders produce a
+        // report structurally identical to this one. See that file for why.
+        const summary = buildReportSummary({
+          job,
+          matches: jobMatches,
+          exceptions: jobExceptions,
           generatedBy: ctx.user.name || ctx.user.email || "Unknown",
-        };
+        });
 
         const reportId = await db.createReport({
           jobId: input.jobId,

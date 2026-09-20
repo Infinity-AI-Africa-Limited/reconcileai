@@ -34,7 +34,27 @@ import type { Segment } from "./segments";
 export type NavGroup = "main" | "admin" | "advanced" | "superAdmin";
 
 export type NavEntry = {
+  /**
+   * The default wording, used by every vertical that does not override it in
+   * `labels`. Pick the term the majority of verticals actually use, so an
+   * override is the exception rather than the rule.
+   */
   label: string;
+  /**
+   * Per-vertical wording for the SAME destination.
+   *
+   * One surface, different vocabulary: a bank and an FMCG supplier reconcile
+   * "Transactions", while a SHOPLINE merchant has "Orders & Payments" — two legs
+   * with different names, which is the merchant's own language and the wording
+   * the retail screens already use.
+   *
+   * This is a label, never a second entry. Splitting it into two entries with
+   * one path would duplicate the `segments` and `roles` rules that decide who
+   * may reach it, and the two copies would drift — which is the exact failure
+   * this module was created to end. Resolved in `navFor`, where the segment is
+   * already known, so no call site has to remember.
+   */
+  labels?: Partial<Record<Segment, string>>;
   path: string;
   group: NavGroup;
   /** Omitted = every role. */
@@ -121,7 +141,18 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Multi-Channel", path: "/channels", group: "admin", roles: ["admin", "operations"], segments: ["financial_services", "super_admin"] },
   { label: "Payment Exceptions", path: "/exceptions", group: "admin", roles: ["admin", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
   { label: "Age Tracker", path: "/age-tracker", group: "admin", roles: ["admin", "operations"], segments: ["financial_services", "super_admin"] },
-  { label: "Orders & Payments", path: "/transactions", group: "admin", roles: ["admin", "operations"], segments: ["retail_commerce", "financial_services", "super_admin"] },
+  // One destination, three vocabularies. A bank and an FMCG supplier both call
+  // these Transactions; a SHOPLINE merchant reconciles an order leg against a
+  // payment leg and calls them Orders & Payments, which is what the retail
+  // screens already say.
+  //
+  // Corporate B2B was added here on 2026-09-20 (owner instruction). It had been
+  // excluded from the controlled-pilot surface, and deliberately so — the
+  // exclusion was asserted twice in navItems.test.ts, including as an explicit
+  // by-URL refusal. Widening it is a pilot-scope decision, not a typo fix, and
+  // it is recorded as one. Because `canReachPath` reads this same list, the link
+  // and the route grant together; there is no second place to update.
+  { label: "Transactions", labels: { retail_commerce: "Orders & Payments" }, path: "/transactions", group: "admin", roles: ["admin", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
   { label: "Review Queue", path: "/review", group: "admin", roles: ["admin", "operations"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
   { label: "Audit Trail", path: "/audit", group: "admin", roles: ["admin", "compliance", "cfo"], segments: ["financial_services", "corporate_b2b", "super_admin"] },
   // Nigerian data protection: the frameworks on this page are NDPA 2023 and
@@ -162,6 +193,32 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "POC Hub", path: "/admin/poc", group: "superAdmin", roles: ["super_admin"] },
   { label: "Roadmap Access", path: "/admin/roadmap-access", group: "superAdmin", roles: ["super_admin"] },
 ];
+
+/**
+ * What this vertical calls the entry.
+ *
+ * Falls back to `label` for a vertical with no override, and for a null segment
+ * — an unresolved segment must not flash a vertical's private wording at
+ * someone who may turn out not to be in it.
+ */
+export function labelFor(entry: NavEntry, segment: Segment | null): string {
+  if (!entry.labels || segment === null) return entry.label;
+  return entry.labels[segment] ?? entry.label;
+}
+
+/**
+ * What this vertical calls the surface at `path` — for the PAGE to use, so its
+ * heading and its sidebar entry cannot disagree.
+ *
+ * Without this a page hardcodes its own title, and a merchant clicks
+ * "Orders & Payments" to arrive somewhere headed "Transactions". That was the
+ * state before 2026-09-20. Returns undefined for a path with no nav entry, so a
+ * caller that mistypes gets nothing rather than a plausible-looking default.
+ */
+export function labelForPath(path: string, segment: Segment | null): string | undefined {
+  const entry = NAV_ITEMS.find((e) => e.path === path);
+  return entry ? labelFor(entry, segment) : undefined;
+}
 
 /** Does this vertical get the entry at all? */
 export function inSegment(entry: NavEntry, segment: Segment | null): boolean {
@@ -231,12 +288,29 @@ export function navFor(
   if (opts.portal) {
     return NAV_ITEMS.filter(
       (e) => e.group !== "superAdmin" && !e.staffOnly && inSegment(e, segment),
-    );
+    ).map((e) => resolveLabel(e, segment));
   }
   const staff = isStaff(role);
   return NAV_ITEMS.filter(
     (e) => passesStaffGate(e, role) && inRole(e, role) && (e.strictSegment ? inSegment(e, segment) : staff || inSegment(e, segment)),
-  );
+  ).map((e) => resolveLabel(e, segment));
+}
+
+/**
+ * Return the entry with `label` already set to this vertical's wording.
+ *
+ * Done HERE rather than at each call site, for the reason this module exists:
+ * the sidebar, the portal sidebar, the mobile header and the page title all read
+ * `.label`, and any one of them could forget. `navFor` is the single gate they
+ * all pass through, so resolving here means a vertical's wording cannot be right
+ * in one place and wrong in another.
+ *
+ * Returns the entry untouched when there is no override, so entries without
+ * `labels` keep their identity and no copy is made for nothing.
+ */
+function resolveLabel(entry: NavEntry, segment: Segment | null): NavEntry {
+  const label = labelFor(entry, segment);
+  return label === entry.label ? entry : { ...entry, label };
 }
 
 /** Entries in one group, for a viewer. */

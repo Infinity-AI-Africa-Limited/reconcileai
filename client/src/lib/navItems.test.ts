@@ -12,7 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { NAV_ITEMS, navFor, navGroup, type NavEntry } from "./navItems";
+import { NAV_ITEMS, navFor, navGroup, labelFor, type NavEntry } from "./navItems";
 import { canReachPath } from "./routeAccess";
 import type { Segment } from "./segments";
 
@@ -57,6 +57,10 @@ const APPROVED_CORPORATE_B2B_PILOT = [
   "/reports",
   "/exceptions",
   "/review",
+  // Added 2026-09-20 on the owner's instruction. It was previously excluded from
+  // the controlled-pilot surface and refused by URL; widening it is a
+  // pilot-scope decision, recorded here rather than quietly relaxed.
+  "/transactions",
   "/audit",
   "/compliance",
   "/admin/users",
@@ -130,7 +134,6 @@ describe("when a Corporate B2B pilot user signs in", () => {
       "/schedules",
       "/monitor",
       "/channels",
-      "/transactions",
       "/age-tracker",
       "/modules",
       "/api-ingestion",
@@ -391,5 +394,49 @@ describe("the list itself", () => {
       expect(e.label.length, `${e.path} has no label`).toBeGreaterThan(0);
       expect(["main", "admin", "advanced", "superAdmin"]).toContain(e.group);
     }
+  });
+});
+
+describe("when a vertical has its own word for the same surface", () => {
+  /** What each vertical's sidebar actually renders for /transactions. */
+  const sidebarLabel = (segment: Segment, role = "admin") =>
+    navFor(segment, role).find((e) => e.path === "/transactions")?.label;
+
+  it("should say Transactions to a bank and to an FMCG supplier", () => {
+    // Both reconcile transactions. "Orders & Payments" is retail vocabulary and
+    // described neither of them.
+    expect(sidebarLabel("financial_services")).toBe("Transactions");
+    expect(sidebarLabel("corporate_b2b")).toBe("Transactions");
+  });
+
+  it("should still say Orders & Payments to a SHOPLINE merchant", () => {
+    // A merchant reconciles an order leg against a payment leg, and the retail
+    // screens already use those words.
+    expect(sidebarLabel("retail_commerce")).toBe("Orders & Payments");
+  });
+
+  it("should use the tenant's word inside a super-admin portal, not the operator's", () => {
+    // The portal exists to show the TENANT's surface. Reading the operator's own
+    // wording there would misrepresent what the customer sees — which is the
+    // only reason anyone opens it.
+    const inPortal = (segment: Segment) =>
+      navFor(segment, "super_admin", { portal: true }).find((e) => e.path === "/transactions")?.label;
+    expect(inPortal("retail_commerce")).toBe("Orders & Payments");
+    expect(inPortal("financial_services")).toBe("Transactions");
+    expect(inPortal("corporate_b2b")).toBe("Transactions");
+  });
+
+  it("should fall back to the default while the segment is still unresolved", () => {
+    // Flashing one vertical's private vocabulary at someone who may turn out not
+    // to be in it is worse than showing the neutral default for a moment.
+    const entry = NAV_ITEMS.find((e) => e.path === "/transactions")!;
+    expect(labelFor(entry, null)).toBe("Transactions");
+  });
+
+  it("should leave every entry without an override untouched", () => {
+    // The override is the exception. If a second entry ever grows one, this
+    // forces it to be a deliberate addition rather than a silent rename.
+    const overridden = NAV_ITEMS.filter((e) => e.labels).map((e) => e.path);
+    expect(overridden).toEqual(["/transactions"]);
   });
 });
