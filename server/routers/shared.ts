@@ -8,6 +8,7 @@
  * imports from here instead of re-declaring.
  */
 import { TRPCError } from "@trpc/server";
+import { z } from "zod";
 import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
@@ -19,6 +20,52 @@ import { organizations, users } from "../../drizzle/schema";
 
 /** Max length for user-supplied names (jobs, reports, channels). */
 export const MAX_NAME_LENGTH = 255;
+
+// ─── Portal scoping ──────────────────────────────────────────────────
+
+/**
+ * The organisation a READ should answer for, honouring the super-admin portal
+ * switcher.
+ *
+ * `PortalContext` ("Enter Portal") is client state — sessionStorage and nothing
+ * more. It changes the sidebar and the branding, and the server never hears
+ * about it unless a procedure accepts `viewAsOrgId` and passes it here. Two
+ * procedures did (`dashboard.stats`, `admin.users`); the rest did not, so a
+ * super admin inside Globus Bank's portal still read Infinity AI's own
+ * organisation — which holds no transactions, jobs, reports or exceptions at
+ * all. Every one of Reconciliation, Reports, Exception Intelligence, Payment
+ * Exceptions, Review Queue and Transactions rendered empty, for a tenant
+ * holding tens of thousands of rows.
+ *
+ * `dashboard.stats` already carried a comment describing exactly this failure
+ * being fixed there. It was fixed in one place and left everywhere else, which
+ * is why this now lives in ONE function instead of being restated per call
+ * site: the role check is the whole security boundary, and a boundary copied
+ * seven times is a boundary that will be wrong in one of them.
+ *
+ * ── The security property ─────────────────────────────────────────────
+ *
+ * The override applies ONLY to `super_admin`. For anyone else the parameter is
+ * ignored outright — not rejected, ignored — so a tenant user who discovers the
+ * field and sends another organisation's id reads their own data exactly as
+ * before. Ignoring rather than throwing is deliberate: a 403 would confirm the
+ * id exists, and there is nothing to tell them.
+ *
+ * Reads only. Never reuse this to scope a WRITE: "which tenant am I looking at"
+ * and "which tenant may I change" are different questions, and a mutation that
+ * took its target from a client-supplied field would let staff write into a
+ * customer's data by navigating there.
+ */
+export function portalScopedOrgId(
+  user: { role: string; organizationId: number | null },
+  viewAsOrgId?: number | null,
+): number | null {
+  if (viewAsOrgId && user.role === "super_admin") return viewAsOrgId;
+  return user.organizationId ?? null;
+}
+
+/** The optional `viewAsOrgId` field, so every procedure declares it the same way. */
+export const viewAsOrgInput = { viewAsOrgId: z.number().int().positive().optional() };
 
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.

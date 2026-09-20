@@ -222,6 +222,8 @@ import {
   cbnProcedure,
   distributorProcedure,
   MAX_NAME_LENGTH,
+  portalScopedOrgId,
+  viewAsOrgInput,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -838,6 +840,7 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
+          ...viewAsOrgInput,
           channelId: z.number().int().positive().optional(),
           status: z.string().max(30).optional(),
           dateFrom: z.string().optional(),
@@ -852,7 +855,8 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const isAdmin = ctx.user.role === "admin";
         return db.getTransactions({
-          organizationId: ctx.user.organizationId ?? null,
+          // Honours the super-admin portal switcher; see portalScopedOrgId.
+          organizationId: portalScopedOrgId(ctx.user, input.viewAsOrgId),
           userId: ctx.user.id,
           isAdmin,
           channelId: input.channelId,
@@ -1010,6 +1014,7 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
+          ...viewAsOrgInput,
           jobId: z.number().int().positive().optional(),
           status: z.string().max(30).optional(),
           category: z.string().max(50).optional(),
@@ -1021,7 +1026,11 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        return db.getExceptions({ ...input, organizationId: ctx.user.organizationId ?? null });
+        // Honours the super-admin portal switcher; see portalScopedOrgId.
+        return db.getExceptions({
+          ...input,
+          organizationId: portalScopedOrgId(ctx.user, input.viewAsOrgId),
+        });
       }),
 
     resolve: operationsProcedure
@@ -1756,9 +1765,12 @@ export const appRouter = router({
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         return report;
       }),
-    list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getReports(ctx.user.organizationId ?? null);
-    }),
+    list: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+        // Honours the super-admin portal switcher; see portalScopedOrgId.
+        return db.getReports(portalScopedOrgId(ctx.user, input?.viewAsOrgId));
+      }),
 
     generate: guestProtectedProcedure
       .input(
@@ -6440,8 +6452,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // ─── Exception Intelligence Layer ──────────────────────────────────
   exceptionIntelligence: router({
     // Per-org settings + transparency: what is shared and the current posture.
-    getSettings: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    getSettings: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const ei = await import("./exceptionIntelligence");
       const settings = await ei.getSettings(orgId);
       return {
@@ -6466,8 +6481,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }),
 
     // Local contribution stats (what this org has observed).
-    status: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    status: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const drizzle = await getDb();
       if (!drizzle) return { localSignatures: 0, localObservations: 0, sharedPatternsAvailable: 0 };
       const { exceptionPatternSignatures: eps, sharedExceptionPatterns: sep } = await import("../drizzle/schema");
@@ -6579,8 +6597,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
     // Per-institution learning flywheel stats: patterns captured by this org over time.
     // Powers the "value grows with every job" narrative in the UI.
-    flywheelStats: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    flywheelStats: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const drizzle = await getDb();
       if (!drizzle) return { totalPatterns: 0, categoryCoverage: [] as { category: string; count: number }[], monthlyGrowth: [] as { month: string; count: number }[] };
 

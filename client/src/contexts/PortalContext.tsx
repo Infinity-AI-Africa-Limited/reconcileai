@@ -87,6 +87,27 @@ export function usePortalContext(): PortalContextValue {
 }
 
 /** Segment display labels */
+/**
+ * The organisation id to send with a tenant-scoped QUERY, or undefined when the
+ * viewer is not inside a portal.
+ *
+ * Entering a portal is client state and nothing more — sessionStorage, read by
+ * the sidebar. The server keeps answering for the signed-in user's OWN
+ * organisation unless a query passes this. That gap is why every data screen
+ * was empty for a super admin inside a tenant's portal: Infinity AI's own
+ * organisation holds no transactions, jobs, reports or exceptions, so the
+ * screens faithfully reported nothing while the tenant held tens of thousands
+ * of rows.
+ *
+ * Pass it on READS only. The server ignores it for anyone who is not a super
+ * admin (see `portalScopedOrgId`), and deliberately never honours it on a
+ * mutation: "which tenant am I looking at" and "which tenant may I change" are
+ * different questions.
+ */
+export function useViewAsOrgId(): number | undefined {
+  return usePortalContext().viewAsOrg?.id;
+}
+
 export const SEGMENT_LABELS: Record<OrgSegment, string> = {
   financial_services: "Financial Services",
   corporate_b2b: "Corporate B2B",

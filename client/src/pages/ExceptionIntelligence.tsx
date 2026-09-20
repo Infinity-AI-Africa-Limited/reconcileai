@@ -6,6 +6,7 @@ import { Loader2, Network, ShieldCheck, Share2, Download, RefreshCw, Info, Trend
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { usePortalContext } from "@/contexts/PortalContext";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 // Simple inline bar-chart (no library dependency).
 function MiniBarChart({ data }: { data: { label: string; value: number }[] }) {
@@ -28,10 +29,12 @@ function MiniBarChart({ data }: { data: { label: string; value: number }[] }) {
 }
 
 export default function ExceptionIntelligencePage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const utils = trpc.useUtils();
-  const { data: settings, isLoading } = trpc.exceptionIntelligence.getSettings.useQuery();
-  const { data: status } = trpc.exceptionIntelligence.status.useQuery();
-  const { data: flywheel } = trpc.exceptionIntelligence.flywheelStats.useQuery();
+  const { data: settings, isLoading } = trpc.exceptionIntelligence.getSettings.useQuery({ viewAsOrgId });
+  const { data: status } = trpc.exceptionIntelligence.status.useQuery({ viewAsOrgId });
+  const { data: flywheel } = trpc.exceptionIntelligence.flywheelStats.useQuery({ viewAsOrgId });
   const update = trpc.exceptionIntelligence.updateSettings.useMutation({
     onSuccess: () => {
       utils.exceptionIntelligence.getSettings.invalidate();

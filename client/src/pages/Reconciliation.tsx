@@ -11,13 +11,16 @@ import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Downlo
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 export default function ReconciliationPage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const [, setLocation] = useLocation();
   const { user } = useAuth();
   const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
   const { data: channels } = trpc.channels.list.useQuery();
-  const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery();
+  const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery({ viewAsOrgId });
   const createMutation = trpc.reconciliation.create.useMutation();
   const createMultiMutation = trpc.reconciliation.createMultiChannel.useMutation();
   const exportMutation = trpc.export.csv.useMutation();

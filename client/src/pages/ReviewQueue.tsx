@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 type DiagnosisResult = {
   exceptionId: number;
@@ -29,6 +30,8 @@ type DiagnosisResult = {
 };
 
 export default function ReviewQueuePage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const { user } = useAuth();
   const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
   const {
@@ -38,6 +41,7 @@ export default function ReviewQueuePage() {
   } = useDateRange("reconcileai_reviewqueue_daterange");
 
   const { data: exceptions, isLoading, refetch } = trpc.exceptions.list.useQuery({
+    viewAsOrgId,
     status: "open",
     dateFrom: dateFromObj,
     dateTo: dateToObj,

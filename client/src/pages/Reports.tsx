@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Loader2, FileText, Download, Plus, AlertCircle, Eye, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import { toast } from "sonner";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 // ─── Sparkline component ──────────────────────────────────────────────────────
 function MatchRateSparkline({ rates }: { rates: number[] }) {
@@ -64,9 +65,11 @@ function MatchRateSparkline({ rates }: { rates: number[] }) {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function ReportsPage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const [, navigate] = useLocation();
-  const { data: reports, isLoading, refetch } = trpc.reports.list.useQuery();
-  const { data: jobs } = trpc.reconciliation.list.useQuery();
+  const { data: reports, isLoading, refetch } = trpc.reports.list.useQuery({ viewAsOrgId });
+  const { data: jobs } = trpc.reconciliation.list.useQuery({ viewAsOrgId });
   const generateMutation = trpc.reports.generate.useMutation();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", type: "custom", jobId: "", format: "pdf" });

@@ -23,6 +23,8 @@ import {
   sanitizeInput,
   assertModuleAvailable,
   MAX_NAME_LENGTH,
+  portalScopedOrgId,
+  viewAsOrgInput,
 } from "./shared";
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
@@ -364,9 +366,12 @@ export const reconciliationRouter = router({
       };
     }),
 
-  list: protectedProcedure.query(async ({ ctx }) => {
-    return db.getReconciliationJobs(ctx.user.organizationId ?? null);
-  }),
+  list: protectedProcedure
+    .input(z.object({ ...viewAsOrgInput }).optional())
+    .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      return db.getReconciliationJobs(portalScopedOrgId(ctx.user, input?.viewAsOrgId));
+    }),
 
   get: protectedProcedure
     .input(z.object({ id: z.number().int().positive() }))
