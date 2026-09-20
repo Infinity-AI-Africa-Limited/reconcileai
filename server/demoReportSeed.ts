@@ -25,13 +25,30 @@ type DbHandle = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 export type SeededReportType = "daily" | "weekly" | "monthly" | "custom";
 
 /**
- * Create one report for `jobId`, or return null if the job is not there.
+ * Create THE demo report for `jobId`, replacing any earlier one of the same
+ * title in the same tenant. Returns null if the job is not there.
  *
  * Scoped by organisation as well as id: a seeder is handed a job id it just
  * created, but reading a job by id alone would happily summarise another
  * tenant's job if that id were ever wrong, and write the result into THIS
  * tenant's reports. The extra predicate costs nothing and removes the
  * possibility.
+ *
+ * ── Why it replaces rather than appends ───────────────────────────────────
+ *
+ * The two seeders differ, and the difference leaked. The financial-services
+ * seeder wipes its prior demo data before reseeding, so it naturally holds one
+ * report. The FMCG seeder appends on purpose — a re-run adds a further batch and
+ * job rather than duplicating the distributor roster — so a report per run would
+ * accumulate near-identical rows on the Reports screen, and `demo.activate` is a
+ * button someone can press repeatedly.
+ *
+ * Keyed on the TITLE, which each seeder passes as a constant. That deletes the
+ * previous seeded report and leaves a report a user generated themselves alone,
+ * because they type their own title. The alternative — skip if any report
+ * exists — would leave the report describing the PREVIOUS run's job while the
+ * current job is the one on screen, which is worse than a duplicate: it is
+ * wrong rather than merely repeated.
  */
 export async function createReportForJob(
   db: DbHandle,
@@ -68,6 +85,13 @@ export async function createReportForJob(
     exceptions: jobExceptions,
     generatedBy: args.generatedBy ?? "ReconcileAI demo seed",
   });
+
+  // Tenant-scoped as well as title-scoped, so this can never reach another
+  // organisation's report even if a title happens to collide across tenants.
+  await db.delete(reconciliationReports).where(and(
+    eq(reconciliationReports.organizationId, args.organizationId),
+    eq(reconciliationReports.title, args.title),
+  ));
 
   const inserted = await db.insert(reconciliationReports).values({
     jobId: args.jobId,
