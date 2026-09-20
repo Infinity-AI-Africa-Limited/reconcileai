@@ -15,7 +15,7 @@
  * Kept out of `reportSummary.ts` so that module stays pure and its tests need no
  * database, and out of either seeder so neither owns a copy.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { exceptions, matches, reconciliationJobs, reconciliationReports } from "../drizzle/schema";
 import { getDb } from "./db";
 import { buildReportSummary } from "./reportSummary";
@@ -23,6 +23,23 @@ import { buildReportSummary } from "./reportSummary";
 type DbHandle = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
 export type SeededReportType = "daily" | "weekly" | "monthly" | "custom";
+
+/**
+ * Provenance marker written into a seeded report's summary, and the ONLY thing
+ * that identifies one for replacement.
+ *
+ * An earlier revision matched on the title instead. Review pointed out the hole
+ * and it is real: the Reports screen AUTO-FILLS the title from the selected job,
+ * so a user generating a report against a seeded job lands on a title that can
+ * equal the seeded one — and the next activation would have deleted their report
+ * without a word. A user cannot produce this field at all: `buildReportSummary`
+ * never emits it, and it is added here after the summary is built, so nothing
+ * reachable from `reports.generate` can set it.
+ *
+ * Versioned so a future change of meaning does not silently adopt rows written
+ * under the old one.
+ */
+export const DEMO_REPORT_MARKER = "reconcileai-demo-seed-v1";
 
 /**
  * Create THE demo report for `jobId`, replacing any earlier one of the same
@@ -43,12 +60,11 @@ export type SeededReportType = "daily" | "weekly" | "monthly" | "custom";
  * accumulate near-identical rows on the Reports screen, and `demo.activate` is a
  * button someone can press repeatedly.
  *
- * Keyed on the TITLE, which each seeder passes as a constant. That deletes the
- * previous seeded report and leaves a report a user generated themselves alone,
- * because they type their own title. The alternative — skip if any report
- * exists — would leave the report describing the PREVIOUS run's job while the
- * current job is the one on screen, which is worse than a duplicate: it is
- * wrong rather than merely repeated.
+ * Keyed on `DEMO_REPORT_MARKER`, a value only this function writes — NOT on the
+ * title, which the Reports screen auto-fills from the job and a user can
+ * therefore share. The alternative — skip if any report exists — would leave the
+ * report describing the PREVIOUS run's job while the current job is the one on
+ * screen, which is worse than a duplicate: wrong rather than merely repeated.
  */
 export async function createReportForJob(
   db: DbHandle,
@@ -86,11 +102,15 @@ export async function createReportForJob(
     generatedBy: args.generatedBy ?? "ReconcileAI demo seed",
   });
 
-  // Tenant-scoped as well as title-scoped, so this can never reach another
-  // organisation's report even if a title happens to collide across tenants.
+  // Replace the previous SEEDED report, identified by a marker no user-created
+  // report can carry. Title is deliberately NOT part of this predicate: the
+  // Reports screen auto-fills the title from the job, so a user's report can
+  // share it, and matching on it would delete their work.
+  //
+  // Tenant-scoped as well, so this can never reach another organisation's rows.
   await db.delete(reconciliationReports).where(and(
     eq(reconciliationReports.organizationId, args.organizationId),
-    eq(reconciliationReports.title, args.title),
+    sql`JSON_UNQUOTE(JSON_EXTRACT(${reconciliationReports.summary}, '$.demoSeedMarker')) = ${DEMO_REPORT_MARKER}`,
   ));
 
   const inserted = await db.insert(reconciliationReports).values({
@@ -99,7 +119,10 @@ export async function createReportForJob(
     organizationId: args.organizationId,
     reportType: args.reportType ?? "custom",
     title: args.title,
-    summary,
+    // Marker added AFTER the shared builder, so `buildReportSummary` keeps the
+    // exact contract `reports.generate` ships and nothing a user can reach adds
+    // this field.
+    summary: { ...summary, demoSeedMarker: DEMO_REPORT_MARKER },
     format: "pdf",
   });
 
