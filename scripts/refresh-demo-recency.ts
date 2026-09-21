@@ -43,7 +43,7 @@
  *     and transactions alone — see trimToNewestRun for why.
  */
 import "dotenv/config";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, lt } from "drizzle-orm";
 import {
   exceptions,
   matches,
@@ -52,7 +52,7 @@ import {
   reconciliationReports,
 } from "../drizzle/schema";
 import { getDb } from "../server/db";
-import { dateForIndex, statusForAge, daysAgoForIndex, RECENCY_BANDS } from "../server/demoRecency";
+import { dateForIndex, statusForAge, daysAgoForIndex, utcDayStart, RECENCY_BANDS } from "../server/demoRecency";
 
 const COMMIT = process.argv.includes("--commit");
 const TRIM = process.argv.includes("--trim");
@@ -134,14 +134,20 @@ async function report(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId:
     { label: "Yesterday", from: 1, to: 1 },
     ...RECENCY_BANDS.map((b) => ({ label: b.label, from: b.from, to: b.to })),
   ];
+  // Band boundaries are computed HERE, in UTC, from the same `utcDayStart` the
+  // re-dating writes with. They used to be CURDATE()/DATE_SUB in the query, which
+  // hands the definition of "yesterday" to the database server's session
+  // timezone — so the measurement and the writing could each be right and still
+  // disagree about which day a row was on.
+  const now = new Date();
   for (const b of bands) {
     const [row] = await db
-      .select({ n: sql<number>`count(*)` })
+      .select({ n: count() })
       .from(exceptions)
       .where(and(
         eq(exceptions.organizationId, orgId),
-        sql`${exceptions.createdAt} >= DATE_SUB(CURDATE(), INTERVAL ${b.to} DAY)`,
-        sql`${exceptions.createdAt} < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL ${b.from} DAY), INTERVAL 1 DAY)`,
+        gte(exceptions.createdAt, utcDayStart(now, b.to)),
+        lt(exceptions.createdAt, utcDayStart(now, b.from - 1)),
       ));
     const empty = Number(row?.n ?? 0) === 0;
     if (empty && when === "after") failures++;
@@ -214,7 +220,11 @@ async function respreadExceptions(db: NonNullable<Awaited<ReturnType<typeof getD
     .select({ id: exceptions.id, status: exceptions.status, ai: exceptions.aiAnalysis })
     .from(exceptions)
     .where(eq(exceptions.organizationId, orgId))
-    .orderBy(sql`(${exceptions.aiAnalysis} IS NULL)`, desc(exceptions.id));
+    .orderBy(desc(exceptions.id));
+  // Diagnosed rows first, then newest id — done in TypeScript rather than as an
+  // `IS NULL` expression in ORDER BY. The set is one tenant's exceptions (a few
+  // hundred), and a stable in-memory sort keeps the ordering typed and obvious.
+  rows.sort((a, b) => Number(a.ai == null) - Number(b.ai == null) || b.id - a.id);
 
   // Interrupting the loop below leaves a partial spread, which is untidy but
   // self-correcting: the assignment is derived from position in a stable

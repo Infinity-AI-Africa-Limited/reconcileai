@@ -117,17 +117,43 @@ function bandSizes(total: number): number[] {
 }
 
 /**
- * The date for the `index`-th of `total` rows, relative to `reference`.
+ * Midnight UTC at the start of the day `daysAgo` days before `reference`.
  *
- * The time of day is preserved from `reference` rather than zeroed, so rows do
- * not all land on midnight — a column of identical timestamps is the other way
- * seeded data announces itself.
+ * The ONE definition of "N days ago" used both to write rows and to measure
+ * which band they landed in, so the two cannot disagree about a boundary.
+ */
+export function utcDayStart(reference: Date, daysAgo: number): Date {
+  return new Date(Date.UTC(
+    reference.getUTCFullYear(),
+    reference.getUTCMonth(),
+    reference.getUTCDate() - daysAgo,
+  ));
+}
+
+/**
+ * The timestamp for the `index`-th of `total` rows, relative to `reference`.
+ *
+ * ── UTC, and why that alone was not enough ────────────────────────────────
+ *
+ * This first used `setDate`/`setHours`, so the calendar day a row landed on
+ * depended on the timezone of whatever machine ran the script: "08:00 local" on
+ * a UTC+13 host is 19:00 UTC the PREVIOUS day. It now works in UTC throughout,
+ * which is the repository rule (CLAUDE.md §16) and makes the result identical on
+ * every host — pinned by a test that runs it under UTC+14 and UTC-11.
+ *
+ * But the Exceptions screen decides "Today" in the VIEWER's timezone, which no
+ * seeder can know. So the time of day is chosen to survive that too: every row
+ * sits between 08:00 and 17:59 UTC, which is the same calendar day for anyone
+ * from UTC-8 to UTC+6 — Lagos, Kampala and London included. Midnight UTC would
+ * have been the fragile choice: it is still the previous evening in the
+ * Americas, so a row dated "today" would read as yesterday.
+ *
+ * Varied within that window rather than fixed, because a column of identical
+ * timestamps is the other way seeded data announces itself.
  */
 export function dateForIndex(index: number, total: number, reference: Date = new Date()): Date {
-  const d = new Date(reference);
-  d.setDate(d.getDate() - daysAgoForIndex(index, total));
-  // Spread within the working day: 08:00 + up to ~10h, by index.
-  d.setHours(8 + (index % 10), (index * 7) % 60, (index * 13) % 60, 0);
+  const d = utcDayStart(reference, daysAgoForIndex(index, total));
+  d.setUTCHours(8 + (index % 10), (index * 7) % 60, (index * 13) % 60, 0);
   return d;
 }
 

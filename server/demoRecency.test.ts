@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   daysAgoForIndex,
   dateForIndex,
+  utcDayStart,
   statusForAge,
   RECENCY_BANDS,
   RECENCY_WINDOW_DAYS,
@@ -87,10 +88,43 @@ describe("when demo rows are spread across the selectable window", () => {
 });
 
 describe("when a demo row is given its timestamp", () => {
-  it("should land the requested number of days back", () => {
+  it("should land the requested number of UTC calendar days back", () => {
     const reference = new Date("2026-09-20T12:00:00Z");
-    const d = dateForIndex(0, 10, reference);
-    expect(Math.round((reference.getTime() - d.getTime()) / 86_400_000)).toBe(0);
+    for (let i = 0; i < 40; i++) {
+      const d = dateForIndex(i, 40, reference);
+      const expected = utcDayStart(reference, daysAgoForIndex(i, 40));
+      expect(d.toISOString().slice(0, 10), `row ${i}`).toBe(expected.toISOString().slice(0, 10));
+    }
+  });
+
+  it("should produce the same instant whatever timezone the host runs in", () => {
+    // The first version used setDate/setHours, so "08:00 local" on a UTC+13 host
+    // was 19:00 UTC the previous day and the row fell out of its band. Run the
+    // same inputs under the two most extreme real zones and demand identity.
+    const reference = new Date("2026-09-20T23:30:00Z"); // late evening UTC: where a local-time bug shows
+    const original = process.env.TZ;
+    try {
+      const results = ["Pacific/Kiritimati", "Pacific/Pago_Pago", "Africa/Lagos", "UTC"].map((tz) => {
+        process.env.TZ = tz;
+        return Array.from({ length: 30 }, (_, i) => dateForIndex(i, 30, reference).toISOString());
+      });
+      for (const r of results.slice(1)) expect(r).toEqual(results[0]);
+    } finally {
+      if (original === undefined) delete process.env.TZ;
+      else process.env.TZ = original;
+    }
+  });
+
+  it("should keep every row mid-day in UTC, so viewers from UTC-8 to UTC+6 see the same day", () => {
+    // "Today" on screen is the VIEWER's day. 08:00-17:59 UTC is one calendar day
+    // for Lagos, Kampala and London alike; midnight UTC would read as yesterday
+    // across the Americas.
+    const reference = new Date("2026-09-20T12:00:00Z");
+    for (let i = 0; i < 100; i++) {
+      const h = dateForIndex(i, 100, reference).getUTCHours();
+      expect(h, `row ${i}`).toBeGreaterThanOrEqual(8);
+      expect(h, `row ${i}`).toBeLessThanOrEqual(17);
+    }
   });
 
   it("should not stack every row on the same timestamp", () => {
