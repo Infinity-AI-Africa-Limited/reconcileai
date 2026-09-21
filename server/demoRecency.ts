@@ -288,6 +288,75 @@ export function anchoredDetection(txDate: Date, index: number, now: Date = new D
   return new Date(tx + Math.floor((nowS - tx) / 2000) * 1000);
 }
 
+/** How many of the tenant's calendar days before `now` the instant `at` falls. */
+export function daysAgoInZone(at: Date, now: Date, timeZone: string): number {
+  for (let d = 0; d < 400; d++) {
+    if (at.getTime() >= zonedDayStart(now, d, timeZone).getTime()) return d;
+  }
+  return 400;
+}
+
+export type TimelineRow = { id: number; txId: number | null; status: string };
+
+export type TimelinePlan = {
+  /** One date per transaction that should move. Never two for the same transaction. */
+  transactionDates: Map<number, Date>;
+  exceptions: { id: number; createdAt: Date; status: string; resolvedAt: Date | null }[];
+};
+
+/**
+ * Plan every exception's timestamp from its transaction's, ONE date per
+ * transaction.
+ *
+ * The first version assigned a date per EXCEPTION row and wrote it to that row's
+ * transaction as it went. Review pointed out that `exceptions.transactionId` is
+ * not unique — reconciliation can raise both an "unmatched" and a "duplicate"
+ * exception on one transaction — so a later row re-dated a transaction after an
+ * earlier exception on it had already been anchored, leaving that exception
+ * raised before its transaction: the exact inconsistency this exists to repair.
+ * (Neither demo tenant had a shared transaction on 21 September, and both
+ * post-run checks read 0 — but "the data happened not to" is not a guarantee.)
+ *
+ * So the first exception to reach a transaction decides its date, and every
+ * exception on it is anchored to that one date. `pinned` transactions — those in
+ * a match row, whose counterpart must not be left behind — keep their current
+ * date. Status follows the exception's REAL age rather than its position in the
+ * list, because a row sharing an older transaction is older than its position
+ * says.
+ *
+ * Pure, so the invariant is tested directly rather than inferred from a run.
+ */
+export function planExceptionTimeline(
+  rows: readonly TimelineRow[],
+  now: Date,
+  timeZone: string,
+  pinned: ReadonlyMap<number, Date>,
+): TimelinePlan {
+  const transactionDates = new Map<number, Date>();
+  const chosen = new Map<number, Date>();
+  const out: TimelinePlan["exceptions"] = [];
+  const n = rows.length;
+  for (let i = 0; i < n; i++) {
+    const r = rows[i];
+    if (r.txId == null) continue;
+    let txDate = chosen.get(r.txId);
+    if (!txDate) {
+      const fixed = pinned.get(r.txId);
+      txDate = fixed ?? dateForIndex(i, n, now, timeZone);
+      chosen.set(r.txId, txDate);
+      if (!fixed) transactionDates.set(r.txId, txDate);
+    }
+    const createdAt = anchoredDetection(txDate, i, now);
+    const status = statusForAge(daysAgoInZone(createdAt, now, timeZone), r.status);
+    const closed = status === "resolved" || status === "dismissed";
+    const resolvedAt = closed
+      ? new Date(Math.min(now.getTime(), createdAt.getTime() + (1 + (i % 3)) * 86_400_000))
+      : null;
+    out.push({ id: r.id, createdAt, status, resolvedAt });
+  }
+  return { transactionDates, exceptions: out };
+}
+
 /**
  * How far to move a tenant's whole timeline so its newest transaction sits at
  * `now`. Whole seconds, never negative: a timeline already current is left alone.

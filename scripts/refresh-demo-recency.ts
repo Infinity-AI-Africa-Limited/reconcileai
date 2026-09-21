@@ -58,13 +58,10 @@ import {
 } from "../drizzle/schema";
 import { getDb } from "../server/db";
 import {
-  anchoredDetection,
+  planExceptionTimeline,
   COUNTRY_TIMEZONES,
-  dateForIndex,
-  daysAgoForIndex,
   RECENCY_BANDS,
   rollDeltaMs,
-  statusForAge,
   zonedDayStart,
 } from "../server/demoRecency";
 import { createReportForJob, DEMO_REPORT_MARKER } from "../server/demoReportSeed";
@@ -433,38 +430,43 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
   );
 
   if (COMMIT) {
-    // Autocommitted per row, deliberately: every value derives from a stable
-    // ordering and from `now`, never from the row's current date, so an
-    // interrupted run is repaired by re-running it — it converges.
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      if (r.txId == null) continue;
-      let txDate: Date;
-      if (matched.has(r.txId)) {
-        const [t] = await db
-          .select({ d: transactions.transactionDate })
-          .from(transactions)
-          .where(and(eq(transactions.organizationId, orgId), eq(transactions.id, r.txId)))
-          .limit(1);
-        if (!t) continue;
-        txDate = new Date(t.d);
-      } else {
-        txDate = dateForIndex(i, rows.length, now, timeZone);
-        await db
-          .update(transactions)
-          .set({ transactionDate: txDate, valueDate: txDate, createdAt: txDate })
-          .where(and(eq(transactions.organizationId, orgId), eq(transactions.id, r.txId)));
+    // Planned per TRANSACTION, not per exception row — see planExceptionTimeline.
+    // A matched transaction keeps its current date, so its counterpart is not
+    // left behind; read those first so the plan anchors to what is really there.
+    const pinned = new Map<number, Date>();
+    const pinnedIds = [...new Set(rows.map((r) => r.txId).filter((t): t is number => t != null && matched.has(t)))];
+    if (pinnedIds.length) {
+      for (const t of await db
+        .select({ id: transactions.id, d: transactions.transactionDate })
+        .from(transactions)
+        .where(and(eq(transactions.organizationId, orgId), inArray(transactions.id, pinnedIds)))) {
+        pinned.set(t.id, new Date(t.d));
       }
-      const createdAt = anchoredDetection(txDate, i, now);
-      const status = statusForAge(daysAgoForIndex(i, rows.length), r.status as string) as typeof exceptions.$inferInsert.status;
-      const closed = status === "resolved" || status === "dismissed";
-      const resolvedAt = closed
-        ? new Date(Math.min(now.getTime(), createdAt.getTime() + (1 + (i % 3)) * 86_400_000))
-        : null;
+    }
+    const plan = planExceptionTimeline(
+      rows.map((r) => ({ id: r.id, txId: r.txId, status: r.status as string })),
+      now,
+      timeZone,
+      pinned,
+    );
+    // Autocommitted per row, deliberately: the plan derives from a stable
+    // ordering and from `now`, never from a row's current date, so an
+    // interrupted run is repaired by re-running it — it converges.
+    for (const [txId, txDate] of plan.transactionDates) {
+      await db
+        .update(transactions)
+        .set({ transactionDate: txDate, valueDate: txDate, createdAt: txDate })
+        .where(and(eq(transactions.organizationId, orgId), eq(transactions.id, txId)));
+    }
+    for (const e of plan.exceptions) {
       await db
         .update(exceptions)
-        .set({ createdAt, status, resolvedAt })
-        .where(and(eq(exceptions.organizationId, orgId), eq(exceptions.id, r.id)));
+        .set({
+          createdAt: e.createdAt,
+          status: e.status as typeof exceptions.$inferInsert.status,
+          resolvedAt: e.resolvedAt,
+        })
+        .where(and(eq(exceptions.organizationId, orgId), eq(exceptions.id, e.id)));
     }
   }
 

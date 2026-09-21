@@ -13,6 +13,8 @@ import {
   wallTimeInZone,
   anchoredDetection,
   rollDeltaMs,
+  planExceptionTimeline,
+  daysAgoInZone,
   statusForAge,
   RECENCY_BANDS,
   RECENCY_WINDOW_DAYS,
@@ -299,5 +301,63 @@ describe("when a tenant's timeline is rolled forward", () => {
     expect(rollDeltaMs(now, now)).toBe(0);
     expect(rollDeltaMs(new Date("2026-09-22T00:00:00Z"), now)).toBe(0);
     expect(rollDeltaMs(null, now)).toBe(0);
+  });
+});
+
+describe("when several exceptions share one transaction", () => {
+  const LAGOS = "Africa/Lagos";
+  const now = new Date("2026-09-21T12:00:00Z");
+
+  it("should give the transaction ONE date and anchor every exception after it", () => {
+    // Review finding: transactionId is not unique — reconciliation can raise an
+    // "unmatched" and a "duplicate" exception on one transaction. Planning per
+    // row re-dated the transaction after an earlier exception was anchored.
+    //
+    // The case has to WRAP to bite. Rows run newest band first, so a later row
+    // usually moves a shared transaction EARLIER, which never breaks the rule —
+    // a five-row version of this test passed with the bug put back. Inside band
+    // 0 the day cycles 0..6, so row 1 lands on yesterday and row 7 wraps to
+    // today: sharing a transaction between them makes the later row move it
+    // FORWARD, past the exception row 1 already anchored.
+    const n = 20; // band 0 holds rows 0-8, so both index 1 and index 7 are in it
+    const rows = Array.from({ length: n }, (_, i) => ({ id: 100 + i, txId: 1000 + i, status: "open" }));
+    rows[7] = { ...rows[7], txId: 1001 }; // shares row 1's transaction
+    // Deliberately NOT also shared with a later-band row. A second attempt did,
+    // and the bug hid again: the LAST writer wins, and a later-band row moves the
+    // transaction back past every anchor. The violation needs the last writer to
+    // be the newest date — row 7 — and the test is only honest if it is.
+    const plan = planExceptionTimeline(rows, now, LAGOS, new Map());
+    // The shared transaction takes the date of the FIRST exception that reached
+    // it (row 1), not the last.
+    expect(plan.transactionDates.get(1001)?.getTime()).toBe(dateForIndex(1, n, now, LAGOS).getTime());
+    for (const e of plan.exceptions) {
+      const row = rows.find((r) => r.id === e.id)!;
+      const tx = plan.transactionDates.get(row.txId!)!;
+      expect(e.createdAt.getTime(), `exception ${e.id} raised before its transaction`).toBeGreaterThanOrEqual(tx.getTime());
+      expect(e.createdAt.getTime(), `exception ${e.id}`).toBeLessThanOrEqual(now.getTime());
+    }
+  });
+
+  it("should never move a pinned (matched) transaction, and still anchor to it", () => {
+    const fixed = new Date("2026-09-10T09:30:00Z");
+    const plan = planExceptionTimeline([{ id: 1, txId: 900, status: "open" }], now, LAGOS, new Map([[900, fixed]]));
+    expect(plan.transactionDates.has(900)).toBe(false);
+    expect(plan.exceptions[0].createdAt.getTime()).toBeGreaterThanOrEqual(fixed.getTime());
+  });
+
+  it("should derive status from the exception's real age, not its position", () => {
+    // A row sharing an old transaction is old, whatever its index says. Pinned
+    // 60 days back, it must not be left "open".
+    const old = new Date(now.getTime() - 60 * 86_400_000);
+    const plan = planExceptionTimeline([{ id: 1, txId: 7, status: "open" }], now, LAGOS, new Map([[7, old]]));
+    expect(daysAgoInZone(plan.exceptions[0].createdAt, now, LAGOS)).toBeGreaterThanOrEqual(59);
+    expect(plan.exceptions[0].status).toBe("resolved");
+    expect(plan.exceptions[0].resolvedAt).not.toBeNull();
+  });
+
+  it("should leave exceptions without a transaction alone", () => {
+    const plan = planExceptionTimeline([{ id: 1, txId: null, status: "open" }], now, LAGOS, new Map());
+    expect(plan.exceptions).toEqual([]);
+    expect(plan.transactionDates.size).toBe(0);
   });
 });
