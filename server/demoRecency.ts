@@ -117,44 +117,98 @@ function bandSizes(total: number): number[] {
 }
 
 /**
- * Midnight UTC at the start of the day `daysAgo` days before `reference`.
+ * Which calendar "today" a tenant's demo is written for.
  *
- * The ONE definition of "N days ago" used both to write rows and to measure
- * which band they landed in, so the two cannot disagree about a boundary.
+ * "Today" does not exist without a timezone: at any instant two calendar dates
+ * are in effect somewhere. An earlier revision used UTC, and review showed where
+ * that breaks — after 21:00 UTC it is already tomorrow in Kampala, so rows
+ * written for the UTC "today" landed on a Kampala viewer's Yesterday while the
+ * script, measuring in UTC, reported Today populated. A false success.
+ *
+ * The honest anchor is the tenant's OWN local day, which is what its operators
+ * see. Organisations record `country` (ISO 3166-1 alpha-3) but no timezone, so
+ * this maps the markets the platform serves. An unlisted country is NOT given a
+ * guessed zone: the script refuses and asks for `--tz`, because a wrong anchor
+ * produces exactly the empty-Today it exists to prevent.
  */
-export function utcDayStart(reference: Date, daysAgo: number): Date {
-  return new Date(Date.UTC(
-    reference.getUTCFullYear(),
-    reference.getUTCMonth(),
-    reference.getUTCDate() - daysAgo,
-  ));
+export const COUNTRY_TIMEZONES: Readonly<Record<string, string>> = {
+  NGA: "Africa/Lagos",
+  UGA: "Africa/Kampala",
+  GHA: "Africa/Accra",
+  KEN: "Africa/Nairobi",
+};
+
+/** How far `timeZone`'s wall clock is ahead of UTC at `instant`, in ms. */
+export function zoneOffsetMs(instant: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(instant);
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  const wallAsUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return wallAsUtc - Math.floor(instant.getTime() / 1000) * 1000;
 }
 
 /**
- * The timestamp for the `index`-th of `total` rows, relative to `reference`.
+ * The instant the calendar day `daysAgo` days before `reference` BEGINS, in
+ * `timeZone`.
  *
- * ── UTC, and why that alone was not enough ────────────────────────────────
- *
- * This first used `setDate`/`setHours`, so the calendar day a row landed on
- * depended on the timezone of whatever machine ran the script: "08:00 local" on
- * a UTC+13 host is 19:00 UTC the PREVIOUS day. It now works in UTC throughout,
- * which is the repository rule (CLAUDE.md §16) and makes the result identical on
- * every host — pinned by a test that runs it under UTC+14 and UTC-11.
- *
- * But the Exceptions screen decides "Today" in the VIEWER's timezone, which no
- * seeder can know. So the time of day is chosen to survive that too: every row
- * sits between 08:00 and 17:59 UTC, which is the same calendar day for anyone
- * from UTC-8 to UTC+6 — Lagos, Kampala and London included. Midnight UTC would
- * have been the fragile choice: it is still the previous evening in the
- * Americas, so a row dated "today" would read as yesterday.
- *
- * Varied within that window rather than fixed, because a column of identical
- * timestamps is the other way seeded data announces itself.
+ * The ONE definition of "N days ago" used both to write rows and to measure
+ * which band they landed in, so the two cannot disagree about a boundary. The
+ * offset is re-read at the candidate midnight, because on a daylight-saving
+ * change the offset at noon is not the offset at midnight.
  */
-export function dateForIndex(index: number, total: number, reference: Date = new Date()): Date {
-  const d = utcDayStart(reference, daysAgoForIndex(index, total));
-  d.setUTCHours(8 + (index % 10), (index * 7) % 60, (index * 13) % 60, 0);
-  return d;
+export function zonedDayStart(reference: Date, daysAgo: number, timeZone: string): Date {
+  const offset = zoneOffsetMs(reference, timeZone);
+  const wall = new Date(reference.getTime() + offset);
+  const wallMidnight = Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate() - daysAgo);
+  let instant = wallMidnight - offset;
+  const offsetThen = zoneOffsetMs(new Date(instant), timeZone);
+  if (offsetThen !== offset) instant = wallMidnight - offsetThen;
+  return new Date(instant);
+}
+
+/**
+ * The timestamp for the `index`-th of `total` rows, relative to `reference`,
+ * in the tenant's `timeZone`.
+ *
+ * Rows sit between 08:00 and 17:59 on the tenant's wall clock — working hours,
+ * and varied rather than fixed, because a column of identical timestamps is the
+ * other way seeded data announces itself. It is independent of the HOST's
+ * timezone (an earlier version used setDate/setHours, so "08:00 local" on a
+ * UTC+13 machine fell on the previous UTC day), pinned by a test.
+ *
+ * ── Never in the future ───────────────────────────────────────────────────
+ *
+ * A run at 07:40 wrote every "today" row between 08:00 and 17:59, i.e. up to ten
+ * hours AHEAD of the clock: 36 exceptions on Globus Bank and 4 on BrightGoods
+ * were created "later today". They still showed under Today, but anything that
+ * computes age showed a negative one. So a row for a day that has not reached
+ * working hours yet is placed in the part of that day that has already
+ * happened, between local midnight and `reference`.
+ */
+export function dateForIndex(
+  index: number,
+  total: number,
+  reference: Date = new Date(),
+  timeZone: string = "UTC",
+): Date {
+  const dayStart = zonedDayStart(reference, daysAgoForIndex(index, total), timeZone).getTime();
+  const intoDay = ((8 + (index % 10)) * 3600 + ((index * 7) % 60) * 60 + ((index * 13) % 60)) * 1000;
+  const planned = dayStart + intoDay;
+  if (planned <= reference.getTime()) return new Date(planned);
+
+  // Only day 0 can reach here. Spread across the elapsed part of today; one
+  // second minimum so a run at 00:00:00 still has somewhere to put a row.
+  const elapsed = Math.max(1000, reference.getTime() - dayStart);
+  const within = dayStart + Math.floor((elapsed * ((index % 10) + 1)) / 11);
+  return new Date(Math.min(within, reference.getTime()));
 }
 
 /**

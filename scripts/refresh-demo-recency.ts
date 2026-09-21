@@ -52,12 +52,22 @@ import {
   reconciliationReports,
 } from "../drizzle/schema";
 import { getDb } from "../server/db";
-import { dateForIndex, statusForAge, daysAgoForIndex, utcDayStart, RECENCY_BANDS } from "../server/demoRecency";
+import {
+  COUNTRY_TIMEZONES,
+  dateForIndex,
+  daysAgoForIndex,
+  RECENCY_BANDS,
+  statusForAge,
+  zonedDayStart,
+} from "../server/demoRecency";
 
 const COMMIT = process.argv.includes("--commit");
 const TRIM = process.argv.includes("--trim");
 const orgFlag = process.argv.indexOf("--org");
 const TARGETS = orgFlag !== -1 ? [Number(process.argv[orgFlag + 1])] : [1, 30001];
+const tzFlag = process.argv.indexOf("--tz");
+/** Explicit zone for "today"; otherwise each tenant's own, from its country. */
+const TZ_OVERRIDE = tzFlag !== -1 ? process.argv[tzFlag + 1] : null;
 
 /**
  * `--trim` deletes whole reconciliation runs, so it must name ONE tenant.
@@ -89,7 +99,7 @@ async function main() {
 
   for (const orgId of TARGETS) {
     const [org] = await db
-      .select({ id: organizations.id, name: organizations.name, code: organizations.code, isDemo: organizations.isDemo })
+      .select({ id: organizations.id, name: organizations.name, code: organizations.code, isDemo: organizations.isDemo, country: organizations.country })
       .from(organizations)
       .where(eq(organizations.id, orgId))
       .limit(1);
@@ -102,12 +112,22 @@ async function main() {
     }
 
     console.log(`${"═".repeat(72)}\n${org.code ?? orgId} — ${org.name}\n${"═".repeat(72)}`);
-    await report(db, orgId, "before");
+    // The tenant's own local day. No guessed zone for an unmapped country: a
+    // wrong anchor produces exactly the empty Today this exists to prevent.
+    const timeZone = TZ_OVERRIDE ?? COUNTRY_TIMEZONES[org.country];
+    if (!timeZone) {
+      throw new Error(
+        `REFUSING: no timezone is mapped for country "${org.country}", so "today" is undefined. ` +
+          `Re-run with --tz <IANA zone>, e.g. --tz Africa/Lagos.`,
+      );
+    }
+    console.log(`  "Today" means ${timeZone}${TZ_OVERRIDE ? " (from --tz)" : ` (from country ${org.country})`}`);
+    await report(db, orgId, timeZone, "before");
 
     if (TRIM) await trimToNewestRun(db, orgId);
-    await respreadExceptions(db, orgId);
+    await respreadExceptions(db, orgId, timeZone);
 
-    if (COMMIT) await report(db, orgId, "after");
+    if (COMMIT) await report(db, orgId, timeZone, "after");
     console.log();
   }
 
@@ -127,18 +147,24 @@ async function main() {
 }
 
 /** Count exceptions per selectable band, and flag any that are empty. */
-async function report(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId: number, when: string) {
+async function report(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  orgId: number,
+  timeZone: string,
+  when: string,
+) {
   console.log(`  exceptions per band (${when}):`);
   const bands = [
     { label: "Today", from: 0, to: 0 },
     { label: "Yesterday", from: 1, to: 1 },
     ...RECENCY_BANDS.map((b) => ({ label: b.label, from: b.from, to: b.to })),
   ];
-  // Band boundaries are computed HERE, in UTC, from the same `utcDayStart` the
-  // re-dating writes with. They used to be CURDATE()/DATE_SUB in the query, which
-  // hands the definition of "yesterday" to the database server's session
-  // timezone — so the measurement and the writing could each be right and still
-  // disagree about which day a row was on.
+  // Band boundaries are computed HERE, in the tenant's zone, from the same
+  // `zonedDayStart` the re-dating writes with. They used to be CURDATE() and
+  // DATE_SUB in the query, which handed "yesterday" to the database server's
+  // session timezone; then UTC, which let the report declare Today populated
+  // for a day the tenant's viewers had already left. Measuring in the zone the
+  // rows were written for is what makes a PASS here mean something on screen.
   const now = new Date();
   for (const b of bands) {
     const [row] = await db
@@ -146,13 +172,26 @@ async function report(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId:
       .from(exceptions)
       .where(and(
         eq(exceptions.organizationId, orgId),
-        gte(exceptions.createdAt, utcDayStart(now, b.to)),
-        lt(exceptions.createdAt, utcDayStart(now, b.from - 1)),
+        gte(exceptions.createdAt, zonedDayStart(now, b.to, timeZone)),
+        lt(exceptions.createdAt, zonedDayStart(now, b.from - 1, timeZone)),
       ));
     const empty = Number(row?.n ?? 0) === 0;
     if (empty && when === "after") failures++;
     console.log(`    ${b.label.padEnd(38)} ${String(row?.n ?? 0).padStart(6)}${empty ? "   <- EMPTY" : ""}`);
   }
+
+  // Rows dated after this moment still sit inside Today's upper bound, so the
+  // band count above would call them healthy. They are not: a 07:40 run wrote
+  // every "today" row at 08:00-17:59, and 40 exceptions across the two demo
+  // tenants were "created" up to ten hours in the future. Checked separately so
+  // that defect fails the run instead of padding the Today count.
+  const [ahead] = await db
+    .select({ n: count() })
+    .from(exceptions)
+    .where(and(eq(exceptions.organizationId, orgId), gte(exceptions.createdAt, now)));
+  const future = Number(ahead?.n ?? 0);
+  if (future > 0 && when === "after") failures++;
+  console.log(`    ${"dated in the FUTURE".padEnd(38)} ${String(future).padStart(6)}${future ? "   <- WRONG" : ""}`);
 }
 
 /**
@@ -214,7 +253,11 @@ async function trimToNewestRun(db: NonNullable<Awaited<ReturnType<typeof getDb>>
 }
 
 /** Re-date this tenant's exceptions across the selectable window. */
-async function respreadExceptions(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, orgId: number) {
+async function respreadExceptions(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  orgId: number,
+  timeZone: string,
+) {
   // Diagnosed rows first, so the curated cases land in the recent band.
   const rows = await db
     .select({ id: exceptions.id, status: exceptions.status, ai: exceptions.aiAnalysis })
@@ -238,7 +281,7 @@ async function respreadExceptions(db: NonNullable<Awaited<ReturnType<typeof getD
 
   const now = new Date();
   for (let i = 0; i < rows.length; i++) {
-    const when = dateForIndex(i, rows.length, now);
+    const when = dateForIndex(i, rows.length, now, timeZone);
     const status = statusForAge(daysAgoForIndex(i, rows.length), rows[i].status as string);
     await db
       .update(exceptions)
