@@ -10,6 +10,9 @@ import {
   daysAgoForIndex,
   dateForIndex,
   zonedDayStart,
+  wallTimeInZone,
+  anchoredDetection,
+  rollDeltaMs,
   statusForAge,
   RECENCY_BANDS,
   RECENCY_WINDOW_DAYS,
@@ -198,5 +201,103 @@ describe("when an exception is aged backwards", () => {
     for (const age of [0, 6, 20, 60]) {
       expect(statusForAge(age, "resolved")).toBe("resolved");
     }
+  });
+});
+
+describe("when timestamps must stay distinct and on the wall clock", () => {
+  const LAGOS = "Africa/Lagos";
+  const localHour = (d: Date, tz: string) =>
+    Number(new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", hourCycle: "h23" }).format(d));
+  const localDate = (d: Date, tz: string) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+  it("should keep working hours on the WALL clock across a daylight-saving change", () => {
+    // Review finding, verbatim: on 25 Oct 2026 in London, midnight + 8 elapsed
+    // hours is 07:00 on the wall. Rows must still read 08:00-17:59.
+    const reference = new Date("2026-10-27T12:00:00Z");
+    let checked = 0;
+    for (let i = 0; i < 400; i++) {
+      const d = dateForIndex(i, 400, reference, "Europe/London");
+      if (localDate(d, "Europe/London") !== "2026-10-25") continue;
+      checked++;
+      expect(localHour(d, "Europe/London"), `row ${i}`).toBeGreaterThanOrEqual(8);
+      expect(localHour(d, "Europe/London"), `row ${i}`).toBeLessThanOrEqual(17);
+    }
+    expect(checked, "no row landed on the DST day, so the test proved nothing").toBeGreaterThan(0);
+    expect(wallTimeInZone(reference, 2, 8 * 3600, "Europe/London").toISOString()).toBe("2026-10-25T08:00:00.000Z");
+  });
+
+  it("should give every row a distinct whole second, however soon after midnight it runs", () => {
+    // Review finding: just after midnight the old spread stored every today row
+    // as the same second. Columns hold seconds, so distinct means distinct
+    // seconds — and never later than the run.
+    const midnight = zonedDayStart(new Date("2026-09-21T12:00:00Z"), 0, LAGOS).getTime();
+    for (const after of [0, 1, 10, 300, 7 * 3600 + 59 * 60, 8 * 3600, 12 * 3600]) {
+      const reference = new Date(midnight + after * 1000);
+      for (const total of [50, 558]) {
+        const stamps = Array.from({ length: total }, (_, i) => dateForIndex(i, total, reference, LAGOS));
+        for (const d of stamps) {
+          expect(d.getTime() % 1000, "not a whole second").toBe(0);
+          expect(d.getTime(), `+${after}s total=${total}: in the future`).toBeLessThanOrEqual(reference.getTime());
+        }
+        expect(new Set(stamps.map((d) => d.getTime())).size, `+${after}s total=${total}: duplicates`).toBe(total);
+      }
+    }
+  });
+
+  it("should move today's overflow to yesterday rather than stack it", () => {
+    // Ten seconds into the day there are ten seconds of today. With 558 rows
+    // there are more today rows than that; the rest belong to yesterday.
+    const midnight = zonedDayStart(new Date("2026-09-21T12:00:00Z"), 0, LAGOS).getTime();
+    const reference = new Date(midnight + 10_000);
+    const today = Array.from({ length: 558 }, (_, i) => dateForIndex(i, 558, reference, LAGOS))
+      .filter((d) => d.getTime() >= midnight).length;
+    expect(today).toBeGreaterThan(0);
+    expect(today).toBeLessThanOrEqual(11);
+  });
+
+  it("should keep a quarter's worth of rows free of shared timestamps", () => {
+    // The old time-of-day formula repeated every 60 rows, so rows 60 apart on
+    // the same day collided — 139 rows in Globus Bank's quarter band did.
+    const reference = new Date("2026-09-21T12:00:00Z");
+    const stamps = Array.from({ length: 2000 }, (_, i) => dateForIndex(i, 2000, reference, LAGOS).getTime());
+    expect(new Set(stamps).size).toBe(2000);
+  });
+});
+
+describe("when an exception is anchored to its transaction", () => {
+  const now = new Date("2026-09-21T12:00:00Z");
+
+  it("should never be raised before the transaction it is about", () => {
+    // 253 Globus and 35 BrightGoods exceptions were, up to 85 days early, on the
+    // Age Tracker — the screen that shows both dates side by side.
+    for (let i = 0; i < 300; i++) {
+      const tx = new Date(now.getTime() - (i % 90) * 86_400_000 - (i % 17) * 60_000);
+      const d = anchoredDetection(tx, i, now);
+      expect(d.getTime(), `row ${i}`).toBeGreaterThanOrEqual(Math.floor(tx.getTime() / 1000) * 1000);
+      expect(d.getTime(), `row ${i}`).toBeLessThanOrEqual(now.getTime());
+      expect(d.getTime() % 1000).toBe(0);
+    }
+  });
+
+  it("should fit detection into the time available for a very recent transaction", () => {
+    const tx = new Date(now.getTime() - 90_000); // 90 seconds ago
+    const d = anchoredDetection(tx, 3, now);
+    expect(d.getTime()).toBeGreaterThanOrEqual(Math.floor(tx.getTime() / 1000) * 1000);
+    expect(d.getTime()).toBeLessThanOrEqual(now.getTime());
+  });
+});
+
+describe("when a tenant's timeline is rolled forward", () => {
+  it("should move it by the whole seconds since its newest transaction", () => {
+    const now = new Date("2026-09-21T12:00:00.750Z");
+    expect(rollDeltaMs(new Date("2026-09-20T12:00:00Z"), now)).toBe(86_400_000);
+  });
+
+  it("should leave a current or future timeline alone rather than move it backwards", () => {
+    const now = new Date("2026-09-21T12:00:00Z");
+    expect(rollDeltaMs(now, now)).toBe(0);
+    expect(rollDeltaMs(new Date("2026-09-22T00:00:00Z"), now)).toBe(0);
+    expect(rollDeltaMs(null, now)).toBe(0);
   });
 });

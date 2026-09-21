@@ -175,23 +175,68 @@ export function zonedDayStart(reference: Date, daysAgo: number, timeZone: string
 }
 
 /**
+ * The instant at which the tenant's wall clock reads `secondsIntoDay` past
+ * midnight, `daysAgo` days before `reference`.
+ *
+ * Built as a WALL time and then resolved to an instant, rather than by adding
+ * elapsed hours to midnight. On a daylight-saving day those differ: London's
+ * clocks go back at 02:00 on 25 October, so midnight plus eight elapsed hours
+ * is 07:00 on the wall, not 08:00. The offset is re-read at the candidate
+ * instant for the same reason zonedDayStart re-reads it.
+ */
+export function wallTimeInZone(reference: Date, daysAgo: number, secondsIntoDay: number, timeZone: string): Date {
+  const offset = zoneOffsetMs(reference, timeZone);
+  const wall = new Date(reference.getTime() + offset);
+  const wallInstant =
+    Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate() - daysAgo) + secondsIntoDay * 1000;
+  let instant = wallInstant - offset;
+  const offsetThen = zoneOffsetMs(new Date(instant), timeZone);
+  if (offsetThen !== offset) instant = wallInstant - offsetThen;
+  return new Date(instant);
+}
+
+/** Working hours: rows land between 08:00:00 and 17:59:59 on the wall clock. */
+const WORKDAY_START_S = 8 * 3600;
+const WORKDAY_S = 10 * 3600;
+/**
+ * The step between consecutive rows' time of day. Prime, and coprime with the
+ * 36,000-second working day, so `index * STRIDE mod 36000` is DIFFERENT for
+ * every index below 36,000: no two rows share a time of day, so no two rows on
+ * the same day share a timestamp.
+ *
+ * The version before used `index % 10` hours with `index * 7 % 60` minutes and
+ * `index * 13 % 60` seconds — which repeats every 60 rows, so rows 60 apart that
+ * fell on the same day had IDENTICAL timestamps. The quarter band, with its
+ * 60-day span, did exactly that for Globus Bank's 139 rows there.
+ */
+const TIME_STRIDE_S = 7919;
+
+function plannedSecondsIntoDay(index: number): number {
+  return WORKDAY_START_S + ((index * TIME_STRIDE_S) % WORKDAY_S);
+}
+
+/**
  * The timestamp for the `index`-th of `total` rows, relative to `reference`,
  * in the tenant's `timeZone`.
  *
- * Rows sit between 08:00 and 17:59 on the tenant's wall clock — working hours,
- * and varied rather than fixed, because a column of identical timestamps is the
- * other way seeded data announces itself. It is independent of the HOST's
- * timezone (an earlier version used setDate/setHours, so "08:00 local" on a
- * UTC+13 machine fell on the previous UTC day), pinned by a test.
+ * Whole seconds, because that is what the timestamp columns store: two values a
+ * few milliseconds apart are the SAME stored value, so "distinct" has to mean
+ * distinct seconds. Independent of the host's timezone, pinned by a test.
  *
- * ── Never in the future ───────────────────────────────────────────────────
+ * ── Never in the future, and no collapse at midnight ──────────────────────
  *
- * A run at 07:40 wrote every "today" row between 08:00 and 17:59, i.e. up to ten
+ * A run at 07:40 wrote every "today" row between 08:00 and 17:59 — up to ten
  * hours AHEAD of the clock: 36 exceptions on Globus Bank and 4 on BrightGoods
- * were created "later today". They still showed under Today, but anything that
- * computes age showed a negative one. So a row for a day that has not reached
- * working hours yet is placed in the part of that day that has already
- * happened, between local midnight and `reference`.
+ * were "created later today". So a today row whose working-hours time has not
+ * arrived is placed in the part of today that HAS happened, before 08:00.
+ *
+ * The first version of that spread milliseconds across the elapsed part of the
+ * day, which review showed collapses: just after midnight there are only a few
+ * seconds of today, so every row stored as the same second. Now each today row
+ * gets its own whole-second slot, and when there are more today rows than
+ * seconds of today so far — at 00:00:10 there are ten — the rest go to
+ * yesterday rather than share a timestamp. That is also simply true: ten seconds
+ * into a day, not much has happened yet.
  */
 export function dateForIndex(
   index: number,
@@ -199,16 +244,57 @@ export function dateForIndex(
   reference: Date = new Date(),
   timeZone: string = "UTC",
 ): Date {
-  const dayStart = zonedDayStart(reference, daysAgoForIndex(index, total), timeZone).getTime();
-  const intoDay = ((8 + (index % 10)) * 3600 + ((index * 7) % 60) * 60 + ((index * 13) % 60)) * 1000;
-  const planned = dayStart + intoDay;
-  if (planned <= reference.getTime()) return new Date(planned);
+  const refS = Math.floor(reference.getTime() / 1000) * 1000;
+  const days = daysAgoForIndex(index, total);
+  const planned = wallTimeInZone(reference, days, plannedSecondsIntoDay(index), timeZone).getTime();
+  if (days > 0 || planned <= refS) return new Date(planned);
 
-  // Only day 0 can reach here. Spread across the elapsed part of today; one
-  // second minimum so a run at 00:00:00 still has somewhere to put a row.
-  const elapsed = Math.max(1000, reference.getTime() - dayStart);
-  const within = dayStart + Math.floor((elapsed * ((index % 10) + 1)) / 11);
-  return new Date(Math.min(within, reference.getTime()));
+  // A today row whose time has not come yet. Today rows are band 0's every
+  // seventh row (daysAgoForIndex cycles band 0 through days 0..6), so this
+  // row's rank among them, and their number, follow from `index` and `total`.
+  const rank = Math.floor(index / 7);
+  const todayRows = Math.ceil(bandSizes(total)[0] / 7);
+  const dayStart = zonedDayStart(reference, 0, timeZone).getTime();
+  // The last usable second: now, or 07:59:59 if working hours have started —
+  // slots stay below 08:00 so they cannot collide with rows kept at their
+  // planned working-hours time.
+  const limit = Math.min(refS, wallTimeInZone(reference, 0, WORKDAY_START_S - 1, timeZone).getTime());
+  const seconds = Math.floor((limit - dayStart) / 1000) + 1;
+
+  if (seconds >= todayRows) {
+    return new Date(dayStart + Math.floor((rank * seconds) / todayRows) * 1000);
+  }
+  if (rank < seconds) return new Date(dayStart + rank * 1000);
+  // Not enough of today has happened to give this row a second of its own.
+  return wallTimeInZone(reference, 1, plannedSecondsIntoDay(index), timeZone);
+}
+
+/**
+ * When an exception on a transaction dated `txDate` was detected.
+ *
+ * Exceptions used to be dated independently of their transactions, which left
+ * 253 of Globus Bank's and 35 of BrightGoods' raised BEFORE the transaction they
+ * are about — up to 85 days early — on the very screen that shows both dates
+ * side by side (the Age Tracker). Reconciliation finds a break after the
+ * transaction exists, so detection follows it: five minutes to four hours
+ * later, never after `now`, and never before the transaction.
+ */
+export function anchoredDetection(txDate: Date, index: number, now: Date = new Date()): Date {
+  const nowS = Math.floor(now.getTime() / 1000) * 1000;
+  const tx = Math.floor(txDate.getTime() / 1000) * 1000;
+  if (tx >= nowS) return new Date(tx);
+  const lag = (5 * 60 + ((index * 37) % 236) * 60) * 1000;
+  if (tx + lag <= nowS) return new Date(tx + lag);
+  return new Date(tx + Math.floor((nowS - tx) / 2000) * 1000);
+}
+
+/**
+ * How far to move a tenant's whole timeline so its newest transaction sits at
+ * `now`. Whole seconds, never negative: a timeline already current is left alone.
+ */
+export function rollDeltaMs(newest: Date | null, now: Date = new Date()): number {
+  if (!newest) return 0;
+  return Math.max(0, Math.floor((now.getTime() - newest.getTime()) / 1000) * 1000);
 }
 
 /**
