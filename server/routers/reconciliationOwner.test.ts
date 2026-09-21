@@ -27,6 +27,7 @@ vi.mock("../db", async (importOriginal) => ({
   createReconciliationJob: vi.fn(),
   updateReconciliationJob: vi.fn(),
   abandonUnstartedReconciliationJob: vi.fn(),
+  getReconciliationJobsByMultiRun: vi.fn(async () => []),
 }));
 vi.mock("../reconciliationQueue", () => ({
   assertReconciliationQueueAvailable: vi.fn(async () => {}),
@@ -107,6 +108,26 @@ describe("when a user starts a multi-channel run", () => {
     vi.mocked(db.getChannels).mockResolvedValue([{ id: 12, name: "a", code: "A", isActive: true }] as never);
     await caller(TENANT).createMultiChannel({ ...multi, targetChannelIds: undefined, allActiveTargets: true });
     expect(db.getChannels).toHaveBeenCalledWith(TENANT);
+  });
+});
+
+describe("when a multi-channel run is opened by its id", () => {
+  const child = (id: number, organizationId: number) => ({
+    id, organizationId, targetChannelId: 12, status: "completed", matchRate: "90.00",
+    totalSourceTxns: 1, totalTargetTxns: 1, matchedCount: 1, exceptionCount: 0, unmatchedCount: 0,
+  });
+
+  it("should show only the caller's own tenant's jobs", async () => {
+    vi.mocked(db.getReconciliationJobsByMultiRun).mockResolvedValue([child(1, TENANT), child(2, 60001)] as never);
+    const run = await caller(TENANT).getMultiRun({ multiRunId: "a" });
+    expect(run.jobCount).toBe(1);
+    expect(run.channels.map((c) => c.jobId)).toEqual([1]);
+  });
+
+  it("should answer another tenant's run exactly as a missing one", async () => {
+    // A UUID is hard to guess but not authorisation; this returned any tenant's run.
+    vi.mocked(db.getReconciliationJobsByMultiRun).mockResolvedValue([child(2, 60001)] as never);
+    await expect(caller(TENANT).getMultiRun({ multiRunId: "a" })).rejects.toThrow("Multi-channel run not found");
   });
 });
 

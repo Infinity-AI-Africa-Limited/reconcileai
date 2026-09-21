@@ -13,8 +13,9 @@ import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { isTenantId } from "@shared/tenantId";
+import { currentPortalOrganizationId } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog, getChannelByIdForOrg, type DbExecutor } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, type DbExecutor } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -104,6 +105,27 @@ export function runOwner(user: { organizationId?: number | null }): number {
     });
   }
   return user.organizationId;
+}
+
+/**
+ * Refuse a job id the caller may not see, before anything about the job is read.
+ *
+ * Jobs are fetched by id alone (`getReconciliationJob`), so every procedure
+ * that takes a job id from the caller must check the job's tenant itself.
+ * `export.csv` / `export.xlsx` did not: any signed-in user could export any
+ * tenant's full reconciliation — matches, exceptions and every transaction —
+ * by walking sequential ids. NOT_FOUND either way, so another tenant's id is
+ * indistinguishable from one that does not exist.
+ */
+export async function assertJobVisible(
+  user: { role: string; organizationId: number | null },
+  jobId: number,
+): Promise<NonNullable<Awaited<ReturnType<typeof getReconciliationJob>>>> {
+  const job = await getReconciliationJob(jobId);
+  if (!job || !canActOnTenant(user, job.organizationId ?? null)) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+  }
+  return job;
 }
 
 /**
@@ -199,8 +221,16 @@ export function canActOnTenant(
 export function channelListScope(
   user: { role: string; organizationId: number | null },
   viewAsOrgId?: number | null,
+  /** The portal tenant from the request context (ctx.viewingAs). */
+  viewingAs?: number | null,
 ): "all" | number | null {
-  if (user.role === "super_admin") return viewAsOrgId ? viewAsOrgId : "all";
+  // Keyed on role, so the organisation override in the request context does not
+  // reach this branch on its own: a super admin in a portal would still get the
+  // whole estate. The portal tenant must be passed in.
+  if (user.role === "super_admin") {
+    const portal = viewAsOrgId || viewingAs;
+    return portal ? portal : "all";
+  }
   return user.organizationId ?? null;
 }
 
@@ -372,7 +402,11 @@ export async function logAudit(
   try {
     await createAuditLog({
       userId,
-      organizationId: organizationId ?? null,
+      // Omitted → the tenant a super admin is acting on through the portal, if
+      // any (server/_core/requestScope.ts); otherwise the global chain, as
+      // before. An explicit `null` still means global — only an OMITTED
+      // argument is filled in, so no caller that chose the global chain is moved.
+      organizationId: organizationId === undefined ? currentPortalOrganizationId() : organizationId,
       action,
       entityType,
       entityId,

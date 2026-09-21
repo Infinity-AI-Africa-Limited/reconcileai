@@ -2,6 +2,7 @@ import { NOT_ADMIN_ERR_MSG, UNAUTHED_ERR_MSG } from '@shared/const';
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
+import { runInRequestScope } from "./requestScope";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
@@ -63,7 +64,16 @@ const refuseReadOnlyWrites = t.middleware(async opts => {
   return next();
 });
 
-const baseProcedure = t.procedure.use(refuseReadOnlyWrites);
+/**
+ * Open the request scope for every call, so helpers that are not handed the
+ * context — the audit logger above all — can still tell which tenant a super
+ * admin is acting on through the portal. See server/_core/requestScope.ts.
+ */
+const bindRequestScope = t.middleware(({ ctx, next }) =>
+  runInRequestScope({ portalOrganizationId: ctx.viewingAs ?? null }, () => next()),
+);
+
+const baseProcedure = t.procedure.use(bindRequestScope).use(refuseReadOnlyWrites);
 
 export const publicProcedure = baseProcedure;
 

@@ -9,15 +9,18 @@
  * tenant's portal and rendering nothing. Every round was a page where one query
  * was forgotten. This makes forgetting fail CI for the pages already fixed.
  *
- * ── What this does NOT yet cover — stated so nobody reads it as more ─────
+ * ── No longer the only line of defence ────────────────────────────────
  *
- *   - Pages not listed below. A scan on 2026-09-21 found roughly fifty
- *     unscoped query call sites across portal-visible pages — Multi-Channel,
- *     Dashboard's distributor card, Audit Trail, Monitor, CBN Reports, Data
- *     Protection and more. They are a known open item, not a pass.
- *   - Mutations. Row-targeted actions on these pages (exceptions.resolve and
- *     friends) still act on the signed-in organisation and are a separate,
- *     known gap.
+ * The portal is now applied structurally: every tRPC request carries the
+ * portal tenant in a header, and for a super admin the server makes it the
+ * request's organisation (server/_core/portalView.ts) — so queries that pass
+ * no `viewAsOrgId`, and mutations, are scoped to the tenant on screen too. The
+ * ~50 unscoped query sites this file used to list as an open item are covered
+ * by that, not by this list.
+ *
+ * This ratchet stays for the pages that still pass `viewAsOrgId`: it keeps a
+ * query's cache key distinct per tenant, and a regression here would still be
+ * a bug worth failing on.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";

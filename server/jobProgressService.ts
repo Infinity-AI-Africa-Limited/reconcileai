@@ -232,8 +232,9 @@ export async function getJobProgress(jobId: number): Promise<JobProgressSummary 
   };
 }
 
-export async function getAllActiveJobsProgress(): Promise<JobProgressSummary[]> {
-  const activeJobs = await db.getActiveJobsProgress();
+/** Live jobs for one organisation — see db.getActiveJobsProgress. */
+export async function getAllActiveJobsProgress(organizationId: number | null): Promise<JobProgressSummary[]> {
+  const activeJobs = await db.getActiveJobsProgress(organizationId);
   const summaries: JobProgressSummary[] = [];
 
   for (const job of activeJobs) {

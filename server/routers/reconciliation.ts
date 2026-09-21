@@ -327,7 +327,12 @@ export const reconciliationRouter = router({
   getMultiRun: protectedProcedure
     .input(z.object({ multiRunId: z.string().min(1).max(36) }))
     .query(async ({ ctx, input }) => {
-      const jobs = await db.getReconciliationJobsByMultiRun(input.multiRunId);
+      // Only the caller's tenant's children. The run id is a UUID — hard to
+      // guess, but not authorisation — and this returned any tenant's run to
+      // whoever held it.
+      const jobs = (await db.getReconciliationJobsByMultiRun(input.multiRunId)).filter((j) =>
+        canActOnTenant(ctx.user, j.organizationId ?? null),
+      );
       if (jobs.length === 0) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Multi-channel run not found" });
       }

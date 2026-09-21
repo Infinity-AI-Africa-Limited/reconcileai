@@ -9,6 +9,8 @@
  */
 
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { PORTAL_SESSION_KEY } from "@/lib/portalRequest";
 
 export type OrgSegment = "financial_services" | "corporate_b2b" | "super_admin" | "retail_commerce";
 
@@ -32,7 +34,9 @@ interface PortalContextValue {
   isViewingAs: boolean;
 }
 
-const SESSION_KEY = "reconcileai_view_as_org";
+// Shared with the request layer, which reads it on every tRPC call
+// (client/src/lib/portalRequest.ts) — one key, so the two cannot disagree.
+const SESSION_KEY = PORTAL_SESSION_KEY;
 
 function loadFromSession(): ViewAsOrg | null {
   try {
@@ -53,20 +57,33 @@ const PortalContext = createContext<PortalContextValue>({
 
 export function PortalProvider({ children }: { children: ReactNode }) {
   const [viewAsOrg, setViewAsOrg] = useState<ViewAsOrg | null>(loadFromSession);
+  const queryClient = useQueryClient();
+
+  // Every tRPC request now carries the portal tenant in a header, and the
+  // server answers for it — but query cache keys do not include it. Without a
+  // reset, entering a portal would keep showing whatever the previous view had
+  // cached until each query happened to refetch: Infinity AI's data under a
+  // tenant's name, or one tenant's under another's. Storage is written FIRST,
+  // so the refetches this triggers already carry the new tenant.
+  const rescope = useCallback(() => {
+    void queryClient.cancelQueries().then(() => queryClient.resetQueries());
+  }, [queryClient]);
 
   const enterPortal = useCallback((org: ViewAsOrg) => {
-    setViewAsOrg(org);
     try {
       sessionStorage.setItem(SESSION_KEY, JSON.stringify(org));
     } catch {}
-  }, []);
+    setViewAsOrg(org);
+    rescope();
+  }, [rescope]);
 
   const exitPortal = useCallback(() => {
-    setViewAsOrg(null);
     try {
       sessionStorage.removeItem(SESSION_KEY);
     } catch {}
-  }, []);
+    setViewAsOrg(null);
+    rescope();
+  }, [rescope]);
 
   return (
     <PortalContext.Provider
@@ -88,21 +105,14 @@ export function usePortalContext(): PortalContextValue {
 
 /** Segment display labels */
 /**
- * The organisation id to send with a tenant-scoped QUERY, or undefined when the
- * viewer is not inside a portal.
+ * The portal tenant's id, or undefined when the viewer is not inside a portal.
  *
- * Entering a portal is client state and nothing more — sessionStorage, read by
- * the sidebar. The server keeps answering for the signed-in user's OWN
- * organisation unless a query passes this. That gap is why every data screen
- * was empty for a super admin inside a tenant's portal: Infinity AI's own
- * organisation holds no transactions, jobs, reports or exceptions, so the
- * screens faithfully reported nothing while the tenant held tens of thousands
- * of rows.
- *
- * Pass it on READS only. The server ignores it for anyone who is not a super
- * admin (see `portalScopedOrgId`), and deliberately never honours it on a
- * mutation: "which tenant am I looking at" and "which tenant may I change" are
- * different questions.
+ * No longer what scopes a query. Every tRPC request now carries the portal
+ * tenant in a header, and the server makes it the request's organisation for a
+ * super admin (server/_core/portalView.ts) — so a query that does not pass this
+ * is scoped all the same. The pages that pass it as `viewAsOrgId` still do; the
+ * server resolves both to the same tenant, and they also keep one tenant's
+ * cached results from ever being served under another's query key.
  */
 export function useViewAsOrgId(): number | undefined {
   return usePortalContext().viewAsOrg?.id;

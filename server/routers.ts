@@ -230,6 +230,7 @@ import {
   transactionOwnerFilter,
   runOwner,
   requireOwnedChannels,
+  assertJobVisible,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -476,7 +477,10 @@ export const appRouter = router({
   system: systemRouter,
 
   auth: router({
-    me: publicProcedure.query((opts) => opts.ctx.user),
+    // The account as it signed in — not the portal view. Inside a tenant's
+    // portal `ctx.user.organizationId` is the TENANT's (server/_core/portalView.ts);
+    // telling the browser the super admin now belongs to that tenant would be false.
+    me: publicProcedure.query((opts) => opts.ctx.actor ?? opts.ctx.user),
     // Which enterprise SSO providers are configured (drives /login buttons).
     oauthProviders: publicProcedure.query(async () => {
       const { enabledSsoProviders } = await import("./_core/sso");
@@ -637,7 +641,7 @@ export const appRouter = router({
         // could build a run across two tenants from the dropdown. Scoping the
         // reads while leaving this list unscoped made the page look tenanted
         // and behave otherwise.
-        const scope = channelListScope(ctx.user, input?.viewAsOrgId);
+        const scope = channelListScope(ctx.user, input?.viewAsOrgId, ctx.viewingAs);
         return scope === "all" ? db.getAllChannelsAcrossTenants() : db.getChannels(scope);
       }),
 
@@ -2046,6 +2050,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2101,6 +2106,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2984,9 +2990,11 @@ export const appRouter = router({
 
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const task = await db.getScheduledTaskById(input.id);
-        if (!task) throw new TRPCError({ code: "NOT_FOUND" });
+        // The task names its tenant. It was served by id alone — any tenant's
+        // schedule and run history to any caller who guessed the id.
+        if (!task || !canActOnTenant(ctx.user, task.organizationId ?? null)) throw new TRPCError({ code: "NOT_FOUND" });
         const history = await db.getScheduleRunHistoryByTask(input.id, 20);
         return {
           ...task,
@@ -3227,13 +3235,18 @@ export const appRouter = router({
       return db.getMonitoringStats(ctx.user.organizationId ?? null);
     }),
 
-    activeJobs: protectedProcedure.query(async () => {
-      return getAllActiveJobsProgress();
+    // The caller's organisation only (the portal tenant, inside a portal). This
+    // returned every tenant's live jobs to any signed-in user.
+    activeJobs: protectedProcedure.query(async ({ ctx }) => {
+      return getAllActiveJobsProgress(ctx.user.organizationId ?? null);
     }),
 
     jobProgress: protectedProcedure
       .input(z.object({ jobId: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // The job names its tenant; the caller must be allowed to see it. It
+        // was served by id alone.
+        await assertJobVisible(ctx.user, input.jobId);
         const progress = await getJobProgress(input.jobId);
         if (!progress) throw new TRPCError({ code: "NOT_FOUND" });
         return progress;
@@ -3463,7 +3476,8 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         if (ctx.user.role === "super_admin") {
           // Portal-view: scope to the viewed org and hide Infinity AI super admins.
-          if (input?.viewAsOrgId) return db.getUsersByOrg(input.viewAsOrgId, { excludeSuperAdmins: true });
+          const portal = input?.viewAsOrgId || ctx.viewingAs;
+          if (portal) return db.getUsersByOrg(portal, { excludeSuperAdmins: true });
           // Super-admin home: full cross-tenant list.
           return db.getAllUsers();
         }

@@ -1007,6 +1007,20 @@ Super admins can "enter" any organisation's portal and see the app scoped to tha
 - `client/src/components/DashboardLayout.tsx` — portal banner, segment-aware sidebar
 - `client/src/pages/SuperAdminDashboard.tsx` — "Enter Portal" button per org row
 
+**How the server knows (structural, since 2026-09-21).** Every tRPC request
+carries the portal tenant in the `x-portal-org` header (`client/src/lib/portalRequest.ts`,
+sent from `main.tsx`). In `server/_core/context.ts`, `applyPortalView` makes that
+tenant the request's `ctx.user.organizationId` — **for `super_admin` only**; the
+header is ignored for everyone else, and an unknown tenant fails CLOSED to no
+organisation (never the operator's own). `ctx.actor` is the signed-in account
+(`auth.me` returns it); `ctx.viewingAs` is the tenant. So every procedure that
+keys on the caller's organisation — reads AND writes — follows the portal
+without passing `viewAsOrgId`. Audit entries written without an explicit
+organisation default to the portal tenant (`server/_core/requestScope.ts`).
+The monitoring SSE stream takes the same id as `?portalOrg=`. Reads that widen
+to "all tenants" by ROLE (e.g. `channelListScope`) must also take `ctx.viewingAs`.
+The React Query cache is reset on entering/leaving a portal (keys carry no tenant).
+
 ### Segment-Specific Navigation
 - `financialServicesMenuItems` — includes CBN Reports, Multi-Channel, Email Settings, Module Configuration
 - `financialServicesAdvancedItems` — full Advanced Tools dropdown (Sample Data, Integrations, API Ingestion, SFTP Config, Anomaly Detection)
