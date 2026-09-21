@@ -46,9 +46,11 @@ describe("when a schedule creates a run", () => {
     expect(vi.mocked(dbMock.createReconciliationJob).mock.calls[0][0]).toMatchObject({ organizationId: 7, userId: 3 });
   });
 
-  it("should fail visibly, creating nothing, when the task has no organisation", async () => {
-    vi.mocked(dbMock.getScheduledTaskById).mockResolvedValue(task({ organizationId: null }));
-    expect((await executeScheduledTask(5)).success).toBe(false);
+  it("should fail visibly, creating nothing, when the task has no organisation — or the legacy 0", async () => {
+    for (const organizationId of [null, 0]) {
+      vi.mocked(dbMock.getScheduledTaskById).mockResolvedValue(task({ organizationId }));
+      expect((await executeScheduledTask(5)).success, String(organizationId)).toBe(false);
+    }
     expect(dbMock.createReconciliationJob).not.toHaveBeenCalled();
   });
 

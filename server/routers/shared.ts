@@ -12,6 +12,7 @@ import { z } from "zod";
 import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
+import { isTenantId } from "@shared/tenantId";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb, createAuditLog, getChannelByIdForOrg, type DbExecutor } from "../db";
 import { organizations, users } from "../../drizzle/schema";
@@ -93,7 +94,10 @@ export const viewAsOrgInput = { viewAsOrgId: z.number().int().positive().optiona
  * portal-write gap.
  */
 export function runOwner(user: { organizationId?: number | null }): number {
-  if (user.organizationId == null) {
+  // Not `== null`: organisation 0 is the legacy non-tenant (CLAUDE.md §19.2
+  // traces unreachable rows to it), and a record filed there belongs to nobody.
+  // Only a positive id names a tenant.
+  if (!isTenantId(user.organizationId)) {
     throw new TRPCError({
       code: "PRECONDITION_FAILED",
       message: "Your account is not linked to an organisation, so a reconciliation run would have no owner.",

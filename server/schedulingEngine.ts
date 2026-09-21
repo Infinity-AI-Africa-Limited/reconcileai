@@ -5,6 +5,7 @@
  */
 import * as db from "./db";
 import { sendReconciliationReport } from "./emailReportService";
+import { isTenantId } from "@shared/tenantId";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -183,7 +184,8 @@ export async function executeScheduledTask(taskId: number): Promise<{
     // produce a run anyone can own — runReconciliation would refuse it — so it
     // fails here, visibly, in the run history, rather than as a dead job.
     const tenant = task.organizationId;
-    if (tenant == null) {
+    // Positive ids only: organisation 0 is the legacy non-tenant (see isTenantId).
+    if (!isTenantId(tenant)) {
       throw new Error("Scheduled task has no owning organisation; it cannot create a reconciliation run");
     }
     const [source, target] = await Promise.all([

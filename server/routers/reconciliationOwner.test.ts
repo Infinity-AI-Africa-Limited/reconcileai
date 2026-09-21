@@ -42,6 +42,7 @@ import * as db from "../db";
 import { enqueueReconciliationRun } from "../reconciliationQueue";
 import { reconciliationRouter } from "./reconciliation";
 import { requireOwnedChannels, runOwner } from "./shared";
+import { isTenantId } from "@shared/tenantId";
 
 const TENANT = 30001;
 /** Channels this tenant can see (its own and shared rails); anything else is another tenant's. */
@@ -121,6 +122,19 @@ describe("when a run's owner and channels are decided", () => {
     expect(runOwner({ organizationId: TENANT })).toBe(TENANT);
     expect(() => runOwner({ organizationId: null })).toThrow(/not linked to an organisation/);
     expect(() => runOwner({})).toThrow(/not linked to an organisation/);
+  });
+
+  it("should refuse the legacy organisation 0, which is no tenant", () => {
+    // `== null` let 0 through; anything filed there belongs to nobody.
+    expect(() => runOwner({ organizationId: 0 })).toThrow(/not linked to an organisation/);
+    for (const id of [0, -1, 1.5, Number.NaN, null, undefined]) expect(isTenantId(id), String(id)).toBe(false);
+    for (const id of [1, 30001]) expect(isTenantId(id)).toBe(true);
+  });
+
+  it("should refuse an organisation-0 caller at the procedure, before any lookup", async () => {
+    await expect(caller(0).create(single)).rejects.toThrow(/not linked to an organisation/);
+    expect(db.getChannelByIdForOrg).not.toHaveBeenCalled();
+    expect(db.createReconciliationJob).not.toHaveBeenCalled();
   });
 });
 
