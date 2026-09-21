@@ -357,7 +357,7 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
   // this script and a scheduled pass can never both apply the same relative
   // shift. `allowList: null` because this script names its tenant explicitly
   // and has already applied its own checks above.
-  const rolled = await rollDemoTimeline(db, orgId, { commit: COMMIT, now, allowList: null });
+  const rolled = await rollDemoTimeline(db, orgId, { commit: COMMIT, now, allowList: null, trigger: "operator_cli" });
   if (rolled.status === "refused") throw new Error(`REFUSING: ${rolled.reason}`);
   const secs = rolled.seconds;
   console.log(

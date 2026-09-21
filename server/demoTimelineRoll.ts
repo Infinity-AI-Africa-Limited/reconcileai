@@ -44,6 +44,14 @@
  *
  * Audit logs are NOT rolled and must never be: they are a tamper-evident hash
  * chain, and rewriting their timestamps is exactly the tampering it detects.
+ * Each roll instead APPENDS to that chain — `demo_timeline_rolled`, in the
+ * tenant's own trail, inside the roll's transaction — so a timestamp that
+ * moved overnight can always be told apart from one a person changed.
+ *
+ * ── Where it runs ────────────────────────────────────────────────────────
+ *
+ * Only in the deployed production service (`rollEnabledHere`). Never under
+ * `pnpm dev`: the local .env names the production database.
  */
 import { and, count, eq, inArray, max, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { getTableColumns } from "drizzle-orm";
@@ -61,8 +69,7 @@ import {
   uploadBatches,
 } from "../drizzle/schema";
 import { slConnectorStores } from "../drizzle/connector_schema";
-import { getDb } from "./db";
-import { rollDeltaMs } from "./demoRecency";
+import { createAuditLog, getDb } from "./db";
 import { DEMO_REPORT_MARKER, isSeededReportSummary } from "./demoReportSeed";
 import { buildReportSummary } from "./reportSummary";
 
@@ -180,13 +187,42 @@ export function rollIntervalMinutes(raw: string | undefined): number {
   return Math.max(5, Math.round(n));
 }
 
+/**
+ * The furthest a roll will move a timeline BACKWARDS, in seconds.
+ *
+ * A newest transaction in the future is rolled back to now — the FMCG seeder
+ * writes today's rows at 09:00, which is ahead of the clock when it runs
+ * earlier that morning, and a forward-only roll then skipped every pass and
+ * left the tenant future-dated for good. But a timeline two days ahead is not
+ * a seeding artefact; it is a bad row, and dragging a whole tenant back by an
+ * outlier's error would be worse than leaving it. Beyond this, the roll
+ * refuses and says so.
+ */
+export const MAX_BACKWARD_SECONDS = 2 * 86_400;
+
+export type RollTrigger = "scheduler" | "operator_cli";
+
 export type RollResult =
   | { status: "rolled"; seconds: number; ms: number }
   | { status: "skipped"; seconds: number; reason: string }
   | { status: "refused"; reason: string };
 
+/** What a measured shift means: roll it, or why not. Pure, so every branch is tested. */
+export function rollDecision(seconds: number | null): { roll: true } | { roll: false; reason: string } {
+  if (seconds === null) return { roll: false, reason: "the tenant has no transactions" };
+  if (seconds < -MAX_BACKWARD_SECONDS) {
+    return {
+      roll: false,
+      reason: `newest transaction is ${Math.round(-seconds / 3600)}h in the FUTURE — beyond a seeding artefact; investigate the row rather than drag the tenant back`,
+    };
+  }
+  if (Math.abs(seconds) < MIN_ROLL_SECONDS) return { roll: false, reason: `newest transaction is within ${MIN_ROLL_SECONDS}s of now` };
+  return { roll: true };
+}
+
 /**
- * Roll one tenant's timeline forward so its newest transaction sits at `now`.
+ * Roll one tenant's timeline so its newest transaction sits at `now` —
+ * forward, or back when it is ahead of the clock (see MAX_BACKWARD_SECONDS).
  *
  * With `commit: false` it only measures, and takes no lock.
  * `allowList: null` is for the operator-run CLI, which names its tenant
@@ -195,7 +231,7 @@ export type RollResult =
 export async function rollDemoTimeline(
   db: Db,
   orgId: number,
-  opts: { commit: boolean; now?: Date; allowList?: readonly string[] | null },
+  opts: { commit: boolean; now?: Date; allowList?: readonly string[] | null; trigger?: RollTrigger },
 ): Promise<RollResult> {
   const allowList = opts.allowList === undefined ? DEMO_TIMELINE_TENANTS : opts.allowList;
 
@@ -203,7 +239,7 @@ export async function rollDemoTimeline(
     const verdict = await eligibility(db, orgId, allowList, false);
     if (!verdict.ok) return { status: "refused", reason: verdict.reason };
     const seconds = await deltaSeconds(db, orgId, opts.now ?? new Date());
-    return { status: "skipped", seconds, reason: "measured only (commit: false)" };
+    return { status: "skipped", seconds: seconds ?? 0, reason: "measured only (commit: false)" };
   }
 
   const started = Date.now();
@@ -215,10 +251,10 @@ export async function rollDemoTimeline(
     // `now` is taken after the lock is held, so a runner that waited on
     // another measures from the moment it actually gets to act.
     const now = opts.now ?? new Date();
-    const seconds = await deltaSeconds(tx, orgId, now);
-    if (seconds < MIN_ROLL_SECONDS) {
-      return { status: "skipped", seconds, reason: `newest transaction is only ${seconds}s old` } as const;
-    }
+    const measured = await deltaSeconds(tx, orgId, now);
+    const decision = rollDecision(measured);
+    if (!decision.roll) return { status: "skipped", seconds: measured ?? 0, reason: decision.reason } as const;
+    const seconds = measured as number;
 
     const jobIds = (
       await tx.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, orgId))
@@ -253,6 +289,29 @@ export async function rollDemoTimeline(
     }
 
     await refreshSeededReportSummary(tx, orgId);
+
+    // A durable record, in the tenant's own audit trail and in THIS
+    // transaction: the rewrite and the evidence of it commit together or not
+    // at all. Without it, a roll leaves only a process log line behind, and a
+    // timestamp that moved overnight is indistinguishable from one a user or a
+    // source system changed. userId null: no person did this.
+    await createAuditLog(
+      {
+        userId: null,
+        organizationId: orgId,
+        action: "demo_timeline_rolled",
+        entityType: "organization",
+        entityId: orgId,
+        details: JSON.stringify({
+          seconds,
+          direction: seconds > 0 ? "forward" : "back",
+          trigger: opts.trigger ?? "scheduler",
+          clampedTo: bound,
+          tables: ROLL_PLAN.map((s) => s.name),
+        }),
+      },
+      tx,
+    );
     return { status: "rolled", seconds, ms: Date.now() - started } as const;
   });
 }
@@ -277,13 +336,19 @@ async function eligibility(
   return rollEligibility(org, Number(stores?.n ?? 0), allowList);
 }
 
-async function deltaSeconds(db: Db | Tx, orgId: number, now: Date): Promise<number> {
+/**
+ * Whole seconds from the newest transaction to `now` — NEGATIVE when the newest
+ * is ahead of the clock — or null when there are no transactions. Signed on
+ * purpose: `rollDeltaMs` floors at zero, which is what left a future-dated
+ * tenant skipped by every pass.
+ */
+async function deltaSeconds(db: Db | Tx, orgId: number, now: Date): Promise<number | null> {
   const [row] = await db
     .select({ newest: max(transactions.transactionDate) })
     .from(transactions)
     .where(eq(transactions.organizationId, orgId));
-  const newest = row?.newest ? new Date(row.newest) : null;
-  return rollDeltaMs(newest, now) / 1000;
+  if (!row?.newest) return null;
+  return Math.trunc((now.getTime() - new Date(row.newest).getTime()) / 1000);
 }
 
 /** One UPDATE moving `keys` of `table` by `shift`, for the rows `where` selects. */
@@ -400,8 +465,19 @@ async function refreshSeededReportSummary(tx: Tx, orgId: number) {
 
 let running = false;
 
-/** One pass over the allow-list. Never throws; logs one line per tenant. */
-export async function rollAllDemoTimelines(): Promise<void> {
+/**
+ * One pass over the allow-list. Never throws; logs one line per tenant.
+ *
+ * Checks `rollEnabledHere` itself rather than trusting its caller: the timer is
+ * one way in, and an exported function is another. A deliberate roll from
+ * anywhere else is the operator CLI, which calls `rollDemoTimeline` per tenant.
+ */
+export async function rollAllDemoTimelines(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const here = rollEnabledHere(env);
+  if (!here.enabled) {
+    console.warn(`[demo-timeline] pass refused: ${here.reason}`);
+    return;
+  }
   if (running) {
     console.warn("[demo-timeline] previous pass still running — skipping this tick");
     return;
@@ -417,11 +493,14 @@ export async function rollAllDemoTimelines(): Promise<void> {
           console.log(`[demo-timeline] ${code}: not present here — nothing to roll`);
           continue;
         }
-        const result = await rollDemoTimeline(db, org.id, { commit: true });
+        const result = await rollDemoTimeline(db, org.id, { commit: true, trigger: "scheduler" });
         if (result.status === "rolled") {
-          console.log(`[demo-timeline] ${code}: rolled +${result.seconds}s in ${result.ms}ms`);
+          console.log(`[demo-timeline] ${code}: rolled ${result.seconds > 0 ? "+" : ""}${result.seconds}s in ${result.ms}ms`);
         } else if (result.status === "refused") {
           console.warn(`[demo-timeline] ${code}: REFUSED — ${result.reason}`);
+        } else if (result.reason.includes("FUTURE")) {
+          // Every other skip is routine; this one needs a person.
+          console.warn(`[demo-timeline] ${code}: NOT ROLLED — ${result.reason}`);
         }
       } catch (err) {
         console.error(`[demo-timeline] ${code}: failed —`, err instanceof Error ? err.message : err);
@@ -433,19 +512,63 @@ export async function rollAllDemoTimelines(): Promise<void> {
 }
 
 /**
- * Start the hourly roll. Returns the interval, or null when it is not started:
- * under test, in an on-premise deployment (a bank's own install has no demo
- * tenants to keep fresh, and a timer that rewrites rows is not something it
- * asked for), or when DEMO_TIMELINE_ROLL_MINUTES disables it.
+ * Where the scheduled roll may run: the deployed production service, and
+ * nowhere else. Pure, so every environment is tested.
+ *
+ * ── An allow-list, and why ────────────────────────────────────────────────
+ *
+ * The first version refused under test and on-premise and ran EVERYWHERE
+ * else — including `pnpm dev` on a laptop, whose `.env` holds the production
+ * DATABASE_URL. Starting a dev server would have rewritten production demo
+ * tenants a minute later. Review caught it. That is the `db:push` hazard
+ * again (CLAUDE.md §12), and the lesson from that one applies: enumerate what
+ * is provably safe and refuse the rest, because a list of dangerous places can
+ * always be re-spelled.
+ *
+ * Provably the deployed service means BOTH:
+ *   - NODE_ENV=production — set by `pnpm start`, never by `pnpm dev`;
+ *   - RAILWAY_ENVIRONMENT_NAME=production — injected by Railway at runtime,
+ *     and by nothing on a developer machine. The name, not the variable's
+ *     presence: a Railway PR or staging environment copies production's
+ *     variables, DATABASE_URL included, and would roll production data from
+ *     unmerged code.
+ *
+ * There is no override. A deliberate manual roll is the operator CLI
+ * (`pnpm demo:recency --commit`), which names its tenant and says what it
+ * will do before it does it.
+ */
+export function rollEnabledHere(env: NodeJS.ProcessEnv): { enabled: true; minutes: number } | { enabled: false; reason: string } {
+  if (env.VITEST) return { enabled: false, reason: "under test" };
+  if ((env.DEPLOYMENT_MODE ?? "cloud").toLowerCase() === "on_premise") {
+    // A bank's own install has no demo tenants to keep fresh, and a timer that
+    // rewrites rows is not something it asked for.
+    return { enabled: false, reason: "on-premise deployment" };
+  }
+  const railwayEnv = env.RAILWAY_ENVIRONMENT_NAME ?? env.RAILWAY_ENVIRONMENT;
+  if (env.NODE_ENV !== "production" || railwayEnv !== "production") {
+    return {
+      enabled: false,
+      reason:
+        `not the deployed production service (NODE_ENV=${env.NODE_ENV ?? "unset"}, ` +
+        `RAILWAY_ENVIRONMENT_NAME=${railwayEnv ?? "unset"}); both must be "production"`,
+    };
+  }
+  const minutes = rollIntervalMinutes(env.DEMO_TIMELINE_ROLL_MINUTES);
+  if (minutes === 0) return { enabled: false, reason: "switched off by DEMO_TIMELINE_ROLL_MINUTES" };
+  return { enabled: true, minutes };
+}
+
+/**
+ * Start the scheduled roll. Returns the interval, or null when `rollEnabledHere`
+ * says this is not the place — logged, so a deploy that did not start it says why.
  */
 export function startDemoTimelineRoll(env: NodeJS.ProcessEnv = process.env): NodeJS.Timeout | null {
-  if (env.VITEST) return null;
-  if ((env.DEPLOYMENT_MODE ?? "cloud").toLowerCase() === "on_premise") return null;
-  const minutes = rollIntervalMinutes(env.DEMO_TIMELINE_ROLL_MINUTES);
-  if (minutes === 0) {
-    console.log("[demo-timeline] disabled (DEMO_TIMELINE_ROLL_MINUTES)");
+  const here = rollEnabledHere(env);
+  if (!here.enabled) {
+    if (!env.VITEST) console.log(`[demo-timeline] not started: ${here.reason}`);
     return null;
   }
+  const minutes = here.minutes;
   console.log(`[demo-timeline] rolling ${DEMO_TIMELINE_TENANTS.join(", ")} every ${minutes} min`);
   // First pass a minute after boot, clear of startup work, so a deploy also
   // brings the demo current rather than waiting up to an hour.

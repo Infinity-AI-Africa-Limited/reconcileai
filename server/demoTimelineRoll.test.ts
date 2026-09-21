@@ -14,14 +14,27 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { SQL, getTableColumns, getTableName } from "drizzle-orm";
 import { MySqlDialect } from "drizzle-orm/mysql-core";
+
+// No path in this file may reach a real database. `getDb` resolves to null, so
+// anything that gets past the environment check stops there; the audit writer
+// stays real because every roll passes it the fake transaction.
+vi.mock("./db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./db")>();
+  return { ...actual, getDb: vi.fn(async () => null) };
+});
+import { getDb } from "./db";
 import { DEMO_REPORT_MARKER } from "./demoReportSeed";
 import { OPERATOR_ORG_CODE } from "../shared/operatorOrg";
 import {
   DEMO_TIMELINE_TENANTS,
+  MAX_BACKWARD_SECONDS,
   MIN_ROLL_SECONDS,
   ROLL_PLAN,
+  rollAllDemoTimelines,
+  rollDecision,
   rollDemoTimeline,
   rollEligibility,
+  rollEnabledHere,
   rollIntervalMinutes,
   startDemoTimelineRoll,
 } from "./demoTimelineRoll";
@@ -45,12 +58,14 @@ const dialect = new MySqlDialect();
 
 function fakeDb(script: Script) {
   const log: string[] = [];
+  const inserts: { table: string; values: Record<string, unknown> }[] = [];
   const sqlLog: { table: string; key: string; sql: string; params: unknown[] }[] = [];
   const select = (fields?: Record<string, unknown>) => {
     let table = "";
     const q = {
       from(t: Parameters<typeof getTableName>[0]) { table = getTableName(t); return q; },
       where() { return q; },
+      orderBy() { return q; },
       limit() { return q; },
       for(strength: string) { log.push(`lock ${table} ${strength}`); return q; },
       then(resolve: (rows: unknown[]) => unknown, reject: (e: unknown) => unknown) {
@@ -92,10 +107,19 @@ function fakeDb(script: Script) {
       };
     },
     delete(t: Parameters<typeof getTableName>[0]) { log.push(`delete ${getTableName(t)}`); return { where: async () => {} }; },
-    insert(t: Parameters<typeof getTableName>[0]) { log.push(`insert ${getTableName(t)}`); return { values: async () => {} }; },
+    insert(t: Parameters<typeof getTableName>[0]) {
+      const table = getTableName(t);
+      return { values: async (v: Record<string, unknown>) => { log.push(`insert ${table}`); inserts.push({ table, values: v }); } };
+    },
     async transaction<T>(fn: (tx: unknown) => Promise<T>) { log.push("begin"); const r = await fn(db); log.push("commit"); return r; },
   };
-  return { db: db as unknown as Parameters<typeof rollDemoTimeline>[0], log, sqlLog };
+  return { db: db as unknown as Parameters<typeof rollDemoTimeline>[0], log, sqlLog, inserts };
+}
+
+/** The audit entry a roll wrote, parsed, or undefined. */
+function auditOf(inserts: { table: string; values: Record<string, unknown> }[]) {
+  const row = inserts.find((i) => i.table === "audit_logs")?.values;
+  return row ? { ...row, details: JSON.parse(String(row.details)) as Record<string, unknown> } : undefined;
 }
 
 /** The log line a plan step should produce: its keys, `~` on the unclamped ones. */
@@ -217,11 +241,78 @@ describe("when an eligible tenant is rolled", () => {
   });
 
   it("should only measure, without a lock or a write, when not committing", async () => {
-    const { db, log } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
+    const { db, log, inserts } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
     const result = await rollDemoTimeline(db, 1, { commit: false, now: NOW });
     expect(result).toMatchObject({ status: "skipped", seconds: 3600 });
     expect(log.some((l) => l.startsWith("lock"))).toBe(false);
     expect(updates(log)).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+});
+
+describe("when a roll rewrites a tenant's timestamps", () => {
+  it("should record it in that tenant's audit trail, inside the same transaction", async () => {
+    // Otherwise a timestamp that moved overnight is indistinguishable from one a
+    // person or a source system changed.
+    const { db, log, inserts } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
+    await rollDemoTimeline(db, 1, { commit: true, now: NOW, trigger: "operator_cli" });
+    const audit = auditOf(inserts);
+    expect(audit).toMatchObject({ organizationId: 1, userId: null, action: "demo_timeline_rolled", entityType: "organization", entityId: 1 });
+    expect(audit?.details).toMatchObject({ seconds: 3600, direction: "forward", trigger: "operator_cli", clampedTo: "2026-09-21 12:00:00" });
+    // Committed with the rewrite, not after it.
+    const at = log.indexOf("insert audit_logs");
+    expect(at).toBeGreaterThan(log.indexOf("begin"));
+    expect(at).toBeLessThan(log.indexOf("commit"));
+  });
+
+  it("should record nothing when nothing was rewritten", async () => {
+    const justNow = new Date(NOW.getTime() - 10_000);
+    for (const script of [{ org: globus, newest: justNow }, { org: { ...globus, isDemo: false }, newest: HOUR_AGO }] as Script[]) {
+      const { db, inserts } = fakeDb({ jobIds: [5], ...script });
+      await rollDemoTimeline(db, 1, { commit: true, now: NOW });
+      expect(auditOf(inserts), JSON.stringify(script)).toBeUndefined();
+    }
+  });
+});
+
+describe("when the newest transaction is ahead of the clock", () => {
+  it("should roll the timeline BACK to now, clamped, rather than skip it forever", () => {
+    // The FMCG seeder writes today's rows at 09:00; seeded earlier that morning,
+    // the newest transaction is in the future. A forward-only roll measured
+    // zero and skipped every pass, so the clamps never ran.
+    const threeHoursAhead = new Date(NOW.getTime() + 3 * 3600_000);
+    const { db, log, inserts, sqlLog } = fakeDb({ org: globus, newest: threeHoursAhead, jobIds: [5] });
+    return rollDemoTimeline(db, 1, { commit: true, now: NOW }).then((result) => {
+      expect(result).toMatchObject({ status: "rolled", seconds: -10800 });
+      expect(updates(log).length).toBeGreaterThan(5);
+      expect(sqlLog.find((s) => s.key === "transactionDate")!.params).toContain(-10800);
+      expect(auditOf(inserts)?.details).toMatchObject({ seconds: -10800, direction: "back" });
+    });
+  });
+
+  it("should refuse to drag a tenant back by more than two days, and say why", async () => {
+    // Two days ahead is not a seeding artefact, it is a bad row.
+    const { db, log, inserts } = fakeDb({ org: globus, newest: new Date(NOW.getTime() + 3 * 86_400_000), jobIds: [5] });
+    const result = await rollDemoTimeline(db, 1, { commit: true, now: NOW });
+    expect(result.status).toBe("skipped");
+    expect(result.status === "skipped" ? result.reason : "").toMatch(/FUTURE/);
+    expect(updates(log)).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+});
+
+describe("when deciding what a measured shift means", () => {
+  it("should roll either way beyond the minimum, within the backward cap", () => {
+    expect(rollDecision(3600)).toEqual({ roll: true });
+    expect(rollDecision(-3600)).toEqual({ roll: true });
+    expect(rollDecision(-MAX_BACKWARD_SECONDS)).toEqual({ roll: true });
+  });
+
+  it("should not roll a tenant with no transactions, a near-zero shift, or one past the cap", () => {
+    expect(rollDecision(null).roll).toBe(false);
+    expect(rollDecision(MIN_ROLL_SECONDS - 1).roll).toBe(false);
+    expect(rollDecision(-(MIN_ROLL_SECONDS - 1)).roll).toBe(false);
+    expect(rollDecision(-MAX_BACKWARD_SECONDS - 1).roll).toBe(false);
   });
 });
 
@@ -233,7 +324,8 @@ describe("when the tenant has a seeded report", () => {
     const { db, log } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], reports: [seeded] });
     await rollDemoTimeline(db, 1, { commit: true, now: NOW });
     expect(log).toContain("update reconciliation_reports summary");
-    expect(log.some((l) => l.startsWith("delete") || l.startsWith("insert"))).toBe(false);
+    expect(log).not.toContain("delete reconciliation_reports");
+    expect(log).not.toContain("insert reconciliation_reports");
   });
 
   it("should leave reports alone when which one is current is ambiguous, or none is seeded", async () => {
@@ -290,18 +382,65 @@ describe("when the server starts", () => {
     vi.useRealTimers();
   });
 
-  it("should not start under test, on-premise, or when switched off", () => {
-    expect(startDemoTimelineRoll({ VITEST: "true" })).toBeNull();
-    expect(startDemoTimelineRoll({ DEPLOYMENT_MODE: "on_premise" })).toBeNull();
-    expect(startDemoTimelineRoll({ DEPLOYMENT_MODE: "ON_PREMISE" })).toBeNull();
-    expect(startDemoTimelineRoll({ DEMO_TIMELINE_ROLL_MINUTES: "off" })).toBeNull();
+  const PROD = { NODE_ENV: "production", RAILWAY_ENVIRONMENT_NAME: "production" };
+
+  it("should run in the deployed production service", () => {
+    expect(rollEnabledHere(PROD)).toEqual({ enabled: true, minutes: 60 });
+    expect(rollEnabledHere({ ...PROD, DEMO_TIMELINE_ROLL_MINUTES: "30" })).toEqual({ enabled: true, minutes: 30 });
+    // Railway's older name for the same variable.
+    expect(rollEnabledHere({ NODE_ENV: "production", RAILWAY_ENVIRONMENT: "production" }).enabled).toBe(true);
   });
 
-  it("should start in the cloud deployment", () => {
+  it("should never run from a developer's machine, whose .env may name production", () => {
+    // The finding: `pnpm dev` is NODE_ENV=development, VITEST unset, cloud mode —
+    // and the first version started the timer there.
+    expect(rollEnabledHere({ NODE_ENV: "development" }).enabled).toBe(false);
+    expect(rollEnabledHere({}).enabled).toBe(false);
+    // `pnpm start` on a laptop is production mode, but not Railway.
+    expect(rollEnabledHere({ NODE_ENV: "production" }).enabled).toBe(false);
+    // Railway variables with a dev server (e.g. `railway run pnpm dev`).
+    expect(rollEnabledHere({ NODE_ENV: "development", RAILWAY_ENVIRONMENT_NAME: "production" }).enabled).toBe(false);
+  });
+
+  it("should never run in a Railway PR or staging environment, which copies production's DATABASE_URL", () => {
+    for (const name of ["staging", "pr-138", "Production ", ""]) {
+      expect(rollEnabledHere({ NODE_ENV: "production", RAILWAY_ENVIRONMENT_NAME: name }).enabled, name).toBe(false);
+    }
+  });
+
+  it("should not run under test, on-premise, or when switched off — even in production", () => {
+    expect(rollEnabledHere({ ...PROD, VITEST: "true" }).enabled).toBe(false);
+    expect(rollEnabledHere({ ...PROD, DEPLOYMENT_MODE: "on_premise" }).enabled).toBe(false);
+    expect(rollEnabledHere({ ...PROD, DEPLOYMENT_MODE: "ON_PREMISE" }).enabled).toBe(false);
+    expect(rollEnabledHere({ ...PROD, DEMO_TIMELINE_ROLL_MINUTES: "off" }).enabled).toBe(false);
+  });
+
+  it("should not start a timer anywhere it may not run", () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const env of [{ VITEST: "true" }, { NODE_ENV: "development" }, { ...PROD, DEPLOYMENT_MODE: "on_premise" }]) {
+      expect(startDemoTimelineRoll(env), JSON.stringify(env)).toBeNull();
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("should refuse a pass called directly from anywhere it may not run, before touching the database", async () => {
+    // The timer is one way in; the exported function is another.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(getDb).mockClear();
+    await rollAllDemoTimelines({ NODE_ENV: "development" });
+    await rollAllDemoTimelines({ NODE_ENV: "production" });
+    expect(getDb).not.toHaveBeenCalled();
+    // The positive: in production the pass does reach for the database.
+    await rollAllDemoTimelines(PROD);
+    expect(getDb).toHaveBeenCalledTimes(1);
+  });
+
+  it("should start in the deployed production service", () => {
     // Fake timers: nothing fires, so no pass can reach a database.
     vi.useFakeTimers();
     vi.spyOn(console, "log").mockImplementation(() => {});
-    expect(startDemoTimelineRoll({})).not.toBeNull();
+    expect(startDemoTimelineRoll(PROD)).not.toBeNull();
     expect(vi.getTimerCount()).toBe(2); // the first pass after boot, and the interval
   });
 });

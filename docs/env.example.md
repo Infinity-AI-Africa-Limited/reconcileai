@@ -246,7 +246,12 @@ Leave blank until Woodcore whitelists the production server's IP address.
 # BRIGHTGOODS_DEMO) so their newest transaction stays within the hour and every
 # list that opens on Today shows data. Unset = 60. "0" or "off" disables it.
 # Values under 5 are raised to 5 — each roll rewrites ~81k demo rows.
-# Never runs when DEPLOYMENT_MODE=on_premise. See server/demoTimelineRoll.ts.
+# Runs ONLY where NODE_ENV=production AND RAILWAY_ENVIRONMENT_NAME=production
+# (Railway injects the latter). Never under `pnpm dev`, never in a Railway
+# PR/staging environment, never with DEPLOYMENT_MODE=on_premise, and there is
+# no override — a manual roll is `pnpm demo:recency --commit`.
+# Each roll is recorded in the tenant's audit trail (action demo_timeline_rolled).
+# See server/demoTimelineRoll.ts.
 DEMO_TIMELINE_ROLL_MINUTES=60
 ```
 

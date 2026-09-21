@@ -7372,7 +7372,8 @@ startBucketPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
 // Keep the two demo tenants' timelines current (hourly; allow-listed by code,
-// refuses anything that is not a demo tenant). Off under test and on-premise.
+// refuses anything that is not a demo tenant). Runs ONLY in the deployed
+// production service — never under `pnpm dev`, whose .env may name production.
 startDemoTimelineRoll();
 // Pre-warm the shared demo user so the first guest gets instant data
 // Runs asynchronously — does not block server startup
