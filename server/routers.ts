@@ -227,6 +227,7 @@ import {
   viewAsOrgInput,
   canActOnTenant,
   channelListScope,
+  transactionOwnerFilter,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -910,12 +911,11 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
         return db.getTransactions({
           // Honours the super-admin portal switcher; see portalScopedOrgId.
           organizationId: portalScopedOrgId(ctx.user, input.viewAsOrgId),
-          userId: ctx.user.id,
-          isAdmin,
+          // Organisation-wide, not per-uploader, except for guests.
+          userId: transactionOwnerFilter(ctx.user),
           channelId: input.channelId,
           status: input.status,
           dateFrom: input.dateFrom ? new Date(input.dateFrom) : undefined,
@@ -2416,6 +2416,7 @@ export const appRouter = router({
           totalTransactions: 0,
           matchRate: 0,
           totalExceptions: 0,
+          openExceptions: 0,
           avgProcessingTime: 0,
         };
       }
@@ -2425,6 +2426,10 @@ export const appRouter = router({
           ? ((stats.transactions.matched / stats.transactions.total) * 100)
           : 0,
         totalExceptions: stats.exceptions.total,
+        // The CFO card is titled "Open Exceptions" and showed `total` — every
+        // resolved and dismissed exception counted as outstanding (558 against
+        // 148 actually open on the Globus demo). Open is its own figure.
+        openExceptions: stats.exceptions.open,
         avgProcessingTime: 0, // Placeholder - would need to be calculated from job data
       };
     }),

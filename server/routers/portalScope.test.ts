@@ -13,7 +13,9 @@
  * and is pinned here rather than restated at each call site.
  */
 import { describe, it, expect } from "vitest";
-import { canActOnTenant, channelListScope, portalScopedOrgId } from "./shared";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { canActOnTenant, channelListScope, portalScopedOrgId, transactionOwnerFilter } from "./shared";
 
 const staff = { role: "super_admin", organizationId: 30002 };
 const tenantAdmin = { role: "admin", organizationId: 1 };
@@ -118,5 +120,37 @@ describe("when the channel list is requested", () => {
       expect(scope, `${role} got the cross-tenant list`).not.toBe("all");
       expect(scope, `${role} got another tenant's channels`).toBe(1);
     }
+  });
+});
+
+describe("when a tenant member lists transactions", () => {
+  it("should see the organisation's rows, not only the ones they uploaded", () => {
+    // Every role but `admin` used to be narrowed to its own uploads, so a super
+    // admin in the Globus portal saw 0 of 1,191 transactions for the day and a
+    // SHOPLINE order (user 0) was invisible to everyone but an admin.
+    for (const role of ["operations", "cfo", "compliance", "super_admin", "admin", "user"]) {
+      expect(transactionOwnerFilter({ id: 42, isGuest: false }), role).toBeUndefined();
+    }
+    expect(transactionOwnerFilter({ id: 42 })).toBeUndefined();
+    expect(transactionOwnerFilter({ id: 42, isGuest: null })).toBeUndefined();
+  });
+
+  it("should still narrow a guest to their own uploads, since guests share one tenant", () => {
+    expect(transactionOwnerFilter({ id: 42, isGuest: true })).toBe(42);
+  });
+});
+
+describe("when transactions.list builds its query", () => {
+  // The unit above proves the rule; this proves the procedure uses it. The old
+  // code passed `userId: ctx.user.id` with an admin-only bypass, and keeping
+  // that shape while adding the helper elsewhere would leave the defect in place.
+  const src = readFileSync(path.join(__dirname, "..", "routers.ts"), "utf8").replace(/\r\n/g, "\n");
+  const start = src.indexOf("  transactions: router({");
+  const block = src.slice(start, src.indexOf("\n  }),", start));
+
+  it("should narrow by the owner filter, never by the caller's id directly", () => {
+    expect(start, "transactions router not found — has it moved?").toBeGreaterThan(-1);
+    expect(block).toContain("userId: transactionOwnerFilter(ctx.user)");
+    expect(block).not.toMatch(/userId: ctx[.]user[.]id/);
   });
 });
