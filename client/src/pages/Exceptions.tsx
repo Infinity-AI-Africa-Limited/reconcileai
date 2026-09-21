@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
 import { useAuth } from "@/_core/hooks/useAuth";
 import ExceptionGlossary from "@/components/ExceptionGlossary";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -41,6 +42,8 @@ const TEMPLATE_CATEGORIES = [
 type TemplateCategory = typeof TEMPLATE_CATEGORIES[number];
 
 export default function Exceptions() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const { user } = useAuth();
   const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
   const {
@@ -67,6 +70,7 @@ export default function Exceptions() {
   );
 
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
+    viewAsOrgId,
     status: statusFilter !== "all" ? statusFilter : undefined,
     dateFrom: dateFromObj,
     dateTo: dateToObj,

@@ -7,13 +7,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Loader2, Search, ChevronLeft, ChevronRight } from "lucide-react";
 import { useOrgSegment } from "@/hooks/useOrgSegment";
 import { labelForPath } from "@/lib/navItems";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 export default function TransactionsPage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const segment = useOrgSegment();
   // The same source the sidebar reads, so a merchant who clicks
   // "Orders & Payments" does not land on a page headed "Transactions".
   const heading = labelForPath("/transactions", segment) ?? "Transactions";
-  const { data: channels } = trpc.channels.list.useQuery();
+  const { data: channels } = trpc.channels.list.useQuery({ viewAsOrgId });
   const [filters, setFilters] = useState({
     channelId: "",
     status: "",
@@ -27,6 +30,7 @@ export default function TransactionsPage() {
   const limit = 50;
 
   const queryInput = useMemo(() => ({
+    viewAsOrgId,
     channelId: filters.channelId ? parseInt(filters.channelId) : undefined,
     status: filters.status || undefined,
     dateFrom: filters.dateFrom || undefined,
@@ -36,7 +40,7 @@ export default function TransactionsPage() {
     search: filters.search || undefined,
     limit,
     offset: page * limit,
-  }), [filters, page]);
+  }), [filters, page, viewAsOrgId]);
 
   const { data, isLoading } = trpc.transactions.list.useQuery(queryInput);
   const channelMap = useMemo(() => new Map(channels?.map((c) => [c.id, c]) || []), [channels]);

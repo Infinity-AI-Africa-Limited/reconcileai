@@ -6,6 +6,7 @@ import { Loader2, Network, ShieldCheck, Share2, Download, RefreshCw, Info, Trend
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { usePortalContext } from "@/contexts/PortalContext";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 // Simple inline bar-chart (no library dependency).
 function MiniBarChart({ data }: { data: { label: string; value: number }[] }) {
@@ -28,10 +29,12 @@ function MiniBarChart({ data }: { data: { label: string; value: number }[] }) {
 }
 
 export default function ExceptionIntelligencePage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const utils = trpc.useUtils();
-  const { data: settings, isLoading } = trpc.exceptionIntelligence.getSettings.useQuery();
-  const { data: status } = trpc.exceptionIntelligence.status.useQuery();
-  const { data: flywheel } = trpc.exceptionIntelligence.flywheelStats.useQuery();
+  const { data: settings, isLoading } = trpc.exceptionIntelligence.getSettings.useQuery({ viewAsOrgId });
+  const { data: status } = trpc.exceptionIntelligence.status.useQuery({ viewAsOrgId });
+  const { data: flywheel } = trpc.exceptionIntelligence.flywheelStats.useQuery({ viewAsOrgId });
   const update = trpc.exceptionIntelligence.updateSettings.useMutation({
     onSuccess: () => {
       utils.exceptionIntelligence.getSettings.invalidate();
@@ -227,7 +230,7 @@ export default function ExceptionIntelligencePage() {
               </div>
               <Switch
                 checked={participating}
-                onCheckedChange={(v) => update.mutate({ shareEnabled: v, consumeEnabled: v })}
+                onCheckedChange={(v) => update.mutate({ viewAsOrgId,  shareEnabled: v, consumeEnabled: v })}
                 disabled={update.isPending}
               />
             </div>
@@ -241,7 +244,7 @@ export default function ExceptionIntelligencePage() {
               </div>
               <Switch
                 checked={participating}
-                onCheckedChange={(v) => update.mutate({ shareEnabled: v, consumeEnabled: v })}
+                onCheckedChange={(v) => update.mutate({ viewAsOrgId,  shareEnabled: v, consumeEnabled: v })}
                 disabled={update.isPending}
               />
             </div>
@@ -268,7 +271,7 @@ export default function ExceptionIntelligencePage() {
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
-            <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate()}>
+            <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate({ viewAsOrgId })}>
               {sync.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               Refresh shared pool
             </Button>
