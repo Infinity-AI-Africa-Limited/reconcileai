@@ -910,7 +910,17 @@ export async function findDuplicateTransactions(
 
 // ─── Reconciliation Jobs ─────────────────────────────────────────────
 
-export async function createReconciliationJob(data: InsertReconciliationJob) {
+/**
+ * Create a reconciliation job. `organizationId` is REQUIRED by the type.
+ *
+ * It was optional, and every caller — both run procedures and the scheduler —
+ * left it out. `runReconciliation` refuses a job with no owning organisation
+ * ("refusing to run"), so every run started from the UI or a schedule was
+ * created and then failed, for every tenant, while the demo tenants looked
+ * healthy on runs the seeders insert directly. Making it required turns a
+ * forgotten owner into a compile error instead of a dead run.
+ */
+export async function createReconciliationJob(data: InsertReconciliationJob & { organizationId: number }) {
   const db = await getDb();
   if (!db) return null;
   return insertJobUnderTenantLock(db, data);
@@ -1806,7 +1816,8 @@ export async function getFullReconciliationReport(jobId: number) {
 
 // ─── Scheduled Tasks ────────────────────────────────────────────────
 
-export async function createScheduledTask(data: InsertScheduledTask) {
+/** `organizationId` is required for the same reason as createReconciliationJob. */
+export async function createScheduledTask(data: InsertScheduledTask & { organizationId: number }) {
   const db = await getDb();
   if (!db) return null;
   const result = await db.insert(scheduledTasks).values(data);

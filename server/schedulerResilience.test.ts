@@ -17,6 +17,9 @@ vi.mock("./db", () => ({
   updateScheduleRunHistory: vi.fn(),
   createReconciliationJob: vi.fn(),
   updateScheduledTask: vi.fn(),
+  // The task's channels are checked against its organisation before a job is
+  // created (executeScheduledTask). Resolves to a channel unless a test says not.
+  getChannelByIdForOrg: vi.fn(async (id: number) => ({ id })),
 }));
 
 // ─── Mock executeScheduledTask (internal to schedulingEngine) ────────
@@ -200,6 +203,9 @@ describe("schedulerTick — duplicate-run guard", () => {
       totalRuns: 0,
       failedRuns: 0,
       userId: 1,
+      organizationId: 7,
+      sourceChannelId: 1,
+      targetChannelId: 2,
     } as never);
     vi.mocked(dbMock.createScheduleRunHistory).mockResolvedValue(1 as never);
     // Job creation fails transiently …
