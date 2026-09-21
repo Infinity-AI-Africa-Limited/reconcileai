@@ -83,6 +83,28 @@ export function portalScopedOrgId(
 export const viewAsOrgInput = { viewAsOrgId: z.number().int().positive().optional() };
 
 /**
+ * Whose transactions a tenant list shows: the whole organisation's, except to a
+ * guest, who sees only their own. Returns the user id to narrow by, or undefined
+ * for "no narrowing — the organisation is the boundary".
+ *
+ * `transactions.list` used to narrow EVERY role except `admin` to rows the
+ * caller had personally uploaded — the one tenant read that did, since
+ * exceptions, jobs and reports have always been organisation-wide. So an
+ * operations user saw exceptions on transactions their own list would not show;
+ * rows a connector ingests (a SHOPLINE order carries user 0) were invisible to
+ * everyone but an admin, the App Store reviewer included; and a super admin in
+ * the Globus Bank portal saw 0 of its 1,191 transactions for the day, because a
+ * seed account had loaded them. The tenancy predicate is unchanged and still
+ * unconditional in `getTransactions`; only the per-uploader filter goes.
+ *
+ * Guests keep it. Demo guests share one tenant, and one guest's uploads are not
+ * another's to read.
+ */
+export function transactionOwnerFilter(user: { id: number; isGuest?: boolean | null }): number | undefined {
+  return user.isGuest ? user.id : undefined;
+}
+
+/**
  * May this caller act on a row that belongs to `tenantId`?
  *
  * For procedures that take a ROW id from the client — a job id, a report id —

@@ -1,18 +1,21 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearch } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, AlertTriangle, CheckCircle2, Eye, ClipboardList,
-  FilterX, Filter, CalendarDays, X, Download, Lock, RefreshCw
+  FilterX, Filter, Download, Lock, RefreshCw
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
-import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
+import { useDateRange } from "@/hooks/useDateRange";
+import { DateRangeBar } from "@/components/DateRangeBar";
+import { rangeFromSearch } from "@/lib/dateRange";
+import { EXCEPTION_LIST_STATUSES, statusFromSearch } from "@/lib/listLinks";
 import { useAuth } from "@/_core/hooks/useAuth";
 import ExceptionGlossary from "@/components/ExceptionGlossary";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
@@ -47,16 +50,23 @@ export default function Exceptions() {
   const viewAsOrgId = useViewAsOrgId();
   const { user } = useAuth();
   const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
-  const {
-    dateFrom, dateTo, dateFromObj, dateToObj,
-    setDateFrom, setDateTo, applyPreset, resetToToday,
-    activePreset, isToday, isSingleDay, today,
-  } = useDateRange("reconcileai_exceptions_daterange");
+  // A link (a dashboard count) names the rows it counted; honour it for this
+  // visit. Read once: the URL is where the viewer ARRIVED from, not live state.
+  const search = useSearch();
+  const [arrival] = useState(() => ({
+    range: rangeFromSearch(search),
+    status: statusFromSearch(search, EXCEPTION_LIST_STATUSES),
+  }));
+  const range = useDateRange("reconcileai_exceptions_daterange", { initial: arrival.range });
+  const { dateFromObj, dateToObj, setDateFrom, resetToDefault, isToday, label: dateLabel } = range;
 
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  // ONE status filter. There used to be two: the Status menu wrote
+  // `filters.status`, while the query and the notice read a `statusFilter`
+  // nothing ever set — so choosing "Open" changed the menu and nothing else.
+  const [statusFilter, setStatusFilter] = useState<string>(arrival.status ?? "all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
-  const [filters, setFilters] = useState({ status: "all", category: "all", severity: "all" });
+  const [filters, setFilters] = useState({ category: "all", severity: "all" });
   const [autoFilter, setAutoFilter] = useState<boolean>(true);
 
   useEffect(() => { setAutoFilter(readFilterPref()); }, []);
@@ -179,8 +189,9 @@ export default function Exceptions() {
     if (filters.severity !== "all" && ex.severity !== filters.severity) return false;
     return true;
   }) ?? [];
-
-  const dateLabel = isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`;
+  const loaded = data?.data?.length ?? 0;
+  const matchingTotal = data?.total ?? 0;
+  const clientFiltered = filters.category !== "all" || filters.severity !== "all";
 
   return (
     <div className="space-y-6">
@@ -195,7 +206,7 @@ export default function Exceptions() {
           onClick={async () => {
             try {
               const res = await exportXlsxMutation.mutateAsync({
-                status: filters.status !== "all" ? filters.status : undefined,
+                status: statusFilter !== "all" ? statusFilter : undefined,
                 severity: filters.severity !== "all" ? filters.severity : undefined,
                 category: filters.category !== "all" ? filters.category : undefined,
               });
@@ -231,57 +242,16 @@ export default function Exceptions() {
 
       {/* Filters row */}
       <div className="flex flex-wrap gap-3 items-center">
-        {/* Quick-select preset pills */}
-        <div className="flex items-center gap-1 rounded-lg border bg-muted/30 p-1">
-          {DATE_PRESETS.map((p) => (
-            <button
-              key={p.key}
-              onClick={() => applyPreset(p.key as DatePreset)}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                activePreset === p.key
-                  ? "bg-primary text-primary-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+        <DateRangeBar range={range} />
 
-        {/* Date range inputs */}
-        <div className="flex items-center gap-2 bg-muted/40 border rounded-lg px-3 py-2">
-          <CalendarDays className="h-4 w-4 text-muted-foreground shrink-0" />
-          <div className="flex items-center gap-1.5">
-            <Input
-              type="date"
-              value={dateFrom}
-              max={dateTo}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
-            />
-            <span className="text-xs text-muted-foreground">→</span>
-            <Input
-              type="date"
-              value={dateTo}
-              min={dateFrom}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
-            />
-          </div>
-          {!isToday && (
-            <button onClick={resetToToday} className="ml-1 text-muted-foreground hover:text-foreground" title="Reset to today">
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-
-        {/* Status */}
-        <Select value={filters.status} onValueChange={(v) => setFilters({ ...filters, status: v })}>
+        {/* Status — sent to the server, so it filters every row, not just the loaded page */}
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-40"><SelectValue placeholder="Status" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Statuses</SelectItem>
             <SelectItem value="open">Open</SelectItem>
             <SelectItem value="in_review">In Review</SelectItem>
+            <SelectItem value="escalated">Escalated</SelectItem>
             <SelectItem value="resolved">Resolved</SelectItem>
             <SelectItem value="dismissed">Dismissed</SelectItem>
           </SelectContent>
@@ -328,6 +298,7 @@ export default function Exceptions() {
                 <thead>
                   <tr className="border-b">
                     <th className="text-left py-3 px-2 font-medium text-muted-foreground">ID</th>
+                    <th className="text-left py-3 px-2 font-medium text-muted-foreground">Raised</th>
                     <th className="text-left py-3 px-2 font-medium text-muted-foreground">Category</th>
                     <th className="text-left py-3 px-2 font-medium text-muted-foreground">Severity</th>
                     <th className="text-left py-3 px-2 font-medium text-muted-foreground">Description</th>
@@ -343,6 +314,12 @@ export default function Exceptions() {
                     return (
                       <tr key={ex.id} className={`border-b last:border-0 hover:bg-muted/30 ${isStale ? "bg-amber-50/40" : ""}`}>
                         <td className="py-3 px-2 font-mono text-xs">{ex.id}</td>
+                        {/* When it was raised — the only way to see, on this page, that the list is current. */}
+                        <td className="py-3 px-2 text-xs text-muted-foreground whitespace-nowrap">
+                          {ex.createdAt
+                            ? new Date(ex.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+                            : "-"}
+                        </td>
                         <td className="py-3 px-2">
                           <span className="text-xs font-medium">{ex.category?.replace(/_/g, " ")}</span>
                         </td>
@@ -373,7 +350,13 @@ export default function Exceptions() {
               </table>
             </div>
             <p className="text-xs text-muted-foreground mt-3">
-              Showing {filtered.length} exception{filtered.length !== 1 ? "s" : ""} — {dateLabel}
+              {/* Say when the list is a slice. A dashboard count of 558 beside a
+                  page that silently stopped at 200 reads as missing data. */}
+              {loaded < matchingTotal
+                ? `Showing the ${loaded.toLocaleString()} most recent of ${matchingTotal.toLocaleString()} exceptions — narrow the dates or status to see the rest`
+                : `Showing ${filtered.length} exception${filtered.length !== 1 ? "s" : ""}`}
+              {clientFiltered && loaded > 0 ? ` (${filtered.length} match the category/severity filter)` : ""}
+              {" — "}{dateLabel}
             </p>
           </CardContent>
         </Card>
@@ -383,10 +366,12 @@ export default function Exceptions() {
             <CheckCircle2 className="h-12 w-12 text-green-500 mb-4" />
             <h3 className="font-semibold text-lg">No Exceptions Found</h3>
             <p className="text-muted-foreground text-sm mt-1">
-              {isToday ? "No exceptions for today." : "No exceptions match the selected date range and filters."}
+              {isToday && statusFilter === "all" && !clientFiltered
+                ? "No exceptions for today."
+                : "No exceptions match the selected date range and filters."}
             </p>
-            {!isToday && (
-              <Button variant="outline" size="sm" className="mt-4" onClick={resetToToday}>Reset to today</Button>
+            {range.isDefault ? null : (
+              <Button variant="outline" size="sm" className="mt-4" onClick={resetToDefault}>Reset to today</Button>
             )}
           </CardContent>
         </Card>
