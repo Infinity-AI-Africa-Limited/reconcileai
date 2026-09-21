@@ -52,6 +52,8 @@ type Script = {
   reports?: { id: number; jobId: number; createdAt: Date; summary: unknown }[];
   /** Reconciliation runs pending or running for the tenant. */
   activeRuns?: number;
+  /** SHOPLINE stores seen by every store read after the first (a store attached mid-roll). */
+  storesLater?: number;
 };
 
 const JOB = {
@@ -64,6 +66,7 @@ const dialect = new MySqlDialect();
 function fakeDb(script: Script) {
   const log: string[] = [];
   const inserts: { table: string; values: Record<string, unknown> }[] = [];
+  let storeReads = 0;
   type Where = { table: string; fields: string[]; params: unknown[]; sql?: string; locked?: boolean };
   const wheres: Where[] = [];
   const sqlLog: { table: string; key: string; sql: string; params: unknown[] }[] = [];
@@ -101,7 +104,12 @@ function fakeDb(script: Script) {
   const rows = (table: string, fields: Record<string, unknown> | undefined, locked: boolean): unknown[] => {
     switch (table) {
       case "organizations": return script.org ? [script.org] : [];
-      case "sl_connector_stores": return [{ n: script.stores ?? 0 }];
+      case "sl_connector_stores": {
+        // One row per store. `storesLater` models a store attached mid-roll:
+        // the first read sees `stores`, every later read sees `storesLater`.
+        const n = storeReads++ === 0 ? (script.stores ?? 0) : (script.storesLater ?? script.stores ?? 0);
+        return Array.from({ length: n }, (_, i) => ({ id: 700 + i }));
+      }
       case "transactions": return [{ newest: script.newest ?? null }];
       case "reconciliation_jobs":
         // Three shapes: the live runs (a LOCKING read), the tenant's job ids, a full job row.
@@ -330,6 +338,31 @@ describe("when the newest transaction is ahead of the clock", () => {
     expect(result.status === "skipped" ? result.reason : "").toMatch(/FUTURE/);
     expect(updates(log)).toEqual([]);
     expect(inserts).toEqual([]);
+  });
+});
+
+describe("when a SHOPLINE store could be attached during the roll", () => {
+  it("should check for stores with LOCKING reads, before the shift and again just before commit", async () => {
+    // A plain read sees the snapshot from BEGIN and would miss a store attached since.
+    const { db, log } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
+    expect((await rollDemoTimeline(db, 1, { commit: true, now: NOW })).status).toBe("rolled");
+    const storeLocks = log.map((l, i) => (l === "lock sl_connector_stores update" ? i : -1)).filter((i) => i >= 0);
+    expect(storeLocks, log.join(" | ")).toHaveLength(2);
+    const lastUpdate = log.lastIndexOf(updates(log).at(-1)!);
+    expect(storeLocks[0]).toBeLessThan(log.indexOf("read transactions"));
+    expect(storeLocks[1]).toBeGreaterThan(lastUpdate);
+    expect(storeLocks[1]).toBeGreaterThan(log.indexOf("insert audit_logs"));
+  });
+
+  it("should roll everything back, and say so, when a store appears before commit", async () => {
+    const { db, log } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], stores: 0, storesLater: 1 });
+    const result = await rollDemoTimeline(db, 1, { commit: true, now: NOW });
+    expect(result.status).toBe("refused");
+    expect(result.status === "refused" ? result.reason : "").toMatch(/SHOPLINE store was attached during the roll; rolled back/);
+    // The transaction threw, so it never committed — a real database discards
+    // every update and the audit entry with it.
+    expect(log).toContain("begin");
+    expect(log).not.toContain("commit");
   });
 });
 

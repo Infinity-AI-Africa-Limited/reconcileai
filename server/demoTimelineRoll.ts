@@ -345,7 +345,22 @@ export async function rollDemoTimeline(
       },
       tx,
     );
+
+    // Last, just before commit: is the tenant STILL not a SHOPLINE store?
+    // Provisioning does not take the organisations lock, so a store attached
+    // since the first check would have gone unseen. If one exists now, undo
+    // everything. That closes the race rather than narrowing it: a store's
+    // orders are ingested only after its store row exists, so any row this
+    // roll moved that belongs to a store implies a store this read will see.
+    const storesNow = await shoplineStores(tx, orgId, true);
+    if (storesNow > 0) {
+      throw new RollAborted(`a SHOPLINE store was attached during the roll; rolled back — its rows mirror a real store`);
+    }
     return { status: "rolled", seconds, ms: Date.now() - started } as const;
+  }).catch((err: unknown) => {
+    // The transaction has rolled back; report it as the refusal it is.
+    if (err instanceof RollAborted) return { status: "refused", reason: err.message } as const;
+    throw err;
   });
 }
 
@@ -362,12 +377,23 @@ async function eligibility(
     .limit(1);
   const [org] = lock ? await query.for("update") : await query;
   if (!org) return { ok: false, reason: `organisation ${orgId} does not exist` };
-  const [stores] = await db
-    .select({ n: count() })
-    .from(slConnectorStores)
-    .where(eq(slConnectorStores.organizationId, orgId));
-  return rollEligibility(org, Number(stores?.n ?? 0), allowList);
+  return rollEligibility(org, await shoplineStores(db, orgId, lock), allowList);
 }
+
+/**
+ * SHOPLINE stores attached to the tenant. Under the roll's transaction this is
+ * a LOCKING read: a plain SELECT would read the snapshot from BEGIN and miss a
+ * store attached since — and then re-date a tenant that already mirrors a real
+ * store. Store provisioning does not take the organisations lock, so the roll
+ * also asks again just before committing (see rollDemoTimeline).
+ */
+async function shoplineStores(db: Db | Tx, orgId: number, lock: boolean): Promise<number> {
+  const query = db.select({ id: slConnectorStores.id }).from(slConnectorStores).where(eq(slConnectorStores.organizationId, orgId));
+  return (lock ? await query.for("update") : await query).length;
+}
+
+/** Thrown inside the roll's transaction to roll it back; turned into a refusal. */
+class RollAborted extends Error {}
 
 /**
  * Whole seconds from the newest transaction to `now` — NEGATIVE when the newest
