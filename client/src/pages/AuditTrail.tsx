@@ -29,7 +29,13 @@ export default function AuditTrailPage() {
       if (!r) throw new Error("No result");
       setIntegrity({ valid: r.valid, signedRows: r.signedRows, reason: r.reason });
       if (r.valid) {
-        toast.success(`Audit chain intact — ${r.signedRows.toLocaleString()} entries verified${r.unsignedRows ? `, ${r.unsignedRows} legacy` : ""}`);
+        // Rounded rows are stated, not folded silently into "verified": they
+        // passed under the narrower rounded-write rule (server/auditChain.ts).
+        toast.success(
+          `Audit chain intact — ${r.signedRows.toLocaleString()} entries verified` +
+            (r.roundedRows ? ` (${r.roundedRows.toLocaleString()} at the second they were signed, stored rounded up)` : "") +
+            (r.unsignedRows ? `, ${r.unsignedRows} legacy` : ""),
+        );
       } else {
         toast.error(`Tampering detected: ${r.reason}`);
       }

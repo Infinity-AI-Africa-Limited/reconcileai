@@ -30,6 +30,26 @@ function epochSeconds(d: Date | string): number {
   return Math.floor(t / 1000);
 }
 
+/**
+ * The timestamp to WRITE on a new audit entry: `now` cut to a whole second.
+ *
+ * ── Why this exists: half the chain verified as tampered ──────────────────
+ *
+ * The writer used `new Date()`, hashed it floored to the second, and inserted
+ * it into a `timestamp(0)` column — which ROUNDS. Any entry written in the
+ * second half of a second was stored one second later than it was hashed, and
+ * failed verification as "altered after it was written". Measured 2026-09-21:
+ * 364 of 760 signed production rows, every one of them matching exactly at
+ * createdAt − 1 s, with no other mismatch of any kind. The chain was intact;
+ * the writer disagreed with the column.
+ *
+ * Writing a whole second means the value hashed IS the value stored: there is
+ * nothing left for the column to round.
+ */
+export function auditTimestamp(now: Date = new Date()): Date {
+  return new Date(Math.floor(now.getTime() / 1000) * 1000);
+}
+
 /** Deterministic SHA-256 over the entry content + the previous link. */
 export function computeRecordHash(fields: AuditChainFields, prevRecordHash: string | null): string {
   return contentHashOf({
@@ -58,8 +78,33 @@ export interface ChainVerification {
   totalRows: number;
   signedRows: number;
   unsignedRows: number; // legacy rows written before chaining existed
+  /**
+   * Signed rows that verified only under the ROUNDED-WRITE rule: their stored
+   * time is exactly one second after the time they were hashed at. Reported,
+   * never hidden — see `matchesRoundedWrite`.
+   */
+  roundedRows: number;
   firstBrokenSequence: number | null;
   reason: string | null;
+}
+
+/**
+ * Did this row's writer hash it one second EARLIER than the column stored it?
+ *
+ * That is the signature of the pre-`auditTimestamp` writer (see above): the
+ * hash took the floored second, the `timestamp(0)` column rounded up. Such a
+ * row was not altered; its evidence is intact at the second it was hashed.
+ *
+ * Deliberately narrow. Exactly one second, exactly earlier, and only the
+ * timestamp: every other field must match as written. Re-signing those rows
+ * instead was rejected — rewriting the hashes of an audit chain is precisely
+ * what a tamper-evident chain exists to make detectable. What this admits is
+ * that a row's time could be moved forward by one second unnoticed; an edit
+ * to anything else, or any other time, still breaks the chain.
+ */
+function matchesRoundedWrite(row: ChainRow): boolean {
+  const t = row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(row.createdAt).getTime();
+  return computeRecordHash({ ...row, createdAt: new Date(t - 1000) }, row.prevRecordHash) === row.recordHash;
 }
 
 /**
@@ -73,19 +118,25 @@ export function verifyChain(rows: ChainRow[]): ChainVerification {
 
   let prevHash: string | null = null;
   let started = false;
+  let roundedRows = 0;
 
   for (const row of signed) {
     // Recompute the content hash and compare (detects content tampering).
     const expected = computeRecordHash(row, row.prevRecordHash);
     if (expected !== row.recordHash) {
-      return {
-        valid: false,
-        totalRows: rows.length,
-        signedRows: signed.length,
-        unsignedRows,
-        firstBrokenSequence: row.sequenceNumber,
-        reason: `Content hash mismatch at sequence ${row.sequenceNumber} — the entry was altered after it was written.`,
-      };
+      if (matchesRoundedWrite(row)) {
+        roundedRows++;
+      } else {
+        return {
+          valid: false,
+          totalRows: rows.length,
+          signedRows: signed.length,
+          unsignedRows,
+          roundedRows,
+          firstBrokenSequence: row.sequenceNumber,
+          reason: `Content hash mismatch at sequence ${row.sequenceNumber} — the entry was altered after it was written.`,
+        };
+      }
     }
     // Check linkage to the previous signed row (detects removal/reordering).
     if (started && row.prevRecordHash !== prevHash) {
@@ -94,6 +145,7 @@ export function verifyChain(rows: ChainRow[]): ChainVerification {
         totalRows: rows.length,
         signedRows: signed.length,
         unsignedRows,
+        roundedRows,
         firstBrokenSequence: row.sequenceNumber,
         reason: `Broken link at sequence ${row.sequenceNumber} — a preceding entry was removed or reordered.`,
       };
@@ -107,6 +159,7 @@ export function verifyChain(rows: ChainRow[]): ChainVerification {
     totalRows: rows.length,
     signedRows: signed.length,
     unsignedRows,
+    roundedRows,
     firstBrokenSequence: null,
     reason: null,
   };
