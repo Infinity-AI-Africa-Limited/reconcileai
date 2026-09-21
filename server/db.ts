@@ -940,21 +940,26 @@ export async function createReconciliationJob(data: InsertReconciliationJob & { 
  *
  * Both paths take the organisations row FIRST, so they cannot deadlock. For a
  * tenant that is never rolled, the lock is uncontended: one extra indexed
- * SELECT … FOR UPDATE per job created. A job with no organisation takes no
- * lock; the roll never targets one.
+ * SELECT … FOR UPDATE per job created.
+ *
+ * The owner is required, so the lock ALWAYS engages. It used to be optional,
+ * and every creator omitted it — which is how this lock first shipped unable
+ * to engage for any real run (and how every such run failed to start; see
+ * createReconciliationJob).
  *
  * Every live job is created here — tests hold other writers of
  * `reconciliation_jobs` to the seeders, which only ever write completed runs.
  */
-export async function insertJobUnderTenantLock(db: DbHandle, data: InsertReconciliationJob): Promise<number> {
+export async function insertJobUnderTenantLock(
+  db: DbHandle,
+  data: InsertReconciliationJob & { organizationId: number },
+): Promise<number> {
   return db.transaction(async (tx) => {
-    if (data.organizationId != null) {
-      await tx
-        .select({ id: organizations.id })
-        .from(organizations)
-        .where(eq(organizations.id, data.organizationId))
-        .for("update");
-    }
+    await tx
+      .select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.id, data.organizationId))
+      .for("update");
     const result = await tx.insert(reconciliationJobs).values(data);
     return result[0].insertId;
   });

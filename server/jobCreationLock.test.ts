@@ -36,7 +36,7 @@ function fakeDb() {
   return { db: db as unknown as Parameters<typeof insertJobUnderTenantLock>[0], log };
 }
 
-const job = (organizationId: number | null) =>
+const job = (organizationId: number) =>
   ({ userId: 1, organizationId, name: "run", dateFrom: new Date(), dateTo: new Date(), status: "pending" }) as Parameters<typeof insertJobUnderTenantLock>[1];
 
 describe("when a reconciliation job is created", () => {
@@ -46,11 +46,9 @@ describe("when a reconciliation job is created", () => {
     expect(log).toEqual(["begin", "lock organizations update", "insert reconciliation_jobs", "commit"]);
   });
 
-  it("should take no lock for a job with no organisation, which no roll can target", async () => {
-    const { db, log } = fakeDb();
-    await insertJobUnderTenantLock(db, job(null));
-    expect(log).toEqual(["begin", "insert reconciliation_jobs", "commit"]);
-  });
+  // No "without an organisation" case: the owner is required by the type, so
+  // there is no path that skips the lock. It used to be optional and every
+  // caller omitted it — the lock then engaged for no real run at all.
 });
 
 describe("when anything writes a reconciliation job", () => {
