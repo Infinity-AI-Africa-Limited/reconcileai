@@ -1,4 +1,5 @@
-import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne, type SQL } from "drizzle-orm";
+import { eq, and, gte, lte, lt, like, or, desc, asc, sql, inArray, isNull, ne, count, min, type SQL } from "drizzle-orm";
+import { UNRESOLVED_EXCEPTION_STATUSES } from "@shared/exceptionStatus";
 import { drizzle } from "drizzle-orm/mysql2";
 import type { MySqlColumn } from "drizzle-orm/mysql-core";
 import * as schema from "../drizzle/schema";
@@ -1155,6 +1156,39 @@ export async function insertExceptionsBatch(dataArray: InsertException[]) {
  * exceptions. The column now exists (migration 0078), so the exemption is gone
  * and the tenancy predicate is unconditional like every other scoped reader.
  */
+/**
+ * Unresolved exceptions that a date-filtered list is currently HIDING: created
+ * before `before`, and still needing work.
+ *
+ * The Payment Exceptions page and the Review Queue both open on a date range
+ * that defaults to today, while the dashboard counts unresolved exceptions
+ * all-time. So a merchant saw "1 open exception" on the dashboard and an empty
+ * exceptions page — the one row created on 19 August sat outside "today". The
+ * count and the list disagreed, silently, and the list is where the work is.
+ *
+ * This lets the page say so and offer the range that reveals them, rather than
+ * changing the presets or re-dating anyone's data to hide the mismatch.
+ */
+export async function getUnresolvedExceptionsBefore(
+  organizationId: number | null,
+  before: Date,
+  status?: string,
+): Promise<{ count: number; oldest: Date | null }> {
+  const db = await getDb();
+  if (!db) return { count: 0, oldest: null };
+  const [row] = await db
+    .select({ n: count(), oldest: min(exceptions.createdAt) })
+    .from(exceptions)
+    .where(and(
+      orgFilter(exceptions.organizationId, organizationId),
+      status
+        ? eq(exceptions.status, status as typeof exceptions.$inferSelect.status)
+        : inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+      lt(exceptions.createdAt, before),
+    ));
+  return { count: Number(row?.n ?? 0), oldest: row?.oldest ?? null };
+}
+
 export async function getExceptions(filters: {
   organizationId: number | null;
   jobId?: number;
@@ -1246,7 +1280,7 @@ export async function getOpenExceptionsForAging(organizationId: number | null, l
     .leftJoin(users, eq(exceptions.assignedTo, users.id))
     .where(and(
       orgFilter(exceptions.organizationId, organizationId),
-      inArray(exceptions.status, ["open", "in_review", "escalated"]),
+      inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
     ))
     .orderBy(asc(exceptions.createdAt))
     .limit(limit);

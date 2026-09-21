@@ -231,6 +231,7 @@ import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
 import { buildReportSummary } from "./reportSummary";
+import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -243,29 +244,68 @@ async function dispatchWebhook(event: string, payload: any) {
 }
 
 // ─── Distributor Identity Registry Router ───────────────────────────
+/**
+ * The tenant a Distributor Registry call acts on.
+ *
+ * Every procedure below looked the caller up and used THEIR organisation, so a
+ * super admin inside BrightGoods' portal saw Infinity AI's registry — empty —
+ * and anything they created or confirmed went there too. This honours the
+ * portal exactly as portalScopedOrgId does everywhere else.
+ *
+ * One extra rule, because the portal widens who the target can be: when the
+ * target is a VIEWED tenant, that tenant must itself be one that holds
+ * distributors. The feature gate on this router checks the CALLER's segment,
+ * and a super admin's always passes — so without this, staff could file a
+ * distributor against a bank. Distributors belong to Corporate B2B and to no
+ * other vertical (owner ruling 2026-08-08, CLAUDE.md §9C), and this is a write
+ * path, so it uses the STRICT check: an unknown segment does not qualify.
+ */
+async function distributorTenant(
+  ctx: { user: { openId: string; role: string } },
+  viewAsOrgId?: number,
+): Promise<number | null> {
+  const user = await db.getUserByOpenId(ctx.user.openId);
+  if (!user?.organizationId) return null;
+  const tenant = portalScopedOrgId({ role: ctx.user.role, organizationId: user.organizationId }, viewAsOrgId);
+  if (tenant !== null && tenant !== user.organizationId) {
+    const org = await db.getOrganizationById(tenant);
+    if (!org || !featureStrictlyAppliesTo("distributor_registry", org.segment)) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "That organisation's vertical does not keep a distributor registry.",
+      });
+    }
+  }
+  return tenant;
+}
+
 const distributorRouter = router({
   list: distributorProcedure
     .input(z.object({
+      ...viewAsOrgInput,
       status: z.string().optional(),
       search: z.string().optional(),
       limit: z.number().optional(),
       offset: z.number().optional(),
     }))
     .query(async ({ ctx, input }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) return [];
-      return db.getDistributors({ organizationId: user.organizationId, ...input });
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!tenant) return [];
+      const { viewAsOrgId: _v, ...filters } = input;
+      return db.getDistributors({ organizationId: tenant, ...filters });
     }),
 
   stats: distributorProcedure
-    .query(async ({ ctx }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
-      return db.getDistributorStats(user.organizationId);
+    .input(z.object({ ...viewAsOrgInput }).optional())
+    .query(async ({ ctx, input }) => {
+      const tenant = await distributorTenant(ctx, input?.viewAsOrgId);
+      if (!tenant) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
+      return db.getDistributorStats(tenant);
     }),
 
   create: distributorProcedure
     .input(z.object({
+      ...viewAsOrgInput,
       canonicalName: z.string().min(1),
       registeredBusinessName: z.string().optional(),
       taxId: z.string().optional(),
@@ -279,13 +319,16 @@ const distributorRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.createDistributor({ ...input, organizationId: user.organizationId, createdBy: user.id });
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!user || !tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      const { viewAsOrgId: _v, ...fields } = input;
+      await db.createDistributor({ ...fields, organizationId: tenant, createdBy: user.id });
       return { success: true };
     }),
 
   update: distributorProcedure
     .input(z.object({
+      ...viewAsOrgInput,
       id: z.number(),
       canonicalName: z.string().optional(),
       registeredBusinessName: z.string().optional(),
@@ -300,19 +343,20 @@ const distributorRouter = router({
       notes: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      const { id, ...data } = input;
-      await db.updateDistributor(id, user.organizationId, data);
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      const { id, viewAsOrgId: _v, ...data } = input;
+      await db.updateDistributor(id, tenant, data);
       return { success: true };
     }),
 
   confirm: distributorProcedure
-    .input(z.object({ id: z.number() }))
+    .input(z.object({ ...viewAsOrgInput, id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.updateDistributor(input.id, user.organizationId, {
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!user || !tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.updateDistributor(input.id, tenant, {
         status: "active",
         confirmedBy: user.id,
         confirmedAt: new Date(),
@@ -321,11 +365,11 @@ const distributorRouter = router({
     }),
 
   addVariant: distributorProcedure
-    .input(z.object({ id: z.number(), variant: z.string().min(1) }))
+    .input(z.object({ ...viewAsOrgInput, id: z.number(), variant: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.addDistributorNameVariant(input.id, user.organizationId, input.variant);
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.addDistributorNameVariant(input.id, tenant, input.variant);
       return { success: true };
     }),
 });
@@ -891,11 +935,17 @@ export const appRouter = router({
   // ─── Exception Age / Escalation Tracker ──────────────────────────
   ageTracker: router({
     // Ops control-centre summary: aging buckets + ₦ exposure + over-aged tally.
-    summary: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    summary: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Every Age Tracker procedure answers for the tenant ON SCREEN — see
+      // portalScopedOrgId. It read the signed-in organisation, so inside Globus
+      // Bank's portal the tracker aged Infinity AI's queue, which is empty.
+      const tenant = portalScopedOrgId(ctx.user, input?.viewAsOrgId);
+      const orgId = tenant ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
+      const rows = await db.getOpenExceptionsForAging(tenant);
       const now = new Date();
       const items = rows.map((r) => ({
         ageDays: ageTracker.ageDays(r.createdAt, now),
@@ -906,12 +956,13 @@ export const appRouter = router({
 
     // The aging list, oldest first; optionally only the over-aged items.
     list: protectedProcedure
-      .input(z.object({ onlyOverAged: z.boolean().default(false), limit: z.number().int().min(1).max(1000).default(200) }))
+      .input(z.object({ ...viewAsOrgInput, onlyOverAged: z.boolean().default(false), limit: z.number().int().min(1).max(1000).default(200) }))
       .query(async ({ ctx, input }) => {
-        const orgId = ctx.user.organizationId ?? 0;
+        const tenant = portalScopedOrgId(ctx.user, input.viewAsOrgId);
+        const orgId = tenant ?? 0;
         const settings = orgId ? await db.getAgingSettings(orgId) : null;
         const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-        const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
+        const rows = await db.getOpenExceptionsForAging(tenant);
         const now = new Date();
         let items = rows.map((r) => {
           const age = ageTracker.ageDays(r.createdAt, now);
@@ -940,17 +991,21 @@ export const appRouter = router({
 
     // Escalate a single over-aged exception (visible workflow action).
     escalate: operationsProcedure
-      .input(z.object({ id: z.number().int().positive(), note: z.string().max(2000).optional() }))
+      .input(z.object({ ...viewAsOrgInput, id: z.number().int().positive(), note: z.string().max(2000).optional() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+        // The viewed tenant, so Escalate on a row the tracker just showed acts on
+        // that row. Against the signed-in organisation the update matched no row,
+        // and the button reported success having changed nothing.
+        const tenant = portalScopedOrgId(ctx.user, input.viewAsOrgId);
+        await db.updateException(input.id, tenant, {
           status: "escalated",
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
         await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua);
         // Flywheel write-path (audit fix): escalations are learnable outcomes.
-        if (ctx.user.organizationId) {
-          const _orgId = ctx.user.organizationId;
+        if (tenant) {
+          const _orgId = tenant;
           const _userId = ctx.user.id;
           void import("./exceptionIntelligence").then((ei) =>
             ei.captureExceptionOutcome({
@@ -967,22 +1022,25 @@ export const appRouter = router({
       }),
 
     // One-click: escalate every over-aged item still open (ops bulk action).
-    bulkEscalateOverAged: operationsProcedure.mutation(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    bulkEscalateOverAged: operationsProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .mutation(async ({ ctx, input }) => {
+      const tenant = portalScopedOrgId(ctx.user, input?.viewAsOrgId);
+      const orgId = tenant ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
+      const rows = await db.getOpenExceptionsForAging(tenant);
       const now = new Date();
       const overAged = rows.filter(
         (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
       );
-      await Promise.all(overAged.map((r) => db.updateException(r.id, ctx.user.organizationId ?? null, { status: "escalated" })));
+      await Promise.all(overAged.map((r) => db.updateException(r.id, tenant, { status: "escalated" })));
       const { ip, ua } = getClientInfo(ctx);
       await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
       // Flywheel write-path (audit fix): each bulk escalation is a learnable
       // outcome. Fire-and-forget, sequential to avoid hammering the DB.
-      if (ctx.user.organizationId && overAged.length > 0) {
-        const _orgId = ctx.user.organizationId;
+      if (tenant && overAged.length > 0) {
+        const _orgId = tenant;
         const _userId = ctx.user.id;
         const _ids = overAged.map((r) => r.id);
         void (async () => {
@@ -1003,16 +1061,18 @@ export const appRouter = router({
       return { success: true, count: overAged.length };
     }),
 
-    getSettings: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    getSettings: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       return { slaDays: settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS };
     }),
 
     saveSettings: operationsProcedure
-      .input(z.object({ slaDays: z.number().int().min(1).max(365) }))
+      .input(z.object({ ...viewAsOrgInput, slaDays: z.number().int().min(1).max(365) }))
       .mutation(async ({ ctx, input }) => {
-        const orgId = ctx.user.organizationId ?? 0;
+        const orgId = portalScopedOrgId(ctx.user, input.viewAsOrgId) ?? 0;
         if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization context for SLA settings" });
         await db.upsertAgingSettings(orgId, input.slaDays);
         await logAudit(ctx.user.id, "update_aging_sla", "exception_aging_settings", orgId, { slaDays: input.slaDays });
@@ -1043,6 +1103,21 @@ export const appRouter = router({
           ...input,
           organizationId: portalScopedOrgId(ctx.user, input.viewAsOrgId),
         });
+      }),
+
+    // What the current date range is hiding. See getUnresolvedExceptionsBefore.
+    hiddenByRange: protectedProcedure
+      .input(z.object({
+        ...viewAsOrgInput,
+        dateFrom: z.date(),
+        status: z.string().max(30).optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        return db.getUnresolvedExceptionsBefore(
+          portalScopedOrgId(ctx.user, input.viewAsOrgId),
+          input.dateFrom,
+          input.status,
+        );
       }),
 
     resolve: operationsProcedure
@@ -1510,9 +1585,14 @@ export const appRouter = router({
   resolutionTemplates: router({
     list: protectedProcedure
       .input(z.object({
+        ...viewAsOrgInput,
         category: z.enum(RESOLUTION_TEMPLATE_CATEGORIES).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
+        // The viewed tenant's templates, like every other read on the Payment
+        // Exceptions page — otherwise a tenant portal offered Infinity AI's own
+        // resolution templates beside the tenant's exceptions.
+        const tenant = portalScopedOrgId(ctx.user, input?.viewAsOrgId);
         const dbConn = await db.getDb();
         if (!dbConn) return [];
         
@@ -1523,7 +1603,7 @@ export const appRouter = router({
         
         // Filter in memory to include user's org templates and global templates
         const orgFiltered = allTemplates.filter(t => 
-          t.organizationId === ctx.user.organizationId || t.organizationId === null
+          t.organizationId === tenant || t.organizationId === null
         );
 
         // If a category is specified, return only templates for that category
