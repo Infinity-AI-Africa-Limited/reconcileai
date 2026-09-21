@@ -53,7 +53,7 @@
  * Only in the deployed production service (`rollEnabledHere`). Never under
  * `pnpm dev`: the local .env names the production database.
  */
-import { and, count, eq, inArray, max, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { and, count, eq, gt, inArray, max, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { getTableColumns } from "drizzle-orm";
 import type { MySqlTable, MySqlUpdateSetSource } from "drizzle-orm/mysql-core";
 import {
@@ -289,6 +289,12 @@ export async function rollDemoTimeline(
 
     // Column arithmetic has no typed drizzle form, so the SET values use its
     // parameterised `sql` tag; the interval and bound are parameters, never text.
+    // This is drizzle, not a raw query string — the same form the repository
+    // already uses for the same job (db.ts, incrementUploadBatchCounts:
+    // `sql\`${uploadBatches.validRows} + ${addValid}\``). The alternative, a
+    // per-row loop, is ~81,000 round trips and cannot be atomic, and an
+    // interrupted relative shift cannot be retried without splitting the
+    // timeline.
     //
     // The shift is anchored on the newest TRANSACTION, but records made after
     // it — a job run, an upload batch, the moment rows were ingested — can be
@@ -449,7 +455,6 @@ export async function futureDated(
     await db.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(eq(reconciliationJobs.organizationId, orgId))
   ).map((j) => j.id);
   const out: { table: string; column: string; rows: number }[] = [];
-  const bound = utcSql(now);
   for (const step of ROLL_PLAN) {
     const cols = getTableColumns(step.table) as Record<string, AnyColumn>;
     if (step.scope === "jobs" && jobIds.length === 0) continue;
@@ -457,10 +462,12 @@ export async function futureDated(
     const future: Record<string, string> = step.mayBeFuture;
     for (const key of step.roll) {
       if (key in future) continue;
+      // A typed operator: `gt` binds `now` through the column's own encoder,
+      // which writes a UTC timestamp — no hand-built literal needed here.
       const [row] = await db
         .select({ n: count() })
         .from(step.table)
-        .where(and(scope, sql`${cols[key]} > ${bound}`));
+        .where(and(scope, gt(cols[key], now)));
       const rows = Number(row?.n ?? 0);
       if (rows > 0) out.push({ table: step.name, column: key, rows });
     }
