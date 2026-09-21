@@ -202,6 +202,9 @@ export const MAX_BACKWARD_SECONDS = 2 * 86_400;
 
 export type RollTrigger = "scheduler" | "operator_cli";
 
+/** Job statuses that mean a run is live: its timestamps are in use, not history. */
+export const ACTIVE_JOB_STATUSES = ["pending", "running"] as const;
+
 export type RollResult =
   | { status: "rolled"; seconds: number; ms: number }
   | { status: "skipped"; seconds: number; reason: string }
@@ -247,6 +250,22 @@ export async function rollDemoTimeline(
     // Lock FIRST, then decide. See the module header: the delta is relative.
     const verdict = await eligibility(tx, orgId, allowList, true);
     if (!verdict.ok) return { status: "refused", reason: verdict.reason } as const;
+
+    // Never under a live reconciliation run. The run is writing matches and
+    // exceptions against the dates it loaded, and its heartbeat is how the
+    // stuck-job sweep tells it is alive: a backward roll moved `heartbeatAt`
+    // up to two days into the past, past the sweep's two-hour cutoff, and the
+    // sweep would fail a healthy run and abandon it for good. Deferred, not
+    // refused — the next pass rolls once the run has finished. Checked under
+    // the lock so the answer holds for the rest of this transaction's reads.
+    const [active] = await tx
+      .select({ n: count() })
+      .from(reconciliationJobs)
+      .where(and(eq(reconciliationJobs.organizationId, orgId), inArray(reconciliationJobs.status, ACTIVE_JOB_STATUSES)));
+    const activeRuns = Number(active?.n ?? 0);
+    if (activeRuns > 0) {
+      return { status: "skipped", seconds: 0, reason: `${activeRuns} reconciliation run(s) in progress — deferred to the next pass` } as const;
+    }
 
     // `now` is taken after the lock is held, so a runner that waited on
     // another measures from the moment it actually gets to act.

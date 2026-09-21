@@ -12,6 +12,8 @@
  * The local .env names PRODUCTION, and a roll is a write.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { SQL, getTableColumns, getTableName } from "drizzle-orm";
 import { MySqlDialect } from "drizzle-orm/mysql-core";
 
@@ -26,6 +28,7 @@ import { getDb } from "./db";
 import { DEMO_REPORT_MARKER } from "./demoReportSeed";
 import { OPERATOR_ORG_CODE } from "../shared/operatorOrg";
 import {
+  ACTIVE_JOB_STATUSES,
   DEMO_TIMELINE_TENANTS,
   MAX_BACKWARD_SECONDS,
   MIN_ROLL_SECONDS,
@@ -47,6 +50,8 @@ type Script = {
   newest?: Date | null;
   jobIds?: number[];
   reports?: { id: number; jobId: number; createdAt: Date; summary: unknown }[];
+  /** Reconciliation runs pending or running for the tenant. */
+  activeRuns?: number;
 };
 
 const JOB = {
@@ -59,12 +64,17 @@ const dialect = new MySqlDialect();
 function fakeDb(script: Script) {
   const log: string[] = [];
   const inserts: { table: string; values: Record<string, unknown> }[] = [];
+  const wheres: { table: string; fields: string[]; params: unknown[] }[] = [];
   const sqlLog: { table: string; key: string; sql: string; params: unknown[] }[] = [];
   const select = (fields?: Record<string, unknown>) => {
     let table = "";
     const q = {
       from(t: Parameters<typeof getTableName>[0]) { table = getTableName(t); return q; },
-      where() { return q; },
+      where(cond?: unknown) {
+        // Rendered, so a test can see what a query actually filters on.
+        if (cond instanceof SQL) wheres.push({ table, fields: Object.keys(fields ?? {}), params: dialect.sqlToQuery(cond).params });
+        return q;
+      },
       orderBy() { return q; },
       limit() { return q; },
       for(strength: string) { log.push(`lock ${table} ${strength}`); return q; },
@@ -82,7 +92,10 @@ function fakeDb(script: Script) {
       case "organizations": return script.org ? [script.org] : [];
       case "sl_connector_stores": return [{ n: script.stores ?? 0 }];
       case "transactions": return [{ newest: script.newest ?? null }];
-      case "reconciliation_jobs": return fields ? (script.jobIds ?? []).map((id) => ({ id })) : [JOB];
+      case "reconciliation_jobs":
+        // Three shapes: a count of live runs, the tenant's job ids, a full job row.
+        if (fields && "n" in fields) return [{ n: script.activeRuns ?? 0 }];
+        return fields ? (script.jobIds ?? []).map((id) => ({ id })) : [JOB];
       case "reconciliation_reports": return script.reports ?? [];
       default: return [];
     }
@@ -113,7 +126,7 @@ function fakeDb(script: Script) {
     },
     async transaction<T>(fn: (tx: unknown) => Promise<T>) { log.push("begin"); const r = await fn(db); log.push("commit"); return r; },
   };
-  return { db: db as unknown as Parameters<typeof rollDemoTimeline>[0], log, sqlLog, inserts };
+  return { db: db as unknown as Parameters<typeof rollDemoTimeline>[0], log, sqlLog, inserts, wheres };
 }
 
 /** The audit entry a roll wrote, parsed, or undefined. */
@@ -298,6 +311,48 @@ describe("when the newest transaction is ahead of the clock", () => {
     expect(result.status === "skipped" ? result.reason : "").toMatch(/FUTURE/);
     expect(updates(log)).toEqual([]);
     expect(inserts).toEqual([]);
+  });
+});
+
+describe("when a reconciliation run is live for the tenant", () => {
+  it("should defer the roll, in either direction, and write nothing", async () => {
+    // A backward roll moved a live run's heartbeat days into the past, beyond
+    // the stuck-job sweep's two-hour cutoff: a healthy run failed and abandoned.
+    for (const newest of [HOUR_AGO, new Date(NOW.getTime() + 3 * 3600_000)]) {
+      const { db, log, inserts } = fakeDb({ org: globus, newest, jobIds: [5], activeRuns: 1 });
+      const result = await rollDemoTimeline(db, 1, { commit: true, now: NOW });
+      expect(result.status).toBe("skipped");
+      expect(result.status === "skipped" ? result.reason : "").toMatch(/in progress/);
+      expect(updates(log)).toEqual([]);
+      expect(inserts).toEqual([]);
+      // Decided under the lock, before anything is measured.
+      expect(log.indexOf("read reconciliation_jobs")).toBeGreaterThan(log.indexOf("lock organizations update"));
+      expect(log).not.toContain("read transactions");
+    }
+  });
+
+  it("should roll once no run is live — the positive to the deferral", async () => {
+    const { db } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], activeRuns: 0 });
+    expect((await rollDemoTimeline(db, 1, { commit: true, now: NOW })).status).toBe("rolled");
+  });
+
+  it("should count as live exactly the statuses the stuck-job sweep treats as live", async () => {
+    // The deferral protects runs FROM the sweep, so the two must agree on what
+    // "live" means. Read from the sweep's own source, not restated here.
+    const src = readFileSync(path.join(__dirname, "reconciliationQueue.ts"), "utf8").replace(/\r\n/g, "\n");
+    const sweep = src.slice(src.indexOf("export async function recoverStuckReconciliationJobs"));
+    const listed = /inArray\(reconciliationJobs\.status, \[([^\]]*)\]\)/.exec(sweep)?.[1];
+    expect(listed, "the sweep's status list has moved").toBeTruthy();
+    const sweepStatuses = [...listed!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).sort();
+    expect([...ACTIVE_JOB_STATUSES].sort()).toEqual(sweepStatuses);
+
+    // And the query really filters on them — not merely a constant that exists.
+    const { db, wheres } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
+    await rollDemoTimeline(db, 1, { commit: true, now: NOW });
+    const live = wheres.find((w) => w.table === "reconciliation_jobs" && w.fields.includes("n"));
+    expect(live, "no live-run query was issued").toBeDefined();
+    for (const s of sweepStatuses) expect(live!.params).toContain(s);
+    expect(live!.params).toContain(1); // scoped to THIS tenant
   });
 });
 
