@@ -213,10 +213,14 @@ async function report(
   // The Age Tracker shows an exception's date beside its transaction's. One
   // raised before the transaction it concerns is visibly wrong there — 253 on
   // Globus Bank and 35 on BrightGoods were, before exceptions were anchored.
+  // Joined within this tenant only — same rule as the job-window query below.
   const [early] = await db
     .select({ n: count() })
     .from(exceptions)
-    .innerJoin(transactions, eq(transactions.id, exceptions.transactionId))
+    .innerJoin(
+      transactions,
+      and(eq(transactions.id, exceptions.transactionId), eq(transactions.organizationId, orgId)),
+    )
     .where(and(eq(exceptions.organizationId, orgId), lt(exceptions.createdAt, transactions.transactionDate)));
   const before = Number(early?.n ?? 0);
   if (before > 0 && when === "after") failures++;
@@ -501,7 +505,16 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
       const [span] = await db
         .select({ lo: min(transactions.transactionDate), hi: max(transactions.transactionDate) })
         .from(exceptions)
-        .innerJoin(transactions, eq(transactions.id, exceptions.transactionId))
+        // Ownership on the transaction side too. An exception may reference a
+        // transaction another organisation owns; joining on id alone would copy
+        // that organisation's dates into this tenant's job window and into the
+        // report regenerated from it. The pinning read above may look at such a
+        // row, because it only decides what NOT to move; persisting its dates
+        // into this tenant is a different thing, and is not done.
+        .innerJoin(
+          transactions,
+          and(eq(transactions.id, exceptions.transactionId), eq(transactions.organizationId, orgId)),
+        )
         .where(and(eq(exceptions.organizationId, orgId), eq(exceptions.jobId, jobId)));
       if (!span?.lo || !span?.hi) continue;
       const [job] = await db
