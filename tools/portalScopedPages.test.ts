@@ -42,6 +42,16 @@ const PORTAL_PAGES: Record<string, string[]> = {
   "client/src/components/HiddenExceptionsNotice.tsx": [],
 };
 
+/**
+ * A source file with line endings normalised. The definition check below keys on
+ * a semicolon followed by a newline, and a Windows checkout with core.autocrlf is
+ * CRLF — so the verdict could depend on how the file was checked out rather than
+ * on the code.
+ */
+function read(file: string): string {
+  return readFileSync(path.join(ROOT, file), "utf8").replace(/\r\n/g, "\n");
+}
+
 /** Every `trpc.<router>.<proc>.useQuery(<args>)` with its full argument text. */
 function queries(src: string): { proc: string; args: string }[] {
   const out: { proc: string; args: string }[] = [];
@@ -81,7 +91,7 @@ function carriesPortalId(args: string, src: string): boolean {
 describe("when a page follows the super-admin portal", () => {
   for (const [file, allowed] of Object.entries(PORTAL_PAGES)) {
     it(`should pass viewAsOrgId to every tenant query in ${path.basename(file)}`, () => {
-      const src = readFileSync(path.join(ROOT, file), "utf8");
+      const src = read(file);
       const found = queries(src);
       expect(found.length, `${file} has no queries — has it moved?`).toBeGreaterThan(0);
       const unscoped = found
@@ -97,7 +107,7 @@ describe("when a page follows the super-admin portal", () => {
 
   it("should only exempt queries that exist, so a stale exemption cannot hide a new one", () => {
     for (const [file, allowed] of Object.entries(PORTAL_PAGES)) {
-      const procs = queries(readFileSync(path.join(ROOT, file), "utf8")).map((q) => q.proc);
+      const procs = queries(read(file)).map((q) => q.proc);
       for (const a of allowed) expect(procs, `${file} exempts ${a}, which it no longer calls`).toContain(a);
     }
   });

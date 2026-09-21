@@ -117,44 +117,253 @@ function bandSizes(total: number): number[] {
 }
 
 /**
- * Midnight UTC at the start of the day `daysAgo` days before `reference`.
+ * Which calendar "today" a tenant's demo is written for.
  *
- * The ONE definition of "N days ago" used both to write rows and to measure
- * which band they landed in, so the two cannot disagree about a boundary.
+ * "Today" does not exist without a timezone: at any instant two calendar dates
+ * are in effect somewhere. An earlier revision used UTC, and review showed where
+ * that breaks — after 21:00 UTC it is already tomorrow in Kampala, so rows
+ * written for the UTC "today" landed on a Kampala viewer's Yesterday while the
+ * script, measuring in UTC, reported Today populated. A false success.
+ *
+ * The honest anchor is the tenant's OWN local day, which is what its operators
+ * see. Organisations record `country` (ISO 3166-1 alpha-3) but no timezone, so
+ * this maps the markets the platform serves. An unlisted country is NOT given a
+ * guessed zone: the script refuses and asks for `--tz`, because a wrong anchor
+ * produces exactly the empty-Today it exists to prevent.
  */
-export function utcDayStart(reference: Date, daysAgo: number): Date {
-  return new Date(Date.UTC(
-    reference.getUTCFullYear(),
-    reference.getUTCMonth(),
-    reference.getUTCDate() - daysAgo,
-  ));
+export const COUNTRY_TIMEZONES: Readonly<Record<string, string>> = {
+  NGA: "Africa/Lagos",
+  UGA: "Africa/Kampala",
+  GHA: "Africa/Accra",
+  KEN: "Africa/Nairobi",
+};
+
+/** How far `timeZone`'s wall clock is ahead of UTC at `instant`, in ms. */
+export function zoneOffsetMs(instant: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(instant);
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  const wallAsUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return wallAsUtc - Math.floor(instant.getTime() / 1000) * 1000;
 }
 
 /**
- * The timestamp for the `index`-th of `total` rows, relative to `reference`.
+ * The instant the calendar day `daysAgo` days before `reference` BEGINS, in
+ * `timeZone`.
  *
- * ── UTC, and why that alone was not enough ────────────────────────────────
- *
- * This first used `setDate`/`setHours`, so the calendar day a row landed on
- * depended on the timezone of whatever machine ran the script: "08:00 local" on
- * a UTC+13 host is 19:00 UTC the PREVIOUS day. It now works in UTC throughout,
- * which is the repository rule (CLAUDE.md §16) and makes the result identical on
- * every host — pinned by a test that runs it under UTC+14 and UTC-11.
- *
- * But the Exceptions screen decides "Today" in the VIEWER's timezone, which no
- * seeder can know. So the time of day is chosen to survive that too: every row
- * sits between 08:00 and 17:59 UTC, which is the same calendar day for anyone
- * from UTC-8 to UTC+6 — Lagos, Kampala and London included. Midnight UTC would
- * have been the fragile choice: it is still the previous evening in the
- * Americas, so a row dated "today" would read as yesterday.
- *
- * Varied within that window rather than fixed, because a column of identical
- * timestamps is the other way seeded data announces itself.
+ * The ONE definition of "N days ago" used both to write rows and to measure
+ * which band they landed in, so the two cannot disagree about a boundary. The
+ * offset is re-read at the candidate midnight, because on a daylight-saving
+ * change the offset at noon is not the offset at midnight.
  */
-export function dateForIndex(index: number, total: number, reference: Date = new Date()): Date {
-  const d = utcDayStart(reference, daysAgoForIndex(index, total));
-  d.setUTCHours(8 + (index % 10), (index * 7) % 60, (index * 13) % 60, 0);
-  return d;
+export function zonedDayStart(reference: Date, daysAgo: number, timeZone: string): Date {
+  const offset = zoneOffsetMs(reference, timeZone);
+  const wall = new Date(reference.getTime() + offset);
+  const wallMidnight = Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate() - daysAgo);
+  let instant = wallMidnight - offset;
+  const offsetThen = zoneOffsetMs(new Date(instant), timeZone);
+  if (offsetThen !== offset) instant = wallMidnight - offsetThen;
+  return new Date(instant);
+}
+
+/**
+ * The instant at which the tenant's wall clock reads `secondsIntoDay` past
+ * midnight, `daysAgo` days before `reference`.
+ *
+ * Built as a WALL time and then resolved to an instant, rather than by adding
+ * elapsed hours to midnight. On a daylight-saving day those differ: London's
+ * clocks go back at 02:00 on 25 October, so midnight plus eight elapsed hours
+ * is 07:00 on the wall, not 08:00. The offset is re-read at the candidate
+ * instant for the same reason zonedDayStart re-reads it.
+ */
+export function wallTimeInZone(reference: Date, daysAgo: number, secondsIntoDay: number, timeZone: string): Date {
+  const offset = zoneOffsetMs(reference, timeZone);
+  const wall = new Date(reference.getTime() + offset);
+  const wallInstant =
+    Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate() - daysAgo) + secondsIntoDay * 1000;
+  let instant = wallInstant - offset;
+  const offsetThen = zoneOffsetMs(new Date(instant), timeZone);
+  if (offsetThen !== offset) instant = wallInstant - offsetThen;
+  return new Date(instant);
+}
+
+/** Working hours: rows land between 08:00:00 and 17:59:59 on the wall clock. */
+const WORKDAY_START_S = 8 * 3600;
+const WORKDAY_S = 10 * 3600;
+/**
+ * The step between consecutive rows' time of day. Prime, and coprime with the
+ * 36,000-second working day, so `index * STRIDE mod 36000` is DIFFERENT for
+ * every index below 36,000: no two rows share a time of day, so no two rows on
+ * the same day share a timestamp.
+ *
+ * The version before used `index % 10` hours with `index * 7 % 60` minutes and
+ * `index * 13 % 60` seconds — which repeats every 60 rows, so rows 60 apart that
+ * fell on the same day had IDENTICAL timestamps. The quarter band, with its
+ * 60-day span, did exactly that for Globus Bank's 139 rows there.
+ */
+const TIME_STRIDE_S = 7919;
+
+function plannedSecondsIntoDay(index: number): number {
+  return WORKDAY_START_S + ((index * TIME_STRIDE_S) % WORKDAY_S);
+}
+
+/**
+ * The timestamp for the `index`-th of `total` rows, relative to `reference`,
+ * in the tenant's `timeZone`.
+ *
+ * Whole seconds, because that is what the timestamp columns store: two values a
+ * few milliseconds apart are the SAME stored value, so "distinct" has to mean
+ * distinct seconds. Independent of the host's timezone, pinned by a test.
+ *
+ * ── Never in the future, and no collapse at midnight ──────────────────────
+ *
+ * A run at 07:40 wrote every "today" row between 08:00 and 17:59 — up to ten
+ * hours AHEAD of the clock: 36 exceptions on Globus Bank and 4 on BrightGoods
+ * were "created later today". So a today row whose working-hours time has not
+ * arrived is placed in the part of today that HAS happened, before 08:00.
+ *
+ * The first version of that spread milliseconds across the elapsed part of the
+ * day, which review showed collapses: just after midnight there are only a few
+ * seconds of today, so every row stored as the same second. Now each today row
+ * gets its own whole-second slot, and when there are more today rows than
+ * seconds of today so far — at 00:00:10 there are ten — the rest go to
+ * yesterday rather than share a timestamp. That is also simply true: ten seconds
+ * into a day, not much has happened yet.
+ */
+export function dateForIndex(
+  index: number,
+  total: number,
+  reference: Date = new Date(),
+  timeZone: string = "UTC",
+): Date {
+  const refS = Math.floor(reference.getTime() / 1000) * 1000;
+  const days = daysAgoForIndex(index, total);
+  const planned = wallTimeInZone(reference, days, plannedSecondsIntoDay(index), timeZone).getTime();
+  if (days > 0 || planned <= refS) return new Date(planned);
+
+  // A today row whose time has not come yet. Today rows are band 0's every
+  // seventh row (daysAgoForIndex cycles band 0 through days 0..6), so this
+  // row's rank among them, and their number, follow from `index` and `total`.
+  const rank = Math.floor(index / 7);
+  const todayRows = Math.ceil(bandSizes(total)[0] / 7);
+  const dayStart = zonedDayStart(reference, 0, timeZone).getTime();
+  // The last usable second: now, or 07:59:59 if working hours have started —
+  // slots stay below 08:00 so they cannot collide with rows kept at their
+  // planned working-hours time.
+  const limit = Math.min(refS, wallTimeInZone(reference, 0, WORKDAY_START_S - 1, timeZone).getTime());
+  const seconds = Math.floor((limit - dayStart) / 1000) + 1;
+
+  if (seconds >= todayRows) {
+    return new Date(dayStart + Math.floor((rank * seconds) / todayRows) * 1000);
+  }
+  if (rank < seconds) return new Date(dayStart + rank * 1000);
+  // Not enough of today has happened to give this row a second of its own.
+  return wallTimeInZone(reference, 1, plannedSecondsIntoDay(index), timeZone);
+}
+
+/**
+ * When an exception on a transaction dated `txDate` was detected.
+ *
+ * Exceptions used to be dated independently of their transactions, which left
+ * 253 of Globus Bank's and 35 of BrightGoods' raised BEFORE the transaction they
+ * are about — up to 85 days early — on the very screen that shows both dates
+ * side by side (the Age Tracker). Reconciliation finds a break after the
+ * transaction exists, so detection follows it: five minutes to four hours
+ * later, never after `now`, and never before the transaction.
+ */
+export function anchoredDetection(txDate: Date, index: number, now: Date = new Date()): Date {
+  const nowS = Math.floor(now.getTime() / 1000) * 1000;
+  const tx = Math.floor(txDate.getTime() / 1000) * 1000;
+  if (tx >= nowS) return new Date(tx);
+  const lag = (5 * 60 + ((index * 37) % 236) * 60) * 1000;
+  if (tx + lag <= nowS) return new Date(tx + lag);
+  return new Date(tx + Math.floor((nowS - tx) / 2000) * 1000);
+}
+
+/** How many of the tenant's calendar days before `now` the instant `at` falls. */
+export function daysAgoInZone(at: Date, now: Date, timeZone: string): number {
+  for (let d = 0; d < 400; d++) {
+    if (at.getTime() >= zonedDayStart(now, d, timeZone).getTime()) return d;
+  }
+  return 400;
+}
+
+export type TimelineRow = { id: number; txId: number | null; status: string };
+
+export type TimelinePlan = {
+  /** One date per transaction that should move. Never two for the same transaction. */
+  transactionDates: Map<number, Date>;
+  exceptions: { id: number; createdAt: Date; status: string; resolvedAt: Date | null }[];
+};
+
+/**
+ * Plan every exception's timestamp from its transaction's, ONE date per
+ * transaction.
+ *
+ * The first version assigned a date per EXCEPTION row and wrote it to that row's
+ * transaction as it went. Review pointed out that `exceptions.transactionId` is
+ * not unique — reconciliation can raise both an "unmatched" and a "duplicate"
+ * exception on one transaction — so a later row re-dated a transaction after an
+ * earlier exception on it had already been anchored, leaving that exception
+ * raised before its transaction: the exact inconsistency this exists to repair.
+ * (Neither demo tenant had a shared transaction on 21 September, and both
+ * post-run checks read 0 — but "the data happened not to" is not a guarantee.)
+ *
+ * So the first exception to reach a transaction decides its date, and every
+ * exception on it is anchored to that one date. `pinned` transactions — those in
+ * a match row, whose counterpart must not be left behind — keep their current
+ * date. Status follows the exception's REAL age rather than its position in the
+ * list, because a row sharing an older transaction is older than its position
+ * says.
+ *
+ * Pure, so the invariant is tested directly rather than inferred from a run.
+ */
+export function planExceptionTimeline(
+  rows: readonly TimelineRow[],
+  now: Date,
+  timeZone: string,
+  pinned: ReadonlyMap<number, Date>,
+): TimelinePlan {
+  const transactionDates = new Map<number, Date>();
+  const chosen = new Map<number, Date>();
+  const out: TimelinePlan["exceptions"] = [];
+  const n = rows.length;
+  for (let i = 0; i < n; i++) {
+    const r = rows[i];
+    if (r.txId == null) continue;
+    let txDate = chosen.get(r.txId);
+    if (!txDate) {
+      const fixed = pinned.get(r.txId);
+      txDate = fixed ?? dateForIndex(i, n, now, timeZone);
+      chosen.set(r.txId, txDate);
+      if (!fixed) transactionDates.set(r.txId, txDate);
+    }
+    const createdAt = anchoredDetection(txDate, i, now);
+    const status = statusForAge(daysAgoInZone(createdAt, now, timeZone), r.status);
+    const closed = status === "resolved" || status === "dismissed";
+    const resolvedAt = closed
+      ? new Date(Math.min(now.getTime(), createdAt.getTime() + (1 + (i % 3)) * 86_400_000))
+      : null;
+    out.push({ id: r.id, createdAt, status, resolvedAt });
+  }
+  return { transactionDates, exceptions: out };
+}
+
+/**
+ * How far to move a tenant's whole timeline so its newest transaction sits at
+ * `now`. Whole seconds, never negative: a timeline already current is left alone.
+ */
+export function rollDeltaMs(newest: Date | null, now: Date = new Date()): number {
+  if (!newest) return 0;
+  return Math.max(0, Math.floor((now.getTime() - newest.getTime()) / 1000) * 1000);
 }
 
 /**

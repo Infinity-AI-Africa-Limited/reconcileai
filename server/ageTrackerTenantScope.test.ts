@@ -2,8 +2,13 @@ import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("Age Tracker tenant scope", () => {
-  const dbSource = fs.readFileSync("server/db.ts", "utf8");
-  const routerSource = fs.readFileSync("server/routers.ts", "utf8");
+  // Line endings normalised. On a Windows checkout with core.autocrlf the sources
+  // are CRLF, so a block boundary written with LF never matched: the Age Tracker
+  // block silently became "everything to end of file", and these assertions
+  // judged the whole router. They must judge the code, not how it was checked out.
+  const read = (p: string) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
+  const dbSource = read("server/db.ts");
+  const routerSource = read("server/routers.ts");
 
   it("requires an organization id for aged-exception reads and applies it in SQL", () => {
     expect(dbSource).toContain("getOpenExceptionsForAging(organizationId: number | null");
