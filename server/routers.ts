@@ -227,6 +227,8 @@ import {
   canActOnTenant,
   channelListScope,
   transactionOwnerFilter,
+  runOwner,
+  requireOwnedChannels,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -3019,11 +3021,11 @@ export const appRouter = router({
         // shared rail). It recorded no owner and looked channels up by id
         // alone, so each run it produced was refused for having no owner, and
         // any tenant's channel could be named. Same rule as reconciliation.create.
-        const tenant = requireOrg(ctx);
-        const source = await db.getChannelByIdForOrg(input.sourceChannelId, tenant);
-        const target = await db.getChannelByIdForOrg(input.targetChannelId, tenant);
-        if (!source) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-        if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
+        const tenant = runOwner(ctx.user);
+        await requireOwnedChannels(tenant, [
+          { id: input.sourceChannelId, notFound: "Source channel not found" },
+          { id: input.targetChannelId, notFound: "Target channel not found" },
+        ]);
         if (input.sourceChannelId === input.targetChannelId) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Source and target channels must be different" });
         }

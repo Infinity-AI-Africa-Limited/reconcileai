@@ -83,6 +83,50 @@ export function portalScopedOrgId(
 export const viewAsOrgInput = { viewAsOrgId: z.number().int().positive().optional() };
 
 /**
+ * The organisation that owns a new reconciliation run or schedule: the caller's.
+ *
+ * Every creator of runs and schedules used to omit it, and runReconciliation
+ * refuses a job with no owner — so every run started from the UI or a schedule
+ * failed. A caller with NO organisation is refused here rather than pooled into
+ * a pseudo-tenant (CLAUDE.md §9C). A super admin owns runs under their own
+ * organisation; creating one inside a tenant's portal is the known
+ * portal-write gap.
+ */
+export function runOwner(user: { organizationId?: number | null }): number {
+  if (user.organizationId == null) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Your account is not linked to an organisation, so a reconciliation run would have no owner.",
+    });
+  }
+  return user.organizationId;
+}
+
+/**
+ * Resolve the channels a caller named for a run or schedule, each UNDER the
+ * owning tenant (its own channel or a shared rail), in order; the first that is
+ * not visible throws NOT_FOUND with its own message.
+ *
+ * The call sites looked channels up by id alone, so any tenant's channel could
+ * be named — and the missing owner was all that stopped such a run. Owner and
+ * channel scope are one rule, so every creator goes through `runOwner` and this.
+ * NOT_FOUND rather than FORBIDDEN: another tenant's channel is indistinguishable
+ * from one that does not exist.
+ */
+export async function requireOwnedChannels(
+  tenant: number,
+  named: readonly { id: number; notFound: string }[],
+): Promise<NonNullable<Awaited<ReturnType<typeof getChannelByIdForOrg>>>[]> {
+  const found: NonNullable<Awaited<ReturnType<typeof getChannelByIdForOrg>>>[] = [];
+  for (const { id, notFound } of named) {
+    const channel = await getChannelByIdForOrg(id, tenant);
+    if (!channel) throw new TRPCError({ code: "NOT_FOUND", message: notFound });
+    found.push(channel);
+  }
+  return found;
+}
+
+/**
  * Whose transactions a tenant list shows: the whole organisation's, except to a
  * guest, who sees only their own. Returns the user id to narrow by, or undefined
  * for "no narrowing — the organisation is the boundary".

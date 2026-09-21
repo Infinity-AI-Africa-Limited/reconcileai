@@ -26,35 +26,11 @@ import {
   portalScopedOrgId,
   viewAsOrgInput,
   canActOnTenant,
+  runOwner,
+  requireOwnedChannels,
 } from "./shared";
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
-
-/**
- * The organisation a new run belongs to: the caller's. Exported for its tests.
- *
- * Two defects shared this spot. The job was created with no organisation at
- * all, so `runReconciliation` refused every run started here. And the channels
- * were fetched by id alone (`getChannelById`), so a caller could name another
- * tenant's channel — which the missing owner happened to stop, since the run
- * never started. Fixing only the owner would have opened that door: tenant A
- * reconciling tenant B's transactions into A's exceptions. So the owner and
- * the channel scope are one rule — every channel is looked up under this
- * tenant (its own or a shared rail), and a caller with NO organisation is
- * refused, not pooled into a pseudo-tenant (CLAUDE.md §9C).
- *
- * A super admin creates runs under their own organisation, as before; running
- * one inside another tenant's portal is the known portal-write gap.
- */
-export function runTenant(user: { organizationId: number | null }): number {
-  if (user.organizationId == null) {
-    throw new TRPCError({
-      code: "PRECONDITION_FAILED",
-      message: "Your account is not linked to an organisation, so a reconciliation run would have no owner.",
-    });
-  }
-  return user.organizationId;
-}
 
 export const reconciliationRouter = router({
   create: operationsProcedure
@@ -80,12 +56,12 @@ export const reconciliationRouter = router({
       await assertModuleAvailable(ctx, input.moduleType);
 
       // The run belongs to the caller's organisation, and may read only that
-      // organisation's channels (or shared rails). See runTenant.
-      const tenant = runTenant(ctx.user);
-      const sourceChannel = await db.getChannelByIdForOrg(input.sourceChannelId, tenant);
-      const targetChannel = await db.getChannelByIdForOrg(input.targetChannelId, tenant);
-      if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-      if (!targetChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
+      // organisation's channels (or shared rails). See runOwner.
+      const tenant = runOwner(ctx.user);
+      const [sourceChannel, targetChannel] = await requireOwnedChannels(tenant, [
+        { id: input.sourceChannelId, notFound: "Source channel not found" },
+        { id: input.targetChannelId, notFound: "Target channel not found" },
+      ]);
 
       // Validate date range
       const dateFrom = new Date(input.dateFrom);
@@ -193,10 +169,11 @@ export const reconciliationRouter = router({
       // not become a way around it.
       await assertModuleAvailable(ctx, input.moduleType);
 
-      // Same ownership rule as the single-channel run — see runTenant.
-      const tenant = runTenant(ctx.user);
-      const sourceChannel = await db.getChannelByIdForOrg(input.sourceChannelId, tenant);
-      if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
+      // Same ownership rule as the single-channel run — see runOwner.
+      const tenant = runOwner(ctx.user);
+      const [sourceChannel] = await requireOwnedChannels(tenant, [
+        { id: input.sourceChannelId, notFound: "Source channel not found" },
+      ]);
 
       const dateFrom = new Date(input.dateFrom);
       const dateTo = new Date(input.dateTo);
@@ -227,11 +204,7 @@ export const reconciliationRouter = router({
         if (ids.length === 0) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Provide at least one target channel (or set allActiveTargets)" });
         }
-        for (const id of ids) {
-          const ch = await db.getChannelByIdForOrg(id, tenant);
-          if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: `Target channel ${id} not found` });
-          targets.push(ch);
-        }
+        targets.push(...(await requireOwnedChannels(tenant, ids.map((id) => ({ id, notFound: `Target channel ${id} not found` })))));
       }
       if (targets.length === 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "No eligible target channels for this run" });
