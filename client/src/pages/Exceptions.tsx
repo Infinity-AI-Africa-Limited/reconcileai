@@ -80,9 +80,14 @@ export default function Exceptions() {
     { viewAsOrgId, ...(selectedCategory ? { category: selectedCategory } : {}) }
   );
 
+  // Every filter goes to the server. Category and severity used to be applied
+  // to the 200 rows already loaded, so over a wider range the table, its count
+  // and the empty state described one slice while the total described all rows.
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
     viewAsOrgId,
     status: statusFilter !== "all" ? statusFilter : undefined,
+    category: filters.category !== "all" ? filters.category : undefined,
+    severity: filters.severity !== "all" ? filters.severity : undefined,
     dateFrom: dateFromObj,
     dateTo: dateToObj,
     limit: 200,
@@ -184,14 +189,10 @@ export default function Exceptions() {
     }
   };
 
-  const filtered = data?.data?.filter((ex) => {
-    if (filters.category !== "all" && ex.category !== filters.category) return false;
-    if (filters.severity !== "all" && ex.severity !== filters.severity) return false;
-    return true;
-  }) ?? [];
-  const loaded = data?.data?.length ?? 0;
+  const filtered = data?.data ?? [];
+  const loaded = filtered.length;
   const matchingTotal = data?.total ?? 0;
-  const clientFiltered = filters.category !== "all" || filters.severity !== "all";
+  const anyFilter = statusFilter !== "all" || filters.category !== "all" || filters.severity !== "all";
 
   return (
     <div className="space-y-6">
@@ -353,9 +354,8 @@ export default function Exceptions() {
               {/* Say when the list is a slice. A dashboard count of 558 beside a
                   page that silently stopped at 200 reads as missing data. */}
               {loaded < matchingTotal
-                ? `Showing the ${loaded.toLocaleString()} most recent of ${matchingTotal.toLocaleString()} exceptions — narrow the dates or status to see the rest`
-                : `Showing ${filtered.length} exception${filtered.length !== 1 ? "s" : ""}`}
-              {clientFiltered && loaded > 0 ? ` (${filtered.length} match the category/severity filter)` : ""}
+                ? `Showing the ${loaded.toLocaleString()} most recent of ${matchingTotal.toLocaleString()} exceptions — narrow the dates or filters to see the rest`
+                : `Showing ${loaded} exception${loaded !== 1 ? "s" : ""}`}
               {" — "}{dateLabel}
             </p>
           </CardContent>
@@ -366,7 +366,7 @@ export default function Exceptions() {
             <CheckCircle2 className="h-12 w-12 text-green-500 mb-4" />
             <h3 className="font-semibold text-lg">No Exceptions Found</h3>
             <p className="text-muted-foreground text-sm mt-1">
-              {isToday && statusFilter === "all" && !clientFiltered
+              {isToday && !anyFilter
                 ? "No exceptions for today."
                 : "No exceptions match the selected date range and filters."}
             </p>
