@@ -12,6 +12,12 @@
  * AsyncLocalStorage carries the scope through every await in the procedure.
  * Outside a tRPC call (background jobs, webhooks) there is no scope and the
  * helpers behave exactly as before.
+ *
+ * Two kinds of reader: the audit default (logAudit), and the by-id gates that
+ * narrow staff reach to the tenant on screen (canActOnTenant,
+ * assertCanManageUsers, tenancy.assertSameOrg). Platform procedures
+ * (superAdminProcedure) re-bind the scope to "no portal", because they act for
+ * the platform whatever tenant happens to be open in the tab.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 

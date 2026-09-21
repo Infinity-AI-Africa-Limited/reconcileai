@@ -4,6 +4,11 @@
  * (portalScopedOrgId). `logAudit` has 81 call sites and is handed no context,
  * so the base tRPC procedure opens a request scope and the logger reads it.
  * These tests run real procedures through the real base procedure.
+ *
+ * The default is right only for an event about the tenant on screen, so the
+ * tests also pin what keeps everything else out of it: platform procedures run
+ * outside the portal scope, by-id reach narrows to the portal, and events about
+ * the account rather than a tenant name the global chain.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -19,8 +24,9 @@ vi.mock("../db", async (importOriginal) => ({
 
 import * as db from "../db";
 import { router, protectedProcedure } from "../_core/trpc";
-import { currentPortalOrganizationId } from "../_core/requestScope";
-import { assertJobVisible, logAudit } from "./shared";
+import { currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
+import { assertSameOrg } from "../_core/tenancy";
+import { assertCanManageUsers, assertJobVisible, canActOnTenant, logAudit, superAdminProcedure } from "./shared";
 
 const probe = router({
   act: protectedProcedure.mutation(async ({ ctx }) => {
@@ -29,6 +35,11 @@ const probe = router({
   }),
   actGlobal: protectedProcedure.mutation(async ({ ctx }) => {
     await logAudit(ctx.user.id, "platform_event", "platform", undefined, undefined, undefined, undefined, null);
+  }),
+  reach: protectedProcedure.query(({ ctx }) => [canActOnTenant(ctx.user, 30001), canActOnTenant(ctx.user, 30002)]),
+  platform: superAdminProcedure.mutation(async ({ ctx }) => {
+    await logAudit(ctx.user.id, "create_organization", "organization", 77);
+    return { portal: currentPortalOrganizationId(), orgOnScreen: ctx.user.organizationId, reachOther: canActOnTenant(ctx.user, 30002) };
   }),
 });
 
@@ -47,6 +58,91 @@ describe("when a super admin acts inside a tenant's portal", () => {
   it("should still honour an explicit choice of the global chain", async () => {
     await call(30001).actGlobal();
     expect(auditedOrg()).toBeNull();
+  });
+
+  it("should reach only the tenant on screen by id — not every tenant, as the role alone allowed", async () => {
+    expect(await call(30001).reach()).toEqual([true, false]);
+  });
+});
+
+describe("when a platform procedure is called while a portal is open", () => {
+  // The browser sends the portal header on every call — the Super Admin
+  // dashboard's included, while a portal is still open in the tab.
+  it("should file its audit record in the global chain, not the tenant's trail", async () => {
+    const out = await call(30001).platform();
+    expect(auditedOrg()).toBeNull();
+    expect(out.portal).toBeNull();
+  });
+
+  it("should keep its cross-tenant reach, and leave the user it acts as untouched", async () => {
+    // ctx.user is not rewritten: demo.activate still seeds the tenant on screen.
+    const out = await call(30001).platform();
+    expect(out.reachOther).toBe(true);
+    expect(out.orgOnScreen).toBe(30001);
+  });
+
+  it("should still refuse anyone who is not staff", async () => {
+    const tenantAdmin = { id: 2, role: "admin", organizationId: 30001, isReadOnly: false } as never;
+    const caller = probe.createCaller({ user: tenantAdmin, viewingAs: null, req: { headers: {} }, res: {} } as never);
+    await expect(caller.platform()).rejects.toThrow(/Super Admin access required/);
+  });
+});
+
+describe("when staff reach a row by id inside a tenant's portal", () => {
+  const inPortal = <T,>(fn: () => T) => runInRequestScope({ portalOrganizationId: 30001 }, fn);
+  const superAdmin = { role: "super_admin", organizationId: 30001 };
+
+  it("should serve the tenant's own job and answer another tenant's as missing", async () => {
+    vi.mocked(db.getReconciliationJob).mockResolvedValue({ id: 5, organizationId: 30001 } as never);
+    await expect(inPortal(() => assertJobVisible(superAdmin, 5))).resolves.toMatchObject({ id: 5 });
+    vi.mocked(db.getReconciliationJob).mockResolvedValue({ id: 6, organizationId: 30002 } as never);
+    await expect(inPortal(() => assertJobVisible(superAdmin, 6))).rejects.toThrow("Job not found");
+  });
+
+  it("should keep every tenant in reach outside a portal", async () => {
+    vi.mocked(db.getReconciliationJob).mockResolvedValue({ id: 6, organizationId: 30002 } as never);
+    await expect(assertJobVisible(superAdmin, 6)).resolves.toMatchObject({ id: 6 });
+    expect(canActOnTenant(superAdmin, 30002)).toBe(true);
+  });
+
+  it("should hold the canonical row guard to the same rule", () => {
+    expect(() => inPortal(() => assertSameOrg(superAdmin, 30001))).not.toThrow();
+    expect(() => inPortal(() => assertSameOrg(superAdmin, 30002))).toThrow(/another organization/);
+    expect(() => inPortal(() => assertSameOrg(superAdmin, null))).toThrow(/another organization/);
+    expect(() => assertSameOrg(superAdmin, 30002)).not.toThrow();
+  });
+});
+
+describe("when users are managed", () => {
+  const targets = (rows: { id: number; role: string; organizationId: number | null }[]) => {
+    const chain = { select: () => chain, from: () => chain, where: async () => rows };
+    vi.mocked(db.getDb).mockResolvedValue(chain as never);
+  };
+  const staffCtx = { user: { role: "super_admin", organizationId: 30001 } };
+  const inPortal = <T,>(fn: () => T) => runInRequestScope({ portalOrganizationId: 30001 }, fn);
+
+  it("should let staff inside a portal manage that tenant's users only", async () => {
+    targets([{ id: 8, role: "operations", organizationId: 30001 }]);
+    await expect(inPortal(() => assertCanManageUsers(staffCtx, [8]))).resolves.toBeUndefined();
+    targets([{ id: 9, role: "operations", organizationId: 30002 }]);
+    await expect(inPortal(() => assertCanManageUsers(staffCtx, [9]))).rejects.toThrow(/own organisation/);
+    targets([{ id: 1, role: "super_admin", organizationId: 30001 }]);
+    await expect(inPortal(() => assertCanManageUsers(staffCtx, [1]))).rejects.toThrow(/own organisation/);
+  });
+
+  it("should let staff outside a portal manage anyone, without a lookup", async () => {
+    await expect(assertCanManageUsers(staffCtx, [9])).resolves.toBeUndefined();
+    expect(db.getDb).not.toHaveBeenCalled();
+  });
+
+  it("should let an admin with no organisation manage no one, org-less users included", async () => {
+    targets([{ id: 9, role: "operations", organizationId: null }]);
+    await expect(assertCanManageUsers({ user: { role: "admin", organizationId: null } }, [9])).rejects.toThrow(/own organisation/);
+  });
+
+  it("should still let an org admin manage their own organisation's users", async () => {
+    targets([{ id: 9, role: "operations", organizationId: 4 }]);
+    await expect(assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [9])).resolves.toBeUndefined();
   });
 });
 
@@ -85,6 +181,31 @@ describe("when a procedure in routers.ts reads a job or schedule by a caller's i
     // return the account itself, or the client would believe the super admin
     // had become a member of that tenant.
     expect(src).toContain("me: publicProcedure.query((opts) => opts.ctx.actor ?? opts.ctx.user),");
+  });
+
+  it("should file events about the ACCOUNT, or spanning organisations, in the global chain", () => {
+    // The portal default would otherwise put a staff member's sign-out, their
+    // personal email preferences, a super-admin grant or a move between
+    // organisations into the trail of whichever tenant was on screen.
+    for (const [action, arg] of [
+      ['"user_logout"', "ip, ua, null);"],
+      ['"update_email_prefs"', "ip, ua, null);"],
+      ['"update_user_org"', "ip, ua, null);"],
+    ] as const) {
+      const sites = [...src.matchAll(new RegExp(`logAudit\\(ctx\\.user\\.id, ${action}`, "g"))];
+      expect(sites.length, `${action} has moved`).toBeGreaterThan(0);
+      for (const m of sites) expect(src.slice(m.index!, m.index! + 260), action).toContain(arg);
+    }
+    const grants = [...src.matchAll(/logAudit\(ctx\.user\.id, "update_user_role"/g)];
+    expect(grants.length).toBe(2);
+    for (const m of grants) expect(src.slice(m.index!, m.index! + 200)).toContain('input.role === "super_admin" ? null : undefined');
+  });
+
+  it("should name the tenant a record is about where the portal default would guess wrong", () => {
+    expect(src).toMatch(/"add_user", "user", newUserId, \{[^}]*\}, ip, ua, targetOrgId\);/);
+    const at = src.indexOf('"activate_finserv_operational_demo"');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 600)).toMatch(/\}, ip, ua, target\);/);
   });
 
   it("should check a schedule's tenant before returning it", () => {

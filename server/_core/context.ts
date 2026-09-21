@@ -30,9 +30,12 @@ export async function createContext(
     signedIn = null;
   }
 
+  // `headers?.` — a caller building a context by hand (tests, internal
+  // callers) may pass a request without headers. That must mean "no portal",
+  // not an unhandled rejection from inside context creation.
   const view = await applyPortalView(
     signedIn,
-    opts.req.headers[PORTAL_ORG_HEADER],
+    opts.req.headers?.[PORTAL_ORG_HEADER],
     async (id) => Boolean(await getOrganizationById(id)),
   );
 

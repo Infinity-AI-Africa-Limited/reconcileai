@@ -97,4 +97,14 @@ describe("when a tRPC request context is created", () => {
     expect(ctx.user).toBeNull();
     expect(ctx.actor).toBeNull();
   });
+
+  it("should treat a request with no headers at all as having no portal, not reject", async () => {
+    // documentation.test.ts builds a context from a bare mock request. Reading
+    // `req.headers[...]` unguarded rejected inside createContext — three
+    // unhandled errors, and CI failed a run whose every test had passed.
+    vi.mocked(sdk.authenticateRequest).mockResolvedValue(staff);
+    const ctx = await createContext({ req: {} as never, res: {} as never });
+    expect(ctx.user).toBe(staff);
+    expect(ctx.viewingAs).toBeNull();
+  });
 });

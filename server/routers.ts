@@ -542,7 +542,8 @@ export const appRouter = router({
       // Audit: log logout before clearing the cookie
       if (ctx.user) {
         const { ip, ua } = getClientInfo(ctx);
-        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua);
+        // The account's session ended, not an action on the tenant on screen.
+        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua, null);
       }
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
@@ -3202,7 +3203,8 @@ export const appRouter = router({
           updateData.lowMatchRateThreshold = String(input.lowMatchRateThreshold);
         }
         await db.upsertEmailPreferences(ctx.user.id, updateData);
-        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua);
+        // The caller's OWN preferences (keyed by user id), not the tenant's.
+        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua, null);
         return { success: true };
       }),
 
@@ -3499,9 +3501,12 @@ export const appRouter = router({
         }
         const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
+        // Granting super admin is a platform event, not the tenant's: it joins the
+        // global chain even from inside a portal. Any other role change is about
+        // the tenant on screen (assertCanManageUsers holds the target to it).
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
           newRole: input.role,
-        }, ip, ua);
+        }, ip, ua, input.role === "super_admin" ? null : undefined);
         return { success: true };
       }),
     bulkUpdateRole: adminProcedure
@@ -3519,7 +3524,8 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ role: input.role }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua);
+          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua,
+            input.role === "super_admin" ? null : undefined);
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3554,7 +3560,8 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ organizationId: input.organizationId }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua);
+          // Spans two organisations, so it belongs to neither's trail: global.
+          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua, null);
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3600,7 +3607,9 @@ export const appRouter = router({
           loginMethod: "invite",
         });
         const newUserId = (result as any).insertId;
-        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua);
+        // The new user's own organisation, which the row names — not the portal
+        // on screen: a super admin may create a user for any organisation.
+        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua, targetOrgId);
         // Send welcome email with magic login link
         if (input.origin) {
           try {
@@ -3707,9 +3716,10 @@ export const appRouter = router({
         await drizzle.update(users)
           .set({ organizationId: input.organizationId })
           .where(eq(users.id, input.userId));
+        // Spans two organisations, so it belongs to neither's trail: global.
         await logAudit(ctx.user.id, "update_user_org", "user", input.userId, {
           organizationId: input.organizationId,
-        }, ip, ua);
+        }, ip, ua, null);
         return { success: true };
       }),
 
@@ -5033,7 +5043,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
             matchedPairs: result.matchedCount,
             exceptionCases: result.exceptionCount,
             reviewQueueOpenToday: result.reviewQueueOpenToday,
-          }, ip, ua);
+            // Named, not defaulted: a platform procedure runs outside the portal
+            // scope (superAdminProcedure), and this one acts on the tenant on screen.
+          }, ip, ua, target);
           return { success: true, ...result };
         }
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
