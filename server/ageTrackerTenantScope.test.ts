@@ -37,4 +37,18 @@ describe("Age Tracker tenant scope", () => {
     const calls = routerSource.match(/getOpenExceptionsForAging\(([^)]*)\)/g) ?? [];
     expect(calls.every((c) => c === "getOpenExceptionsForAging(tenant)"), calls.join(" | ")).toBe(true);
   });
+
+  it("files every Age Tracker audit record under the tenant it changed", () => {
+    // logAudit with no organisation writes to the GLOBAL chain, and a tenant's
+    // Audit Trail selects `organizationId = tenant` exactly — so an escalation
+    // made inside a tenant's portal changed that tenant and appeared in no
+    // tenant's trail, export or chain verification.
+    const start = routerSource.indexOf("  ageTracker: router({");
+    const block = routerSource.slice(start, routerSource.indexOf("\n  }),\n", start));
+    const audits = block.match(/await logAudit\([^;]*\);/g) ?? [];
+    expect(audits.length).toBe(3);
+    for (const a of audits) {
+      expect(a, "an Age Tracker audit record omits its tenant").toMatch(/,\s*(tenant|orgId \|\| null)\)\s*;$/);
+    }
+  });
 });

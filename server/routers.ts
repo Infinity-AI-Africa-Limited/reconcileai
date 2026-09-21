@@ -1002,7 +1002,7 @@ export const appRouter = router({
           status: "escalated",
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
-        await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua);
+        await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua, tenant);
         // Flywheel write-path (audit fix): escalations are learnable outcomes.
         if (tenant) {
           const _orgId = tenant;
@@ -1036,7 +1036,7 @@ export const appRouter = router({
       );
       await Promise.all(overAged.map((r) => db.updateException(r.id, tenant, { status: "escalated" })));
       const { ip, ua } = getClientInfo(ctx);
-      await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
+      await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua, tenant);
       // Flywheel write-path (audit fix): each bulk escalation is a learnable
       // outcome. Fire-and-forget, sequential to avoid hammering the DB.
       if (tenant && overAged.length > 0) {
@@ -1075,7 +1075,7 @@ export const appRouter = router({
         const orgId = portalScopedOrgId(ctx.user, input.viewAsOrgId) ?? 0;
         if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization context for SLA settings" });
         await db.upsertAgingSettings(orgId, input.slaDays);
-        await logAudit(ctx.user.id, "update_aging_sla", "exception_aging_settings", orgId, { slaDays: input.slaDays });
+        await logAudit(ctx.user.id, "update_aging_sla", "exception_aging_settings", orgId, { slaDays: input.slaDays }, undefined, undefined, orgId || null);
         return { slaDays: input.slaDays };
       }),
   }),
