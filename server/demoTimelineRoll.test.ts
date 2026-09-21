@@ -64,7 +64,7 @@ const dialect = new MySqlDialect();
 function fakeDb(script: Script) {
   const log: string[] = [];
   const inserts: { table: string; values: Record<string, unknown> }[] = [];
-  const wheres: { table: string; fields: string[]; params: unknown[] }[] = [];
+  const wheres: { table: string; fields: string[]; params: unknown[]; sql?: string }[] = [];
   const sqlLog: { table: string; key: string; sql: string; params: unknown[] }[] = [];
   const select = (fields?: Record<string, unknown>) => {
     let table = "";
@@ -115,7 +115,15 @@ function fakeDb(script: Script) {
             sqlLog.push({ table, key: k, sql: q.sql, params: q.params });
             return /least\(/i.test(q.sql) ? k : `${k}~`;
           });
-          return { where: async () => { log.push(`update ${table} ${keys.join(",")}`); } };
+          return {
+            where: async (cond?: unknown) => {
+              log.push(`update ${table} ${keys.join(",")}`);
+              if (cond instanceof SQL) {
+                const q = dialect.sqlToQuery(cond);
+                wheres.push({ table: `update:${table}`, fields: Object.keys(s), params: q.params, sql: q.sql });
+              }
+            },
+          };
         },
       };
     },
@@ -334,6 +342,23 @@ describe("when a reconciliation run is live for the tenant", () => {
   it("should roll once no run is live — the positive to the deferral", async () => {
     const { db } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], activeRuns: 0 });
     expect((await rollDemoTimeline(db, 1, { commit: true, now: NOW })).status).toBe("rolled");
+  });
+
+  it("should never rewrite a live job, even one that started after the check", async () => {
+    // The check can race: job creation does not take the organisations lock,
+    // so a run may start after it returns zero. The jobs UPDATE therefore
+    // excludes live statuses row by row, and a mid-roll run keeps its heartbeat.
+    const { db, wheres } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], activeRuns: 0 });
+    expect((await rollDemoTimeline(db, 1, { commit: true, now: NOW })).status).toBe("rolled");
+    const jobsUpdate = wheres.find((w) => w.table === "update:reconciliation_jobs");
+    expect(jobsUpdate, "the jobs UPDATE was not issued").toBeDefined();
+    expect(jobsUpdate!.sql).toMatch(/not in/i);
+    for (const s of ACTIVE_JOB_STATUSES) expect(jobsUpdate!.params).toContain(s);
+    expect(jobsUpdate!.params).toContain(1);
+    // Only jobs carry that predicate; every other table rolls whole.
+    const others = wheres.filter((w) => w.table.startsWith("update:") && w.table !== "update:reconciliation_jobs" && w.table !== "update:reconciliation_reports");
+    expect(others.length).toBeGreaterThan(5);
+    for (const w of others) expect(w.sql, w.table).not.toMatch(/not in/i);
   });
 
   it("should count as live exactly the statuses the stuck-job sweep treats as live", async () => {
