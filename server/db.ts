@@ -37,7 +37,7 @@ import {
   exceptionAgingSettings,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
-import { auditTimestamp, computeRecordHash } from "./auditChain";
+import { AUDIT_WRITER_VERSION, auditTimestamp, computeRecordHash } from "./auditChain";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -1387,6 +1387,9 @@ export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor
       createdAt,
     },
     prevRecordHash,
+    // Signed as writer 2, so the rounded-write allowance can never apply to
+    // this row (see AuditWriterVersion).
+    AUDIT_WRITER_VERSION,
   );
 
   await db.insert(auditLogs).values({

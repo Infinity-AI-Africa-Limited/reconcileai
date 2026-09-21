@@ -50,9 +50,32 @@ export function auditTimestamp(now: Date = new Date()): Date {
   return new Date(Math.floor(now.getTime() / 1000) * 1000);
 }
 
+/**
+ * Which writer signed a row — recorded INSIDE the hashed content, so a row
+ * proves its own writer and no column (or migration) is needed to know it.
+ *
+ *   1  the original writer: hashed the floored second, which the column then
+ *      rounded. Its canonical form carries no version field, so every row it
+ *      wrote still hashes exactly as it was signed.
+ *   2  `auditTimestamp`: a whole second, stored as hashed. Its canonical form
+ *      carries `writer: 2`.
+ *
+ * Why it matters: the rounded-write allowance below must apply ONLY to
+ * writer-1 rows. Applied to every row, it would let anyone move a new entry's
+ * time forward a second undetected — review caught exactly that. A writer-2
+ * row cannot pass as writer-1, because its hash was taken over different
+ * content; forging that needs the chain re-hashed, which the links expose.
+ */
+export type AuditWriterVersion = 1 | 2;
+export const AUDIT_WRITER_VERSION: AuditWriterVersion = 2;
+
 /** Deterministic SHA-256 over the entry content + the previous link. */
-export function computeRecordHash(fields: AuditChainFields, prevRecordHash: string | null): string {
-  return contentHashOf({
+export function computeRecordHash(
+  fields: AuditChainFields,
+  prevRecordHash: string | null,
+  writer: AuditWriterVersion = AUDIT_WRITER_VERSION,
+): string {
+  const content = {
     sequenceNumber: fields.sequenceNumber,
     userId: fields.userId ?? null,
     organizationId: fields.organizationId ?? null,
@@ -64,7 +87,9 @@ export function computeRecordHash(fields: AuditChainFields, prevRecordHash: stri
     userAgent: fields.userAgent ?? null,
     createdAtEpochSec: epochSeconds(fields.createdAt),
     prevRecordHash: prevRecordHash ?? "",
-  });
+  };
+  // Writer 1 is the form every existing row was signed with — unchanged, key for key.
+  return contentHashOf(writer === 1 ? content : { ...content, writer });
 }
 
 export interface ChainRow extends AuditChainFields {
@@ -79,9 +104,10 @@ export interface ChainVerification {
   signedRows: number;
   unsignedRows: number; // legacy rows written before chaining existed
   /**
-   * Signed rows that verified only under the ROUNDED-WRITE rule: their stored
-   * time is exactly one second after the time they were hashed at. Reported,
-   * never hidden — see `matchesRoundedWrite`.
+   * Writer-1 rows that verified only under the ROUNDED-WRITE rule: their
+   * stored time is exactly one second after the time they were hashed at.
+   * Reported, never hidden — see `matchesRoundedWrite`. Writer-2 rows are never
+   * counted here; they verify exactly or not at all.
    */
   roundedRows: number;
   firstBrokenSequence: number | null;
@@ -89,22 +115,32 @@ export interface ChainVerification {
 }
 
 /**
- * Did this row's writer hash it one second EARLIER than the column stored it?
+ * Was this a WRITER-1 row that the column stored one second later than it was
+ * hashed?
  *
  * That is the signature of the pre-`auditTimestamp` writer (see above): the
  * hash took the floored second, the `timestamp(0)` column rounded up. Such a
  * row was not altered; its evidence is intact at the second it was hashed.
  *
- * Deliberately narrow. Exactly one second, exactly earlier, and only the
- * timestamp: every other field must match as written. Re-signing those rows
- * instead was rejected — rewriting the hashes of an audit chain is precisely
- * what a tamper-evident chain exists to make detectable. What this admits is
- * that a row's time could be moved forward by one second unnoticed; an edit
- * to anything else, or any other time, still breaks the chain.
+ * Deliberately narrow. Writer 1 only — a writer-2 row never needs it, and
+ * allowing it there would blind the chain to a one-second edit on every new
+ * entry. Exactly one second, exactly earlier, and only the timestamp: every
+ * other field must match as written. Re-signing those rows instead was
+ * rejected — rewriting the hashes of an audit chain is precisely what a
+ * tamper-evident chain exists to make detectable. What this admits, for
+ * writer-1 rows only, is that a time could have moved forward one second.
  */
 function matchesRoundedWrite(row: ChainRow): boolean {
   const t = row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(row.createdAt).getTime();
-  return computeRecordHash({ ...row, createdAt: new Date(t - 1000) }, row.prevRecordHash) === row.recordHash;
+  return computeRecordHash({ ...row, createdAt: new Date(t - 1000) }, row.prevRecordHash, 1) === row.recordHash;
+}
+
+/** Does the row verify exactly as written, by either writer? */
+function matchesAsWritten(row: ChainRow): boolean {
+  return (
+    computeRecordHash(row, row.prevRecordHash, 2) === row.recordHash ||
+    computeRecordHash(row, row.prevRecordHash, 1) === row.recordHash
+  );
 }
 
 /**
@@ -122,8 +158,7 @@ export function verifyChain(rows: ChainRow[]): ChainVerification {
 
   for (const row of signed) {
     // Recompute the content hash and compare (detects content tampering).
-    const expected = computeRecordHash(row, row.prevRecordHash);
-    if (expected !== row.recordHash) {
+    if (!matchesAsWritten(row)) {
       if (matchesRoundedWrite(row)) {
         roundedRows++;
       } else {

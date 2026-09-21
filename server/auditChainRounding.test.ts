@@ -21,13 +21,13 @@ const fields = (seq: number, createdAt: Date): AuditChainFields => ({
   entityId: 900 + seq, details: JSON.stringify({ n: seq }), ipAddress: null, userAgent: null, createdAt,
 });
 
-/** A chain as the OLD writer produced it: hashed at `hashedAt`, stored as the column rounds it. */
+/** A chain as the OLD writer produced it: writer 1, hashed at `hashedAt`, stored as the column rounds it. */
 function oldWriterChain(hashedAt: Date[]): ChainRow[] {
   const rows: ChainRow[] = [];
   let prev: string | null = null;
   hashedAt.forEach((t, i) => {
     const f = fields(i + 1, t);
-    const recordHash = computeRecordHash(f, prev);
+    const recordHash = computeRecordHash(f, prev, 1);
     rows.push({ ...f, createdAt: storedByColumn(t), recordHash, prevRecordHash: prev });
     prev = recordHash;
   });
@@ -69,6 +69,51 @@ describe("when createAuditLog writes an entry", () => {
   });
 });
 
+describe("when rows signed before this change are verified", () => {
+  it("should hash writer-1 content exactly as the original implementation did", () => {
+    // Golden value computed with origin/main's computeRecordHash (before writer
+    // versions existed). Every production row signed so far depends on this
+    // form being unchanged, and the chain tests above cannot notice a change —
+    // they sign and verify with the same function.
+    const golden = computeRecordHash(
+      {
+        sequenceNumber: 41, userId: 7, organizationId: 30001, action: "exception_resolved", entityType: "exception",
+        entityId: 941, details: '{"n":41}', ipAddress: "10.0.0.1", userAgent: "golden", createdAt: new Date("2026-08-01T10:00:05.000Z"),
+      },
+      "prev-hash-golden",
+      1,
+    );
+    expect(golden).toBe("e2ce2becbe9e84b7bb309b2e72e826765e3afcca6925bdbf9a8c11a48e4c3a33");
+  });
+});
+
+describe("when a row signed by the NEW writer is edited", () => {
+  /** A chain as the new writer produces it: writer 2, whole seconds, stored as hashed. */
+  function newWriterChain(n: number): ChainRow[] {
+    const rows: ChainRow[] = [];
+    let prev: string | null = null;
+    for (let i = 1; i <= n; i++) {
+      const f = fields(i, auditTimestamp(new Date(`2026-09-22T10:00:0${i}.600Z`)));
+      const recordHash = computeRecordHash(f, prev, 2);
+      rows.push({ ...f, createdAt: storedByColumn(f.createdAt as Date), recordHash, prevRecordHash: prev });
+      prev = recordHash;
+    }
+    return rows;
+  }
+
+  it("should verify it strictly, with nothing counted as rounded", () => {
+    expect(verifyChain(newWriterChain(3))).toMatchObject({ valid: true, roundedRows: 0 });
+  });
+
+  it("should catch its time moved forward ONE second — the allowance is for old rows only", () => {
+    // Review's case: with the allowance applied to every row, +1 s on a new
+    // entry reproduced the original hash and the chain still read intact.
+    const rows = newWriterChain(3);
+    rows[1] = { ...rows[1], createdAt: new Date((rows[1].createdAt as Date).getTime() + 1000) };
+    expect(verifyChain(rows)).toMatchObject({ valid: false, firstBrokenSequence: 2 });
+  });
+});
+
 describe("when verifying rows the old writer stored a second late", () => {
   it("should verify them, and SAY how many needed the rounded-write rule", () => {
     const rows = oldWriterChain([
@@ -91,6 +136,11 @@ describe("when verifying rows the old writer stored a second late", () => {
     const rows = oldWriterChain([new Date("2026-08-01T10:00:05.700Z")]);
     rows[0] = { ...rows[0], action: "exception_dismissed" };
     expect(verifyChain(rows)).toMatchObject({ valid: false, firstBrokenSequence: 1 });
+  });
+
+  it("should verify a writer-1 row the column happened to round DOWN, exactly as written", () => {
+    // Half the old rows were never affected; they must not be counted as rounded.
+    expect(verifyChain(oldWriterChain([new Date("2026-08-01T10:00:00.200Z")]))).toMatchObject({ valid: true, roundedRows: 0 });
   });
 
   it("should still catch a removed entry", () => {
