@@ -64,7 +64,7 @@ import {
   rollDeltaMs,
   zonedDayStart,
 } from "../server/demoRecency";
-import { createReportForJob, DEMO_REPORT_MARKER } from "../server/demoReportSeed";
+import { createReportForJob, isSeededReportSummary } from "../server/demoReportSeed";
 
 const COMMIT = process.argv.includes("--commit");
 const TRIM = process.argv.includes("--trim");
@@ -356,6 +356,16 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
     // parameterised `sql` tag. The alternative, a per-row loop, is 79,718 round
     // trips on Globus Bank — which is how the restore on 20 September died of
     // ECONNRESET partway through. Every statement is scoped by tenant.
+    //
+    // This is kept deliberately where other raw expressions were removed (the
+    // JSON marker checks now filter in TypeScript). Drizzle has no typed column
+    // arithmetic, and the roll must be ATOMIC: a shift is relative, so a per-row
+    // loop interrupted halfway could not be retried — the rerun would compute a
+    // new delta from an already-moved newest row and shift the remainder by the
+    // wrong amount, splitting the timeline. One set-based statement per table,
+    // inside one transaction, is the only form that is all-or-nothing. It is
+    // still a drizzle query — db.update().set().where() — with the interval
+    // bound as a parameter, never interpolated text.
     const shift = (col: AnyColumn) => sql`DATE_ADD(${col}, INTERVAL ${secs} SECOND)`;
     await db.transaction(async (tx) => {
       await tx
@@ -431,20 +441,35 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
 
   if (COMMIT) {
     // Planned per TRANSACTION, not per exception row — see planExceptionTimeline.
-    // A matched transaction keeps its current date, so its counterpart is not
-    // left behind; read those first so the plan anchors to what is really there.
+    //
+    // Which transactions may MOVE is decided from the transaction rows
+    // themselves, loaded by id. An earlier version preloaded only matched
+    // transactions and only within this tenant, so one owned by another
+    // organisation, or by none — both of which the schema allows — was missed,
+    // treated as movable, re-dated in the plan, and then left unchanged by the
+    // tenant-scoped update: its exception anchored to a date the transaction
+    // does not have. The ids come from THIS tenant's exceptions, so reading
+    // their dates widens nothing; writing is still tenant-scoped, and only a
+    // transaction this tenant owns and no match references is ever moved.
+    const referenced = [...new Set(rows.map((r) => r.txId).filter((t): t is number => t != null))];
+    const txRows = referenced.length
+      ? await db
+          .select({ id: transactions.id, org: transactions.organizationId, d: transactions.transactionDate })
+          .from(transactions)
+          .where(inArray(transactions.id, referenced))
+      : [];
+    const found = new Map(txRows.map((t) => [t.id, t]));
     const pinned = new Map<number, Date>();
-    const pinnedIds = [...new Set(rows.map((r) => r.txId).filter((t): t is number => t != null && matched.has(t)))];
-    if (pinnedIds.length) {
-      for (const t of await db
-        .select({ id: transactions.id, d: transactions.transactionDate })
-        .from(transactions)
-        .where(and(eq(transactions.organizationId, orgId), inArray(transactions.id, pinnedIds)))) {
-        pinned.set(t.id, new Date(t.d));
-      }
+    for (const t of txRows) {
+      if (t.org !== orgId || matched.has(t.id)) pinned.set(t.id, new Date(t.d));
+    }
+    const missing = referenced.filter((id) => !found.has(id)).length;
+    if (pinned.size || missing) {
+      console.log(`  kept in place: ${pinned.size} transaction(s) not owned here or matched; ${missing} referenced but missing (their exceptions are left as they are)`);
     }
     const plan = planExceptionTimeline(
-      rows.map((r) => ({ id: r.id, txId: r.txId, status: r.status as string })),
+      // An exception whose transaction does not exist has nothing to anchor to.
+      rows.map((r) => ({ id: r.id, txId: r.txId != null && found.has(r.txId) ? r.txId : null, status: r.status as string })),
       now,
       timeZone,
       pinned,
@@ -539,17 +564,20 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
   }
 
   // ── 6. Refresh the seeded report ─────────────────────────────────────────
-  const seeded = await db
-    .select({
-      jobId: reconciliationReports.jobId,
-      userId: reconciliationReports.userId,
-      title: reconciliationReports.title,
-    })
-    .from(reconciliationReports)
-    .where(and(
-      eq(reconciliationReports.organizationId, orgId),
-      sql`JSON_UNQUOTE(JSON_EXTRACT(${reconciliationReports.summary}, '$.demoSeedMarker')) = ${DEMO_REPORT_MARKER}`,
-    ));
+  // Filtered in TypeScript rather than with JSON_EXTRACT: a tenant has a handful
+  // of reports, drizzle already returns `summary` parsed, and the typed read
+  // keeps this inside the repository's data-access convention.
+  const seeded = (
+    await db
+      .select({
+        jobId: reconciliationReports.jobId,
+        userId: reconciliationReports.userId,
+        title: reconciliationReports.title,
+        summary: reconciliationReports.summary,
+      })
+      .from(reconciliationReports)
+      .where(eq(reconciliationReports.organizationId, orgId))
+  ).filter((r) => isSeededReportSummary(r.summary));
   if (seeded.length === 1) {
     if (COMMIT) {
       await createReportForJob(db, {

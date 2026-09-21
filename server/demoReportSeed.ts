@@ -15,7 +15,7 @@
  * Kept out of `reportSummary.ts` so that module stays pure and its tests need no
  * database, and out of either seeder so neither owns a copy.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { exceptions, matches, reconciliationJobs, reconciliationReports } from "../drizzle/schema";
 import { getDb } from "./db";
 import { buildReportSummary } from "./reportSummary";
@@ -41,9 +41,19 @@ export type SeededReportType = "daily" | "weekly" | "monthly" | "custom";
  */
 export const DEMO_REPORT_MARKER = "reconcileai-demo-seed-v1";
 
+/** Does a stored report summary carry the seed marker? Pure, so both callers agree. */
+export function isSeededReportSummary(summary: unknown): boolean {
+  return (
+    typeof summary === "object" &&
+    summary !== null &&
+    (summary as { demoSeedMarker?: unknown }).demoSeedMarker === DEMO_REPORT_MARKER
+  );
+}
+
 /**
- * Create THE demo report for `jobId`, replacing any earlier one of the same
- * title in the same tenant. Returns null if the job is not there.
+ * Create THE demo report for `jobId`, replacing any earlier SEEDED report in the
+ * same tenant (identified by DEMO_REPORT_MARKER, never by title). Returns null
+ * if the job is not there.
  *
  * Scoped by organisation as well as id: a seeder is handed a job id it just
  * created, but reading a job by id alone would happily summarise another
@@ -103,15 +113,27 @@ export async function createReportForJob(
   });
 
   // Replace the previous SEEDED report, identified by a marker no user-created
-  // report can carry. Title is deliberately NOT part of this predicate: the
-  // Reports screen auto-fills the title from the job, so a user's report can
-  // share it, and matching on it would delete their work.
+  // report can carry. Title is deliberately NOT part of this: the Reports screen
+  // auto-fills the title from the job, so a user's report can share it, and
+  // matching on it would delete their work.
   //
-  // Tenant-scoped as well, so this can never reach another organisation's rows.
-  await db.delete(reconciliationReports).where(and(
-    eq(reconciliationReports.organizationId, args.organizationId),
-    sql`JSON_UNQUOTE(JSON_EXTRACT(${reconciliationReports.summary}, '$.demoSeedMarker')) = ${DEMO_REPORT_MARKER}`,
-  ));
+  // The marker is read in TypeScript, not with JSON_EXTRACT: a tenant holds a
+  // handful of reports, drizzle returns `summary` already parsed, and the
+  // delete that follows is a typed, tenant-scoped statement over explicit ids.
+  const prior = (
+    await db
+      .select({ id: reconciliationReports.id, summary: reconciliationReports.summary })
+      .from(reconciliationReports)
+      .where(eq(reconciliationReports.organizationId, args.organizationId))
+  )
+    .filter((r) => isSeededReportSummary(r.summary))
+    .map((r) => r.id);
+  if (prior.length) {
+    await db.delete(reconciliationReports).where(and(
+      eq(reconciliationReports.organizationId, args.organizationId),
+      inArray(reconciliationReports.id, prior),
+    ));
+  }
 
   const inserted = await db.insert(reconciliationReports).values({
     jobId: args.jobId,
