@@ -53,7 +53,7 @@
  * Only in the deployed production service (`rollEnabledHere`). Never under
  * `pnpm dev`: the local .env names the production database.
  */
-import { and, count, eq, inArray, max, notInArray, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { and, count, eq, inArray, max, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { getTableColumns } from "drizzle-orm";
 import type { MySqlTable, MySqlUpdateSetSource } from "drizzle-orm/mysql-core";
 import {
@@ -112,8 +112,6 @@ export const ROLL_PLAN = [
     roll: ["dateFrom", "dateTo", "startedAt", "completedAt", "abandonedAt", "heartbeatAt", "createdAt"],
     exempt: {},
     mayBeFuture: {},
-    // A live run's timestamps are in use, not history — see rollDemoTimeline.
-    settledOnly: true,
   },
   { table: matches, name: "matches", scope: "jobs", roll: ["createdAt", "reviewedAt"], exempt: {}, mayBeFuture: {} },
   { table: reconciliationReports, name: "reconciliationReports", scope: "org", roll: ["createdAt"], exempt: {}, mayBeFuture: {} },
@@ -146,8 +144,6 @@ export const ROLL_PLAN = [
    * CLAMPED to now — see `rollDemoTimeline` for why.
    */
   mayBeFuture: Record<string, string>;
-  /** Skip rows whose `status` is in ACTIVE_JOB_STATUSES (jobs only). */
-  settledOnly?: boolean;
 }[];
 
 export type RollEligibility = { ok: true } | { ok: false; reason: string };
@@ -262,11 +258,19 @@ export async function rollDemoTimeline(
     // sweep would fail a healthy run and abandon it for good. Deferred, not
     // refused — the next pass rolls once the run has finished. Checked under
     // the lock so the answer holds for the rest of this transaction's reads.
-    const [active] = await tx
-      .select({ n: count() })
+    //
+    // A LOCKING read, not a plain one. In a TiDB pessimistic transaction a
+    // plain SELECT reads the snapshot taken when the transaction BEGAN, so a
+    // job committed between BEGIN and the organisations lock would be
+    // invisible here. FOR UPDATE reads the latest committed rows. Together
+    // with job creation taking the same organisations lock
+    // (insertJobUnderTenantLock), no live job can exist that this does not see.
+    const live = await tx
+      .select({ id: reconciliationJobs.id })
       .from(reconciliationJobs)
-      .where(and(eq(reconciliationJobs.organizationId, orgId), inArray(reconciliationJobs.status, ACTIVE_JOB_STATUSES)));
-    const activeRuns = Number(active?.n ?? 0);
+      .where(and(eq(reconciliationJobs.organizationId, orgId), inArray(reconciliationJobs.status, [...ACTIVE_JOB_STATUSES])))
+      .for("update");
+    const activeRuns = live.length;
     if (activeRuns > 0) {
       return { status: "skipped", seconds: 0, reason: `${activeRuns} reconciliation run(s) in progress — deferred to the next pass` } as const;
     }
@@ -306,20 +310,13 @@ export async function rollDemoTimeline(
       // would re-date every tenant's rows.
       if (!scopeCol) throw new Error(`demo timeline roll: ${step.name} has no ${step.scope === "jobs" ? "jobId" : "organizationId"}`);
       if (step.scope === "jobs" && jobIds.length === 0) continue;
-      const scoped = step.scope === "jobs" ? inArray(scopeCol, jobIds) : eq(scopeCol, orgId);
-      // The live-run check above can race: a job created (or claimed) after it
-      // returned zero is not stopped by the organisations lock, which job
-      // creation does not take. Rather than thread a tenant lock through the
-      // run lifecycle for a demo feature, the roll simply never rewrites a
-      // live job: this predicate is evaluated per row at UPDATE time, against
-      // the latest committed row (TiDB pessimistic DML), so a run that starts
-      // mid-roll keeps its own heartbeat and window. That run reads committed,
-      // pre-roll dates, and every date shifts by the same delta on commit, so
-      // what it computed stays consistent.
-      const settledOnly = (step as { settledOnly?: boolean }).settledOnly === true;
-      const liveCol = settledOnly ? cols.status : undefined;
-      if (settledOnly && !liveCol) throw new Error(`demo timeline roll: ${step.name} has no status column`);
-      const where = liveCol ? and(scoped, notInArray(liveCol, [...ACTIVE_JOB_STATUSES]))! : scoped;
+      // Every job is rolled with everything else. No live job can be here: the
+      // check above deferred for any it saw, and job creation takes the same
+      // organisations lock this transaction holds, so none can appear before
+      // commit. (An earlier revision excluded live jobs row by row instead;
+      // that left such a job's window unshifted while its transactions moved —
+      // it closed one symptom of the race, not the race.)
+      const where = step.scope === "jobs" ? inArray(scopeCol, jobIds) : eq(scopeCol, orgId);
       const future: Record<string, string> = step.mayBeFuture;
       await rollColumns(tx, step.table, step.roll, where, (col, key) => (key in future ? shiftUnclamped(col) : shift(col)));
     }

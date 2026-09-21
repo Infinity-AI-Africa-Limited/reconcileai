@@ -64,37 +64,48 @@ const dialect = new MySqlDialect();
 function fakeDb(script: Script) {
   const log: string[] = [];
   const inserts: { table: string; values: Record<string, unknown> }[] = [];
-  const wheres: { table: string; fields: string[]; params: unknown[]; sql?: string }[] = [];
+  type Where = { table: string; fields: string[]; params: unknown[]; sql?: string; locked?: boolean };
+  const wheres: Where[] = [];
   const sqlLog: { table: string; key: string; sql: string; params: unknown[] }[] = [];
   const select = (fields?: Record<string, unknown>) => {
     let table = "";
+    let locked = false;
+    let entry: Where | undefined;
     const q = {
       from(t: Parameters<typeof getTableName>[0]) { table = getTableName(t); return q; },
       where(cond?: unknown) {
         // Rendered, so a test can see what a query actually filters on.
-        if (cond instanceof SQL) wheres.push({ table, fields: Object.keys(fields ?? {}), params: dialect.sqlToQuery(cond).params });
+        if (cond instanceof SQL) {
+          entry = { table, fields: Object.keys(fields ?? {}), params: dialect.sqlToQuery(cond).params };
+          wheres.push(entry);
+        }
         return q;
       },
       orderBy() { return q; },
       limit() { return q; },
-      for(strength: string) { log.push(`lock ${table} ${strength}`); return q; },
+      for(strength: string) {
+        log.push(`lock ${table} ${strength}`);
+        locked = true;
+        if (entry) entry.locked = true;
+        return q;
+      },
       then(resolve: (rows: unknown[]) => unknown, reject: (e: unknown) => unknown) {
         log.push(`read ${table}`);
         try {
-          return Promise.resolve(rows(table, fields)).then(resolve, reject);
+          return Promise.resolve(rows(table, fields, locked)).then(resolve, reject);
         } catch (e) { return Promise.reject(e).then(resolve, reject); }
       },
     };
     return q;
   };
-  const rows = (table: string, fields?: Record<string, unknown>): unknown[] => {
+  const rows = (table: string, fields: Record<string, unknown> | undefined, locked: boolean): unknown[] => {
     switch (table) {
       case "organizations": return script.org ? [script.org] : [];
       case "sl_connector_stores": return [{ n: script.stores ?? 0 }];
       case "transactions": return [{ newest: script.newest ?? null }];
       case "reconciliation_jobs":
-        // Three shapes: a count of live runs, the tenant's job ids, a full job row.
-        if (fields && "n" in fields) return [{ n: script.activeRuns ?? 0 }];
+        // Three shapes: the live runs (a LOCKING read), the tenant's job ids, a full job row.
+        if (locked) return Array.from({ length: script.activeRuns ?? 0 }, (_, i) => ({ id: 800 + i }));
         return fields ? (script.jobIds ?? []).map((id) => ({ id })) : [JOB];
       case "reconciliation_reports": return script.reports ?? [];
       default: return [];
@@ -344,21 +355,29 @@ describe("when a reconciliation run is live for the tenant", () => {
     expect((await rollDemoTimeline(db, 1, { commit: true, now: NOW })).status).toBe("rolled");
   });
 
-  it("should never rewrite a live job, even one that started after the check", async () => {
-    // The check can race: job creation does not take the organisations lock,
-    // so a run may start after it returns zero. The jobs UPDATE therefore
-    // excludes live statuses row by row, and a mid-roll run keeps its heartbeat.
-    const { db, wheres } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], activeRuns: 0 });
+  it("should look for live runs with a LOCKING read, after the tenant lock and before measuring", async () => {
+    // On TiDB a plain SELECT in a transaction reads the snapshot from BEGIN, so
+    // a job committed between BEGIN and the organisations lock would be missed.
+    // FOR UPDATE reads the latest committed rows.
+    const { db, log, wheres } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5], activeRuns: 0 });
     expect((await rollDemoTimeline(db, 1, { commit: true, now: NOW })).status).toBe("rolled");
+    const orgLock = log.indexOf("lock organizations update");
+    const liveLock = log.indexOf("lock reconciliation_jobs update");
+    expect(orgLock).toBeGreaterThan(-1);
+    expect(liveLock, log.join(" | ")).toBeGreaterThan(orgLock);
+    expect(log.indexOf("read transactions")).toBeGreaterThan(liveLock);
+    expect(wheres.some((w) => w.table === "reconciliation_jobs" && w.locked)).toBe(true);
+  });
+
+  it("should roll every job with the rest, since no live one can be present", async () => {
+    // A row-level exclusion was tried and removed: it left a job created
+    // mid-roll with an unshifted window over shifted transactions. Mutual
+    // exclusion with job creation (insertJobUnderTenantLock) replaces it.
+    const { db, wheres } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
+    await rollDemoTimeline(db, 1, { commit: true, now: NOW });
     const jobsUpdate = wheres.find((w) => w.table === "update:reconciliation_jobs");
     expect(jobsUpdate, "the jobs UPDATE was not issued").toBeDefined();
-    expect(jobsUpdate!.sql).toMatch(/not in/i);
-    for (const s of ACTIVE_JOB_STATUSES) expect(jobsUpdate!.params).toContain(s);
-    expect(jobsUpdate!.params).toContain(1);
-    // Only jobs carry that predicate; every other table rolls whole.
-    const others = wheres.filter((w) => w.table.startsWith("update:") && w.table !== "update:reconciliation_jobs" && w.table !== "update:reconciliation_reports");
-    expect(others.length).toBeGreaterThan(5);
-    for (const w of others) expect(w.sql, w.table).not.toMatch(/not in/i);
+    expect(jobsUpdate!.sql).not.toMatch(/not in/i);
   });
 
   it("should count as live exactly the statuses the stuck-job sweep treats as live", async () => {
@@ -374,7 +393,7 @@ describe("when a reconciliation run is live for the tenant", () => {
     // And the query really filters on them — not merely a constant that exists.
     const { db, wheres } = fakeDb({ org: globus, newest: HOUR_AGO, jobIds: [5] });
     await rollDemoTimeline(db, 1, { commit: true, now: NOW });
-    const live = wheres.find((w) => w.table === "reconciliation_jobs" && w.fields.includes("n"));
+    const live = wheres.find((w) => w.table === "reconciliation_jobs" && w.locked);
     expect(live, "no live-run query was issued").toBeDefined();
     for (const s of sweepStatuses) expect(live!.params).toContain(s);
     expect(live!.params).toContain(1); // scoped to THIS tenant
