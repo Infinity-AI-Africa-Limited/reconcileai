@@ -923,8 +923,46 @@ export async function findDuplicateTransactions(
 export async function createReconciliationJob(data: InsertReconciliationJob & { organizationId: number }) {
   const db = await getDb();
   if (!db) return null;
-  const result = await db.insert(reconciliationJobs).values(data);
-  return result[0].insertId;
+  return insertJobUnderTenantLock(db, data);
+}
+
+/**
+ * Insert a reconciliation job while holding its tenant's `organizations` row
+ * lock — the same lock the demo-timeline roll holds (server/demoTimelineRoll.ts).
+ *
+ * The roll shifts a tenant's whole timeline and defers while a run is live.
+ * Deferral alone could race: a job created after the roll's check would run
+ * against dates moving underneath it, with a window that no longer matched
+ * its input. Taking the tenant lock here makes the two mutually exclusive: a
+ * job either exists (and is seen) before a roll begins, or is created after it
+ * commits. Claims need nothing further — a job can only be claimed once it
+ * exists, so every claimable job is one the roll saw and deferred for.
+ *
+ * Both paths take the organisations row FIRST, so they cannot deadlock. For a
+ * tenant that is never rolled, the lock is uncontended: one extra indexed
+ * SELECT … FOR UPDATE per job created.
+ *
+ * The owner is required, so the lock ALWAYS engages. It used to be optional,
+ * and every creator omitted it — which is how this lock first shipped unable
+ * to engage for any real run (and how every such run failed to start; see
+ * createReconciliationJob).
+ *
+ * Every live job is created here — tests hold other writers of
+ * `reconciliation_jobs` to the seeders, which only ever write completed runs.
+ */
+export async function insertJobUnderTenantLock(
+  db: DbHandle,
+  data: InsertReconciliationJob & { organizationId: number },
+): Promise<number> {
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.id, data.organizationId))
+      .for("update");
+    const result = await tx.insert(reconciliationJobs).values(data);
+    return result[0].insertId;
+  });
 }
 
 export async function updateReconciliationJob(id: number, data: Partial<InsertReconciliationJob>) {
