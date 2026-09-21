@@ -25,6 +25,7 @@ import {
   MAX_NAME_LENGTH,
   portalScopedOrgId,
   viewAsOrgInput,
+  canActOnTenant,
 } from "./shared";
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
@@ -377,10 +378,17 @@ export const reconciliationRouter = router({
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
       const job = await db.getReconciliationJob(input.id);
-      if (!job) throw new TRPCError({ code: "NOT_FOUND" });
+      // Same defect as reports.generate, on the job-detail view: the job was
+      // loaded by id alone (any tenant's, to anyone who guessed the id) while its
+      // exceptions were read under the CALLER's organisation. Inside a tenant
+      // portal that showed the tenant's job and matches with no exceptions at
+      // all. The job names its tenant; the caller only decides access.
+      if (!job || !canActOnTenant(ctx.user, job.organizationId ?? null)) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
       const jobMatches = await db.getMatchesByJob(input.id);
       const { data: jobExceptions } = await db.getExceptions({
-        organizationId: ctx.user.organizationId ?? null,
+        organizationId: job.organizationId ?? null,
         jobId: input.id,
       });
       // Audit: log data access event

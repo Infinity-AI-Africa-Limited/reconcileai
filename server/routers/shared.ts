@@ -67,6 +67,58 @@ export function portalScopedOrgId(
 /** The optional `viewAsOrgId` field, so every procedure declares it the same way. */
 export const viewAsOrgInput = { viewAsOrgId: z.number().int().positive().optional() };
 
+/**
+ * May this caller act on a row that belongs to `tenantId`?
+ *
+ * For procedures that take a ROW id from the client — a job id, a report id —
+ * the row already names its tenant, and that is the tenant the work belongs to.
+ * The caller's own organisation only decides whether they may touch it. Using
+ * the caller's organisation for the work itself is the bug this replaces:
+ * `reports.generate` and `reconciliation.get` both loaded a job by id alone and
+ * then read its exceptions under the CALLER's organisation, so inside a tenant
+ * portal they paired that tenant's job and matches with Infinity AI's exceptions
+ * (none), and for an ordinary user they returned another tenant's job to anyone
+ * who guessed its id.
+ *
+ * Mirrors the rule `allocations.ts` already applies, plus the staff pass the
+ * portal needs:
+ *
+ *   - staff may act on any tenant — the portal exists for exactly that;
+ *   - a caller with NO organisation may act on none. No organisation is not
+ *     "unknown tenant, match anything": a null-to-null match would pool every
+ *     org-less account into one shared pseudo-tenant;
+ *   - everyone else, only their own.
+ *
+ * Callers answer a refusal with NOT_FOUND, never FORBIDDEN, so another tenant's
+ * id is indistinguishable from one that does not exist.
+ */
+export function canActOnTenant(
+  user: { role: string; organizationId: number | null },
+  tenantId: number | null,
+): boolean {
+  if (user.role === "super_admin") return true;
+  if (user.organizationId == null) return false;
+  return tenantId === user.organizationId;
+}
+
+/**
+ * Which channels `channels.list` should return.
+ *
+ * `"all"` only for staff outside a portal — the platform overview genuinely
+ * spans tenants. Inside a portal, staff see the tenant they are viewing: the
+ * cross-tenant list was reaching the Reconciliation job form, so a super admin
+ * in Globus Bank's portal could build a run whose source and target channels
+ * belonged to two different tenants. Everyone else gets their own organisation,
+ * and a `viewAsOrgId` from them is ignored exactly as in `portalScopedOrgId`.
+ */
+export function channelListScope(
+  user: { role: string; organizationId: number | null },
+  viewAsOrgId?: number | null,
+): "all" | number | null {
+  if (user.role === "super_admin") return viewAsOrgId ? viewAsOrgId : "all";
+  return user.organizationId ?? null;
+}
+
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.
 // Cross-tenant visibility: can see ALL organisations, instances, and users.

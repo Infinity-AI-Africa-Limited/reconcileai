@@ -19,7 +19,7 @@ export default function ReconciliationPage() {
   const [, setLocation] = useLocation();
   const { user } = useAuth();
   const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
-  const { data: channels } = trpc.channels.list.useQuery();
+  const { data: channels } = trpc.channels.list.useQuery({ viewAsOrgId });
   const { data: jobs, isLoading, refetch } = trpc.reconciliation.list.useQuery({ viewAsOrgId });
   const createMutation = trpc.reconciliation.create.useMutation();
   const createMultiMutation = trpc.reconciliation.createMultiChannel.useMutation();

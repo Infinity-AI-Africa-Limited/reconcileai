@@ -230,7 +230,7 @@ export default function ExceptionIntelligencePage() {
               </div>
               <Switch
                 checked={participating}
-                onCheckedChange={(v) => update.mutate({ shareEnabled: v, consumeEnabled: v })}
+                onCheckedChange={(v) => update.mutate({ viewAsOrgId,  shareEnabled: v, consumeEnabled: v })}
                 disabled={update.isPending}
               />
             </div>
@@ -244,7 +244,7 @@ export default function ExceptionIntelligencePage() {
               </div>
               <Switch
                 checked={participating}
-                onCheckedChange={(v) => update.mutate({ shareEnabled: v, consumeEnabled: v })}
+                onCheckedChange={(v) => update.mutate({ viewAsOrgId,  shareEnabled: v, consumeEnabled: v })}
                 disabled={update.isPending}
               />
             </div>
@@ -271,7 +271,7 @@ export default function ExceptionIntelligencePage() {
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
-            <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate()}>
+            <Button variant="outline" className="gap-2" disabled={sync.isPending} onClick={() => sync.mutate({ viewAsOrgId })}>
               {sync.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               Refresh shared pool
             </Button>

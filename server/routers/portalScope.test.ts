@@ -13,7 +13,7 @@
  * and is pinned here rather than restated at each call site.
  */
 import { describe, it, expect } from "vitest";
-import { portalScopedOrgId } from "./shared";
+import { canActOnTenant, channelListScope, portalScopedOrgId } from "./shared";
 
 const staff = { role: "super_admin", organizationId: 30002 };
 const tenantAdmin = { role: "admin", organizationId: 1 };
@@ -63,5 +63,60 @@ describe("when the override is absent or meaningless", () => {
 
   it("should give an org-less super admin null rather than a borrowed tenant", () => {
     expect(portalScopedOrgId({ role: "super_admin", organizationId: null }, undefined)).toBeNull();
+  });
+});
+
+describe("when a procedure acts on a row the client named by id", () => {
+  // reports.generate and reconciliation.get loaded a job by id alone and then
+  // read its exceptions under the CALLER's organisation. The row names its own
+  // tenant; the caller only decides whether they may touch it.
+
+  it("should let staff act on any tenant's row, since the portal exists for that", () => {
+    expect(canActOnTenant(staff, 1)).toBe(true);
+    expect(canActOnTenant(staff, 30001)).toBe(true);
+  });
+
+  it("should let a tenant user act on their own tenant's row", () => {
+    expect(canActOnTenant(tenantAdmin, 1)).toBe(true);
+  });
+
+  it("should refuse a tenant user another tenant's row", () => {
+    // The cross-tenant read this closes: any caller could summarise any job by
+    // guessing its id, because getReconciliationJob selects by id alone.
+    for (const role of ["admin", "operations", "cfo", "compliance", "user"]) {
+      expect(canActOnTenant({ role, organizationId: 1 }, 30001), `${role} crossed tenants`).toBe(false);
+    }
+  });
+
+  it("should refuse a caller with no organisation, even against a row with none", () => {
+    // null === null would pool every org-less account into one pseudo-tenant.
+    // No organisation is no tenant, not a wildcard (CLAUDE.md §9C).
+    expect(canActOnTenant({ role: "admin", organizationId: null }, null)).toBe(false);
+    expect(canActOnTenant({ role: "admin", organizationId: null }, 1)).toBe(false);
+  });
+
+  it("should refuse a tenant user a row that has no tenant", () => {
+    expect(canActOnTenant(tenantAdmin, null)).toBe(false);
+  });
+});
+
+describe("when the channel list is requested", () => {
+  it("should give staff the whole estate only OUTSIDE a portal", () => {
+    expect(channelListScope(staff, undefined)).toBe("all");
+    expect(channelListScope(staff, null)).toBe("all");
+  });
+
+  it("should give staff the viewed tenant's channels INSIDE a portal", () => {
+    // The cross-tenant list reached the Reconciliation job form, so a super
+    // admin in Globus Bank's portal could build a run across two tenants.
+    expect(channelListScope(staff, 1)).toBe(1);
+  });
+
+  it("should never give a tenant user the whole estate or another tenant", () => {
+    for (const role of ["admin", "operations", "cfo", "compliance", "user"]) {
+      const scope = channelListScope({ role, organizationId: 1 }, 30001);
+      expect(scope, `${role} got the cross-tenant list`).not.toBe("all");
+      expect(scope, `${role} got another tenant's channels`).toBe(1);
+    }
   });
 });

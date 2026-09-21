@@ -224,6 +224,8 @@ import {
   MAX_NAME_LENGTH,
   portalScopedOrgId,
   viewAsOrgInput,
+  canActOnTenant,
+  channelListScope,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -573,13 +575,23 @@ export const appRouter = router({
   // ─── Channels ────────────────────────────────────────────────────
 
   channels: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      // Super admins (Infinity AI staff) legitimately span tenants — platform
-      // overview and the portal switcher both need the full estate. Everyone
-      // else sees their own org's channels plus the shared platform rails.
-      if (ctx.user.role === "super_admin") return db.getAllChannelsAcrossTenants();
-      return db.getChannels(ctx.user.organizationId ?? null);
-    }),
+    list: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+        // Super admins (Infinity AI staff) legitimately span tenants — the
+        // platform overview needs the full estate. Everyone else sees their own
+        // org's channels plus the shared platform rails.
+        //
+        // INSIDE a tenant portal they do not. The cross-tenant list was reaching
+        // the Reconciliation job form and the Transactions filter, so a super
+        // admin viewing Globus Bank picked source and target channels from a
+        // list containing BrightGoods' and the SHOPLINE stores' rails — and
+        // could build a run across two tenants from the dropdown. Scoping the
+        // reads while leaving this list unscoped made the page look tenanted
+        // and behave otherwise.
+        const scope = channelListScope(ctx.user, input?.viewAsOrgId);
+        return scope === "all" ? db.getAllChannelsAcrossTenants() : db.getChannels(scope);
+      }),
 
     create: adminProcedure
       .input(z.object({
@@ -1785,9 +1797,27 @@ export const appRouter = router({
         const job = await db.getReconciliationJob(input.jobId);
         if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
+        // The report belongs to the JOB's tenant, not the caller's.
+        //
+        // This read the exceptions with the caller's own organisationId while
+        // summarising whatever job it was handed, and then stored the report
+        // with no organisationId at all. Inside a tenant portal that produced a
+        // report mixing the viewed tenant's job and matches with the SIGNED-IN
+        // organisation's exceptions — and the result appeared in nobody's report
+        // list, because `reports.list` scopes by organisation.
+        //
+        // Deriving the tenant from the job makes all three agree. The access
+        // check is separate and explicit (see canActOnTenant) — and it is new:
+        // before this, any caller could summarise any tenant's job by guessing
+        // its id, because getReconciliationJob selects by id alone.
+        const jobOrgId = job.organizationId ?? null;
+        if (!canActOnTenant(ctx.user, jobOrgId)) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+
         const jobMatches = await db.getMatchesByJob(input.jobId);
         const { data: jobExceptions } = await db.getExceptions({
-          organizationId: ctx.user.organizationId ?? null,
+          organizationId: jobOrgId,
           jobId: input.jobId,
         });
 
@@ -1803,9 +1833,19 @@ export const appRouter = router({
         const reportId = await db.createReport({
           jobId: input.jobId,
           userId: ctx.user.id,
+          // Without this the row had no tenant, so it appeared in no report
+          // list at all — `reports.list` scopes by organisation.
+          organizationId: jobOrgId,
           reportType: input.reportType,
           title: sanitizeInput(input.title, MAX_NAME_LENGTH),
-          summary: JSON.stringify(summary),
+          // The column is `json`, and every reader treats this as an object —
+          // `Reports.tsx` does `summary?.matchRate` straight off the row, and
+          // nothing anywhere calls JSON.parse on it. Stringifying first stored a
+          // JSON *string* scalar, so that lookup was undefined and every
+          // generated report rendered a 0% match rate. The seeded reports store
+          // an object and rendered correctly, which is how the difference
+          // surfaced.
+          summary,
           format: "pdf",
         });
 
@@ -6471,11 +6511,22 @@ Always be specific, reference actual exception IDs and amounts where available, 
     }),
 
     updateSettings: adminProcedure
-      .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
+      .input(z.object({ ...viewAsOrgInput, shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
-        const orgId = ctx.user.organizationId ?? 0;
+        // Acts on the tenant being VIEWED, because that is the one whose
+        // settings are on screen. Scoping only the reads meant a super admin
+        // inside tenant B toggled data sharing, saw "saved", watched tenant B's
+        // unchanged posture — and had actually changed Infinity AI's own. A
+        // control whose switch reports success while affecting a different
+        // organisation is worse than one that refuses.
+        //
+        // This is the deliberate exception to "reads only": the portal exists so
+        // staff can administer a tenant, the override is super-admin-gated, and
+        // the audit entry below records which organisation was actually changed.
+        const orgId = portalScopedOrgId(ctx.user, input.viewAsOrgId) ?? 0;
         const ei = await import("./exceptionIntelligence");
-        const updated = await ei.updateSettings(orgId, input);
+        const { viewAsOrgId: _ignored, ...settings } = input;
+        const updated = await ei.updateSettings(orgId, settings);
         await logAudit(ctx.user.id, "exception_intelligence_settings_updated", "exception_intelligence", orgId, input);
         return { shareEnabled: updated?.shareEnabled ?? false, consumeEnabled: updated?.consumeEnabled ?? false };
       }),
@@ -6506,8 +6557,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
     }),
 
     // Admin: rebuild the shared pool aggregate (cloud) and/or push to the pool (on-prem).
-    sync: adminProcedure.mutation(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    sync: adminProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .mutation(async ({ ctx, input }) => {
+      // Same reason as updateSettings: this pushes the VIEWED tenant's patterns
+      // to the shared pool, which is what the screen says it will do.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const ei = await import("./exceptionIntelligence");
       const aggregated = await ei.aggregateSharedPatterns();
       const pushed = await ei.syncToPool(orgId);

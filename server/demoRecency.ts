@@ -84,16 +84,32 @@ export function daysAgoForIndex(index: number, total: number): number {
 function bandSizes(total: number): number[] {
   const n = RECENCY_BANDS.length;
   if (total <= 0) return RECENCY_BANDS.map(() => 0);
-  if (total < n) return RECENCY_BANDS.map((_, i) => (i === 0 ? total : 0));
 
-  const sizes = RECENCY_BANDS.map((b) => Math.max(1, Math.floor(total * b.share)));
+  // Filling every band AND both Today and Yesterday needs at least four rows:
+  // day 0, day 1, one in 7-29, one in 30-89. Below that the two goals genuinely
+  // conflict, and the recent band wins — a "quarter of history" made of one row
+  // is meaningless, while an empty Today is the defect this exists to remove.
+  //
+  // An earlier version used `total < n` (three), which let bandSizes(3) allocate
+  // one row per band and produce days 0, 7 and 30 — leaving Yesterday empty
+  // while claiming the invariant held. Review caught it; the test below now
+  // covers every small total rather than only the comfortable ones.
+  const MIN_FOR_ALL_BANDS = n + 1;
+  if (total < MIN_FOR_ALL_BANDS) return RECENCY_BANDS.map((_, i) => (i === 0 ? total : 0));
+
+  // The recent band needs two rows of its own, so Today and Yesterday both fill.
+  const sizes = RECENCY_BANDS.map((b, i) =>
+    Math.max(i === 0 ? 2 : 1, Math.floor(total * b.share)),
+  );
   const sum = sizes.reduce((a, b) => a + b, 0);
   // Any shortfall goes to the recent band, keeping the weighting.
   if (sum < total) sizes[0] += total - sum;
-  // Any overshoot comes off the older bands first, never below one row each.
+  // Any overshoot comes off the older bands first, never below their minimum —
+  // one row each, and two for the recent band so Yesterday keeps its row.
   let over = sum - total;
   for (let b = n - 1; b >= 0 && over > 0; b--) {
-    const take = Math.min(over, sizes[b] - 1);
+    const floorForBand = b === 0 ? 2 : 1;
+    const take = Math.min(over, sizes[b] - floorForBand);
     sizes[b] -= take;
     over -= take;
   }

@@ -16,7 +16,7 @@ export default function TransactionsPage() {
   // The same source the sidebar reads, so a merchant who clicks
   // "Orders & Payments" does not land on a page headed "Transactions".
   const heading = labelForPath("/transactions", segment) ?? "Transactions";
-  const { data: channels } = trpc.channels.list.useQuery();
+  const { data: channels } = trpc.channels.list.useQuery({ viewAsOrgId });
   const [filters, setFilters] = useState({
     channelId: "",
     status: "",

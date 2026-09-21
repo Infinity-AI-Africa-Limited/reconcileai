@@ -2,10 +2,12 @@
  * refresh-demo-recency.ts — make a demo tenant's exceptions span the window a
  * viewer can actually select, and optionally collapse it to a single run.
  *
- *   pnpm demo:recency                      # report only, writes nothing
- *   pnpm demo:recency --commit             # re-date exceptions
- *   pnpm demo:recency --commit --trim      # ...and keep only the newest run
- *   pnpm demo:recency --org 1 --commit     # one tenant
+ *   pnpm demo:recency                                # report only, writes nothing
+ *   pnpm demo:recency --commit                       # re-date every demo tenant
+ *   pnpm demo:recency --org 1 --commit               # re-date one tenant
+ *   pnpm demo:recency --org 30001 --commit --trim    # ...and keep only its newest run
+ *
+ * --trim without --org is refused: it deletes runs, and must name its tenant.
  *
  * WHY THIS EXISTS
  *
@@ -35,7 +37,10 @@
  *   - Refuses any organisation not flagged `isDemo`.
  *   - Every statement is scoped by organizationId.
  *   - --trim deletes whole runs and is irreversible; it names what it will
- *     remove and requires --commit like everything else.
+ *     remove, requires --commit like everything else, and refuses to run
+ *     without --org. It removes jobs and what is keyed to them (matches,
+ *     exceptions, reports) inside one transaction, and leaves upload batches
+ *     and transactions alone — see trimToNewestRun for why.
  */
 import "dotenv/config";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
@@ -45,8 +50,6 @@ import {
   organizations,
   reconciliationJobs,
   reconciliationReports,
-  transactions,
-  uploadBatches,
 } from "../drizzle/schema";
 import { getDb } from "../server/db";
 import { dateForIndex, statusForAge, daysAgoForIndex, RECENCY_BANDS } from "../server/demoRecency";
@@ -165,50 +168,43 @@ async function trimToNewestRun(db: NonNullable<Awaited<ReturnType<typeof getDb>>
   const drop = jobs.slice(1).map((j) => j.id);
   console.log(`  trim: keeping #${keep.id}, removing ${drop.length} older run(s): ${drop.join(", ")}`);
 
-  // Batches are matched by the demo seeders' own filename prefixes, so an upload
-  // a person made is never caught, and scoped by tenant like everything else.
+  // ── What this deliberately does NOT delete ──────────────────────────────
   //
-  // The first version hardcoded 'BrightGoods\_%'. On any other tenant that
-  // matched nothing, so the script reported "trimmed to one run" while leaving
-  // every transaction in place — a claim that was simply false. Each prefix
-  // belongs to one seeder; add one when a seeder is added.
-  const batches = await db
-    .select({ id: uploadBatches.id })
-    .from(uploadBatches)
-    .where(and(
-      eq(uploadBatches.organizationId, orgId),
-      sql`(${uploadBatches.fileName} LIKE 'BrightGoods\\_%'
-        OR ${uploadBatches.fileName} LIKE 'FinServ\\_Demo\\_%')`,
-    ))
-    .orderBy(desc(uploadBatches.id));
-  // Each run writes two batches; keep the newest pair, drop the rest.
-  const dropBatches = batches.slice(2).map((b) => b.id);
-  console.log(`  trim: removing ${dropBatches.length} older upload batch(es) and their transactions`);
+  // Upload batches and their transactions stay. An earlier version took the
+  // newest two batches and deleted the rest, on the assumption that a run owns
+  // exactly two — true for the FMCG seeder, false for the financial-services
+  // one, which writes EIGHT batches for a single job. Against Globus that would
+  // have deleted six batches belonging to the run it was keeping, leaving the
+  // retained job's stored counts, matches and exceptions describing
+  // transactions that no longer existed.
+  //
+  // There is no reliable link from a batch to a run — transactions carry a
+  // batchId, not a jobId — so attributing them is guesswork, and guesswork is
+  // not something a delete should do. Jobs, matches, exceptions and reports ARE
+  // keyed by jobId, so those are exactly what this removes. For a genuine
+  // from-scratch reset use the seeder's own wipe, which knows its own batches.
+  console.log(`  trim: upload batches and transactions are left alone (see comment)`);
 
   if (!COMMIT) return;
-  await db.delete(reconciliationReports).where(and(
-    eq(reconciliationReports.organizationId, orgId),
-    inArray(reconciliationReports.jobId, drop),
-  ));
-  await db.delete(exceptions).where(and(
-    eq(exceptions.organizationId, orgId),
-    inArray(exceptions.jobId, drop),
-  ));
-  await db.delete(matches).where(inArray(matches.jobId, drop));
-  await db.delete(reconciliationJobs).where(and(
-    eq(reconciliationJobs.organizationId, orgId),
-    inArray(reconciliationJobs.id, drop),
-  ));
-  if (dropBatches.length) {
-    await db.delete(transactions).where(and(
-      eq(transactions.organizationId, orgId),
-      inArray(transactions.batchId, dropBatches),
+
+  // One transaction: an interruption partway through used to leave exceptions
+  // whose job was already gone, and a retry could not find them because the
+  // parent it would have looked them up by no longer existed.
+  await db.transaction(async (tx) => {
+    await tx.delete(reconciliationReports).where(and(
+      eq(reconciliationReports.organizationId, orgId),
+      inArray(reconciliationReports.jobId, drop),
     ));
-    await db.delete(uploadBatches).where(and(
-      eq(uploadBatches.organizationId, orgId),
-      inArray(uploadBatches.id, dropBatches),
+    await tx.delete(exceptions).where(and(
+      eq(exceptions.organizationId, orgId),
+      inArray(exceptions.jobId, drop),
     ));
-  }
+    await tx.delete(matches).where(inArray(matches.jobId, drop));
+    await tx.delete(reconciliationJobs).where(and(
+      eq(reconciliationJobs.organizationId, orgId),
+      inArray(reconciliationJobs.id, drop),
+    ));
+  });
 }
 
 /** Re-date this tenant's exceptions across the selectable window. */
@@ -220,6 +216,13 @@ async function respreadExceptions(db: NonNullable<Awaited<ReturnType<typeof getD
     .where(eq(exceptions.organizationId, orgId))
     .orderBy(sql`(${exceptions.aiAnalysis} IS NULL)`, desc(exceptions.id));
 
+  // Interrupting the loop below leaves a partial spread, which is untidy but
+  // self-correcting: the assignment is derived from position in a stable
+  // ordering (diagnosed first, then id descending) and not from the current
+  // date, so re-running recomputes the same answer for every row and converges.
+  // `statusForAge` converges too — open becomes in_review becomes resolved, and
+  // each is a fixed point at its own age. So a retry is the recovery, and no
+  // resumability marker is needed.
   console.log(`  re-dating ${rows.length} exception(s)${COMMIT ? "" : " (not written)"}`);
   if (!COMMIT || rows.length === 0) return;
 

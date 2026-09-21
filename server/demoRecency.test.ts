@@ -19,12 +19,31 @@ const spread = (total: number) =>
   Array.from({ length: total }, (_, i) => daysAgoForIndex(i, total));
 
 describe("when demo rows are spread across the selectable window", () => {
-  it("should put rows on today AND on yesterday", () => {
+  it("should put rows on today AND on yesterday, at EVERY total", () => {
     // Both are preset buttons. BrightGoods had 150 exceptions on today and none
     // on yesterday, so the Yesterday button opened onto an empty screen.
-    const days = spread(50);
-    expect(days, "no row dated today").toContain(0);
-    expect(days, "no row dated yesterday").toContain(1);
+    //
+    // Swept across totals rather than checked at one comfortable size: the first
+    // version asserted this at 50 rows only, and bandSizes(3) quietly produced
+    // days 0, 7, 30 — Yesterday empty, invariant broken, test green.
+    for (let total = 2; total <= 60; total++) {
+      const days = spread(total);
+      expect(days, `total=${total}: no row dated today`).toContain(0);
+      expect(days, `total=${total}: no row dated yesterday`).toContain(1);
+    }
+  });
+
+  it("should fill all three bands once there are enough rows to do so", () => {
+    // Four is the true minimum: day 0, day 1, one in 7-29, one in 30-89. Below
+    // it the goals conflict and the recent band wins, which is stated rather
+    // than left as an accident.
+    for (let total = 4; total <= 60; total++) {
+      const days = spread(total);
+      for (const band of RECENCY_BANDS) {
+        const inBand = days.filter((d) => d >= band.from && d <= band.to).length;
+        expect(inBand, `total=${total}: ${band.label} is empty`).toBeGreaterThan(0);
+      }
+    }
   });
 
   it("should fill every band, including the one that was empty", () => {
