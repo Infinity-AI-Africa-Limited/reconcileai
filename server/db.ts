@@ -37,7 +37,7 @@ import {
   exceptionAgingSettings,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
-import { computeRecordHash } from "./auditChain";
+import { AUDIT_WRITER_VERSION, auditTimestamp, computeRecordHash } from "./auditChain";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -1369,7 +1369,10 @@ export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor
 
   const sequenceNumber = (prev?.seq ?? 0) + 1;
   const prevRecordHash = prev?.hash ?? null;
-  const createdAt = new Date();
+  // A whole second, so the value hashed is the value the timestamp(0) column
+  // stores. `new Date()` here was rounded by the column and half of all
+  // entries then verified as tampered — see auditTimestamp.
+  const createdAt = auditTimestamp();
   const recordHash = computeRecordHash(
     {
       sequenceNumber,
@@ -1384,6 +1387,9 @@ export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor
       createdAt,
     },
     prevRecordHash,
+    // Signed as writer 2, so the rounded-write allowance can never apply to
+    // this row (see AuditWriterVersion).
+    AUDIT_WRITER_VERSION,
   );
 
   await db.insert(auditLogs).values({
