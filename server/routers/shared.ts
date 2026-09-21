@@ -51,10 +51,25 @@ export const MAX_NAME_LENGTH = 255;
  * before. Ignoring rather than throwing is deliberate: a 403 would confirm the
  * id exists, and there is nothing to tell them.
  *
- * Reads only. Never reuse this to scope a WRITE: "which tenant am I looking at"
- * and "which tenant may I change" are different questions, and a mutation that
- * took its target from a client-supplied field would let staff write into a
- * customer's data by navigating there.
+ * ── Writes ─────────────────────────────────────────────────────────────
+ *
+ * This first said "reads only, never a write". That stopped being the rule when
+ * review showed what reads-only produced: the Exception Intelligence switches
+ * and the Age Tracker's Escalate button, inside a tenant's portal, reported
+ * success while changing Infinity AI's own organisation. A control that says
+ * "saved" about a different tenant is worse than one that refuses.
+ *
+ * So a WRITE may take its tenant from here only when all three hold:
+ *
+ *   1. it is an action on the tenant ON SCREEN — the thing the portal exists
+ *      for (settings, escalations, registry entries), not a platform action;
+ *   2. the override is staff-only, which this function already enforces — for
+ *      anyone else the field is ignored and they write to their own org;
+ *   3. its audit record names that tenant (logAudit's `organizationId`), so the
+ *      change appears in the trail of the organisation it changed.
+ *
+ * Where the write targets a ROW the client named by id, prefer deriving the
+ * tenant from the row (canActOnTenant) — the row cannot be wrong about itself.
  */
 export function portalScopedOrgId(
   user: { role: string; organizationId: number | null },
@@ -271,11 +286,23 @@ export async function logAudit(
   entityId?: number,
   details?: any,
   ipAddress?: string,
-  userAgent?: string
+  userAgent?: string,
+  /**
+   * The tenant the event belongs to. Omitted, the event joins the GLOBAL chain —
+   * and a tenant's Audit Trail selects `organizationId = tenant` exactly, so a
+   * global event appears in NO tenant's trail, export or chain verification.
+   *
+   * That is still true for most of this function's callers, which predate the
+   * parameter; it was added so a staff action inside a tenant portal files its
+   * record with the tenant it changed. New callers acting on a tenant's data
+   * should pass it.
+   */
+  organizationId?: number | null,
 ) {
   try {
     await createAuditLog({
       userId,
+      organizationId: organizationId ?? null,
       action,
       entityType,
       entityId,

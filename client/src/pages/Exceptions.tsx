@@ -16,6 +16,7 @@ import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRang
 import { useAuth } from "@/_core/hooks/useAuth";
 import ExceptionGlossary from "@/components/ExceptionGlossary";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
+import { HiddenExceptionsNotice } from "@/components/HiddenExceptionsNotice";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -66,7 +67,7 @@ export default function Exceptions() {
       : undefined;
 
   const { data: templates } = trpc.resolutionTemplates.list.useQuery(
-    selectedCategory ? { category: selectedCategory } : undefined
+    { viewAsOrgId, ...(selectedCategory ? { category: selectedCategory } : {}) }
   );
 
   const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
@@ -221,6 +222,12 @@ export default function Exceptions() {
           </span>
         </div>
       )}
+
+      <HiddenExceptionsNotice
+        dateFrom={dateFromObj}
+        status={statusFilter !== "all" ? statusFilter : undefined}
+        onReveal={setDateFrom}
+      />
 
       {/* Filters row */}
       <div className="flex flex-wrap gap-3 items-center">

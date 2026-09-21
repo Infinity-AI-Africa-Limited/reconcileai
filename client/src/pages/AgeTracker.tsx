@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 // WS-6: per-row amounts render in the exception's own currency. Aggregate
 // exposure figures (mixed currencies possible) stay ₦-labelled — the dominant
@@ -56,14 +57,16 @@ function ageColor(days: number, sla: number) {
 }
 
 export default function AgeTracker() {
+  // Staff inside a tenant portal must act on THAT tenant.
+  const viewAsOrgId = useViewAsOrgId();
   const [, setLocation] = useLocation();
   const utils = trpc.useUtils();
   const [onlyOverAged, setOnlyOverAged] = useState(true);
   const [slaInput, setSlaInput] = useState<string>("");
 
-  const summary = trpc.ageTracker.summary.useQuery();
-  const settings = trpc.ageTracker.getSettings.useQuery();
-  const list = trpc.ageTracker.list.useQuery({ onlyOverAged, limit: 200 });
+  const summary = trpc.ageTracker.summary.useQuery({ viewAsOrgId });
+  const settings = trpc.ageTracker.getSettings.useQuery({ viewAsOrgId });
+  const list = trpc.ageTracker.list.useQuery({ viewAsOrgId, onlyOverAged, limit: 200 });
 
   // Seed the SLA input once settings load (React Query v5 has no useQuery onSuccess).
   useEffect(() => {
@@ -106,7 +109,7 @@ export default function AgeTracker() {
               <Input type="number" min={1} max={365} value={slaInput} onChange={(e) => setSlaInput(e.target.value)} className="w-20 h-9" />
               <Button size="sm" variant="outline" className="gap-1.5"
                 disabled={saveSettings.isPending || !slaInput}
-                onClick={() => saveSettings.mutate({ slaDays: Math.max(1, Math.min(365, parseInt(slaInput) || 7)) })}>
+                onClick={() => saveSettings.mutate({ viewAsOrgId, slaDays: Math.max(1, Math.min(365, parseInt(slaInput) || 7)) })}>
                 {saveSettings.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
               </Button>
             </div>
@@ -166,7 +169,7 @@ export default function AgeTracker() {
         </div>
         <Button variant="outline" size="sm" className="gap-2 border-red-300 text-red-700 hover:bg-red-50"
           disabled={bulkEscalate.isPending || (s?.overAgedCount ?? 0) === 0}
-          onClick={() => bulkEscalate.mutate()}>
+          onClick={() => bulkEscalate.mutate({ viewAsOrgId })}>
           {bulkEscalate.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUpCircle className="h-4 w-4" />}
           Escalate all over-aged
         </Button>
@@ -214,7 +217,7 @@ export default function AgeTracker() {
                         {e.status !== "escalated" && (
                           <Button size="sm" variant="ghost" className="h-7 gap-1 text-orange-700"
                             disabled={escalate.isPending}
-                            onClick={() => escalate.mutate({ id: e.id })}>
+                            onClick={() => escalate.mutate({ viewAsOrgId, id: e.id })}>
                             <ArrowUpCircle className="h-3.5 w-3.5" /> Escalate
                           </Button>
                         )}
