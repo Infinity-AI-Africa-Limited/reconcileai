@@ -178,9 +178,26 @@ export async function executeScheduledTask(taskId: number): Promise<{
     const dateTo = new Date();
     const dateFrom = new Date(dateTo.getTime() - task.lookbackDays * 86400000);
 
+    // The task's own organisation owns the run, and the task's channels must
+    // belong to it (or be shared rails). A task with no organisation cannot
+    // produce a run anyone can own — runReconciliation would refuse it — so it
+    // fails here, visibly, in the run history, rather than as a dead job.
+    const tenant = task.organizationId;
+    if (tenant == null) {
+      throw new Error("Scheduled task has no owning organisation; it cannot create a reconciliation run");
+    }
+    const [source, target] = await Promise.all([
+      db.getChannelByIdForOrg(task.sourceChannelId, tenant),
+      db.getChannelByIdForOrg(task.targetChannelId, tenant),
+    ]);
+    if (!source || !target) {
+      throw new Error("A channel this task reconciles is not available to its organisation");
+    }
+
     // Create reconciliation job
     const jobId = await db.createReconciliationJob({
       userId: task.userId,
+      organizationId: tenant,
       name: `[Scheduled] ${task.name} — ${new Date().toISOString().split("T")[0]}`,
       sourceChannelId: task.sourceChannelId,
       targetChannelId: task.targetChannelId,

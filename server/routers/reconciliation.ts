@@ -30,6 +30,32 @@ import {
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
 
+/**
+ * The organisation a new run belongs to: the caller's. Exported for its tests.
+ *
+ * Two defects shared this spot. The job was created with no organisation at
+ * all, so `runReconciliation` refused every run started here. And the channels
+ * were fetched by id alone (`getChannelById`), so a caller could name another
+ * tenant's channel — which the missing owner happened to stop, since the run
+ * never started. Fixing only the owner would have opened that door: tenant A
+ * reconciling tenant B's transactions into A's exceptions. So the owner and
+ * the channel scope are one rule — every channel is looked up under this
+ * tenant (its own or a shared rail), and a caller with NO organisation is
+ * refused, not pooled into a pseudo-tenant (CLAUDE.md §9C).
+ *
+ * A super admin creates runs under their own organisation, as before; running
+ * one inside another tenant's portal is the known portal-write gap.
+ */
+export function runTenant(user: { organizationId: number | null }): number {
+  if (user.organizationId == null) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Your account is not linked to an organisation, so a reconciliation run would have no owner.",
+    });
+  }
+  return user.organizationId;
+}
+
 export const reconciliationRouter = router({
   create: operationsProcedure
     .input(
@@ -53,9 +79,11 @@ export const reconciliationRouter = router({
       // having it enabled. Refuse before anything is persisted or enqueued.
       await assertModuleAvailable(ctx, input.moduleType);
 
-      // Validate channels exist
-      const sourceChannel = await db.getChannelById(input.sourceChannelId);
-      const targetChannel = await db.getChannelById(input.targetChannelId);
+      // The run belongs to the caller's organisation, and may read only that
+      // organisation's channels (or shared rails). See runTenant.
+      const tenant = runTenant(ctx.user);
+      const sourceChannel = await db.getChannelByIdForOrg(input.sourceChannelId, tenant);
+      const targetChannel = await db.getChannelByIdForOrg(input.targetChannelId, tenant);
       if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
       if (!targetChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
 
@@ -81,6 +109,7 @@ export const reconciliationRouter = router({
 
       const jobId = await db.createReconciliationJob({
         userId: ctx.user.id,
+        organizationId: tenant,
         name: sanitizeInput(input.name, MAX_NAME_LENGTH),
         moduleType: input.moduleType,
         sourceChannelId: input.sourceChannelId,
@@ -164,7 +193,9 @@ export const reconciliationRouter = router({
       // not become a way around it.
       await assertModuleAvailable(ctx, input.moduleType);
 
-      const sourceChannel = await db.getChannelById(input.sourceChannelId);
+      // Same ownership rule as the single-channel run — see runTenant.
+      const tenant = runTenant(ctx.user);
+      const sourceChannel = await db.getChannelByIdForOrg(input.sourceChannelId, tenant);
       if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
 
       const dateFrom = new Date(input.dateFrom);
@@ -189,7 +220,7 @@ export const reconciliationRouter = router({
       // Resolve the target set.
       let targets: { id: number; name: string; code: string }[] = [];
       if (input.allActiveTargets) {
-        const all = await db.getChannels(ctx.user.organizationId ?? null);
+        const all = await db.getChannels(tenant);
         targets = all.filter((c) => c.isActive && c.id !== input.sourceChannelId);
       } else {
         const ids = (input.targetChannelIds ?? []).filter((id) => id !== input.sourceChannelId);
@@ -197,7 +228,7 @@ export const reconciliationRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: "Provide at least one target channel (or set allActiveTargets)" });
         }
         for (const id of ids) {
-          const ch = await db.getChannelById(id);
+          const ch = await db.getChannelByIdForOrg(id, tenant);
           if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: `Target channel ${id} not found` });
           targets.push(ch);
         }
@@ -217,6 +248,7 @@ export const reconciliationRouter = router({
       for (const target of targets) {
         const jobId = await db.createReconciliationJob({
           userId: ctx.user.id,
+          organizationId: tenant,
           name: sanitizeInput(`${input.name} — ${target.name}`, MAX_NAME_LENGTH),
           moduleType: input.moduleType,
           sourceChannelId: input.sourceChannelId,

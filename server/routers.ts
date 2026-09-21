@@ -3014,9 +3014,14 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
 
-        // Validate channels
-        const source = await db.getChannelById(input.sourceChannelId);
-        const target = await db.getChannelById(input.targetChannelId);
+        // The schedule — and every run it creates — belongs to the caller's
+        // organisation, and may name only that organisation's channels (or a
+        // shared rail). It recorded no owner and looked channels up by id
+        // alone, so each run it produced was refused for having no owner, and
+        // any tenant's channel could be named. Same rule as reconciliation.create.
+        const tenant = requireOrg(ctx);
+        const source = await db.getChannelByIdForOrg(input.sourceChannelId, tenant);
+        const target = await db.getChannelByIdForOrg(input.targetChannelId, tenant);
         if (!source) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
         if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
         if (input.sourceChannelId === input.targetChannelId) {
@@ -3031,6 +3036,7 @@ export const appRouter = router({
 
         const id = await db.createScheduledTask({
           userId: ctx.user.id,
+          organizationId: tenant,
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           description: input.description ? sanitizeInput(input.description, 1000) : null,
           sourceChannelId: input.sourceChannelId,
