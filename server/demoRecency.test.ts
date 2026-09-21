@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   daysAgoForIndex,
   dateForIndex,
-  utcDayStart,
+  zonedDayStart,
   statusForAge,
   RECENCY_BANDS,
   RECENCY_WINDOW_DAYS,
@@ -88,25 +88,59 @@ describe("when demo rows are spread across the selectable window", () => {
 });
 
 describe("when a demo row is given its timestamp", () => {
-  it("should land the requested number of UTC calendar days back", () => {
+  const LAGOS = "Africa/Lagos";
+  /** The calendar date a timestamp falls on, as seen in `timeZone`. */
+  const localDate = (d: Date, timeZone: string) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+  it("should land the requested number of the TENANT's calendar days back", () => {
     const reference = new Date("2026-09-20T12:00:00Z");
     for (let i = 0; i < 40; i++) {
-      const d = dateForIndex(i, 40, reference);
-      const expected = utcDayStart(reference, daysAgoForIndex(i, 40));
-      expect(d.toISOString().slice(0, 10), `row ${i}`).toBe(expected.toISOString().slice(0, 10));
+      const d = dateForIndex(i, 40, reference, LAGOS);
+      const expected = zonedDayStart(reference, daysAgoForIndex(i, 40), LAGOS);
+      expect(localDate(d, LAGOS), `row ${i}`).toBe(localDate(expected, LAGOS));
     }
   });
 
-  it("should produce the same instant whatever timezone the host runs in", () => {
-    // The first version used setDate/setHours, so "08:00 local" on a UTC+13 host
-    // was 19:00 UTC the previous day and the row fell out of its band. Run the
-    // same inputs under the two most extreme real zones and demand identity.
-    const reference = new Date("2026-09-20T23:30:00Z"); // late evening UTC: where a local-time bug shows
+  it("should put today's rows on the viewer's today after local midnight but before UTC midnight", () => {
+    // The review finding, exactly. At 21:30 UTC it is already 00:30 tomorrow in
+    // Kampala. Anchored to UTC, day-0 rows landed on the Kampala viewer's
+    // Yesterday while the script reported Today populated.
+    const reference = new Date("2026-09-20T21:30:00Z");
+    const kampalaToday = localDate(reference, "Africa/Kampala"); // 2026-09-21
+    expect(kampalaToday).toBe("2026-09-21");
+    for (let i = 0; i < 30; i++) {
+      if (daysAgoForIndex(i, 30) !== 0) continue;
+      const d = dateForIndex(i, 30, reference, "Africa/Kampala");
+      expect(localDate(d, "Africa/Kampala"), `row ${i}`).toBe(kampalaToday);
+    }
+  });
+
+  it("should never date a row after the moment the script ran", () => {
+    // A 07:40 run wrote today's rows at 08:00-17:59 — up to ten hours ahead of
+    // the clock. 36 Globus and 4 BrightGoods exceptions were "created later
+    // today". Swept across a whole day of run times, in two zones.
+    for (const zone of [LAGOS, "Africa/Kampala"]) {
+      for (let minute = 0; minute < 24 * 60; minute += 17) {
+        const reference = new Date(Date.UTC(2026, 8, 20, 0, minute, 0));
+        for (let i = 0; i < 60; i++) {
+          const d = dateForIndex(i, 60, reference, zone);
+          expect(d.getTime(), `${zone} run at +${minute}m, row ${i}`).toBeLessThanOrEqual(reference.getTime());
+        }
+      }
+    }
+  });
+
+  it("should produce the same instant whatever timezone the HOST runs in", () => {
+    // The first version used setDate/setHours, so the machine running the script
+    // decided which day a row landed on. Same inputs under the most extreme
+    // real zones must give byte-identical output.
+    const reference = new Date("2026-09-20T23:30:00Z");
     const original = process.env.TZ;
     try {
-      const results = ["Pacific/Kiritimati", "Pacific/Pago_Pago", "Africa/Lagos", "UTC"].map((tz) => {
+      const results = ["Pacific/Kiritimati", "Pacific/Pago_Pago", LAGOS, "UTC"].map((tz) => {
         process.env.TZ = tz;
-        return Array.from({ length: 30 }, (_, i) => dateForIndex(i, 30, reference).toISOString());
+        return Array.from({ length: 30 }, (_, i) => dateForIndex(i, 30, reference, LAGOS).toISOString());
       });
       for (const r of results.slice(1)) expect(r).toEqual(results[0]);
     } finally {
@@ -115,22 +149,30 @@ describe("when a demo row is given its timestamp", () => {
     }
   });
 
-  it("should keep every row mid-day in UTC, so viewers from UTC-8 to UTC+6 see the same day", () => {
-    // "Today" on screen is the VIEWER's day. 08:00-17:59 UTC is one calendar day
-    // for Lagos, Kampala and London alike; midnight UTC would read as yesterday
-    // across the Americas.
+  it("should place past days in the tenant's working hours", () => {
     const reference = new Date("2026-09-20T12:00:00Z");
+    const hour = (d: Date) =>
+      Number(new Intl.DateTimeFormat("en-GB", { timeZone: LAGOS, hour: "2-digit", hourCycle: "h23" }).format(d));
     for (let i = 0; i < 100; i++) {
-      const h = dateForIndex(i, 100, reference).getUTCHours();
+      if (daysAgoForIndex(i, 100) === 0) continue; // today is clamped to "so far"
+      const h = hour(dateForIndex(i, 100, reference, LAGOS));
       expect(h, `row ${i}`).toBeGreaterThanOrEqual(8);
       expect(h, `row ${i}`).toBeLessThanOrEqual(17);
     }
   });
 
+  it("should find local midnight correctly across a daylight-saving change", () => {
+    // London leaves BST at 01:00 UTC on 25 Oct 2026. Midnight on the 25th is
+    // still BST (23:00 UTC on the 24th), though noon that day is GMT — so the
+    // offset has to be re-read at the midnight itself.
+    const start = zonedDayStart(new Date("2026-10-25T12:00:00Z"), 0, "Europe/London");
+    expect(start.toISOString()).toBe("2026-10-24T23:00:00.000Z");
+  });
+
   it("should not stack every row on the same timestamp", () => {
     // A column of identical times is the other way seeded data announces itself.
     const reference = new Date("2026-09-20T12:00:00Z");
-    const times = Array.from({ length: 10 }, (_, i) => dateForIndex(i, 10, reference).toISOString());
+    const times = Array.from({ length: 10 }, (_, i) => dateForIndex(i, 10, reference, LAGOS).toISOString());
     expect(new Set(times).size).toBeGreaterThan(1);
   });
 });
