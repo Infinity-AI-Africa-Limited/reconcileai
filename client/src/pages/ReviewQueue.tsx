@@ -16,6 +16,7 @@ import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRang
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
+import { HiddenExceptionsNotice } from "@/components/HiddenExceptionsNotice";
 
 type DiagnosisResult = {
   exceptionId: number;
@@ -136,6 +137,8 @@ export default function ReviewQueuePage() {
           </span>
         </div>
       )}
+
+      <HiddenExceptionsNotice dateFrom={dateFromObj} status="open" onReveal={setDateFrom} />
 
       {/* Date range filter */}
       <div className="flex flex-wrap gap-3 items-center">

@@ -19,6 +19,7 @@ import {
   RefreshCw, ShieldCheck, Layers,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -69,6 +70,8 @@ function DistributorDialog({
   distributor?: Distributor | null;
   onSuccess: () => void;
 }) {
+  // Staff inside a tenant portal must act on THAT tenant.
+  const viewAsOrgId = useViewAsOrgId();
   const isEdit = !!distributor;
   const [form, setForm] = useState({
     canonicalName: distributor?.canonicalName || "",
@@ -95,9 +98,9 @@ function DistributorDialog({
   const handleSubmit = () => {
     if (!form.canonicalName.trim()) { toast.error("Canonical name is required"); return; }
     if (isEdit && distributor) {
-      updateMutation.mutate({ id: distributor.id, ...form, status: form.status as "active" | "inactive" | "pending_confirmation" | "flagged" });
+      updateMutation.mutate({ viewAsOrgId, id: distributor.id, ...form, status: form.status as "active" | "inactive" | "pending_confirmation" | "flagged" });
     } else {
-      createMutation.mutate(form);
+      createMutation.mutate({ viewAsOrgId, ...form });
     }
   };
 
@@ -196,6 +199,8 @@ function DistributorDetail({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  // Staff inside a tenant portal must act on THAT tenant.
+  const viewAsOrgId = useViewAsOrgId();
   const [newVariant, setNewVariant] = useState("");
   const utils = trpc.useUtils();
   const addVariantMutation = trpc.distributor.addVariant.useMutation({
@@ -271,13 +276,13 @@ function DistributorDetail({
             placeholder="Add a new alias..."
             value={newVariant}
             onChange={(e) => setNewVariant(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && newVariant.trim()) addVariantMutation.mutate({ id: distributor.id, variant: newVariant.trim() }); }}
+            onKeyDown={(e) => { if (e.key === "Enter" && newVariant.trim()) addVariantMutation.mutate({ viewAsOrgId, id: distributor.id, variant: newVariant.trim() }); }}
           />
           <Button
             size="sm"
             className="h-8 text-xs"
             disabled={!newVariant.trim() || addVariantMutation.isPending}
-            onClick={() => addVariantMutation.mutate({ id: distributor.id, variant: newVariant.trim() })}
+            onClick={() => addVariantMutation.mutate({ viewAsOrgId, id: distributor.id, variant: newVariant.trim() })}
           >
             Add
           </Button>
@@ -313,6 +318,8 @@ function DistributorDetail({
 // ─── Main Page ────────────────────────────────────────────────────────
 
 export default function DistributorRegistry() {
+  // Staff inside a tenant portal must act on THAT tenant.
+  const viewAsOrgId = useViewAsOrgId();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -321,8 +328,9 @@ export default function DistributorRegistry() {
 
   const utils = trpc.useUtils();
 
-  const { data: stats } = trpc.distributor.stats.useQuery();
+  const { data: stats } = trpc.distributor.stats.useQuery({ viewAsOrgId });
   const { data: distributors = [], isLoading, refetch } = trpc.distributor.list.useQuery({
+    viewAsOrgId,
     search: search || undefined,
     status: statusFilter === "all" ? undefined : statusFilter,
     limit: 100,
@@ -498,7 +506,7 @@ export default function DistributorRegistry() {
             <DistributorDetail
               distributor={selectedDistributor}
               onEdit={() => setEditTarget(selectedDistributor)}
-              onConfirm={() => confirmMutation.mutate({ id: selectedDistributor.id })}
+              onConfirm={() => confirmMutation.mutate({ viewAsOrgId, id: selectedDistributor.id })}
               onClose={() => setSelectedId(null)}
             />
           </div>
