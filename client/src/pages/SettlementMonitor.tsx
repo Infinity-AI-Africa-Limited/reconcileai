@@ -28,6 +28,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { SettlementFileImport } from "@/components/SettlementFileImport";
+import { CountLink } from "@/components/CountLink";
+import { useReachableHref } from "@/hooks/useReachableHref";
+import { exceptionsHref } from "@/lib/listLinks";
 
 // `transactions.amount` is decimal(18,2) in MAJOR units (e.g. "25.00" = $25.00),
 // which is what the SHOPLINE ingest writes and what every sibling page renders.
@@ -67,6 +70,8 @@ export default function SettlementMonitor() {
   // Declared with the other hooks, ABOVE the isLoading early return — a hook
   // after a conditional return changes hook order between renders and throws.
   const [showImporter, setShowImporter] = useState(false);
+  // The open-exception count opens the list it counted (see listLinks).
+  const reachable = useReachableHref();
   const portalScope = useMemo(
     () => ({ organizationId: viewAsOrg?.id }),
     [viewAsOrg?.id],
@@ -246,16 +251,18 @@ export default function SettlementMonitor() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Open Exceptions</CardTitle>
-            <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalExceptions}</div>
-            <p className="text-xs text-muted-foreground mt-1">Requires review</p>
-          </CardContent>
-        </Card>
+        <CountLink href={reachable(exceptionsHref("open"))} title="View open exceptions">
+          <Card className="h-full">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Open Exceptions</CardTitle>
+              <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{totalExceptions}</div>
+              <p className="text-xs text-muted-foreground mt-1">Requires review</p>
+            </CardContent>
+          </Card>
+        </CountLink>
       </div>
 
       {/* Connected Stores */}

@@ -588,14 +588,17 @@ export const shoplineConnectorRouter = router({
       const matched = Number(agg?.matched ?? 0);
       const total = Number(agg?.total ?? 0);
 
-      // Open exceptions on this org's SHOPLINE transactions.
-      const [exAgg] = channelIds.length
-        ? await db
-            .select({ open: sql<number>`count(*)` })
-            .from(exceptions)
-            .innerJoin(transactions, eq(exceptions.transactionId, transactions.id))
-            .where(and(inArray(transactions.channelId, channelIds), eq(exceptions.status, "open")))
-        : [{ open: 0 }];
+      // Open exceptions in this organisation — the merchant's whole queue, and
+      // exactly the set the card's link opens (Payment Exceptions, status open,
+      // every date). It used to count only exceptions joined to SHOPLINE
+      // gateway transactions, so an exception on any other channel — a
+      // settlement-file import, say — was on the page the card linked to but
+      // not in the card's number. Also what the Dashboard's Open Exceptions
+      // counts, so the two surfaces agree.
+      const [exAgg] = await db
+        .select({ open: sql<number>`count(*)` })
+        .from(exceptions)
+        .where(and(eq(exceptions.organizationId, orgId), eq(exceptions.status, "open")));
 
       // Payment-leg presence. A merchant on a third-party gateway or COD has an
       // order book and no payment feed, which reconciles to a legitimate-looking

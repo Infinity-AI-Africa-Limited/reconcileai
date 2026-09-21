@@ -1,168 +1,104 @@
 import { useState, useMemo, useCallback } from "react";
+import {
+  type DatePreset,
+  type DayRange,
+  fromSaved,
+  presetOf,
+  rangeBounds,
+  rangeForPreset,
+  toSaved,
+} from "@/lib/dateRange";
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+export { DATE_PRESETS, toLocalDateString, type DatePreset } from "@/lib/dateRange";
 
-export function toLocalDateString(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+// ─── localStorage, wrapped so a blocked store never breaks the page ─────────
 
-export function startOfDay(dateStr: string): Date {
-  const d = new Date(dateStr);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-export function endOfDay(dateStr: string): Date {
-  const d = new Date(dateStr);
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
-
-function getToday() {
-  return toLocalDateString(new Date());
-}
-
-function getYesterday() {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return toLocalDateString(d);
-}
-
-function getLast7From() {
-  const d = new Date();
-  d.setDate(d.getDate() - 6);
-  return toLocalDateString(d);
-}
-
-// ─── Preset definitions ───────────────────────────────────────────────────────
-
-export type DatePreset = "today" | "yesterday" | "last7" | "custom";
-
-export const DATE_PRESETS: { key: DatePreset; label: string }[] = [
-  { key: "today", label: "Today" },
-  { key: "yesterday", label: "Yesterday" },
-  { key: "last7", label: "Last 7 days" },
-];
-
-function presetDates(preset: DatePreset): { from: string; to: string } {
-  const today = getToday();
-  switch (preset) {
-    case "today":
-      return { from: today, to: today };
-    case "yesterday": {
-      const y = getYesterday();
-      return { from: y, to: y };
-    }
-    case "last7":
-      return { from: getLast7From(), to: today };
-    default:
-      return { from: today, to: today };
-  }
-}
-
-function detectPreset(from: string, to: string): DatePreset {
-  const today = getToday();
-  const yesterday = getYesterday();
-  const last7from = getLast7From();
-  if (from === today && to === today) return "today";
-  if (from === yesterday && to === yesterday) return "yesterday";
-  if (from === last7from && to === today) return "last7";
-  return "custom";
-}
-
-// ─── localStorage helpers ─────────────────────────────────────────────────────
-
-function readStorage(key: string): { from: string; to: string } | null {
+function readStorage(key: string): DayRange | null {
   try {
     const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (parsed?.from && parsed?.to) return parsed;
-    return null;
+    return raw ? fromSaved(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
 }
 
-function writeStorage(key: string, from: string, to: string) {
+function writeStorage(key: string, range: DayRange) {
   try {
-    localStorage.setItem(key, JSON.stringify({ from, to }));
+    localStorage.setItem(key, JSON.stringify(toSaved(range)));
   } catch {}
 }
 
-// ─── Hook ─────────────────────────────────────────────────────────────────────
+type DefaultPreset = Extract<DatePreset, "today" | "all">;
 
 /**
- * Persistent date-range state backed by localStorage.
- * @param storageKey  Unique localStorage key per page (e.g. "reconcileai_exceptions_daterange")
+ * Persistent date-range state for a list screen. The rules live in
+ * `@/lib/dateRange`; this only holds state and saves it.
+ *
+ * @param storageKey  Unique localStorage key per page.
+ * @param opts.defaultPreset  What an unsaved page opens on (default "today").
+ * @param opts.initial  A range named by the URL. It wins for this visit and is
+ *   NOT saved — following a dashboard link must not change what the page opens
+ *   on next time. Only the viewer's own choices are saved.
  */
-export function useDateRange(storageKey: string) {
-  const today = useMemo(() => getToday(), []);
-
-  const [dateFrom, setDateFromRaw] = useState<string>(() => {
-    const saved = readStorage(storageKey);
-    return saved?.from ?? today;
-  });
-
-  const [dateTo, setDateToRaw] = useState<string>(() => {
-    const saved = readStorage(storageKey);
-    return saved?.to ?? today;
-  });
-
-  const setDateFrom = useCallback(
-    (v: string) => {
-      setDateFromRaw(v);
-      writeStorage(storageKey, v, dateTo);
-    },
-    [storageKey, dateTo]
+export function useDateRange(
+  storageKey: string,
+  opts: { defaultPreset?: DefaultPreset; initial?: DayRange | null } = {},
+) {
+  const defaultPreset: DefaultPreset = opts.defaultPreset ?? "today";
+  const [range, setRange] = useState<DayRange>(
+    () => opts.initial ?? readStorage(storageKey) ?? rangeForPreset(defaultPreset),
   );
 
-  const setDateTo = useCallback(
-    (v: string) => {
-      setDateToRaw(v);
-      writeStorage(storageKey, dateFrom, v);
+  const choose = useCallback(
+    (next: DayRange) => {
+      setRange(next);
+      writeStorage(storageKey, next);
     },
-    [storageKey, dateFrom]
+    [storageKey],
   );
 
+  const setDateFrom = useCallback((v: string) => choose({ from: v, to: range.to }), [choose, range.to]);
+  const setDateTo = useCallback((v: string) => choose({ from: range.from, to: v }), [choose, range.from]);
   const applyPreset = useCallback(
-    (preset: DatePreset) => {
-      const { from, to } = presetDates(preset);
-      setDateFromRaw(from);
-      setDateToRaw(to);
-      writeStorage(storageKey, from, to);
-    },
-    [storageKey]
+    (preset: Exclude<DatePreset, "custom">) => choose(rangeForPreset(preset)),
+    [choose],
   );
+  const resetToDefault = useCallback(() => applyPreset(defaultPreset), [applyPreset, defaultPreset]);
 
-  const resetToToday = useCallback(() => applyPreset("today"), [applyPreset]);
-
-  const activePreset: DatePreset = useMemo(
-    () => detectPreset(dateFrom, dateTo),
-    [dateFrom, dateTo]
-  );
+  const activePreset: DatePreset = useMemo(() => presetOf(range), [range]);
+  const bounds = useMemo(() => rangeBounds(range), [range]);
 
   const isToday = activePreset === "today";
-  const isSingleDay = dateFrom === dateTo;
-
-  const dateFromObj = useMemo(() => startOfDay(dateFrom), [dateFrom]);
-  const dateToObj = useMemo(() => endOfDay(dateTo), [dateTo]);
+  const isAll = activePreset === "all";
+  const isSingleDay = range.from !== "" && range.from === range.to;
+  const label = isToday
+    ? "Today"
+    : isAll
+      ? "All dates"
+      : isSingleDay
+        ? range.from
+        : `${range.from || "…"} – ${range.to || "…"}`;
 
   return {
-    dateFrom,
-    dateTo,
-    dateFromObj,
-    dateToObj,
+    dateFrom: range.from,
+    dateTo: range.to,
+    /** First instant of the range, or undefined when it is unbounded. */
+    dateFromObj: bounds.from,
+    /** Last instant of the range (inclusive), or undefined when unbounded. */
+    dateToObj: bounds.to,
     setDateFrom,
     setDateTo,
     applyPreset,
-    resetToToday,
+    resetToDefault,
     activePreset,
     isToday,
+    isAll,
     isSingleDay,
-    today,
+    /** True while the range is what this page opens on. */
+    isDefault: activePreset === defaultPreset,
+    defaultPreset,
+    label,
   };
 }
+
+export type DateRangeState = ReturnType<typeof useDateRange>;
