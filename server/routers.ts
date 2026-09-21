@@ -56,6 +56,7 @@ import {
 } from "./sftpService";
 import { startBucketPolling } from "./bucketIngestionService";
 import { startSLAMonitoring } from "./slaMonitoringService";
+import { startDemoTimelineRoll } from "./demoTimelineRoll";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 import {
   runFullPOC,
@@ -7370,6 +7371,9 @@ startSftpPolling();
 startBucketPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
+// Keep the two demo tenants' timelines current (hourly; allow-listed by code,
+// refuses anything that is not a demo tenant). Off under test and on-premise.
+startDemoTimelineRoll();
 // Pre-warm the shared demo user so the first guest gets instant data
 // Runs asynchronously — does not block server startup
 setImmediate(() => {

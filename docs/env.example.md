@@ -239,6 +239,17 @@ WOODCORE_TENANT_ID=
 
 Leave blank until Woodcore whitelists the production server's IP address.
 
+## Demo timeline (optional)
+
+```bash
+# Minutes between rolls of the demo tenants' timelines (GLOBUS_DEMO,
+# BRIGHTGOODS_DEMO) so their newest transaction stays within the hour and every
+# list that opens on Today shows data. Unset = 60. "0" or "off" disables it.
+# Values under 5 are raised to 5 — each roll rewrites ~81k demo rows.
+# Never runs when DEPLOYMENT_MODE=on_premise. See server/demoTimelineRoll.ts.
+DEMO_TIMELINE_ROLL_MINUTES=60
+```
+
 ## Analytics (optional)
 
 ```bash

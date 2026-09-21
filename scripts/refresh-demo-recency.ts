@@ -9,6 +9,14 @@
  *
  * --trim without --org is refused: it deletes runs, and must name its tenant.
  *
+ * KEEPING IT CURRENT — the server does that now
+ *
+ * An hourly pass in the server (server/demoTimelineRoll.ts) rolls
+ * GLOBUS_DEMO and BRIGHTGOODS_DEMO forward so their newest transaction is
+ * always within the hour; step 1 below IS that roll. Run this script when a
+ * tenant has been RE-SEEDED, to re-shape its exceptions across the quarter —
+ * the hourly roll preserves whatever shape it finds, it does not create one.
+ *
  * WHY THIS EXISTS
  *
  * The Exceptions and Review Queue screens open on TODAY, offer Today /
@@ -43,9 +51,8 @@
  *     and transactions alone — see trimToNewestRun for why.
  */
 import "dotenv/config";
-import { and, count, desc, eq, gte, inArray, lt, max, min, sql, type AnyColumn } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, lt, max, min } from "drizzle-orm";
 import {
-  agentMemory,
   channels,
   distributors,
   exceptions,
@@ -54,17 +61,16 @@ import {
   reconciliationJobs,
   reconciliationReports,
   transactions,
-  uploadBatches,
 } from "../drizzle/schema";
 import { getDb } from "../server/db";
 import {
   planExceptionTimeline,
   COUNTRY_TIMEZONES,
   RECENCY_BANDS,
-  rollDeltaMs,
   zonedDayStart,
 } from "../server/demoRecency";
 import { createReportForJob, isSeededReportSummary } from "../server/demoReportSeed";
+import { futureDated, rollDemoTimeline } from "../server/demoTimelineRoll";
 
 const COMMIT = process.argv.includes("--commit");
 const TRIM = process.argv.includes("--trim");
@@ -202,13 +208,15 @@ async function report(
   // every "today" row at 08:00-17:59, and 40 exceptions across the two demo
   // tenants were "created" up to ten hours in the future. Checked separately so
   // that defect fails the run instead of padding the Today count.
-  const [ahead] = await db
-    .select({ n: count() })
-    .from(exceptions)
-    .where(and(eq(exceptions.organizationId, orgId), gte(exceptions.createdAt, now)));
-  const future = Number(ahead?.n ?? 0);
+  //
+  // Across EVERY rolled column, not only exceptions. Checking exceptions alone
+  // is how 1,950 BrightGoods ingestion times, 950 match times and a job window
+  // sat up to 12 hours in the future through several "all bands populated" runs.
+  const ahead = await futureDated(db, orgId, now);
+  const future = ahead.reduce((n, f) => n + f.rows, 0);
   if (future > 0 && when === "after") failures++;
-  console.log(`    ${"dated in the FUTURE".padEnd(38)} ${String(future).padStart(6)}${future ? "   <- WRONG" : ""}`);
+  console.log(`    ${"dated in the FUTURE (any column)".padEnd(38)} ${String(future).padStart(6)}${future ? "   <- WRONG" : ""}`);
+  for (const f of ahead) console.log(`      ${`${f.table}.${f.column}`.padEnd(36)} ${String(f.rows).padStart(6)}`);
 
   // The Age Tracker shows an exception's date beside its transaction's. One
   // raised before the transaction it concerns is visibly wrong there — 253 on
@@ -320,8 +328,8 @@ type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
  * them:
  *
  *   1. ROLL   the whole timeline forward by one delta, so the newest transaction
- *             sits at now — transactions, upload batches, jobs, matches, reports,
- *             agent memory. One transaction, all or nothing: a half-rolled
+ *             sits at now — every table in ROLL_PLAN (server/demoTimelineRoll.ts).
+ *             One transaction under a tenant lock, all or nothing: a half-rolled
  *             timeline would leave matched pairs and job windows disagreeing.
  *   2. SPREAD the transactions that carry exceptions across the quarter, so the
  *             7-day, 30-day and quarter views all hold cases. Only those: none is
@@ -344,76 +352,18 @@ async function refreshTimeline(db: Db, orgId: number, timeZone: string) {
   ).map((j) => j.id);
 
   // ── 1. Roll ──────────────────────────────────────────────────────────────
-  const [newestRow] = await db
-    .select({ newest: max(transactions.transactionDate) })
-    .from(transactions)
-    .where(eq(transactions.organizationId, orgId));
-  const newest = newestRow?.newest ? new Date(newestRow.newest) : null;
-  const secs = rollDeltaMs(newest, now) / 1000;
+  // The same roll the hourly scheduler runs (server/demoTimelineRoll.ts): one
+  // transaction per tenant, under a lock on the tenant's organisations row, so
+  // this script and a scheduled pass can never both apply the same relative
+  // shift. `allowList: null` because this script names its tenant explicitly
+  // and has already applied its own checks above.
+  const rolled = await rollDemoTimeline(db, orgId, { commit: COMMIT, now, allowList: null });
+  if (rolled.status === "refused") throw new Error(`REFUSING: ${rolled.reason}`);
+  const secs = rolled.seconds;
   console.log(
-    `  roll: newest transaction ${newest ? newest.toISOString() : "none"}` +
-      ` → move the timeline forward ${(secs / 3600).toFixed(2)}h${COMMIT ? "" : " — not written"}`,
+    `  roll: move the timeline forward ${(secs / 3600).toFixed(2)}h` +
+      (rolled.status === "rolled" ? ` (done in ${rolled.ms}ms)` : ` — not written: ${rolled.reason}`),
   );
-
-  if (COMMIT && secs > 0) {
-    // Column arithmetic has no typed drizzle form, so these SET clauses use its
-    // parameterised `sql` tag. The alternative, a per-row loop, is 79,718 round
-    // trips on Globus Bank — which is how the restore on 20 September died of
-    // ECONNRESET partway through. Every statement is scoped by tenant.
-    //
-    // This is kept deliberately where other raw expressions were removed (the
-    // JSON marker checks now filter in TypeScript). Drizzle has no typed column
-    // arithmetic, and the roll must be ATOMIC: a shift is relative, so a per-row
-    // loop interrupted halfway could not be retried — the rerun would compute a
-    // new delta from an already-moved newest row and shift the remainder by the
-    // wrong amount, splitting the timeline. One set-based statement per table,
-    // inside one transaction, is the only form that is all-or-nothing. It is
-    // still a drizzle query — db.update().set().where() — with the interval
-    // bound as a parameter, never interpolated text.
-    const shift = (col: AnyColumn) => sql`DATE_ADD(${col}, INTERVAL ${secs} SECOND)`;
-    await db.transaction(async (tx) => {
-      await tx
-        .update(transactions)
-        .set({
-          transactionDate: shift(transactions.transactionDate),
-          valueDate: shift(transactions.valueDate),
-          createdAt: shift(transactions.createdAt),
-        })
-        .where(eq(transactions.organizationId, orgId));
-      await tx
-        .update(uploadBatches)
-        .set({ createdAt: shift(uploadBatches.createdAt), completedAt: shift(uploadBatches.completedAt) })
-        .where(eq(uploadBatches.organizationId, orgId));
-      await tx
-        .update(reconciliationJobs)
-        .set({
-          dateFrom: shift(reconciliationJobs.dateFrom),
-          dateTo: shift(reconciliationJobs.dateTo),
-          startedAt: shift(reconciliationJobs.startedAt),
-          completedAt: shift(reconciliationJobs.completedAt),
-          heartbeatAt: shift(reconciliationJobs.heartbeatAt),
-          abandonedAt: shift(reconciliationJobs.abandonedAt),
-          createdAt: shift(reconciliationJobs.createdAt),
-        })
-        .where(eq(reconciliationJobs.organizationId, orgId));
-      // matches carry no usable organisationId (CLAUDE.md §19.3); they are
-      // reached through this tenant's own jobs.
-      if (jobIds.length) {
-        await tx
-          .update(matches)
-          .set({ createdAt: shift(matches.createdAt), reviewedAt: shift(matches.reviewedAt) })
-          .where(inArray(matches.jobId, jobIds));
-      }
-      await tx
-        .update(reconciliationReports)
-        .set({ createdAt: shift(reconciliationReports.createdAt) })
-        .where(eq(reconciliationReports.organizationId, orgId));
-      await tx
-        .update(agentMemory)
-        .set({ createdAt: shift(agentMemory.createdAt) })
-        .where(eq(agentMemory.organizationId, orgId));
-    });
-  }
 
   // ── 2 + 3. Spread exception transactions, anchor exceptions ──────────────
   const rows = await db
