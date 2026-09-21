@@ -11,7 +11,7 @@ import {
   reconciliationJobs, InsertReconciliationJob,
   matches, InsertMatch,
   exceptions, InsertException,
-  auditLogs, InsertAuditLog,
+  auditLogs, InsertAuditLog, auditChainLocks,
   reconciliationReports, InsertReconciliationReport,
   organizations, InsertOrganization,
   webhooks, InsertWebhook,
@@ -1400,20 +1400,48 @@ export type DbExecutor = DbHandle | Parameters<Parameters<DbHandle["transaction"
  * Optional because most callers use logAudit, which is best-effort by design.
  */
 export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor) {
-  const db = executor ?? (await getDb());
+  // Inside the caller's transaction when one is given, so the change and its
+  // record commit together; otherwise in a transaction of its own, because the
+  // chain lock below is held until commit.
+  if (executor) return appendToAuditChain(executor, data);
+  const db = await getDb();
   if (!db) return;
+  await db.transaction((tx) => appendToAuditChain(tx, data));
+}
 
-  // Tamper-evident hash chain (per organization). Fetch the latest entry in the
-  // same org scope to link against, then compute this record's hash.
-  // Note: best-effort under concurrency — see auditChain.ts. For the audit
-  // volume here this is acceptable; a SELECT…FOR UPDATE tx would harden it.
+/**
+ * Append one entry to its organisation's hash chain, serialised per chain.
+ *
+ * This read the chain's head and appended to it with nothing stopping a second
+ * writer doing the same at the same moment — "best-effort under concurrency",
+ * its own comment said. Two writers that read the same head both wrote the next
+ * sequence number: 8 forks in the global chain as of 2026-09-21 (a
+ * double-clicked "revoke" among them), each breaking verification.
+ *
+ * Now every writer takes the chain's row in `audit_chain_locks` first — created
+ * on first use by INSERT IGNORE, which itself waits on a concurrent first
+ * insert of the same key — and reads the head with a LOCKING read. That read
+ * matters: on TiDB a plain SELECT in a transaction reads the snapshot from
+ * BEGIN, and would miss the entry the previous lock holder just committed.
+ * Rows written here are signed as writer 3, so the verifier's allowance for
+ * the old forks can never apply to them.
+ */
+async function appendToAuditChain(db: DbExecutor, data: InsertAuditLog) {
   const orgScope = data.organizationId ?? null;
+  const chainKey = orgScope ?? 0;
+  await db.insert(auditChainLocks).ignore().values({ chainKey });
+  await db
+    .select({ chainKey: auditChainLocks.chainKey })
+    .from(auditChainLocks)
+    .where(eq(auditChainLocks.chainKey, chainKey))
+    .for("update");
   const [prev] = await db
     .select({ seq: auditLogs.sequenceNumber, hash: auditLogs.recordHash })
     .from(auditLogs)
     .where(orgScope === null ? isNull(auditLogs.organizationId) : eq(auditLogs.organizationId, orgScope))
     .orderBy(desc(auditLogs.sequenceNumber))
-    .limit(1);
+    .limit(1)
+    .for("update");
 
   const sequenceNumber = (prev?.seq ?? 0) + 1;
   const prevRecordHash = prev?.hash ?? null;
@@ -1435,8 +1463,9 @@ export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor
       createdAt,
     },
     prevRecordHash,
-    // Signed as writer 2, so the rounded-write allowance can never apply to
-    // this row (see AuditWriterVersion).
+    // Signed as the current (serialised) writer, so neither the rounded-write
+    // nor the concurrent-fork allowance can apply to this row
+    // (see AuditWriterVersion).
     AUDIT_WRITER_VERSION,
   );
 

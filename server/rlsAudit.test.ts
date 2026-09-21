@@ -59,6 +59,9 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   matches: "tenant_nullable",
   exceptions: "tenant_nullable",
   audit_logs: "tenant_nullable",
+  // One lock row per audit chain (chainKey = organisationId, 0 = global); holds
+  // no tenant data, only serialises appends. See drizzle/schema.ts.
+  audit_chain_locks: "global",
   exception_aging_settings: "tenant_nullable",
   reconciliation_reports: "tenant_nullable",
   webhooks: "tenant_nullable",
