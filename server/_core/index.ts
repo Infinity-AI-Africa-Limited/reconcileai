@@ -17,6 +17,7 @@ import { seedDefaultResolutionTemplates, seedNigerianExceptionDefaults } from ".
 import { sql } from "drizzle-orm";
 import { storagePut, storageGet, storageDelete } from "../storage";
 import { sdk } from "./sdk";
+import { applyPortalView } from "./portalView";
 import { ENV } from "./env";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -700,7 +701,17 @@ async function startServer() {
     let viewerOrganizationId: number | null;
     try {
       const user = await sdk.authenticateRequest(req);
-      viewerOrganizationId = user.organizationId ?? null;
+      // The same portal rule as every tRPC call (server/_core/portalView.ts).
+      // EventSource cannot set request headers, so the portal tenant arrives as
+      // a query parameter; it is honoured only for a super admin, and an
+      // unknown tenant yields no organisation rather than the operator's own.
+      const { getOrganizationById } = await import("../db");
+      const view = await applyPortalView(
+        user,
+        typeof req.query.portalOrg === "string" ? req.query.portalOrg : undefined,
+        async (id) => Boolean(await getOrganizationById(id)),
+      );
+      viewerOrganizationId = view.user?.organizationId ?? null;
     } catch {
       res.status(401).end();
       return;

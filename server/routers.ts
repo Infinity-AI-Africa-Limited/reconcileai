@@ -230,6 +230,7 @@ import {
   transactionOwnerFilter,
   runOwner,
   requireOwnedChannels,
+  assertJobVisible,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -476,7 +477,10 @@ export const appRouter = router({
   system: systemRouter,
 
   auth: router({
-    me: publicProcedure.query((opts) => opts.ctx.user),
+    // The account as it signed in — not the portal view. Inside a tenant's
+    // portal `ctx.user.organizationId` is the TENANT's (server/_core/portalView.ts);
+    // telling the browser the super admin now belongs to that tenant would be false.
+    me: publicProcedure.query((opts) => opts.ctx.actor ?? opts.ctx.user),
     // Which enterprise SSO providers are configured (drives /login buttons).
     oauthProviders: publicProcedure.query(async () => {
       const { enabledSsoProviders } = await import("./_core/sso");
@@ -538,7 +542,8 @@ export const appRouter = router({
       // Audit: log logout before clearing the cookie
       if (ctx.user) {
         const { ip, ua } = getClientInfo(ctx);
-        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua);
+        // The account's session ended, not an action on the tenant on screen.
+        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua, null);
       }
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
@@ -637,7 +642,7 @@ export const appRouter = router({
         // could build a run across two tenants from the dropdown. Scoping the
         // reads while leaving this list unscoped made the page look tenanted
         // and behave otherwise.
-        const scope = channelListScope(ctx.user, input?.viewAsOrgId);
+        const scope = channelListScope(ctx.user, input?.viewAsOrgId, ctx.viewingAs);
         return scope === "all" ? db.getAllChannelsAcrossTenants() : db.getChannels(scope);
       }),
 
@@ -2046,6 +2051,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2101,6 +2107,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2984,9 +2991,11 @@ export const appRouter = router({
 
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const task = await db.getScheduledTaskById(input.id);
-        if (!task) throw new TRPCError({ code: "NOT_FOUND" });
+        // The task names its tenant. It was served by id alone — any tenant's
+        // schedule and run history to any caller who guessed the id.
+        if (!task || !canActOnTenant(ctx.user, task.organizationId ?? null)) throw new TRPCError({ code: "NOT_FOUND" });
         const history = await db.getScheduleRunHistoryByTask(input.id, 20);
         return {
           ...task,
@@ -3194,7 +3203,8 @@ export const appRouter = router({
           updateData.lowMatchRateThreshold = String(input.lowMatchRateThreshold);
         }
         await db.upsertEmailPreferences(ctx.user.id, updateData);
-        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua);
+        // The caller's OWN preferences (keyed by user id), not the tenant's.
+        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua, null);
         return { success: true };
       }),
 
@@ -3227,13 +3237,18 @@ export const appRouter = router({
       return db.getMonitoringStats(ctx.user.organizationId ?? null);
     }),
 
-    activeJobs: protectedProcedure.query(async () => {
-      return getAllActiveJobsProgress();
+    // The caller's organisation only (the portal tenant, inside a portal). This
+    // returned every tenant's live jobs to any signed-in user.
+    activeJobs: protectedProcedure.query(async ({ ctx }) => {
+      return getAllActiveJobsProgress(ctx.user.organizationId ?? null);
     }),
 
     jobProgress: protectedProcedure
       .input(z.object({ jobId: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // The job names its tenant; the caller must be allowed to see it. It
+        // was served by id alone.
+        await assertJobVisible(ctx.user, input.jobId);
         const progress = await getJobProgress(input.jobId);
         if (!progress) throw new TRPCError({ code: "NOT_FOUND" });
         return progress;
@@ -3463,7 +3478,8 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         if (ctx.user.role === "super_admin") {
           // Portal-view: scope to the viewed org and hide Infinity AI super admins.
-          if (input?.viewAsOrgId) return db.getUsersByOrg(input.viewAsOrgId, { excludeSuperAdmins: true });
+          const portal = input?.viewAsOrgId || ctx.viewingAs;
+          if (portal) return db.getUsersByOrg(portal, { excludeSuperAdmins: true });
           // Super-admin home: full cross-tenant list.
           return db.getAllUsers();
         }
@@ -3485,9 +3501,12 @@ export const appRouter = router({
         }
         const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
+        // Granting super admin is a platform event, not the tenant's: it joins the
+        // global chain even from inside a portal. Any other role change is about
+        // the tenant on screen (assertCanManageUsers holds the target to it).
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
           newRole: input.role,
-        }, ip, ua);
+        }, ip, ua, input.role === "super_admin" ? null : undefined);
         return { success: true };
       }),
     bulkUpdateRole: adminProcedure
@@ -3505,7 +3524,8 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ role: input.role }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua);
+          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua,
+            input.role === "super_admin" ? null : undefined);
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3540,7 +3560,8 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ organizationId: input.organizationId }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua);
+          // Spans two organisations, so it belongs to neither's trail: global.
+          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua, null);
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3586,7 +3607,9 @@ export const appRouter = router({
           loginMethod: "invite",
         });
         const newUserId = (result as any).insertId;
-        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua);
+        // The new user's own organisation, which the row names — not the portal
+        // on screen: a super admin may create a user for any organisation.
+        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua, targetOrgId);
         // Send welcome email with magic login link
         if (input.origin) {
           try {
@@ -3693,9 +3716,10 @@ export const appRouter = router({
         await drizzle.update(users)
           .set({ organizationId: input.organizationId })
           .where(eq(users.id, input.userId));
+        // Spans two organisations, so it belongs to neither's trail: global.
         await logAudit(ctx.user.id, "update_user_org", "user", input.userId, {
           organizationId: input.organizationId,
-        }, ip, ua);
+        }, ip, ua, null);
         return { success: true };
       }),
 
@@ -5019,7 +5043,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
             matchedPairs: result.matchedCount,
             exceptionCases: result.exceptionCount,
             reviewQueueOpenToday: result.reviewQueueOpenToday,
-          }, ip, ua);
+            // Named, not defaulted: a platform procedure runs outside the portal
+            // scope (superAdminProcedure), and this one acts on the tenant on screen.
+          }, ip, ua, target);
           return { success: true, ...result };
         }
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);

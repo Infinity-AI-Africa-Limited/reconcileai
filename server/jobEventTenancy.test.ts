@@ -88,7 +88,13 @@ describe("the stream endpoint applies the rule", () => {
   );
 
   it("should read the viewer's organisation from the authenticated user", () => {
-    expect(stream).toMatch(/viewerOrganizationId = user\.organizationId \?\? null/);
+    // Through the same portal rule as every tRPC call: a super admin inside a
+    // tenant's portal streams that tenant's events (the id arrives as
+    // ?portalOrg=, since EventSource cannot send headers); anyone else gets
+    // their own organisation, and the parameter is never trusted on its own.
+    expect(stream).toMatch(/const user = await sdk\.authenticateRequest\(req\)/);
+    expect(stream).toMatch(/applyPortalView\(\s*user,/);
+    expect(stream).toMatch(/viewerOrganizationId = view\.user\?\.organizationId \?\? null/);
   });
 
   it("should filter every event before writing it to the socket", () => {

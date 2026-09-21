@@ -114,6 +114,16 @@ describe("when the channel list is requested", () => {
     expect(channelListScope(staff, 1)).toBe(1);
   });
 
+  it("should use the portal tenant from the request context when the page passes none", () => {
+    // The request context now carries the portal tenant (ctx.viewingAs) for
+    // every call. This function keys on ROLE, so the organisation override
+    // alone would still hand a super admin in a portal the whole estate.
+    expect(channelListScope(staff, undefined, 30001)).toBe(30001);
+    expect(channelListScope(staff, 1, 30001)).toBe(1);
+    // Never for a tenant user, whatever the context says.
+    expect(channelListScope({ role: "admin", organizationId: 1 }, undefined, 30001)).toBe(1);
+  });
+
   it("should never give a tenant user the whole estate or another tenant", () => {
     for (const role of ["admin", "operations", "cfo", "compliance", "user"]) {
       const scope = channelListScope({ role, organizationId: 1 }, 30001);

@@ -2007,14 +2007,21 @@ export async function getLatestJobProgress(jobId: number) {
   return result[0];
 }
 
-export async function getActiveJobsProgress() {
+/**
+ * Running and pending jobs for ONE organisation.
+ *
+ * It had no tenant predicate: `monitoring.activeJobs` returned every tenant's
+ * live jobs — names, channel names, match and exception counts — to any
+ * signed-in user. A caller with no organisation gets nothing, not the legacy
+ * org-less rows `orgFilter(null)` would select.
+ */
+export async function getActiveJobsProgress(organizationId: number | null) {
   const db = await getDb();
-  if (!db) return [];
-  // Get all running jobs
+  if (!db || organizationId === null) return [];
   const runningJobs = await db.select().from(reconciliationJobs)
-    .where(or(
-      eq(reconciliationJobs.status, "running"),
-      eq(reconciliationJobs.status, "pending")
+    .where(and(
+      eq(reconciliationJobs.organizationId, organizationId),
+      or(eq(reconciliationJobs.status, "running"), eq(reconciliationJobs.status, "pending")),
     ))
     .orderBy(desc(reconciliationJobs.createdAt))
     .limit(20);
