@@ -20,6 +20,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { assertTenantAiAllowed, isTenantAiAllowed, TenantAiDisabledError } from "./aiGate";
 import * as db from "./db";
+import { isTenantId } from "@shared/tenantId";
 import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
@@ -231,6 +232,8 @@ import {
   runOwner,
   requireOwnedChannels,
   assertJobVisible,
+  assertRowVisible,
+  assertReportVisible,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -1502,7 +1505,15 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        // The caller's tenant, required. This read exceptions by caller-supplied
+        // ids with no organisation predicate, WROTE a verification verdict onto
+        // them, and returned notes quoting their transaction references — any
+        // tenant's, to any signed-in user. With no organisation the reappearance
+        // query below also dropped its filter and searched every tenant.
         const orgId = ctx.user.organizationId;
+        if (!isTenantId(orgId)) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your account is not linked to an organisation." });
+        }
 
         const { exceptions: exceptionsTable, transactions: transactionsTable } = await import("../drizzle/schema");
 
@@ -1520,6 +1531,7 @@ export const appRouter = router({
           .where(
             and(
               inArray(exceptionsTable.id, input.exceptionIds),
+              eq(exceptionsTable.organizationId, orgId),
               inArray(exceptionsTable.status, ["resolved", "dismissed"] as any[]),
             )
           );
@@ -1536,7 +1548,7 @@ export const appRouter = router({
 
           // Raw SQL avoids drizzle self-join complexity. Finds any open exception
           // for a transaction with the same ref + channel created after resolution.
-          const orgFilter = orgId != null ? sql` AND t_new.organizationId = ${orgId}` : sql``;
+          const orgFilter = sql` AND t_new.organizationId = ${orgId}`;
           const rawResult = await drizzle.execute(sql`
             SELECT e_new.id AS new_exception_id, e_new.jobId AS new_job_id, e_new.createdAt AS new_created_at
             FROM transactions t_new
@@ -1557,7 +1569,7 @@ export const appRouter = router({
 
           await drizzle.update(exceptionsTable)
             .set({ cbsStillAnomalous: stillAnomalous, cbsVerificationNote: note })
-            .where(eq(exceptionsTable.id, row.exceptionId));
+            .where(and(eq(exceptionsTable.id, row.exceptionId), eq(exceptionsTable.organizationId, orgId)));
 
           results.push({ exceptionId: row.exceptionId, cbsStillAnomalous: stillAnomalous, verificationNote: note });
         }
@@ -1575,9 +1587,10 @@ export const appRouter = router({
     // It also wrote `.where(eq(exceptions.id, input.exceptionId))` on a
     // caller-supplied id with no tenancy predicate, so ANY signed-in user could
     // mark ANY tenant's exception as kept-resolved. db.updateException carries
-    // the org filter; the inline drizzle write bypassed it. `checkStaleness`
-    // directly above already scoped its own query, which is what made this an
-    // outlier rather than a pattern.
+    // the org filter; the inline drizzle write bypassed it. This comment used
+    // to say `checkStaleness` directly above "already scoped its own query".
+    // It did not — only its inner reappearance query was scoped, and only when
+    // the caller had an organisation; its read and its write were by id alone.
     keepResolvedDespiteStaleness: operationsProcedure
       .input(z.object({ exceptionId: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
@@ -1629,15 +1642,26 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        // A template's organisation decides who sees it, and NULL means every
+        // tenant (the shared defaults). A caller with no tenant would have
+        // written exactly that — text shown to every other tenant — so they are
+        // refused rather than pooled (CLAUDE.md §9C). Organisation 0 is no tenant.
+        const owner = ctx.user.organizationId;
+        if (!isTenantId(owner)) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: "Your account is not linked to an organisation, so a template would be shared with every tenant.",
+          });
+        }
         const dbConn = await db.getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        
+
         await dbConn.insert(db.resolutionTemplates).values({
           name: sanitizeInput(input.name, 255),
           category: input.category,
           templateText: sanitizeInput(input.templateText, 2000),
           createdBy: ctx.user.id,
-          organizationId: ctx.user.organizationId,
+          organizationId: owner,
           isDefault: false,
         });
         await logAudit(ctx.user.id, "create_resolution_template", "template", undefined, {
@@ -1657,14 +1681,27 @@ export const appRouter = router({
         const { ip, ua } = getClientInfo(ctx);
         const dbConn = await db.getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-        
+
+        // Updated by id alone, so any signed-in user could rewrite any tenant's
+        // template — and the SHARED defaults every tenant is shown. The row names
+        // its tenant; assertRowVisible decides (shared rows: staff outside a
+        // portal only), and the write carries the same predicate.
+        const [found] = await dbConn
+          .select({ id: db.resolutionTemplates.id, organizationId: db.resolutionTemplates.organizationId })
+          .from(db.resolutionTemplates)
+          .where(eq(db.resolutionTemplates.id, input.id))
+          .limit(1);
+        const template = assertRowVisible(ctx.user, found, "Template not found");
         await dbConn.update(db.resolutionTemplates)
           .set({
             name: sanitizeInput(input.name, 255),
             templateText: sanitizeInput(input.templateText, 2000),
             updatedAt: new Date(),
           })
-          .where(eq(db.resolutionTemplates.id, input.id));
+          .where(and(
+            eq(db.resolutionTemplates.id, input.id),
+            db.orgFilter(db.resolutionTemplates.organizationId, template.organizationId),
+          ));
         await logAudit(ctx.user.id, "update_resolution_template", "template", input.id, {
           name: input.name,
         }, ip, ua);
@@ -1678,8 +1715,18 @@ export const appRouter = router({
         const dbConn = await db.getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         
+        // Same defect and rule as update: deleted by id alone, any tenant's.
+        const [found] = await dbConn
+          .select({ id: db.resolutionTemplates.id, organizationId: db.resolutionTemplates.organizationId })
+          .from(db.resolutionTemplates)
+          .where(eq(db.resolutionTemplates.id, input.id))
+          .limit(1);
+        const template = assertRowVisible(ctx.user, found, "Template not found");
         await dbConn.delete(db.resolutionTemplates)
-          .where(eq(db.resolutionTemplates.id, input.id));
+          .where(and(
+            eq(db.resolutionTemplates.id, input.id),
+            db.orgFilter(db.resolutionTemplates.organizationId, template.organizationId),
+          ));
         await logAudit(ctx.user.id, "delete_resolution_template", "template", input.id, {}, ip, ua);
         return { success: true };
       }),
@@ -1859,11 +1906,7 @@ export const appRouter = router({
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.organizationId ?? null);
-        const report = reports.find((r) => r.id === input.id);
-        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
-        return report;
+        return assertReportVisible(ctx.user, input.id);
       }),
     list: protectedProcedure
       .input(z.object({ ...viewAsOrgInput }).optional())
@@ -1955,9 +1998,7 @@ export const appRouter = router({
         expiresInDays: z.number().int().min(1).max(365).optional(), // null = never
       }))
       .mutation(async ({ ctx, input }) => {        const isAdmin = ctx.user.role === "admin";
-        const reports = await db.getReports(ctx.user.organizationId ?? null);
-        const report = reports.find((r) => r.id === input.reportId);
-        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
+        const report = await assertReportVisible(ctx.user, input.reportId);
         const crypto = await import("crypto");
         const token = crypto.randomBytes(32).toString("hex");
         const expiresAt = input.expiresInDays
@@ -1970,7 +2011,8 @@ export const appRouter = router({
           reportId: input.reportId,
           token,
           createdByUserId: ctx.user.id,
-          organizationId: ctx.user.organizationId ?? null,
+          // The report's tenant — which is the link's — not the caller's.
+          organizationId: report.organizationId ?? null,
           recipientEmail: input.recipientEmail ?? null,
           recipientName: input.recipientName ?? null,
           note: input.note ?? null,
@@ -1982,9 +2024,7 @@ export const appRouter = router({
     listShareTokens: protectedProcedure
       .input(z.object({ reportId: z.number().int().positive() }))
       .query(async ({ ctx, input }) => {
-        const reports = await db.getReports(ctx.user.organizationId ?? null);
-        const report = reports.find((r) => r.id === input.reportId);
-        if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
+        await assertReportVisible(ctx.user, input.reportId);
         const dbConn = await getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { sharedReportTokens } = await import("../drizzle/schema");
@@ -1999,9 +2039,19 @@ export const appRouter = router({
         const dbConn = await getDb();
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { sharedReportTokens } = await import("../drizzle/schema");
+        // Revoked by id alone, so any signed-in user could kill any tenant's
+        // shared-report link. The link's report names the tenant. One message for
+        // a missing link and someone else's, so ids cannot be probed.
+        const [link] = await dbConn
+          .select({ id: sharedReportTokens.id, reportId: sharedReportTokens.reportId })
+          .from(sharedReportTokens)
+          .where(eq(sharedReportTokens.id, input.tokenId))
+          .limit(1);
+        if (!link) throw new TRPCError({ code: "NOT_FOUND", message: "Share link not found" });
+        await assertReportVisible(ctx.user, link.reportId, "Share link not found");
         await dbConn.update(sharedReportTokens)
           .set({ revokedAt: new Date() })
-          .where(eq(sharedReportTokens.id, input.tokenId));
+          .where(and(eq(sharedReportTokens.id, input.tokenId), eq(sharedReportTokens.reportId, link.reportId)));
         return { ok: true };
       }),
 
@@ -4800,26 +4850,42 @@ Always be specific, reference actual exception IDs and amounts where available, 
       }))
       .mutation(async ({ input, ctx }) => {
         const userId = ctx.user.id;
-        const orgId = ctx.user.organizationId ?? 0;
+        // The memory — and the pattern signature below — belong to the caller's
+        // tenant. `?? 0` filed an org-less caller's under organisation 0, pooling
+        // every such account into one pseudo-tenant (CLAUDE.md §9C).
+        const orgId = ctx.user.organizationId;
+        if (!isTenantId(orgId)) {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: 'Your account is not linked to an organisation, so a resolution memory would belong to no one.',
+          });
+        }
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+
+        // A linked exception must be THIS tenant's. It was read by id alone:
+        // another tenant's transaction counterparty was derived into this memory,
+        // and the foreign exception id stored beside it.
+        let linkedCounterparty: string | null = null;
+        if (input.exceptionId) {
+          const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
+          const [linked] = await drizzle
+            .select({ counterparty: txTbl.counterparty })
+            .from(exTbl)
+            .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
+            .where(and(eq(exTbl.id, input.exceptionId), eq(exTbl.organizationId, orgId)))
+            .limit(1);
+          if (!linked) throw new TRPCError({ code: 'NOT_FOUND', message: 'Exception not found' });
+          linkedCounterparty = linked.counterparty ?? null;
+        }
 
         // Derive the counterparty type from the linked exception's transaction when
         // the caller does not supply it, so we never fall back to a hardcoded value.
         let resolvedCounterpartyType = input.counterpartyType ?? null;
-        if (!resolvedCounterpartyType && input.exceptionId) {
+        if (!resolvedCounterpartyType && linkedCounterparty) {
           try {
-            const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
-            const cpRows = await drizzle
-              .select({ counterparty: txTbl.counterparty })
-              .from(exTbl)
-              .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
-              .where(eq(exTbl.id, input.exceptionId))
-              .limit(1);
-            if (cpRows.length) {
-              const ei = await import("./exceptionIntelligence");
-              resolvedCounterpartyType = ei.counterpartyTypeOf(cpRows[0].counterparty);
-            }
+            const ei = await import("./exceptionIntelligence");
+            resolvedCounterpartyType = ei.counterpartyTypeOf(linkedCounterparty);
           } catch { /* non-fatal: fall through to 'unknown' */ }
         }
         if (!resolvedCounterpartyType) resolvedCounterpartyType = 'unknown';

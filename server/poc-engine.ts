@@ -832,8 +832,13 @@ export async function runFullPoc(params: {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
 
-  const [ledgerUp] = await db.select().from(pocUploads).where(eq(pocUploads.id, params.ledgerUploadId)).limit(1);
-  const [stmtUp] = await db.select().from(pocUploads).where(eq(pocUploads.id, params.statementUploadId)).limit(1);
+  // Each upload must be THIS POC's. They were loaded by id alone, so the holder
+  // of one POC's link could reconcile another POC's ledger and statement and
+  // read the result under their own POC.
+  const [ledgerUp] = await db.select().from(pocUploads)
+    .where(and(eq(pocUploads.id, params.ledgerUploadId), eq(pocUploads.pocSlug, params.pocSlug))).limit(1);
+  const [stmtUp] = await db.select().from(pocUploads)
+    .where(and(eq(pocUploads.id, params.statementUploadId), eq(pocUploads.pocSlug, params.pocSlug))).limit(1);
   if (!ledgerUp || !stmtUp) throw new Error("Upload(s) not found — please re-upload the files");
 
   const ledgerAll = (ledgerUp.rows as CanonicalRow[]) ?? [];
@@ -934,10 +939,17 @@ export async function getRun(runId: number, pocSlug: string) {
   return run ?? null;
 }
 
-export async function getRunExceptions(runId: number) {
+/**
+ * A run's exceptions — only if the run is the named POC's. The slug is required
+ * so no caller can read another POC's exceptions by run id; the router's
+ * getExceptions did exactly that, with no run check in front of it.
+ */
+export async function getRunExceptions(runId: number, pocSlug: string) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(pocExceptions).where(eq(pocExceptions.runId, runId)).orderBy(desc(pocExceptions.amount));
+  return db.select().from(pocExceptions)
+    .where(and(eq(pocExceptions.runId, runId), eq(pocExceptions.pocSlug, pocSlug)))
+    .orderBy(desc(pocExceptions.amount));
 }
 
 export async function listRuns(pocSlug: string, limit = 20) {
@@ -946,9 +958,15 @@ export async function listRuns(pocSlug: string, limit = 20) {
   return db.select().from(pocRuns).where(eq(pocRuns.pocSlug, pocSlug)).orderBy(desc(pocRuns.createdAt)).limit(limit);
 }
 
+/** Thrown when a POC id names nothing in that POC — the router answers NOT_FOUND. */
+export class PocNotFoundError extends Error {}
+
 export async function createShareToken(runId: number, pocSlug: string, createdBy?: string, expiresInDays = 30) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  // The run must be this POC's. A token minted for another POC's run was dead on
+  // arrival (getSharedReport re-checks the pair), but it should never be minted.
+  if (!(await getRun(runId, pocSlug))) throw new PocNotFoundError("Run not found");
   const token = crypto.randomBytes(24).toString("hex");
   const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
   await db.insert(pocShareTokens).values({ token, runId, pocSlug, createdBy: createdBy ?? null, expiresAt });
@@ -963,6 +981,6 @@ export async function getSharedReport(token: string) {
   if (share.expiresAt && share.expiresAt < new Date()) return null;
   const run = await getRun(share.runId, share.pocSlug);
   if (!run) return null;
-  const exceptions = await getRunExceptions(share.runId);
+  const exceptions = await getRunExceptions(share.runId, share.pocSlug);
   return { run, exceptions, pocSlug: share.pocSlug, expiresAt: share.expiresAt };
 }
