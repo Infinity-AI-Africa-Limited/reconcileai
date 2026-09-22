@@ -309,14 +309,26 @@ export async function assertCanManageUsers(
     .select({ id: users.id, role: users.role, organizationId: users.organizationId })
     .from(users)
     .where(inArray(users.id, userIds));
+  const refused = () =>
+    new TRPCError({
+      code: "FORBIDDEN",
+      message: "You can only manage users within your own organisation.",
+    });
   for (const t of targets) {
     if (!unrestricted && (own == null || t.role === "super_admin" || t.organizationId !== own)) {
-      throw new TRPCError({
-        code: "FORBIDDEN",
-        message: "You can only manage users within your own organisation.",
-      });
+      throw refused();
     }
     tenantOf.set(t.id, isTenantId(t.organizationId) ? t.organizationId : null);
+  }
+  // Every requested user must exist. A missing id passed silently: the update
+  // changed nothing, the endpoint reported success, and the audit record —
+  // `tenantOf.get(id)` undefined, so the default — told the tenant's trail a
+  // user who never existed had been deleted or deactivated. For anyone held to
+  // one tenant the refusal is the SAME as for another tenant's user, so the
+  // difference cannot be used to learn which ids exist; staff outside a portal
+  // can see every user already.
+  if (userIds.some((id) => !tenantOf.has(id))) {
+    throw unrestricted ? new TRPCError({ code: "NOT_FOUND", message: "User not found" }) : refused();
   }
   return tenantOf;
 }

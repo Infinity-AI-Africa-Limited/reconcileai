@@ -141,6 +141,29 @@ describe("when users are managed", () => {
     await expect(assertCanManageUsers(staffCtx, [9, 1, 7])).resolves.toEqual(new Map([[9, 30002], [1, 30001], [7, null]]));
   });
 
+  it("should refuse a user id that does not exist, rather than audit an action on nobody", async () => {
+    // The update would change nothing, report success, and file "deleted user
+    // N" in the tenant's trail for a user who never existed.
+    targets([{ id: 9, role: "operations", organizationId: 4 }]);
+    await expect(assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [9, 404])).rejects.toThrow(/own organisation/);
+    targets([{ id: 9, role: "operations", organizationId: 30002 }]);
+    await expect(assertCanManageUsers(staffCtx, [9, 404])).rejects.toThrow("User not found");
+  });
+
+  it("should give a tenant admin the same answer for a missing id as for another tenant's user", async () => {
+    // Otherwise the difference would say which ids exist.
+    targets([]);
+    const missing = await assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [404]).catch((e) => e);
+    targets([{ id: 9, role: "operations", organizationId: 5 }]);
+    const foreign = await assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [9]).catch((e) => e);
+    expect([missing.code, missing.message]).toEqual([foreign.code, foreign.message]);
+  });
+
+  it("should accept a repeated id that exists", async () => {
+    targets([{ id: 9, role: "operations", organizationId: 4 }]);
+    await expect(assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [9, 9])).resolves.toEqual(new Map([[9, 4]]));
+  });
+
   it("should not look anything up for an empty list", async () => {
     await expect(assertCanManageUsers(staffCtx, [])).resolves.toEqual(new Map());
     expect(db.getDb).not.toHaveBeenCalled();
