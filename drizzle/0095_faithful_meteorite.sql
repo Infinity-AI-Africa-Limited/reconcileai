@@ -40,6 +40,14 @@ CREATE TABLE `shopify_connector_tokens` (
 	CONSTRAINT `uq_shopify_token_store` UNIQUE(`storeId`)
 );
 --> statement-breakpoint
+CREATE TABLE `shopify_install_leases` (
+	`shopDomain` varchar(253) NOT NULL,
+	`leaseId` varchar(64) NOT NULL,
+	`expiresAt` timestamp NOT NULL,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	CONSTRAINT `shopify_install_leases_shopDomain` PRIMARY KEY(`shopDomain`)
+);
+--> statement-breakpoint
 CREATE TABLE `shopify_oauth_states` (
 	`id` int AUTO_INCREMENT NOT NULL,
 	`shopDomain` varchar(253) NOT NULL,

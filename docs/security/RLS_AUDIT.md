@@ -21,7 +21,7 @@ enforced at three layers:
 
 ## 2. Classification summary (see the test for the per-table list)
 
-Measured by `server/rlsAudit.test.ts` on 2026-09-22 (105 tables).
+Measured by `server/rlsAudit.test.ts` on 2026-09-22 (106 tables).
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
@@ -30,7 +30,7 @@ Measured by `server/rlsAudit.test.ts` on 2026-09-22 (105 tables).
 | `derived` | 3 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
 | `mirror_single_tenant` | 13 | `wc_*` Fineract mirror (Woodcore POC) | **Known caveat** — see finding F2. |
-| `global` | 8 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
+| `global` | 9 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
 | `token` | 5 | random-secret keyed | Entropy-gated, not org-gated. |
 
 ## 3. Findings & remediation plan
@@ -121,3 +121,4 @@ unclassified. The ratchet now also asserts that every schema file listed in
 | `shopify_webhook_events` | `tenant_nullable` | Digest-only delivery ledger. A verified delivery for a shop with no store record is acknowledged and recorded without inventing a tenant. |
 | `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |
 | `shopify_oauth_states` | `token` | Hash-only ledger of CONSUMED OAuth states. States are signed and shop-bound, so a row is written only at the callback, after Shopify's HMAC and our signature verify — the install endpoint writes nothing. The unique `stateHash` enforces single use. |
+| `shopify_install_leases` | `global` | Pre-tenant platform lock serialising installations per shop domain (one authorization-code exchange in flight at a time). Lease id and expiry only; no tenant data. |

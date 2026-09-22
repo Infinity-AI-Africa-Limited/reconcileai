@@ -23,6 +23,8 @@ import {
 } from "./auth";
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
+import { acquireInstallLease, releaseInstallLease } from "./installLease";
+import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
 
@@ -30,7 +32,7 @@ const FLOW_COOKIE = "shopify_oauth_flow";
 const STATE_RETENTION_AFTER_EXPIRY_MS = 60 * 60_000;
 
 /** The error-page reason for a failed callback. Pure, so every mapping is testable. */
-export function callbackReasonFor(error: unknown): string {
+export function callbackReasonFor(error: unknown): ShopifyInstallErrorReason {
   if (!(error instanceof ShopifyOnboardingError)) return "install_failed";
   switch (error.code) {
     case "OWNERSHIP_UNVERIFIED":
@@ -93,7 +95,7 @@ function sameState(left: string | undefined, right: string): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function callbackError(res: express.Response, reason: string): void {
+function callbackError(res: express.Response, reason: ShopifyInstallErrorReason): void {
   res.redirect(302, `/shopify/error?reason=${encodeURIComponent(reason)}`);
 }
 
@@ -200,30 +202,22 @@ export function createShopifyRouter(): express.Router {
       }
       await purgeExpiredStates(db);
 
-      // Last write before the exchange, and deliberately so: the exchange
-      // retires the shop's stored refresh token, so its live connection goes
-      // out of service first. If this fails we stop here, with nothing retired.
-      const reauthorization = await suspendForReauthorization(shopDomain);
-
-      const tokens = await exchangeAuthorizationCode({
-        shopDomain,
-        clientId: ENV.shopifyClientId,
-        clientSecret: ENV.shopifyClientSecret,
-        code,
-      });
-      if (!requiredScopesGranted(tokens.scope, SHOPIFY_ORDER_LED_SCOPES)) {
-        return callbackError(res, "required_permissions_not_granted");
+      // One installation in flight per shop (see shopifyInstallLeases). Refused
+      // BEFORE the exchange, so an overlapping callback's grant never happens
+      // and cannot retire the credentials this one is about to store.
+      const leaseId = await acquireInstallLease(db, shopDomain);
+      if (!leaseId) return callbackError(res, "installation_in_progress");
+      try {
+        return await completeLeasedInstall(res, { shopDomain, code, origin });
+      } finally {
+        await releaseInstallLease(db, shopDomain, leaseId).catch((error: unknown) => {
+          // The lease expires on its own; a failed release only delays the next install.
+          console.warn("[shopify-oauth] install lease release failed", {
+            shopDomain,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
-      const metadata = await fetchShopifyShopMetadata({ shopDomain, accessToken: tokens.access_token });
-      const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin, reauthorization });
-      // No internal store id in the URL: the page needs only the shop, and an
-      // id in a shareable link is an enumeration handle with no purpose.
-      const params = new URLSearchParams({
-        shop: shopDomain,
-        installed: result.isReinstallation ? "reconnected" : "connected",
-        email: result.welcomeEmailSent ? "sent" : "pending",
-      });
-      return res.redirect(302, `/shopify/welcome?${params.toString()}`);
     } catch (error) {
       if (error instanceof ShopifyNotConfiguredError) {
         console.error("[shopify-oauth] callback refused: APP_URL is not configured in production");
@@ -240,6 +234,42 @@ export function createShopifyRouter(): express.Router {
   });
 
   return router;
+}
+
+/**
+ * The part of the callback that runs under the shop's install lease: suspend,
+ * exchange, onboard. Separate so the lease's acquire/release reads as one
+ * bracket around it in the route.
+ */
+async function completeLeasedInstall(
+  res: express.Response,
+  params: { shopDomain: string; code: string; origin: string },
+): Promise<void> {
+  const { shopDomain, code, origin } = params;
+  // Last write before the exchange, and deliberately so: the exchange retires
+  // the shop's stored refresh token, so its live connection goes out of
+  // service first. If this fails we stop here, with nothing retired.
+  const reauthorization = await suspendForReauthorization(shopDomain);
+
+  const tokens = await exchangeAuthorizationCode({
+    shopDomain,
+    clientId: ENV.shopifyClientId,
+    clientSecret: ENV.shopifyClientSecret,
+    code,
+  });
+  if (!requiredScopesGranted(tokens.scope, SHOPIFY_ORDER_LED_SCOPES)) {
+    return callbackError(res, "required_permissions_not_granted");
+  }
+  const metadata = await fetchShopifyShopMetadata({ shopDomain, accessToken: tokens.access_token });
+  const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin, reauthorization });
+  // No internal store id in the URL: the page needs only the shop, and an id
+  // in a shareable link is an enumeration handle with no purpose.
+  const query = new URLSearchParams({
+    shop: shopDomain,
+    installed: result.isReinstallation ? "reconnected" : "connected",
+    email: result.welcomeEmailSent ? "sent" : "pending",
+  });
+  return res.redirect(302, `/shopify/welcome?${query.toString()}`);
 }
 
 /** Best-effort housekeeping: OAuth states are single-use and short-lived. */

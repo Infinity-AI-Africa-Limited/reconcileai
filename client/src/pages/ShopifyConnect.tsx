@@ -4,6 +4,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SHOPIFY_CONNECTION_MESSAGES, shopifyConnectionVerdict, shopifyInstallErrorMessage } from "@/lib/shopifyConnection";
 
 export function ShopifyWelcome() {
   const search = useSearch();
@@ -56,13 +57,9 @@ export function ShopifyWelcome() {
     );
   }
 
-  const connectionText = connection.isLoading
-    ? "Checking the secured connection…"
-    : store?.status === "active"
-      ? "Your Shopify store is connected to this ReconcileAI workspace."
-      : store?.status === "reauthorization_required" || store?.status === "uninstalled"
-        ? "This store is not currently connected. Reinstall ReconcileAI from Shopify, or contact support if that does not restore it."
-        : "The store connection is being confirmed. Refresh this page in a moment if it does not appear.";
+  const connectionText = SHOPIFY_CONNECTION_MESSAGES[
+    shopifyConnectionVerdict({ isLoading: connection.isLoading, status: store?.status })
+  ];
 
   return (
     <Shell>
@@ -87,30 +84,14 @@ export function ShopifyWelcome() {
 export function ShopifyError() {
   const search = useSearch();
   const [, navigate] = useLocation();
-  const reason = new URLSearchParams(search).get("reason") ?? "install_failed";
-  const message: Record<string, string> = {
-    invalid_shop: "The Shopify store address is not valid. Restart installation from Shopify.",
-    security_check_failed: "The Shopify security check could not be completed. Restart installation from Shopify.",
-    expired_or_replayed: "This installation session expired or was already used. Restart installation from Shopify.",
-    required_permissions_not_granted: "ReconcileAI needs read-only order access to continue. No Shopify data was changed.",
-    not_configured: "The ReconcileAI Shopify connector is not yet configured for this environment.",
-    ownership_verification_required:
-      "This store is already connected to a ReconcileAI workspace, and its current contact email does not match that workspace's administrator. For your protection the connection was not transferred. Contact ReconcileAI support to verify ownership.",
-    email_already_registered:
-      "This store's contact email already belongs to another ReconcileAI workspace, so a new workspace could not be created for it. Contact ReconcileAI support to connect this store.",
-    missing_contact_email:
-      "Shopify did not provide a contact email for this store. Add a store contact email in Shopify settings, then restart installation.",
-    store_identity_conflict:
-      "This store's details conflict with an existing connection, so it was not connected. Contact ReconcileAI support.",
-    temporarily_unavailable: "ReconcileAI is temporarily unavailable. Please restart installation from Shopify in a few minutes.",
-  };
+  const message = shopifyInstallErrorMessage(new URLSearchParams(search).get("reason"));
   return (
     <Shell>
       <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-100">
         <TriangleAlert className="h-9 w-9 text-red-600" />
       </div>
       <CardTitle className="text-2xl text-[#1B365D]">Shopify connection not completed</CardTitle>
-      <CardDescription className="text-base leading-relaxed">{message[reason] ?? "We could not finish the secure Shopify connection. No changes were made to your store."}</CardDescription>
+      <CardDescription className="text-base leading-relaxed">{message}</CardDescription>
       <Button variant="outline" className="w-full" onClick={() => navigate("/")}>Return to ReconcileAI</Button>
     </Shell>
   );

@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "9a868198-9bd0-4fa0-aafa-5abd2533b2ed",
+  "id": "8967faa3-f4c6-4343-a652-557cdf4642d8",
   "prevId": "8866591d-a8c1-49b1-8d3b-f040031ec9d1",
   "tables": {
     "agent_action_drafts": {
@@ -14077,6 +14077,52 @@
           "name": "shopify_connector_tokens_id",
           "columns": [
             "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "shopify_install_leases": {
+      "name": "shopify_install_leases",
+      "columns": {
+        "shopDomain": {
+          "name": "shopDomain",
+          "type": "varchar(253)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "leaseId": {
+          "name": "leaseId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(now())"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_install_leases_shopDomain": {
+          "name": "shopify_install_leases_shopDomain",
+          "columns": [
+            "shopDomain"
           ]
         }
       },

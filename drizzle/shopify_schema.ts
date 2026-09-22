@@ -114,6 +114,24 @@ export const shopifyOauthStates = mysqlTable(
 export type ShopifyOauthState = typeof shopifyOauthStates.$inferSelect;
 
 /**
+ * One installation in flight per shop. A callback takes the shop's lease BEFORE
+ * exchanging its authorization code and holds it through onboarding.
+ *
+ * Every authorization-code grant retires the refresh tokens the store held, and
+ * the moment it does so is not observable from here. Two callbacks exchanging
+ * concurrently can therefore each retire the other's credentials, and no
+ * after-the-fact fence can tell which pair survived. Serializing the exchanges
+ * removes the question: a callback that cannot take the lease is refused before
+ * it exchanges, so its grant never happens and retires nothing.
+ */
+export const shopifyInstallLeases = mysqlTable("shopify_install_leases", {
+  shopDomain: varchar("shopDomain", { length: 253 }).primaryKey(),
+  leaseId: varchar("leaseId", { length: 64 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+/**
  * Durable, idempotent webhook admission ledger. The raw provider payload is not
  * retained in this first release because the connector is field-minimal; only a
  * digest, topic and processing evidence are stored.
@@ -221,3 +239,10 @@ export const SHOPIFY_API_VERSION = "2026-07";
 export const SHOPIFY_OAUTH_STATE_TTL_MS = 10 * 60_000;
 export const SHOPIFY_ACCESS_TOKEN_REFRESH_SKEW_MS = 5 * 60_000;
 export const SHOPIFY_REFRESH_LEASE_MS = 60_000;
+/**
+ * How long an install lease is held at most. Everything done under it is
+ * bounded — the code exchange and metadata lookup each time out at 30s — so a
+ * healthy callback finishes far inside this; the TTL only frees a shop whose
+ * callback crashed mid-install.
+ */
+export const SHOPIFY_INSTALL_LEASE_MS = 5 * 60_000;

@@ -180,6 +180,35 @@ describe("GET /api/shopify/callback", () => {
     expect(reason(res.location)).toBe("install_failed");
   });
 
+  it("should refuse an overlapping callback for the same shop before it exchanges its code", async () => {
+    // Greptile #134, fifth pass: overlapping exchanges each retire the other's
+    // credentials at a moment no fence can observe. The second callback is
+    // refused while the first holds the shop's lease, so its grant never
+    // happens and retires nothing.
+    const fake = scriptedDb({
+      insert: { shopify_install_leases: [duplicateKeyError()] },
+      update: { shopify_install_leases: [0] },
+    });
+    state.db = fake.db;
+    const res = fakeRes();
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+
+    expect(reason(res.location)).toBe("installation_in_progress");
+    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+    expect(fake.writes("update", "shopify_connector_stores")).toEqual([]); // nothing suspended either
+  });
+
+  it("should release its lease once the install ends, even when it fails", async () => {
+    const fake = scriptedDb();
+    state.db = fake.db;
+    vi.mocked(exchangeAuthorizationCode).mockRejectedValueOnce(new Error("Shopify unreachable"));
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), fakeRes() as never);
+
+    const taken = fake.writes("insert", "shopify_install_leases")[0]?.data?.leaseId;
+    expect(taken).toBeTruthy();
+    expect(fake.writes("delete", "shopify_install_leases")[0]?.where?.params).toEqual([SHOP, taken]);
+  });
+
   it("should refuse a state that does not match the browser's flow cookie", async () => {
     state.db = scriptedDb().db;
     const res = fakeRes();
