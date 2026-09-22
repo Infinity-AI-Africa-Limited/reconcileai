@@ -5,6 +5,7 @@ import {
   SHOPIFY_API_VERSION,
   SHOPIFY_ORDER_LED_SCOPES,
   shopifyConnectorStores,
+  shopifyConnectorTokens,
   type ShopifyConnectorStore,
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
@@ -12,7 +13,13 @@ import { createAuditLog, getDb } from "../../db";
 import { isDuplicateKeyError } from "../../dbErrors";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { sha256, type ShopifyTokenResponse } from "./auth";
-import { affectedRows, encryptShopifyTokens, markReauthorizationRequired, writeShopifyTokens } from "./tokenStore";
+import {
+  affectedRows,
+  encryptShopifyTokens,
+  markReauthorizationRequired,
+  writeShopifyTokens,
+  type TokenGeneration,
+} from "./tokenStore";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -48,11 +55,13 @@ export type ShopifyOnboardingErrorCode =
 
 /**
  * After a refusal or failure that had to take a store out of service:
- * `confirmed` — it is out of service; `not_confirmed` — the transition could not
- * be written, so the store may still read `active` on a retired refresh token.
+ * `confirmed` — it is out of service; `superseded` — a newer grant stored
+ * credentials after this one began, so there was nothing of ours to retire and
+ * the store was left alone; `not_confirmed` — the transition could not be
+ * written.
  * Absent when the error needed no such transition.
  */
-export type StoreFailClosedState = "confirmed" | "not_confirmed";
+export type StoreFailClosedState = "confirmed" | "superseded" | "not_confirmed";
 
 export class ShopifyOnboardingError extends Error {
   constructor(
@@ -106,13 +115,16 @@ function emailEquals(email: string) {
  * store we already hold credentials for, the stored refresh token is dead
  * whatever happens next. Any branch that does not store the new pair must take
  * the store out of service — leaving it `active` would report a connection that
- * stops working within the hour.
+ * stops working within the hour — but only the generation THIS grant retired
+ * (ReauthorizationTicket): an overlapping callback may have stored a newer one.
  */
 export async function onboardShopifyMerchant(params: {
   shopDomain: string;
   metadata: ShopifyShopMetadata;
   tokenResponse: ShopifyTokenResponse;
   origin: string;
+  /** From suspendForReauthorization, taken before the code was exchanged. Required: see its type. */
+  reauthorization: ReauthorizationTicket;
 }): Promise<ShopifyOnboardingResult> {
   const db = await getDb();
   if (!db) throw new ShopifyOnboardingError("Database unavailable", "DB_UNAVAILABLE");
@@ -163,13 +175,35 @@ export async function onboardShopifyMerchant(params: {
  * connection to protect. Matched by domain because the shop id is not known
  * until after the exchange (it comes from the metadata call).
  */
-export async function suspendForReauthorization(shopDomain: string): Promise<void> {
+export async function suspendForReauthorization(shopDomain: string): Promise<ReauthorizationTicket> {
   const db = await getDb();
   if (!db) throw new ShopifyOnboardingError("Database unavailable", "DB_UNAVAILABLE");
   await db
     .update(shopifyConnectorStores)
     .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
     .where(and(eq(shopifyConnectorStores.shopDomain, shopDomain), eq(shopifyConnectorStores.status, "active")));
+  // Read AFTER suspending and BEFORE the exchange. Every pair stored by now was
+  // issued before this callback's grant, so the grant retires it; a pair stored
+  // after this read may come from a newer grant, and is not ours to retire.
+  const [held] = await db
+    .select({ id: shopifyConnectorTokens.id, rotationVersion: shopifyConnectorTokens.rotationVersion })
+    .from(shopifyConnectorTokens)
+    .innerJoin(shopifyConnectorStores, eq(shopifyConnectorTokens.storeId, shopifyConnectorStores.id))
+    .where(eq(shopifyConnectorStores.shopDomain, shopDomain))
+    .limit(1);
+  return { retiring: held ? { tokenRowId: held.id, rotationVersion: held.rotationVersion } : "none" };
+}
+
+/**
+ * What one callback's authorization-code grant is about to retire.
+ *
+ * Two callbacks for the same shop can overlap. If B stores a fresh pair and A
+ * fails afterwards, A's fail-close must not delete B's credentials — B's grant
+ * may well be the newer one. Fencing A's failure on the generation A retired
+ * makes it act only while that generation is still what the store holds.
+ */
+export interface ReauthorizationTicket {
+  retiring: TokenGeneration;
 }
 
 /**
@@ -228,7 +262,7 @@ async function reauthorizeExistingStore(
   if (!admin) {
     // The new grant has already retired this store's refresh token, so the
     // workspace's connection is dead either way; this records it as such.
-    const failClosedState = await failClosed(db, store, "ownership_unverified");
+    const failClosedState = await failClosed(db, store, "ownership_unverified", params.reauthorization.retiring);
     throw new ShopifyOnboardingError(
       "The Shopify store's contact email does not match an administrator of its ReconcileAI workspace",
       "OWNERSHIP_UNVERIFIED",
@@ -282,7 +316,7 @@ async function reauthorizeExistingStore(
       );
     });
   } catch (error) {
-    const failClosedState = await failClosed(db, store, "token_store_failed");
+    const failClosedState = await failClosed(db, store, "token_store_failed", params.reauthorization.retiring);
     throw new ShopifyOnboardingError(
       `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
       "TOKEN_STORE_FAILED",
@@ -418,7 +452,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     // The store is still `pending_claim` here, never `active`; recording why
     // it has no credentials is for the operator, not for safety.
-    const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed");
+    const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed", "none");
     throw new ShopifyOnboardingError(
       `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
       "TOKEN_STORE_FAILED",
@@ -470,12 +504,18 @@ async function failClosed(
   db: Db,
   store: Pick<ShopifyConnectorStore, "id" | "organizationId">,
   reason: ShopifyStatusReason,
+  fence: TokenGeneration,
 ): Promise<StoreFailClosedState> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= FAIL_CLOSED_ATTEMPTS; attempt += 1) {
     try {
-      await markReauthorizationRequired(db, { storeId: store.id, organizationId: store.organizationId, reason });
-      return "confirmed";
+      const marked = await markReauthorizationRequired(db, {
+        storeId: store.id,
+        organizationId: store.organizationId,
+        reason,
+        fence,
+      });
+      return marked ? "confirmed" : "superseded";
     } catch (error) {
       lastError = error;
       if (attempt < FAIL_CLOSED_ATTEMPTS) {

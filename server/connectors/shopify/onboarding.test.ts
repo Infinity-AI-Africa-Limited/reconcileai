@@ -33,7 +33,8 @@ vi.mock("../../provisioning", () => ({
 import { encryptForTenant } from "../../_core/tenantKeys";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { provisionTenantBaseline } from "../../provisioning";
-import { onboardShopifyMerchant, ShopifyOnboardingError } from "./onboarding";
+import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
+import type { TokenGeneration } from "./tokenStore";
 import { duplicateKeyError, scriptedDb, type RecordedOp } from "./scriptedDb.testkit";
 
 const SHOP = "merchant.myshopify.com";
@@ -70,8 +71,26 @@ const existingStore = {
   claimedAt: new Date("2026-09-01T00:00:00Z"),
 };
 
-const onboard = () =>
-  onboardShopifyMerchant({ shopDomain: SHOP, metadata, tokenResponse, origin: "https://www.reconcileaiafrica.com" });
+const onboardFirst = () =>
+  onboardShopifyMerchant({
+    shopDomain: SHOP,
+    metadata,
+    tokenResponse,
+    origin: "https://www.reconcileaiafrica.com",
+    reauthorization: { retiring: "none" },
+  });
+
+/** The pair the store held when this callback suspended it — what its grant retires. */
+const HELD: TokenGeneration = { tokenRowId: 501, rotationVersion: 3 };
+
+const onboard = (retiring: TokenGeneration = HELD) =>
+  onboardShopifyMerchant({
+    shopDomain: SHOP,
+    metadata,
+    tokenResponse,
+    origin: "https://www.reconcileaiafrica.com",
+    reauthorization: { retiring },
+  });
 
 async function codeOf(run: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -113,7 +132,8 @@ describe("when a shop we already know is reauthorized", () => {
     it("should take the store out of service, since the new grant retired its refresh token", async () => {
       const fake = setup();
       await codeOf(onboard);
-      expect(fake.writes("delete", TOKENS)[0]?.where?.params).toEqual(expect.arrayContaining([7, 42]));
+      // Fenced on the exact pair this grant retired (row 501, version 3).
+      expect(fake.writes("delete", TOKENS)[0]?.where?.params).toEqual(expect.arrayContaining([7, 42, 501, 3]));
       expect(storeUpdates(fake.committed())).toEqual([{ status: "reauthorization_required", statusReason: "ownership_unverified" }]);
     });
 
@@ -184,6 +204,7 @@ describe("when a shop we already know is reauthorized", () => {
 });
 
 describe("when a shop installs for the first time", () => {
+  const onboard = () => onboardFirst();
   function firstInstall(extra: Parameters<typeof scriptedDb>[0] = {}) {
     const fake = scriptedDb({
       select: { [STORES]: [[]], [USERS]: [[]] },
@@ -240,7 +261,28 @@ describe("when a shop installs for the first time", () => {
     const fake = firstInstall({ insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7], [TOKENS]: [new Error("disk full")] } });
     expect(await codeOf(onboard)).toBe("TOKEN_STORE_FAILED");
     expect(storeUpdates(fake.committed())).toEqual([{ status: "reauthorization_required", statusReason: "token_store_failed" }]);
+    // It held nothing before, so the mark is conditioned on still holding nothing.
+    expect(fake.writes("update", STORES)[0]?.where?.sql).toMatch(/not exists \(select/i);
     expect(sendWelcomeEmail).not.toHaveBeenCalled();
+  });
+
+  it("should not mark a store a concurrent callback has since given credentials", async () => {
+    const fake = firstInstall({
+      insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7], [TOKENS]: [new Error("disk full")] },
+      update: { [STORES]: [0] },
+    });
+    let failClosed: unknown;
+    try {
+      await onboard();
+    } catch (error) {
+      failClosed = (error as ShopifyOnboardingError).storeFailClosed;
+    }
+    // The only store write is the conditional mark — one statement that
+    // changes nothing while a token row exists — and it matched no row.
+    expect(failClosed).toBe("superseded");
+    const marks = fake.writes("update", STORES);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]?.where?.sql).toMatch(/not exists \(select/i);
   });
 
   describe("and a concurrent callback for the same shop created the workspace first", () => {
@@ -282,6 +324,50 @@ describe("when a shop installs for the first time", () => {
       state.db = fake.db;
       expect(await codeOf(onboard)).toBe("other:ECONNRESET");
     });
+  });
+});
+
+describe("when an overlapping callback stored a newer pair before this one failed", () => {
+  // Greptile #134, fourth pass: B's reinstall succeeded, then A — whose grant
+  // may be the OLDER one — failed and ran an unfenced fail-close that deleted
+  // B's valid credentials and marked the store out of service.
+  it("should leave the newer installation alone and say so", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] },
+      insert: { [TOKENS]: [new Error("disk full")] },
+      delete: { [TOKENS]: [0] }, // the pair A retired is no longer stored
+    });
+    state.db = fake.db;
+
+    let error: ShopifyOnboardingError | undefined;
+    try {
+      await onboard();
+    } catch (caught) {
+      error = caught as ShopifyOnboardingError;
+    }
+    expect(error?.code).toBe("TOKEN_STORE_FAILED");
+    expect(error?.storeFailClosed).toBe("superseded");
+    expect(storeUpdates(fake.committed())).not.toContainEqual(expect.objectContaining({ status: "reauthorization_required" }));
+  });
+});
+
+describe("when a callback suspends a store before its exchange", () => {
+  it("should take only an active store out of service, and record the pair its grant will retire", async () => {
+    const fake = scriptedDb({ select: { [TOKENS]: [[{ id: 501, rotationVersion: 3 }]] } });
+    state.db = fake.db;
+
+    expect(await suspendForReauthorization(SHOP)).toEqual({ retiring: { tokenRowId: 501, rotationVersion: 3 } });
+    const suspend = fake.writes("update", STORES)[0];
+    expect(suspend?.data).toEqual({ status: "reauthorization_required", statusReason: "reauthorization_pending" });
+    expect(suspend?.where?.params).toEqual(expect.arrayContaining([SHOP, "active"]));
+    // Read after suspending: anything stored before this point predates the grant.
+    const kinds = fake.ops.map((op) => `${op.kind}:${op.table}`);
+    expect(kinds.indexOf(`update:${STORES}`)).toBeLessThan(kinds.indexOf(`select:${TOKENS}`));
+  });
+
+  it("should retire nothing when the store holds no credentials", async () => {
+    state.db = scriptedDb({ select: { [TOKENS]: [[]] } }).db;
+    expect(await suspendForReauthorization(SHOP)).toEqual({ retiring: "none" });
   });
 });
 
@@ -335,7 +421,13 @@ describe("when Shopify returns no usable contact email", () => {
     const fake = scriptedDb();
     state.db = fake.db;
     const code = await codeOf(() =>
-      onboardShopifyMerchant({ shopDomain: SHOP, metadata: { ...metadata, contactEmail: "not-an-email" }, tokenResponse, origin: "https://x" }),
+      onboardShopifyMerchant({
+        shopDomain: SHOP,
+        metadata: { ...metadata, contactEmail: "not-an-email" },
+        tokenResponse,
+        origin: "https://x",
+        reauthorization: { retiring: "none" },
+      }),
     );
     expect(code).toBe("MISSING_CONTACT_EMAIL");
     expect(fake.ops).toEqual([]);

@@ -203,7 +203,7 @@ export function createShopifyRouter(): express.Router {
       // Last write before the exchange, and deliberately so: the exchange
       // retires the shop's stored refresh token, so its live connection goes
       // out of service first. If this fails we stop here, with nothing retired.
-      await suspendForReauthorization(shopDomain);
+      const reauthorization = await suspendForReauthorization(shopDomain);
 
       const tokens = await exchangeAuthorizationCode({
         shopDomain,
@@ -215,7 +215,7 @@ export function createShopifyRouter(): express.Router {
         return callbackError(res, "required_permissions_not_granted");
       }
       const metadata = await fetchShopifyShopMetadata({ shopDomain, accessToken: tokens.access_token });
-      const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin });
+      const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin, reauthorization });
       // No internal store id in the URL: the page needs only the shop, and an
       // id in a shareable link is an enumeration handle with no purpose.
       const params = new URLSearchParams({

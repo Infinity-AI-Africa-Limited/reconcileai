@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import { QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   SHOPIFY_ACCESS_TOKEN_REFRESH_SKEW_MS,
   SHOPIFY_REFRESH_LEASE_MS,
@@ -42,10 +43,18 @@ export function affectedRows(result: unknown): number {
  * deleted and re-inserted restarts at version 1, and a version alone would then
  * match a pair that no longer exists.
  */
-interface TokenFence {
+export interface TokenFence {
   tokenRowId: number;
   rotationVersion: number;
 }
+
+/**
+ * The credentials a failure is about: an exact token pair, or `"none"` — the
+ * store held no token row when the failing operation began. A fail-close acts
+ * only while that is still what the store holds, so a stale failure can never
+ * destroy credentials a newer grant or rotation stored after it.
+ */
+export type TokenGeneration = TokenFence | "none";
 
 export interface EncryptedShopifyTokens {
   accessTokenEnc: string;
@@ -296,11 +305,12 @@ async function rotateTokenUnderLease(
  * Take a store out of service: delete its tokens and mark it
  * `reauthorization_required`, with the reason recorded.
  *
- * With a `fence`, this happens only if the store still holds the exact pair the
- * failure was about, and returns false otherwise — the failure is then stale
- * and the store is left alone. Without one it is unconditional, which is right
- * after an authorization-code grant: that grant has already retired every
- * refresh token the store held, whatever else happened.
+ * Always fenced (see TokenGeneration). It acts only while the store still holds
+ * the generation the failure was about, and returns false otherwise — the
+ * failure is then stale and the store is left alone. There is deliberately no
+ * unconditional form: every caller that took the store out of service
+ * unconditionally was one overlapping request away from deleting a newer,
+ * valid installation.
  *
  * The state change is committed without waiting on its audit record. A control
  * that revokes credentials must not be able to fail because logging did; the
@@ -308,38 +318,52 @@ async function rotateTokenUnderLease(
  */
 export async function markReauthorizationRequired(
   db: Db,
-  params: { storeId: number; organizationId: number; reason: ShopifyStatusReason; fence?: TokenFence },
+  params: { storeId: number; organizationId: number; reason: ShopifyStatusReason; fence: TokenGeneration },
 ): Promise<boolean> {
+  const { fence } = params;
   const marked = await db.transaction(async (tx) => {
-    const tokenScope = and(
-      eq(shopifyConnectorTokens.storeId, params.storeId),
-      eq(shopifyConnectorTokens.organizationId, params.organizationId),
+    const storeScope = and(
+      eq(shopifyConnectorStores.id, params.storeId),
+      eq(shopifyConnectorStores.organizationId, params.organizationId),
     );
-    if (params.fence) {
-      const deleted = affectedRows(
+    if (fence === "none") {
+      // Nothing to retire; mark the store only if no pair has been stored
+      // since. One statement, so the check and the change cannot interleave.
+      const updated = affectedRows(
         await tx
-          .delete(shopifyConnectorTokens)
+          .update(shopifyConnectorStores)
+          .set({ status: "reauthorization_required", statusReason: params.reason })
           .where(
             and(
-              tokenScope,
-              eq(shopifyConnectorTokens.id, params.fence.tokenRowId),
-              eq(shopifyConnectorTokens.rotationVersion, params.fence.rotationVersion),
+              storeScope,
+              notExists(
+                new QueryBuilder()
+                  .select({ id: shopifyConnectorTokens.id })
+                  .from(shopifyConnectorTokens)
+                  .where(eq(shopifyConnectorTokens.storeId, params.storeId)),
+              ),
             ),
           ),
       );
-      if (deleted !== 1) return false;
-    } else {
-      await tx.delete(shopifyConnectorTokens).where(tokenScope);
+      return updated === 1;
     }
+    const deleted = affectedRows(
+      await tx
+        .delete(shopifyConnectorTokens)
+        .where(
+          and(
+            eq(shopifyConnectorTokens.storeId, params.storeId),
+            eq(shopifyConnectorTokens.organizationId, params.organizationId),
+            eq(shopifyConnectorTokens.id, fence.tokenRowId),
+            eq(shopifyConnectorTokens.rotationVersion, fence.rotationVersion),
+          ),
+        ),
+    );
+    if (deleted !== 1) return false;
     await tx
       .update(shopifyConnectorStores)
       .set({ status: "reauthorization_required", statusReason: params.reason })
-      .where(
-        and(
-          eq(shopifyConnectorStores.id, params.storeId),
-          eq(shopifyConnectorStores.organizationId, params.organizationId),
-        ),
-      );
+      .where(storeScope);
     return true;
   });
 
