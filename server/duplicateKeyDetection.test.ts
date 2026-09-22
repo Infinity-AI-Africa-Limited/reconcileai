@@ -7,11 +7,8 @@
  * so none of them ever saw a real one:
  *
  *   - _core/tenantKeys.ts provisionTenantKey — the concurrent-first-use race
- *     rethrew instead of adopting the key the other caller stored. Fixed in
- *     its own PR: server/_core is protected (CLAUDE.md §17) and needs the
- *     owner's explicit sign-off, which should not hold back the two below —
- *     neither depends on it, because provisioning now recognises the duplicate
- *     provisionTenantKey rethrows;
+ *     rethrew instead of adopting the key the other caller stored (fixed in
+ *     its own PR, as server/_core is protected — CLAUDE.md §17);
  *   - provisioning.ts provisionTenantBaseline — a step that already existed
  *     reported `failed`, so a re-run of the "idempotent" baseline never passed
  *     (and CBS onboarding, which encrypts its secrets before the baseline,
@@ -59,7 +56,7 @@ import { drizzle } from "drizzle-orm/mysql2";
 import { tenantQuotas } from "../drizzle/tenant_schema";
 import { isDuplicateKeyError } from "./dbErrors";
 import { provisionTenantBaseline } from "./provisioning";
-import { clearDekCacheForTests, getMasterKeyProvider } from "./_core/tenantKeys";
+import { clearDekCacheForTests, getMasterKeyProvider, provisionTenantKey } from "./_core/tenantKeys";
 import { getConfigRow } from "./connectors/woodcore/config";
 import { computeSignature, handleWoodcoreWebhook } from "./connectors/woodcore/webhooks";
 
@@ -120,6 +117,30 @@ describe("the premise: drizzle wraps the driver's error", () => {
     expect(/duplicate/i.test(error?.message ?? "")).toBe(false);
     expect(error?.cause?.code).toBe("ER_DUP_ENTRY");
     expect(isDuplicateKeyError(error)).toBe(true);
+  });
+});
+
+describe("when two callers provision the same tenant's key at once", () => {
+  it("should adopt the key the other caller stored instead of failing", async () => {
+    const winner = await getMasterKeyProvider().generateDek();
+    const { db, statements } = drizzleOver((sql) => {
+      if (sql.startsWith("insert into `tenant_encryption_keys`")) return mysqlDuplicateEntry("uq_tenant_key_org_version");
+      if (sql.startsWith("select") && sql.includes("from `tenant_encryption_keys`")) return [keyRow(winner.wrapped)];
+      return unexpected(sql);
+    });
+    state.db = db;
+
+    const key = await provisionTenantKey(ORG);
+
+    // The winner's DEK: anything either caller encrypts decrypts under the stored key.
+    expect(key.dek.equals(winner.dek)).toBe(true);
+    expect(statements.some((sql) => sql.startsWith("select"))).toBe(true);
+  });
+
+  it("should still surface a failure that is not a duplicate", async () => {
+    const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", errno: -4077 });
+    state.db = drizzleOver(() => reset).db;
+    await expect(provisionTenantKey(ORG)).rejects.toThrow(/Failed query/);
   });
 });
 
@@ -227,10 +248,7 @@ describe("no hand-rolled duplicate detection", () => {
    * must still offend: the moment its fix lands, the staleness test below fails
    * until the entry is removed, so this list can only shrink.
    */
-  const AWAITING_FIX: Record<string, string> = {
-    "server/_core/tenantKeys.ts":
-      "protected plumbing (CLAUDE.md §17): the provisionTenantKey fix is its own PR, pending the owner's explicit sign-off",
-  };
+  const AWAITING_FIX: Record<string, string> = {};
 
   const normalise = (file: string) => file.split(path.sep).join("/");
 
