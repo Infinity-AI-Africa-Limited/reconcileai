@@ -24,6 +24,7 @@ import {
   wcConnectorWebhookEvents,
 } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { isDuplicateKeyError } from "../../dbErrors";
 import { getCbsProfile } from "../cbs/registry";
 import { getConfigRow } from "./config";
 import { enqueueDeadLetter } from "./dlq";
@@ -157,7 +158,7 @@ export async function handleWoodcoreWebhook(input: {
     eventDbId = Number((res as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (/duplicate/i.test(msg)) {
+    if (isDuplicateKeyError(err)) {
       return { httpStatus: 200, body: { ok: true, status: "duplicate" } };
     }
     return { httpStatus: 503, body: { ok: false, status: "event_store_failed", error: msg } };

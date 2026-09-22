@@ -15,6 +15,7 @@
  * what was provisioned — that checklist is the technical half of the 4-hour
  * contract-to-live SLA (the human half: credentials + DNS/email are ready).
  */
+import { isDuplicateKeyError } from "./dbErrors";
 import { tenantQuotas } from "../drizzle/tenant_schema";
 import { moduleConfigurations, organizations } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
@@ -34,9 +35,6 @@ export interface ProvisionResult {
   steps: ProvisionStep[];
 }
 
-function isDuplicate(err: unknown): boolean {
-  return /duplicate/i.test(err instanceof Error ? err.message : String(err));
-}
 
 /**
  * Which modules to provision, or why we could not tell.
@@ -75,7 +73,7 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
     await provisionTenantKey(organizationId);
     steps.push({ step: "encryption_key", status: "created" });
   } catch (err) {
-    if (isDuplicate(err)) steps.push({ step: "encryption_key", status: "already_present" });
+    if (isDuplicateKeyError(err)) steps.push({ step: "encryption_key", status: "already_present" });
     else steps.push({ step: "encryption_key", status: "failed", detail: err instanceof Error ? err.message : String(err) });
   }
 
@@ -84,7 +82,7 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
     await db.insert(tenantQuotas).values({ organizationId });
     steps.push({ step: "quotas", status: "created" });
   } catch (err) {
-    if (isDuplicate(err)) steps.push({ step: "quotas", status: "already_present" });
+    if (isDuplicateKeyError(err)) steps.push({ step: "quotas", status: "already_present" });
     else steps.push({ step: "quotas", status: "failed", detail: err instanceof Error ? err.message : String(err) });
   }
 
@@ -123,7 +121,7 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
     try {
       await db.insert(moduleConfigurations).values({ organizationId, moduleType, isEnabled: true });
     } catch (err) {
-      if (!isDuplicate(err)) {
+      if (!isDuplicateKeyError(err)) {
         steps.push({ step: "modules", status: "failed", detail: `${moduleType}: ${err instanceof Error ? err.message : String(err)}` });
       }
     }
