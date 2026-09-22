@@ -20,7 +20,7 @@ import {
   writeShopifyTokens,
   type TokenGeneration,
 } from "./tokenStore";
-import { holdsInstallLease, type InstallLease } from "./installLease";
+import { holdsInstallLease, renewInstallLease, type InstallLease } from "./installLease";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -179,24 +179,36 @@ export async function onboardShopifyMerchant(params: {
  * Only an `active` store is touched: an uninstalled or pending one has no live
  * connection to protect. Matched by domain because the shop id is not known
  * until after the exchange (it comes from the metadata call).
+ *
+ * Returns null — having changed nothing — when this callback no longer holds
+ * the shop's install lease; the caller must stop before exchanging.
  */
-export async function suspendForReauthorization(shopDomain: string): Promise<ReauthorizationTicket> {
+export async function suspendForReauthorization(lease: InstallLease): Promise<ReauthorizationTicket | null> {
   const db = await getDb();
   if (!db) throw new ShopifyOnboardingError("Database unavailable", "DB_UNAVAILABLE");
-  await db
-    .update(shopifyConnectorStores)
-    .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
-    .where(and(eq(shopifyConnectorStores.shopDomain, shopDomain), eq(shopifyConnectorStores.status, "active")));
-  // Read AFTER suspending and BEFORE the exchange. Every pair stored by now was
-  // issued before this callback's grant, so the grant retires it; a pair stored
-  // after this read may come from a newer grant, and is not ours to retire.
-  const [held] = await db
-    .select({ id: shopifyConnectorTokens.id, rotationVersion: shopifyConnectorTokens.rotationVersion })
-    .from(shopifyConnectorTokens)
-    .innerJoin(shopifyConnectorStores, eq(shopifyConnectorTokens.storeId, shopifyConnectorStores.id))
-    .where(eq(shopifyConnectorStores.shopDomain, shopDomain))
-    .limit(1);
-  return { retiring: held ? { tokenRowId: held.id, rotationVersion: held.rotationVersion } : "none" };
+  const { shopDomain } = lease;
+  return db.transaction(async (tx) => {
+    // Lease FIRST, in the same transaction, and renewed: a callback that
+    // stalled past its TTL and lost the shop must not suspend the installation
+    // that took over (Greptile #134, seventh pass). The renewing UPDATE locks
+    // the lease row, so no takeover can commit before this does, and it leaves
+    // a fresh TTL for the exchange that follows immediately.
+    if (!(await renewInstallLease(tx, lease))) return null;
+    await tx
+      .update(shopifyConnectorStores)
+      .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
+      .where(and(eq(shopifyConnectorStores.shopDomain, shopDomain), eq(shopifyConnectorStores.status, "active")));
+    // Read AFTER suspending and BEFORE the exchange. Every pair stored by now
+    // was issued before this callback's grant, so the grant retires it; a pair
+    // stored after this read may come from a newer grant, not ours to retire.
+    const [held] = await tx
+      .select({ id: shopifyConnectorTokens.id, rotationVersion: shopifyConnectorTokens.rotationVersion })
+      .from(shopifyConnectorTokens)
+      .innerJoin(shopifyConnectorStores, eq(shopifyConnectorTokens.storeId, shopifyConnectorStores.id))
+      .where(eq(shopifyConnectorStores.shopDomain, shopDomain))
+      .limit(1);
+    return { retiring: held ? { tokenRowId: held.id, rotationVersion: held.rotationVersion } : "none" };
+  });
 }
 
 /**

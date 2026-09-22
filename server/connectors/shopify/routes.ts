@@ -23,7 +23,7 @@ import {
 } from "./auth";
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
-import { acquireInstallLease, releaseInstallLease, renewInstallLease, type InstallLease } from "./installLease";
+import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./installLease";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
@@ -210,7 +210,7 @@ export function createShopifyRouter(): express.Router {
       const leaseId = await acquireInstallLease(db, shopDomain);
       if (!leaseId) return callbackError(res, "installation_in_progress");
       try {
-        return await completeLeasedInstall(db, res, { lease: { shopDomain, leaseId }, code, origin });
+        return await completeLeasedInstall(res, { lease: { shopDomain, leaseId }, code, origin });
       } finally {
         await releaseInstallLease(db, shopDomain, leaseId).catch((error: unknown) => {
           // The lease expires on its own; a failed release only delays the next install.
@@ -244,7 +244,6 @@ export function createShopifyRouter(): express.Router {
  * bracket around it in the route.
  */
 async function completeLeasedInstall(
-  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   res: express.Response,
   params: { lease: InstallLease; code: string; origin: string },
 ): Promise<void> {
@@ -253,12 +252,13 @@ async function completeLeasedInstall(
   // Last write before the exchange, and deliberately so: the exchange retires
   // the shop's stored refresh token, so its live connection goes out of
   // service first. If this fails we stop here, with nothing retired.
-  const reauthorization = await suspendForReauthorization(shopDomain);
-
-  // Renewed immediately before the exchange, which times out far inside the
-  // TTL, so this callback's grant happens while it holds the shop. If the lease
-  // was taken over while we stalled, stop now — nothing has been retired yet.
-  if (!(await renewInstallLease(db, lease))) return callbackError(res, "installation_in_progress");
+  //
+  // It also verifies and renews the lease in the same transaction, immediately
+  // before the exchange (which times out far inside the TTL), so this callback's
+  // grant happens while it holds the shop. Lost while we stalled -> null, and
+  // nothing — not even the suspension — has been written.
+  const reauthorization = await suspendForReauthorization(lease);
+  if (!reauthorization) return callbackError(res, "installation_in_progress");
 
   const tokens = await exchangeAuthorizationCode({
     shopDomain,

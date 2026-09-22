@@ -209,6 +209,8 @@ describe("GET /api/shopify/callback", () => {
 
     expect(reason(res.location)).toBe("installation_in_progress");
     expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+    // …and it has not suspended the installation that took over, either.
+    expect(fake.writes("update", "shopify_connector_stores")).toEqual([]);
   });
 
   it("should release its lease once the install ends, even when it fails", async () => {

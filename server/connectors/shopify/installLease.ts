@@ -40,16 +40,17 @@ export interface InstallLease {
 }
 
 /**
- * Extend a lease this callback still holds — call it immediately before the
- * code exchange. False means it expired and was taken over; the caller must
- * stop BEFORE exchanging, while its grant has retired nothing.
+ * Extend a lease this callback still holds. False means it expired and was
+ * taken over. Run inside a transaction, the UPDATE also row-locks the lease, so
+ * no takeover can commit before that transaction does (see
+ * suspendForReauthorization, the one caller).
  *
  * Renewing right before the exchange is what bounds the exchange inside the
  * lease: the exchange times out at 30s, far inside the TTL, so the grant
  * happens while this callback still holds the shop. (mysql2 reports MATCHED
  * rows, so a same-second renewal that changes nothing still counts.)
  */
-export async function renewInstallLease(db: Db, lease: InstallLease, now: Date = new Date()): Promise<boolean> {
+export async function renewInstallLease(db: DbExecutor, lease: InstallLease, now: Date = new Date()): Promise<boolean> {
   const renewed = affectedRows(
     await db
       .update(shopifyInstallLeases)

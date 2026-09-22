@@ -366,18 +366,31 @@ describe("when a callback suspends a store before its exchange", () => {
     const fake = held({ select: { [TOKENS]: [[{ id: 501, rotationVersion: 3 }]] } });
     state.db = fake.db;
 
-    expect(await suspendForReauthorization(SHOP)).toEqual({ retiring: { tokenRowId: 501, rotationVersion: 3 } });
+    expect(await suspendForReauthorization(LEASE)).toEqual({ retiring: { tokenRowId: 501, rotationVersion: 3 } });
     const suspend = fake.writes("update", STORES)[0];
     expect(suspend?.data).toEqual({ status: "reauthorization_required", statusReason: "reauthorization_pending" });
     expect(suspend?.where?.params).toEqual(expect.arrayContaining([SHOP, "active"]));
-    // Read after suspending: anything stored before this point predates the grant.
+    // Lease renewed first, then suspend, then read the pair — one transaction.
     const kinds = fake.ops.map((op) => `${op.kind}:${op.table}`);
+    expect(kinds.indexOf(`update:${LEASES}`)).toBeLessThan(kinds.indexOf(`update:${STORES}`));
     expect(kinds.indexOf(`update:${STORES}`)).toBeLessThan(kinds.indexOf(`select:${TOKENS}`));
+    const txIds = new Set(fake.ops.map((op) => op.txId));
+    expect(txIds.size).toBe(1);
+    expect([...txIds][0]).not.toBeNull();
   });
 
   it("should retire nothing when the store holds no credentials", async () => {
     state.db = held({ select: { [TOKENS]: [[]] } }).db;
-    expect(await suspendForReauthorization(SHOP)).toEqual({ retiring: "none" });
+    expect(await suspendForReauthorization(LEASE)).toEqual({ retiring: "none" });
+  });
+
+  it("should suspend nothing when this callback's lease was taken over", async () => {
+    // Greptile #134, seventh pass: a callback that stalled past its TTL must
+    // not disable the installation that took over and reactivated the store.
+    const fake = held({ update: { [LEASES]: [0] } });
+    state.db = fake.db;
+    expect(await suspendForReauthorization(LEASE)).toBeNull();
+    expect(fake.writes("update", STORES)).toEqual([]);
   });
 });
 
