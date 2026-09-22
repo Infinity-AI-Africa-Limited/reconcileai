@@ -30,6 +30,7 @@ import { getDb } from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { assertEgressAllowed } from "./egress";
 import { ENV } from "./env";
+import { clientIpOrUnknown } from "./clientIp";
 import { sdk } from "./sdk";
 import { isOrgLoginAllowed } from "./tenancy";
 
@@ -410,10 +411,7 @@ export function registerSsoRoutes(app: Express): void {
 
       try {
         const { createAuditLog } = await import("../db");
-        const ip =
-          (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
-          req.socket?.remoteAddress ||
-          "unknown";
+        const ip = clientIpOrUnknown(req);
         await createAuditLog({
           userId: user.id,
           organizationId: user.organizationId ?? null,

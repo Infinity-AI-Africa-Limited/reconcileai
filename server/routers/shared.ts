@@ -13,6 +13,7 @@ import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { isTenantId } from "@shared/tenantId";
+import { clientIpOrUnknown } from "../_core/clientIp";
 import { currentAuditOrganizationId, currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, getReportById, type DbTransaction } from "../db";
@@ -592,9 +593,7 @@ export async function logAuditStrict(entry: {
 }
 
 export function getClientInfo(ctx: any): { ip: string; ua: string } {
-  const ip = ctx.req?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
-    || ctx.req?.socket?.remoteAddress
-    || "unknown";
+  const ip = clientIpOrUnknown(ctx.req);
   const ua = ctx.req?.headers?.["user-agent"] || "unknown";
   return { ip, ua };
 }

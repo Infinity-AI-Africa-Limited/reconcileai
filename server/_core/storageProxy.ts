@@ -3,6 +3,7 @@ import { storageGet, orgIdFromKey } from "../storage";
 import { sdk } from "./sdk";
 import { isTenantId } from "@shared/tenantId";
 import { auditOrganizationFor } from "./requestScope";
+import { clientIp } from "./clientIp";
 
 /**
  * Which audit chain a storage access decision is filed in.
@@ -80,7 +81,7 @@ export function registerStorageProxy(app: Express) {
           action: allowed ? "storage_access" : "storage_access_denied",
           entityType: "storage_object",
           details: JSON.stringify({ key: key.slice(0, 400), keyOrgId }),
-          ipAddress: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || null,
+          ipAddress: clientIp(req),
           userAgent: (req.headers["user-agent"] || "").toString().substring(0, 500) || null,
         });
       } catch { /* audit is best-effort here */ }

@@ -23,6 +23,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { appRouter } from "../routers";
 import { validateApiKey } from "../apiIngestionService";
 import { publicApiLimiter, publicApiRateKey, createRateLimiter } from "../rateLimiter";
+import { clientIpOrUnknown } from "../_core/clientIp";
 import { getDb, getUserById } from "../db";
 import { apiIngestionLogs, reconciliationJobs, exceptions as exceptionsTable } from "../../drizzle/schema";
 import { runSandboxReconciliation } from "./sandbox";
@@ -63,7 +64,7 @@ function handleError(res: Response, err: unknown) {
  *  brute-forcing is throttled too. Shared instance with the tRPC public API. */
 function rateLimit(req: ApiRequest, res: Response, next: NextFunction) {
   const key = (req.headers["x-api-key"] as string) || undefined;
-  const result = publicApiLimiter.check(publicApiRateKey(key, req.ip));
+  const result = publicApiLimiter.check(publicApiRateKey(key, clientIpOrUnknown(req)));
   if (!result.allowed) {
     res.setHeader("Retry-After", String(result.retryAfterSec));
     return sendError(res, 429, "RATE_LIMITED", `Rate limit exceeded (60 requests/minute). Retry in ${result.retryAfterSec}s.`);
@@ -144,7 +145,7 @@ export function createApiGateway(): express.Router {
   // ── Sandbox (keyless; own tighter IP limit) ─────────────────────────────────
   const sandboxLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
   const sandboxLimit = (req: Request, res: Response, next: NextFunction) => {
-    const r = sandboxLimiter.check(`ip:${req.ip || "unknown"}`);
+    const r = sandboxLimiter.check(`ip:${clientIpOrUnknown(req)}`);
     if (!r.allowed) {
       res.setHeader("Retry-After", String(r.retryAfterSec));
       return sendError(res, 429, "RATE_LIMITED", `Sandbox rate limit exceeded. Retry in ${r.retryAfterSec}s.`);

@@ -18,6 +18,7 @@ import { sql } from "drizzle-orm";
 import { storagePut, storageGet, storageDelete } from "../storage";
 import { sdk } from "./sdk";
 import { applyPortalView } from "./portalView";
+import { clientIpOrUnknown, describeTrustedProxyConfig } from "./clientIp";
 import { ENV } from "./env";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -50,6 +51,11 @@ async function startServer() {
         : ""),
   );
   assertResidencyStartupConfig();
+
+  // How many proxies this process believes sit in front of it. Logged because
+  // every rate limit and audit address depends on it, and a wrong value is
+  // otherwise only visible as strange addresses in the audit trail.
+  console.log(describeTrustedProxyConfig());
 
   const app = express();
   const server = createServer(app);
@@ -372,7 +378,7 @@ async function startServer() {
   const { createRateLimiter } = await import("../rateLimiter");
   const magicLoginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
   app.get("/api/magic-login", async (req, res) => {
-    const reqIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+    const reqIp = clientIpOrUnknown(req);
     if (!magicLoginLimiter.check(`ip:${reqIp}`).allowed) {
       return res.status(429).send("Too many attempts. Please try again in a few minutes.");
     }
@@ -412,10 +418,7 @@ async function startServer() {
 
       // Audit log
       try {
-        const ip =
-          (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
-          req.socket?.remoteAddress ||
-          "unknown";
+        const ip = clientIpOrUnknown(req);
         await createAuditLog({
           userId: user.id,
           organizationId: user.organizationId ?? null,
@@ -455,7 +458,7 @@ async function startServer() {
   // operations role, one pinned organisation, a hard expiry, and revocation.
   const reviewerAccessLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
   app.get("/api/reviewer-access", async (req, res) => {
-    const reqIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+    const reqIp = clientIpOrUnknown(req);
     if (!reviewerAccessLimiter.check(`ip:${reqIp}`).allowed) {
       return res.status(429).send("Too many attempts. Please try again in a few minutes.");
     }
