@@ -39,16 +39,19 @@ import { appRouter } from "./routers";
 
 type Caller = ReturnType<typeof appRouter.createCaller>;
 
-function contextFor(role: string | null, organizationId: number | null = 42) {
+function contextFor(role: string | null, organizationId: number | null = 42, viewingAs: number | null = null) {
   return {
     user: role === null ? null : { id: 7, role, organizationId, email: "person@example.com" },
+    // The tenant a super admin is viewing through the portal. The real base
+    // procedure binds it into the request scope, which resolveOrgScope reads.
+    viewingAs,
     req: { headers: {}, ip: "127.0.0.1" },
     res: { cookie: () => {}, clearCookie: () => {} },
   } as never;
 }
 
-const callerAs = (role: string | null, orgId: number | null = 42) =>
-  appRouter.createCaller(contextFor(role, orgId));
+const callerAs = (role: string | null, orgId: number | null = 42, viewingAs: number | null = null) =>
+  appRouter.createCaller(contextFor(role, orgId, viewingAs));
 
 /** Another tenant's id — never the caller's own 42. */
 const OTHER_ORG = 60001;
@@ -144,6 +147,18 @@ function proceduresAcceptingAnOrgOverride(): string[] {
   return [...found];
 }
 
+/** The code and message a call rejected with; both null if it did not reject. */
+async function failureOf(run: () => Promise<unknown>): Promise<{ code: string | null; message: string | null }> {
+  try {
+    await run();
+    return { code: null, message: null };
+  } catch (err) {
+    return err instanceof TRPCError
+      ? { code: err.code, message: err.message }
+      : { code: `NON_TRPC`, message: (err as Error)?.message ?? null };
+  }
+}
+
 /** The tRPC error code a call rejected with, or null if it did not reject. */
 async function codeOf(run: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -192,6 +207,27 @@ describe("when a tenant user names another organisation", () => {
 describe("when Infinity AI staff name another organisation", () => {
   it.each(SCOPED_CALLS)("should not refuse %s on authorisation grounds", async (_name, run) => {
     const code = await codeOf(() => run(callerAs("super_admin"), OTHER_ORG));
+    expect(code).not.toBe("FORBIDDEN");
+    expect(code).not.toBe("UNAUTHORIZED");
+  });
+});
+
+describe("when Infinity AI staff are inside a tenant's portal", () => {
+  // Inside tenant A's portal, applyPortalView makes A the request's
+  // organisation and the portal scope. The override must then reach A alone —
+  // a stale link or stale client state naming tenant B would otherwise read, or
+  // for importSettlementFile WRITE, B's data under A's banner (CLAUDE.md §6).
+  const PORTAL = 42;
+  const inPortal = () => callerAs("super_admin", PORTAL, PORTAL);
+
+  it.each(SCOPED_CALLS)("should refuse %s naming a different organisation", async (_name, run) => {
+    const { code, message } = await failureOf(() => run(inPortal(), OTHER_ORG));
+    expect(code).toBe("FORBIDDEN");
+    expect(message).toMatch(/portal/i);
+  });
+
+  it.each(SCOPED_CALLS)("should not refuse %s naming the tenant on screen", async (_name, run) => {
+    const { code } = await failureOf(() => run(inPortal(), PORTAL));
     expect(code).not.toBe("FORBIDDEN");
     expect(code).not.toBe("UNAUTHORIZED");
   });
