@@ -198,6 +198,19 @@ describe("no SELECT on a tenant-scoped table may omit its predicate", () => {
     expect(body, "isAdmin must not gate tenancy").not.toContain("isAdmin");
   });
 
+  it("getActiveJobsProgress is scoped by organization, not by status alone", () => {
+    // It passed the `.where()` rule above because it HAD a where — on status
+    // only. monitoring.activeJobs therefore served every tenant's live jobs to
+    // any signed-in user. A where clause is not a tenant predicate.
+    const body = DB_SOURCE.slice(
+      DB_SOURCE.indexOf("export async function getActiveJobsProgress("),
+      DB_SOURCE.indexOf("export async function", DB_SOURCE.indexOf("export async function getActiveJobsProgress(") + 10),
+    );
+    expect(body).toContain("getActiveJobsProgress(organizationId: number | null)");
+    expect(body).toMatch(/eq\(reconciliationJobs\.organizationId, organizationId\)/);
+    expect(body, "no organisation must return nothing, not the org-less rows").toMatch(/organizationId === null\) return \[\]/);
+  });
+
   it("invalidateDashboardStatsCache deletes only the caller's tenant row", () => {
     const body = DB_SOURCE.slice(DB_SOURCE.indexOf("export async function invalidateDashboardStatsCache(")).slice(0, 600);
     expect(body).toContain("organizationId: number | null");
