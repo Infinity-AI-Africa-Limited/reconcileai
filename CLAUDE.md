@@ -1211,16 +1211,28 @@ every tenant-scoped guard.
 
 ### A row named by id is gated on the row's OWN tenant (since 2026-09-22)
 
-A write, or a read, that takes a row id from the caller must ask the ROW whose it
-is — `assertRowVisible(user, row, notFound)` / `assertReportVisible` /
-`assertJobVisible` in `server/routers/shared.ts`, all built on `canActOnTenant` —
-and carry that tenant into its WHERE. Six procedures acted by id alone and were
+A write, or a read, that takes a row id from the caller must be tenant-scoped in
+ONE of two ways — what is forbidden is the id alone:
+
+1. **Scoped to the caller's organisation** in the WHERE (`requireOrg(ctx)`, the
+   org-scoped db functions, the whole exceptions router). Inside a portal
+   `ctx.user.organizationId` IS the tenant on screen (§6), so this follows the
+   portal; staff outside a portal reach only their own organisation's rows —
+   deliberately, for tenant data they should change from inside that portal.
+2. **Gated on the row's own tenant** — load it, `assertRowVisible(user, row,
+   notFound)` / `assertReportVisible` / `assertJobVisible` in
+   `server/routers/shared.ts` (all `canActOnTenant`, so staff outside a portal
+   may reach any tenant) — and carry that tenant into the write's WHERE.
+
+Six procedures acted by id alone and were
 fixed together: resolution template update/delete, share-link revoke, the Super
 Agent memory's exception read, `exceptions.checkStaleness` (read AND write), and
 the POC router's exception review, run exceptions, run uploads, share link and
 saved-file run. **`byIdTenantGates.test.ts` ratchets it:** any `.update()` /
-`.delete()` in a router whose only predicate is `eq(<table>.id, input.<x>)` fails
-CI unless its table is in `GATED_ELSEWHERE` with a reason.
+`.delete()` in a router whose WHERE names the row by a caller's id
+(`eq`/`inArray(<t>.id, input.<x>)`, however wrapped) and carries no tenant
+(`organizationId`, `orgFilter(`, `requireOrg(`, `pocSlug`) fails CI unless its
+table is in `GATED_ELSEWHERE` with a reason.
 
 - **Shared rows** (`organizationId` NULL — the default resolution templates every
   tenant is shown) may be changed by **staff outside a portal only**:

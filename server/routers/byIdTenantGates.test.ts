@@ -153,12 +153,16 @@ describe("when reports and their share links are reached by id", () => {
     expect(procedure("reports", "createShareToken")).toContain("organizationId: report.organizationId ?? null,");
   });
 
-  it("should revoke a link only after its report is shown to be the caller's", () => {
+  it("should revoke a link only after the link and its report are both shown to be the caller's", () => {
     const body = procedure("reports", "revokeShareToken");
-    const gate = body.indexOf('await assertReportVisible(ctx.user, link.reportId, "Share link not found");');
+    const linkGate = body.indexOf('const link = assertRowVisible(ctx.user, found, "Share link not found");');
+    const reportGate = body.indexOf('await assertReportVisible(ctx.user, link.reportId, "Share link not found");');
     const write = body.indexOf("await dbConn.update(sharedReportTokens)");
-    expect(gate).toBeGreaterThan(-1);
-    expect(write).toBeGreaterThan(gate);
+    expect(linkGate).toBeGreaterThan(-1);
+    expect(reportGate).toBeGreaterThan(linkGate);
+    expect(write).toBeGreaterThan(reportGate);
+    // The write carries the link's own tenant, not only the ids.
+    expect(body.slice(write)).toContain("db.orgFilter(sharedReportTokens.organizationId, link.organizationId)");
     expect(body.slice(write)).toContain("eq(sharedReportTokens.reportId, link.reportId)");
   });
 });
@@ -207,6 +211,25 @@ describe("when any router writes a row", () => {
     slConnectorStores: "the store is first loaded with an organisation predicate",
   };
 
+  /**
+   * Does this update/delete statement name its row by a caller-supplied id with
+   * NO tenant predicate anywhere in its WHERE?
+   *
+   * Judged on the whole WHERE, not on one spelling of it. The first version
+   * matched only `.where(eq(t.id, input.x))`, so `.where(and(eq(t.id,
+   * input.x)))` — the same unscoped write, reformatted — walked past it (review
+   * caught that). A WHERE is tenant-scoped when it carries an organisation
+   * (`organizationId`, `orgFilter(`, `requireOrg(`) or a POC slug.
+   */
+  function unscopedByIdWrite(stmt: string): boolean {
+    const at = stmt.indexOf(".where(");
+    if (at === -1) return false;
+    const where = stmt.slice(at);
+    const byCallerId = /\b(eq|inArray)\(\s*[\w.]+\.id\s*,\s*input\.\w+/.test(where);
+    const tenantScoped = /organizationId|orgFilter\(|requireOrg\(|pocSlug/.test(where);
+    return byCallerId && !tenantScoped;
+  }
+
   it("should never update or delete by a caller-supplied id alone", () => {
     const files = ["routers.ts", ...readdirSync(join(root, "routers"))
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
@@ -216,23 +239,35 @@ describe("when any router writes a row", () => {
       const src = read(file);
       for (const m of src.matchAll(/\.(update|delete)\(\s*([\w.]+)\s*\)/g)) {
         const stmt = src.slice(m.index!, src.indexOf(";", m.index!));
-        if (!/\.where\(\s*eq\(\s*[\w.]+\.id\s*,\s*input\.\w+\s*\)\s*\)/.test(stmt)) continue;
+        if (!unscopedByIdWrite(stmt)) continue;
         const table = m[2].replace(/^db\./, "");
         if (!(table in GATED_ELSEWHERE)) offenders.push(`${file}:${src.slice(0, m.index!).split("\n").length} ${m[1]}(${m[2]})`);
       }
     }
     expect(
       offenders,
-      "A write whose only predicate is the caller's id reaches ANY tenant's row. Gate it on the " +
-        "row's own tenant (assertRowVisible) and carry the tenant into the WHERE.",
+      "A write whose WHERE names the row by the caller's id and carries no tenant reaches ANY " +
+        "tenant's row. Gate it on the row's own tenant (assertRowVisible) and carry the tenant into the WHERE.",
     ).toEqual([]);
   });
 
-  it("should be able to see the shape it forbids", () => {
-    // Paired positive: the ratchet's pattern must match the defect it exists
-    // for, or it would pass vacuously.
-    const shape = /\.where\(\s*eq\(\s*[\w.]+\.id\s*,\s*input\.\w+\s*\)\s*\)/;
-    expect(shape.test(".where(eq(db.resolutionTemplates.id, input.id))")).toBe(true);
-    expect(shape.test(".where(and(eq(db.resolutionTemplates.id, input.id), x))")).toBe(false);
+  it("should see the forbidden write however it is spelled", () => {
+    // Paired positives: the ratchet must match the defect it exists for, in
+    // every wrapping, or it passes vacuously.
+    for (const where of [
+      ".where(eq(db.resolutionTemplates.id, input.id))",
+      ".where(and(eq(db.resolutionTemplates.id, input.id)))",
+      ".where(and(eq(t.id, input.id), eq(t.status, \"open\")))",
+      ".where(inArray(t.id, input.ids))",
+    ]) expect(unscopedByIdWrite(`dbConn.update(t).set({})${where}`), where).toBe(true);
+  });
+
+  it("should accept a by-id write that carries its tenant", () => {
+    for (const where of [
+      ".where(and(eq(t.id, input.id), eq(t.organizationId, orgId)))",
+      ".where(and(eq(t.id, input.id), db.orgFilter(t.organizationId, row.organizationId)))",
+      ".where(and(eq(t.id, input.id), eq(t.pocSlug, input.pocSlug)))",
+      ".where(eq(t.status, \"open\"))",
+    ]) expect(unscopedByIdWrite(`dbConn.update(t).set({})${where}`), where).toBe(false);
   });
 });

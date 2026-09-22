@@ -2041,18 +2041,26 @@ export const appRouter = router({
         if (!dbConn) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { sharedReportTokens } = await import("../drizzle/schema");
         // Revoked by id alone, so any signed-in user could kill any tenant's
-        // shared-report link. The link's report names the tenant. One message for
-        // a missing link and someone else's, so ids cannot be probed.
-        const [link] = await dbConn
-          .select({ id: sharedReportTokens.id, reportId: sharedReportTokens.reportId })
+        // shared-report link. The link names its tenant and so does its report:
+        // both must be the caller's, and the write carries the link's. Gating on
+        // the link row itself means a link whose tenant ever disagreed with its
+        // report's answers "not found" — never a success that revoked nothing
+        // while the link stayed live. One message for a missing link and someone
+        // else's, so ids cannot be probed.
+        const [found] = await dbConn
+          .select({ id: sharedReportTokens.id, reportId: sharedReportTokens.reportId, organizationId: sharedReportTokens.organizationId })
           .from(sharedReportTokens)
           .where(eq(sharedReportTokens.id, input.tokenId))
           .limit(1);
-        if (!link) throw new TRPCError({ code: "NOT_FOUND", message: "Share link not found" });
+        const link = assertRowVisible(ctx.user, found, "Share link not found");
         await assertReportVisible(ctx.user, link.reportId, "Share link not found");
         await dbConn.update(sharedReportTokens)
           .set({ revokedAt: new Date() })
-          .where(and(eq(sharedReportTokens.id, input.tokenId), eq(sharedReportTokens.reportId, link.reportId)));
+          .where(and(
+            eq(sharedReportTokens.id, input.tokenId),
+            eq(sharedReportTokens.reportId, link.reportId),
+            db.orgFilter(sharedReportTokens.organizationId, link.organizationId),
+          ));
         return { ok: true };
       }),
 
