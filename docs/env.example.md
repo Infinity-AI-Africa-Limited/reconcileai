@@ -185,6 +185,28 @@ TRUSTED_PROXY_HOPS=2
 > address** — one shared rate-limit bucket, and one address in every audit row.
 > The boot log prints the effective value (`[clientIp] trusted proxy hops = …`).
 
+**One deployment can be reached two ways.** `*.up.railway.app` skips Cloudflare,
+so it crosses one hop fewer — and nothing inside the request settles which path
+it took (`Host` is what *routes* it, so a caller can send either). Set
+`CLOUDFLARE_ORIGIN_SECRET` and the edge can say so itself:
+
+```bash
+# Generate in the Railway dashboard; never transcribe it (CLAUDE.md §18).
+CLOUDFLARE_ORIGIN_SECRET=<random 32+ chars>
+```
+
+Then add a Cloudflare **Transform Rule → Modify Request Header** on the zone:
+set `x-origin-verify` to the same value, for all requests. The rule overwrites
+any caller-supplied value, so only genuine edge traffic carries it.
+
+The app then gives a **verified** request the configured hop count and an
+**unverified** one *one hop fewer*, which on the direct hostname is exactly the
+address Railway appended — so a caller there can no longer shift the window. It
+**never rejects** a request: an origin lock that can black-hole the site on a
+half-deployed rule is the worse trade. Unset, the check is inert and the direct
+hostname stays a bypass — of this control and of every other Cloudflare
+protection in front of the app. The boot log says which state it is in.
+
 ## Scheduler authentication (Woodcore mirror sync, SHOPLINE sync)
 
 Two accepted paths. **GitHub OIDC is preferred**; the shared secret remains for

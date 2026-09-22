@@ -27,10 +27,12 @@ import {
   CLOUD_TRUSTED_PROXY_HOPS,
   MAX_TRUSTED_PROXY_HOPS,
   ON_PREMISE_TRUSTED_PROXY_HOPS,
+  ORIGIN_VERIFY_HEADER,
   TRUSTED_PROXY_HOPS,
   clientIp,
   clientIpFrom,
   clientIpOrUnknown,
+  effectiveHopsFor,
   normalizeIp,
   resolveTrustedProxyHops,
 } from "./_core/clientIp";
@@ -137,6 +139,67 @@ describe("when counting hops for other topologies", () => {
 
   it("should read a repeated header the same as a joined one", () => {
     expect(clientIpFrom(chain([`1.1.1.1, ${CLIENT}`, CLOUDFLARE_EGRESS]), 2)).toBe(CLIENT);
+  });
+});
+
+describe("when the request reaches the origin directly, bypassing the edge", () => {
+  const SECRET = "edge-secret-value";
+
+  /**
+   * The direct `*.up.railway.app` hostname: ONE proxy, so Railway appends the
+   * caller's address and anything to its left is the caller's own.
+   */
+  const directRequest = (clientSent: string[] = [], headers: Record<string, string> = {}) => ({
+    headers: { "x-forwarded-for": [...clientSent, CLIENT].join(", "), ...headers },
+    socket: { remoteAddress: SOCKET },
+  });
+
+  const verified = (req: ReturnType<typeof productionRequest>) => ({
+    ...req,
+    headers: { ...req.headers, [ORIGIN_VERIFY_HEADER]: SECRET },
+  });
+
+  it("should still pick the caller's entry while no edge secret is configured", () => {
+    // The honest baseline: with nothing to prove the path, a one-hop chain read
+    // with the two-hop count lands on the caller's entry. This is the residual
+    // the secret exists to close, and it is worth pinning so it cannot quietly
+    // change meaning.
+    expect(clientIpFrom(directRequest(["1.1.1.1"]), 2)).toBe("1.1.1.1");
+    expect(effectiveHopsFor(directRequest(["1.1.1.1"]), 2, "")).toBe(2);
+  });
+
+  it("should drop to one hop for an unverified request once the secret is configured", () => {
+    const req = directRequest(["1.1.1.1"]);
+    expect(effectiveHopsFor(req, 2, SECRET)).toBe(1);
+    // One hop on a one-hop chain is the address Railway appended — the caller's
+    // own entry is now ignored, which is the whole point.
+    expect(clientIpFrom(req, effectiveHopsFor(req, 2, SECRET))).toBe(CLIENT);
+  });
+
+  it("should keep the full count for a request the edge vouched for", () => {
+    const req = verified(productionRequest(["1.1.1.1"]));
+    expect(effectiveHopsFor(req, 2, SECRET)).toBe(2);
+    expect(clientIpFrom(req, effectiveHopsFor(req, 2, SECRET))).toBe(CLIENT);
+  });
+
+  it("should refuse a wrong, empty or differently-sized secret without throwing", () => {
+    // timingSafeEqual throws on a length mismatch; a caller must not be able to
+    // turn a guess into a 500.
+    for (const presented of ["", "wrong", `${SECRET}x`, SECRET.slice(0, 4), "  "]) {
+      const req = directRequest(["1.1.1.1"], { [ORIGIN_VERIFY_HEADER]: presented });
+      expect(effectiveHopsFor(req, 2, SECRET), presented).toBe(1);
+    }
+  });
+
+  it("should never go below zero hops", () => {
+    expect(effectiveHopsFor(directRequest(), 0, SECRET)).toBe(0);
+  });
+
+  it("should not let an unverified request be WORSE off than no header at all", () => {
+    // Dropping a hop must not reach past the left edge and collapse callers
+    // onto the proxy: a bare one-entry chain still resolves to that entry.
+    const req = directRequest();
+    expect(clientIpFrom(req, effectiveHopsFor(req, 2, SECRET))).toBe(CLIENT);
   });
 });
 
