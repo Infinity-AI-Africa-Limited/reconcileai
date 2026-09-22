@@ -1,6 +1,31 @@
 import type { Express } from "express";
 import { storageGet, orgIdFromKey } from "../storage";
 import { sdk } from "./sdk";
+import { isTenantId } from "@shared/tenantId";
+import { auditOrganizationFor } from "./requestScope";
+
+/**
+ * Which audit chain a storage access decision is filed in.
+ *
+ * It named none, so every download — a bank's staff opening their own exports
+ * and uploads — joined the GLOBAL chain, which no tenant's Audit Trail reads.
+ *
+ *   - allowed → the object's own tenant (its `org/<id>/` key), so the owner's
+ *     trail shows who took its file — staff included. A legacy key names no
+ *     tenant, so the requester's default applies (their own tenant; staff: none);
+ *   - denied  → the global chain. It is a platform security event, and either
+ *     tenant's trail would expose the other: the owner's would carry another
+ *     tenant's user, the requester's another tenant's file path.
+ */
+export function storageAuditTenant(
+  allowed: boolean,
+  keyOrgId: number | null,
+  user: { role: string; organizationId: number | null },
+): number | null {
+  if (!allowed) return null;
+  if (isTenantId(keyOrgId)) return keyOrgId;
+  return auditOrganizationFor(user, null);
+}
 
 /**
  * Storage proxy — serves /manus-storage/<key> by redirecting to a fresh presigned
@@ -51,6 +76,7 @@ export function registerStorageProxy(app: Express) {
         const { createAuditLog } = await import("../db");
         await createAuditLog({
           userId: user!.id,
+          organizationId: storageAuditTenant(allowed, keyOrgId, user!),
           action: allowed ? "storage_access" : "storage_access_denied",
           entityType: "storage_object",
           details: JSON.stringify({ key: key.slice(0, 400), keyOrgId }),

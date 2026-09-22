@@ -13,7 +13,7 @@ import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { isTenantId } from "@shared/tenantId";
-import { currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
+import { currentAuditOrganizationId, currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, type DbTransaction } from "../db";
 import { organizations, users } from "../../drizzle/schema";
@@ -261,7 +261,7 @@ export const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.user.role !== "super_admin") {
     throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin access required. This action is restricted to Infinity AI staff." });
   }
-  return runInRequestScope({ portalOrganizationId: null }, () => next({ ctx }));
+  return runInRequestScope({ portalOrganizationId: null, auditOrganizationId: null }, () => next({ ctx }));
 });
 
 // ─── Admin Procedure ─────────────────────────────────────────────────
@@ -287,13 +287,21 @@ export const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
 // A caller with no organisation manages no one. The comparison used to be a
 // bare `!==`, so an org-less admin passed for every org-less user — the
 // null-to-null pooling canActOnTenant already refuses.
+//
+// Returns each target's own tenant (null for none), which is where the audit
+// record of acting on that user belongs. It is what the audit default already
+// gives a tenant admin, or staff inside a portal — the guard holds their
+// targets to that tenant — but NOT staff outside a portal: the Super Admin
+// dashboard manages every tenant's users, and without this a bank's trail
+// never showed Infinity AI staff deactivating one of its users.
 export async function assertCanManageUsers(
   ctx: { user: { role: string; organizationId: number | null } },
   userIds: number[]
-): Promise<void> {
+): Promise<ReadonlyMap<number, number | null>> {
+  const tenantOf = new Map<number, number | null>();
+  if (userIds.length === 0) return tenantOf;
   const portal = ctx.user.role === "super_admin" ? currentPortalOrganizationId() : null;
-  if (ctx.user.role === "super_admin" && portal === null) return;
-  if (userIds.length === 0) return;
+  const unrestricted = ctx.user.role === "super_admin" && portal === null;
   const own = portal ?? ctx.user.organizationId;
   const drizzle = await getDb();
   if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -302,13 +310,15 @@ export async function assertCanManageUsers(
     .from(users)
     .where(inArray(users.id, userIds));
   for (const t of targets) {
-    if (own == null || t.role === "super_admin" || t.organizationId !== own) {
+    if (!unrestricted && (own == null || t.role === "super_admin" || t.organizationId !== own)) {
       throw new TRPCError({
         code: "FORBIDDEN",
         message: "You can only manage users within your own organisation.",
       });
     }
+    tenantOf.set(t.id, isTenantId(t.organizationId) ? t.organizationId : null);
   }
+  return tenantOf;
 }
 
 // ─── Vertical Feature Middleware ─────────────────────────────────────
@@ -419,33 +429,32 @@ export async function logAudit(
   ipAddress?: string,
   userAgent?: string,
   /**
-   * The tenant the event belongs to. Omitted, the event joins the GLOBAL chain —
-   * and a tenant's Audit Trail selects `organizationId = tenant` exactly, so a
-   * global event appears in NO tenant's trail, export or chain verification.
+   * The tenant the event belongs to. A tenant's Audit Trail selects
+   * `organizationId = tenant` exactly, so an event in the GLOBAL chain (null)
+   * appears in NO tenant's trail, export or chain verification.
    *
-   * That is still true for most of this function's callers, which predate the
-   * parameter; it was added so a staff action inside a tenant portal files its
-   * record with the tenant it changed. New callers acting on a tenant's data
-   * should pass it.
+   * Omitted → the tenant the request acts for (server/_core/requestScope.ts):
+   * a tenant user's own organisation, or the tenant on screen for staff in a
+   * portal; the global chain for staff outside a portal, platform procedures,
+   * and work outside a tRPC call. Pass it explicitly when that is wrong:
+   * `null` for an event about the ACCOUNT or the platform rather than a tenant
+   * (sign-out, personal preferences, super-admin grants, moving a user between
+   * organisations), or the row's own tenant when staff act on a tenant's row
+   * from outside a portal, or when the work runs outside a request.
    */
   organizationId?: number | null,
 ) {
   try {
     await createAuditLog({
       userId,
-      // Omitted → the tenant a super admin is acting on through the portal, if
-      // any (server/_core/requestScope.ts); otherwise the global chain, as
-      // before. An explicit `null` still means global — only an OMITTED
-      // argument is filled in, so no caller that chose the global chain is moved.
+      // Only an OMITTED argument is filled in, so no caller that chose the
+      // global chain, or named a tenant, is moved.
       //
-      // The default is right only for an event about the tenant on screen, so
-      // everything else is kept out of it: platform procedures run outside the
-      // portal scope (superAdminProcedure); by-id reach narrows to the portal
-      // (canActOnTenant, assertCanManageUsers), so a tenant procedure there can
-      // only touch that tenant's rows; and events about the ACCOUNT rather than
-      // a tenant — sign-out, personal email preferences, platform role grants,
-      // moving a user between organisations — pass `null` at the call site.
-      organizationId: organizationId === undefined ? currentPortalOrganizationId() : organizationId,
+      // The default used to be the PORTAL tenant alone, so every ordinary
+      // user's action — a bank's own staff resolving exceptions, approving
+      // matches, uploading files — joined the global chain, and the bank's
+      // trail never showed its own staff's work.
+      organizationId: organizationId === undefined ? currentAuditOrganizationId() : organizationId,
       action,
       entityType,
       entityId,
@@ -457,6 +466,17 @@ export async function logAudit(
     // Audit logging should never crash the main operation
     console.error("[Audit] Failed to log:", err);
   }
+}
+
+/**
+ * The audit chain a row's own tenant maps to: that tenant, or null (the global
+ * chain) when the row names none — organisation 0 included, which is no tenant
+ * (shared/tenantId.ts). For call sites that name the tenant from a ROW rather
+ * than take logAudit's default: staff reaching a tenant's job from outside a
+ * portal, or work that runs outside a request.
+ */
+export function auditTenant(organizationId: number | null | undefined): number | null {
+  return isTenantId(organizationId) ? organizationId : null;
 }
 
 /**

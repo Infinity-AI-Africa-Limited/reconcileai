@@ -89,7 +89,7 @@ describe("when a platform procedure is called while a portal is open", () => {
 });
 
 describe("when staff reach a row by id inside a tenant's portal", () => {
-  const inPortal = <T,>(fn: () => T) => runInRequestScope({ portalOrganizationId: 30001 }, fn);
+  const inPortal = <T,>(fn: () => T) => runInRequestScope({ portalOrganizationId: 30001, auditOrganizationId: 30001 }, fn);
   const superAdmin = { role: "super_admin", organizationId: 30001 };
 
   it("should serve the tenant's own job and answer another tenant's as missing", async () => {
@@ -119,19 +119,30 @@ describe("when users are managed", () => {
     vi.mocked(db.getDb).mockResolvedValue(chain as never);
   };
   const staffCtx = { user: { role: "super_admin", organizationId: 30001 } };
-  const inPortal = <T,>(fn: () => T) => runInRequestScope({ portalOrganizationId: 30001 }, fn);
+  const inPortal = <T,>(fn: () => T) => runInRequestScope({ portalOrganizationId: 30001, auditOrganizationId: 30001 }, fn);
 
   it("should let staff inside a portal manage that tenant's users only", async () => {
     targets([{ id: 8, role: "operations", organizationId: 30001 }]);
-    await expect(inPortal(() => assertCanManageUsers(staffCtx, [8]))).resolves.toBeUndefined();
+    await expect(inPortal(() => assertCanManageUsers(staffCtx, [8]))).resolves.toEqual(new Map([[8, 30001]]));
     targets([{ id: 9, role: "operations", organizationId: 30002 }]);
     await expect(inPortal(() => assertCanManageUsers(staffCtx, [9]))).rejects.toThrow(/own organisation/);
     targets([{ id: 1, role: "super_admin", organizationId: 30001 }]);
     await expect(inPortal(() => assertCanManageUsers(staffCtx, [1]))).rejects.toThrow(/own organisation/);
   });
 
-  it("should let staff outside a portal manage anyone, without a lookup", async () => {
-    await expect(assertCanManageUsers(staffCtx, [9])).resolves.toBeUndefined();
+  it("should let staff outside a portal manage anyone — and say whose each user is", async () => {
+    // The Super Admin dashboard manages every tenant's users; the audit record
+    // of acting on one belongs in that user's own tenant's trail.
+    targets([
+      { id: 9, role: "operations", organizationId: 30002 },
+      { id: 1, role: "super_admin", organizationId: 30001 },
+      { id: 7, role: "user", organizationId: 0 },
+    ]);
+    await expect(assertCanManageUsers(staffCtx, [9, 1, 7])).resolves.toEqual(new Map([[9, 30002], [1, 30001], [7, null]]));
+  });
+
+  it("should not look anything up for an empty list", async () => {
+    await expect(assertCanManageUsers(staffCtx, [])).resolves.toEqual(new Map());
     expect(db.getDb).not.toHaveBeenCalled();
   });
 
@@ -142,7 +153,7 @@ describe("when users are managed", () => {
 
   it("should still let an org admin manage their own organisation's users", async () => {
     targets([{ id: 9, role: "operations", organizationId: 4 }]);
-    await expect(assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [9])).resolves.toBeUndefined();
+    await expect(assertCanManageUsers({ user: { role: "admin", organizationId: 4 } }, [9])).resolves.toEqual(new Map([[9, 4]]));
   });
 });
 
@@ -198,7 +209,8 @@ describe("when a procedure in routers.ts reads a job or schedule by a caller's i
     }
     const grants = [...src.matchAll(/logAudit\(ctx\.user\.id, "update_user_role"/g)];
     expect(grants.length).toBe(2);
-    for (const m of grants) expect(src.slice(m.index!, m.index! + 200)).toContain('input.role === "super_admin" ? null : undefined');
+    // Any other role change names the target's own tenant (see auditTenantDefault.test.ts).
+    for (const m of grants) expect(src.slice(m.index!, m.index! + 200)).toContain('input.role === "super_admin" ? null : tenantOf.get(');
   });
 
   it("should name the tenant a record is about where the portal default would guess wrong", () => {
