@@ -196,6 +196,35 @@ describe("when exception staleness is checked", () => {
   });
 });
 
+describe("when these procedures write their audit records", () => {
+  /** The logAudit call for `action`, from its start to its closing `);`. */
+  const auditCall = (action: string) => {
+    const at = routers.search(new RegExp(`logAudit\\([^,]+, ['"]${action}['"]`));
+    expect(at, `${action} has moved`).toBeGreaterThan(-1);
+    return routers.slice(at, routers.indexOf(");", at) + 2);
+  };
+
+  it("should name the row's own tenant where staff outside a portal can reach any tenant's row", () => {
+    // Since the audit default for staff outside a portal is the global chain,
+    // an unnamed record would never reach the affected tenant's trail.
+    expect(auditCall("update_resolution_template")).toMatch(/auditTenant\(template\.organizationId\)\);$/);
+    expect(auditCall("delete_resolution_template")).toMatch(/auditTenant\(template\.organizationId\)\);$/);
+    expect(auditCall("create_report_share_link")).toMatch(/auditTenant\(report\.organizationId\)\);$/);
+    expect(auditCall("revoke_report_share_link")).toMatch(/auditTenant\(link\.organizationId\)\);$/);
+  });
+
+  it("should file the record where the row itself was filed", () => {
+    expect(auditCall("create_resolution_template")).toMatch(/, ip, ua, owner\);$/);
+    expect(auditCall("super_agent_memory_added")).toMatch(/undefined, undefined, orgId\);$/);
+  });
+
+  it("should record share links being created and revoked at all", () => {
+    // A link grants read access without a sign-in; neither end was audited.
+    expect(procedure("reports", "createShareToken")).toContain('"create_report_share_link"');
+    expect(procedure("reports", "revokeShareToken")).toContain('"revoke_report_share_link"');
+  });
+});
+
 // ─── The class ───────────────────────────────────────────────────────────────
 
 describe("when any router writes a row", () => {

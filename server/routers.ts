@@ -1665,10 +1665,12 @@ export const appRouter = router({
           organizationId: owner,
           isDefault: false,
         });
+        // Named: the template is filed under the caller's organisation, so its
+        // record goes to the same trail (staff outside a portal default to global).
         await logAudit(ctx.user.id, "create_resolution_template", "template", undefined, {
           name: input.name,
           category: input.category,
-        }, ip, ua);
+        }, ip, ua, owner);
         return { success: true };
       }),
 
@@ -1703,9 +1705,11 @@ export const appRouter = router({
             eq(db.resolutionTemplates.id, input.id),
             db.orgFilter(db.resolutionTemplates.organizationId, template.organizationId),
           ));
+        // The template's own tenant: staff outside a portal may edit any tenant's.
+        // A shared template names none, so its record joins the global chain.
         await logAudit(ctx.user.id, "update_resolution_template", "template", input.id, {
           name: input.name,
-        }, ip, ua);
+        }, ip, ua, auditTenant(template.organizationId));
         return { success: true };
       }),
 
@@ -1728,7 +1732,8 @@ export const appRouter = router({
             eq(db.resolutionTemplates.id, input.id),
             db.orgFilter(db.resolutionTemplates.organizationId, template.organizationId),
           ));
-        await logAudit(ctx.user.id, "delete_resolution_template", "template", input.id, {}, ip, ua);
+        await logAudit(ctx.user.id, "delete_resolution_template", "template", input.id, {}, ip, ua,
+          auditTenant(template.organizationId));
         return { success: true };
       }),
   }),
@@ -2019,6 +2024,14 @@ export const appRouter = router({
           note: input.note ?? null,
           expiresAt: expiresAt ?? undefined,
         });
+        // A share link grants read access to a report without a sign-in, and was
+        // created with no audit record at all. The report's tenant must see who
+        // shared it, with whom, and until when.
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "create_report_share_link", "report", input.reportId, {
+          recipientEmail: input.recipientEmail ?? null,
+          expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        }, ip, ua, auditTenant(report.organizationId));
         return { token };
       }),
 
@@ -2061,6 +2074,11 @@ export const appRouter = router({
             eq(sharedReportTokens.reportId, link.reportId),
             db.orgFilter(sharedReportTokens.organizationId, link.organizationId),
           ));
+        // Revoking was unaudited too; the link's tenant sees who cut access.
+        const { ip, ua } = getClientInfo(ctx);
+        await logAudit(ctx.user.id, "revoke_report_share_link", "report", link.reportId, {
+          linkId: input.tokenId,
+        }, ip, ua, auditTenant(link.organizationId));
         return { ok: true };
       }),
 
@@ -4949,10 +4967,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
           console.error("[ExceptionIntelligence] signature record failed (non-fatal):", err);
         }
 
+        // Named: the memory is filed under orgId, so its record goes there too.
         await logAudit(userId, 'super_agent_memory_added', 'agent_memory', undefined, {
           category: input.exceptionCategory,
           outcome: input.outcome,
-        });
+        }, undefined, undefined, orgId);
 
         return { success: true };
       }),
