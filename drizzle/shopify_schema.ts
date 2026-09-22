@@ -36,6 +36,13 @@ export const shopifyConnectorStores = mysqlTable(
     status: mysqlEnum("status", ["pending_claim", "active", "reauthorization_required", "uninstalled"])
       .default("pending_claim")
       .notNull(),
+    /**
+     * Why the store left `active` (see SHOPIFY_STATUS_REASONS); NULL while active.
+     * A connection that fails closed must say why, or "reauthorization required"
+     * is indistinguishable across an ownership change, a rejected refresh and a
+     * failed credential write — each of which needs a different response.
+     */
+    statusReason: varchar("statusReason", { length: 64 }),
     /** An authorised ReconcileAI administrator who claimed the merchant workspace. */
     claimedByUserId: int("claimedByUserId"),
     claimedAt: timestamp("claimedAt"),
@@ -188,6 +195,21 @@ export const shopifySyncCursors = mysqlTable(
   ],
 );
 export type ShopifySyncCursor = typeof shopifySyncCursors.$inferSelect;
+
+/** Every value `shopify_connector_stores.statusReason` may hold. */
+export const SHOPIFY_STATUS_REASONS = [
+  /** The shop's current contact email matches no active administrator of the owning workspace. */
+  "ownership_unverified",
+  /** Shopify rejected the stored refresh token (401). */
+  "refresh_rejected",
+  /** The stored refresh token could not be decrypted. */
+  "refresh_token_unreadable",
+  /** A fresh authorization could not be encrypted or persisted. */
+  "token_store_failed",
+  /** Shopify reported the app uninstalled. */
+  "uninstalled",
+] as const;
+export type ShopifyStatusReason = (typeof SHOPIFY_STATUS_REASONS)[number];
 
 export const SHOPIFY_ORDER_LED_SCOPES = ["read_orders"] as const;
 export const SHOPIFY_API_VERSION = "2026-07";

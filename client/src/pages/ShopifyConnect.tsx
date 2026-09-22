@@ -60,7 +60,9 @@ export function ShopifyWelcome() {
     ? "Checking the secured connection…"
     : store?.status === "active"
       ? "Your Shopify store is connected to this ReconcileAI workspace."
-      : "The store connection is being confirmed. Refresh this page in a moment if it does not appear.";
+      : store?.status === "reauthorization_required" || store?.status === "uninstalled"
+        ? "This store is not currently connected. Reinstall ReconcileAI from Shopify, or contact support if that does not restore it."
+        : "The store connection is being confirmed. Refresh this page in a moment if it does not appear.";
 
   return (
     <Shell>
@@ -92,6 +94,15 @@ export function ShopifyError() {
     expired_or_replayed: "This installation session expired or was already used. Restart installation from Shopify.",
     required_permissions_not_granted: "ReconcileAI needs read-only order access to continue. No Shopify data was changed.",
     not_configured: "The ReconcileAI Shopify connector is not yet configured for this environment.",
+    ownership_verification_required:
+      "This store is already connected to a ReconcileAI workspace, and its current contact email does not match that workspace's administrator. For your protection the connection was not transferred. Contact ReconcileAI support to verify ownership.",
+    email_already_registered:
+      "This store's contact email already belongs to another ReconcileAI workspace, so a new workspace could not be created for it. Contact ReconcileAI support to connect this store.",
+    missing_contact_email:
+      "Shopify did not provide a contact email for this store. Add a store contact email in Shopify settings, then restart installation.",
+    store_identity_conflict:
+      "This store's details conflict with an existing connection, so it was not connected. Contact ReconcileAI support.",
+    temporarily_unavailable: "ReconcileAI is temporarily unavailable. Please restart installation from Shopify in a few minutes.",
   };
   return (
     <Shell>

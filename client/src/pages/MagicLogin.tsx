@@ -61,12 +61,10 @@ export default function MagicLogin() {
     }
 
     // ── Valid token: hand off to the backend endpoint ─────────────────────
-    // The backend independently validates any optional same-origin return path
-    // before setting a session cookie and redirecting.
+    // The backend sets the cookie and redirects to /dashboard on success,
+    // or to /?error=... on failure.
     setState("loading");
-    const returnTo = params.get("returnTo");
-    const continuation = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : "";
-    window.location.href = `/api/magic-login?token=${encodeURIComponent(token)}${continuation}`;
+    window.location.href = `/api/magic-login?token=${encodeURIComponent(token)}`;
   }, [meQuery.isLoading, meQuery.data]);
 
   return (

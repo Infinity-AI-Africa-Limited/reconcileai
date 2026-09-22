@@ -42,9 +42,13 @@ export function verifyShopifyCallbackHmac(
 ): boolean {
   const provided = params.hmac;
   if (!provided || !clientSecret) return false;
+  // Code-unit order, as Shopify's own reference implementation sorts
+  // (`Object.entries(params).sort()`). `localeCompare` is locale collation —
+  // it orders case and punctuation differently — so a key set where the two
+  // disagree would fail verification on a genuine callback.
   const message = Object.entries(params)
     .filter(([key]) => key !== "hmac")
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}=${value}`)
     .join("&");
   const expected = crypto.createHmac("sha256", clientSecret).update(message).digest("hex");

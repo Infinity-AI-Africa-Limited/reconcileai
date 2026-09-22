@@ -5,8 +5,9 @@ import {
   SHOPIFY_REFRESH_LEASE_MS,
   shopifyConnectorStores,
   shopifyConnectorTokens,
+  type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
-import { getDb } from "../../db";
+import { createAuditLog, getDb, type DbExecutor } from "../../db";
 import { decryptForTenant, encryptForTenant } from "../../_core/tenantKeys";
 import { ENV } from "../../_core/env";
 import {
@@ -27,47 +28,76 @@ export class ShopifyTokenUnavailableError extends Error {
   }
 }
 
-function assertTokenTiming(response: ShopifyTokenResponse): {
+/** Rows changed by an UPDATE/DELETE: mysql2 answers `[ResultSetHeader, fields]`. */
+export function affectedRows(result: unknown): number {
+  const header = Array.isArray(result) ? result[0] : result;
+  return Number((header as { affectedRows?: number } | undefined)?.affectedRows ?? 0);
+}
+
+/**
+ * The exact token pair a refresh started from. Every write that follows the
+ * refresh is conditioned on it, because the pair may be replaced while the
+ * refresh is in flight — by a reinstall, or by a worker that took over an
+ * expired lease. The row id is part of it as well as the version: a row that is
+ * deleted and re-inserted restarts at version 1, and a version alone would then
+ * match a pair that no longer exists.
+ */
+interface TokenFence {
+  tokenRowId: number;
+  rotationVersion: number;
+}
+
+export interface EncryptedShopifyTokens {
+  accessTokenEnc: string;
+  refreshTokenEnc: string;
   accessExpiresAt: Date;
   refreshExpiresAt: Date | null;
-} {
+}
+
+/** Encrypt a token response under the tenant's envelope key. No database write. */
+export async function encryptShopifyTokens(
+  organizationId: number,
+  response: ShopifyTokenResponse,
+): Promise<EncryptedShopifyTokens> {
   const accessExpiresAt = tokenExpiryFromSeconds(response.expires_in);
   if (!accessExpiresAt) throw new Error("Shopify token response is missing expires_in");
+  const [accessTokenEnc, refreshTokenEnc] = await Promise.all([
+    encryptForTenant(organizationId, response.access_token),
+    encryptForTenant(organizationId, response.refresh_token),
+  ]);
   return {
+    accessTokenEnc,
+    refreshTokenEnc,
     accessExpiresAt,
     refreshExpiresAt: tokenExpiryFromSeconds(response.refresh_token_expires_in),
   };
 }
 
-/** Encrypt and atomically replace both rotating token values for a store. */
-export async function saveShopifyTokens(
-  db: Db,
-  params: { storeId: number; organizationId: number; response: ShopifyTokenResponse },
+/**
+ * Replace a store's tokens with a fresh AUTHORIZATION (install or reinstall).
+ *
+ * The version bump is load-bearing: Shopify retires every other refresh token
+ * for the store the moment an authorization-code grant succeeds, so any refresh
+ * already in flight is working from a dead pair. Bumping the version makes that
+ * refresh's fenced write miss, and its result is discarded rather than stored
+ * over the new grant.
+ */
+export async function writeShopifyTokens(
+  executor: DbExecutor,
+  params: { storeId: number; organizationId: number; tokens: EncryptedShopifyTokens },
 ): Promise<void> {
-  const { accessExpiresAt, refreshExpiresAt } = assertTokenTiming(params.response);
-  const [accessTokenEnc, refreshTokenEnc] = await Promise.all([
-    encryptForTenant(params.organizationId, params.response.access_token),
-    encryptForTenant(params.organizationId, params.response.refresh_token),
-  ]);
-
-  await db
+  await executor
     .insert(shopifyConnectorTokens)
     .values({
       storeId: params.storeId,
       organizationId: params.organizationId,
-      accessTokenEnc,
-      refreshTokenEnc,
-      accessExpiresAt,
-      refreshExpiresAt,
+      ...params.tokens,
       rotationVersion: 1,
     })
     .onDuplicateKeyUpdate({
       set: {
         organizationId: params.organizationId,
-        accessTokenEnc,
-        refreshTokenEnc,
-        accessExpiresAt,
-        refreshExpiresAt,
+        ...params.tokens,
         refreshLeaseId: null,
         refreshLeaseExpiresAt: null,
         rotationVersion: sql`${shopifyConnectorTokens.rotationVersion} + 1`,
@@ -78,7 +108,8 @@ export async function saveShopifyTokens(
 /**
  * Returns a valid access token for a tenant-owned store, rotating the expiring
  * offline token when necessary. Refresh ownership is leased in the database so
- * concurrent workers do not use the same one-time refresh token in parallel.
+ * concurrent workers do not normally spend the same refresh token in parallel;
+ * correctness does not depend on the lease, only on the fence (see TokenFence).
  */
 export async function getValidShopifyAccessToken(params: {
   storeId: number;
@@ -87,6 +118,25 @@ export async function getValidShopifyAccessToken(params: {
   const db = await getDb();
   if (!db) throw new ShopifyTokenUnavailableError("Database unavailable", "not_found");
 
+  const refreshThreshold = new Date(Date.now() + SHOPIFY_ACCESS_TOKEN_REFRESH_SKEW_MS);
+  const row = await readActiveToken(db, params);
+  if (!row) throw new ShopifyTokenUnavailableError("Shopify store is not active", "not_found");
+
+  if (row.token.accessExpiresAt > refreshThreshold) {
+    const accessToken = await decryptForTenant(params.organizationId, row.token.accessTokenEnc);
+    if (!accessToken) throw new ShopifyTokenUnavailableError("Stored Shopify access token cannot be decrypted", "not_found");
+    return accessToken;
+  }
+
+  return rotateTokenUnderLease(db, {
+    storeId: params.storeId,
+    organizationId: params.organizationId,
+    shopDomain: row.shopDomain,
+    refreshThreshold,
+  });
+}
+
+async function readActiveToken(db: Db, params: { storeId: number; organizationId: number }) {
   const [row] = await db
     .select({ token: shopifyConnectorTokens, shopDomain: shopifyConnectorStores.shopDomain })
     .from(shopifyConnectorTokens)
@@ -100,20 +150,28 @@ export async function getValidShopifyAccessToken(params: {
       ),
     )
     .limit(1);
+  return row ?? null;
+}
+
+/**
+ * The token the database holds now, if it is fresh — otherwise "try again".
+ *
+ * Used whenever this worker's own refresh cannot be the answer: another worker
+ * holds the lease, finished first, or replaced the pair mid-flight. Returning
+ * the STORED token, never one this worker obtained and failed to persist, is the
+ * point: a caller must use the rotation the database retains.
+ */
+async function storedTokenOrRetry(
+  db: Db,
+  params: { storeId: number; organizationId: number; refreshThreshold: Date },
+): Promise<string> {
+  const row = await readActiveToken(db, params);
   if (!row) throw new ShopifyTokenUnavailableError("Shopify store is not active", "not_found");
-
-  const accessToken = await decryptForTenant(params.organizationId, row.token.accessTokenEnc);
-  if (!accessToken) throw new ShopifyTokenUnavailableError("Stored Shopify access token cannot be decrypted", "not_found");
-
-  const refreshThreshold = new Date(Date.now() + SHOPIFY_ACCESS_TOKEN_REFRESH_SKEW_MS);
-  if (row.token.accessExpiresAt > refreshThreshold) return accessToken;
-
-  return rotateTokenUnderLease(db, {
-    storeId: params.storeId,
-    organizationId: params.organizationId,
-    shopDomain: row.shopDomain,
-    refreshThreshold,
-  });
+  if (row.token.accessExpiresAt > params.refreshThreshold) {
+    const accessToken = await decryptForTenant(params.organizationId, row.token.accessTokenEnc);
+    if (accessToken) return accessToken;
+  }
+  throw new ShopifyTokenUnavailableError("Shopify token refresh is already in progress", "refresh_in_progress");
 }
 
 async function rotateTokenUnderLease(
@@ -126,20 +184,17 @@ async function rotateTokenUnderLease(
   },
 ): Promise<string> {
   const leaseId = crypto.randomUUID();
-  const leaseExpiry = new Date(Date.now() + SHOPIFY_REFRESH_LEASE_MS);
+  const now = new Date();
 
   await db
     .update(shopifyConnectorTokens)
-    .set({ refreshLeaseId: leaseId, refreshLeaseExpiresAt: leaseExpiry })
+    .set({ refreshLeaseId: leaseId, refreshLeaseExpiresAt: new Date(now.getTime() + SHOPIFY_REFRESH_LEASE_MS) })
     .where(
       and(
         eq(shopifyConnectorTokens.storeId, params.storeId),
         eq(shopifyConnectorTokens.organizationId, params.organizationId),
         lt(shopifyConnectorTokens.accessExpiresAt, params.refreshThreshold),
-        or(
-          isNull(shopifyConnectorTokens.refreshLeaseId),
-          lt(shopifyConnectorTokens.refreshLeaseExpiresAt, new Date()),
-        ),
+        or(isNull(shopifyConnectorTokens.refreshLeaseId), lt(shopifyConnectorTokens.refreshLeaseExpiresAt, now)),
       ),
     );
 
@@ -155,16 +210,17 @@ async function rotateTokenUnderLease(
     )
     .limit(1);
 
-  if (!claimed) {
-    // Another worker owns a valid lease. It must finish or expire before a retry;
-    // returning the expiring token would reintroduce stale-token races.
-    throw new ShopifyTokenUnavailableError("Shopify token refresh is already in progress", "refresh_in_progress");
-  }
+  // No lease: another worker holds a live one, or has already refreshed (the
+  // claim only matches an expiring token). Either way the answer is theirs.
+  if (!claimed) return storedTokenOrRetry(db, params);
 
+  const fence: TokenFence = { tokenRowId: claimed.id, rotationVersion: claimed.rotationVersion };
   try {
     const refreshToken = await decryptForTenant(params.organizationId, claimed.refreshTokenEnc);
     if (!refreshToken) {
-      await markReauthorizationRequired(db, params);
+      if (!(await markReauthorizationRequired(db, { ...params, reason: "refresh_token_unreadable", fence }))) {
+        return storedTokenOrRetry(db, params);
+      }
       throw new ShopifyTokenUnavailableError("Stored Shopify refresh token cannot be decrypted", "reauthorize");
     }
     if (!ENV.shopifyClientId || !ENV.shopifyClientSecret) {
@@ -179,7 +235,13 @@ async function rotateTokenUnderLease(
     });
 
     if (result.kind === "reauthorize") {
-      await markReauthorizationRequired(db, params);
+      // A 401 is about the refresh token we PRESENTED. If the stored pair has
+      // moved on — most often a reinstall, whose grant is exactly what retired
+      // the token we sent — the store is healthy and its new credentials must
+      // not be deleted over a rejection that was about the old ones.
+      if (!(await markReauthorizationRequired(db, { ...params, reason: "refresh_rejected", fence }))) {
+        return storedTokenOrRetry(db, params);
+      }
       throw new ShopifyTokenUnavailableError("Shopify authorization must be renewed", "reauthorize");
     }
     if (result.kind === "retry") {
@@ -189,29 +251,36 @@ async function rotateTokenUnderLease(
       throw new ShopifyTokenUnavailableError("Shopify token refresh was rejected", "refresh_failed");
     }
 
-    const { accessExpiresAt, refreshExpiresAt } = assertTokenTiming(result.token);
-    const [accessTokenEnc, refreshTokenEnc] = await Promise.all([
-      encryptForTenant(params.organizationId, result.token.access_token),
-      encryptForTenant(params.organizationId, result.token.refresh_token),
-    ]);
-    await db
-      .update(shopifyConnectorTokens)
-      .set({
-        accessTokenEnc,
-        refreshTokenEnc,
-        accessExpiresAt,
-        refreshExpiresAt,
-        refreshLeaseId: null,
-        refreshLeaseExpiresAt: null,
-        rotationVersion: sql`${shopifyConnectorTokens.rotationVersion} + 1`,
-      })
-      .where(
-        and(
-          eq(shopifyConnectorTokens.storeId, params.storeId),
-          eq(shopifyConnectorTokens.organizationId, params.organizationId),
-          eq(shopifyConnectorTokens.refreshLeaseId, leaseId),
+    const tokens = await encryptShopifyTokens(params.organizationId, result.token);
+    const written = affectedRows(
+      await db
+        .update(shopifyConnectorTokens)
+        .set({
+          ...tokens,
+          refreshLeaseId: null,
+          refreshLeaseExpiresAt: null,
+          rotationVersion: sql`${shopifyConnectorTokens.rotationVersion} + 1`,
+        })
+        .where(
+          and(
+            eq(shopifyConnectorTokens.id, fence.tokenRowId),
+            eq(shopifyConnectorTokens.organizationId, params.organizationId),
+            eq(shopifyConnectorTokens.rotationVersion, fence.rotationVersion),
+          ),
         ),
-      );
+    );
+    if (written !== 1) {
+      // The pair was replaced while this refresh was in flight — a reinstall,
+      // or a worker that took over after our lease expired. The database keeps
+      // THEIR rotation, so returning ours would hand the caller a token that
+      // differs from the one retained. Discarding ours is safe: Shopify keeps a
+      // presented refresh token usable until its successor is used, precisely
+      // so that a lost refresh response does not strand the store.
+      console.warn("[shopify-token] refresh result discarded: token pair replaced mid-refresh", {
+        storeId: params.storeId,
+      });
+      return storedTokenOrRetry(db, params);
+    }
     return result.token.access_token;
   } finally {
     // Keep no lease after any terminal/transient failure. The next scheduled
@@ -219,37 +288,78 @@ async function rotateTokenUnderLease(
     await db
       .update(shopifyConnectorTokens)
       .set({ refreshLeaseId: null, refreshLeaseExpiresAt: null })
-      .where(
-        and(
-          eq(shopifyConnectorTokens.storeId, params.storeId),
-          eq(shopifyConnectorTokens.organizationId, params.organizationId),
-          eq(shopifyConnectorTokens.refreshLeaseId, leaseId),
-        ),
-      );
+      .where(and(eq(shopifyConnectorTokens.id, fence.tokenRowId), eq(shopifyConnectorTokens.refreshLeaseId, leaseId)));
   }
 }
 
-async function markReauthorizationRequired(
+/**
+ * Take a store out of service: delete its tokens and mark it
+ * `reauthorization_required`, with the reason recorded.
+ *
+ * With a `fence`, this happens only if the store still holds the exact pair the
+ * failure was about, and returns false otherwise — the failure is then stale
+ * and the store is left alone. Without one it is unconditional, which is right
+ * after an authorization-code grant: that grant has already retired every
+ * refresh token the store held, whatever else happened.
+ *
+ * The state change is committed without waiting on its audit record. A control
+ * that revokes credentials must not be able to fail because logging did; the
+ * record is written afterwards and a failure there is logged loudly.
+ */
+export async function markReauthorizationRequired(
   db: Db,
-  params: { storeId: number; organizationId: number },
-): Promise<void> {
-  await db.transaction(async (tx) => {
+  params: { storeId: number; organizationId: number; reason: ShopifyStatusReason; fence?: TokenFence },
+): Promise<boolean> {
+  const marked = await db.transaction(async (tx) => {
+    const tokenScope = and(
+      eq(shopifyConnectorTokens.storeId, params.storeId),
+      eq(shopifyConnectorTokens.organizationId, params.organizationId),
+    );
+    if (params.fence) {
+      const deleted = affectedRows(
+        await tx
+          .delete(shopifyConnectorTokens)
+          .where(
+            and(
+              tokenScope,
+              eq(shopifyConnectorTokens.id, params.fence.tokenRowId),
+              eq(shopifyConnectorTokens.rotationVersion, params.fence.rotationVersion),
+            ),
+          ),
+      );
+      if (deleted !== 1) return false;
+    } else {
+      await tx.delete(shopifyConnectorTokens).where(tokenScope);
+    }
     await tx
       .update(shopifyConnectorStores)
-      .set({ status: "reauthorization_required" })
+      .set({ status: "reauthorization_required", statusReason: params.reason })
       .where(
         and(
           eq(shopifyConnectorStores.id, params.storeId),
           eq(shopifyConnectorStores.organizationId, params.organizationId),
         ),
       );
-    await tx
-      .delete(shopifyConnectorTokens)
-      .where(
-        and(
-          eq(shopifyConnectorTokens.storeId, params.storeId),
-          eq(shopifyConnectorTokens.organizationId, params.organizationId),
-        ),
-      );
+    return true;
   });
+
+  if (marked) {
+    try {
+      await createAuditLog({
+        organizationId: params.organizationId,
+        userId: null,
+        action: "shopify_store_reauthorization_required",
+        entityType: "shopify_store",
+        entityId: params.storeId,
+        details: { reason: params.reason, provider: "shopify" },
+      });
+    } catch (error) {
+      console.error("[shopify-token] AUDIT WRITE FAILED for a fail-closed store", {
+        storeId: params.storeId,
+        reason: params.reason,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return marked;
 }

@@ -364,20 +364,12 @@ async function startServer() {
   });
 
   // ── Magic-link login ─────────────────────────────────────────────────────
-  // GET /api/magic-login?token=<hex>&returnTo=/same-origin/path
+  // GET /api/magic-login?token=<hex>
   // Consumes a single-use welcome token, creates a session cookie, and
   // redirects the user to the dashboard. On error, redirects to /?error=...
   // PCI remediation (WS-2): per-IP throttle — tokens are high-entropy and
   // single-use, but auth endpoints must still be rate-limited.
   const { createRateLimiter } = await import("../rateLimiter");
-  const isSafeMagicLinkReturnPath = (value: string): boolean => {
-    if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return false;
-    try {
-      return new URL(value, "https://reconcileai.invalid").origin === "https://reconcileai.invalid";
-    } catch {
-      return false;
-    }
-  };
   const magicLoginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
   app.get("/api/magic-login", async (req, res) => {
     const reqIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
@@ -385,8 +377,6 @@ async function startServer() {
       return res.status(429).send("Too many attempts. Please try again in a few minutes.");
     }
     const token = typeof req.query.token === "string" ? req.query.token.trim() : "";
-    const rawReturnTo = typeof req.query.returnTo === "string" ? req.query.returnTo : "";
-    const returnTo = isSafeMagicLinkReturnPath(rawReturnTo) ? rawReturnTo : "/home";
     if (!token) {
       return res.redirect(302, "/?error=invalid_magic_link");
     }
@@ -440,10 +430,11 @@ async function startServer() {
       const { getSessionCookieOptions } = await import("./cookies");
       const cookieOptions = getSessionCookieOptions(req);
       res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ENV.sessionTtlMs });
-      // /home resolves a vertical's own landing page. The only continuation is
-      // a validated same-origin path sent in a welcome email after OAuth install.
-      if (returnTo === "/home") return res.redirect(302, "/home");
-      return res.redirect(302, returnTo);
+      // /home, not /dashboard: the client resolves the vertical's own starting
+      // page there (a merchant lands on Settlement Monitor). Keeping the choice
+      // client-side means this route does not need to load the organisation just
+      // to pick a redirect.
+      return res.redirect(302, "/home");
     } catch (err) {
       console.error("[magic-login] error:", err);
       return res.redirect(302, "/?error=login_failed");

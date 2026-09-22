@@ -78,14 +78,11 @@ export async function sendWelcomeEmail(params: {
   email: string;
   role: string;
   origin: string;
-  /** Optional same-origin path, validated again by the magic-login endpoint. */
-  returnTo?: string;
 }): Promise<{ success: boolean; magicLink: string }> {
-  const { userId, name, email, role, origin, returnTo } = params;
+  const { userId, name, email, role, origin } = params;
 
   const token = await createMagicLinkToken(userId);
-  const continuation = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : "";
-  const magicLink = `${origin}/magic-login?token=${token}${continuation}`;
+  const magicLink = `${origin}/magic-login?token=${token}`;
   const safeName = escapeHtml(name);
 
   const subject = "Welcome to ReconcileAI — your account is ready";

@@ -48,6 +48,18 @@ describe("Shopify connector security helpers", () => {
     expect(verifyShopifyCallbackHmac({ ...params, shop: "attacker.myshopify.com" }, secret)).toBe(false);
   });
 
+  it("sorts callback parameters in code-unit order, as Shopify's reference does", () => {
+    // "Z" (0x5A) sorts before "a" (0x61) by code unit, but after it under locale
+    // collation. Shopify signs with `Object.entries(params).sort()`.
+    const secret = "shopify-secret";
+    const params: Record<string, string> = { a: "1", Z: "2", shop: "merchant.myshopify.com" };
+    expect(["a", "Z"].sort()).toEqual(["Z", "a"]);
+    expect("a".localeCompare("Z")).toBeLessThan(0); // the two orders genuinely disagree
+    const codeUnitMessage = "Z=2&a=1&shop=merchant.myshopify.com";
+    const hmac = crypto.createHmac("sha256", secret).update(codeUnitMessage).digest("hex");
+    expect(verifyShopifyCallbackHmac({ ...params, hmac }, secret)).toBe(true);
+  });
+
   it("verifies raw webhook bytes rather than reserialized JSON", () => {
     const raw = Buffer.from('{"shop_id":7,"customer":{"email":"not-stored@example.com"}}');
     const secret = "shopify-webhook-secret";
