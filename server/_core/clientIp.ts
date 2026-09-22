@@ -190,6 +190,27 @@ function crossedVerifiedEdge(req: ProxiedRequest, secret: string): boolean | nul
 }
 
 /**
+ * How long a proof that the edge is really injecting the header stays good for.
+ *
+ * Production traffic renews this continuously, so the window only matters at
+ * the two edges of a rollout — see `effectiveHopsFor`.
+ */
+export const EDGE_PROOF_TTL_MS = 10 * 60_000;
+
+/** When this process last saw a request the edge had vouched for. */
+let lastEdgeProofAt = 0;
+
+/** Tests and ops: forget what this process has observed. */
+export function resetEdgeProof(): void {
+  lastEdgeProofAt = 0;
+}
+
+/** Whether the edge has proven itself recently enough to reason from. */
+export function edgeProofIsFresh(now: number = Date.now()): boolean {
+  return lastEdgeProofAt > 0 && now - lastEdgeProofAt <= EDGE_PROOF_TTL_MS;
+}
+
+/**
  * How many hops THIS request crossed.
  *
  * The count is per-deployment, but one deployment can be reached two ways: the
@@ -198,15 +219,43 @@ function crossedVerifiedEdge(req: ProxiedRequest, secret: string): boolean | nul
  * caller-controlled space. `Host` cannot tell the two apart — it is what routes
  * the request, so a caller can send either — but a secret the edge injects can.
  *
- * Until `CLOUDFLARE_ORIGIN_SECRET` is set this is inert and every request uses
- * the configured count, which is exactly the behaviour without it. Once set, an
- * unverified request is treated as having crossed one hop fewer: it is never
- * REJECTED (an origin lock that can take the site down on a misconfigured rule
- * is a worse trade), it just stops being able to shift the window.
+ * An unverified request is treated as having crossed one hop fewer. It is never
+ * REJECTED — an origin lock that can take the site down on a misconfigured rule
+ * is the worse trade — it just stops being able to shift the window.
+ *
+ * ⚠️ BUT "no header" has two very different causes, and only one of them is a
+ * direct request. The other is that the Transform Rule is not live yet: the
+ * secret and the rule are separate manual steps, so between them EVERY request
+ * arrives unverified. Dropping a hop for all of them would select the edge's own
+ * egress address — unrelated people sharing one login rate-limit bucket, and
+ * that address in every audit row. A rollout step must not be able to cause
+ * that, so the header's ABSENCE is never evidence on its own.
+ *
+ * So the rule is evidence-led, not configuration-led (the same shape as email
+ * inbound's unconfigured → unproven → receiving): a hop is dropped only once
+ * this process has RECENTLY seen a request the edge did vouch for. Before that
+ * first proof — and again if proofs stop arriving, i.e. the rule was removed —
+ * every request uses the configured count, which is exactly the behaviour
+ * before this check existed. Configuration is never evidence of capability.
  */
-export function effectiveHopsFor(req: ProxiedRequest, configuredHops: number, originSecret: string): number {
+export function effectiveHopsFor(
+  req: ProxiedRequest,
+  configuredHops: number,
+  originSecret: string,
+  now: number = Date.now(),
+): number {
   const verified = crossedVerifiedEdge(req, originSecret);
-  if (verified === null || verified) return configuredHops;
+  if (verified === null) return configuredHops; // not configured — inert
+  if (verified) {
+    if (lastEdgeProofAt === 0) {
+      console.log("[clientIp] edge verification header observed; unverified requests now count one hop fewer");
+    }
+    lastEdgeProofAt = now;
+    return configuredHops;
+  }
+  // Unverified, and nothing recent says the edge is stamping requests at all.
+  // Treat that as "we cannot tell", not as "this came the short way".
+  if (!edgeProofIsFresh(now)) return configuredHops;
   return Math.max(0, configuredHops - 1);
 }
 

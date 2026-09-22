@@ -205,7 +205,18 @@ address Railway appended — so a caller there can no longer shift the window. I
 **never rejects** a request: an origin lock that can black-hole the site on a
 half-deployed rule is the worse trade. Unset, the check is inert and the direct
 hostname stays a bypass — of this control and of every other Cloudflare
-protection in front of the app. The boot log says which state it is in.
+protection in front of the app.
+
+**The order of the two steps does not matter**, which is the point. A missing
+header is not on its own evidence of anything: between setting the variable and
+publishing the rule, *every* request arrives unverified, and dropping a hop for
+all of them would resolve every caller to Cloudflare's egress address — one
+shared login rate-limit bucket and one address in every audit row. So the app
+waits for **evidence**: it only starts distinguishing the direct hostname once
+it has seen a request the edge actually stamped, and it stops again if those
+stop arriving (the rule was removed). Before that first proof it behaves exactly
+as it did before the check existed. The boot log states which state the process
+is in, and a line is logged the first time the header is observed.
 
 ## Scheduler authentication (Woodcore mirror sync, SHOPLINE sync)
 
