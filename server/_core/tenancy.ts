@@ -22,6 +22,7 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { organizations } from "../../drizzle/schema";
 import { getDb } from "../db";
+import { currentPortalOrganizationId } from "./requestScope";
 
 export interface TenantActor {
   role?: string | null;
@@ -65,9 +66,20 @@ export function resolveOrgScope(user: TenantActor, requestedOrgId?: number): num
  * Assert the caller may touch a resource that belongs to `resourceOrgId`.
  * Use after loading any row by bare id: load → assertSameOrg → act.
  * `null` resource org (legacy/global rows) is allowed only for super admins.
+ *
+ * Inside a tenant's portal a super admin's reach is that tenant alone — the same
+ * rule as canActOnTenant (routers/shared.ts). The role does not change in a
+ * portal, so a role check by itself let a row from ANY tenant through.
  */
 export function assertSameOrg(user: TenantActor, resourceOrgId: number | null | undefined): void {
-  if (isSuperAdmin(user)) return;
+  if (isSuperAdmin(user)) {
+    const portal = currentPortalOrganizationId();
+    if (portal === null || resourceOrgId === portal) return;
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "This resource belongs to another organization",
+    });
+  }
   const own = user.organizationId ?? null;
   if (own === null || resourceOrgId === null || resourceOrgId === undefined || resourceOrgId !== own) {
     throw new TRPCError({

@@ -23,6 +23,11 @@ import {
   sanitizeInput,
   assertModuleAvailable,
   MAX_NAME_LENGTH,
+  portalScopedOrgId,
+  viewAsOrgInput,
+  canActOnTenant,
+  runOwner,
+  requireOwnedChannels,
 } from "./shared";
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
@@ -50,11 +55,13 @@ export const reconciliationRouter = router({
       // having it enabled. Refuse before anything is persisted or enqueued.
       await assertModuleAvailable(ctx, input.moduleType);
 
-      // Validate channels exist
-      const sourceChannel = await db.getChannelById(input.sourceChannelId);
-      const targetChannel = await db.getChannelById(input.targetChannelId);
-      if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-      if (!targetChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
+      // The run belongs to the caller's organisation, and may read only that
+      // organisation's channels (or shared rails). See runOwner.
+      const tenant = runOwner(ctx.user);
+      const [sourceChannel, targetChannel] = await requireOwnedChannels(tenant, [
+        { id: input.sourceChannelId, notFound: "Source channel not found" },
+        { id: input.targetChannelId, notFound: "Target channel not found" },
+      ]);
 
       // Validate date range
       const dateFrom = new Date(input.dateFrom);
@@ -78,6 +85,7 @@ export const reconciliationRouter = router({
 
       const jobId = await db.createReconciliationJob({
         userId: ctx.user.id,
+        organizationId: tenant,
         name: sanitizeInput(input.name, MAX_NAME_LENGTH),
         moduleType: input.moduleType,
         sourceChannelId: input.sourceChannelId,
@@ -161,8 +169,11 @@ export const reconciliationRouter = router({
       // not become a way around it.
       await assertModuleAvailable(ctx, input.moduleType);
 
-      const sourceChannel = await db.getChannelById(input.sourceChannelId);
-      if (!sourceChannel) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
+      // Same ownership rule as the single-channel run — see runOwner.
+      const tenant = runOwner(ctx.user);
+      const [sourceChannel] = await requireOwnedChannels(tenant, [
+        { id: input.sourceChannelId, notFound: "Source channel not found" },
+      ]);
 
       const dateFrom = new Date(input.dateFrom);
       const dateTo = new Date(input.dateTo);
@@ -186,18 +197,14 @@ export const reconciliationRouter = router({
       // Resolve the target set.
       let targets: { id: number; name: string; code: string }[] = [];
       if (input.allActiveTargets) {
-        const all = await db.getChannels(ctx.user.organizationId ?? null);
+        const all = await db.getChannels(tenant);
         targets = all.filter((c) => c.isActive && c.id !== input.sourceChannelId);
       } else {
         const ids = (input.targetChannelIds ?? []).filter((id) => id !== input.sourceChannelId);
         if (ids.length === 0) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Provide at least one target channel (or set allActiveTargets)" });
         }
-        for (const id of ids) {
-          const ch = await db.getChannelById(id);
-          if (!ch) throw new TRPCError({ code: "NOT_FOUND", message: `Target channel ${id} not found` });
-          targets.push(ch);
-        }
+        targets.push(...(await requireOwnedChannels(tenant, ids.map((id) => ({ id, notFound: `Target channel ${id} not found` })))));
       }
       if (targets.length === 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "No eligible target channels for this run" });
@@ -214,6 +221,7 @@ export const reconciliationRouter = router({
       for (const target of targets) {
         const jobId = await db.createReconciliationJob({
           userId: ctx.user.id,
+          organizationId: tenant,
           name: sanitizeInput(`${input.name} — ${target.name}`, MAX_NAME_LENGTH),
           moduleType: input.moduleType,
           sourceChannelId: input.sourceChannelId,
@@ -319,7 +327,12 @@ export const reconciliationRouter = router({
   getMultiRun: protectedProcedure
     .input(z.object({ multiRunId: z.string().min(1).max(36) }))
     .query(async ({ ctx, input }) => {
-      const jobs = await db.getReconciliationJobsByMultiRun(input.multiRunId);
+      // Only the caller's tenant's children. The run id is a UUID — hard to
+      // guess, but not authorisation — and this returned any tenant's run to
+      // whoever held it.
+      const jobs = (await db.getReconciliationJobsByMultiRun(input.multiRunId)).filter((j) =>
+        canActOnTenant(ctx.user, j.organizationId ?? null),
+      );
       if (jobs.length === 0) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Multi-channel run not found" });
       }
@@ -364,18 +377,28 @@ export const reconciliationRouter = router({
       };
     }),
 
-  list: protectedProcedure.query(async ({ ctx }) => {
-    return db.getReconciliationJobs(ctx.user.organizationId ?? null);
-  }),
+  list: protectedProcedure
+    .input(z.object({ ...viewAsOrgInput }).optional())
+    .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      return db.getReconciliationJobs(portalScopedOrgId(ctx.user, input?.viewAsOrgId));
+    }),
 
   get: protectedProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
       const job = await db.getReconciliationJob(input.id);
-      if (!job) throw new TRPCError({ code: "NOT_FOUND" });
+      // Same defect as reports.generate, on the job-detail view: the job was
+      // loaded by id alone (any tenant's, to anyone who guessed the id) while its
+      // exceptions were read under the CALLER's organisation. Inside a tenant
+      // portal that showed the tenant's job and matches with no exceptions at
+      // all. The job names its tenant; the caller only decides access.
+      if (!job || !canActOnTenant(ctx.user, job.organizationId ?? null)) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
       const jobMatches = await db.getMatchesByJob(input.id);
       const { data: jobExceptions } = await db.getExceptions({
-        organizationId: ctx.user.organizationId ?? null,
+        organizationId: job.organizationId ?? null,
         jobId: input.id,
       });
       // Audit: log data access event

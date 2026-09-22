@@ -8,11 +8,14 @@
  * imports from here instead of re-declaring.
  */
 import { TRPCError } from "@trpc/server";
+import { z } from "zod";
 import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
+import { isTenantId } from "@shared/tenantId";
+import { currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog, getChannelByIdForOrg, type DbExecutor } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, type DbTransaction } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -20,15 +23,245 @@ import { organizations, users } from "../../drizzle/schema";
 /** Max length for user-supplied names (jobs, reports, channels). */
 export const MAX_NAME_LENGTH = 255;
 
+// ─── Portal scoping ──────────────────────────────────────────────────
+
+/**
+ * The organisation a READ should answer for, honouring the super-admin portal
+ * switcher.
+ *
+ * `PortalContext` ("Enter Portal") is client state — sessionStorage and nothing
+ * more. It changes the sidebar and the branding, and the server never hears
+ * about it unless a procedure accepts `viewAsOrgId` and passes it here. Two
+ * procedures did (`dashboard.stats`, `admin.users`); the rest did not, so a
+ * super admin inside Globus Bank's portal still read Infinity AI's own
+ * organisation — which holds no transactions, jobs, reports or exceptions at
+ * all. Every one of Reconciliation, Reports, Exception Intelligence, Payment
+ * Exceptions, Review Queue and Transactions rendered empty, for a tenant
+ * holding tens of thousands of rows.
+ *
+ * `dashboard.stats` already carried a comment describing exactly this failure
+ * being fixed there. It was fixed in one place and left everywhere else, which
+ * is why this now lives in ONE function instead of being restated per call
+ * site: the role check is the whole security boundary, and a boundary copied
+ * seven times is a boundary that will be wrong in one of them.
+ *
+ * ── The security property ─────────────────────────────────────────────
+ *
+ * The override applies ONLY to `super_admin`. For anyone else the parameter is
+ * ignored outright — not rejected, ignored — so a tenant user who discovers the
+ * field and sends another organisation's id reads their own data exactly as
+ * before. Ignoring rather than throwing is deliberate: a 403 would confirm the
+ * id exists, and there is nothing to tell them.
+ *
+ * ── Writes ─────────────────────────────────────────────────────────────
+ *
+ * This first said "reads only, never a write". That stopped being the rule when
+ * review showed what reads-only produced: the Exception Intelligence switches
+ * and the Age Tracker's Escalate button, inside a tenant's portal, reported
+ * success while changing Infinity AI's own organisation. A control that says
+ * "saved" about a different tenant is worse than one that refuses.
+ *
+ * So a WRITE may take its tenant from here only when all three hold:
+ *
+ *   1. it is an action on the tenant ON SCREEN — the thing the portal exists
+ *      for (settings, escalations, registry entries), not a platform action;
+ *   2. the override is staff-only, which this function already enforces — for
+ *      anyone else the field is ignored and they write to their own org;
+ *   3. its audit record names that tenant (logAudit's `organizationId`), so the
+ *      change appears in the trail of the organisation it changed.
+ *
+ * Where the write targets a ROW the client named by id, prefer deriving the
+ * tenant from the row (canActOnTenant) — the row cannot be wrong about itself.
+ */
+export function portalScopedOrgId(
+  user: { role: string; organizationId: number | null },
+  viewAsOrgId?: number | null,
+): number | null {
+  if (viewAsOrgId && user.role === "super_admin") return viewAsOrgId;
+  return user.organizationId ?? null;
+}
+
+/** The optional `viewAsOrgId` field, so every procedure declares it the same way. */
+export const viewAsOrgInput = { viewAsOrgId: z.number().int().positive().optional() };
+
+/**
+ * The organisation that owns a new reconciliation run or schedule: the caller's.
+ *
+ * Every creator of runs and schedules used to omit it, and runReconciliation
+ * refuses a job with no owner — so every run started from the UI or a schedule
+ * failed. A caller with NO organisation is refused here rather than pooled into
+ * a pseudo-tenant (CLAUDE.md §9C). A super admin owns runs under their own
+ * organisation; creating one inside a tenant's portal is the known
+ * portal-write gap.
+ */
+export function runOwner(user: { organizationId?: number | null }): number {
+  // Not `== null`: organisation 0 is the legacy non-tenant (CLAUDE.md §19.2
+  // traces unreachable rows to it), and a record filed there belongs to nobody.
+  // Only a positive id names a tenant.
+  if (!isTenantId(user.organizationId)) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "Your account is not linked to an organisation, so a reconciliation run would have no owner.",
+    });
+  }
+  return user.organizationId;
+}
+
+/**
+ * Refuse a job id the caller may not see, before anything about the job is read.
+ *
+ * Jobs are fetched by id alone (`getReconciliationJob`), so every procedure
+ * that takes a job id from the caller must check the job's tenant itself.
+ * `export.csv` / `export.xlsx` did not: any signed-in user could export any
+ * tenant's full reconciliation — matches, exceptions and every transaction —
+ * by walking sequential ids. NOT_FOUND either way, so another tenant's id is
+ * indistinguishable from one that does not exist.
+ */
+export async function assertJobVisible(
+  user: { role: string; organizationId: number | null },
+  jobId: number,
+): Promise<NonNullable<Awaited<ReturnType<typeof getReconciliationJob>>>> {
+  const job = await getReconciliationJob(jobId);
+  if (!job || !canActOnTenant(user, job.organizationId ?? null)) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+  }
+  return job;
+}
+
+/**
+ * Resolve the channels a caller named for a run or schedule, each UNDER the
+ * owning tenant (its own channel or a shared rail), in order; the first that is
+ * not visible throws NOT_FOUND with its own message.
+ *
+ * The call sites looked channels up by id alone, so any tenant's channel could
+ * be named — and the missing owner was all that stopped such a run. Owner and
+ * channel scope are one rule, so every creator goes through `runOwner` and this.
+ * NOT_FOUND rather than FORBIDDEN: another tenant's channel is indistinguishable
+ * from one that does not exist.
+ */
+export async function requireOwnedChannels(
+  tenant: number,
+  named: readonly { id: number; notFound: string }[],
+): Promise<NonNullable<Awaited<ReturnType<typeof getChannelByIdForOrg>>>[]> {
+  const found: NonNullable<Awaited<ReturnType<typeof getChannelByIdForOrg>>>[] = [];
+  for (const { id, notFound } of named) {
+    const channel = await getChannelByIdForOrg(id, tenant);
+    if (!channel) throw new TRPCError({ code: "NOT_FOUND", message: notFound });
+    found.push(channel);
+  }
+  return found;
+}
+
+/**
+ * Whose transactions a tenant list shows: the whole organisation's, except to a
+ * guest, who sees only their own. Returns the user id to narrow by, or undefined
+ * for "no narrowing — the organisation is the boundary".
+ *
+ * `transactions.list` used to narrow EVERY role except `admin` to rows the
+ * caller had personally uploaded — the one tenant read that did, since
+ * exceptions, jobs and reports have always been organisation-wide. So an
+ * operations user saw exceptions on transactions their own list would not show;
+ * rows a connector ingests (a SHOPLINE order carries user 0) were invisible to
+ * everyone but an admin, the App Store reviewer included; and a super admin in
+ * the Globus Bank portal saw 0 of its 1,191 transactions for the day, because a
+ * seed account had loaded them. The tenancy predicate is unchanged and still
+ * unconditional in `getTransactions`; only the per-uploader filter goes.
+ *
+ * Guests keep it. Demo guests share one tenant, and one guest's uploads are not
+ * another's to read.
+ */
+export function transactionOwnerFilter(user: { id: number; isGuest?: boolean | null }): number | undefined {
+  return user.isGuest ? user.id : undefined;
+}
+
+/**
+ * May this caller act on a row that belongs to `tenantId`?
+ *
+ * For procedures that take a ROW id from the client — a job id, a report id —
+ * the row already names its tenant, and that is the tenant the work belongs to.
+ * The caller's own organisation only decides whether they may touch it. Using
+ * the caller's organisation for the work itself is the bug this replaces:
+ * `reports.generate` and `reconciliation.get` both loaded a job by id alone and
+ * then read its exceptions under the CALLER's organisation, so inside a tenant
+ * portal they paired that tenant's job and matches with Infinity AI's exceptions
+ * (none), and for an ordinary user they returned another tenant's job to anyone
+ * who guessed its id.
+ *
+ * Mirrors the rule `allocations.ts` already applies, plus the staff pass the
+ * portal needs:
+ *
+ *   - staff outside a portal may act on any tenant;
+ *   - staff INSIDE a tenant's portal may act on that tenant only. The role is
+ *     unchanged in a portal, so a role check alone let a super admin viewing
+ *     tenant A open tenant B's job, export or schedule by id — a stale link
+ *     showing B's figures under A's banner, and any change filed in A's trail.
+ *     The portal is read from the request scope (server/_core/requestScope.ts)
+ *     rather than passed in, so no caller can forget it;
+ *   - a caller with NO organisation may act on none. No organisation is not
+ *     "unknown tenant, match anything": a null-to-null match would pool every
+ *     org-less account into one shared pseudo-tenant;
+ *   - everyone else, only their own.
+ *
+ * Callers answer a refusal with NOT_FOUND, never FORBIDDEN, so another tenant's
+ * id is indistinguishable from one that does not exist.
+ */
+export function canActOnTenant(
+  user: { role: string; organizationId: number | null },
+  tenantId: number | null,
+): boolean {
+  if (user.role === "super_admin") {
+    const portal = currentPortalOrganizationId();
+    return portal === null || tenantId === portal;
+  }
+  if (user.organizationId == null) return false;
+  return tenantId === user.organizationId;
+}
+
+/**
+ * Which channels `channels.list` should return.
+ *
+ * `"all"` only for staff outside a portal — the platform overview genuinely
+ * spans tenants. Inside a portal, staff see the tenant they are viewing: the
+ * cross-tenant list was reaching the Reconciliation job form, so a super admin
+ * in Globus Bank's portal could build a run whose source and target channels
+ * belonged to two different tenants. Everyone else gets their own organisation,
+ * and a `viewAsOrgId` from them is ignored exactly as in `portalScopedOrgId`.
+ */
+export function channelListScope(
+  user: { role: string; organizationId: number | null },
+  viewAsOrgId?: number | null,
+  /** The portal tenant from the request context (ctx.viewingAs). */
+  viewingAs?: number | null,
+): "all" | number | null {
+  // Keyed on role, so the organisation override in the request context does not
+  // reach this branch on its own: a super admin in a portal would still get the
+  // whole estate. The portal tenant must be passed in.
+  if (user.role === "super_admin") {
+    const portal = viewAsOrgId || viewingAs;
+    return portal ? portal : "all";
+  }
+  return user.organizationId ?? null;
+}
+
 // ─── Super Admin Procedure ───────────────────────────────────────────
 // Only Infinity AI staff (super_admin role) can access these procedures.
 // Cross-tenant visibility: can see ALL organisations, instances, and users.
+//
+// A platform procedure acts for the PLATFORM, not for the tenant on screen, so
+// it runs outside the portal's request scope. Without this, the portal header
+// the browser sends on every call — including from the Super Admin dashboard
+// while a portal is still open — filed "created organisation B" or "promoted X
+// to super admin" in tenant A's audit trail, which A's own users can read and
+// export. Failing this way round is the safe direction: a platform procedure
+// that DOES act on the tenant on screen (demo.activate) and forgets to name it
+// files its record in the global chain, as before — never in the wrong tenant.
+// `ctx.user` is untouched; only the audit default and by-id reach change.
 
 export const superAdminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.user.role !== "super_admin") {
     throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin access required. This action is restricted to Infinity AI staff." });
   }
-  return next({ ctx });
+  return runInRequestScope({ portalOrganizationId: null }, () => next({ ctx }));
 });
 
 // ─── Admin Procedure ─────────────────────────────────────────────────
@@ -42,14 +275,26 @@ export const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
 });
 
 // Tenancy guard for user-management mutations. Super admins (Infinity AI) may act
-// on anyone. Org admins may only act on non-super-admin users within their OWN
-// organisation — they can neither see nor touch Infinity AI staff or other orgs.
+// on anyone — outside a portal. Org admins may only act on non-super-admin users
+// within their OWN organisation — they can neither see nor touch Infinity AI
+// staff or other orgs.
+//
+// Inside a tenant's portal a super admin is held to that same rule for the
+// tenant on screen, as canActOnTenant is: the Team page there lists only that
+// tenant's users, and a user id from anywhere else is a stale link or a crafted
+// call, whose audit record would otherwise land in the wrong tenant's trail.
+//
+// A caller with no organisation manages no one. The comparison used to be a
+// bare `!==`, so an org-less admin passed for every org-less user — the
+// null-to-null pooling canActOnTenant already refuses.
 export async function assertCanManageUsers(
   ctx: { user: { role: string; organizationId: number | null } },
   userIds: number[]
 ): Promise<void> {
-  if (ctx.user.role === "super_admin") return;
+  const portal = ctx.user.role === "super_admin" ? currentPortalOrganizationId() : null;
+  if (ctx.user.role === "super_admin" && portal === null) return;
   if (userIds.length === 0) return;
+  const own = portal ?? ctx.user.organizationId;
   const drizzle = await getDb();
   if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
   const targets = await drizzle
@@ -57,7 +302,7 @@ export async function assertCanManageUsers(
     .from(users)
     .where(inArray(users.id, userIds));
   for (const t of targets) {
-    if (t.role === "super_admin" || t.organizationId !== ctx.user.organizationId) {
+    if (own == null || t.role === "super_admin" || t.organizationId !== own) {
       throw new TRPCError({
         code: "FORBIDDEN",
         message: "You can only manage users within your own organisation.",
@@ -172,11 +417,35 @@ export async function logAudit(
   entityId?: number,
   details?: any,
   ipAddress?: string,
-  userAgent?: string
+  userAgent?: string,
+  /**
+   * The tenant the event belongs to. Omitted, the event joins the GLOBAL chain —
+   * and a tenant's Audit Trail selects `organizationId = tenant` exactly, so a
+   * global event appears in NO tenant's trail, export or chain verification.
+   *
+   * That is still true for most of this function's callers, which predate the
+   * parameter; it was added so a staff action inside a tenant portal files its
+   * record with the tenant it changed. New callers acting on a tenant's data
+   * should pass it.
+   */
+  organizationId?: number | null,
 ) {
   try {
     await createAuditLog({
       userId,
+      // Omitted → the tenant a super admin is acting on through the portal, if
+      // any (server/_core/requestScope.ts); otherwise the global chain, as
+      // before. An explicit `null` still means global — only an OMITTED
+      // argument is filled in, so no caller that chose the global chain is moved.
+      //
+      // The default is right only for an event about the tenant on screen, so
+      // everything else is kept out of it: platform procedures run outside the
+      // portal scope (superAdminProcedure); by-id reach narrows to the portal
+      // (canActOnTenant, assertCanManageUsers), so a tenant procedure there can
+      // only touch that tenant's rows; and events about the ACCOUNT rather than
+      // a tenant — sign-out, personal email preferences, platform role grants,
+      // moving a user between organisations — pass `null` at the call site.
+      organizationId: organizationId === undefined ? currentPortalOrganizationId() : organizationId,
       action,
       entityType,
       entityId,
@@ -225,8 +494,11 @@ export async function logAuditStrict(entry: {
    * back together. Propagating the failure is not enough on its own: without
    * this the row is already committed when the audit insert fails, so the caller
    * reports failure over a change that did happen and left no trace.
+   *
+   * A transaction only: the audit chain's lock is held until commit, and a
+   * pooled handle would release it statement by statement (createAuditLog).
    */
-  executor?: DbExecutor;
+  executor?: DbTransaction;
 }) {
   await createAuditLog(
     {

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
+import { readPortalSession, withPortalOrg } from "@/lib/portalRequest";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -80,7 +81,9 @@ export default function Monitor() {
   // auto-reconnects on error; the fallback intervals above cover any gap.
   useEffect(() => {
     if (!autoRefresh) return;
-    const es = new EventSource("/api/monitoring/stream");
+    // EventSource cannot send the portal header; the tenant rides as a query
+    // parameter instead, under the same server rule (super admins only).
+    const es = new EventSource(withPortalOrg("/api/monitoring/stream", readPortalSession()));
     es.onmessage = () => {
       utils.monitoring.stats.invalidate();
       utils.monitoring.activeJobs.invalidate();

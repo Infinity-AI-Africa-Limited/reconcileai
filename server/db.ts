@@ -1,4 +1,5 @@
-import { eq, and, gte, lte, like, or, desc, asc, sql, inArray, isNull, ne, type SQL } from "drizzle-orm";
+import { eq, and, gte, lte, lt, like, or, desc, asc, sql, inArray, isNull, ne, count, min, type SQL } from "drizzle-orm";
+import { UNRESOLVED_EXCEPTION_STATUSES } from "@shared/exceptionStatus";
 import { drizzle } from "drizzle-orm/mysql2";
 import type { MySqlColumn } from "drizzle-orm/mysql-core";
 import * as schema from "../drizzle/schema";
@@ -10,7 +11,7 @@ import {
   reconciliationJobs, InsertReconciliationJob,
   matches, InsertMatch,
   exceptions, InsertException,
-  auditLogs, InsertAuditLog,
+  auditLogs, InsertAuditLog, auditChainLocks,
   reconciliationReports, InsertReconciliationReport,
   organizations, InsertOrganization,
   webhooks, InsertWebhook,
@@ -36,7 +37,7 @@ import {
   exceptionAgingSettings,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
-import { computeRecordHash } from "./auditChain";
+import { AUDIT_WRITER_VERSION, auditTimestamp, computeRecordHash } from "./auditChain";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -909,11 +910,59 @@ export async function findDuplicateTransactions(
 
 // ─── Reconciliation Jobs ─────────────────────────────────────────────
 
-export async function createReconciliationJob(data: InsertReconciliationJob) {
+/**
+ * Create a reconciliation job. `organizationId` is REQUIRED by the type.
+ *
+ * It was optional, and every caller — both run procedures and the scheduler —
+ * left it out. `runReconciliation` refuses a job with no owning organisation
+ * ("refusing to run"), so every run started from the UI or a schedule was
+ * created and then failed, for every tenant, while the demo tenants looked
+ * healthy on runs the seeders insert directly. Making it required turns a
+ * forgotten owner into a compile error instead of a dead run.
+ */
+export async function createReconciliationJob(data: InsertReconciliationJob & { organizationId: number }) {
   const db = await getDb();
   if (!db) return null;
-  const result = await db.insert(reconciliationJobs).values(data);
-  return result[0].insertId;
+  return insertJobUnderTenantLock(db, data);
+}
+
+/**
+ * Insert a reconciliation job while holding its tenant's `organizations` row
+ * lock — the same lock the demo-timeline roll holds (server/demoTimelineRoll.ts).
+ *
+ * The roll shifts a tenant's whole timeline and defers while a run is live.
+ * Deferral alone could race: a job created after the roll's check would run
+ * against dates moving underneath it, with a window that no longer matched
+ * its input. Taking the tenant lock here makes the two mutually exclusive: a
+ * job either exists (and is seen) before a roll begins, or is created after it
+ * commits. Claims need nothing further — a job can only be claimed once it
+ * exists, so every claimable job is one the roll saw and deferred for.
+ *
+ * Both paths take the organisations row FIRST, so they cannot deadlock. For a
+ * tenant that is never rolled, the lock is uncontended: one extra indexed
+ * SELECT … FOR UPDATE per job created.
+ *
+ * The owner is required, so the lock ALWAYS engages. It used to be optional,
+ * and every creator omitted it — which is how this lock first shipped unable
+ * to engage for any real run (and how every such run failed to start; see
+ * createReconciliationJob).
+ *
+ * Every live job is created here — tests hold other writers of
+ * `reconciliation_jobs` to the seeders, which only ever write completed runs.
+ */
+export async function insertJobUnderTenantLock(
+  db: DbHandle,
+  data: InsertReconciliationJob & { organizationId: number },
+): Promise<number> {
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.id, data.organizationId))
+      .for("update");
+    const result = await tx.insert(reconciliationJobs).values(data);
+    return result[0].insertId;
+  });
 }
 
 export async function updateReconciliationJob(id: number, data: Partial<InsertReconciliationJob>) {
@@ -1155,6 +1204,39 @@ export async function insertExceptionsBatch(dataArray: InsertException[]) {
  * exceptions. The column now exists (migration 0078), so the exemption is gone
  * and the tenancy predicate is unconditional like every other scoped reader.
  */
+/**
+ * Unresolved exceptions that a date-filtered list is currently HIDING: created
+ * before `before`, and still needing work.
+ *
+ * The Payment Exceptions page and the Review Queue both open on a date range
+ * that defaults to today, while the dashboard counts unresolved exceptions
+ * all-time. So a merchant saw "1 open exception" on the dashboard and an empty
+ * exceptions page — the one row created on 19 August sat outside "today". The
+ * count and the list disagreed, silently, and the list is where the work is.
+ *
+ * This lets the page say so and offer the range that reveals them, rather than
+ * changing the presets or re-dating anyone's data to hide the mismatch.
+ */
+export async function getUnresolvedExceptionsBefore(
+  organizationId: number | null,
+  before: Date,
+  status?: string,
+): Promise<{ count: number; oldest: Date | null }> {
+  const db = await getDb();
+  if (!db) return { count: 0, oldest: null };
+  const [row] = await db
+    .select({ n: count(), oldest: min(exceptions.createdAt) })
+    .from(exceptions)
+    .where(and(
+      orgFilter(exceptions.organizationId, organizationId),
+      status
+        ? eq(exceptions.status, status as typeof exceptions.$inferSelect.status)
+        : inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+      lt(exceptions.createdAt, before),
+    ));
+  return { count: Number(row?.n ?? 0), oldest: row?.oldest ?? null };
+}
+
 export async function getExceptions(filters: {
   organizationId: number | null;
   jobId?: number;
@@ -1246,7 +1328,7 @@ export async function getOpenExceptionsForAging(organizationId: number | null, l
     .leftJoin(users, eq(exceptions.assignedTo, users.id))
     .where(and(
       orgFilter(exceptions.organizationId, organizationId),
-      inArray(exceptions.status, ["open", "in_review", "escalated"]),
+      inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
     ))
     .orderBy(asc(exceptions.createdAt))
     .limit(limit);
@@ -1304,7 +1386,9 @@ export async function getJobExceptionsNeedingAi(jobId: number, organizationId: n
  * type silently excluded the very thing this parameter exists to accept.
  */
 type DbHandle = NonNullable<Awaited<ReturnType<typeof getDb>>>;
-export type DbExecutor = DbHandle | Parameters<Parameters<DbHandle["transaction"]>[0]>[0];
+/** An open transaction — what `db.transaction(tx => …)` hands its callback. */
+export type DbTransaction = Parameters<Parameters<DbHandle["transaction"]>[0]>[0];
+export type DbExecutor = DbHandle | DbTransaction;
 
 /**
  * `executor` lets a caller enrol the audit write in ITS OWN transaction.
@@ -1316,26 +1400,70 @@ export type DbExecutor = DbHandle | Parameters<Parameters<DbHandle["transaction"
  * fail together, which is the only version worth calling an evidence trail.
  *
  * Optional because most callers use logAudit, which is best-effort by design.
+ *
+ * A TRANSACTION, not any executor. The chain lock is a `FOR UPDATE` held until
+ * commit; on a pooled handle each statement autocommits, so the lock would be
+ * released before the head is read and two appends could fork the chain again —
+ * with every type checking. (Review caught that the wider `DbExecutor` allowed
+ * exactly that.) A pooled handle is not assignable here: it has no rollback.
  */
-export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor) {
-  const db = executor ?? (await getDb());
+export async function createAuditLog(data: InsertAuditLog, tx?: DbTransaction) {
+  // Inside the caller's transaction when one is given, so the change and its
+  // record commit together; otherwise in a transaction of its own, because the
+  // chain lock below is held until commit.
+  if (tx) return appendToAuditChain(tx, data);
+  const db = await getDb();
   if (!db) return;
+  await db.transaction((own) => appendToAuditChain(own, data));
+}
 
-  // Tamper-evident hash chain (per organization). Fetch the latest entry in the
-  // same org scope to link against, then compute this record's hash.
-  // Note: best-effort under concurrency — see auditChain.ts. For the audit
-  // volume here this is acceptable; a SELECT…FOR UPDATE tx would harden it.
+// Compile-time ratchet — `pnpm check` runs in CI and does not typecheck test
+// files, so the guarantee above is pinned here: widening createAuditLog's
+// parameter to accept a pooled handle again makes this line a type error.
+type AuditAcceptsPool = DbHandle extends NonNullable<Parameters<typeof createAuditLog>[1]> ? true : false;
+const auditRefusesPool: AuditAcceptsPool = false;
+void auditRefusesPool;
+
+/**
+ * Append one entry to its organisation's hash chain, serialised per chain.
+ *
+ * This read the chain's head and appended to it with nothing stopping a second
+ * writer doing the same at the same moment — "best-effort under concurrency",
+ * its own comment said. Two writers that read the same head both wrote the next
+ * sequence number: 8 forks in the global chain as of 2026-09-21 (a
+ * double-clicked "revoke" among them), each breaking verification.
+ *
+ * Now every writer takes the chain's row in `audit_chain_locks` first — created
+ * on first use by INSERT IGNORE, which itself waits on a concurrent first
+ * insert of the same key — and reads the head with a LOCKING read. That read
+ * matters: on TiDB a plain SELECT in a transaction reads the snapshot from
+ * BEGIN, and would miss the entry the previous lock holder just committed.
+ * Rows written here are signed as writer 3, so the verifier's allowance for
+ * the old forks can never apply to them.
+ */
+async function appendToAuditChain(db: DbTransaction, data: InsertAuditLog) {
   const orgScope = data.organizationId ?? null;
+  const chainKey = orgScope ?? 0;
+  await db.insert(auditChainLocks).ignore().values({ chainKey });
+  await db
+    .select({ chainKey: auditChainLocks.chainKey })
+    .from(auditChainLocks)
+    .where(eq(auditChainLocks.chainKey, chainKey))
+    .for("update");
   const [prev] = await db
     .select({ seq: auditLogs.sequenceNumber, hash: auditLogs.recordHash })
     .from(auditLogs)
     .where(orgScope === null ? isNull(auditLogs.organizationId) : eq(auditLogs.organizationId, orgScope))
     .orderBy(desc(auditLogs.sequenceNumber))
-    .limit(1);
+    .limit(1)
+    .for("update");
 
   const sequenceNumber = (prev?.seq ?? 0) + 1;
   const prevRecordHash = prev?.hash ?? null;
-  const createdAt = new Date();
+  // A whole second, so the value hashed is the value the timestamp(0) column
+  // stores. `new Date()` here was rounded by the column and half of all
+  // entries then verified as tampered — see auditTimestamp.
+  const createdAt = auditTimestamp();
   const recordHash = computeRecordHash(
     {
       sequenceNumber,
@@ -1350,6 +1478,10 @@ export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor
       createdAt,
     },
     prevRecordHash,
+    // Signed as the current (serialised) writer, so neither the rounded-write
+    // nor the concurrent-fork allowance can apply to this row
+    // (see AuditWriterVersion).
+    AUDIT_WRITER_VERSION,
   );
 
   await db.insert(auditLogs).values({
@@ -1733,7 +1865,8 @@ export async function getFullReconciliationReport(jobId: number) {
 
 // ─── Scheduled Tasks ────────────────────────────────────────────────
 
-export async function createScheduledTask(data: InsertScheduledTask) {
+/** `organizationId` is required for the same reason as createReconciliationJob. */
+export async function createScheduledTask(data: InsertScheduledTask & { organizationId: number }) {
   const db = await getDb();
   if (!db) return null;
   const result = await db.insert(scheduledTasks).values(data);
@@ -1918,14 +2051,21 @@ export async function getLatestJobProgress(jobId: number) {
   return result[0];
 }
 
-export async function getActiveJobsProgress() {
+/**
+ * Running and pending jobs for ONE organisation.
+ *
+ * It had no tenant predicate: `monitoring.activeJobs` returned every tenant's
+ * live jobs — names, channel names, match and exception counts — to any
+ * signed-in user. A caller with no organisation gets nothing, not the legacy
+ * org-less rows `orgFilter(null)` would select.
+ */
+export async function getActiveJobsProgress(organizationId: number | null) {
   const db = await getDb();
-  if (!db) return [];
-  // Get all running jobs
+  if (!db || organizationId === null) return [];
   const runningJobs = await db.select().from(reconciliationJobs)
-    .where(or(
-      eq(reconciliationJobs.status, "running"),
-      eq(reconciliationJobs.status, "pending")
+    .where(and(
+      eq(reconciliationJobs.organizationId, organizationId),
+      or(eq(reconciliationJobs.status, "running"), eq(reconciliationJobs.status, "pending")),
     ))
     .orderBy(desc(reconciliationJobs.createdAt))
     .limit(20);

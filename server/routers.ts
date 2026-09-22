@@ -57,6 +57,7 @@ import {
 } from "./sftpService";
 import { startBucketPolling } from "./bucketIngestionService";
 import { startSLAMonitoring } from "./slaMonitoringService";
+import { startDemoTimelineRoll } from "./demoTimelineRoll";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 import {
   runFullPOC,
@@ -223,11 +224,20 @@ import {
   cbnProcedure,
   distributorProcedure,
   MAX_NAME_LENGTH,
+  portalScopedOrgId,
+  viewAsOrgInput,
+  canActOnTenant,
+  channelListScope,
+  transactionOwnerFilter,
+  runOwner,
+  requireOwnedChannels,
+  assertJobVisible,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
 import { buildReportSummary } from "./reportSummary";
+import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
@@ -240,29 +250,68 @@ async function dispatchWebhook(event: string, payload: any) {
 }
 
 // ─── Distributor Identity Registry Router ───────────────────────────
+/**
+ * The tenant a Distributor Registry call acts on.
+ *
+ * Every procedure below looked the caller up and used THEIR organisation, so a
+ * super admin inside BrightGoods' portal saw Infinity AI's registry — empty —
+ * and anything they created or confirmed went there too. This honours the
+ * portal exactly as portalScopedOrgId does everywhere else.
+ *
+ * One extra rule, because the portal widens who the target can be: when the
+ * target is a VIEWED tenant, that tenant must itself be one that holds
+ * distributors. The feature gate on this router checks the CALLER's segment,
+ * and a super admin's always passes — so without this, staff could file a
+ * distributor against a bank. Distributors belong to Corporate B2B and to no
+ * other vertical (owner ruling 2026-08-08, CLAUDE.md §9C), and this is a write
+ * path, so it uses the STRICT check: an unknown segment does not qualify.
+ */
+async function distributorTenant(
+  ctx: { user: { openId: string; role: string } },
+  viewAsOrgId?: number,
+): Promise<number | null> {
+  const user = await db.getUserByOpenId(ctx.user.openId);
+  if (!user?.organizationId) return null;
+  const tenant = portalScopedOrgId({ role: ctx.user.role, organizationId: user.organizationId }, viewAsOrgId);
+  if (tenant !== null && tenant !== user.organizationId) {
+    const org = await db.getOrganizationById(tenant);
+    if (!org || !featureStrictlyAppliesTo("distributor_registry", org.segment)) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "That organisation's vertical does not keep a distributor registry.",
+      });
+    }
+  }
+  return tenant;
+}
+
 const distributorRouter = router({
   list: distributorProcedure
     .input(z.object({
+      ...viewAsOrgInput,
       status: z.string().optional(),
       search: z.string().optional(),
       limit: z.number().optional(),
       offset: z.number().optional(),
     }))
     .query(async ({ ctx, input }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) return [];
-      return db.getDistributors({ organizationId: user.organizationId, ...input });
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!tenant) return [];
+      const { viewAsOrgId: _v, ...filters } = input;
+      return db.getDistributors({ organizationId: tenant, ...filters });
     }),
 
   stats: distributorProcedure
-    .query(async ({ ctx }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
-      return db.getDistributorStats(user.organizationId);
+    .input(z.object({ ...viewAsOrgInput }).optional())
+    .query(async ({ ctx, input }) => {
+      const tenant = await distributorTenant(ctx, input?.viewAsOrgId);
+      if (!tenant) return { total: 0, active: 0, pendingConfirmation: 0, flagged: 0 };
+      return db.getDistributorStats(tenant);
     }),
 
   create: distributorProcedure
     .input(z.object({
+      ...viewAsOrgInput,
       canonicalName: z.string().min(1),
       registeredBusinessName: z.string().optional(),
       taxId: z.string().optional(),
@@ -276,13 +325,16 @@ const distributorRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.createDistributor({ ...input, organizationId: user.organizationId, createdBy: user.id });
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!user || !tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      const { viewAsOrgId: _v, ...fields } = input;
+      await db.createDistributor({ ...fields, organizationId: tenant, createdBy: user.id });
       return { success: true };
     }),
 
   update: distributorProcedure
     .input(z.object({
+      ...viewAsOrgInput,
       id: z.number(),
       canonicalName: z.string().optional(),
       registeredBusinessName: z.string().optional(),
@@ -297,19 +349,20 @@ const distributorRouter = router({
       notes: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      const { id, ...data } = input;
-      await db.updateDistributor(id, user.organizationId, data);
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      const { id, viewAsOrgId: _v, ...data } = input;
+      await db.updateDistributor(id, tenant, data);
       return { success: true };
     }),
 
   confirm: distributorProcedure
-    .input(z.object({ id: z.number() }))
+    .input(z.object({ ...viewAsOrgInput, id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.updateDistributor(input.id, user.organizationId, {
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!user || !tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.updateDistributor(input.id, tenant, {
         status: "active",
         confirmedBy: user.id,
         confirmedAt: new Date(),
@@ -318,11 +371,11 @@ const distributorRouter = router({
     }),
 
   addVariant: distributorProcedure
-    .input(z.object({ id: z.number(), variant: z.string().min(1) }))
+    .input(z.object({ ...viewAsOrgInput, id: z.number(), variant: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.getUserByOpenId(ctx.user.openId);
-      if (!user?.organizationId) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.addDistributorNameVariant(input.id, user.organizationId, input.variant);
+      const tenant = await distributorTenant(ctx, input.viewAsOrgId);
+      if (!tenant) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.addDistributorNameVariant(input.id, tenant, input.variant);
       return { success: true };
     }),
 });
@@ -425,7 +478,10 @@ export const appRouter = router({
   system: systemRouter,
 
   auth: router({
-    me: publicProcedure.query((opts) => opts.ctx.user),
+    // The account as it signed in — not the portal view. Inside a tenant's
+    // portal `ctx.user.organizationId` is the TENANT's (server/_core/portalView.ts);
+    // telling the browser the super admin now belongs to that tenant would be false.
+    me: publicProcedure.query((opts) => opts.ctx.actor ?? opts.ctx.user),
     // Which enterprise SSO providers are configured (drives /login buttons).
     oauthProviders: publicProcedure.query(async () => {
       const { enabledSsoProviders } = await import("./_core/sso");
@@ -487,7 +543,8 @@ export const appRouter = router({
       // Audit: log logout before clearing the cookie
       if (ctx.user) {
         const { ip, ua } = getClientInfo(ctx);
-        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua);
+        // The account's session ended, not an action on the tenant on screen.
+        await logAudit(ctx.user.id, "user_logout", "user_session", undefined, { email: ctx.user.email }, ip, ua, null);
       }
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
@@ -572,13 +629,23 @@ export const appRouter = router({
   // ─── Channels ────────────────────────────────────────────────────
 
   channels: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      // Super admins (Infinity AI staff) legitimately span tenants — platform
-      // overview and the portal switcher both need the full estate. Everyone
-      // else sees their own org's channels plus the shared platform rails.
-      if (ctx.user.role === "super_admin") return db.getAllChannelsAcrossTenants();
-      return db.getChannels(ctx.user.organizationId ?? null);
-    }),
+    list: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+        // Super admins (Infinity AI staff) legitimately span tenants — the
+        // platform overview needs the full estate. Everyone else sees their own
+        // org's channels plus the shared platform rails.
+        //
+        // INSIDE a tenant portal they do not. The cross-tenant list was reaching
+        // the Reconciliation job form and the Transactions filter, so a super
+        // admin viewing Globus Bank picked source and target channels from a
+        // list containing BrightGoods' and the SHOPLINE stores' rails — and
+        // could build a run across two tenants from the dropdown. Scoping the
+        // reads while leaving this list unscoped made the page look tenanted
+        // and behave otherwise.
+        const scope = channelListScope(ctx.user, input?.viewAsOrgId, ctx.viewingAs);
+        return scope === "all" ? db.getAllChannelsAcrossTenants() : db.getChannels(scope);
+      }),
 
     create: adminProcedure
       .input(z.object({
@@ -839,6 +906,7 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
+          ...viewAsOrgInput,
           channelId: z.number().int().positive().optional(),
           status: z.string().max(30).optional(),
           dateFrom: z.string().optional(),
@@ -851,11 +919,11 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const isAdmin = ctx.user.role === "admin";
         return db.getTransactions({
-          organizationId: ctx.user.organizationId ?? null,
-          userId: ctx.user.id,
-          isAdmin,
+          // Honours the super-admin portal switcher; see portalScopedOrgId.
+          organizationId: portalScopedOrgId(ctx.user, input.viewAsOrgId),
+          // Organisation-wide, not per-uploader, except for guests.
+          userId: transactionOwnerFilter(ctx.user),
           channelId: input.channelId,
           status: input.status,
           dateFrom: input.dateFrom ? new Date(input.dateFrom) : undefined,
@@ -876,11 +944,17 @@ export const appRouter = router({
   // ─── Exception Age / Escalation Tracker ──────────────────────────
   ageTracker: router({
     // Ops control-centre summary: aging buckets + ₦ exposure + over-aged tally.
-    summary: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    summary: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Every Age Tracker procedure answers for the tenant ON SCREEN — see
+      // portalScopedOrgId. It read the signed-in organisation, so inside Globus
+      // Bank's portal the tracker aged Infinity AI's queue, which is empty.
+      const tenant = portalScopedOrgId(ctx.user, input?.viewAsOrgId);
+      const orgId = tenant ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
+      const rows = await db.getOpenExceptionsForAging(tenant);
       const now = new Date();
       const items = rows.map((r) => ({
         ageDays: ageTracker.ageDays(r.createdAt, now),
@@ -891,12 +965,13 @@ export const appRouter = router({
 
     // The aging list, oldest first; optionally only the over-aged items.
     list: protectedProcedure
-      .input(z.object({ onlyOverAged: z.boolean().default(false), limit: z.number().int().min(1).max(1000).default(200) }))
+      .input(z.object({ ...viewAsOrgInput, onlyOverAged: z.boolean().default(false), limit: z.number().int().min(1).max(1000).default(200) }))
       .query(async ({ ctx, input }) => {
-        const orgId = ctx.user.organizationId ?? 0;
+        const tenant = portalScopedOrgId(ctx.user, input.viewAsOrgId);
+        const orgId = tenant ?? 0;
         const settings = orgId ? await db.getAgingSettings(orgId) : null;
         const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-        const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
+        const rows = await db.getOpenExceptionsForAging(tenant);
         const now = new Date();
         let items = rows.map((r) => {
           const age = ageTracker.ageDays(r.createdAt, now);
@@ -925,17 +1000,21 @@ export const appRouter = router({
 
     // Escalate a single over-aged exception (visible workflow action).
     escalate: operationsProcedure
-      .input(z.object({ id: z.number().int().positive(), note: z.string().max(2000).optional() }))
+      .input(z.object({ ...viewAsOrgInput, id: z.number().int().positive(), note: z.string().max(2000).optional() }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+        // The viewed tenant, so Escalate on a row the tracker just showed acts on
+        // that row. Against the signed-in organisation the update matched no row,
+        // and the button reported success having changed nothing.
+        const tenant = portalScopedOrgId(ctx.user, input.viewAsOrgId);
+        await db.updateException(input.id, tenant, {
           status: "escalated",
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
-        await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua);
+        await logAudit(ctx.user.id, "escalate_exception", "exception", input.id, { note: input.note }, ip, ua, tenant);
         // Flywheel write-path (audit fix): escalations are learnable outcomes.
-        if (ctx.user.organizationId) {
-          const _orgId = ctx.user.organizationId;
+        if (tenant) {
+          const _orgId = tenant;
           const _userId = ctx.user.id;
           void import("./exceptionIntelligence").then((ei) =>
             ei.captureExceptionOutcome({
@@ -952,22 +1031,25 @@ export const appRouter = router({
       }),
 
     // One-click: escalate every over-aged item still open (ops bulk action).
-    bulkEscalateOverAged: operationsProcedure.mutation(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    bulkEscalateOverAged: operationsProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .mutation(async ({ ctx, input }) => {
+      const tenant = portalScopedOrgId(ctx.user, input?.viewAsOrgId);
+      const orgId = tenant ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       const slaDays = settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS;
-      const rows = await db.getOpenExceptionsForAging(ctx.user.organizationId ?? null);
+      const rows = await db.getOpenExceptionsForAging(tenant);
       const now = new Date();
       const overAged = rows.filter(
         (r) => ageTracker.isOverAged(ageTracker.ageDays(r.createdAt, now), slaDays) && r.status !== "escalated",
       );
-      await Promise.all(overAged.map((r) => db.updateException(r.id, ctx.user.organizationId ?? null, { status: "escalated" })));
+      await Promise.all(overAged.map((r) => db.updateException(r.id, tenant, { status: "escalated" })));
       const { ip, ua } = getClientInfo(ctx);
-      await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua);
+      await logAudit(ctx.user.id, "bulk_escalate_overaged", "exception", undefined, { count: overAged.length, slaDays }, ip, ua, tenant);
       // Flywheel write-path (audit fix): each bulk escalation is a learnable
       // outcome. Fire-and-forget, sequential to avoid hammering the DB.
-      if (ctx.user.organizationId && overAged.length > 0) {
-        const _orgId = ctx.user.organizationId;
+      if (tenant && overAged.length > 0) {
+        const _orgId = tenant;
         const _userId = ctx.user.id;
         const _ids = overAged.map((r) => r.id);
         void (async () => {
@@ -988,19 +1070,21 @@ export const appRouter = router({
       return { success: true, count: overAged.length };
     }),
 
-    getSettings: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    getSettings: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const settings = orgId ? await db.getAgingSettings(orgId) : null;
       return { slaDays: settings?.slaDays ?? ageTracker.DEFAULT_SLA_DAYS };
     }),
 
     saveSettings: operationsProcedure
-      .input(z.object({ slaDays: z.number().int().min(1).max(365) }))
+      .input(z.object({ ...viewAsOrgInput, slaDays: z.number().int().min(1).max(365) }))
       .mutation(async ({ ctx, input }) => {
-        const orgId = ctx.user.organizationId ?? 0;
+        const orgId = portalScopedOrgId(ctx.user, input.viewAsOrgId) ?? 0;
         if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization context for SLA settings" });
         await db.upsertAgingSettings(orgId, input.slaDays);
-        await logAudit(ctx.user.id, "update_aging_sla", "exception_aging_settings", orgId, { slaDays: input.slaDays });
+        await logAudit(ctx.user.id, "update_aging_sla", "exception_aging_settings", orgId, { slaDays: input.slaDays }, undefined, undefined, orgId || null);
         return { slaDays: input.slaDays };
       }),
   }),
@@ -1011,6 +1095,7 @@ export const appRouter = router({
     list: protectedProcedure
       .input(
         z.object({
+          ...viewAsOrgInput,
           jobId: z.number().int().positive().optional(),
           status: z.string().max(30).optional(),
           category: z.string().max(50).optional(),
@@ -1022,7 +1107,26 @@ export const appRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        return db.getExceptions({ ...input, organizationId: ctx.user.organizationId ?? null });
+        // Honours the super-admin portal switcher; see portalScopedOrgId.
+        return db.getExceptions({
+          ...input,
+          organizationId: portalScopedOrgId(ctx.user, input.viewAsOrgId),
+        });
+      }),
+
+    // What the current date range is hiding. See getUnresolvedExceptionsBefore.
+    hiddenByRange: protectedProcedure
+      .input(z.object({
+        ...viewAsOrgInput,
+        dateFrom: z.date(),
+        status: z.string().max(30).optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        return db.getUnresolvedExceptionsBefore(
+          portalScopedOrgId(ctx.user, input.viewAsOrgId),
+          input.dateFrom,
+          input.status,
+        );
       }),
 
     resolve: operationsProcedure
@@ -1490,9 +1594,14 @@ export const appRouter = router({
   resolutionTemplates: router({
     list: protectedProcedure
       .input(z.object({
+        ...viewAsOrgInput,
         category: z.enum(RESOLUTION_TEMPLATE_CATEGORIES).optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
+        // The viewed tenant's templates, like every other read on the Payment
+        // Exceptions page — otherwise a tenant portal offered Infinity AI's own
+        // resolution templates beside the tenant's exceptions.
+        const tenant = portalScopedOrgId(ctx.user, input?.viewAsOrgId);
         const dbConn = await db.getDb();
         if (!dbConn) return [];
         
@@ -1503,7 +1612,7 @@ export const appRouter = router({
         
         // Filter in memory to include user's org templates and global templates
         const orgFiltered = allTemplates.filter(t => 
-          t.organizationId === ctx.user.organizationId || t.organizationId === null
+          t.organizationId === tenant || t.organizationId === null
         );
 
         // If a category is specified, return only templates for that category
@@ -1757,9 +1866,12 @@ export const appRouter = router({
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
         return report;
       }),
-    list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getReports(ctx.user.organizationId ?? null);
-    }),
+    list: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+        // Honours the super-admin portal switcher; see portalScopedOrgId.
+        return db.getReports(portalScopedOrgId(ctx.user, input?.viewAsOrgId));
+      }),
 
     generate: guestProtectedProcedure
       .input(
@@ -1774,9 +1886,27 @@ export const appRouter = router({
         const job = await db.getReconciliationJob(input.jobId);
         if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
+        // The report belongs to the JOB's tenant, not the caller's.
+        //
+        // This read the exceptions with the caller's own organisationId while
+        // summarising whatever job it was handed, and then stored the report
+        // with no organisationId at all. Inside a tenant portal that produced a
+        // report mixing the viewed tenant's job and matches with the SIGNED-IN
+        // organisation's exceptions — and the result appeared in nobody's report
+        // list, because `reports.list` scopes by organisation.
+        //
+        // Deriving the tenant from the job makes all three agree. The access
+        // check is separate and explicit (see canActOnTenant) — and it is new:
+        // before this, any caller could summarise any tenant's job by guessing
+        // its id, because getReconciliationJob selects by id alone.
+        const jobOrgId = job.organizationId ?? null;
+        if (!canActOnTenant(ctx.user, jobOrgId)) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+
         const jobMatches = await db.getMatchesByJob(input.jobId);
         const { data: jobExceptions } = await db.getExceptions({
-          organizationId: ctx.user.organizationId ?? null,
+          organizationId: jobOrgId,
           jobId: input.jobId,
         });
 
@@ -1792,9 +1922,19 @@ export const appRouter = router({
         const reportId = await db.createReport({
           jobId: input.jobId,
           userId: ctx.user.id,
+          // Without this the row had no tenant, so it appeared in no report
+          // list at all — `reports.list` scopes by organisation.
+          organizationId: jobOrgId,
           reportType: input.reportType,
           title: sanitizeInput(input.title, MAX_NAME_LENGTH),
-          summary: JSON.stringify(summary),
+          // The column is `json`, and every reader treats this as an object —
+          // `Reports.tsx` does `summary?.matchRate` straight off the row, and
+          // nothing anywhere calls JSON.parse on it. Stringifying first stored a
+          // JSON *string* scalar, so that lookup was undefined and every
+          // generated report rendered a 0% match rate. The seeded reports store
+          // an object and rendered correctly, which is how the difference
+          // surfaced.
+          summary,
           format: "pdf",
         });
 
@@ -1912,6 +2052,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -1967,6 +2108,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2284,6 +2426,7 @@ export const appRouter = router({
           totalTransactions: 0,
           matchRate: 0,
           totalExceptions: 0,
+          openExceptions: 0,
           avgProcessingTime: 0,
         };
       }
@@ -2293,6 +2436,10 @@ export const appRouter = router({
           ? ((stats.transactions.matched / stats.transactions.total) * 100)
           : 0,
         totalExceptions: stats.exceptions.total,
+        // The CFO card is titled "Open Exceptions" and showed `total` — every
+        // resolved and dismissed exception counted as outstanding (558 against
+        // 148 actually open on the Globus demo). Open is its own figure.
+        openExceptions: stats.exceptions.open,
         avgProcessingTime: 0, // Placeholder - would need to be calculated from job data
       };
     }),
@@ -2845,9 +2992,11 @@ export const appRouter = router({
 
     get: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const task = await db.getScheduledTaskById(input.id);
-        if (!task) throw new TRPCError({ code: "NOT_FOUND" });
+        // The task names its tenant. It was served by id alone — any tenant's
+        // schedule and run history to any caller who guessed the id.
+        if (!task || !canActOnTenant(ctx.user, task.organizationId ?? null)) throw new TRPCError({ code: "NOT_FOUND" });
         const history = await db.getScheduleRunHistoryByTask(input.id, 20);
         return {
           ...task,
@@ -2878,11 +3027,16 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
 
-        // Validate channels
-        const source = await db.getChannelById(input.sourceChannelId);
-        const target = await db.getChannelById(input.targetChannelId);
-        if (!source) throw new TRPCError({ code: "NOT_FOUND", message: "Source channel not found" });
-        if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target channel not found" });
+        // The schedule — and every run it creates — belongs to the caller's
+        // organisation, and may name only that organisation's channels (or a
+        // shared rail). It recorded no owner and looked channels up by id
+        // alone, so each run it produced was refused for having no owner, and
+        // any tenant's channel could be named. Same rule as reconciliation.create.
+        const tenant = runOwner(ctx.user);
+        await requireOwnedChannels(tenant, [
+          { id: input.sourceChannelId, notFound: "Source channel not found" },
+          { id: input.targetChannelId, notFound: "Target channel not found" },
+        ]);
         if (input.sourceChannelId === input.targetChannelId) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Source and target channels must be different" });
         }
@@ -2895,6 +3049,7 @@ export const appRouter = router({
 
         const id = await db.createScheduledTask({
           userId: ctx.user.id,
+          organizationId: tenant,
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           description: input.description ? sanitizeInput(input.description, 1000) : null,
           sourceChannelId: input.sourceChannelId,
@@ -3049,7 +3204,8 @@ export const appRouter = router({
           updateData.lowMatchRateThreshold = String(input.lowMatchRateThreshold);
         }
         await db.upsertEmailPreferences(ctx.user.id, updateData);
-        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua);
+        // The caller's OWN preferences (keyed by user id), not the tenant's.
+        await logAudit(ctx.user.id, "update_email_prefs", "email_preferences", undefined, input, ip, ua, null);
         return { success: true };
       }),
 
@@ -3082,13 +3238,18 @@ export const appRouter = router({
       return db.getMonitoringStats(ctx.user.organizationId ?? null);
     }),
 
-    activeJobs: protectedProcedure.query(async () => {
-      return getAllActiveJobsProgress();
+    // The caller's organisation only (the portal tenant, inside a portal). This
+    // returned every tenant's live jobs to any signed-in user.
+    activeJobs: protectedProcedure.query(async ({ ctx }) => {
+      return getAllActiveJobsProgress(ctx.user.organizationId ?? null);
     }),
 
     jobProgress: protectedProcedure
       .input(z.object({ jobId: z.number().int().positive() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        // The job names its tenant; the caller must be allowed to see it. It
+        // was served by id alone.
+        await assertJobVisible(ctx.user, input.jobId);
         const progress = await getJobProgress(input.jobId);
         if (!progress) throw new TRPCError({ code: "NOT_FOUND" });
         return progress;
@@ -3318,7 +3479,8 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         if (ctx.user.role === "super_admin") {
           // Portal-view: scope to the viewed org and hide Infinity AI super admins.
-          if (input?.viewAsOrgId) return db.getUsersByOrg(input.viewAsOrgId, { excludeSuperAdmins: true });
+          const portal = input?.viewAsOrgId || ctx.viewingAs;
+          if (portal) return db.getUsersByOrg(portal, { excludeSuperAdmins: true });
           // Super-admin home: full cross-tenant list.
           return db.getAllUsers();
         }
@@ -3340,9 +3502,12 @@ export const appRouter = router({
         }
         const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
+        // Granting super admin is a platform event, not the tenant's: it joins the
+        // global chain even from inside a portal. Any other role change is about
+        // the tenant on screen (assertCanManageUsers holds the target to it).
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
           newRole: input.role,
-        }, ip, ua);
+        }, ip, ua, input.role === "super_admin" ? null : undefined);
         return { success: true };
       }),
     bulkUpdateRole: adminProcedure
@@ -3360,7 +3525,8 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ role: input.role }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua);
+          await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua,
+            input.role === "super_admin" ? null : undefined);
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3395,7 +3561,8 @@ export const appRouter = router({
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ organizationId: input.organizationId }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua);
+          // Spans two organisations, so it belongs to neither's trail: global.
+          await logAudit(ctx.user.id, "update_user_org", "user", userId, { organizationId: input.organizationId }, ip, ua, null);
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3441,7 +3608,9 @@ export const appRouter = router({
           loginMethod: "invite",
         });
         const newUserId = (result as any).insertId;
-        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua);
+        // The new user's own organisation, which the row names — not the portal
+        // on screen: a super admin may create a user for any organisation.
+        await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua, targetOrgId);
         // Send welcome email with magic login link
         if (input.origin) {
           try {
@@ -3548,9 +3717,10 @@ export const appRouter = router({
         await drizzle.update(users)
           .set({ organizationId: input.organizationId })
           .where(eq(users.id, input.userId));
+        // Spans two organisations, so it belongs to neither's trail: global.
         await logAudit(ctx.user.id, "update_user_org", "user", input.userId, {
           organizationId: input.organizationId,
-        }, ip, ua);
+        }, ip, ua, null);
         return { success: true };
       }),
 
@@ -4874,7 +5044,9 @@ Always be specific, reference actual exception IDs and amounts where available, 
             matchedPairs: result.matchedCount,
             exceptionCases: result.exceptionCount,
             reviewQueueOpenToday: result.reviewQueueOpenToday,
-          }, ip, ua);
+            // Named, not defaulted: a platform procedure runs outside the portal
+            // scope (superAdminProcedure), and this one acts on the tenant on screen.
+          }, ip, ua, target);
           return { success: true, ...result };
         }
         const result = await seedDemoData(ctx.user.id, ctx.user.organizationId ?? null);
@@ -6442,8 +6614,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
   // ─── Exception Intelligence Layer ──────────────────────────────────
   exceptionIntelligence: router({
     // Per-org settings + transparency: what is shared and the current posture.
-    getSettings: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    getSettings: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const ei = await import("./exceptionIntelligence");
       const settings = await ei.getSettings(orgId);
       return {
@@ -6458,18 +6633,32 @@ Always be specific, reference actual exception IDs and amounts where available, 
     }),
 
     updateSettings: adminProcedure
-      .input(z.object({ shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
+      .input(z.object({ ...viewAsOrgInput, shareEnabled: z.boolean().optional(), consumeEnabled: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
-        const orgId = ctx.user.organizationId ?? 0;
+        // Acts on the tenant being VIEWED, because that is the one whose
+        // settings are on screen. Scoping only the reads meant a super admin
+        // inside tenant B toggled data sharing, saw "saved", watched tenant B's
+        // unchanged posture — and had actually changed Infinity AI's own. A
+        // control whose switch reports success while affecting a different
+        // organisation is worse than one that refuses.
+        //
+        // This is the deliberate exception to "reads only": the portal exists so
+        // staff can administer a tenant, the override is super-admin-gated, and
+        // the audit entry below records which organisation was actually changed.
+        const orgId = portalScopedOrgId(ctx.user, input.viewAsOrgId) ?? 0;
         const ei = await import("./exceptionIntelligence");
-        const updated = await ei.updateSettings(orgId, input);
+        const { viewAsOrgId: _ignored, ...settings } = input;
+        const updated = await ei.updateSettings(orgId, settings);
         await logAudit(ctx.user.id, "exception_intelligence_settings_updated", "exception_intelligence", orgId, input);
         return { shareEnabled: updated?.shareEnabled ?? false, consumeEnabled: updated?.consumeEnabled ?? false };
       }),
 
     // Local contribution stats (what this org has observed).
-    status: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    status: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const drizzle = await getDb();
       if (!drizzle) return { localSignatures: 0, localObservations: 0, sharedPatternsAvailable: 0 };
       const { exceptionPatternSignatures: eps, sharedExceptionPatterns: sep } = await import("../drizzle/schema");
@@ -6490,8 +6679,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
     }),
 
     // Admin: rebuild the shared pool aggregate (cloud) and/or push to the pool (on-prem).
-    sync: adminProcedure.mutation(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    sync: adminProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .mutation(async ({ ctx, input }) => {
+      // Same reason as updateSettings: this pushes the VIEWED tenant's patterns
+      // to the shared pool, which is what the screen says it will do.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const ei = await import("./exceptionIntelligence");
       const aggregated = await ei.aggregateSharedPatterns();
       const pushed = await ei.syncToPool(orgId);
@@ -6581,8 +6774,11 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
     // Per-institution learning flywheel stats: patterns captured by this org over time.
     // Powers the "value grows with every job" narrative in the UI.
-    flywheelStats: protectedProcedure.query(async ({ ctx }) => {
-      const orgId = ctx.user.organizationId ?? 0;
+    flywheelStats: protectedProcedure
+      .input(z.object({ ...viewAsOrgInput }).optional())
+      .query(async ({ ctx, input }) => {
+      // Honours the super-admin portal switcher; see portalScopedOrgId.
+      const orgId = portalScopedOrgId(ctx.user, input?.viewAsOrgId) ?? 0;
       const drizzle = await getDb();
       if (!drizzle) return { totalPatterns: 0, categoryCoverage: [] as { category: string; count: number }[], monthlyGrowth: [] as { month: string; count: number }[] };
 
@@ -7216,6 +7412,10 @@ startSftpPolling();
 startBucketPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
+// Keep the two demo tenants' timelines current (hourly; allow-listed by code,
+// refuses anything that is not a demo tenant). Runs ONLY in the deployed
+// production service — never under `pnpm dev`, whose .env may name production.
+startDemoTimelineRoll();
 // Pre-warm the shared demo user so the first guest gets instant data
 // Runs asynchronously — does not block server startup
 setImmediate(() => {

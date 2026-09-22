@@ -571,7 +571,10 @@ describe("when the guard is wired into the procedure builders", () => {
     // The behavioural tests above cover the builders that exist today. This
     // catches the way the guarantee would be lost tomorrow: someone re-basing a
     // builder on the raw `t.procedure` and quietly dropping the ban.
-    expect(TRPC).toMatch(/const baseProcedure = t\.procedure\.use\(refuseReadOnlyWrites\)/);
+    // The ban must be in the base chain. Other middleware may precede it — the
+    // request scope (server/_core/requestScope.ts) does — but it may not be
+    // absent from the base every builder derives from.
+    expect(TRPC).toMatch(/const baseProcedure = t\.procedure(?:\.use\(\w+\))*\.use\(refuseReadOnlyWrites\)/);
     expect(TRPC).toMatch(/export const publicProcedure = baseProcedure/);
     expect(TRPC).toMatch(/export const protectedProcedure = baseProcedure\.use\(requireUser\)/);
     expect(TRPC).toMatch(/export const adminProcedure = baseProcedure\.use\(/);

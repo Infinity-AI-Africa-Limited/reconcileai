@@ -7,6 +7,9 @@ import { Link } from "wouter";
 import { toast } from "sonner";
 import { usePortalContext } from "@/contexts/PortalContext";
 import { useDashboardVisibility } from "@/hooks/useDashboardVisibility";
+import { useReachableHref } from "@/hooks/useReachableHref";
+import { CountLink } from "@/components/CountLink";
+import { exceptionsHref, transactionsHref } from "@/lib/listLinks";
 
 export default function Dashboard() {
   const { viewAsOrg, isViewingAs } = usePortalContext();
@@ -17,6 +20,8 @@ export default function Dashboard() {
   // All "what should this vertical see" logic lives in the hook; the page only
   // renders what it is told.
   const { cbnBadge, showPilotReadiness } = useDashboardVisibility(stats);
+  // Every count opens the list it counted, when the viewer may open that list.
+  const reachable = useReachableHref();
 
   if (isLoading) {
     return (
@@ -59,16 +64,18 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Transactions</CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{stats?.transactions.total.toLocaleString() || 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">Across all channels</p>
-          </CardContent>
-        </Card>
+        <CountLink href={reachable(transactionsHref())} title="View all transactions">
+          <Card className="h-full">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Total Transactions</CardTitle>
+              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold">{stats?.transactions.total.toLocaleString() || 0}</div>
+              <p className="text-xs text-muted-foreground mt-1">Across all channels</p>
+            </CardContent>
+          </Card>
+        </CountLink>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -81,27 +88,31 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Open Exceptions</CardTitle>
-            <AlertTriangle className="h-4 w-4 text-amber-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-amber-500">{stats?.exceptions.open || 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">{stats?.exceptions.inReview || 0} in review</p>
-          </CardContent>
-        </Card>
+        <CountLink href={reachable(exceptionsHref("open"))} title="View open exceptions">
+          <Card className="h-full">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Open Exceptions</CardTitle>
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-amber-500">{stats?.exceptions.open || 0}</div>
+              <p className="text-xs text-muted-foreground mt-1">{stats?.exceptions.inReview || 0} in review</p>
+            </CardContent>
+          </Card>
+        </CountLink>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Unmatched</CardTitle>
-            <XCircle className="h-4 w-4 text-destructive" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-destructive">{stats?.transactions.unmatched || 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">Require attention</p>
-          </CardContent>
-        </Card>
+        <CountLink href={reachable(transactionsHref({ status: "unmatched" }))} title="View unmatched transactions">
+          <Card className="h-full">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Unmatched</CardTitle>
+              <XCircle className="h-4 w-4 text-destructive" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-destructive">{stats?.transactions.unmatched || 0}</div>
+              <p className="text-xs text-muted-foreground mt-1">Require attention</p>
+            </CardContent>
+          </Card>
+        </CountLink>
       </div>
 
       {/* Reconciliation Jobs & Channel Stats */}
@@ -112,10 +123,14 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <CountLink
+                href={reachable("/reconciliation")}
+                title="View reconciliation jobs"
+                className="flex items-center justify-between -mx-2 px-2 py-1"
+              >
                 <span className="text-sm text-muted-foreground">Total Jobs</span>
                 <span className="font-semibold">{stats?.jobs.total || 0}</span>
-              </div>
+              </CountLink>
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">Completed</span>
                 <span className="font-semibold text-green-600">{stats?.jobs.completed || 0}</span>
@@ -138,31 +153,32 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <CountLink
+                href={reachable(exceptionsHref())}
+                title="View all exceptions"
+                className="flex items-center justify-between -mx-2 px-2 py-1"
+              >
                 <span className="text-sm text-muted-foreground">Total Exceptions</span>
                 <span className="font-semibold">{stats?.exceptions.total || 0}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-red-500" />
-                  <span className="text-sm text-muted-foreground">Open</span>
-                </div>
-                <span className="font-semibold">{stats?.exceptions.open || 0}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-amber-500" />
-                  <span className="text-sm text-muted-foreground">In Review</span>
-                </div>
-                <span className="font-semibold">{stats?.exceptions.inReview || 0}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500" />
-                  <span className="text-sm text-muted-foreground">Resolved</span>
-                </div>
-                <span className="font-semibold">{stats?.exceptions.resolved || 0}</span>
-              </div>
+              </CountLink>
+              {([
+                { status: "open", label: "Open", dot: "bg-red-500", value: stats?.exceptions.open },
+                { status: "in_review", label: "In Review", dot: "bg-amber-500", value: stats?.exceptions.inReview },
+                { status: "resolved", label: "Resolved", dot: "bg-green-500", value: stats?.exceptions.resolved },
+              ] as const).map((row) => (
+                <CountLink
+                  key={row.status}
+                  href={reachable(exceptionsHref(row.status))}
+                  title={`View ${row.label.toLowerCase()} exceptions`}
+                  className="flex items-center justify-between -mx-2 px-2 py-1"
+                >
+                  <div className="flex items-center gap-2">
+                    <div className={`h-2 w-2 rounded-full ${row.dot}`} />
+                    <span className="text-sm text-muted-foreground">{row.label}</span>
+                  </div>
+                  <span className="font-semibold">{row.value || 0}</span>
+                </CountLink>
+              ))}
             </div>
           </CardContent>
         </Card>
@@ -190,12 +206,30 @@ export default function Dashboard() {
                   {stats?.channelStats?.map((ch) => {
                     const channel = ch.channelId != null ? channelMap.get(ch.channelId) : undefined;
                     const rate = ch.total > 0 ? ((Number(ch.matched) / Number(ch.total)) * 100).toFixed(1) : "0.0";
+                    // A row with no channel has no filter that selects it, so its
+                    // counts stay plain rather than opening every channel's rows.
+                    const unmatchedHref =
+                      ch.channelId != null && Number(ch.unmatched) > 0
+                        ? reachable(transactionsHref({ status: "unmatched", channelId: ch.channelId }))
+                        : null;
                     return (
                       <tr key={ch.channelId} className="border-b last:border-0">
                         <td className="py-3 px-2 font-medium">{channel?.name || `Channel ${ch.channelId}`}</td>
                         <td className="py-3 px-2 text-right">{Number(ch.total).toLocaleString()}</td>
                         <td className="py-3 px-2 text-right text-green-600">{Number(ch.matched).toLocaleString()}</td>
-                        <td className="py-3 px-2 text-right text-red-500">{Number(ch.unmatched).toLocaleString()}</td>
+                        <td className="py-3 px-2 text-right text-red-500">
+                          {unmatchedHref ? (
+                            <Link
+                              href={unmatchedHref}
+                              title={`View unmatched transactions on ${channel?.name ?? "this channel"}`}
+                              className="underline decoration-dotted underline-offset-4 hover:decoration-solid"
+                            >
+                              {Number(ch.unmatched).toLocaleString()}
+                            </Link>
+                          ) : (
+                            Number(ch.unmatched).toLocaleString()
+                          )}
+                        </td>
                         <td className="py-3 px-2 text-right">
                           <span className={`font-semibold ${parseFloat(rate) >= 80 ? "text-green-600" : parseFloat(rate) >= 50 ? "text-amber-500" : "text-red-500"}`}>
                             {rate}%

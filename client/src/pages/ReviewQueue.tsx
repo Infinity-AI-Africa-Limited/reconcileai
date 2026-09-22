@@ -9,12 +9,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Loader2, CheckCircle2, XCircle, Eye, ClipboardList,
   AlertTriangle, Sparkles, Brain, FileText, Mail, BookOpen,
-  Zap, CalendarDays, X, Lock
+  Zap, Lock
 } from "lucide-react";
 import { toast } from "sonner";
-import { useDateRange, DATE_PRESETS, type DatePreset } from "@/hooks/useDateRange";
+import { useDateRange } from "@/hooks/useDateRange";
+import { DateRangeBar } from "@/components/DateRangeBar";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
+import { HiddenExceptionsNotice } from "@/components/HiddenExceptionsNotice";
 
 type DiagnosisResult = {
   exceptionId: number;
@@ -29,15 +32,15 @@ type DiagnosisResult = {
 };
 
 export default function ReviewQueuePage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const { user } = useAuth();
   const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
-  const {
-    dateFrom, dateTo, dateFromObj, dateToObj,
-    setDateFrom, setDateTo, applyPreset, resetToToday,
-    activePreset, isToday, isSingleDay,
-  } = useDateRange("reconcileai_reviewqueue_daterange");
+  const range = useDateRange("reconcileai_reviewqueue_daterange");
+  const { dateFromObj, dateToObj, setDateFrom, resetToDefault, isToday, label: dateLabel } = range;
 
   const { data: exceptions, isLoading, refetch } = trpc.exceptions.list.useQuery({
+    viewAsOrgId,
     status: "open",
     dateFrom: dateFromObj,
     dateTo: dateToObj,
@@ -53,8 +56,6 @@ export default function ReviewQueuePage() {
   const [diagnosisEx, setDiagnosisEx] = useState<any>(null);
   const [diagnosisResult, setDiagnosisResult] = useState<DiagnosisResult | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
-
-  const dateLabel = isToday ? "Today" : isSingleDay ? dateFrom : `${dateFrom} – ${dateTo}`;
 
   const handleAction = async (id: number, status: "resolved" | "dismissed") => {
     try {
@@ -133,52 +134,11 @@ export default function ReviewQueuePage() {
         </div>
       )}
 
+      <HiddenExceptionsNotice dateFrom={dateFromObj} status="open" onReveal={setDateFrom} />
+
       {/* Date range filter */}
       <div className="flex flex-wrap gap-3 items-center">
-        {/* Quick-select preset pills */}
-        <div className="flex items-center gap-1 rounded-lg border bg-muted/30 p-1">
-          {DATE_PRESETS.map((p) => (
-            <button
-              key={p.key}
-              onClick={() => applyPreset(p.key as DatePreset)}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                activePreset === p.key
-                  ? "bg-primary text-primary-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Date inputs */}
-        <div className="flex items-center gap-2 bg-muted/40 border rounded-lg px-3 py-2">
-          <CalendarDays className="h-4 w-4 text-muted-foreground shrink-0" />
-          <div className="flex items-center gap-1.5">
-            <Input
-              type="date"
-              value={dateFrom}
-              max={dateTo}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
-            />
-            <span className="text-xs text-muted-foreground">→</span>
-            <Input
-              type="date"
-              value={dateTo}
-              min={dateFrom}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="h-7 w-36 text-xs border-0 bg-transparent p-0 focus-visible:ring-0"
-            />
-          </div>
-          {!isToday && (
-            <button onClick={resetToToday} className="ml-1 text-muted-foreground hover:text-foreground" title="Reset to today">
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-
+        <DateRangeBar range={range} />
         <span className="text-xs text-muted-foreground">{dateLabel}</span>
       </div>
 
@@ -269,8 +229,8 @@ export default function ReviewQueuePage() {
             <p className="text-muted-foreground text-sm mt-1">
               {isToday ? "No open exceptions for today." : "No open exceptions match the selected date range."}
             </p>
-            {!isToday && (
-              <Button variant="outline" size="sm" className="mt-4" onClick={resetToToday}>Reset to today</Button>
+            {range.isDefault ? null : (
+              <Button variant="outline" size="sm" className="mt-4" onClick={resetToDefault}>Reset to today</Button>
             )}
           </CardContent>
         </Card>

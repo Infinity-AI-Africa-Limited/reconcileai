@@ -687,8 +687,10 @@ export default function CfoDashboard() {
             <AlertCircle className="h-4 w-4 text-orange-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-[#1B365D]">{formatNumber(kpis?.totalExceptions || 0)}</div>
-            <p className="text-xs text-[#8C757D] mt-1">Requiring review</p>
+            <div className="text-2xl font-bold text-[#1B365D]">{formatNumber(kpis?.openExceptions || 0)}</div>
+            <p className="text-xs text-[#8C757D] mt-1">
+              Requiring review · {formatNumber(kpis?.totalExceptions || 0)} raised in total
+            </p>
           </CardContent>
         </Card>
         <Card>

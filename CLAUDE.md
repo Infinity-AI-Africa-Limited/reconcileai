@@ -1007,6 +1007,40 @@ Super admins can "enter" any organisation's portal and see the app scoped to tha
 - `client/src/components/DashboardLayout.tsx` — portal banner, segment-aware sidebar
 - `client/src/pages/SuperAdminDashboard.tsx` — "Enter Portal" button per org row
 
+**How the server knows (structural, since 2026-09-21).** Every tRPC request
+carries the portal tenant in the `x-portal-org` header (`client/src/lib/portalRequest.ts`,
+sent from `main.tsx`). In `server/_core/context.ts`, `applyPortalView` makes that
+tenant the request's `ctx.user.organizationId` — **for `super_admin` only**; the
+header is ignored for everyone else, and an unknown tenant fails CLOSED to no
+organisation (never the operator's own). `ctx.actor` is the signed-in account
+(`auth.me` returns it); `ctx.viewingAs` is the tenant. So every procedure that
+keys on the caller's organisation — reads AND writes — follows the portal
+without passing `viewAsOrgId`. Audit entries written without an explicit
+organisation default to the portal tenant (`server/_core/requestScope.ts`).
+The monitoring SSE stream takes the same id as `?portalOrg=`. Reads that widen
+to "all tenants" by ROLE (e.g. `channelListScope`) must also take `ctx.viewingAs`.
+The React Query cache is reset on entering/leaving a portal (keys carry no tenant).
+
+**The role does not change in a portal — so every role-keyed bypass must ask
+about the portal too.** Two rules follow, both found by review on PR #141:
+
+- **By-id reach narrows to the tenant on screen.** `canActOnTenant`,
+  `assertCanManageUsers` and `tenancy.assertSameOrg` let staff reach any tenant
+  *outside* a portal and only the viewed tenant *inside* one — they read the
+  portal from the request scope, so no call site can forget it. Otherwise a
+  stale link from tenant B, opened in A's portal, shows B's figures under A's
+  banner and files any change in A's trail.
+- **Platform procedures run outside the portal scope.** `superAdminProcedure`
+  re-binds the request scope to "no portal": the browser sends the header on
+  every call, including from the Super Admin dashboard while a portal is still
+  open, and the audit default would otherwise file "created organisation B" in
+  tenant A's trail — which A's users can read and export. `ctx.user` is left
+  alone, so a platform procedure that acts on the tenant on screen
+  (`demo.activate`) still can — and must NAME that tenant in its audit call.
+  Events about the account rather than a tenant (sign-out, personal email
+  preferences, super-admin grants, moving a user between organisations) pass an
+  explicit `null`.
+
 ### Segment-Specific Navigation
 - `financialServicesMenuItems` — includes CBN Reports, Multi-Channel, Email Settings, Module Configuration
 - `financialServicesAdvancedItems` — full Advanced Tools dropdown (Sample Data, Integrations, API Ingestion, SFTP Config, Anomaly Detection)

@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { useSearch } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -6,37 +7,61 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, Search, ChevronLeft, ChevronRight } from "lucide-react";
 import { useOrgSegment } from "@/hooks/useOrgSegment";
+import { useDateRange } from "@/hooks/useDateRange";
+import { DateRangeBar } from "@/components/DateRangeBar";
+import { rangeFromSearch } from "@/lib/dateRange";
+import { TRANSACTION_LIST_STATUSES, channelFromSearch, statusFromSearch } from "@/lib/listLinks";
 import { labelForPath } from "@/lib/navItems";
+import { useViewAsOrgId } from "@/contexts/PortalContext";
 
 export default function TransactionsPage() {
+  // Super admins inside a tenant portal must read THAT tenant's data.
+  const viewAsOrgId = useViewAsOrgId();
   const segment = useOrgSegment();
   // The same source the sidebar reads, so a merchant who clicks
   // "Orders & Payments" does not land on a page headed "Transactions".
   const heading = labelForPath("/transactions", segment) ?? "Transactions";
-  const { data: channels } = trpc.channels.list.useQuery();
+  const { data: channels } = trpc.channels.list.useQuery({ viewAsOrgId });
+
+  // A dashboard count arrives as ?status=unmatched[&channelId=N]. Read once:
+  // it is where the viewer came from, not state the page keeps in sync.
+  const search = useSearch();
+  const [arrival] = useState(() => ({
+    range: rangeFromSearch(search),
+    status: statusFromSearch(search, TRANSACTION_LIST_STATUSES),
+    channelId: channelFromSearch(search),
+  }));
+  // Opens on every date, newest first — as it always has. A merchant's orders
+  // may be weeks old, and a Today default would open their page empty.
+  const range = useDateRange("reconcileai_transactions_daterange", { defaultPreset: "all", initial: arrival.range });
+
   const [filters, setFilters] = useState({
-    channelId: "",
-    status: "",
-    dateFrom: "",
-    dateTo: "",
+    channelId: arrival.channelId ? String(arrival.channelId) : "",
+    status: arrival.status ?? "",
     amountMin: "",
     amountMax: "",
     search: "",
   });
   const [page, setPage] = useState(0);
   const limit = 50;
+  // A new range is a new result set; stay on page 1 of it.
+  useEffect(() => setPage(0), [range.dateFrom, range.dateTo]);
 
+  // Dates go as instants, not bare days. "2026-09-21" reached the server as
+  // midnight UTC, so "to the 21st" ended as the 21st began and a one-day range
+  // held nothing — and in the viewer's zone the day never started at midnight.
   const queryInput = useMemo(() => ({
+    viewAsOrgId,
     channelId: filters.channelId ? parseInt(filters.channelId) : undefined,
     status: filters.status || undefined,
-    dateFrom: filters.dateFrom || undefined,
-    dateTo: filters.dateTo || undefined,
+    dateFrom: range.dateFromObj?.toISOString(),
+    dateTo: range.dateToObj?.toISOString(),
     amountMin: filters.amountMin ? parseFloat(filters.amountMin) : undefined,
     amountMax: filters.amountMax ? parseFloat(filters.amountMax) : undefined,
     search: filters.search || undefined,
     limit,
     offset: page * limit,
-  }), [filters, page]);
+  }), [filters, page, range.dateFromObj, range.dateToObj, viewAsOrgId]);
 
   const { data, isLoading } = trpc.transactions.list.useQuery(queryInput);
   const channelMap = useMemo(() => new Map(channels?.map((c) => [c.id, c]) || []), [channels]);
@@ -87,15 +112,12 @@ export default function TransactionsPage() {
                 <SelectItem value="exception">Exception</SelectItem>
               </SelectContent>
             </Select>
-            <div className="flex gap-2">
-              <Input type="date" placeholder="From" value={filters.dateFrom} onChange={(e) => { setFilters({ ...filters, dateFrom: e.target.value }); setPage(0); }} />
-              <Input type="date" placeholder="To" value={filters.dateTo} onChange={(e) => { setFilters({ ...filters, dateTo: e.target.value }); setPage(0); }} />
-            </div>
           </div>
-          <div className="flex gap-3 mt-3">
+          <div className="flex flex-wrap gap-3 mt-3 items-center">
+            <DateRangeBar range={range} />
             <Input type="number" placeholder="Min Amount" value={filters.amountMin} onChange={(e) => { setFilters({ ...filters, amountMin: e.target.value }); setPage(0); }} className="w-36" />
             <Input type="number" placeholder="Max Amount" value={filters.amountMax} onChange={(e) => { setFilters({ ...filters, amountMax: e.target.value }); setPage(0); }} className="w-36" />
-            <Button variant="outline" onClick={() => { setFilters({ channelId: "", status: "", dateFrom: "", dateTo: "", amountMin: "", amountMax: "", search: "" }); setPage(0); }}>
+            <Button variant="outline" onClick={() => { setFilters({ channelId: "", status: "", amountMin: "", amountMax: "", search: "" }); range.resetToDefault(); setPage(0); }}>
               Clear Filters
             </Button>
           </div>
@@ -126,7 +148,9 @@ export default function TransactionsPage() {
                     <tr key={txn.id} className="border-b last:border-0 hover:bg-muted/30">
                       <td className="py-3 px-2 font-mono text-xs">{txn.transactionRef || "-"}</td>
                       <td className="py-3 px-2 text-xs">{channelMap.get(txn.channelId)?.name || "-"}</td>
-                      <td className="py-3 px-2 text-xs">{new Date(txn.transactionDate).toLocaleDateString()}</td>
+                      <td className="py-3 px-2 text-xs whitespace-nowrap">
+                        {new Date(txn.transactionDate).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+                      </td>
                       <td className="py-3 px-2 text-right font-mono">
                         <span className={txn.debitCredit === "credit" ? "text-green-600" : "text-red-500"}>
                           {txn.debitCredit === "credit" ? "+" : "-"}{parseFloat(txn.amount).toLocaleString()} {txn.currency}
