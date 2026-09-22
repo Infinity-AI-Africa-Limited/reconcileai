@@ -22,7 +22,7 @@ import {
   verifyShopifyCallbackHmac,
 } from "./auth";
 import { fetchShopifyShopMetadata } from "./apiClient";
-import { onboardShopifyMerchant, ShopifyOnboardingError } from "./onboarding";
+import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
 
@@ -199,6 +199,11 @@ export function createShopifyRouter(): express.Router {
         throw error;
       }
       await purgeExpiredStates(db);
+
+      // Last write before the exchange, and deliberately so: the exchange
+      // retires the shop's stored refresh token, so its live connection goes
+      // out of service first. If this fails we stop here, with nothing retired.
+      await suspendForReauthorization(shopDomain);
 
       const tokens = await exchangeAuthorizationCode({
         shopDomain,

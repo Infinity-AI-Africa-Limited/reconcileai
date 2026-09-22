@@ -201,6 +201,8 @@ export type ShopifySyncCursor = typeof shopifySyncCursors.$inferSelect;
 
 /** Every value `shopify_connector_stores.statusReason` may hold. */
 export const SHOPIFY_STATUS_REASONS = [
+  /** A reauthorization is under way: set before the code exchange retires the stored tokens. */
+  "reauthorization_pending",
   /** The shop's current contact email matches no active administrator of the owning workspace. */
   "ownership_unverified",
   /** Shopify rejected the stored refresh token (401). */

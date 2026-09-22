@@ -145,6 +145,34 @@ export async function onboardShopifyMerchant(params: {
 }
 
 /**
+ * Take the shop's live connection out of service BEFORE its authorization code
+ * is exchanged. Call it after the callback is verified and before the exchange.
+ *
+ * The exchange is what retires the stored refresh token. Taking the store out
+ * of service afterwards (failClosed) depends on a write succeeding after
+ * something has already gone wrong — and if that write fails too, the store
+ * reads `active` on dead credentials. Doing it first removes the dependency:
+ *
+ *   - if THIS write fails, the caller aborts before the exchange, while the
+ *     stored credentials are still valid, so `active` is still true;
+ *   - once it succeeds, every later failure — including a failure to record
+ *     the reason — leaves the store out of service. Only the atomic success
+ *     path in reauthorizeExistingStore makes it `active` again.
+ *
+ * Only an `active` store is touched: an uninstalled or pending one has no live
+ * connection to protect. Matched by domain because the shop id is not known
+ * until after the exchange (it comes from the metadata call).
+ */
+export async function suspendForReauthorization(shopDomain: string): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new ShopifyOnboardingError("Database unavailable", "DB_UNAVAILABLE");
+  await db
+    .update(shopifyConnectorStores)
+    .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
+    .where(and(eq(shopifyConnectorStores.shopDomain, shopDomain), eq(shopifyConnectorStores.status, "active")));
+}
+
+/**
  * The store record this shop already has, by its Shopify id OR its permanent
  * domain. Both are unique, and they must agree: a domain that now names a
  * different shop id (or two records, one per key) cannot be resolved by picking
@@ -430,10 +458,13 @@ async function createMerchantWorkspace(
  * the outcome is NOT swallowed: it is returned as a named state for the caller
  * to carry on its error, and logged under a marker distinct enough to alert on.
  *
- * What cannot be done is record it durably — the write that failed is the
- * durable record. The backstop is the token store: the retired refresh token
- * earns a 401 on the next refresh, and that path fails the store closed itself
- * (tokenStore.ts, markReauthorizationRequired with a fence).
+ * Safety does not rest on this write. An existing live store was already taken
+ * out of service before the code exchange (suspendForReauthorization), and a
+ * first install is still `pending_claim`; what this adds is the specific reason
+ * and the removal of credentials that are now dead. The one path it still
+ * guards alone is a store matched only by shop id after its domain changed —
+ * and there the token store's fenced 401 path fails the store closed on the
+ * next refresh.
  */
 async function failClosed(
   db: Db,

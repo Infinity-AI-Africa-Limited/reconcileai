@@ -149,6 +149,37 @@ describe("GET /api/shopify/callback", () => {
     expect(exchangeAuthorizationCode).toHaveBeenCalledTimes(1);
   });
 
+  it("should take a live store out of service before exchanging the code that retires its credentials", async () => {
+    // Greptile #134 re-review: a fail-close attempted AFTER a failure can itself
+    // fail, leaving `active` on retired credentials. Suspending first means the
+    // store is already out of service whatever happens after the exchange.
+    const fake = scriptedDb();
+    state.db = fake.db;
+    let suspendedBeforeExchange = false;
+    vi.mocked(exchangeAuthorizationCode).mockImplementationOnce(async () => {
+      suspendedBeforeExchange = fake.writes("update", "shopify_connector_stores").some(
+        (op) => op.data?.status === "reauthorization_required" && op.data?.statusReason === "reauthorization_pending",
+      );
+      throw new Error("stop here");
+    });
+
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), fakeRes() as never);
+
+    expect(suspendedBeforeExchange).toBe(true);
+    const suspend = fake.writes("update", "shopify_connector_stores")[0];
+    expect(suspend?.where?.params).toEqual(expect.arrayContaining([SHOP, "active"]));
+  });
+
+  it("should not exchange the code at all when the suspension cannot be written", async () => {
+    // Nothing is retired until the exchange, so stopping here leaves a live
+    // store truthfully active.
+    state.db = scriptedDb({ update: { shopify_connector_stores: [new Error("ECONNRESET")] } }).db;
+    const res = fakeRes();
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+    expect(reason(res.location)).toBe("install_failed");
+  });
+
   it("should refuse a state that does not match the browser's flow cookie", async () => {
     state.db = scriptedDb().db;
     const res = fakeRes();
