@@ -15,7 +15,7 @@ import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from
 import { isTenantId } from "@shared/tenantId";
 import { currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, type DbExecutor } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, type DbTransaction } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -494,8 +494,11 @@ export async function logAuditStrict(entry: {
    * back together. Propagating the failure is not enough on its own: without
    * this the row is already committed when the audit insert fails, so the caller
    * reports failure over a change that did happen and left no trace.
+   *
+   * A transaction only: the audit chain's lock is held until commit, and a
+   * pooled handle would release it statement by statement (createAuditLog).
    */
-  executor?: DbExecutor;
+  executor?: DbTransaction;
 }) {
   await createAuditLog(
     {

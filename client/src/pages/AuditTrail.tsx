@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, Shield, ShieldCheck, ShieldAlert, ChevronLeft, ChevronRight, Download } from "lucide-react";
 import { toast } from "sonner";
+import { intactBadge, intactToastSuffix, intactTooltip } from "@/lib/auditIntegrity";
 
 export default function AuditTrailPage() {
   const [filters, setFilters] = useState({ action: "", entityType: "", dateFrom: "", dateTo: "" });
@@ -19,9 +20,11 @@ export default function AuditTrailPage() {
   });
 
   const exportXlsxMutation = trpc.audit.exportXlsx.useMutation();
-  // `roundedRows` is kept with the result, not only toasted: the badge persists
-  // after the toast is gone, and an examiner reading it must see the caveat.
-  const [integrity, setIntegrity] = useState<{ valid: boolean; signedRows: number; roundedRows: number; reason: string | null } | null>(null);
+  // The allowance counts are kept with the result, not only toasted: the badge
+  // persists after the toast is gone, and an examiner reading it must see them.
+  const [integrity, setIntegrity] = useState<
+    { valid: boolean; signedRows: number; roundedRows: number; forkedRows: number; reason: string | null } | null
+  >(null);
   const verifyChainQuery = trpc.audit.verifyChain.useQuery(undefined, { enabled: false });
 
   const handleVerifyIntegrity = async () => {
@@ -29,13 +32,13 @@ export default function AuditTrailPage() {
       const res = await verifyChainQuery.refetch();
       const r = res.data;
       if (!r) throw new Error("No result");
-      setIntegrity({ valid: r.valid, signedRows: r.signedRows, roundedRows: r.roundedRows, reason: r.reason });
+      setIntegrity({ valid: r.valid, signedRows: r.signedRows, roundedRows: r.roundedRows, forkedRows: r.forkedRows, reason: r.reason });
       if (r.valid) {
-        // Rounded rows are stated, not folded silently into "verified": they
-        // passed under the narrower rounded-write rule (server/auditChain.ts).
+        // Allowances are stated, not folded silently into "verified"
+        // (client/src/lib/auditIntegrity.ts, server/auditChain.ts).
         toast.success(
           `Audit chain intact — ${r.signedRows.toLocaleString()} entries verified` +
-            (r.roundedRows ? ` (${r.roundedRows.toLocaleString()} at the second they were signed, stored rounded up)` : "") +
+            intactToastSuffix(r) +
             (r.unsignedRows ? `, ${r.unsignedRows} legacy` : ""),
         );
       } else {
@@ -114,16 +117,10 @@ export default function AuditTrailPage() {
           {integrity ? (
             <span
               className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${integrity.valid ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}
-              title={
-                integrity.valid && integrity.roundedRows > 0
-                  ? `${integrity.roundedRows.toLocaleString()} entries were signed by the earlier audit writer, which hashed the second and let the database round it; they verify at the second they were signed. Any other change to them is still detected.`
-                  : integrity.reason ?? undefined
-              }
+              title={integrity.valid ? intactTooltip(integrity) : integrity.reason ?? undefined}
             >
               {integrity.valid ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-              {integrity.valid
-                ? `Chain intact (${integrity.signedRows.toLocaleString()}${integrity.roundedRows > 0 ? ` · ${integrity.roundedRows.toLocaleString()} rounded` : ""})`
-                : "Tampering detected"}
+              {integrity.valid ? intactBadge(integrity) : "Tampering detected"}
             </span>
           ) : null}
           <Button

@@ -447,6 +447,22 @@ export const auditLogs = mysqlTable("audit_logs", {
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type InsertAuditLog = typeof auditLogs.$inferInsert;
 
+/**
+ * One row per audit chain, locked by every writer before it reads the chain's
+ * head, so appends to a chain are serialised.
+ *
+ * Without it two writers could read the same head at once and both write the
+ * next sequence number — a fork: 8 duplicated sequence numbers in the global
+ * chain as of 2026-09-21 (e.g. a double-clicked "revoke"), each breaking
+ * verification. A dedicated row is needed because the global chain has no
+ * organisation row to lock, and an empty chain has no entry to lock.
+ *
+ * `chainKey` is the chain's organisationId, or 0 for the global chain.
+ */
+export const auditChainLocks = mysqlTable("audit_chain_locks", {
+  chainKey: int("chainKey").primaryKey(),
+});
+
 // ─── Exception Age / Escalation Tracker settings ─────────────────────
 // Per-org SLA target (days) for exception resolution. Items open longer than
 // this are "over-aged" and escalate in the Age Tracker. Default 7 days.

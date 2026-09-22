@@ -50,10 +50,12 @@ describe("when createAuditLog writes an entry", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-21T14:05:25.600Z"));
     const inserted: Record<string, unknown>[] = [];
-    const q = { from: () => q, where: () => q, orderBy: () => q, limit: () => q, then: (r: (v: unknown[]) => unknown) => Promise.resolve([]).then(r) };
+    const q = { from: () => q, where: () => q, orderBy: () => q, limit: () => q, for: () => q, then: (r: (v: unknown[]) => unknown) => Promise.resolve([]).then(r) };
     const executor = {
       select: () => q,
       insert: (t: Parameters<typeof getTableName>[0]) => ({
+        // The chain's lock row (audit_chain_locks) is created with INSERT IGNORE.
+        ignore: () => ({ values: async () => {} }),
         values: async (v: Record<string, unknown>) => { expect(getTableName(t)).toBe("audit_logs"); inserted.push(v); },
       }),
     } as unknown as DbExecutor;

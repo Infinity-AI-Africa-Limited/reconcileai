@@ -149,7 +149,11 @@ function fakeDb(script: Script) {
     delete(t: Parameters<typeof getTableName>[0]) { log.push(`delete ${getTableName(t)}`); return { where: async () => {} }; },
     insert(t: Parameters<typeof getTableName>[0]) {
       const table = getTableName(t);
-      return { values: async (v: Record<string, unknown>) => { log.push(`insert ${table}`); inserts.push({ table, values: v }); } };
+      return {
+        // The audit writer creates its chain's lock row with INSERT IGNORE.
+        ignore: () => ({ values: async () => { log.push(`insert-ignore ${table}`); } }),
+        values: async (v: Record<string, unknown>) => { log.push(`insert ${table}`); inserts.push({ table, values: v }); },
+      };
     },
     async transaction<T>(fn: (tx: unknown) => Promise<T>) { log.push("begin"); const r = await fn(db); log.push("commit"); return r; },
   };
