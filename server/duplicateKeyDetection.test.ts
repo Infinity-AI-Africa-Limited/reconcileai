@@ -7,7 +7,11 @@
  * so none of them ever saw a real one:
  *
  *   - _core/tenantKeys.ts provisionTenantKey — the concurrent-first-use race
- *     rethrew instead of adopting the key the other caller stored;
+ *     rethrew instead of adopting the key the other caller stored. Fixed in
+ *     its own PR: server/_core is protected (CLAUDE.md §17) and needs the
+ *     owner's explicit sign-off, which should not hold back the two below —
+ *     neither depends on it, because provisioning now recognises the duplicate
+ *     provisionTenantKey rethrows;
  *   - provisioning.ts provisionTenantBaseline — a step that already existed
  *     reported `failed`, so a re-run of the "idempotent" baseline never passed
  *     (and CBS onboarding, which encrypts its secrets before the baseline,
@@ -55,7 +59,7 @@ import { drizzle } from "drizzle-orm/mysql2";
 import { tenantQuotas } from "../drizzle/tenant_schema";
 import { isDuplicateKeyError } from "./dbErrors";
 import { provisionTenantBaseline } from "./provisioning";
-import { clearDekCacheForTests, getMasterKeyProvider, provisionTenantKey } from "./_core/tenantKeys";
+import { clearDekCacheForTests, getMasterKeyProvider } from "./_core/tenantKeys";
 import { getConfigRow } from "./connectors/woodcore/config";
 import { computeSignature, handleWoodcoreWebhook } from "./connectors/woodcore/webhooks";
 
@@ -116,30 +120,6 @@ describe("the premise: drizzle wraps the driver's error", () => {
     expect(/duplicate/i.test(error?.message ?? "")).toBe(false);
     expect(error?.cause?.code).toBe("ER_DUP_ENTRY");
     expect(isDuplicateKeyError(error)).toBe(true);
-  });
-});
-
-describe("when two callers provision the same tenant's key at once", () => {
-  it("should adopt the key the other caller stored instead of failing", async () => {
-    const winner = await getMasterKeyProvider().generateDek();
-    const { db, statements } = drizzleOver((sql) => {
-      if (sql.startsWith("insert into `tenant_encryption_keys`")) return mysqlDuplicateEntry("uq_tenant_key_org_version");
-      if (sql.startsWith("select") && sql.includes("from `tenant_encryption_keys`")) return [keyRow(winner.wrapped)];
-      return unexpected(sql);
-    });
-    state.db = db;
-
-    const key = await provisionTenantKey(ORG);
-
-    // The winner's DEK: anything either caller encrypts decrypts under the stored key.
-    expect(key.dek.equals(winner.dek)).toBe(true);
-    expect(statements.some((sql) => sql.startsWith("select"))).toBe(true);
-  });
-
-  it("should still surface a failure that is not a duplicate", async () => {
-    const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", errno: -4077 });
-    state.db = drizzleOver(() => reset).db;
-    await expect(provisionTenantKey(ORG)).rejects.toThrow(/Failed query/);
   });
 });
 
@@ -242,11 +222,29 @@ describe("no hand-rolled duplicate detection", () => {
   const offendingLines = (source: string) =>
     source.split(/\r?\n/).filter((line) => HAND_ROLLED.some((pattern) => pattern.test(line)));
 
-  it("should find none outside server/dbErrors.ts", () => {
+  /**
+   * Known offenders whose fix lives elsewhere, each with its reason. An entry
+   * must still offend: the moment its fix lands, the staleness test below fails
+   * until the entry is removed, so this list can only shrink.
+   */
+  const AWAITING_FIX: Record<string, string> = {
+    "server/_core/tenantKeys.ts":
+      "protected plumbing (CLAUDE.md §17): the provisionTenantKey fix is its own PR, pending the owner's explicit sign-off",
+  };
+
+  const normalise = (file: string) => file.split(path.sep).join("/");
+
+  it("should find none outside server/dbErrors.ts and the files awaiting a fix", () => {
     const offenders = sourceFiles("server")
-      .filter((file) => path.basename(file) !== "dbErrors.ts")
-      .flatMap((file) => offendingLines(fs.readFileSync(file, "utf8")).map((line) => `${file}: ${line.trim()}`));
+      .filter((file) => path.basename(file) !== "dbErrors.ts" && !(normalise(file) in AWAITING_FIX))
+      .flatMap((file) => offendingLines(fs.readFileSync(file, "utf8")).map((line) => `${normalise(file)}: ${line.trim()}`));
     expect(offenders, "Detect duplicates with isDuplicateKeyError (server/dbErrors.ts), not a local check").toEqual([]);
+  });
+
+  it("should drop a file from the awaiting list as soon as it is fixed", () => {
+    for (const file of Object.keys(AWAITING_FIX)) {
+      expect(offendingLines(fs.readFileSync(file, "utf8")), `${file} no longer offends — remove it from AWAITING_FIX`).not.toEqual([]);
+    }
   });
 
   it("should recognise each spelling it forbids, so the check above cannot pass vacuously", () => {

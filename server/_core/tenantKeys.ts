@@ -26,7 +26,6 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { tenantEncryptionKeys } from "../../drizzle/tenant_schema";
 import { getDb } from "../db";
-import { isDuplicateKeyError } from "../dbErrors";
 import { ENV } from "./env";
 
 const ALGO = "aes-256-gcm";
@@ -209,7 +208,7 @@ export async function provisionTenantKey(
     });
   } catch (err) {
     // Unique (org, version) — a concurrent provisioner won; use theirs.
-    if (isDuplicateKeyError(err)) {
+    if (/duplicate/i.test(err instanceof Error ? err.message : String(err))) {
       dekCache.delete(organizationId);
       return getTenantDek(organizationId);
     }
