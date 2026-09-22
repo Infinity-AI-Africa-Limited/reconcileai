@@ -6,13 +6,13 @@
  * forks in the global chain on 2026-09-21, every one a clean pair (same parent,
  * both rows intact, the chain continuing from one of them), each breaking
  * verification. The writer now takes a per-chain lock; the verifier accepts a
- * fork only from rows written before that (writer < 3).
+ * fork only where KNOWN_CONCURRENT_FORKS names it — chain, sequence and hash.
  */
 import { describe, it, expect } from "vitest";
 import { SQL, getTableName } from "drizzle-orm";
 import { MySqlDialect } from "drizzle-orm/mysql-core";
-import { auditTimestamp, computeRecordHash, verifyChain, type AuditChainFields, type AuditWriterVersion, type ChainRow } from "./auditChain";
-import { createAuditLog, type DbExecutor } from "./db";
+import { KNOWN_CONCURRENT_FORKS, auditTimestamp, computeRecordHash, verifyChain, type AuditChainFields, type AuditWriterVersion, type ChainRow, type KnownConcurrentFork } from "./auditChain";
+import { createAuditLog, type DbTransaction } from "./db";
 
 // ─── The writer ─────────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ function recordingExecutor(head: { seq: number; hash: string } | null) {
       ignore: () => ({ values: async (v: Record<string, unknown>) => { log.push(`insert-ignore ${getTableName(t)} ${JSON.stringify(v)}`); } }),
       values: async (v: Record<string, unknown>) => { log.push(`insert ${getTableName(t)}`); inserted.push(v); },
     }),
-  } as unknown as DbExecutor;
+  } as unknown as DbTransaction;
   return { executor, log, inserted, whereParams };
 }
 
@@ -96,46 +96,109 @@ function row(seq: number, action: string, s: number, prev: string | null, writer
   return { ...f, prevRecordHash: prev, recordHash: computeRecordHash(f, prev, writer) };
 }
 
-/** 205 → (206a, 206b siblings) → 207 continuing from `continueFrom`. */
+
+/** 205 → (206a, 206b siblings) → 207 continuing from `continueFrom`; `dead` is the other sibling. */
 function forkedChain(writer: AuditWriterVersion, continueFrom: "a" | "b") {
   const r205 = row(205, "created", 50, null, writer);
   const a = row(206, "revoked", 56, r205.recordHash, writer);
   const b = row(206, "revoked-again", 57, r205.recordHash, writer);
-  const r207 = row(207, "created", 58, (continueFrom === "a" ? a : b).recordHash, writer);
-  return [r205, a, b, r207];
+  const live = continueFrom === "a" ? a : b;
+  const dead = continueFrom === "a" ? b : a;
+  const r207 = row(207, "created", 58, live.recordHash, writer);
+  return { rows: [r205, a, b, r207], r205, a, b, live, dead, r207 };
 }
+const listing = (dead: ChainRow, org: number | null = null): KnownConcurrentFork[] => [
+  { organizationId: org, sequenceNumber: dead.sequenceNumber, deadRecordHash: dead.recordHash as string },
+];
 
-describe("when a chain holds a fork written before appends were serialised", () => {
-  it("should verify it, and SAY how many rows were forked", () => {
-    // The production shape: the chain continued from the later sibling.
+describe("when a chain holds a LISTED fork written before appends were serialised", () => {
+  it("should verify it, and SAY how many rows were forked — whichever sibling comes first", () => {
     for (const writer of [1, 2] as const) {
-      expect(verifyChain(forkedChain(writer, "b")), `writer ${writer}`).toMatchObject({ valid: true, forkedRows: 1 });
-      expect(verifyChain(forkedChain(writer, "a")), `writer ${writer}`).toMatchObject({ valid: true, forkedRows: 1 });
+      for (const from of ["a", "b"] as const) {
+        const c = forkedChain(writer, from);
+        expect(verifyChain(c.rows, listing(c.dead)), `writer ${writer}, from ${from}`).toMatchObject({ valid: true, forkedRows: 1 });
+      }
     }
   });
 
-  it("should still catch a sibling with a different parent — that is an insertion, not a fork", () => {
-    const [r205, a, , r207] = forkedChain(2, "a");
-    const stray = row(206, "inserted", 57, "some-other-hash", 2);
-    expect(verifyChain([r205, a, stray, r207])).toMatchObject({ valid: false, firstBrokenSequence: 206 });
+  it("should accept the same entry written twice — one hash, the chain continuing from it", () => {
+    // Sequence 206 in production: a double-clicked revoke, identical content.
+    const r205 = row(205, "created", 50, null, 1);
+    const once = row(206, "revoked", 56, r205.recordHash, 1);
+    const twice = { ...once, createdAt: at(57) }; // stored a second later, hashed at 56
+    const r207 = row(207, "created", 58, once.recordHash, 1);
+    expect(verifyChain([r205, once, twice, r207], listing(once))).toMatchObject({ valid: true, forkedRows: 1, roundedRows: 1 });
+  });
+});
+
+describe("when a duplicate sequence is NOT a listed fork", () => {
+  it("should break the chain for a same-parent sibling — the forgery the old rule let through", () => {
+    // One inserted row, hashed over its own content and dated into the past,
+    // with no later hash rewritten: the rule accepted it as history.
+    const c = forkedChain(2, "a");
+    expect(verifyChain(c.rows, [])).toMatchObject({ valid: false, firstBrokenSequence: 206, forkedRows: 0 });
+    expect(verifyChain(c.rows)).toMatchObject({ valid: false, firstBrokenSequence: 206 });
   });
 
-  it("should still catch a next entry that links to neither sibling", () => {
-    const [r205, a, b] = forkedChain(2, "a");
-    const orphan = row(207, "created", 58, "not-a-sibling", 2);
-    expect(verifyChain([r205, a, b, orphan])).toMatchObject({ valid: false, firstBrokenSequence: 207 });
+  it("should break it for a different row at a listed sequence", () => {
+    const c = forkedChain(2, "a");
+    const forged = row(206, "forged", 57, c.r205.recordHash, 2);
+    expect(verifyChain([c.r205, c.a, forged, c.r207], listing(c.dead))).toMatchObject({ valid: false, firstBrokenSequence: 206 });
+  });
+
+  it("should break it for a listed hash in a different chain", () => {
+    const c = forkedChain(2, "a");
+    expect(verifyChain(c.rows, listing(c.dead, 30001))).toMatchObject({ valid: false, firstBrokenSequence: 206 });
+  });
+
+  it("should break it for a sibling with a different parent", () => {
+    const c = forkedChain(2, "a");
+    const stray = row(206, "revoked-again", 57, "some-other-hash", 2);
+    expect(verifyChain([c.r205, c.a, stray, c.r207], listing(stray))).toMatchObject({ valid: false, firstBrokenSequence: 206 });
+  });
+
+  it("should break it when the next entry continues from the dead sibling instead", () => {
+    const c = forkedChain(2, "a");
+    const wrong = row(207, "created", 58, c.dead.recordHash, 2);
+    expect(verifyChain([c.r205, c.a, c.b, wrong], listing(c.dead))).toMatchObject({ valid: false, firstBrokenSequence: 207 });
+  });
+});
+
+describe("when a listed fork's extra entry has been removed", () => {
+  it("should report the removal — no later link would have noticed it", () => {
+    const c = forkedChain(2, "a");
+    const res = verifyChain([c.r205, c.live, c.r207], listing(c.dead));
+    expect(res).toMatchObject({ valid: false, firstBrokenSequence: 206 });
+    expect(res.reason).toMatch(/Missing entry at sequence 206/);
+  });
+
+  it("should report it at the end of the chain too", () => {
+    const c = forkedChain(2, "a");
+    expect(verifyChain([c.r205, c.live], listing(c.dead))).toMatchObject({ valid: false, firstBrokenSequence: 206 });
   });
 });
 
 describe("when the serialised writer is in use", () => {
-  it("should never read a duplicate sequence number as a fork", () => {
-    // After writer 3 no two appends can collide, so a duplicate is an insertion.
-    expect(verifyChain(forkedChain(3, "a"))).toMatchObject({ valid: false, firstBrokenSequence: 206, forkedRows: 0 });
+  it("should never read a duplicate sequence number as a fork, even a listed one — whichever sibling comes first", () => {
+    for (const from of ["a", "b"] as const) {
+      const c = forkedChain(3, from);
+      expect(verifyChain(c.rows, listing(c.dead)), `from ${from}`).toMatchObject({ valid: false, firstBrokenSequence: 206, forkedRows: 0 });
+    }
   });
 
   it("should verify a clean chain with nothing forked or rounded", () => {
     const r1 = row(1, "a", 1, null, 3);
     const r2 = row(2, "b", 2, r1.recordHash, 3);
     expect(verifyChain([r1, r2])).toMatchObject({ valid: true, forkedRows: 0, roundedRows: 0 });
+  });
+});
+
+describe("when the production list of known forks is read", () => {
+  it("should name exactly the eight measured on 2026-09-21, each a full hash in the global chain", () => {
+    expect(KNOWN_CONCURRENT_FORKS.map((f) => f.sequenceNumber)).toEqual([206, 229, 231, 237, 246, 250, 385, 393]);
+    for (const f of KNOWN_CONCURRENT_FORKS) {
+      expect(f.organizationId).toBeNull();
+      expect(f.deadRecordHash).toMatch(/^[0-9a-f]{64}$/);
+    }
   });
 });

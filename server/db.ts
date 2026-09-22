@@ -1386,7 +1386,9 @@ export async function getJobExceptionsNeedingAi(jobId: number, organizationId: n
  * type silently excluded the very thing this parameter exists to accept.
  */
 type DbHandle = NonNullable<Awaited<ReturnType<typeof getDb>>>;
-export type DbExecutor = DbHandle | Parameters<Parameters<DbHandle["transaction"]>[0]>[0];
+/** An open transaction — what `db.transaction(tx => …)` hands its callback. */
+export type DbTransaction = Parameters<Parameters<DbHandle["transaction"]>[0]>[0];
+export type DbExecutor = DbHandle | DbTransaction;
 
 /**
  * `executor` lets a caller enrol the audit write in ITS OWN transaction.
@@ -1398,16 +1400,29 @@ export type DbExecutor = DbHandle | Parameters<Parameters<DbHandle["transaction"
  * fail together, which is the only version worth calling an evidence trail.
  *
  * Optional because most callers use logAudit, which is best-effort by design.
+ *
+ * A TRANSACTION, not any executor. The chain lock is a `FOR UPDATE` held until
+ * commit; on a pooled handle each statement autocommits, so the lock would be
+ * released before the head is read and two appends could fork the chain again —
+ * with every type checking. (Review caught that the wider `DbExecutor` allowed
+ * exactly that.) A pooled handle is not assignable here: it has no rollback.
  */
-export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor) {
+export async function createAuditLog(data: InsertAuditLog, tx?: DbTransaction) {
   // Inside the caller's transaction when one is given, so the change and its
   // record commit together; otherwise in a transaction of its own, because the
   // chain lock below is held until commit.
-  if (executor) return appendToAuditChain(executor, data);
+  if (tx) return appendToAuditChain(tx, data);
   const db = await getDb();
   if (!db) return;
-  await db.transaction((tx) => appendToAuditChain(tx, data));
+  await db.transaction((own) => appendToAuditChain(own, data));
 }
+
+// Compile-time ratchet — `pnpm check` runs in CI and does not typecheck test
+// files, so the guarantee above is pinned here: widening createAuditLog's
+// parameter to accept a pooled handle again makes this line a type error.
+type AuditAcceptsPool = DbHandle extends NonNullable<Parameters<typeof createAuditLog>[1]> ? true : false;
+const auditRefusesPool: AuditAcceptsPool = false;
+void auditRefusesPool;
 
 /**
  * Append one entry to its organisation's hash chain, serialised per chain.
@@ -1426,7 +1441,7 @@ export async function createAuditLog(data: InsertAuditLog, executor?: DbExecutor
  * Rows written here are signed as writer 3, so the verifier's allowance for
  * the old forks can never apply to them.
  */
-async function appendToAuditChain(db: DbExecutor, data: InsertAuditLog) {
+async function appendToAuditChain(db: DbTransaction, data: InsertAuditLog) {
   const orgScope = data.organizationId ?? null;
   const chainKey = orgScope ?? 0;
   await db.insert(auditChainLocks).ignore().values({ chainKey });
