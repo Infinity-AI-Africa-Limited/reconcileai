@@ -1209,6 +1209,42 @@ organisation at all is refused — otherwise every such account pools into one s
 pseudo-tenant (22 accounts currently have no organisation). Ask this question of
 every tenant-scoped guard.
 
+### A row named by id is gated on the row's OWN tenant (since 2026-09-22)
+
+A write, or a read, that takes a row id from the caller must be tenant-scoped in
+ONE of two ways — what is forbidden is the id alone:
+
+1. **Scoped to the caller's organisation** in the WHERE (`requireOrg(ctx)`, the
+   org-scoped db functions, the whole exceptions router). Inside a portal
+   `ctx.user.organizationId` IS the tenant on screen (§6), so this follows the
+   portal; staff outside a portal reach only their own organisation's rows —
+   deliberately, for tenant data they should change from inside that portal.
+2. **Gated on the row's own tenant** — load it, `assertRowVisible(user, row,
+   notFound)` / `assertReportVisible` / `assertJobVisible` in
+   `server/routers/shared.ts` (all `canActOnTenant`, so staff outside a portal
+   may reach any tenant) — and carry that tenant into the write's WHERE.
+
+Six procedures acted by id alone and were
+fixed together: resolution template update/delete, share-link revoke, the Super
+Agent memory's exception read, `exceptions.checkStaleness` (read AND write), and
+the POC router's exception review, run exceptions, run uploads, share link and
+saved-file run. **`byIdTenantGates.test.ts` ratchets it:** any `.update()` /
+`.delete()` in a router whose WHERE names the row by a caller's id
+(`eq`/`inArray(<t>.id, input.<x>)`, however wrapped) and carries no tenant
+(`organizationId`, `orgFilter(`, `requireOrg(`, `pocSlug`) fails CI unless its
+table is in `GATED_ELSEWHERE` with a reason.
+
+- **Shared rows** (`organizationId` NULL — the default resolution templates every
+  tenant is shown) may be changed by **staff outside a portal only**:
+  `canActOnTenant` refuses NULL to everyone else, including staff inside a
+  tenant's portal. A caller with no tenant cannot CREATE one either — they would
+  have written text shown to every tenant.
+- **One answer for missing and for someone else's** (NOT_FOUND, same message), so
+  the response cannot be used to learn which ids exist.
+- **A POC link proves only its slug**: every POC id (exception, run, upload) is
+  looked up WITH `pocSlug`, inside `server/poc-engine.ts` where possible so no
+  caller can forget it.
+
 ---
 
 ## 9A. Feature Evaluation Rubric — The Intelligence Moat Test

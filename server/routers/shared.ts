@@ -15,7 +15,7 @@ import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from
 import { isTenantId } from "@shared/tenantId";
 import { currentAuditOrganizationId, currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
-import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, type DbTransaction } from "../db";
+import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, getReportById, type DbTransaction } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -126,6 +126,50 @@ export async function assertJobVisible(
     throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
   }
   return job;
+}
+
+/**
+ * The row a caller named by id, if they may act on it — else NOT_FOUND.
+ *
+ * For writes that load a row by id alone. The row names its own tenant and
+ * canActOnTenant decides: a tenant's user reaches only their organisation's
+ * rows; staff inside a portal only that tenant's; staff outside a portal any.
+ * A SHARED row (`organizationId` null, e.g. the default resolution templates
+ * every tenant is shown) is therefore reachable only by staff outside a portal
+ * — canActOnTenant refuses null to everyone else, which is what keeps a tenant
+ * from rewriting text every other tenant reads.
+ *
+ * NOT_FOUND rather than FORBIDDEN, with one message for missing and for
+ * someone else's, so the answer cannot be used to learn which ids exist.
+ */
+export function assertRowVisible<T extends { organizationId: number | null }>(
+  user: { role: string; organizationId: number | null },
+  row: T | null | undefined,
+  notFound: string,
+): T {
+  if (!row || !canActOnTenant(user, row.organizationId ?? null)) {
+    throw new TRPCError({ code: "NOT_FOUND", message: notFound });
+  }
+  return row;
+}
+
+/**
+ * A report the caller may act on, by id, from ANY tenant — decided by the
+ * report's own tenant.
+ *
+ * `reports.get` and the share-link procedures looked the report up among
+ * `getReports(caller's organisation)` instead. That failed two ways: an
+ * org-less caller got the org-less reports (`orgFilter(null)` is `IS NULL`),
+ * pooling every such account into one pseudo-tenant; and the list is capped
+ * at the newest 100, so any older report answered "not found".
+ * `revokeShareToken` did not check at all.
+ */
+export async function assertReportVisible(
+  user: { role: string; organizationId: number | null },
+  reportId: number,
+  notFound = "Report not found",
+) {
+  return assertRowVisible(user, await getReportById(reportId), notFound);
 }
 
 /**

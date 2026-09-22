@@ -139,13 +139,15 @@ export const pocRouter = router({
     .query(async ({ input }) => {
       const run = await poc.getRun(input.runId, input.pocSlug);
       if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Run not found" });
-      const exceptions = await poc.getRunExceptions(input.runId);
+      const exceptions = await poc.getRunExceptions(input.runId, input.pocSlug);
       return { run, exceptions };
     }),
 
+  // Held to the caller's POC inside getRunExceptions: this read another POC's
+  // exceptions by run id, with no run check in front of it.
   getExceptions: pocProcedure
     .input(z.object({ pocSlug, runId: z.number().int().positive() }))
-    .query(async ({ input }) => poc.getRunExceptions(input.runId)),
+    .query(async ({ input }) => poc.getRunExceptions(input.runId, input.pocSlug)),
 
   listRuns: pocProcedure
     .input(z.object({ pocSlug }))
@@ -163,7 +165,7 @@ export const pocRouter = router({
     .query(async ({ input }) => {
       const run = await poc.getRun(input.runId, input.pocSlug);
       if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Run not found" });
-      const exceptions = await poc.getRunExceptions(input.runId);
+      const exceptions = await poc.getRunExceptions(input.runId, input.pocSlug);
       return { run, exceptions };
     }),
 
@@ -182,7 +184,13 @@ export const pocRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { pocExceptions } = await import("../../drizzle/poc_schema");
-      const { eq } = await import("drizzle-orm");
+      const { and, eq } = await import("drizzle-orm");
+      // The exception must be THIS POC's: the access token proves only the slug,
+      // and this updated by id alone — so one POC's link could rewrite another
+      // POC's review status. Same answer for missing and for another POC's.
+      const ofThisPoc = and(eq(pocExceptions.id, input.exceptionId), eq(pocExceptions.pocSlug, input.pocSlug));
+      const [found] = await db.select({ id: pocExceptions.id }).from(pocExceptions).where(ofThisPoc).limit(1);
+      if (!found) throw new TRPCError({ code: "NOT_FOUND", message: "Exception not found" });
       await db
         .update(pocExceptions)
         .set({
@@ -191,13 +199,20 @@ export const pocRouter = router({
           reviewNote: input.reviewNote ?? null,
           reviewedAt: new Date(),
         })
-        .where(eq(pocExceptions.id, input.exceptionId));
+        .where(ofThisPoc);
       return { success: true, exceptionId: input.exceptionId, reviewStatus: input.reviewStatus };
     }),
 
   createShareToken: pocProcedure
     .input(z.object({ pocSlug, runId: z.number().int().positive(), createdBy: z.string().max(100).optional() }))
-    .mutation(async ({ input }) => poc.createShareToken(input.runId, input.pocSlug, input.createdBy)),
+    .mutation(async ({ input }) => {
+      try {
+        return await poc.createShareToken(input.runId, input.pocSlug, input.createdBy);
+      } catch (err) {
+        if (err instanceof poc.PocNotFoundError) throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+        throw err;
+      }
+    }),
 
   getSharedReport: publicProcedure
     .input(z.object({ token: z.string().min(1).max(64) }))
@@ -232,6 +247,13 @@ export const pocRouter = router({
 
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // A run this file is linked to must be THIS POC's — before anything is
+      // stored. The id was saved unchecked, filing one POC's upload against
+      // another POC's run in the Hub.
+      if (input.runId !== undefined && !(await poc.getRun(input.runId, input.pocSlug))) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Run not found" });
+      }
 
       // Derive a safe S3 key
       const safeName = input.originalName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
