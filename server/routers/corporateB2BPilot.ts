@@ -73,9 +73,10 @@ async function requireCorporateB2B(
   user: { role: string; organizationId?: number | null },
   requestedOrganizationId?: number,
 ) {
+  // Scope before the connection, so a refusal never depends on the database being up.
+  const organizationId = resolveOrgScope(user, requestedOrganizationId);
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-  const organizationId = resolveOrgScope(user, requestedOrganizationId);
   const [org] = await db.select({ segment: organizations.segment }).from(organizations)
     .where(eq(organizations.id, organizationId)).limit(1);
   if (org?.segment !== "corporate_b2b") {
