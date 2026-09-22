@@ -120,4 +120,4 @@ unclassified. The ratchet now also asserts that every schema file listed in
 | `shopify_sync_cursors` | `tenant_required` | Reserved for the order-led sync phase; written by nothing yet. |
 | `shopify_webhook_events` | `tenant_nullable` | Digest-only delivery ledger. A verified delivery for a shop with no store record is acknowledged and recorded without inventing a tenant. |
 | `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |
-| `shopify_oauth_states` | `token` | Hash-only, single-use OAuth states keyed by a random secret held in the browser's flow cookie; they exist before any tenant does. |
+| `shopify_oauth_states` | `token` | Hash-only ledger of CONSUMED OAuth states. States are signed and shop-bound, so a row is written only at the callback, after Shopify's HMAC and our signature verify — the install endpoint writes nothing. The unique `stateHash` enforces single use. |

@@ -4,9 +4,61 @@ import {
   buildShopifyAuthorizationUrl,
   normalizeShopDomain,
   requiredScopesGranted,
+  signOAuthState,
+  verifyOAuthState,
   verifyShopifyCallbackHmac,
   verifyShopifyWebhookHmac,
 } from "./auth";
+
+describe("signed OAuth state", () => {
+  const SECRET = "client-secret";
+  const TTL = 10 * 60_000;
+  const NOW = 1_790_000_000_000;
+  const SHOP = "merchant.myshopify.com";
+  const issue = () => signOAuthState({ shopDomain: SHOP, secret: SECRET, ttlMs: TTL, now: NOW });
+  const check = (state: string, over: Partial<{ shopDomain: string; secret: string; now: number }> = {}) =>
+    verifyOAuthState(state, { shopDomain: SHOP, secret: SECRET, ttlMs: TTL, now: NOW + 1_000, ...over });
+
+  it("should verify a state it issued, for the same shop, returning its expiry", () => {
+    const { state, expiresAt } = issue();
+    expect(check(state)?.getTime()).toBe(expiresAt.getTime());
+  });
+
+  it("should refuse the state for a different shop", () => {
+    expect(check(issue().state, { shopDomain: "attacker.myshopify.com" })).toBeNull();
+  });
+
+  it("should refuse it once expired", () => {
+    expect(check(issue().state, { now: NOW + TTL })).toBeNull();
+  });
+
+  it("should refuse a state signed with another secret", () => {
+    expect(check(issue().state, { secret: "someone-else" })).toBeNull();
+  });
+
+  it("should refuse a state whose expiry was extended after signing", () => {
+    const [, nonce, mac] = issue().state.split(".");
+    expect(check(`${NOW + TTL + 60_000}.${nonce}.${mac}`)).toBeNull();
+  });
+
+  it("should refuse a validly-signed state that claims to live longer than one TTL", () => {
+    // Not forgeable without the secret, but a state is never legitimately
+    // longer-lived than the TTL it was issued with, so none is accepted as one.
+    const longLived = signOAuthState({ shopDomain: SHOP, secret: SECRET, ttlMs: TTL * 10, now: NOW });
+    expect(check(longLived.state)).toBeNull();
+  });
+
+  it.each(["", "a.b", "1.2.3.4", "notanumber.nonce-nonce-nonce-nonce.mac", `${NOW + 1000}.short.mac`])(
+    "should refuse the malformed state %j",
+    (state) => {
+      expect(check(state)).toBeNull();
+    },
+  );
+
+  it("should issue a fresh nonce every time", () => {
+    expect(issue().state).not.toBe(issue().state);
+  });
+});
 
 describe("Shopify connector security helpers", () => {
   it("accepts only canonical myshopify.com store hostnames", () => {

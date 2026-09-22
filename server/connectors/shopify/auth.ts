@@ -74,6 +74,55 @@ export function makeState(): string {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+/** Domain separation: this MAC must never be interchangeable with any other use of the secret. */
+const OAUTH_STATE_MAC_LABEL = "reconcileai:shopify-oauth-state:v1";
+
+function oauthStateMac(secret: string, shopDomain: string, expiresAtMs: number, nonce: string): string {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`${OAUTH_STATE_MAC_LABEL}|${shopDomain}|${expiresAtMs}|${nonce}`)
+    .digest("base64url");
+}
+
+/**
+ * A self-verifying OAuth state: `<expiresAtMs>.<nonce>.<mac>`, bound to one shop.
+ *
+ * The install route used to store a row per state. That made an
+ * UNAUTHENTICATED endpoint write to the database on every hit, and the only
+ * brake was a per-client rate limit keyed on `X-Forwarded-For` — a header the
+ * client writes itself, since Cloudflare and Railway append to it rather than
+ * replace it. A signed state needs no row until the callback, where Shopify's
+ * HMAC has already been verified; single use is enforced there.
+ */
+export function signOAuthState(params: { shopDomain: string; secret: string; ttlMs: number; now?: number }): {
+  state: string;
+  expiresAt: Date;
+} {
+  const expiresAtMs = (params.now ?? Date.now()) + params.ttlMs;
+  const nonce = makeState();
+  return {
+    state: `${expiresAtMs}.${nonce}.${oauthStateMac(params.secret, params.shopDomain, expiresAtMs, nonce)}`,
+    expiresAt: new Date(expiresAtMs),
+  };
+}
+
+/** The state's expiry if it is authentic, unexpired, for this shop and within one TTL; otherwise null. */
+export function verifyOAuthState(
+  state: string,
+  params: { shopDomain: string; secret: string; ttlMs: number; now?: number },
+): Date | null {
+  const parts = state.split(".");
+  if (parts.length !== 3 || !params.secret) return null;
+  const [expiry, nonce, mac] = parts;
+  if (!/^[0-9]{1,15}$/.test(expiry) || !/^[A-Za-z0-9_-]{16,}$/.test(nonce)) return null;
+  const expiresAtMs = Number(expiry);
+  const now = params.now ?? Date.now();
+  // A genuine state is never valid for longer than one TTL from now.
+  if (expiresAtMs <= now || expiresAtMs - now > params.ttlMs) return null;
+  if (!secureEqualHex(oauthStateMac(params.secret, params.shopDomain, expiresAtMs, nonce), mac)) return null;
+  return new Date(expiresAtMs);
+}
+
 export function buildShopifyAuthorizationUrl(params: {
   shopDomain: string;
   clientId: string;

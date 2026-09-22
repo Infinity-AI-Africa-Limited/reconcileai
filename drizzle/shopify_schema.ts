@@ -90,8 +90,11 @@ export type ShopifyConnectorToken = typeof shopifyConnectorTokens.$inferSelect;
 export type InsertShopifyConnectorToken = typeof shopifyConnectorTokens.$inferInsert;
 
 /**
- * Hash-only OAuth states. A state may be consumed exactly once; raw state values
- * live only in the browser's short-lived, signed flow cookie.
+ * Ledger of CONSUMED OAuth states, hash-only. A state is self-verifying (signed
+ * and shop-bound, see signOAuthState), so no row exists until its callback has
+ * passed both Shopify's HMAC and our signature; the unique `stateHash` then
+ * makes each state usable exactly once. Raw state values live only in the
+ * browser's short-lived flow cookie.
  */
 export const shopifyOauthStates = mysqlTable(
   "shopify_oauth_states",

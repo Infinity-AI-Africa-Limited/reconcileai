@@ -285,6 +285,51 @@ describe("when a shop installs for the first time", () => {
   });
 });
 
+describe("when taking a store out of service itself fails", () => {
+  // Greptile #134 re-review: failClosed used to log and swallow, so a store
+  // could keep reading `active` on a refresh token Shopify had already retired
+  // while the caller reported the refusal as if it were complete.
+  const failClosedOf = async (run: () => Promise<unknown>) => {
+    try {
+      await run();
+      return null;
+    } catch (error) {
+      return error instanceof ShopifyOnboardingError ? error.storeFailClosed : "other";
+    }
+  };
+
+  it("should retry, then report the transition as not confirmed rather than swallow it", async () => {
+    const down = new Error("ECONNRESET");
+    const fake = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[]] }, delete: { [TOKENS]: [down, down, down] } });
+    state.db = fake.db;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await failClosedOf(onboard)).toBe("not_confirmed");
+    expect(fake.ops.filter((op) => op.kind === "delete" && op.table === TOKENS)).toHaveLength(3);
+    expect(log.mock.calls.flat().join(" ")).toMatch(/FAIL-CLOSED NOT CONFIRMED/);
+    log.mockRestore();
+  });
+
+  it("should confirm it once a retry succeeds after a transient failure", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[existingStore]], [USERS]: [[]] },
+      delete: { [TOKENS]: [new Error("ECONNRESET"), 1] },
+    });
+    state.db = fake.db;
+
+    expect(await failClosedOf(onboard)).toBe("confirmed");
+    expect(storeUpdates(fake.committed())).toEqual([{ status: "reauthorization_required", statusReason: "ownership_unverified" }]);
+  });
+
+  it("should still refuse with the original reason either way", async () => {
+    const down = new Error("ECONNRESET");
+    state.db = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[]] }, delete: { [TOKENS]: [down, down, down] } }).db;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await codeOf(onboard)).toBe("OWNERSHIP_UNVERIFIED");
+    vi.mocked(console.error).mockRestore();
+  });
+});
+
 describe("when Shopify returns no usable contact email", () => {
   it("should refuse before touching the database", async () => {
     const fake = scriptedDb();

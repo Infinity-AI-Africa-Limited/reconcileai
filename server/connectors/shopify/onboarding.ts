@@ -46,15 +46,28 @@ export type ShopifyOnboardingErrorCode =
   /** The shop's deterministic workspace code is taken, but no store record explains it. */
   | "WORKSPACE_CONFLICT";
 
+/**
+ * After a refusal or failure that had to take a store out of service:
+ * `confirmed` — it is out of service; `not_confirmed` — the transition could not
+ * be written, so the store may still read `active` on a retired refresh token.
+ * Absent when the error needed no such transition.
+ */
+export type StoreFailClosedState = "confirmed" | "not_confirmed";
+
 export class ShopifyOnboardingError extends Error {
   constructor(
     message: string,
     public readonly code: ShopifyOnboardingErrorCode,
+    public readonly storeFailClosed?: StoreFailClosedState,
   ) {
     super(message);
     this.name = "ShopifyOnboardingError";
   }
 }
+
+/** Attempts at the fail-closed transition before reporting it unconfirmed. */
+const FAIL_CLOSED_ATTEMPTS = 3;
+const FAIL_CLOSED_BACKOFF_MS = 100;
 
 /** organizations.name is varchar(255); a longer Shopify shop name must not fail the install. */
 const ORGANIZATION_NAME_MAX = 255;
@@ -187,10 +200,11 @@ async function reauthorizeExistingStore(
   if (!admin) {
     // The new grant has already retired this store's refresh token, so the
     // workspace's connection is dead either way; this records it as such.
-    await failClosed(db, store, "ownership_unverified");
+    const failClosedState = await failClosed(db, store, "ownership_unverified");
     throw new ShopifyOnboardingError(
       "The Shopify store's contact email does not match an administrator of its ReconcileAI workspace",
       "OWNERSHIP_UNVERIFIED",
+      failClosedState,
     );
   }
 
@@ -240,10 +254,11 @@ async function reauthorizeExistingStore(
       );
     });
   } catch (error) {
-    await failClosed(db, store, "token_store_failed");
+    const failClosedState = await failClosed(db, store, "token_store_failed");
     throw new ShopifyOnboardingError(
       `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
       "TOKEN_STORE_FAILED",
+      failClosedState,
     );
   }
 
@@ -373,11 +388,13 @@ async function createMerchantWorkspace(
         .where(and(eq(shopifyConnectorStores.id, storeId), eq(shopifyConnectorStores.organizationId, organizationId)));
     });
   } catch (error) {
-    // A workspace with no usable token must never appear active.
-    await failClosed(db, { id: storeId, organizationId }, "token_store_failed");
+    // The store is still `pending_claim` here, never `active`; recording why
+    // it has no credentials is for the operator, not for safety.
+    const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed");
     throw new ShopifyOnboardingError(
       `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
       "TOKEN_STORE_FAILED",
+      failClosedState,
     );
   }
 
@@ -404,19 +421,43 @@ async function createMerchantWorkspace(
   return { storeId, organizationId, organizationCode, connectedUserId: userId, isReinstallation: false, welcomeEmailSent };
 }
 
-/** Take the store out of service after a failed or refused authorization, never masking the original error. */
+/**
+ * Take the store out of service after a failed or refused authorization, and
+ * say whether that actually happened.
+ *
+ * Retried, because the realistic failure is transient (TiDB drops idle
+ * connections; the pool hands the retry a fresh one). If every attempt fails
+ * the outcome is NOT swallowed: it is returned as a named state for the caller
+ * to carry on its error, and logged under a marker distinct enough to alert on.
+ *
+ * What cannot be done is record it durably — the write that failed is the
+ * durable record. The backstop is the token store: the retired refresh token
+ * earns a 401 on the next refresh, and that path fails the store closed itself
+ * (tokenStore.ts, markReauthorizationRequired with a fence).
+ */
 async function failClosed(
   db: Db,
   store: Pick<ShopifyConnectorStore, "id" | "organizationId">,
   reason: ShopifyStatusReason,
-): Promise<void> {
-  try {
-    await markReauthorizationRequired(db, { storeId: store.id, organizationId: store.organizationId, reason });
-  } catch (error) {
-    console.error("[shopify-onboarding] could not take store out of service", {
-      storeId: store.id,
-      reason,
-      message: error instanceof Error ? error.message : String(error),
-    });
+): Promise<StoreFailClosedState> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= FAIL_CLOSED_ATTEMPTS; attempt += 1) {
+    try {
+      await markReauthorizationRequired(db, { storeId: store.id, organizationId: store.organizationId, reason });
+      return "confirmed";
+    } catch (error) {
+      lastError = error;
+      if (attempt < FAIL_CLOSED_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, FAIL_CLOSED_BACKOFF_MS * 2 ** (attempt - 1)));
+      }
+    }
   }
+  console.error("[shopify-onboarding] FAIL-CLOSED NOT CONFIRMED — store may read active on retired credentials", {
+    storeId: store.id,
+    organizationId: store.organizationId,
+    reason,
+    attempts: FAIL_CLOSED_ATTEMPTS,
+    message: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+  return "not_confirmed";
 }

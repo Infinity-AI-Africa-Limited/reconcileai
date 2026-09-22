@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import express, { type Request } from "express";
-import { and, eq, gt, isNull, lt } from "drizzle-orm";
+import { lt } from "drizzle-orm";
 import {
   SHOPIFY_OAUTH_STATE_TTL_MS,
   SHOPIFY_ORDER_LED_SCOPES,
@@ -9,31 +9,24 @@ import {
 import { getSessionCookieOptions } from "../../_core/cookies";
 import { ENV } from "../../_core/env";
 import { getDb } from "../../db";
-import { createRateLimiter } from "../../rateLimiter";
+import { isDuplicateKeyError } from "../../dbErrors";
 import {
   buildShopifyAuthorizationUrl,
   exchangeAuthorizationCode,
-  makeState,
   normalizeShopDomain,
   parseUniqueQuery,
   requiredScopesGranted,
   sha256,
+  signOAuthState,
+  verifyOAuthState,
   verifyShopifyCallbackHmac,
 } from "./auth";
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError } from "./onboarding";
-import { affectedRows } from "./tokenStore";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
 
-/**
- * Each install request writes an OAuth-state row before anyone is
- * authenticated, so it is throttled per client. Generous for a merchant
- * retrying an install; a ceiling on anyone filling the table.
- */
-const installLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 30 });
-
-/** Expired states are kept this long past expiry for diagnosis, then purged. */
+/** Consumed states are kept this long past expiry for diagnosis, then purged. */
 const STATE_RETENTION_AFTER_EXPIRY_MS = 60 * 60_000;
 
 /** The error-page reason for a failed callback. Pure, so every mapping is testable. */
@@ -76,14 +69,6 @@ function redirectUri(req: Request): string {
   return `${appOrigin(req)}/api/shopify/callback`;
 }
 
-function clientIp(req: Request): string {
-  return (
-    (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
-    req.socket?.remoteAddress ||
-    "unknown"
-  );
-}
-
 /** cookie-parser is not installed; parse one named cookie without decoding other values. */
 function cookieValue(req: Request, name: string): string | undefined {
   const header = req.headers.cookie;
@@ -124,10 +109,10 @@ function callbackError(res: express.Response, reason: string): void {
 export function createShopifyRouter(): express.Router {
   const router = express.Router();
 
-  router.get("/api/shopify/install", async (req, res) => {
-    if (!installLimiter.check(`ip:${clientIp(req)}`).allowed) {
-      return res.status(429).send("Too many installation attempts. Please try again in a few minutes.");
-    }
+  // No database access and no rate limit, deliberately: the state is signed,
+  // not stored, so an unauthenticated hit costs one HMAC and a redirect. A
+  // limiter here could only have been keyed on a client-written header.
+  router.get("/api/shopify/install", (req, res) => {
     const shopDomain = normalizeShopDomain(typeof req.query.shop === "string" ? req.query.shop : undefined);
     if (!shopDomain) return callbackError(res, "invalid_shop");
     if (!ENV.shopifyClientId || !ENV.shopifyClientSecret) {
@@ -136,19 +121,8 @@ export function createShopifyRouter(): express.Router {
     }
 
     try {
-      // Resolved first so a misconfigured origin refuses before any row is written.
       const callbackUri = redirectUri(req);
-      const db = await getDb();
-      if (!db) return callbackError(res, "temporarily_unavailable");
-
-      const state = makeState();
-      await db.insert(shopifyOauthStates).values({
-        shopDomain,
-        stateHash: sha256(state),
-        expiresAt: new Date(Date.now() + SHOPIFY_OAUTH_STATE_TTL_MS),
-      });
-      await purgeExpiredStates(db);
-
+      const { state } = signOAuthState({ shopDomain, secret: ENV.shopifyClientSecret, ttlMs: SHOPIFY_OAUTH_STATE_TTL_MS });
       const baseCookie = getSessionCookieOptions(req);
       res.cookie(FLOW_COOKIE, state, {
         ...baseCookie,
@@ -195,36 +169,36 @@ export function createShopifyRouter(): express.Router {
       return callbackError(res, "security_check_failed");
     }
 
+    // Authentic, unexpired and issued for THIS shop — checked without the database.
+    const stateExpiresAt = verifyOAuthState(state, {
+      shopDomain,
+      secret: ENV.shopifyClientSecret,
+      ttlMs: SHOPIFY_OAUTH_STATE_TTL_MS,
+    });
+    if (!stateExpiresAt) return callbackError(res, "expired_or_replayed");
+
     try {
       const db = await getDb();
       if (!db) return callbackError(res, "temporarily_unavailable");
       const origin = appOrigin(req);
 
-      const [stateRow] = await db
-        .select()
-        .from(shopifyOauthStates)
-        .where(
-          and(
-            eq(shopifyOauthStates.shopDomain, shopDomain),
-            eq(shopifyOauthStates.stateHash, sha256(state)),
-            gt(shopifyOauthStates.expiresAt, new Date()),
-            isNull(shopifyOauthStates.consumedAt),
-          ),
-        )
-        .limit(1);
-      if (!stateRow) return callbackError(res, "expired_or_replayed");
-
       // Consume before the external exchange so a retry cannot reuse the same
-      // authorization code. The conditional update, not the earlier select, is
-      // authoritative: two concurrent callbacks may both observe the row, but
-      // exactly one can change `consumedAt` from NULL.
-      const consumed = affectedRows(
-        await db
-          .update(shopifyOauthStates)
-          .set({ consumedAt: new Date() })
-          .where(and(eq(shopifyOauthStates.id, stateRow.id), isNull(shopifyOauthStates.consumedAt))),
-      );
-      if (consumed !== 1) return callbackError(res, "expired_or_replayed");
+      // authorization code. The unique index on stateHash is the arbiter: of
+      // two concurrent callbacks carrying one state, exactly one insert lands.
+      // This is the first write in the flow, and it happens only after Shopify's
+      // HMAC and our own signature have both verified.
+      try {
+        await db.insert(shopifyOauthStates).values({
+          shopDomain,
+          stateHash: sha256(state),
+          expiresAt: stateExpiresAt,
+          consumedAt: new Date(),
+        });
+      } catch (error) {
+        if (isDuplicateKeyError(error)) return callbackError(res, "expired_or_replayed");
+        throw error;
+      }
+      await purgeExpiredStates(db);
 
       const tokens = await exchangeAuthorizationCode({
         shopDomain,
@@ -253,6 +227,7 @@ export function createShopifyRouter(): express.Router {
       console.error("[shopify-oauth] callback failed", {
         shopDomain,
         code: error instanceof ShopifyOnboardingError ? error.code : undefined,
+        storeFailClosed: error instanceof ShopifyOnboardingError ? error.storeFailClosed : undefined,
         message: error instanceof Error ? error.message : String(error),
       });
       return callbackError(res, callbackReasonFor(error));
