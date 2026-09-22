@@ -158,6 +158,33 @@ PORT=3000
 APP_URL=https://reconcileai.vip
 ```
 
+### Trusted proxies — who the client is
+
+`TRUSTED_PROXY_HOPS` is how many proxies sit between the client and this
+process. `X-Forwarded-For` is appended to by each of them, so the client's
+address is that many entries in **from the right**; everything further left is
+whatever the caller chose to send. Rate limits and audit `ipAddress` values are
+derived from it (`server/_core/clientIp.ts`).
+
+Leave it unset unless the topology differs from the default for the deployment:
+
+| Deployment | Default | Chain |
+|---|---|---|
+| Cloud production | `2` | client → Cloudflare → Railway edge → app |
+| `DEPLOYMENT_MODE=on_premise` | `1` | client → nginx → app |
+| Anything not `NODE_ENV=production` | `0` | client → app; the header is ignored |
+
+```bash
+# Only when the topology differs from the table above — e.g. an extra load
+# balancer in front (3), or the app exposed directly in production (0).
+TRUSTED_PROXY_HOPS=2
+```
+
+> ⚠️ **Too HIGH and the count reads into caller-supplied entries**, which is the
+> bug this replaced. **Too LOW and every caller collapses onto the proxy's own
+> address** — one shared rate-limit bucket, and one address in every audit row.
+> The boot log prints the effective value (`[clientIp] trusted proxy hops = …`).
+
 ## Scheduler authentication (Woodcore mirror sync, SHOPLINE sync)
 
 Two accepted paths. **GitHub OIDC is preferred**; the shared secret remains for
