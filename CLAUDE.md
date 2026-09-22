@@ -1016,8 +1016,8 @@ organisation (never the operator's own). `ctx.actor` is the signed-in account
 (`auth.me` returns it); `ctx.viewingAs` is the tenant. So every procedure that
 keys on the caller's organisation — reads AND writes — follows the portal
 without passing `viewAsOrgId`. Audit entries written without an explicit
-organisation default to the portal tenant (`server/_core/requestScope.ts`).
-The monitoring SSE stream takes the same id as `?portalOrg=`. Reads that widen
+organisation default to the tenant the request acts for (see "Where an audit
+record lands" below). The monitoring SSE stream takes the same id as `?portalOrg=`. Reads that widen
 to "all tenants" by ROLE (e.g. `channelListScope`) must also take `ctx.viewingAs`.
 The React Query cache is reset on entering/leaving a portal (keys carry no tenant).
 
@@ -1040,6 +1040,30 @@ about the portal too.** Two rules follow, both found by review on PR #141:
   Events about the account rather than a tenant (sign-out, personal email
   preferences, super-admin grants, moving a user between organisations) pass an
   explicit `null`.
+
+**Where an audit record lands (since 2026-09-22).** A tenant's Audit Trail,
+export and chain verification read `organizationId = tenant` exactly, so a
+record in the global chain (`null`) is invisible to every tenant. `logAudit`'s
+omitted `organizationId` defaults to the request scope's `auditOrganizationId`
+(`auditOrganizationFor` in `server/_core/requestScope.ts`) — a **separate field**
+from the portal, because the by-id gates must keep reading "no portal" for staff:
+
+| Caller | Default chain |
+|---|---|
+| Tenant user | their own organisation (`isTenantId` — org 0 / none → global) |
+| Staff inside a portal | the tenant on screen |
+| Staff outside a portal, `superAdminProcedure`, unauthenticated, no tRPC call | global |
+
+The default only knows who is asking, not whose row was touched. So a call site
+**names the row's own tenant** (`auditTenant(row.organizationId)`) wherever staff
+can reach another tenant's row from outside a portal — user management (the
+tenant from `assertCanManageUsers`'s returned map), organisation settings and
+module overrides (`input.organizationId`), job export/view/report/email (the
+job's tenant) — and for work outside a request (`complete_reconciliation` runs on
+the job queue; its trail must not depend on the queue backend). The storage
+proxy files allowed access under the object's tenant and denied access globally.
+Until 2026-09-22 the default was the portal alone, so a bank's own staff
+resolving exceptions or approving matches never appeared in the bank's trail.
 
 ### Segment-Specific Navigation
 - `financialServicesMenuItems` — includes CBN Reports, Multi-Channel, Email Settings, Module Configuration

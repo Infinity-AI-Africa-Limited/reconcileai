@@ -231,6 +231,7 @@ import {
   runOwner,
   requireOwnedChannels,
   assertJobVisible,
+  auditTenant,
 } from "./routers/shared";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
@@ -1940,7 +1941,7 @@ export const appRouter = router({
         await logAudit(ctx.user.id, "generate_report", "report", reportId || undefined, {
           jobId: input.jobId,
           reportType: input.reportType,
-        }, ip, ua);
+        }, ip, ua, auditTenant(jobOrgId));
 
          return { reportId, summary };
       }),
@@ -2051,7 +2052,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await assertJobVisible(ctx.user, input.jobId);
+        const visibleJob = await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2092,10 +2093,12 @@ export const appRouter = router({
           "text/csv"
         );
 
+        // The job's tenant, not the default: staff outside a portal may export any
+        // tenant's job, and that tenant's trail must show who took its data.
         await logAudit(ctx.user.id, "export_csv", "reconciliation_job", input.jobId, {
           type: input.type,
           fileName,
-        }, ip, ua);
+        }, ip, ua, auditTenant(visibleJob.organizationId));
 
         return { url, fileName, rowCount: csvContent.split("\n").length - 1 };
       }),
@@ -2107,7 +2110,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await assertJobVisible(ctx.user, input.jobId);
+        const visibleJob = await assertJobVisible(ctx.user, input.jobId);
         const report = await db.getFullReconciliationReport(input.jobId);
         if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
 
@@ -2267,7 +2270,7 @@ export const appRouter = router({
         await logAudit(ctx.user.id, "export_xlsx", "reconciliation_job", input.jobId, {
           type: input.type,
           fileName,
-        }, ip, ua);
+        }, ip, ua, auditTenant(visibleJob.organizationId));
 
         return { url, fileName };
       }),
@@ -3214,6 +3217,9 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        // Checked before anything is sent: this took any tenant's job id, and
+        // "Job not found" versus success told the caller which ids exist.
+        const visibleJob = await assertJobVisible(ctx.user, input.jobId);
         const prefs = await db.getEmailPreferences(ctx.user.id);
         const result = await sendReconciliationReport(input.jobId, {
           includeMatchBreakdown: prefs?.includeMatchBreakdown ?? true,
@@ -3221,7 +3227,8 @@ export const appRouter = router({
           includeChannelPerformance: prefs?.includeChannelPerformance ?? true,
           includeTrendAnalysis: prefs?.includeTrendAnalysis ?? false,
         });
-        await logAudit(ctx.user.id, "send_email_report", "reconciliation_job", input.jobId, result, ip, ua);
+        await logAudit(ctx.user.id, "send_email_report", "reconciliation_job", input.jobId, result, ip, ua,
+          auditTenant(visibleJob.organizationId));
         if (!result.success) {
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: result.error || "Failed to send report" });
         }
@@ -3495,18 +3502,18 @@ export const appRouter = router({
         role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        await assertCanManageUsers(ctx, [input.userId]);
+        const tenantOf = await assertCanManageUsers(ctx, [input.userId]);
         if (input.role === "super_admin" && ctx.user.role !== "super_admin") {
           throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can assign the super admin role." });
         }
         const { ip, ua } = getClientInfo(ctx);
         await db.updateUserRole(input.userId, input.role);
         // Granting super admin is a platform event, not the tenant's: it joins the
-        // global chain even from inside a portal. Any other role change is about
-        // the tenant on screen (assertCanManageUsers holds the target to it).
+        // global chain even from inside a portal. Any other role change belongs in
+        // the target user's own tenant's trail — from the Super Admin dashboard too.
         await logAudit(ctx.user.id, "update_user_role", "user", input.userId, {
           newRole: input.role,
-        }, ip, ua, input.role === "super_admin" ? null : undefined);
+        }, ip, ua, input.role === "super_admin" ? null : tenantOf.get(input.userId));
         return { success: true };
       }),
     bulkUpdateRole: adminProcedure
@@ -3515,7 +3522,7 @@ export const appRouter = router({
         role: z.enum(["super_admin", "admin", "cfo", "operations", "compliance", "user"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        await assertCanManageUsers(ctx, input.userIds);
+        const tenantOf = await assertCanManageUsers(ctx, input.userIds);
         if (input.role === "super_admin" && ctx.user.role !== "super_admin") {
           throw new TRPCError({ code: "FORBIDDEN", message: "Only Infinity AI staff can assign the super admin role." });
         }
@@ -3525,7 +3532,7 @@ export const appRouter = router({
         for (const userId of input.userIds) {
           await drizzle.update(users).set({ role: input.role }).where(eq(users.id, userId));
           await logAudit(ctx.user.id, "update_user_role", "user", userId, { newRole: input.role }, ip, ua,
-            input.role === "super_admin" ? null : undefined);
+            input.role === "super_admin" ? null : tenantOf.get(userId));
         }
         return { success: true, count: input.userIds.length };
       }),
@@ -3535,14 +3542,15 @@ export const appRouter = router({
         isActive: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
-        await assertCanManageUsers(ctx, input.userIds);
+        const tenantOf = await assertCanManageUsers(ctx, input.userIds);
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const safeIds = input.userIds.filter(id => id !== ctx.user.id);
         for (const userId of safeIds) {
           await drizzle.update(users).set({ isActive: input.isActive }).where(eq(users.id, userId));
-          await logAudit(ctx.user.id, input.isActive ? "activate_user" : "deactivate_user", "user", userId, { isActive: input.isActive }, ip, ua);
+          await logAudit(ctx.user.id, input.isActive ? "activate_user" : "deactivate_user", "user", userId, { isActive: input.isActive }, ip, ua,
+            tenantOf.get(userId));
         }
         return { success: true, count: safeIds.length };
       }),
@@ -3634,7 +3642,7 @@ export const appRouter = router({
         origin: z.string().url(),
       }))
       .mutation(async ({ ctx, input }) => {
-        await assertCanManageUsers(ctx, [input.userId]);
+        const tenantOf = await assertCanManageUsers(ctx, [input.userId]);
         const { ip, ua } = getClientInfo(ctx);
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
@@ -3653,7 +3661,7 @@ export const appRouter = router({
             role: target.role,
             origin: input.origin,
           });
-          await logAudit(ctx.user.id, "resend_welcome_link", "user", target.id, { email: target.email }, ip, ua);
+          await logAudit(ctx.user.id, "resend_welcome_link", "user", target.id, { email: target.email }, ip, ua, tenantOf.get(target.id));
           return { success: true, magicLink };
         } catch (err: any) {
           console.error("[resendWelcomeLink] Failed:", err);
@@ -3667,7 +3675,7 @@ export const appRouter = router({
         isActive: z.boolean(),
       }))
       .mutation(async ({ ctx, input }) => {
-        await assertCanManageUsers(ctx, [input.userId]);
+        const tenantOf = await assertCanManageUsers(ctx, [input.userId]);
         if (input.userId === ctx.user.id) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot deactivate your own account." });
         }
@@ -3677,7 +3685,7 @@ export const appRouter = router({
         await drizzle.update(users).set({ isActive: input.isActive }).where(eq(users.id, input.userId));
         await logAudit(ctx.user.id, input.isActive ? "activate_user" : "deactivate_user", "user", input.userId, {
           isActive: input.isActive,
-        }, ip, ua);
+        }, ip, ua, tenantOf.get(input.userId));
         return { success: true };
       }),
 
@@ -3686,7 +3694,7 @@ export const appRouter = router({
         userId: z.number().int().positive(),
       }))
       .mutation(async ({ ctx, input }) => {
-        await assertCanManageUsers(ctx, [input.userId]);
+        const tenantOf = await assertCanManageUsers(ctx, [input.userId]);
         if (input.userId === ctx.user.id) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot delete your own account." });
         }
@@ -3697,7 +3705,7 @@ export const appRouter = router({
         await drizzle.update(users)
           .set({ isActive: false, name: "[Deleted User]", email: null })
           .where(eq(users.id, input.userId));
-        await logAudit(ctx.user.id, "delete_user", "user", input.userId, {}, ip, ua);
+        await logAudit(ctx.user.id, "delete_user", "user", input.userId, {}, ip, ua, tenantOf.get(input.userId));
         return { success: true };
       }),
 
@@ -3839,9 +3847,12 @@ export const appRouter = router({
         await drizzle.update(organizations)
           .set({ segment: input.segment })
           .where(eq(organizations.id, input.organizationId));
+        // A platform procedure's record defaults to the global chain; this one
+        // changes ONE tenant's configuration, so it names that tenant, whose trail
+        // must show what the operator changed (the platform log keeps its own copy).
         await logAudit(ctx.user.id, "update_org_segment", "organization", input.organizationId, {
           segment: input.segment,
-        });
+        }, undefined, undefined, input.organizationId);
         // Get org name for audit context
         const updatedOrg = await drizzle.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, input.organizationId)).limit(1);
         await db.logPlatformEvent({
@@ -3872,9 +3883,10 @@ export const appRouter = router({
         await drizzle.update(organizations)
           .set({ ssoProvider: input.ssoProvider })
           .where(eq(organizations.id, input.organizationId));
+        // Names the tenant whose configuration changed — see update_org_segment.
         await logAudit(ctx.user.id, "update_org_sso", "organization", input.organizationId, {
           ssoProvider: input.ssoProvider,
-        });
+        }, undefined, undefined, input.organizationId);
         await db.logPlatformEvent({
           actorId: ctx.user.id,
           actorName: ctx.user.name ?? undefined,
@@ -3903,9 +3915,10 @@ export const appRouter = router({
         await drizzle.update(organizations)
           .set({ aiAssistanceEnabled: input.aiAssistanceEnabled })
           .where(eq(organizations.id, input.organizationId));
+        // Names the tenant whose configuration changed — see update_org_segment.
         await logAudit(ctx.user.id, "update_org_ai_assistance", "organization", input.organizationId, {
           aiAssistanceEnabled: input.aiAssistanceEnabled,
-        });
+        }, undefined, undefined, input.organizationId);
         await db.logPlatformEvent({
           actorId: ctx.user.id,
           actorName: ctx.user.name ?? undefined,
@@ -3943,9 +3956,10 @@ export const appRouter = router({
         await drizzle.update(organizations)
           .set({ bankingModel: input.bankingModel })
           .where(eq(organizations.id, input.organizationId));
+        // Names the tenant whose configuration changed — see update_org_segment.
         await logAudit(ctx.user.id, "update_org_banking_model", "organization", input.organizationId, {
           bankingModel: input.bankingModel,
-        });
+        }, undefined, undefined, input.organizationId);
         await db.logPlatformEvent({
           actorId: ctx.user.id,
           actorName: ctx.user.name ?? undefined,
@@ -3980,9 +3994,10 @@ export const appRouter = router({
         await drizzle.update(organizations)
           .set({ isDemo: input.isDemo })
           .where(eq(organizations.id, input.organizationId));
+        // Names the tenant whose configuration changed — see update_org_segment.
         await logAudit(ctx.user.id, "update_org_is_demo", "organization", input.organizationId, {
           isDemo: input.isDemo,
-        });
+        }, undefined, undefined, input.organizationId);
         return { success: true };
       }),
 
@@ -7322,6 +7337,9 @@ async function runReconciliation(
       );
     }
 
+    // Named, not defaulted: this runs on the job queue. In-process it would
+    // inherit whichever request enqueued it; under BullMQ, no request at all —
+    // the trail a completed run lands in must not depend on the queue backend.
     await logAudit(userId, "complete_reconciliation", "reconciliation_job", jobId, {
       matchedCount,
       exceptionCount,
@@ -7329,7 +7347,7 @@ async function runReconciliation(
       matchRate: `${matchRate.toFixed(2)}%`,
       processingTimeMs,
       engineStats: result.stats,
-    });
+    }, undefined, undefined, auditTenant(runOrganizationId));
 
     await trackProgress(jobId, "completed", {
       message: `Completed: ${matchedCount} matched, ${exceptionCount} exceptions, ${matchRate.toFixed(1)}% match rate`,
