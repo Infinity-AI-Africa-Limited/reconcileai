@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acquireInstallLease, releaseInstallLease } from "./installLease";
+import { acquireInstallLease, holdsInstallLease, releaseInstallLease, renewInstallLease } from "./installLease";
 import { duplicateKeyError, scriptedDb } from "./scriptedDb.testkit";
 
 const SHOP = "merchant.myshopify.com";
@@ -41,5 +41,33 @@ describe("releaseInstallLease", () => {
     const fake = scriptedDb();
     await releaseInstallLease(fake.db as never, SHOP, "lease-a");
     expect(fake.writes("delete", LEASES)[0]?.where?.params).toEqual([SHOP, "lease-a"]);
+  });
+});
+
+describe("renewInstallLease", () => {
+  it("should extend a lease this callback still holds", async () => {
+    const fake = scriptedDb({ update: { [LEASES]: [1] } });
+    expect(await renewInstallLease(fake.db as never, { shopDomain: SHOP, leaseId: "lease-a" }, NOW)).toBe(true);
+    expect(fake.writes("update", LEASES)[0]?.where?.params).toEqual([SHOP, "lease-a"]);
+  });
+
+  it("should report a lease that was taken over", async () => {
+    const fake = scriptedDb({ update: { [LEASES]: [0] } });
+    expect(await renewInstallLease(fake.db as never, { shopDomain: SHOP, leaseId: "lease-a" }, NOW)).toBe(false);
+  });
+});
+
+describe("holdsInstallLease", () => {
+  it("should answer with a locking read, so a takeover cannot commit before the caller does", async () => {
+    const fake = scriptedDb({ select: { [LEASES]: [[{ leaseId: "lease-a" }]] } });
+    expect(await holdsInstallLease(fake.db as never, { shopDomain: SHOP, leaseId: "lease-a" })).toBe(true);
+    const read = fake.ops[0];
+    expect(read?.locked).toBe(true);
+    expect(read?.where?.params).toEqual([SHOP, "lease-a"]);
+  });
+
+  it("should be false once another callback holds it", async () => {
+    const fake = scriptedDb({ select: { [LEASES]: [[]] } });
+    expect(await holdsInstallLease(fake.db as never, { shopDomain: SHOP, leaseId: "lease-a" })).toBe(false);
   });
 });

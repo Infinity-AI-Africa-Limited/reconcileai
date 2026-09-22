@@ -198,6 +198,19 @@ describe("GET /api/shopify/callback", () => {
     expect(fake.writes("update", "shopify_connector_stores")).toEqual([]); // nothing suspended either
   });
 
+  it("should stop before the exchange when its lease was taken over while it stalled", async () => {
+    // Greptile #134, sixth pass. The lease is renewed immediately before the
+    // exchange; a callback that lost it must not exchange, or its grant would
+    // retire the credentials of the installation that took over.
+    const fake = scriptedDb({ update: { shopify_install_leases: [0] } });
+    state.db = fake.db;
+    const res = fakeRes();
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+
+    expect(reason(res.location)).toBe("installation_in_progress");
+    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+  });
+
   it("should release its lease once the install ends, even when it fails", async () => {
     const fake = scriptedDb();
     state.db = fake.db;
@@ -229,6 +242,7 @@ describe("callbackReasonFor", () => {
     ["MISSING_CONTACT_EMAIL", "missing_contact_email"],
     ["SHOP_IDENTITY_CONFLICT", "store_identity_conflict"],
     ["WORKSPACE_CONFLICT", "store_identity_conflict"],
+    ["INSTALL_LEASE_LOST", "installation_in_progress"],
     ["TOKEN_STORE_FAILED", "install_failed"],
     ["DB_UNAVAILABLE", "install_failed"],
   ])("should map %s to %s", (code, expected) => {

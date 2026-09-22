@@ -8,7 +8,7 @@ import {
   shopifyConnectorTokens,
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
-import { createAuditLog, getDb, type DbExecutor } from "../../db";
+import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
 import { decryptForTenant, encryptForTenant } from "../../_core/tenantKeys";
 import { ENV } from "../../_core/env";
 import {
@@ -318,10 +318,18 @@ async function rotateTokenUnderLease(
  */
 export async function markReauthorizationRequired(
   db: Db,
-  params: { storeId: number; organizationId: number; reason: ShopifyStatusReason; fence: TokenGeneration },
+  params: {
+    storeId: number;
+    organizationId: number;
+    reason: ShopifyStatusReason;
+    fence: TokenGeneration;
+    /** Checked first, inside the same transaction; false makes the whole call a no-op. */
+    guard?: (tx: DbTransaction) => Promise<boolean>;
+  },
 ): Promise<boolean> {
   const { fence } = params;
   const marked = await db.transaction(async (tx) => {
+    if (params.guard && !(await params.guard(tx))) return false;
     const storeScope = and(
       eq(shopifyConnectorStores.id, params.storeId),
       eq(shopifyConnectorStores.organizationId, params.organizationId),

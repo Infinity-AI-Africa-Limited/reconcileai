@@ -23,7 +23,7 @@ import {
 } from "./auth";
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
-import { acquireInstallLease, releaseInstallLease } from "./installLease";
+import { acquireInstallLease, releaseInstallLease, renewInstallLease, type InstallLease } from "./installLease";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
@@ -44,6 +44,8 @@ export function callbackReasonFor(error: unknown): ShopifyInstallErrorReason {
     case "SHOP_IDENTITY_CONFLICT":
     case "WORKSPACE_CONFLICT":
       return "store_identity_conflict";
+    case "INSTALL_LEASE_LOST":
+      return "installation_in_progress";
     default:
       return "install_failed";
   }
@@ -208,7 +210,7 @@ export function createShopifyRouter(): express.Router {
       const leaseId = await acquireInstallLease(db, shopDomain);
       if (!leaseId) return callbackError(res, "installation_in_progress");
       try {
-        return await completeLeasedInstall(res, { shopDomain, code, origin });
+        return await completeLeasedInstall(db, res, { lease: { shopDomain, leaseId }, code, origin });
       } finally {
         await releaseInstallLease(db, shopDomain, leaseId).catch((error: unknown) => {
           // The lease expires on its own; a failed release only delays the next install.
@@ -242,14 +244,21 @@ export function createShopifyRouter(): express.Router {
  * bracket around it in the route.
  */
 async function completeLeasedInstall(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   res: express.Response,
-  params: { shopDomain: string; code: string; origin: string },
+  params: { lease: InstallLease; code: string; origin: string },
 ): Promise<void> {
-  const { shopDomain, code, origin } = params;
+  const { lease, code, origin } = params;
+  const { shopDomain } = lease;
   // Last write before the exchange, and deliberately so: the exchange retires
   // the shop's stored refresh token, so its live connection goes out of
   // service first. If this fails we stop here, with nothing retired.
   const reauthorization = await suspendForReauthorization(shopDomain);
+
+  // Renewed immediately before the exchange, which times out far inside the
+  // TTL, so this callback's grant happens while it holds the shop. If the lease
+  // was taken over while we stalled, stop now — nothing has been retired yet.
+  if (!(await renewInstallLease(db, lease))) return callbackError(res, "installation_in_progress");
 
   const tokens = await exchangeAuthorizationCode({
     shopDomain,
@@ -261,7 +270,7 @@ async function completeLeasedInstall(
     return callbackError(res, "required_permissions_not_granted");
   }
   const metadata = await fetchShopifyShopMetadata({ shopDomain, accessToken: tokens.access_token });
-  const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin, reauthorization });
+  const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin, reauthorization, lease });
   // No internal store id in the URL: the page needs only the shop, and an id
   // in a shareable link is an enumeration handle with no purpose.
   const query = new URLSearchParams({

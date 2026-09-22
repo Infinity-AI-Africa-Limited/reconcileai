@@ -71,6 +71,14 @@ const existingStore = {
   claimedAt: new Date("2026-09-01T00:00:00Z"),
 };
 
+const LEASES = "shopify_install_leases";
+/** The shop's install lease this callback holds. */
+const LEASE = { shopDomain: SHOP, leaseId: "lease-1" };
+
+/** A database in which this callback still holds the shop's lease (a standing answer). */
+const held = (script: Parameters<typeof scriptedDb>[0] = {}) =>
+  scriptedDb({ ...script, standing: { [LEASES]: [{ leaseId: LEASE.leaseId }], ...script.standing } });
+
 const onboardFirst = () =>
   onboardShopifyMerchant({
     shopDomain: SHOP,
@@ -78,6 +86,7 @@ const onboardFirst = () =>
     tokenResponse,
     origin: "https://www.reconcileaiafrica.com",
     reauthorization: { retiring: "none" },
+    lease: LEASE,
   });
 
 /** The pair the store held when this callback suspended it — what its grant retires. */
@@ -90,6 +99,7 @@ const onboard = (retiring: TokenGeneration = HELD) =>
     tokenResponse,
     origin: "https://www.reconcileaiafrica.com",
     reauthorization: { retiring },
+    lease: LEASE,
   });
 
 async function codeOf(run: () => Promise<unknown>): Promise<string | null> {
@@ -112,7 +122,7 @@ describe("when a shop we already know is reauthorized", () => {
     // Greptile #134 finding 1: a shop that changed hands must not have the new
     // owner's order access filed under the previous owner's workspace.
     function setup() {
-      const fake = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[]] } });
+      const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[]] } });
       state.db = fake.db;
       return fake;
     }
@@ -149,7 +159,7 @@ describe("when a shop we already know is reauthorized", () => {
 
   describe("and its contact email matches an active administrator", () => {
     it("should store the new pair and mark the store active in the same committed transaction", async () => {
-      const fake = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
+      const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
       state.db = fake.db;
 
       const result = await onboard();
@@ -169,7 +179,7 @@ describe("when a shop we already know is reauthorized", () => {
     // Greptile #134 finding 2: the store was committed `active` before the save,
     // leaving it active on a pair Shopify had already retired.
     it("should not leave the store active, and should record why", async () => {
-      const fake = scriptedDb({
+      const fake = held({
         select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] },
         insert: { [TOKENS]: [new Error("disk full")] },
       });
@@ -183,7 +193,7 @@ describe("when a shop we already know is reauthorized", () => {
     });
 
     it("should do the same when encryption fails", async () => {
-      const fake = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
+      const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
       state.db = fake.db;
       vi.mocked(encryptForTenant).mockRejectedValueOnce(new Error("KMS unavailable"));
 
@@ -194,7 +204,7 @@ describe("when a shop we already know is reauthorized", () => {
 
   describe("and the permanent domain now names a different shop", () => {
     it("should refuse without writing anything", async () => {
-      const fake = scriptedDb({ select: { [STORES]: [[{ ...existingStore, shopId: "gid://shopify/Shop/9999" }]] } });
+      const fake = held({ select: { [STORES]: [[{ ...existingStore, shopId: "gid://shopify/Shop/9999" }]] } });
       state.db = fake.db;
 
       expect(await codeOf(onboard)).toBe("SHOP_IDENTITY_CONFLICT");
@@ -206,7 +216,7 @@ describe("when a shop we already know is reauthorized", () => {
 describe("when a shop installs for the first time", () => {
   const onboard = () => onboardFirst();
   function firstInstall(extra: Parameters<typeof scriptedDb>[0] = {}) {
-    const fake = scriptedDb({
+    const fake = held({
       select: { [STORES]: [[]], [USERS]: [[]] },
       insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7] },
       ...extra,
@@ -290,7 +300,7 @@ describe("when a shop installs for the first time", () => {
     // the other callback had completed the install.
     it("should complete as a reauthorization of the winning store", async () => {
       const winner = { ...existingStore, status: "pending_claim" };
-      const fake = scriptedDb({
+      const fake = held({
         select: { [STORES]: [[], [winner]], [USERS]: [[], [{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] },
         insert: { [ORGS]: [duplicateKeyError()] },
       });
@@ -305,7 +315,7 @@ describe("when a shop installs for the first time", () => {
     });
 
     it("should still require the ownership check on that path", async () => {
-      const fake = scriptedDb({
+      const fake = held({
         select: { [STORES]: [[], [existingStore]], [USERS]: [[], []] },
         insert: { [ORGS]: [duplicateKeyError()] },
       });
@@ -314,13 +324,13 @@ describe("when a shop installs for the first time", () => {
     });
 
     it("should refuse clearly when the conflicting workspace has no store to resolve", async () => {
-      const fake = scriptedDb({ select: { [STORES]: [[], []], [USERS]: [[]] }, insert: { [ORGS]: [duplicateKeyError()] } });
+      const fake = held({ select: { [STORES]: [[], []], [USERS]: [[]] }, insert: { [ORGS]: [duplicateKeyError()] } });
       state.db = fake.db;
       expect(await codeOf(onboard)).toBe("WORKSPACE_CONFLICT");
     });
 
     it("should not treat an unrelated database error as a concurrent install", async () => {
-      const fake = scriptedDb({ select: { [STORES]: [[]], [USERS]: [[]] }, insert: { [ORGS]: [new Error("ECONNRESET")] } });
+      const fake = held({ select: { [STORES]: [[]], [USERS]: [[]] }, insert: { [ORGS]: [new Error("ECONNRESET")] } });
       state.db = fake.db;
       expect(await codeOf(onboard)).toBe("other:ECONNRESET");
     });
@@ -332,7 +342,7 @@ describe("when an overlapping callback stored a newer pair before this one faile
   // may be the OLDER one — failed and ran an unfenced fail-close that deleted
   // B's valid credentials and marked the store out of service.
   it("should leave the newer installation alone and say so", async () => {
-    const fake = scriptedDb({
+    const fake = held({
       select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] },
       insert: { [TOKENS]: [new Error("disk full")] },
       delete: { [TOKENS]: [0] }, // the pair A retired is no longer stored
@@ -353,7 +363,7 @@ describe("when an overlapping callback stored a newer pair before this one faile
 
 describe("when a callback suspends a store before its exchange", () => {
   it("should take only an active store out of service, and record the pair its grant will retire", async () => {
-    const fake = scriptedDb({ select: { [TOKENS]: [[{ id: 501, rotationVersion: 3 }]] } });
+    const fake = held({ select: { [TOKENS]: [[{ id: 501, rotationVersion: 3 }]] } });
     state.db = fake.db;
 
     expect(await suspendForReauthorization(SHOP)).toEqual({ retiring: { tokenRowId: 501, rotationVersion: 3 } });
@@ -366,8 +376,56 @@ describe("when a callback suspends a store before its exchange", () => {
   });
 
   it("should retire nothing when the store holds no credentials", async () => {
-    state.db = scriptedDb({ select: { [TOKENS]: [[]] } }).db;
+    state.db = held({ select: { [TOKENS]: [[]] } }).db;
     expect(await suspendForReauthorization(SHOP)).toEqual({ retiring: "none" });
+  });
+});
+
+describe("when this callback's install lease was taken over mid-install", () => {
+  // Greptile #134, sixth pass: past the lease TTL another callback can take
+  // the shop. It renewed the lease right before ITS exchange, so its grant is
+  // the later one — this callback must write nothing, success or failure.
+  const lost = (script: Parameters<typeof scriptedDb>[0] = {}) => scriptedDb({ ...script, standing: { [LEASES]: [] } });
+
+  it("should not activate the store or store its pair", async () => {
+    const fake = lost({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("INSTALL_LEASE_LOST");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    expect(storeUpdates(fake.committed())).toEqual([]);
+    expect(fake.writes("delete", TOKENS)).toEqual([]); // and no fail-close either
+  });
+
+  it("should check the lease with a locking read inside the transaction that writes", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
+    state.db = fake.db;
+    await onboard();
+    const check = fake.ops.find((op) => op.kind === "select" && op.table === LEASES);
+    expect(check?.locked).toBe(true);
+    expect(check?.txId).toBe(fake.writes("insert", TOKENS)[0]?.txId);
+    expect(check?.where?.params).toEqual([SHOP, LEASE.leaseId]);
+  });
+
+  it("should leave the store alone on an ownership refusal too", async () => {
+    const fake = lost({ select: { [STORES]: [[existingStore]], [USERS]: [[]] } });
+    state.db = fake.db;
+    let failClosed: unknown;
+    try {
+      await onboard();
+    } catch (error) {
+      failClosed = (error as ShopifyOnboardingError).storeFailClosed;
+    }
+    expect(failClosed).toBe("superseded");
+    expect(fake.writes("delete", TOKENS)).toEqual([]);
+    expect(storeUpdates(fake.committed())).toEqual([]);
+  });
+
+  it("should not create a workspace for a first install", async () => {
+    const fake = lost({ select: { [STORES]: [[]], [USERS]: [[]] } });
+    state.db = fake.db;
+    expect(await codeOf(onboardFirst)).toBe("INSTALL_LEASE_LOST");
+    expect(fake.writes("insert", ORGS)).toEqual([]);
   });
 });
 
@@ -386,7 +444,7 @@ describe("when taking a store out of service itself fails", () => {
 
   it("should retry, then report the transition as not confirmed rather than swallow it", async () => {
     const down = new Error("ECONNRESET");
-    const fake = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[]] }, delete: { [TOKENS]: [down, down, down] } });
+    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[]] }, delete: { [TOKENS]: [down, down, down] } });
     state.db = fake.db;
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -397,7 +455,7 @@ describe("when taking a store out of service itself fails", () => {
   });
 
   it("should confirm it once a retry succeeds after a transient failure", async () => {
-    const fake = scriptedDb({
+    const fake = held({
       select: { [STORES]: [[existingStore]], [USERS]: [[]] },
       delete: { [TOKENS]: [new Error("ECONNRESET"), 1] },
     });
@@ -409,7 +467,7 @@ describe("when taking a store out of service itself fails", () => {
 
   it("should still refuse with the original reason either way", async () => {
     const down = new Error("ECONNRESET");
-    state.db = scriptedDb({ select: { [STORES]: [[existingStore]], [USERS]: [[]] }, delete: { [TOKENS]: [down, down, down] } }).db;
+    state.db = held({ select: { [STORES]: [[existingStore]], [USERS]: [[]] }, delete: { [TOKENS]: [down, down, down] } }).db;
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect(await codeOf(onboard)).toBe("OWNERSHIP_UNVERIFIED");
     vi.mocked(console.error).mockRestore();
@@ -418,7 +476,7 @@ describe("when taking a store out of service itself fails", () => {
 
 describe("when Shopify returns no usable contact email", () => {
   it("should refuse before touching the database", async () => {
-    const fake = scriptedDb();
+    const fake = held();
     state.db = fake.db;
     const code = await codeOf(() =>
       onboardShopifyMerchant({
@@ -427,6 +485,7 @@ describe("when Shopify returns no usable contact email", () => {
         tokenResponse,
         origin: "https://x",
         reauthorization: { retiring: "none" },
+        lease: LEASE,
       }),
     );
     expect(code).toBe("MISSING_CONTACT_EMAIL");

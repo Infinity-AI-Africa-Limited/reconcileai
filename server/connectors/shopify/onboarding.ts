@@ -9,7 +9,7 @@ import {
   type ShopifyConnectorStore,
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
-import { createAuditLog, getDb } from "../../db";
+import { createAuditLog, getDb, type DbTransaction } from "../../db";
 import { isDuplicateKeyError } from "../../dbErrors";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { sha256, type ShopifyTokenResponse } from "./auth";
@@ -20,6 +20,7 @@ import {
   writeShopifyTokens,
   type TokenGeneration,
 } from "./tokenStore";
+import { holdsInstallLease, type InstallLease } from "./installLease";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -51,7 +52,9 @@ export type ShopifyOnboardingErrorCode =
   /** The shop's permanent domain and its Shopify id point at different records. */
   | "SHOP_IDENTITY_CONFLICT"
   /** The shop's deterministic workspace code is taken, but no store record explains it. */
-  | "WORKSPACE_CONFLICT";
+  | "WORKSPACE_CONFLICT"
+  /** This callback no longer holds the shop's install lease; a later installation owns the outcome. */
+  | "INSTALL_LEASE_LOST";
 
 /**
  * After a refusal or failure that had to take a store out of service:
@@ -125,6 +128,8 @@ export async function onboardShopifyMerchant(params: {
   origin: string;
   /** From suspendForReauthorization, taken before the code was exchanged. Required: see its type. */
   reauthorization: ReauthorizationTicket;
+  /** The shop's install lease this callback holds; every write below is conditioned on still holding it. */
+  lease: InstallLease;
 }): Promise<ShopifyOnboardingResult> {
   const db = await getDb();
   if (!db) throw new ShopifyOnboardingError("Database unavailable", "DB_UNAVAILABLE");
@@ -262,7 +267,7 @@ async function reauthorizeExistingStore(
   if (!admin) {
     // The new grant has already retired this store's refresh token, so the
     // workspace's connection is dead either way; this records it as such.
-    const failClosedState = await failClosed(db, store, "ownership_unverified", params.reauthorization.retiring);
+    const failClosedState = await failClosed(db, store, "ownership_unverified", params.reauthorization.retiring, params.lease);
     throw new ShopifyOnboardingError(
       "The Shopify store's contact email does not match an administrator of its ReconcileAI workspace",
       "OWNERSHIP_UNVERIFIED",
@@ -273,6 +278,7 @@ async function reauthorizeExistingStore(
   try {
     const tokens = await encryptShopifyTokens(store.organizationId, params.tokenResponse);
     await db.transaction(async (tx) => {
+      await assertLeaseHeld(tx, params.lease);
       // Store state, credentials and the record of both commit together. The
       // store becomes `active` only in the same commit that stores the pair it
       // is active ON — never ahead of it, as a separate write could leave it.
@@ -316,7 +322,8 @@ async function reauthorizeExistingStore(
       );
     });
   } catch (error) {
-    const failClosedState = await failClosed(db, store, "token_store_failed", params.reauthorization.retiring);
+    if (isLeaseLost(error)) throw error;
+    const failClosedState = await failClosed(db, store, "token_store_failed", params.reauthorization.retiring, params.lease);
     throw new ShopifyOnboardingError(
       `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
       "TOKEN_STORE_FAILED",
@@ -359,6 +366,7 @@ async function createMerchantWorkspace(
   //    says it is not connected, and the merchant's retry completes it through
   //    the reauthorization path.
   const { organizationId, userId, storeId } = await db.transaction(async (tx) => {
+    await assertLeaseHeld(tx, params.lease);
     const orgResult = await tx.insert(organizations).values({
       name: params.metadata.name.slice(0, ORGANIZATION_NAME_MAX),
       code: organizationCode,
@@ -443,6 +451,7 @@ async function createMerchantWorkspace(
   try {
     const tokens = await encryptShopifyTokens(organizationId, params.tokenResponse);
     await db.transaction(async (tx) => {
+      await assertLeaseHeld(tx, params.lease);
       await writeShopifyTokens(tx, { storeId, organizationId, tokens });
       await tx
         .update(shopifyConnectorStores)
@@ -450,9 +459,10 @@ async function createMerchantWorkspace(
         .where(and(eq(shopifyConnectorStores.id, storeId), eq(shopifyConnectorStores.organizationId, organizationId)));
     });
   } catch (error) {
+    if (isLeaseLost(error)) throw error;
     // The store is still `pending_claim` here, never `active`; recording why
     // it has no credentials is for the operator, not for safety.
-    const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed", "none");
+    const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed", "none", params.lease);
     throw new ShopifyOnboardingError(
       `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
       "TOKEN_STORE_FAILED",
@@ -484,6 +494,27 @@ async function createMerchantWorkspace(
 }
 
 /**
+ * Throw unless this callback still holds the shop's install lease. Called first
+ * inside every transaction that stores credentials or activates a store, so a
+ * takeover cannot commit in between (holdsInstallLease locks the lease row).
+ *
+ * Losing it means the lease expired mid-install and another callback took the
+ * shop. That callback renewed the lease immediately before ITS exchange, so its
+ * grant came after ours and retired our credentials: its outcome is the one
+ * that stands, and this callback must write nothing.
+ */
+async function assertLeaseHeld(tx: DbTransaction, lease: InstallLease): Promise<void> {
+  if (!(await holdsInstallLease(tx, lease))) {
+    throw new ShopifyOnboardingError("Another installation for this shop took over this one", "INSTALL_LEASE_LOST");
+  }
+}
+
+/** A lost lease passes through untouched; it is not a credential failure and must not be retried as one. */
+function isLeaseLost(error: unknown): error is ShopifyOnboardingError {
+  return error instanceof ShopifyOnboardingError && error.code === "INSTALL_LEASE_LOST";
+}
+
+/**
  * Take the store out of service after a failed or refused authorization, and
  * say whether that actually happened.
  *
@@ -505,6 +536,7 @@ async function failClosed(
   store: Pick<ShopifyConnectorStore, "id" | "organizationId">,
   reason: ShopifyStatusReason,
   fence: TokenGeneration,
+  lease: InstallLease,
 ): Promise<StoreFailClosedState> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= FAIL_CLOSED_ATTEMPTS; attempt += 1) {
@@ -514,6 +546,8 @@ async function failClosed(
         organizationId: store.organizationId,
         reason,
         fence,
+        // A callback that lost the shop's lease leaves the store to the one that took it.
+        guard: (tx) => holdsInstallLease(tx, lease),
       });
       return marked ? "confirmed" : "superseded";
     } catch (error) {

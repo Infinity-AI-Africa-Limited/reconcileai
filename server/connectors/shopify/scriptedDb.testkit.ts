@@ -29,12 +29,16 @@ export interface RecordedOp {
   upsert: boolean;
   /** The transaction this ran in, or null outside one. */
   txId: number | null;
+  /** Set on a locking read (`.for("update")`). */
+  locked: boolean;
 }
 
 /** A scripted answer: rows for a select, affected rows for a write, or an error to throw. */
 type Answer = unknown[] | number | Error;
 
 export interface Script {
+  /** Rows a select on the table returns whenever its queue below is empty. */
+  standing?: Record<string, unknown[]>;
   select?: Record<string, Answer[]>;
   insert?: Record<string, Answer[]>;
   update?: Record<string, Answer[]>;
@@ -77,8 +81,8 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
   });
 
   const handle = (txId: number | null): Record<string, unknown> => {
-    const record = (op: Omit<RecordedOp, "txId">): RecordedOp => {
-      const full = { ...op, txId };
+    const record = (op: Omit<RecordedOp, "txId" | "locked"> & { locked?: boolean }): RecordedOp => {
+      const full = { ...op, locked: op.locked ?? false, txId };
       ops.push(full);
       return full;
     };
@@ -94,17 +98,19 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
       select(_fields?: unknown) {
         let table = "";
         let where: RecordedOp["where"] = null;
+        let locked = false;
         const query = {
           from(t: Table) { table = getTableName(t); return query; },
           innerJoin() { return query; },
           where(cond: unknown) { where = render(cond); return query; },
           orderBy() { return query; },
           limit() { return query; },
+          for() { locked = true; return query; },
           ...settle(() => {
-            record({ kind: "select", table, where, data: null, upsert: false });
+            record({ kind: "select", table, where, data: null, upsert: false, locked });
             const answer = take("select", table);
             if (answer instanceof Error) throw answer;
-            return Array.isArray(answer) ? answer : [];
+            return Array.isArray(answer) ? answer : (script.standing?.[table] ?? []);
           }),
         };
         return query;

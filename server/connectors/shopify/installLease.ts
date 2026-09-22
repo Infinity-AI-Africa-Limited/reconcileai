@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { and, eq, lt } from "drizzle-orm";
 import { SHOPIFY_INSTALL_LEASE_MS, shopifyInstallLeases } from "../../../drizzle/shopify_schema";
-import { getDb } from "../../db";
+import { getDb, type DbExecutor } from "../../db";
 import { isDuplicateKeyError } from "../../dbErrors";
 import { affectedRows } from "./tokenStore";
 
@@ -31,6 +31,51 @@ export async function acquireInstallLease(db: Db, shopDomain: string, now: Date 
       .where(and(eq(shopifyInstallLeases.shopDomain, shopDomain), lt(shopifyInstallLeases.expiresAt, now))),
   );
   return taken === 1 ? leaseId : null;
+}
+
+/** A lease one callback holds on one shop. */
+export interface InstallLease {
+  shopDomain: string;
+  leaseId: string;
+}
+
+/**
+ * Extend a lease this callback still holds — call it immediately before the
+ * code exchange. False means it expired and was taken over; the caller must
+ * stop BEFORE exchanging, while its grant has retired nothing.
+ *
+ * Renewing right before the exchange is what bounds the exchange inside the
+ * lease: the exchange times out at 30s, far inside the TTL, so the grant
+ * happens while this callback still holds the shop. (mysql2 reports MATCHED
+ * rows, so a same-second renewal that changes nothing still counts.)
+ */
+export async function renewInstallLease(db: Db, lease: InstallLease, now: Date = new Date()): Promise<boolean> {
+  const renewed = affectedRows(
+    await db
+      .update(shopifyInstallLeases)
+      .set({ expiresAt: new Date(now.getTime() + SHOPIFY_INSTALL_LEASE_MS) })
+      .where(and(eq(shopifyInstallLeases.shopDomain, lease.shopDomain), eq(shopifyInstallLeases.leaseId, lease.leaseId))),
+  );
+  return renewed === 1;
+}
+
+/**
+ * Inside a transaction: does this callback still hold the shop's lease?
+ *
+ * The locking read is the point: a takeover is an UPDATE of this row, so it
+ * cannot commit until the caller's transaction does — the answer stays true
+ * until the caller's writes are in. Only the lease id is compared, not the
+ * expiry: an expired lease nobody has taken over still means nobody else has
+ * exchanged a code for this shop.
+ */
+export async function holdsInstallLease(tx: DbExecutor, lease: InstallLease): Promise<boolean> {
+  const [row] = await tx
+    .select({ leaseId: shopifyInstallLeases.leaseId })
+    .from(shopifyInstallLeases)
+    .where(and(eq(shopifyInstallLeases.shopDomain, lease.shopDomain), eq(shopifyInstallLeases.leaseId, lease.leaseId)))
+    .for("update")
+    .limit(1);
+  return Boolean(row);
 }
 
 /** Release a lease this callback holds. A lease since taken over by another is left alone. */
