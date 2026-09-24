@@ -361,13 +361,32 @@ describe("when deciding whether a request was HTTPS", () => {
   });
 
   it("should not let a caller downgrade its own cookie by claiming http", () => {
-    // Two trusted hops means the caller's own entry sits THREE from the right:
-    // it sent "http", Cloudflare appended the scheme it saw, Railway appended
-    // the scheme Cloudflare used. The hop that counts is never the caller's.
+    // The caller's entry is on the LEFT, outside the trusted window.
     expect(requestIsSecureFrom(req("http,https,https"), 2)).toBe(true);
     expect(requestIsSecureFrom(req("http,http,https,https"), 2)).toBe(true);
-    // And the honest chain, which is what production actually sends.
     expect(requestIsSecureFrom(req("https,https"), 2)).toBe(true);
+  });
+
+  it("should be right whether the proxies APPEND or OVERWRITE the header", () => {
+    // Greptile P2 on PR #151: X-Forwarded-For is append-only by spec, but
+    // X-Forwarded-Proto is not — proxies differ, and indexing into it would be
+    // asserting a shape nobody documents. Every plausible shape of an https
+    // request must read as https.
+    for (const chain of [
+      "https",             // one proxy, overwriting
+      "https,https",       // both appending
+      "http,https",        // one appended (keeping the caller's), one overwrote
+      "http,https,https",  // caller's entry plus two appends
+    ]) {
+      expect(requestIsSecureFrom(req(chain), 2), chain).toBe(true);
+    }
+  });
+
+  it("should still refuse a caller who claims https on a plaintext deployment", () => {
+    // The window holds only what the trusted hops wrote, so an upgrade attempt
+    // from the left is ignored.
+    expect(requestIsSecureFrom(req("https,http,http"), 2)).toBe(false);
+    expect(requestIsSecureFrom(req("http,http"), 2)).toBe(false);
   });
 
   it("should believe the connection when nothing is in front of the app", () => {

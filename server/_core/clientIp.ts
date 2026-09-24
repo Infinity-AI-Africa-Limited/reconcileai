@@ -273,6 +273,20 @@ export function clientIpOrUnknown(req: ProxiedRequest | null | undefined): strin
 }
 
 /** The scheme of the connection this process actually accepted. */
+/**
+ * Log the first X-Forwarded-Proto shape this process sees, once.
+ *
+ * The append-vs-overwrite question above is answered by what the edge actually
+ * sends, and that is not documented anywhere we control. One line at the first
+ * real request makes it a log lookup instead of an assumption.
+ */
+let loggedProtoShape = false;
+function noteForwardedProtoShape(header: string, entryCount: number): void {
+  if (loggedProtoShape) return;
+  loggedProtoShape = true;
+  console.log(`[clientIp] first x-forwarded-proto seen: "${header}" (${entryCount} entr${entryCount === 1 ? "y" : "ies"})`);
+}
+
 function rawSchemeIsSecure(req: ProxiedRequest): boolean {
   if (req.secure === true) return true;
   if (req.socket?.encrypted === true) return true;
@@ -282,15 +296,31 @@ function rawSchemeIsSecure(req: ProxiedRequest): boolean {
 /**
  * Was the request HTTPS end to end?
  *
- * `X-Forwarded-Proto` is appended and read exactly like `X-Forwarded-For`, and
- * for the same reason: behind a TLS-terminating proxy the socket is plaintext,
- * so `req.protocol` says `http` and anything derived from it is wrong. That is
- * why the SSO flow cookie (PKCE verifier, state, nonce) shipped WITHOUT the
- * Secure attribute in production.
+ * Behind a TLS-terminating proxy the socket is plaintext, so `req.protocol` says
+ * `http` and anything derived from it is wrong. That is why the SSO flow cookie
+ * (PKCE verifier, state, nonce) shipped WITHOUT the Secure attribute.
  *
- * Counted from the right on the same hop policy, so a caller cannot downgrade
- * its own cookie by claiming `http` — the entry that counts is the one trusted
- * infrastructure wrote.
+ * ⚠️ This header is NOT read the same way as `X-Forwarded-For`, on purpose.
+ * XFF is append-only by specification, so the client's address sits at a known
+ * index. `X-Forwarded-Proto` has no such guarantee — some proxies append, some
+ * OVERWRITE — so indexing into it would be asserting a shape nobody documents,
+ * and getting it wrong drops `Secure` from an auth cookie.
+ *
+ * So instead: look only at the RIGHTMOST `trustedProxyHops` entries — the ones
+ * trusted infrastructure can have written — and say https if ANY of them does.
+ * That is correct whether the proxies append or overwrite, and whether the chain
+ * is shorter than the window:
+ *
+ *   "https,https"        → https ✔        (both proxies appended)
+ *   "https"              → https ✔        (a proxy overwrote)
+ *   "http,https,https"   → https ✔        (caller's entry is outside the window)
+ *   "http,https"         → https ✔        (one appended, one overwrote)
+ *   "https,http,http"    → http  ✔        (a caller cannot claim https)
+ *   "http,http"          → http  ✔        (genuinely plaintext)
+ *
+ * The asymmetry is deliberate: a wrong `false` drops Secure from a live auth
+ * cookie, while a wrong `true` only makes the browser discard a cookie the
+ * caller themselves mislabelled. Only one of those is someone else's problem.
  */
 export function requestIsSecureFrom(req: ProxiedRequest, trustedProxyHops: number): boolean {
   if (trustedProxyHops <= 0) return rawSchemeIsSecure(req);
@@ -303,7 +333,8 @@ export function requestIsSecureFrom(req: ProxiedRequest, trustedProxyHops: numbe
     .filter(s => s === "http" || s === "https");
   if (entries.length === 0) return rawSchemeIsSecure(req);
 
-  return entries[Math.max(0, entries.length - trustedProxyHops)] === "https";
+  noteForwardedProtoShape(header ?? "", entries.length);
+  return entries.slice(-trustedProxyHops).includes("https");
 }
 
 /** Was the request HTTPS end to end, under this deployment's proxy policy? */
