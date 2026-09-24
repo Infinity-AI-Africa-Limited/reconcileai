@@ -198,11 +198,16 @@ describe("when a procedure in routers.ts reads a job or schedule by a caller's i
   // polling and SLA monitoring on import, against whatever database is
   // configured — production on a developer machine. So its by-id reads are
   // pinned by their checks here, and the check itself is tested below.
-  // `auth.*` now lives in routers/auth.ts. Reading both keeps these assertions
-  // about the CODE rather than about which file currently holds it.
+  // `auth.*` was extracted from routers.ts and then split again, so pinning a
+  // filename means re-editing this test on every move. Read routers.ts plus
+  // whatever auth files exist — these assertions are about the CODE.
+  const fs = require("node:fs");
+  const path = require("node:path");
   const read = (...p: string[]) =>
-    require("node:fs").readFileSync(require("node:path").join(__dirname, ...p), "utf8").replace(/\r\n/g, "\n") as string;
-  const src = read("..", "routers.ts") + read("auth.ts");
+    fs.readFileSync(path.join(__dirname, ...p), "utf8").replace(/\r\n/g, "\n") as string;
+  const authFiles = (fs.readdirSync(__dirname) as string[])
+    .filter(f => f.startsWith("auth") && f.endsWith(".ts") && !f.includes(".test."));
+  const src = [read("..", "routers.ts"), ...authFiles.map(f => read(f))].join("\n");
   const preceding = (needle: string) =>
     [...src.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))].map((m) => src.slice(Math.max(0, m.index! - 400), m.index));
 
