@@ -36,24 +36,36 @@ const TOKEN_TTL_HOURS = 72;
 export function resolveMagicLinkOrigin(candidate?: string | null): string {
   // NEVER the candidate. A missing APP_URL is a configuration slip; it must not
   // become "trust the caller", because the caller here is unauthenticated and
-  // the link carries a live token. DEFAULT_APP_ORIGIN keeps sign-in working on
-  // the hosted product while staying un-forgeable.
-  const trusted = normalizeOrigin(ENV.appUrl) || DEFAULT_APP_ORIGIN;
-  if (!ENV.appUrl) {
-    console.warn(`[magicLink] APP_URL is not set — sign-in links will point at ${trusted}`);
+  // the link carries a live token.
+  const configured = normalizeOrigin(ENV.appUrl);
+
+  if (!configured) {
+    // An on-premise instance mints tokens in ITS OWN database. Pointing a link
+    // at the hosted product would send that token to a system that cannot use
+    // it and should never see it. Refuse, and say why: no sign-in email is a
+    // diagnosable failure, a misdirected token is not.
+    if (ENV.deploymentMode === "on_premise") {
+      console.error(
+        "[magicLink] APP_URL is not set on an on-premise deployment — refusing to send a sign-in link rather than pointing it elsewhere",
+      );
+      return "";
+    }
+    console.warn(`[magicLink] APP_URL is not set — sign-in links will point at ${DEFAULT_APP_ORIGIN}`);
+    return DEFAULT_APP_ORIGIN;
   }
 
   const supplied = normalizeOrigin(candidate);
-  if (!supplied) return trusted;
+  if (!supplied) return configured;
 
   try {
-    if (new URL(supplied).origin === new URL(trusted).origin) return trusted;
+    if (new URL(supplied).origin === new URL(configured).origin) return configured;
     console.warn(`[magicLink] refusing a sign-in link origin that is not this deployment: ${new URL(supplied).origin}`);
   } catch {
     console.warn("[magicLink] refusing an unparseable sign-in link origin");
   }
-  return trusted;
+  return configured;
 }
+
 
 
 const ROLE_LABELS: Record<string, string> = {
@@ -126,8 +138,13 @@ export async function sendWelcomeEmail(params: {
 }): Promise<{ success: boolean; magicLink: string }> {
   const { userId, name, email, role, origin } = params;
 
+  // Resolve BEFORE minting: a token that is never delivered is still a row in
+  // magic_link_tokens, and an unusable one at that.
+  const appOrigin = resolveMagicLinkOrigin(origin);
+  if (!appOrigin) return { success: false, magicLink: "" };
+
   const token = await createMagicLinkToken(userId);
-  const magicLink = `${resolveMagicLinkOrigin(origin)}/magic-login?token=${token}`;
+  const magicLink = `${appOrigin}/magic-login?token=${token}`;
   const safeName = escapeHtml(name);
 
   const subject = "Welcome to ReconcileAI — your account is ready";
@@ -169,8 +186,11 @@ export async function sendLoginLinkEmail(params: {
     return { sent: false };
   }
 
+  const appOrigin = resolveMagicLinkOrigin(origin);
+  if (!appOrigin) return { sent: false };
+
   const token = await createMagicLinkToken(user.id);
-  const magicLink = `${resolveMagicLinkOrigin(origin)}/magic-login?token=${token}`;
+  const magicLink = `${appOrigin}/magic-login?token=${token}`;
 
   const subject = "Your ReconcileAI sign-in link";
   const body = `

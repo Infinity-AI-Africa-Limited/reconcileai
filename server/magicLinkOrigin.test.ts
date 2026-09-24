@@ -20,15 +20,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const TRUSTED = "https://www.reconcileaiafrica.com";
 
 /** ENV is read at import, so each case gets a freshly-imported module. */
-async function serviceWith(appUrl: string) {
+async function serviceWith(appUrl: string, deploymentMode = "cloud") {
   vi.resetModules();
   // "" means "not configured". Deleting it would NOT work: vi.resetModules()
   // re-imports dotenv/config, which refills APP_URL from the local .env.
   process.env.APP_URL = appUrl;
+  process.env.DEPLOYMENT_MODE = deploymentMode;
   return import("./magicLinkService");
 }
 
 const originalAppUrl = process.env.APP_URL;
+const originalMode = process.env.DEPLOYMENT_MODE;
 let warn: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
@@ -38,6 +40,8 @@ afterEach(() => {
   warn.mockRestore();
   if (originalAppUrl === undefined) delete process.env.APP_URL;
   else process.env.APP_URL = originalAppUrl;
+  if (originalMode === undefined) delete process.env.DEPLOYMENT_MODE;
+  else process.env.DEPLOYMENT_MODE = originalMode;
 });
 
 describe("when a caller supplies the origin for a sign-in link", () => {
@@ -93,6 +97,15 @@ describe("when a caller supplies the origin for a sign-in link", () => {
     expect(resolveMagicLinkOrigin("https://evil.tld")).toBe("https://reconcile.bank.internal");
   });
 
+  it("should refuse to send AT ALL on an on-premise deployment with no APP_URL", async () => {
+    // Greptile P1 on this PR: falling back to the hosted origin would send an
+    // on-premise instance's OWN token to a system that cannot use it and should
+    // never see it. No email is a diagnosable failure; a misdirected token is not.
+    const { resolveMagicLinkOrigin } = await serviceWith("", "on_premise");
+    expect(resolveMagicLinkOrigin("https://evil.tld")).toBe("");
+    expect(resolveMagicLinkOrigin()).toBe("");
+  });
+
   it("should STILL refuse the caller when APP_URL is unset", async () => {
     // The dangerous branch: a configuration slip must not become "trust the
     // caller". Greptile P1 on this PR — the earlier version returned the
@@ -118,9 +131,12 @@ describe("when the service builds the link itself", () => {
     const builds = src.match(/const magicLink = `[^`]+`/g) ?? [];
     expect(builds.length).toBeGreaterThan(0);
     for (const line of builds) {
-      expect(line, line).toContain("resolveMagicLinkOrigin(");
+      // The parameter itself must never reach the template — only a value the
+      // resolver returned.
       expect(line, line).not.toMatch(/\$\{\s*origin\s*\}/);
     }
+    // …and every sender resolves it, once each.
+    expect(src.match(/resolveMagicLinkOrigin\(origin\)/g) ?? []).toHaveLength(builds.length);
   });
 });
 
@@ -133,16 +149,24 @@ describe("when the service builds the link itself", () => {
  * `sendLoginLinkEmail` end to end with a hostile origin and reads the captured
  * email, which is the boundary that actually matters.
  */
+interface SentEmail {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+}
+
 describe("when a sender emails a sign-in link", () => {
   const TRUSTED = "https://www.reconcileaiafrica.com";
 
-  async function sendWith(origin: string, appUrl = TRUSTED) {
+  async function sendWith(origin: string, appUrl = TRUSTED, deploymentMode = "cloud") {
     vi.resetModules();
     process.env.APP_URL = appUrl;
+    process.env.DEPLOYMENT_MODE = deploymentMode;
 
-    const sent: Array<{ to: string; html: string; text: string }> = [];
+    const sent: SentEmail[] = [];
     vi.doMock("./_core/email", () => ({
-      sendEmail: async (m: any) => {
+      sendEmail: async (m: SentEmail) => {
         sent.push(m);
         return { success: true };
       },
@@ -221,6 +245,13 @@ describe("when a sender emails a sign-in link", () => {
     expect(new URL(welcomeLink).origin).toBe(TRUSTED);
     expect(welcomeLink).not.toContain("evil.tld");
     expect(welcomeLink).toMatch(/\/magic-login\?token=[0-9a-f]{16,}/);
+  });
+
+  it("should send NOTHING at all on an on-premise deployment with no APP_URL", async () => {
+    // The other half of Greptile's P1: the resolver refusing is only useful if
+    // the sender then declines to send rather than emailing a broken link.
+    const sent = await sendWith("https://evil.tld", "", "on_premise");
+    expect(sent).toHaveLength(0);
   });
 
   it("should do the same when APP_URL is not configured", async () => {
