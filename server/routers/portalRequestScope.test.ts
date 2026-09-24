@@ -198,7 +198,11 @@ describe("when a procedure in routers.ts reads a job or schedule by a caller's i
   // polling and SLA monitoring on import, against whatever database is
   // configured — production on a developer machine. So its by-id reads are
   // pinned by their checks here, and the check itself is tested below.
-  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "routers.ts"), "utf8").replace(/\r\n/g, "\n") as string;
+  // `auth.*` now lives in routers/auth.ts. Reading both keeps these assertions
+  // about the CODE rather than about which file currently holds it.
+  const read = (...p: string[]) =>
+    require("node:fs").readFileSync(require("node:path").join(__dirname, ...p), "utf8").replace(/\r\n/g, "\n") as string;
+  const src = read("..", "routers.ts") + read("auth.ts");
   const preceding = (needle: string) =>
     [...src.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))].map((m) => src.slice(Math.max(0, m.index! - 400), m.index));
 

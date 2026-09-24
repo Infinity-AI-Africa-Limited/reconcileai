@@ -62,7 +62,10 @@ describe("financial-services operational demo plan", () => {
 // unsuffixed set of channel codes shared between every org-less caller.
 describe("guest demo accounts belong to a real organisation", () => {
   const PREWARM = readFileSync(join(__dirname, "prewarmDemoUser.ts"), "utf8");
-  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8");
+  // `auth.*` now lives in routers/auth.ts. Reading both keeps these assertions
+  // about the CODE rather than about which file currently holds it.
+  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8")
+    + readFileSync(join(__dirname, "routers", "auth.ts"), "utf8");
 
   it("provisions a dedicated demo organisation", () => {
     expect(PREWARM).toMatch(/export async function ensureGuestDemoOrganization\(/);
@@ -118,7 +121,10 @@ describe("guest demo accounts belong to a real organisation", () => {
 // replace the first — it adds another full dataset. Two cold-start guests would
 // double every transaction and exception the demo shows.
 describe("guest fallback seeds the shared demo tenant only once", () => {
-  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8");
+  // `auth.*` now lives in routers/auth.ts. Reading both keeps these assertions
+  // about the CODE rather than about which file currently holds it.
+  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8")
+    + readFileSync(join(__dirname, "routers", "auth.ts"), "utf8");
   const fallback = ROUTERS.slice(
     ROUTERS.indexOf("const guestOpenId = 'guest_'"),
     ROUTERS.indexOf("const { sdk } = await import"),
