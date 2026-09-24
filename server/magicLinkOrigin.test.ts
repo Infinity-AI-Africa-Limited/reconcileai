@@ -20,10 +20,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const TRUSTED = "https://www.reconcileaiafrica.com";
 
 /** ENV is read at import, so each case gets a freshly-imported module. */
-async function serviceWith(appUrl: string | undefined) {
+async function serviceWith(appUrl: string) {
   vi.resetModules();
-  if (appUrl === undefined) delete process.env.APP_URL;
-  else process.env.APP_URL = appUrl;
+  // "" means "not configured". Deleting it would NOT work: vi.resetModules()
+  // re-imports dotenv/config, which refills APP_URL from the local .env.
+  process.env.APP_URL = appUrl;
   return import("./magicLinkService");
 }
 
@@ -92,11 +93,16 @@ describe("when a caller supplies the origin for a sign-in link", () => {
     expect(resolveMagicLinkOrigin("https://evil.tld")).toBe("https://reconcile.bank.internal");
   });
 
-  it("should say so loudly when APP_URL is unset rather than silently trusting the caller", async () => {
-    // Nothing to compare against — behaviour is unchanged, but it is a
-    // misconfiguration and the log has to name it.
-    const { resolveMagicLinkOrigin } = await serviceWith(undefined);
-    expect(resolveMagicLinkOrigin("https://anything.example")).toBe("https://anything.example");
+  it("should STILL refuse the caller when APP_URL is unset", async () => {
+    // The dangerous branch: a configuration slip must not become "trust the
+    // caller". Greptile P1 on this PR — the earlier version returned the
+    // candidate here, which left the whole takeover intact on any deployment
+    // that had not set APP_URL.
+    const { resolveMagicLinkOrigin } = await serviceWith("");
+    const { DEFAULT_APP_ORIGIN } = await import("@shared/appOrigin");
+
+    expect(resolveMagicLinkOrigin("https://evil.tld")).toBe(DEFAULT_APP_ORIGIN);
+    expect(resolveMagicLinkOrigin()).toBe(DEFAULT_APP_ORIGIN);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("APP_URL is not set"));
   });
 });
@@ -114,6 +120,114 @@ describe("when the service builds the link itself", () => {
     for (const line of builds) {
       expect(line, line).toContain("resolveMagicLinkOrigin(");
       expect(line, line).not.toMatch(/\$\{\s*origin\s*\}/);
+    }
+  });
+});
+
+/**
+ * The link a SENDER actually produces.
+ *
+ * The tests above exercise the resolver and the service's source text. Greptile's
+ * P2 on this PR: neither proves what lands in the recipient's inbox — a sender
+ * could still build an unsafe link while both pass. This drives
+ * `sendLoginLinkEmail` end to end with a hostile origin and reads the captured
+ * email, which is the boundary that actually matters.
+ */
+describe("when a sender emails a sign-in link", () => {
+  const TRUSTED = "https://www.reconcileaiafrica.com";
+
+  async function sendWith(origin: string, appUrl = TRUSTED) {
+    vi.resetModules();
+    process.env.APP_URL = appUrl;
+
+    const sent: Array<{ to: string; html: string; text: string }> = [];
+    vi.doMock("./_core/email", () => ({
+      sendEmail: async (m: any) => {
+        sent.push(m);
+        return { success: true };
+      },
+      renderBrandedHtml: (_s: string, body: string) => body,
+      renderButton: (_label: string, url: string) => `<a href="${url}">go</a>`,
+      escapeHtml: (s: string) => s,
+    }));
+
+    // A drizzle stand-in: one active user, and an insert that swallows the token.
+    const user = { id: 7, email: "cfo@bank.com", name: "CFO", role: "admin", isActive: true, isGuest: false };
+    vi.doMock("./db", () => ({
+      getDb: async () => ({
+        select: () => ({ from: () => ({ where: () => ({ limit: async () => [user] }) }) }),
+        insert: () => ({ values: async () => undefined }),
+      }),
+    }));
+
+    const { sendLoginLinkEmail } = await import("./magicLinkService");
+    await sendLoginLinkEmail({ email: user.email, origin });
+    vi.doUnmock("./_core/email");
+    vi.doUnmock("./db");
+    return sent;
+  }
+
+  async function sendWelcomeWith(origin: string, appUrl = TRUSTED) {
+    vi.resetModules();
+    process.env.APP_URL = appUrl;
+    vi.doMock("./_core/email", () => ({
+      sendEmail: async () => ({ success: true }),
+      renderBrandedHtml: (_s: string, body: string) => body,
+      renderButton: (_l: string, url: string) => `<a href="${url}">go</a>`,
+      escapeHtml: (s: string) => s,
+    }));
+    vi.doMock("./db", () => ({
+      getDb: async () => ({
+        select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+        insert: () => ({ values: async () => undefined }),
+      }),
+    }));
+    const { sendWelcomeEmail } = await import("./magicLinkService");
+    const { magicLink } = await sendWelcomeEmail({
+      userId: 7,
+      name: "CFO",
+      email: "cfo@bank.com",
+      role: "admin",
+      origin,
+    });
+    vi.doUnmock("./_core/email");
+    vi.doUnmock("./db");
+    return { welcomeLink: magicLink };
+  }
+
+  /** Every URL in the email body and text part. */
+  const linksIn = (m: { html: string; text: string }) =>
+    [...`${m.html} ${m.text}`.matchAll(/https?:\/\/[^\s"'<>]+/g)].map(x => x[0]);
+
+  it("should point the emailed link at this deployment, not the caller's host", async () => {
+    const [mail] = await sendWith("https://evil.tld");
+    expect(mail).toBeDefined();
+
+    const links = linksIn(mail);
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) {
+      expect(new URL(link).origin, link).toBe(TRUSTED);
+      expect(link).not.toContain("evil.tld");
+    }
+    // And the token really is in there — otherwise this would pass vacuously.
+    expect(links.some(l => /\/magic-login\?token=[0-9a-f]{16,}/.test(l))).toBe(true);
+  });
+
+  it("should point the WELCOME link there too — both senders, not just the one", async () => {
+    // Found by mutation: breaking the welcome sender left the behavioural test
+    // green because it only drove the login sender. Greptile's P2 says "either
+    // email sender", and it meant it.
+    const { welcomeLink } = await sendWelcomeWith("https://evil.tld");
+    expect(new URL(welcomeLink).origin).toBe(TRUSTED);
+    expect(welcomeLink).not.toContain("evil.tld");
+    expect(welcomeLink).toMatch(/\/magic-login\?token=[0-9a-f]{16,}/);
+  });
+
+  it("should do the same when APP_URL is not configured", async () => {
+    const { DEFAULT_APP_ORIGIN } = await import("@shared/appOrigin");
+    const [mail] = await sendWith("https://evil.tld", "");
+    for (const link of linksIn(mail)) {
+      expect(new URL(link).origin, link).toBe(DEFAULT_APP_ORIGIN);
     }
   });
 });

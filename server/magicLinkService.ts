@@ -9,6 +9,7 @@ import { magicLinkTokens, users } from "../drizzle/schema";
 import { eq, and, gt, isNull } from "drizzle-orm";
 import { sendEmail, renderBrandedHtml, renderButton, escapeHtml } from "./_core/email";
 import { ENV } from "./_core/env";
+import { DEFAULT_APP_ORIGIN, normalizeOrigin } from "@shared/appOrigin";
 
 const TOKEN_TTL_HOURS = 72;
 
@@ -33,31 +34,27 @@ const TOKEN_TTL_HOURS = 72;
  * and "safe as long as every caller remembered" is not a boundary.
  */
 export function resolveMagicLinkOrigin(candidate?: string | null): string {
-  const trusted = (ENV.appUrl || "").trim().replace(/\/+$/, "");
-  const supplied = (candidate ?? "").trim();
-
-  if (!trusted) {
-    // No APP_URL: nothing to compare against, so behaviour is unchanged rather
-    // than broken. Every documented deployment sets it (Railway, the on-prem
-    // templates, and a docker-compose default), so this is a misconfiguration.
-    if (supplied) {
-      console.warn("[magicLink] APP_URL is not set — using the caller-supplied origin, which is NOT verified");
-      return supplied.replace(/\/+$/, "");
-    }
-    return "";
+  // NEVER the candidate. A missing APP_URL is a configuration slip; it must not
+  // become "trust the caller", because the caller here is unauthenticated and
+  // the link carries a live token. DEFAULT_APP_ORIGIN keeps sign-in working on
+  // the hosted product while staying un-forgeable.
+  const trusted = normalizeOrigin(ENV.appUrl) || DEFAULT_APP_ORIGIN;
+  if (!ENV.appUrl) {
+    console.warn(`[magicLink] APP_URL is not set — sign-in links will point at ${trusted}`);
   }
 
+  const supplied = normalizeOrigin(candidate);
   if (!supplied) return trusted;
 
   try {
-    const suppliedOrigin = new URL(supplied).origin;
-    if (suppliedOrigin === new URL(trusted).origin) return trusted;
-    console.warn(`[magicLink] refusing a sign-in link origin that is not this deployment: ${suppliedOrigin}`);
+    if (new URL(supplied).origin === new URL(trusted).origin) return trusted;
+    console.warn(`[magicLink] refusing a sign-in link origin that is not this deployment: ${new URL(supplied).origin}`);
   } catch {
     console.warn("[magicLink] refusing an unparseable sign-in link origin");
   }
   return trusted;
 }
+
 
 const ROLE_LABELS: Record<string, string> = {
   super_admin: "Super Administrator",
