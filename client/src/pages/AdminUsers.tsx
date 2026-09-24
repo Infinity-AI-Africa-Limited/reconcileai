@@ -329,8 +329,15 @@ export default function AdminUsers() {
   });
   const notifyOwner = trpc.system.notifyOwner.useMutation();
   const addUser = trpc.admin.addUser.useMutation({
-    onSuccess: (_, vars) => {
-      toast.success(`${vars.name} has been added. A welcome notification has been sent.`);
+    onSuccess: (data, vars) => {
+      // The account is created either way; only the email can fail. Saying it
+      // was sent when it was not is how a new user ends up with no way in and
+      // nobody looking into it.
+      if (data.invited) {
+        toast.success(`${vars.name} has been added. A welcome notification has been sent.`);
+      } else {
+        toast.warning(`${vars.name} has been added, but the welcome email could not be sent. Use "Resend welcome link" on their row.`);
+      }
       utils.admin.users.invalidate();
       setAddUserOpen(false);
       setNewUser({ name: "", email: "", role: "operations", organizationId: "none" });
