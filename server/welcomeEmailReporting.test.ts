@@ -46,4 +46,16 @@ describe("when a welcome email cannot be sent", () => {
     expect(body).toMatch(/if \(!success \|\| !magicLink\)/);
     expect(body).toContain("Could not send the sign-in link");
   });
+
+  it("should let that guidance reach the operator instead of a generic message", () => {
+    // The message is thrown INSIDE a try whose catch re-wraps everything as
+    // "Failed to send welcome link" — which is all the admin UI shows. A
+    // deliberate TRPCError has to pass through untouched.
+    const resend = routersSrc.slice(routersSrc.indexOf("resendWelcomeLink: adminProcedure"));
+    const body = resend.slice(0, resend.indexOf("toggleActive:"));
+    const catchBlock = body.slice(body.indexOf("} catch"));
+    expect(catchBlock).toMatch(/if \(err instanceof TRPCError\) throw err;/);
+    // …and the rethrow must come BEFORE the generic wrapper, or it is dead code.
+    expect(catchBlock.indexOf("instanceof TRPCError")).toBeLessThan(catchBlock.indexOf("Failed to send welcome link"));
+  });
 });

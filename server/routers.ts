@@ -3759,6 +3759,11 @@ export const appRouter = router({
           return { success: true, magicLink };
         } catch (err: any) {
           console.error("[resendWelcomeLink] Failed:", err);
+          // A TRPCError raised inside this try was raised deliberately and says
+          // something the operator can act on ("check APP_URL"). Re-wrapping it
+          // in a generic message throws that guidance away — the admin would
+          // learn the resend failed and nothing about why.
+          if (err instanceof TRPCError) throw err;
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to send welcome link" });
         }
       }),
