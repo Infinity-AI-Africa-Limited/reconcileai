@@ -274,17 +274,32 @@ export function clientIpOrUnknown(req: ProxiedRequest | null | undefined): strin
 
 /** The scheme of the connection this process actually accepted. */
 /**
- * Log the first X-Forwarded-Proto shape this process sees, once.
+ * Record the X-Forwarded-Proto shapes this process sees.
  *
- * The append-vs-overwrite question above is answered by what the edge actually
- * sends, and that is not documented anywhere we control. One line at the first
- * real request makes it a log lookup instead of an assumption.
+ * The append-vs-overwrite question is answered by what the edge actually sends,
+ * and that is not documented anywhere we control. But the FIRST request is a
+ * poor witness: it may carry a caller-supplied prefix, and one unusual sample
+ * would then be the only record. So distinct shapes are logged, up to a small
+ * cap, and what is logged is the SHAPE — entry count plus the trusted-window
+ * values — not the caller's raw header, which is neither bounded nor trusted.
  */
-let loggedProtoShape = false;
-function noteForwardedProtoShape(header: string, entryCount: number): void {
-  if (loggedProtoShape) return;
-  loggedProtoShape = true;
-  console.log(`[clientIp] first x-forwarded-proto seen: "${header}" (${entryCount} entr${entryCount === 1 ? "y" : "ies"})`);
+const MAX_LOGGED_PROTO_SHAPES = 3;
+const seenProtoShapes = new Set<string>();
+function noteForwardedProtoShape(entries: string[], trustedProxyHops: number): void {
+  const window = entries.slice(-trustedProxyHops);
+  const shape = `${entries.length}:${window.join(",")}`;
+  if (seenProtoShapes.has(shape)) return;
+  if (seenProtoShapes.size >= MAX_LOGGED_PROTO_SHAPES) return;
+  seenProtoShapes.add(shape);
+  console.log(
+    `[clientIp] x-forwarded-proto shape: ${entries.length} entr${entries.length === 1 ? "y" : "ies"}, ` +
+      `trusted window = [${window.join(", ")}]`,
+  );
+}
+
+/** Tests: forget what this process has logged. */
+export function resetProtoShapeLog(): void {
+  seenProtoShapes.clear();
 }
 
 function rawSchemeIsSecure(req: ProxiedRequest): boolean {
@@ -317,10 +332,24 @@ function rawSchemeIsSecure(req: ProxiedRequest): boolean {
  *   "http,https"         → https ✔        (one appended, one overwrote)
  *   "https,http,http"    → http  ✔        (a caller cannot claim https)
  *   "http,http"          → http  ✔        (genuinely plaintext)
+ *   "https,http"         → https ✖ ACCEPTED (see below)
  *
  * The asymmetry is deliberate: a wrong `false` drops Secure from a live auth
  * cookie, while a wrong `true` only makes the browser discard a cookie the
  * caller themselves mislabelled. Only one of those is someone else's problem.
+ *
+ * The last row is the cost of that choice, and it is accepted knowingly. When
+ * the chain is SHORTER than the configured window — one real proxy, two hops
+ * configured, i.e. the direct origin hostname — a caller's own `https` prefix
+ * falls inside the window and its plaintext request reads as secure. The
+ * browser then discards that caller's own cookie. Reading only the rightmost
+ * entry would fix it and fail the other way: if the last hop records its
+ * INTERNAL leg (`…,http`), every session cookie loses Secure, which is the bug
+ * this module exists to fix, for everyone rather than for one caller.
+ *
+ * It is also not a standing gap. `CLOUDFLARE_ORIGIN_SECRET` already narrows an
+ * unverified request to one hop (`effectiveHopsFor`), which shrinks the window
+ * to the entry the real proxy wrote and resolves this case as `http`.
  */
 export function requestIsSecureFrom(req: ProxiedRequest, trustedProxyHops: number): boolean {
   if (trustedProxyHops <= 0) return rawSchemeIsSecure(req);
@@ -333,7 +362,7 @@ export function requestIsSecureFrom(req: ProxiedRequest, trustedProxyHops: numbe
     .filter(s => s === "http" || s === "https");
   if (entries.length === 0) return rawSchemeIsSecure(req);
 
-  noteForwardedProtoShape(header ?? "", entries.length);
+  noteForwardedProtoShape(entries, trustedProxyHops);
   return entries.slice(-trustedProxyHops).includes("https");
 }
 
