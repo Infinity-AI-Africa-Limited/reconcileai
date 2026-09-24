@@ -36,6 +36,9 @@ import {
   edgeProofIsFresh,
   effectiveHopsFor,
   normalizeIp,
+  requestIsSecure,
+  requestIsSecureFrom,
+  requestScheme,
   resetEdgeProof,
   resolveTrustedProxyHops,
   type ProxiedRequest,
@@ -332,5 +335,61 @@ describe("when resolving how many proxies to trust", () => {
     }
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+/**
+ * The scheme, which is the same question as the address and was getting a
+ * different answer. Behind a TLS-terminating proxy the socket is plaintext, so
+ * `req.protocol` reads `http` — and the SSO flow cookie holding the PKCE
+ * verifier, state and nonce was therefore set WITHOUT Secure on every
+ * production sign-in.
+ */
+describe("when deciding whether a request was HTTPS", () => {
+  const req = (xfp: string | string[] | undefined, protocol = "http") => ({
+    headers: xfp === undefined ? {} : { "x-forwarded-proto": xfp },
+    socket: { remoteAddress: SOCKET },
+    protocol,
+  });
+
+  it("should read the proxy's answer, not the plaintext socket", () => {
+    // The production shape: Cloudflare terminates TLS, the app sees http.
+    expect(requestIsSecureFrom(req("https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("https,https"), 2)).toBe(true);
+    expect(requestIsSecure(req("https"))).toBe(true);
+    expect(requestScheme(req("https"))).toBe("https");
+  });
+
+  it("should not let a caller downgrade its own cookie by claiming http", () => {
+    // Two trusted hops means the caller's own entry sits THREE from the right:
+    // it sent "http", Cloudflare appended the scheme it saw, Railway appended
+    // the scheme Cloudflare used. The hop that counts is never the caller's.
+    expect(requestIsSecureFrom(req("http,https,https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("http,http,https,https"), 2)).toBe(true);
+    // And the honest chain, which is what production actually sends.
+    expect(requestIsSecureFrom(req("https,https"), 2)).toBe(true);
+  });
+
+  it("should believe the connection when nothing is in front of the app", () => {
+    expect(requestIsSecureFrom(req("https"), 0)).toBe(false); // header ignored at 0 hops
+    expect(requestIsSecureFrom(req(undefined, "https"), 0)).toBe(true);
+    expect(requestIsSecureFrom({ socket: { encrypted: true } }, 0)).toBe(true);
+    expect(requestIsSecureFrom({ secure: true }, 0)).toBe(true);
+  });
+
+  it("should fall back to the connection when the header says nothing usable", () => {
+    expect(requestIsSecureFrom(req("", "https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("gopher", "https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req(undefined), 2)).toBe(false);
+  });
+
+  it("should read a repeated header the same as a joined one", () => {
+    expect(requestIsSecureFrom(req(["http,https", "https"]), 2)).toBe(true);
+    expect(requestIsSecureFrom(req(["https", "https"]), 2)).toBe(true);
+  });
+
+  it("should answer plainly for a missing request rather than guessing https", () => {
+    expect(requestIsSecure(null)).toBe(false);
+    expect(requestScheme(undefined)).toBe("http");
   });
 });

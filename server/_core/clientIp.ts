@@ -50,7 +50,10 @@ import { ENV } from "./env";
 /** The shape we need — an Express request, or a tRPC ctx's `req`, or a test stub. */
 export interface ProxiedRequest {
   headers?: Record<string, string | string[] | undefined> | undefined;
-  socket?: { remoteAddress?: string | null } | null | undefined;
+  socket?: { remoteAddress?: string | null; encrypted?: boolean } | null | undefined;
+  /** Express's own view of the scheme, which without `trust proxy` is the raw connection. */
+  protocol?: string | undefined;
+  secure?: boolean | undefined;
 }
 
 /** client → Cloudflare → Railway edge → app. */
@@ -267,4 +270,71 @@ export function clientIp(req: ProxiedRequest | null | undefined): string | null 
 /** For the call sites that want a string in hand (limiter keys, audit rows). */
 export function clientIpOrUnknown(req: ProxiedRequest | null | undefined): string {
   return clientIp(req) ?? "unknown";
+}
+
+/** The scheme of the connection this process actually accepted. */
+function rawSchemeIsSecure(req: ProxiedRequest): boolean {
+  if (req.secure === true) return true;
+  if (req.socket?.encrypted === true) return true;
+  return (req.protocol ?? "").toLowerCase() === "https";
+}
+
+/**
+ * Was the request HTTPS end to end?
+ *
+ * `X-Forwarded-Proto` is appended and read exactly like `X-Forwarded-For`, and
+ * for the same reason: behind a TLS-terminating proxy the socket is plaintext,
+ * so `req.protocol` says `http` and anything derived from it is wrong. That is
+ * why the SSO flow cookie (PKCE verifier, state, nonce) shipped WITHOUT the
+ * Secure attribute in production.
+ *
+ * Counted from the right on the same hop policy, so a caller cannot downgrade
+ * its own cookie by claiming `http` — the entry that counts is the one trusted
+ * infrastructure wrote.
+ */
+export function requestIsSecureFrom(req: ProxiedRequest, trustedProxyHops: number): boolean {
+  if (trustedProxyHops <= 0) return rawSchemeIsSecure(req);
+
+  const raw = req.headers?.["x-forwarded-proto"];
+  const header = Array.isArray(raw) ? raw.join(",") : raw;
+  const entries = (header ?? "")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(s => s === "http" || s === "https");
+  if (entries.length === 0) return rawSchemeIsSecure(req);
+
+  return entries[Math.max(0, entries.length - trustedProxyHops)] === "https";
+}
+
+/** Was the request HTTPS end to end, under this deployment's proxy policy? */
+export function requestIsSecure(req: ProxiedRequest | null | undefined): boolean {
+  if (!req) return false;
+  return requestIsSecureFrom(req, effectiveHopsFor(req, TRUSTED_PROXY_HOPS, ENV.cloudflareOriginSecret));
+}
+
+/** `https` or `http`, for building a URL back to this deployment. */
+export function requestScheme(req: ProxiedRequest | null | undefined): "https" | "http" {
+  return requestIsSecure(req) ? "https" : "http";
+}
+
+/**
+ * This deployment's own origin, for building a URL that points back at it —
+ * an OAuth redirect_uri, a post-install redirect, a reviewer link.
+ *
+ * `APP_URL` first, because it is the only value that is not derived from the
+ * request. The fallback uses `Host` (what actually routed the request) and
+ * NEVER `X-Forwarded-Host`: that header is caller-supplied, and a redirect
+ * built from it sends the visitor wherever the caller asked — while a
+ * redirect_uri built from it stops matching what the provider has registered.
+ *
+ * The scheme comes from the hop policy above, so a proxied deployment does not
+ * advertise `http://` URLs for an https site.
+ */
+export function appOriginFor(req: ProxiedRequest | null | undefined): string {
+  const configured = (ENV.appUrl ?? "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+
+  const rawHost = req?.headers?.host;
+  const host = (Array.isArray(rawHost) ? rawHost[0] : rawHost)?.trim();
+  return host ? `${requestScheme(req)}://${host}` : "";
 }
