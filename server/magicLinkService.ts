@@ -8,8 +8,56 @@ import { getDb } from "./db";
 import { magicLinkTokens, users } from "../drizzle/schema";
 import { eq, and, gt, isNull } from "drizzle-orm";
 import { sendEmail, renderBrandedHtml, renderButton, escapeHtml } from "./_core/email";
+import { ENV } from "./_core/env";
 
 const TOKEN_TTL_HOURS = 72;
+
+/**
+ * Which host a sign-in link may point at.
+ *
+ * Every caller of these functions passes an `origin` that ultimately comes from
+ * a request — and `auth.requestMagicLink` is a PUBLIC procedure whose `origin`
+ * is a plain `z.string().url()` from the caller. That string was interpolated
+ * straight into the link this service emails, so anyone who knew an address
+ * could have ReconcileAI send THAT PERSON a genuine, branded sign-in email
+ * carrying a valid single-use token pointed at a host of the attacker's
+ * choosing. Clicking it hands over the session. Nothing in the flow required
+ * the attacker to be authenticated, or to control any part of the platform.
+ *
+ * So the origin is no longer an input. It is `APP_URL`, and a supplied
+ * candidate is honoured only when it names the SAME origin — which is what the
+ * real login page sends (`window.location.origin`), so no caller changes.
+ *
+ * Deciding this inside the service rather than at each call site is deliberate:
+ * there are four call paths (public sign-in, two invite flows, CBS onboarding),
+ * and "safe as long as every caller remembered" is not a boundary.
+ */
+export function resolveMagicLinkOrigin(candidate?: string | null): string {
+  const trusted = (ENV.appUrl || "").trim().replace(/\/+$/, "");
+  const supplied = (candidate ?? "").trim();
+
+  if (!trusted) {
+    // No APP_URL: nothing to compare against, so behaviour is unchanged rather
+    // than broken. Every documented deployment sets it (Railway, the on-prem
+    // templates, and a docker-compose default), so this is a misconfiguration.
+    if (supplied) {
+      console.warn("[magicLink] APP_URL is not set — using the caller-supplied origin, which is NOT verified");
+      return supplied.replace(/\/+$/, "");
+    }
+    return "";
+  }
+
+  if (!supplied) return trusted;
+
+  try {
+    const suppliedOrigin = new URL(supplied).origin;
+    if (suppliedOrigin === new URL(trusted).origin) return trusted;
+    console.warn(`[magicLink] refusing a sign-in link origin that is not this deployment: ${suppliedOrigin}`);
+  } catch {
+    console.warn("[magicLink] refusing an unparseable sign-in link origin");
+  }
+  return trusted;
+}
 
 const ROLE_LABELS: Record<string, string> = {
   super_admin: "Super Administrator",
@@ -82,7 +130,7 @@ export async function sendWelcomeEmail(params: {
   const { userId, name, email, role, origin } = params;
 
   const token = await createMagicLinkToken(userId);
-  const magicLink = `${origin}/magic-login?token=${token}`;
+  const magicLink = `${resolveMagicLinkOrigin(origin)}/magic-login?token=${token}`;
   const safeName = escapeHtml(name);
 
   const subject = "Welcome to ReconcileAI — your account is ready";
@@ -125,7 +173,7 @@ export async function sendLoginLinkEmail(params: {
   }
 
   const token = await createMagicLinkToken(user.id);
-  const magicLink = `${origin}/magic-login?token=${token}`;
+  const magicLink = `${resolveMagicLinkOrigin(origin)}/magic-login?token=${token}`;
 
   const subject = "Your ReconcileAI sign-in link";
   const body = `

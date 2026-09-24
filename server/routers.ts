@@ -527,13 +527,13 @@ export const appRouter = router({
 
         if (!last || now - last > MAGIC_LINK_COOLDOWN_MS) {
           magicLinkRequestCooldown.set(email, now);
-          const host = ctx.req.get("host");
-          const origin =
-            input.origin ||
-            (host ? `${ctx.req.protocol}://${host}` : PUBLIC_APP_ORIGIN);
+          // The origin is NOT taken from the caller or from the Host header:
+          // magicLinkService pins it to APP_URL and accepts a candidate only
+          // when it names the same origin. See resolveMagicLinkOrigin — this
+          // input used to decide where an emailed sign-in token pointed.
           try {
             const { sendLoginLinkEmail } = await import("./magicLinkService");
-            await sendLoginLinkEmail({ email, origin });
+            await sendLoginLinkEmail({ email, origin: input.origin ?? PUBLIC_APP_ORIGIN });
           } catch (err) {
             console.error("[auth.requestMagicLink] Failed to send login link:", err);
           }
