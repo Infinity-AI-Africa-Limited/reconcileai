@@ -11,6 +11,7 @@ import {
 import {
   shopifyConnectorStores,
   shopifyPrivacyArtifacts,
+  shopifyPrivacyCustomerRedactionJobs,
   shopifyPrivacyDataRequestJobs,
   shopifyPrivacyQueueOutbox,
   shopifyPrivacyRequests,
@@ -31,7 +32,7 @@ const LOOKUP_CHUNK = 500;
 const OUTBOX_BATCH_SIZE = 100;
 
 export type ShopifyPrivacyQueuePayload = {
-  kind: "customer_request";
+  kind: "customer_request" | "customer_redact";
   jobId: number;
 };
 
@@ -200,7 +201,7 @@ export async function dispatchShopifyPrivacyOutbox(
 
     const attempt = candidate.attempts + 1;
     try {
-      const payload: ShopifyPrivacyQueuePayload = { kind: "customer_request", jobId: candidate.jobId };
+      const payload: ShopifyPrivacyQueuePayload = { kind: candidate.kind, jobId: candidate.jobId };
       await deps.enqueue(payload);
       await db
         .update(shopifyPrivacyQueueOutbox)
@@ -230,7 +231,7 @@ export async function dispatchShopifyPrivacyOutbox(
         attempts: attempt,
       });
       await db.transaction(async (tx) => {
-        await tx
+        const outboxWrite = await tx
           .update(shopifyPrivacyQueueOutbox)
           .set({
             status: "failed_retryable",
@@ -245,22 +246,43 @@ export async function dispatchShopifyPrivacyOutbox(
               eq(shopifyPrivacyQueueOutbox.leaseId, leaseId),
             ),
           );
-        await tx
-          .update(shopifyPrivacyDataRequestJobs)
-          .set({ status: "failed_retryable", failureCode: "durable_queue_unavailable", lastCheckpoint: "dispatch_failed" })
-          .where(
-            and(
-              eq(shopifyPrivacyDataRequestJobs.requestId, candidate.jobId),
-              inArray(shopifyPrivacyDataRequestJobs.status, ["received", "failed_retryable"]),
-            ),
-          );
+        // The queue delivery is at-least-once: an ambiguous failure may occur
+        // after another dispatcher/worker has progressed the job. Only the
+        // owner of this outbox lease may change child or parent state.
+        if (affectedRows(outboxWrite) !== 1) return;
+        if (candidate.kind === "customer_request") {
+          const jobWrite = await tx
+            .update(shopifyPrivacyDataRequestJobs)
+            .set({ status: "failed_retryable", failureCode: "durable_queue_unavailable", lastCheckpoint: "dispatch_failed" })
+            .where(
+              and(
+                eq(shopifyPrivacyDataRequestJobs.requestId, candidate.jobId),
+                inArray(shopifyPrivacyDataRequestJobs.status, ["received", "failed_retryable"]),
+              ),
+            );
+          if (affectedRows(jobWrite) !== 1) return;
+        } else {
+          const jobWrite = await tx
+            .update(shopifyPrivacyCustomerRedactionJobs)
+            .set({ status: "failed_retryable", failureCode: "durable_queue_unavailable", lastCheckpoint: "dispatch_failed" })
+            .where(
+              and(
+                eq(shopifyPrivacyCustomerRedactionJobs.requestId, candidate.jobId),
+                inArray(shopifyPrivacyCustomerRedactionJobs.status, ["received", "failed_retryable"]),
+              ),
+            );
+          if (affectedRows(jobWrite) !== 1) return;
+        }
         await tx
           .update(shopifyPrivacyRequests)
           .set({ status: "failed_retryable", completionNote: "durable_queue_unavailable" })
           .where(
             and(
               eq(shopifyPrivacyRequests.id, candidate.jobId),
-              eq(shopifyPrivacyRequests.topic, "customers/data_request"),
+              eq(
+                shopifyPrivacyRequests.topic,
+                candidate.kind === "customer_request" ? "customers/data_request" : "customers/redact",
+              ),
               inArray(shopifyPrivacyRequests.status, ["received", "failed_retryable"]),
             ),
           );
@@ -332,7 +354,7 @@ async function setNonTerminalState(
   failureCode: ShopifyPrivacyFailureCode,
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    await tx
+    const jobWrite = await tx
       .update(shopifyPrivacyDataRequestJobs)
       .set({
         status,
@@ -350,6 +372,9 @@ async function setNonTerminalState(
           eq(shopifyPrivacyDataRequestJobs.leaseId, job.leaseId),
         ),
       );
+    // A reclaimed lease belongs to a newer executor. Do not let this stale
+    // worker overwrite the parent's terminal or newer non-terminal state.
+    if (affectedRows(jobWrite) !== 1) return;
     await tx
       .update(shopifyPrivacyRequests)
       .set({ status, completionNote: failureCode })
@@ -373,7 +398,7 @@ async function setFailure(
   const terminal = job.attempts >= SHOPIFY_PRIVACY_JOB_MAX_ATTEMPTS;
   const status = terminal ? "failed_terminal" : "failed_retryable";
   await db.transaction(async (tx) => {
-    await tx
+    const jobWrite = await tx
       .update(shopifyPrivacyDataRequestJobs)
       .set({
         status,
@@ -391,6 +416,7 @@ async function setFailure(
           eq(shopifyPrivacyDataRequestJobs.leaseId, job.leaseId),
         ),
       );
+    if (affectedRows(jobWrite) !== 1) return;
     await tx
       .update(shopifyPrivacyRequests)
       .set({ status, completionNote: code })
@@ -767,7 +793,7 @@ export async function handleShopifyPrivacyJob(
     }
 
     await db.transaction(async (tx) => {
-      await tx
+      const jobWrite = await tx
         .update(shopifyPrivacyDataRequestJobs)
         .set({
           status: "awaiting_delivery",
@@ -788,6 +814,7 @@ export async function handleShopifyPrivacyJob(
             eq(shopifyPrivacyDataRequestJobs.leaseId, job.leaseId),
           ),
         );
+      if (affectedRows(jobWrite) !== 1) return;
       await tx
         .update(shopifyPrivacyRequests)
         .set({

@@ -156,6 +156,26 @@ describe("Shopify privacy outbox recovery", () => {
     expect(fake.committed().flatMap((op) => Object.values(op.data ?? {}))).not.toContain("contains-sensitive-provider-value");
   });
 
+  it("does not mutate job or parent state when a stale outbox dispatcher loses its lease", async () => {
+    const fake = scriptedDb({
+      select: { [OUTBOX]: [[{ id: 77, kind: "customer_request", jobId: 901, attempts: 0 }]] },
+      // The initial claim succeeds. The failure write loses because another
+      // dispatcher has already advanced the outbox delivery state.
+      update: { [OUTBOX]: [1, 0] },
+    });
+
+    const result = await dispatchShopifyPrivacyOutbox({
+      db: fake.db as never,
+      now: () => NOW,
+      uuid: uuidSequence(),
+      enqueue: vi.fn(async () => { throw new Error("ambiguous durable queue response"); }),
+    });
+
+    expect(result).toEqual({ scanned: 1, dispatched: 0, failed: 1 });
+    expect(fake.writes("update", JOBS)).toEqual([]);
+    expect(fake.writes("update", REQUESTS)).toEqual([]);
+  });
+
   it("should keep an acknowledged request dispatchable after repeated queue failures", async () => {
     const fake = scriptedDb({
       select: {
@@ -189,6 +209,26 @@ describe("Shopify privacy outbox recovery", () => {
     expect(writes).toContainEqual(expect.objectContaining({ status: "failed_retryable", failureCode: "durable_queue_unavailable" }));
     expect(writes).toContainEqual(expect.objectContaining({ status: "dispatched" }));
     expect(writes.map((write) => (write as Record<string, unknown> | null)?.status)).not.toContain("failed_terminal");
+  });
+
+  it("should recover customer-redaction work with the same non-sensitive queue contract", async () => {
+    const fake = scriptedDb({
+      select: { [OUTBOX]: [[{ id: 78, kind: "customer_redact", jobId: 902, attempts: 0 }]] },
+    });
+    const enqueue = vi.fn(async () => {});
+
+    const result = await dispatchShopifyPrivacyOutbox({
+      db: fake.db as never,
+      now: () => NOW,
+      uuid: uuidSequence(),
+      enqueue,
+    });
+
+    expect(result).toEqual({ scanned: 1, dispatched: 1, failed: 0 });
+    expect(enqueue).toHaveBeenCalledWith({ kind: "customer_redact", jobId: 902 });
+    expect(Object.keys(enqueue.mock.calls[0][0])).toEqual(["kind", "jobId"]);
+    expect(JSON.stringify(enqueue.mock.calls[0][0])).not.toMatch(/organization|store|shop|domain|selector|hash|url/i);
+    expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "dispatched" });
   });
 });
 
@@ -385,6 +425,57 @@ describe("Shopify data-request execution", () => {
     await handleShopifyPrivacyJob({ kind: "customer_request", jobId: 901 }, { db: fake.db as never, putObject });
     expect(putObject).not.toHaveBeenCalled();
     expect(fake.writes("insert", ARTIFACTS)).toEqual([]);
+    expect(fake.writes("update", REQUESTS)).toEqual([]);
+  });
+
+  it("does not let a stale worker overwrite the parent with manual review after lease loss", async () => {
+    const fake = baseWorkerScript({
+      select: { [STORES]: [[{ ...STORE, claimedByUserId: null }]] },
+      update: { [JOBS]: [1, 0] },
+    });
+
+    await handleShopifyPrivacyJob({ kind: "customer_request", jobId: 901 }, { db: fake.db as never, now: () => NOW });
+
+    expect(fake.writes("update", REQUESTS)).toEqual([]);
+  });
+
+  it("does not let a stale worker overwrite the parent with a failure after lease loss", async () => {
+    const fake = baseWorkerScript({
+      select: { [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)]] },
+      update: { [JOBS]: [1, 0] },
+    });
+
+    await expect(handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_o, value) => value === "enc-customer" ? "41" : "501"),
+        putObject: vi.fn(async () => { throw new Error("storage failed"); }),
+      },
+    )).rejects.toThrow(/retry required/);
+
+    expect(fake.writes("update", REQUESTS)).toEqual([]);
+  });
+
+  it("does not let a stale worker advertise an artifact as ready after lease loss", async () => {
+    const fake = baseWorkerScript({
+      select: { [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)]] },
+      update: { [JOBS]: [1, 0] },
+    });
+
+    await handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_o, value) => value === "enc-customer" ? "41" : "501"),
+        putObject: vi.fn(async (key) => ({ key, url: "unused" })),
+      },
+    );
+
     expect(fake.writes("update", REQUESTS)).toEqual([]);
   });
 

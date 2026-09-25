@@ -701,6 +701,20 @@
       "when": 1790354338118,
       "tag": "0099_shopify_privacy_completion",
       "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "5",
+      "when": 1790356849040,
+      "tag": "0100_puzzling_shocker",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "5",
+      "when": 1790358079366,
+      "tag": "0101_complex_jack_flag",
+      "breakpoints": true
     }
   ]
 }

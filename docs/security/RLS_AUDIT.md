@@ -6,7 +6,7 @@
 > columns. This document is the human-readable half; the test is the enforced half.
 > **Both must be updated together when a table is added.**
 
-*Audited: 25 September 2026 · 107 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
+*Audited: 25 September 2026 · 113 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
 
 ## 1. Isolation model
 
@@ -21,13 +21,13 @@ enforced at three layers:
 
 ## 2. Classification summary (see the test for the per-table list)
 
-Measured by `server/rlsAudit.test.ts` on 2026-09-25 (107 tables).
+Measured by `server/rlsAudit.test.ts` on 2026-09-25 (113 tables).
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 25 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 30 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 45 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
-| `derived` | 3 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
+| `derived` | 4 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
 | `mirror_single_tenant` | 13 | `wc_*` Fineract mirror (Woodcore POC) | **Known caveat** — see finding F2. |
 | `global` | 9 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
@@ -123,6 +123,8 @@ unclassified. The ratchet now also asserts that every schema file listed in
 | `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |
 | `shopify_privacy_request_selectors` | `tenant_required` | Minimal child records for future customer-topic fulfilment. Provider IDs are tenant-encrypted and tenant-keyed blind-indexed; lookups include `organizationId`, and no raw payload or direct identity field is retained. |
 | `shopify_privacy_data_request_jobs` | `tenant_required` | Durable, leased execution state for `customers/data_request`. Carries only internal scope and bounded status/failure codes; authoritative selectors stay in the encrypted child table. |
+| `shopify_privacy_customer_redaction_jobs` | `tenant_required` | Durable, leased execution state for `customers/redact`. It retains only internal scope, bounded failure/checkpoint codes and aggregate deletion evidence; encrypted selectors are destroyed only after the transaction’s postcondition passes. |
+| `shopify_order_redaction_tombstones` | `tenant_required` | Permanent re-import barrier for an exact Shopify order. It contains only tenant/store-scoped versioned HMAC digests—not a provider order ID, selector ciphertext or payload—and is checked under the store write lock before sync persists any order. |
 | `shopify_privacy_queue_outbox` | `derived` | Transactional dispatch intent keyed only by internal job id and kind. It deliberately contains no organization/store/provider identifiers, selector values, hashes, domains, URLs, or customer data; tenant scope is loaded from the job after dequeue. |
 | `shopify_privacy_artifacts` | `tenant_required` | Metadata for a private org-scoped data-request object: key, digest, size, expiry and delivery evidence. It never persists a presigned URL or selector. Download additionally requires the active store-claiming tenant admin. |
 | `shopify_shop_redaction_jobs` | `tenant_required` | Short-lived, durable work record for a verified `shop/redact` request. It is scoped to the merchant workspace while deletion is in progress; completion removes or de-identifies the record rather than retaining a merchant identifier. |

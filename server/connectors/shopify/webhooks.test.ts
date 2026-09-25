@@ -7,6 +7,7 @@ vi.hoisted(() => {
 const state = vi.hoisted(() => ({
   db: null as unknown,
   secret: "whsec",
+  digestKey: "ab".repeat(32),
   enqueue: vi.fn(async () => {}),
 }));
 
@@ -19,7 +20,13 @@ vi.mock("../../_core/env", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../_core/env")>();
   return {
     ...mod,
-    ENV: new Proxy(mod.ENV, { get: (target, key) => (key === "shopifyClientSecret" ? state.secret : Reflect.get(target, key)) }),
+    ENV: new Proxy(mod.ENV, {
+      get: (target, key) => {
+        if (key === "shopifyClientSecret") return state.secret;
+        if (key === "shopifyWebhookDigestKey") return state.digestKey;
+        return Reflect.get(target, key);
+      },
+    }),
   };
 });
 vi.mock("./syncOrchestrator", () => ({
@@ -86,6 +93,7 @@ function delivery(topic: string, body: object, headers: Record<string, string> =
 beforeEach(() => {
   vi.clearAllMocks();
   state.secret = "whsec";
+  state.digestKey = "ab".repeat(32);
   state.enqueue.mockResolvedValue(undefined);
 });
 
@@ -304,6 +312,17 @@ describe("when the HMAC does not verify", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     expect((await delivery("customers/redact", { shop_domain: SHOP }).run()).statusCode).toBe(401);
     expect(log.mock.calls.flat().join(" ")).toMatch(/SHOPIFY_CLIENT_SECRET is not configured/);
+    log.mockRestore();
+  });
+
+  it("should refuse to persist a webhook when the replay-digest secret is absent", async () => {
+    state.digestKey = "";
+    state.db = scriptedDb().db;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await delivery("customers/redact", { shop_domain: SHOP }).run();
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toEqual({ error: "webhook_replay_protection_unavailable" });
+    expect(log.mock.calls.flat().join(" ")).toMatch(/SHOPIFY_WEBHOOK_DIGEST_KEY is unavailable/);
     log.mockRestore();
   });
 });

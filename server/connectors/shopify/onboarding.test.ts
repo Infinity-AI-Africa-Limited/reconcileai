@@ -68,6 +68,8 @@ const existingStore = {
   displayName: "Merchant Ltd",
   status: "active",
   statusReason: null,
+  privacyRedactionState: "active",
+  privacyRedactionRequestId: null,
   claimedByUserId: 9,
   claimedAt: new Date("2026-09-01T00:00:00Z"),
 };
@@ -167,7 +169,13 @@ describe("when a shop we already know is reauthorized", () => {
 
   describe("and its contact email matches an active administrator", () => {
     it("should store the new pair and mark the store active in the same committed transaction", async () => {
-      const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
+      const fake = held({
+        select: {
+          [STORES]: [[existingStore], [{ privacyRedactionState: "active" }]],
+          [USERS]: [[{ id: 9 }]],
+          [ORGS]: [[{ code: "SHP_ABC" }]],
+        },
+      });
       state.db = fake.db;
 
       const result = await onboard();
@@ -309,7 +317,11 @@ describe("when a shop installs for the first time", () => {
     it("should complete as a reauthorization of the winning store", async () => {
       const winner = { ...existingStore, status: "pending_claim" };
       const fake = held({
-        select: { [STORES]: [[], [winner]], [USERS]: [[], [{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] },
+        select: {
+          [STORES]: [[], [winner], [{ privacyRedactionState: "active" }]],
+          [USERS]: [[], [{ id: 9 }]],
+          [ORGS]: [[{ code: "SHP_ABC" }]],
+        },
         insert: { [ORGS]: [duplicateKeyError()] },
       });
       state.db = fake.db;
@@ -419,7 +431,13 @@ describe("when this callback's install lease was taken over mid-install", () => 
   });
 
   it("should check the lease with a locking read inside the transaction that writes", async () => {
-    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
+    const fake = held({
+      select: {
+        [STORES]: [[existingStore], [{ privacyRedactionState: "active" }]],
+        [USERS]: [[{ id: 9 }]],
+        [ORGS]: [[{ code: "SHP_ABC" }]],
+      },
+    });
     state.db = fake.db;
     await onboard();
     const check = fake.ops.find((op) => op.kind === "select" && op.table === LEASES);

@@ -143,4 +143,110 @@ describe("customer privacy request admission", () => {
     });
     expect(JSON.stringify(fake.committed())).not.toContain("501");
   });
+
+  it("atomically admits valid customer redaction work with a store-local write fence", async () => {
+    const validation = validateCustomerPrivacySelectors(
+      "customers/redact",
+      { shop_id: 17, shop_domain: SHOP, customer: { id: 41 }, orders_to_redact: [501] },
+      STORE,
+    );
+    if (!validation.ok) throw new Error("fixture should validate");
+    const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+    const fake = scriptedDb({
+      select: {
+        [REQUESTS]: [[{ id: 902 }]],
+        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active", privacyRedactionRequestId: null }]],
+      },
+    });
+
+    const status = await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
+      admitShopifyCustomerPrivacyRequest(tx, {
+        store: STORE,
+        topic: "customers/redact",
+        requestHash: "redact-payload-digest",
+        webhookId: "wh-customer-redact",
+        validation,
+        selectors,
+      }),
+    );
+
+    expect(status).toBe("received");
+    const fence = fake.writes("update", "shopify_connector_stores").find((op) =>
+      (op.data as Record<string, unknown> | null)?.privacyRedactionState === "customer_redacting",
+    );
+    expect(fence?.data).toMatchObject({ privacyRedactionState: "customer_redacting", privacyRedactionRequestId: 902 });
+    expect(fence?.where?.params).toEqual(expect.arrayContaining([7, 42, "active", "active"]));
+    const execution = fake.writes("insert", "shopify_privacy_customer_redaction_jobs")[0];
+    const outbox = fake.writes("insert", "shopify_privacy_queue_outbox")[0];
+    expect(execution?.data).toMatchObject({ requestId: 902, organizationId: 42, storeId: 7, status: "received" });
+    expect(outbox?.data).toEqual({ kind: "customer_redact", jobId: 902, status: "pending" });
+    expect(execution?.txId).toBe(fence?.txId);
+    expect(outbox?.txId).toBe(fence?.txId);
+  });
+
+  it("rolls back a customer-redaction acknowledgement when the exact store fence cannot be acquired", async () => {
+    const validation = validateCustomerPrivacySelectors(
+      "customers/redact",
+      { shop_id: 17, shop_domain: SHOP, customer: { id: 41 }, orders_to_redact: [501] },
+      STORE,
+    );
+    if (!validation.ok) throw new Error("fixture should validate");
+    const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+    const fake = scriptedDb({
+      select: {
+        [REQUESTS]: [[{ id: 902 }]],
+        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active", privacyRedactionRequestId: null }]],
+      },
+      update: { shopify_connector_stores: [0] },
+    });
+
+    await expect(
+      (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
+        admitShopifyCustomerPrivacyRequest(tx, {
+          store: STORE,
+          topic: "customers/redact",
+          requestHash: "redact-payload-digest",
+          webhookId: "wh-customer-redact",
+          validation,
+          selectors,
+        }),
+      ),
+    ).rejects.toThrow(/fence lost/);
+    expect(fake.committed().filter((op) => op.table === REQUESTS || op.table === SELECTORS)).toEqual([]);
+    expect(fake.committed().filter((op) => op.table === "shopify_privacy_customer_redaction_jobs")).toEqual([]);
+    expect(fake.committed().filter((op) => op.table === "shopify_privacy_queue_outbox")).toEqual([]);
+  });
+
+  it("settles a new delivery of a completed redaction without reviving selectors, work, or the store fence", async () => {
+    const validation = validateCustomerPrivacySelectors(
+      "customers/redact",
+      { shop_id: 17, shop_domain: SHOP, customer: { id: 41 }, orders_to_redact: [501] },
+      STORE,
+    );
+    if (!validation.ok) throw new Error("fixture should validate");
+    const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+    const fake = scriptedDb({ select: { [REQUESTS]: [[{ id: 902, status: "completed" }]] } });
+
+    const status = await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
+      admitShopifyCustomerPrivacyRequest(tx, {
+        store: STORE,
+        topic: "customers/redact",
+        requestHash: "completed-redaction-digest",
+        webhookId: "wh-redelivery-with-new-id",
+        validation,
+        selectors,
+      }),
+    );
+
+    expect(status).toBe("received");
+    expect(fake.writes("insert", SELECTORS)).toEqual([]);
+    expect(fake.writes("insert", "shopify_privacy_customer_redaction_jobs")).toEqual([]);
+    expect(fake.writes("insert", "shopify_privacy_queue_outbox")).toEqual([]);
+    expect(
+      fake.writes("update", "shopify_connector_stores").some(
+        (op) => (op.data as Record<string, unknown> | null)?.privacyRedactionState === "customer_redacting",
+      ),
+    ).toBe(false);
+    expect(fake.writes("update", EVENTS).at(-1)?.data).toMatchObject({ status: "processed", errorCode: null });
+  });
 });

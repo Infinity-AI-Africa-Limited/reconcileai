@@ -37,6 +37,16 @@ export const shopifyConnectorStores = mysqlTable(
       .default("pending_claim")
       .notNull(),
     /**
+     * Store-local fence for a customer redaction. This is deliberately separate
+     * from `status`: uninstall and shop-redact may change lifecycle state while
+     * the privacy fence remains active, and completion must never overwrite them.
+     */
+    privacyRedactionState: mysqlEnum("privacyRedactionState", ["active", "customer_redacting"])
+      .default("active")
+      .notNull(),
+    /** The internal request currently owning the temporary privacy fence. */
+    privacyRedactionRequestId: int("privacyRedactionRequestId"),
+    /**
      * Why the store left `active` (see SHOPIFY_STATUS_REASONS); NULL while active.
      * A connection that fails closed must say why, or "reauthorization required"
      * is indistinguishable across an ownership change, a rejected refresh and a
@@ -173,6 +183,8 @@ export const shopifyPrivacyRequests = mysqlTable(
     storeId: int("storeId"),
     organizationId: int("organizationId"),
     topic: mysqlEnum("topic", ["customers/data_request", "customers/redact", "shop/redact"]).notNull(),
+    // Domain-separated HMAC of the webhook body, not a raw SHA-256. The legacy
+    // database name is retained to avoid a risky rename of an active ledger.
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     subjectHash: varchar("subjectHash", { length: 64 }),
     status: mysqlEnum("status", [
@@ -198,7 +210,7 @@ export const shopifyPrivacyRequests = mysqlTable(
     completedAt: timestamp("completedAt"),
   },
   (t) => [
-    uniqueIndex("uq_shopify_privacy_request").on(t.topic, t.requestHash),
+    uniqueIndex("uq_shopify_privacy_request_scoped").on(t.organizationId, t.storeId, t.topic, t.requestHash),
     index("idx_shopify_privacy_org_status").on(t.organizationId, t.status),
     index("idx_shopify_privacy_store_topic").on(t.storeId, t.topic),
   ],
@@ -281,6 +293,85 @@ export const shopifyPrivacyDataRequestJobs = mysqlTable(
 export type ShopifyPrivacyDataRequestJob = typeof shopifyPrivacyDataRequestJobs.$inferSelect;
 
 /**
+ * One-to-one execution state for `customers/redact`. Selectors remain in the
+ * encrypted request child table until the deletion postcondition succeeds; this
+ * job stores only internal scope, bounded machine state and aggregate evidence.
+ */
+export const shopifyPrivacyCustomerRedactionJobs = mysqlTable(
+  "shopify_privacy_customer_redaction_jobs",
+  {
+    requestId: int("requestId").primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    storeId: int("storeId").notNull(),
+    status: mysqlEnum("status", [
+      "received",
+      "processing",
+      "manual_review",
+      "blocked_dependency",
+      "failed_retryable",
+      "failed_terminal",
+      "completed",
+    ])
+      .default("received")
+      .notNull(),
+    attempts: int("attempts").default(0).notNull(),
+    leaseId: varchar("leaseId", { length: 36 }),
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
+    nextAttemptAt: timestamp("nextAttemptAt"),
+    lastCheckpoint: varchar("lastCheckpoint", { length: 80 }),
+    /** Bounded machine code only; never a selector, GID, payload or free text. */
+    failureCode: varchar("failureCode", { length: 80 }),
+    manifestVersion: int("manifestVersion").default(1).notNull(),
+    startedAt: timestamp("startedAt"),
+    completedAt: timestamp("completedAt"),
+    recordsFound: int("recordsFound").default(0).notNull(),
+    tombstonesWritten: int("tombstonesWritten").default(0).notNull(),
+    transactionsDeleted: int("transactionsDeleted").default(0).notNull(),
+    anomalyScoresDeleted: int("anomalyScoresDeleted").default(0).notNull(),
+    orphanBatchesDeleted: int("orphanBatchesDeleted").default(0).notNull(),
+    remainingTransactions: int("remainingTransactions").default(0).notNull(),
+    selectorDestroyedAt: timestamp("selectorDestroyedAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    index("idx_shopify_privacy_redact_job_org_status").on(t.organizationId, t.status),
+    index("idx_shopify_privacy_redact_job_store_status").on(t.storeId, t.status),
+    index("idx_shopify_privacy_redact_job_claim").on(t.status, t.nextAttemptAt, t.leaseExpiresAt),
+  ],
+);
+export type ShopifyPrivacyCustomerRedactionJob = typeof shopifyPrivacyCustomerRedactionJobs.$inferSelect;
+
+/**
+ * Permanent re-import barrier for an exact Shopify order. No order identifier,
+ * selector ciphertext or provider payload is retained: only a tenant/store
+ * scoped HMAC digest and the non-secret key generation used to derive it.
+ */
+export const shopifyOrderRedactionTombstones = mysqlTable(
+  "shopify_order_redaction_tombstones",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    storeId: int("storeId").notNull(),
+    keyVersion: varchar("keyVersion", { length: 32 }).notNull(),
+    orderDigest: varchar("orderDigest", { length: 64 }).notNull(),
+    sourceRequestId: int("sourceRequestId").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_shopify_order_redaction_digest").on(
+      t.organizationId,
+      t.storeId,
+      t.keyVersion,
+      t.orderDigest,
+    ),
+    index("idx_shopify_order_redaction_store_version").on(t.organizationId, t.storeId, t.keyVersion),
+    index("idx_shopify_order_redaction_request").on(t.organizationId, t.sourceRequestId),
+  ],
+);
+export type ShopifyOrderRedactionTombstone = typeof shopifyOrderRedactionTombstones.$inferSelect;
+
+/**
  * Transactional queue outbox. Deliberately contains only a kind and internal
  * job id plus dispatch mechanics: Redis inspection and dispatcher diagnostics
  * cannot reveal tenant, store, request hashes or selectors.
@@ -289,7 +380,7 @@ export const shopifyPrivacyQueueOutbox = mysqlTable(
   "shopify_privacy_queue_outbox",
   {
     id: int("id").autoincrement().primaryKey(),
-    kind: mysqlEnum("kind", ["customer_request"]).notNull(),
+    kind: mysqlEnum("kind", ["customer_request", "customer_redact"]).notNull(),
     jobId: int("jobId").notNull(),
     status: mysqlEnum("status", ["pending", "dispatching", "failed_retryable", "failed_terminal", "dispatched"])
       .default("pending")

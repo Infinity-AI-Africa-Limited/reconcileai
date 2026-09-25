@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import {
   shopifyConnectorStores,
+  shopifyPrivacyCustomerRedactionJobs,
   shopifyPrivacyDataRequestJobs,
   shopifyPrivacyQueueOutbox,
   shopifyPrivacyRequestSelectors,
@@ -10,6 +11,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { blindIndexForTenant, encryptForTenant } from "../../_core/tenantKeys";
 import type { DbTransaction } from "../../db";
+import { affectedRows } from "./tokenStore";
 
 export type ShopifyCustomerPrivacyTopic = "customers/data_request" | "customers/redact";
 export type ShopifyPrivacyResourceType = "customer" | "order";
@@ -163,7 +165,7 @@ export async function admitShopifyCustomerPrivacyRequest(
 
   if (params.validation.ok) {
     const [request] = await tx
-      .select({ id: shopifyPrivacyRequests.id })
+      .select({ id: shopifyPrivacyRequests.id, status: shopifyPrivacyRequests.status })
       .from(shopifyPrivacyRequests)
       .where(
         and(
@@ -173,8 +175,31 @@ export async function admitShopifyCustomerPrivacyRequest(
           eq(shopifyPrivacyRequests.requestHash, params.requestHash),
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!request) throw new Error("Admitted Shopify privacy request could not be resolved");
+
+    // Shopify can redeliver the same semantic privacy request with a distinct
+    // webhook id. A completed request has already destroyed its selectors and
+    // restored its write fence; replaying admission must settle only the new
+    // receipt and must never resurrect selectors, a job, an outbox row, or a
+    // store fence.
+    if (request.status === "completed") {
+      await tx
+        .update(shopifyConnectorStores)
+        .set({ lastWebhookAt: new Date() })
+        .where(
+          and(
+            eq(shopifyConnectorStores.id, params.store.id),
+            eq(shopifyConnectorStores.organizationId, params.store.organizationId),
+          ),
+        );
+      await tx
+        .update(shopifyWebhookEvents)
+        .set({ status: "processed", errorCode: null, processedAt: new Date() })
+        .where(eq(shopifyWebhookEvents.webhookId, params.webhookId));
+      return "received";
+    }
 
     if (params.selectors.length > 0) {
       await tx
@@ -208,6 +233,61 @@ export async function admitShopifyCustomerPrivacyRequest(
       await tx
         .insert(shopifyPrivacyQueueOutbox)
         .values({ kind: "customer_request", jobId: request.id, status: "pending" })
+        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
+    } else {
+      // The request, encrypted selectors, execution state, dispatch intent, and
+      // write fence are one admission commit. Therefore a Shopify 2xx can never
+      // exist without recoverable database work or while sync remains writable.
+      const [storeState] = await tx
+        .select({
+          status: shopifyConnectorStores.status,
+          privacyRedactionState: shopifyConnectorStores.privacyRedactionState,
+          privacyRedactionRequestId: shopifyConnectorStores.privacyRedactionRequestId,
+        })
+        .from(shopifyConnectorStores)
+        .where(
+          and(
+            eq(shopifyConnectorStores.id, params.store.id),
+            eq(shopifyConnectorStores.organizationId, params.store.organizationId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      const alreadyFencedForThisRequest =
+        storeState?.privacyRedactionState === "customer_redacting" &&
+        storeState.privacyRedactionRequestId === request.id;
+      if (!storeState || storeState.status !== "active" ||
+          (storeState.privacyRedactionState !== "active" && !alreadyFencedForThisRequest)) {
+        throw new Error("Shopify customer redaction store fence unavailable");
+      }
+      if (!alreadyFencedForThisRequest) {
+        const fenced = await tx
+          .update(shopifyConnectorStores)
+          .set({ privacyRedactionState: "customer_redacting", privacyRedactionRequestId: request.id })
+          .where(
+            and(
+              eq(shopifyConnectorStores.id, params.store.id),
+              eq(shopifyConnectorStores.organizationId, params.store.organizationId),
+              eq(shopifyConnectorStores.status, "active"),
+              eq(shopifyConnectorStores.privacyRedactionState, "active"),
+            ),
+          );
+        if (affectedRows(fenced) !== 1) throw new Error("Shopify customer redaction fence lost");
+      }
+      await tx
+        .insert(shopifyPrivacyCustomerRedactionJobs)
+        .values({
+          requestId: request.id,
+          organizationId: params.store.organizationId,
+          storeId: params.store.id,
+          status: "received",
+          lastCheckpoint: "admitted",
+          manifestVersion: 1,
+        })
+        .onDuplicateKeyUpdate({ set: { requestId: sql`${shopifyPrivacyCustomerRedactionJobs.requestId}` } });
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "customer_redact", jobId: request.id, status: "pending" })
         .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
     }
   }

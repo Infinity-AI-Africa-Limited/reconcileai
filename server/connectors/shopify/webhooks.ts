@@ -8,7 +8,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { ENV } from "../../_core/env";
 import { createAuditLog, getDb } from "../../db";
-import { normalizeShopDomain, sha256, verifyShopifyWebhookHmac } from "./auth";
+import { normalizeShopDomain, shopifyWebhookPayloadDigest, verifyShopifyWebhookHmac } from "./auth";
 import { enqueueShopifyWebhookSync } from "./syncOrchestrator";
 import {
   admitShopifyCustomerPrivacyRequest,
@@ -88,10 +88,19 @@ function warnSecretMissing(): void {
   console.error("[shopify-webhook] SHOPIFY_CLIENT_SECRET is not configured — every delivery is being rejected");
 }
 
+let lastDigestKeyWarningAt = 0;
+function warnWebhookDigestKeyUnavailable(): void {
+  if (Date.now() - lastDigestKeyWarningAt < 10 * 60_000) return;
+  lastDigestKeyWarningAt = Date.now();
+  console.error("[shopify-webhook] SHOPIFY_WEBHOOK_DIGEST_KEY is unavailable — refusing to persist webhook replay evidence");
+}
+
 /**
  * Acknowledge Shopify webhook deliveries only after their HMAC has been checked.
  * Raw payloads (which may contain customer identifiers) are never retained in
- * this connector foundation; the durable ledger stores only a SHA-256 digest.
+ * this connector foundation; the durable ledger stores a keyed, domain-separated
+ * HMAC digest. A raw SHA-256 would allow offline confirmation of low-entropy
+ * customer/order identifiers from a database copy.
  *
  * Everything after authentication runs inside one try: Express 4 does not catch
  * a rejected async handler, and this server has no `unhandledRejection`
@@ -117,8 +126,14 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
     return res.status(400).json({ error: "shop_domain_mismatch" });
   }
 
-  const payloadSha256 = sha256(rawBody);
-  const webhookId = headerValue(req, "x-shopify-webhook-id") ?? `${topic}:${payloadSha256}`;
+  let payloadDigest: string;
+  try {
+    payloadDigest = shopifyWebhookPayloadDigest(rawBody, ENV.shopifyWebhookDigestKey);
+  } catch {
+    warnWebhookDigestKeyUnavailable();
+    return res.status(503).json({ error: "webhook_replay_protection_unavailable" });
+  }
+  const webhookId = headerValue(req, "x-shopify-webhook-id") ?? `${topic}:${payloadDigest}`;
   const settle = async (status: "processed" | "ignored" | "failed", errorCode: string | null = null) => {
     const db = await getDb();
     await db
@@ -144,7 +159,9 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
         organizationId: store?.organizationId ?? null,
         webhookId,
         topic,
-        payloadSha256,
+        // The historical column name is retained for a non-breaking migration,
+        // but its value is now a keyed replay digest, never raw SHA-256.
+        payloadSha256: payloadDigest,
         apiVersion: headerValue(req, "x-shopify-api-version") ?? null,
         status: "received",
       })
@@ -207,9 +224,6 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
 
     if (PRIVACY_TOPICS.has(topic)) {
       if (topic === "shop/redact") {
-        // Shop identity is retained only as the pre-existing digest evidence;
-        // customer/order selectors use the encrypted child records below.
-        const subjectHash = body?.shop_id === undefined ? null : sha256(String(body.shop_id));
         // Shopify's 2xx acknowledgement means this request was durably admitted,
         // not that the tenant was deleted. Admission creates a short-lived job,
         // fences new work, revokes credentials, and fails closed on any DB error.
@@ -220,12 +234,15 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
               storeId: store.id,
               organizationId: store.organizationId,
               topic: "shop/redact",
-              requestHash: payloadSha256,
-              subjectHash,
+              requestHash: payloadDigest,
+              // A shop id is not needed by the existing redaction job. Storing
+              // even a digest would create a confirmation oracle for a
+              // low-entropy provider identifier.
+              subjectHash: null,
               status: "received",
             })
             .onDuplicateKeyUpdate({ set: { requestHash: sql`${shopifyPrivacyRequests.requestHash}` } });
-          const admitted = await admitShopifyShopRedaction(tx, { store, requestHash: payloadSha256, webhookId });
+          const admitted = await admitShopifyShopRedaction(tx, { store, requestHash: payloadDigest, webhookId });
           await tx
             .update(shopifyWebhookEvents)
             .set({ status: "processed", processedAt: new Date() })
@@ -244,7 +261,7 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
         admitShopifyCustomerPrivacyRequest(tx, {
           store,
           topic: customerTopic,
-          requestHash: payloadSha256,
+          requestHash: payloadDigest,
           webhookId,
           validation,
           selectors,

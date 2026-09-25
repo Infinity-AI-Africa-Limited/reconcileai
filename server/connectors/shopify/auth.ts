@@ -70,6 +70,27 @@ export function sha256(value: string | Buffer): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * A privacy-safe durable identity for a Shopify webhook body. A raw SHA-256 is
+ * not sufficient here because a privacy body can contain low-entropy provider
+ * identifiers that a database reader could confirm offline. This keyed digest is
+ * used only for replay control; it is domain-separated from OAuth, token and
+ * redaction-suppression MACs.
+ */
+const WEBHOOK_PAYLOAD_DIGEST_LABEL = "reconcileai:shopify-webhook-payload:v1";
+
+export function shopifyWebhookPayloadDigest(rawBody: Buffer, digestKey: string): string {
+  if (!/^[0-9a-f]{64}$/i.test(digestKey)) {
+    throw new Error("Shopify webhook digest key is unavailable or invalid");
+  }
+  return crypto
+    .createHmac("sha256", Buffer.from(digestKey, "hex"))
+    .update(WEBHOOK_PAYLOAD_DIGEST_LABEL)
+    .update("\0")
+    .update(rawBody)
+    .digest("hex");
+}
+
 export function makeState(): string {
   return crypto.randomBytes(32).toString("base64url");
 }

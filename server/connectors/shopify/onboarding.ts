@@ -235,12 +235,21 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
     // a fresh TTL for the exchange that follows immediately.
     if (!(await renewInstallLease(tx, lease))) return null;
     const [storeState] = await tx
-      .select({ status: shopifyConnectorStores.status, deletionState: organizations.deletionState })
+      .select({
+        status: shopifyConnectorStores.status,
+        privacyRedactionState: shopifyConnectorStores.privacyRedactionState,
+        deletionState: organizations.deletionState,
+      })
       .from(shopifyConnectorStores)
       .innerJoin(organizations, eq(organizations.id, shopifyConnectorStores.organizationId))
       .where(eq(shopifyConnectorStores.shopDomain, shopDomain))
-      .limit(1);
-    if (storeState?.status === "redacting" || storeState?.deletionState === "redacting") {
+      .limit(1)
+      .for("update");
+    if (
+      storeState?.status === "redacting" ||
+      storeState?.deletionState === "redacting" ||
+      storeState?.privacyRedactionState === "customer_redacting"
+    ) {
       // Refuse BEFORE the authorization-code exchange. An exchange retires the
       // store's prior refresh token, and a redacting tenant must not acquire or
       // disturb any new credentials while the deletion fence is active.
@@ -359,6 +368,23 @@ async function reauthorizeExistingStore(
     const tokens = await encryptShopifyTokens(store.organizationId, params.tokenResponse);
     ordersChannelId = await db.transaction(async (tx) => {
       await assertLeaseHeld(tx, params.lease);
+      const [writableStore] = await tx
+        .select({ privacyRedactionState: shopifyConnectorStores.privacyRedactionState })
+        .from(shopifyConnectorStores)
+        .where(
+          and(
+            eq(shopifyConnectorStores.id, store.id),
+            eq(shopifyConnectorStores.organizationId, store.organizationId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (!writableStore || writableStore.privacyRedactionState !== "active") {
+        throw new ShopifyOnboardingError(
+          "The Shopify store is being redacted and cannot be reauthorized",
+          "REDACTION_IN_PROGRESS",
+        );
+      }
       // Store state, credentials and the record of both commit together. The
       // store becomes `active` only in the same commit that stores the pair it
       // is active ON — never ahead of it, as a separate write could leave it.

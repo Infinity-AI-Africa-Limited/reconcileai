@@ -5,6 +5,7 @@ import {
   handleShopifyPrivacyJob,
   type ShopifyPrivacyQueuePayload,
 } from "./privacyCompletion";
+import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 
 let queuePromise: Promise<JobQueue<ShopifyPrivacyQueuePayload>> | null = null;
 
@@ -12,7 +13,10 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   if (!queuePromise) {
     queuePromise = createQueue<ShopifyPrivacyQueuePayload>(
       "shopify-privacy",
-      async (job) => handleShopifyPrivacyJob(job.data),
+      async (job) =>
+        job.data.kind === "customer_redact"
+          ? handleShopifyCustomerRedactionJob(job.data.jobId)
+          : handleShopifyPrivacyJob(job.data),
       {
         attempts: 6,
         backoffMs: 30_000,
@@ -30,7 +34,14 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
 /** Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL. */
 export async function enqueueShopifyPrivacyJob(payload: ShopifyPrivacyQueuePayload): Promise<void> {
   const durable = await queue();
-  await durable.enqueue(`privacy-request-${payload.jobId}`, payload);
+  const prefix = payload.kind === "customer_redact" ? "privacy-redact" : "privacy-request";
+  const name = `${prefix}-${payload.jobId}`;
+  // BullMQ retains failed jobs for inspection. Re-adding the same deterministic
+  // id would return that failed row without running it, stranding DB-retryable
+  // work. Remove any non-active prior entry first; an active job refuses removal
+  // and leaves the outbox retryable until the next scanner pass.
+  await durable.remove?.(name);
+  await durable.enqueue(name, payload);
 }
 
 /**

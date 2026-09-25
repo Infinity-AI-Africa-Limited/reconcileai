@@ -5,7 +5,8 @@ vi.hoisted(() => {
 });
 
 import { toShopifyOrderTransaction } from "./ingest";
-import { partitionShopifyOrders, runShopifyOrderSync } from "./syncOrchestrator";
+import { computeShopifyOrderSuppressionDigest } from "./privacySuppression";
+import { filterTombstonedShopifyOrders, partitionShopifyOrders, runShopifyOrderSync } from "./syncOrchestrator";
 import { scriptedDb } from "./scriptedDb.testkit";
 import type { NormalizedShopifyOrder } from "./orders";
 
@@ -15,6 +16,8 @@ const USERS = "users";
 const CHANNELS = "channels";
 const TRANSACTIONS = "transactions";
 const BATCHES = "upload_batches";
+const TOMBSTONES = "shopify_order_redaction_tombstones";
+const SUPPRESSION_KEYS = [{ version: "v1", key: Buffer.alloc(32, 7) }];
 
 const order = (over: Partial<NormalizedShopifyOrder> = {}): NormalizedShopifyOrder => ({
   gid: "gid://shopify/Order/1001",
@@ -37,6 +40,7 @@ const store = {
   currency: "USD",
   claimedByUserId: 9,
 };
+const writableStore = { id: 7, status: "active", privacyRedactionState: "active" };
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -83,6 +87,12 @@ describe("Shopify order idempotency", () => {
     expect(result.updates.map((item) => [item.transactionId, item.order.gid])).toEqual([[2, "newer"]]);
     expect(result.unchanged).toBe(2);
   });
+
+  it("filters only exact tombstoned Shopify order GIDs", () => {
+    expect(
+      filterTombstonedShopifyOrders([order(), order({ gid: "gid://shopify/Order/1002" })], new Set([order().gid])),
+    ).toEqual([order({ gid: "gid://shopify/Order/1002" })]);
+  });
 });
 
 describe("tenant-isolated sync orchestration", () => {
@@ -103,17 +113,23 @@ describe("tenant-isolated sync orchestration", () => {
   it("uses the onboarded active actor, scopes every lookup, and persists a replay only once", async () => {
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [writableStore]],
         [CURSORS]: [[{ watermarkUpdatedAt: new Date("2026-09-20T10:00:00Z") }]],
         [USERS]: [[{ id: 9 }]],
         [CHANNELS]: [[{ id: 70 }]],
         [TRANSACTIONS]: [[{ id: 501, transactionRef: order().gid, shopifyUpdatedAt: new Date(order().updatedAt) }]],
+        [TOMBSTONES]: [[]],
       },
     });
     const fetchOrders = vi.fn(async () => [order()]);
     const report = await runShopifyOrderSync(
       { storeId: 7, organizationId: 42, trigger: "backstop" },
-      { db: fake.db as never, fetchOrders, now: () => new Date("2026-09-20T11:00:00Z") },
+      {
+        db: fake.db as never,
+        fetchOrders,
+        now: () => new Date("2026-09-20T11:00:00Z"),
+        suppressionKeys: SUPPRESSION_KEYS,
+      },
     );
 
     expect(report).toMatchObject({ success: true, fetched: 1, inserted: 0, updated: 0, unchanged: 1, batchId: null });
@@ -130,6 +146,52 @@ describe("tenant-isolated sync orchestration", () => {
     expect(actorLookup?.where?.params).toEqual(expect.arrayContaining([9, 42, true]));
     const txnLookup = fake.ops.find((op) => op.kind === "select" && op.table === TRANSACTIONS);
     expect(txnLookup?.where?.params).toEqual(expect.arrayContaining([42, 7, order().gid]));
+  });
+
+  it("does not re-import an exact tenant/store tombstoned order", async () => {
+    const tombstone = computeShopifyOrderSuppressionDigest(SUPPRESSION_KEYS[0].key, 42, 7, order().gid);
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store], [writableStore]],
+        [CURSORS]: [[{ watermarkUpdatedAt: new Date("2026-09-20T10:00:00Z") }]],
+        [USERS]: [[{ id: 9 }]],
+        [TOMBSTONES]: [[{ keyVersion: "v1", orderDigest: tombstone }]],
+        [CHANNELS]: [[{ id: 70 }]],
+      },
+    });
+    const report = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "backstop" },
+      {
+        db: fake.db as never,
+        fetchOrders: vi.fn(async () => [order()]),
+        now: () => new Date("2026-09-20T11:00:00Z"),
+        suppressionKeys: SUPPRESSION_KEYS,
+      },
+    );
+
+    expect(report).toMatchObject({ success: true, fetched: 1, inserted: 0, updated: 0, unchanged: 0, batchId: null });
+    expect(fake.writes("insert", TRANSACTIONS)).toEqual([]);
+    expect(fake.writes("insert", BATCHES)).toEqual([]);
+    const tombstoneLookup = fake.ops.find((op) => op.kind === "select" && op.table === TOMBSTONES);
+    expect(tombstoneLookup?.where?.params).toEqual(expect.arrayContaining([42, 7, "v1", tombstone]));
+    expect(tombstoneLookup?.where?.sql).not.toMatch(/transactionRef|externalRef|email|name|rawData/i);
+  });
+
+  it("fails closed before a durable sync write when no retained suppression key is available", async () => {
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store], [writableStore]],
+        [CURSORS]: [[{ watermarkUpdatedAt: new Date("2026-09-20T10:00:00Z") }]],
+        [USERS]: [[{ id: 9 }]],
+      },
+    });
+    await expect(
+      runShopifyOrderSync(
+        { storeId: 7, organizationId: 42, trigger: "manual" },
+        { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]), suppressionKeys: [] },
+      ),
+    ).rejects.toThrow(/suppression_key_unavailable/);
+    expect(fake.writes("insert", TRANSACTIONS)).toEqual([]);
   });
 
   it("does not invent user id 0 when the claimed actor is absent", async () => {
