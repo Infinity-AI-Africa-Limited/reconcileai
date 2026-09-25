@@ -53,6 +53,7 @@ const EVENTS = "shopify_webhook_events";
 const PRIVACY_REQUESTS = "shopify_privacy_requests";
 const PRIVACY_SELECTORS = "shopify_privacy_request_selectors";
 const REDACTION_JOBS = "shopify_shop_redaction_jobs";
+const OUTBOX = "shopify_privacy_queue_outbox";
 const ORGANIZATIONS = "organizations";
 const USERS = "users";
 
@@ -190,8 +191,10 @@ describe("when a signed shop/redact delivery arrives", () => {
       select: {
         [STORES]: [[store]],
         [EVENTS]: [[{ status: "received" }]],
-        [REDACTION_JOBS]: [existingRunId ? [{ runId: existingRunId }] : []],
+        [REDACTION_JOBS]: [existingRunId ? [{ jobId: 903, runId: existingRunId }] : []],
+        [PRIVACY_REQUESTS]: [[{ id: 904 }]],
       },
+      insert: { [REDACTION_JOBS]: [903] },
     });
     state.db = fake.db;
     return { fake, run: delivery("shop/redact", { shop_domain: SHOP, shop_id: 17 }).run };
@@ -202,7 +205,13 @@ describe("when a signed shop/redact delivery arrives", () => {
     const res = await run();
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatchObject({ status: "shop_redact_admitted" });
-    expect(fake.writes("insert", REDACTION_JOBS)).toHaveLength(1);
+    const job = fake.writes("insert", REDACTION_JOBS)[0];
+    const outbox = fake.writes("insert", OUTBOX)[0];
+    expect(job?.data).toMatchObject({ organizationId: 42, storeId: 7, status: "admitted" });
+    expect(outbox?.data).toEqual({ kind: "shop_redact", jobId: 903, status: "pending" });
+    expect(outbox?.txId).toBe(job?.txId);
+    expect(outbox?.txId).not.toBeNull();
+    expect(JSON.stringify(outbox?.data)).not.toMatch(/organization|storeId|domain|webhook|hash|payload/i);
     expect(fake.writes("update", ORGANIZATIONS)[0]?.data).toMatchObject({ isActive: false, deletionState: "redacting" });
     expect(fake.writes("update", USERS)[0]?.data).toMatchObject({ isActive: false });
     expect(fake.writes("delete", TOKENS)).toHaveLength(1);
@@ -215,7 +224,28 @@ describe("when a signed shop/redact delivery arrives", () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatchObject({ status: "shop_redact_duplicate" });
     expect(fake.writes("insert", REDACTION_JOBS)).toEqual([]);
+    expect(fake.writes("insert", OUTBOX)).toEqual([]);
     expect(fake.writes("delete", TOKENS)).toEqual([]);
+  });
+
+  it("should roll back the shop job, outbox intent, and fence when admission cannot finish", async () => {
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store]],
+        [EVENTS]: [[{ status: "received" }]],
+        [REDACTION_JOBS]: [[]],
+        [PRIVACY_REQUESTS]: [[{ id: 904 }]],
+      },
+      insert: { [REDACTION_JOBS]: [903], [OUTBOX]: [new Error("outbox unavailable")] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("shop/redact", { shop_domain: SHOP, shop_id: 17 }).run();
+
+    expect(res.statusCode).toBe(503);
+    for (const table of [REDACTION_JOBS, OUTBOX, ORGANIZATIONS, USERS, TOKENS]) {
+      expect(fake.committed().filter((op) => op.table === table && op.kind !== "select")).toEqual([]);
+    }
   });
 });
 

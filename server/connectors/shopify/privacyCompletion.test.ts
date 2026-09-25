@@ -230,6 +230,26 @@ describe("Shopify privacy outbox recovery", () => {
     expect(JSON.stringify(enqueue.mock.calls[0][0])).not.toMatch(/organization|store|shop|domain|selector|hash|url/i);
     expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "dispatched" });
   });
+
+  it("should recover shop-redaction work after a crash using only its internal job id", async () => {
+    const fake = scriptedDb({
+      select: { [OUTBOX]: [[{ id: 79, kind: "shop_redact", jobId: 903, attempts: 0 }]] },
+    });
+    const enqueue = vi.fn(async () => {});
+
+    const result = await dispatchShopifyPrivacyOutbox({
+      db: fake.db as never,
+      now: () => NOW,
+      uuid: uuidSequence(),
+      enqueue,
+    });
+
+    expect(result).toEqual({ scanned: 1, dispatched: 1, failed: 0 });
+    expect(enqueue).toHaveBeenCalledWith({ kind: "shop_redact", jobId: 903 });
+    expect(Object.keys(enqueue.mock.calls[0][0])).toEqual(["kind", "jobId"]);
+    expect(JSON.stringify(enqueue.mock.calls[0][0])).not.toMatch(/organization|storeId|domain|webhook|hash|payload/i);
+    expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "dispatched" });
+  });
 });
 
 describe("Shopify data-request execution", () => {

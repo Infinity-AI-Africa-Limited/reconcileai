@@ -224,9 +224,10 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
 
     if (PRIVACY_TOPICS.has(topic)) {
       if (topic === "shop/redact") {
-        // Shopify's 2xx acknowledgement means this request was durably admitted,
-        // not that the tenant was deleted. Admission creates a short-lived job,
-        // fences new work, revokes credentials, and fails closed on any DB error.
+        // Shopify's 2xx acknowledgement means this request and its report-only
+        // queue intent were durably admitted, not that the tenant was deleted.
+        // Admission fences new work, revokes credentials, and fails closed on
+        // any DB error; automatic destructive completion is not enabled.
         const admission = await db.transaction(async (tx) => {
           await tx
             .insert(shopifyPrivacyRequests)

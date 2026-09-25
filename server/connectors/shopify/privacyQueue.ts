@@ -6,6 +6,7 @@ import {
   type ShopifyPrivacyQueuePayload,
 } from "./privacyCompletion";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
+import { handleShopifyShopRedactionJob } from "./shopRedaction";
 
 let queuePromise: Promise<JobQueue<ShopifyPrivacyQueuePayload>> | null = null;
 
@@ -13,10 +14,15 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   if (!queuePromise) {
     queuePromise = createQueue<ShopifyPrivacyQueuePayload>(
       "shopify-privacy",
-      async (job) =>
-        job.data.kind === "customer_redact"
-          ? handleShopifyCustomerRedactionJob(job.data.jobId)
-          : handleShopifyPrivacyJob(job.data),
+      async (job) => {
+        if (job.data.kind === "customer_redact") {
+          return handleShopifyCustomerRedactionJob(job.data.jobId);
+        }
+        if (job.data.kind === "shop_redact") {
+          return handleShopifyShopRedactionJob(job.data.jobId);
+        }
+        return handleShopifyPrivacyJob(job.data);
+      },
       {
         attempts: 6,
         backoffMs: 30_000,
@@ -34,7 +40,11 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
 /** Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL. */
 export async function enqueueShopifyPrivacyJob(payload: ShopifyPrivacyQueuePayload): Promise<void> {
   const durable = await queue();
-  const prefix = payload.kind === "customer_redact" ? "privacy-redact" : "privacy-request";
+  const prefix = payload.kind === "customer_request"
+    ? "privacy-request"
+    : payload.kind === "customer_redact"
+      ? "privacy-redact"
+      : "privacy-shop-redact";
   const name = `${prefix}-${payload.jobId}`;
   // BullMQ retains failed jobs for inspection. Re-adding the same deterministic
   // id would return that failed row without running it, stranding DB-retryable

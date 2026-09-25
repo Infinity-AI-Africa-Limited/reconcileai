@@ -16,6 +16,7 @@ import {
   shopifyPrivacyQueueOutbox,
   shopifyPrivacyRequests,
   shopifyPrivacyRequestSelectors,
+  shopifyShopRedactionJobs,
 } from "../../../drizzle/shopify_schema";
 import { decryptForTenantQuiet } from "../../_core/tenantKeys";
 import { createAuditLog, getDb, type DbExecutor } from "../../db";
@@ -32,7 +33,7 @@ const LOOKUP_CHUNK = 500;
 const OUTBOX_BATCH_SIZE = 100;
 
 export type ShopifyPrivacyQueuePayload = {
-  kind: "customer_request" | "customer_redact";
+  kind: "customer_request" | "customer_redact" | "shop_redact";
   jobId: number;
 };
 
@@ -261,7 +262,7 @@ export async function dispatchShopifyPrivacyOutbox(
               ),
             );
           if (affectedRows(jobWrite) !== 1) return;
-        } else {
+        } else if (candidate.kind === "customer_redact") {
           const jobWrite = await tx
             .update(shopifyPrivacyCustomerRedactionJobs)
             .set({ status: "failed_retryable", failureCode: "durable_queue_unavailable", lastCheckpoint: "dispatch_failed" })
@@ -272,20 +273,61 @@ export async function dispatchShopifyPrivacyOutbox(
               ),
             );
           if (affectedRows(jobWrite) !== 1) return;
-        }
-        await tx
-          .update(shopifyPrivacyRequests)
-          .set({ status: "failed_retryable", completionNote: "durable_queue_unavailable" })
-          .where(
-            and(
-              eq(shopifyPrivacyRequests.id, candidate.jobId),
-              eq(
-                shopifyPrivacyRequests.topic,
-                candidate.kind === "customer_request" ? "customers/data_request" : "customers/redact",
+        } else {
+          const jobWrite = await tx
+            .update(shopifyShopRedactionJobs)
+            .set({
+              status: "failed_retryable",
+              failureCode: "durable_queue_unavailable",
+              lastCheckpoint: "dispatch_failed",
+            })
+            .where(
+              and(
+                eq(shopifyShopRedactionJobs.id, candidate.jobId),
+                inArray(shopifyShopRedactionJobs.status, ["admitted", "failed_retryable"]),
               ),
-              inArray(shopifyPrivacyRequests.status, ["received", "failed_retryable"]),
-            ),
-          );
+            );
+          if (affectedRows(jobWrite) !== 1) return;
+        }
+        if (candidate.kind !== "shop_redact") {
+          await tx
+            .update(shopifyPrivacyRequests)
+            .set({ status: "failed_retryable", completionNote: "durable_queue_unavailable" })
+            .where(
+              and(
+                eq(shopifyPrivacyRequests.id, candidate.jobId),
+                eq(
+                  shopifyPrivacyRequests.topic,
+                  candidate.kind === "customer_request" ? "customers/data_request" : "customers/redact",
+                ),
+                inArray(shopifyPrivacyRequests.status, ["received", "failed_retryable"]),
+              ),
+            );
+        } else {
+          const [shopJob] = await tx
+            .select({
+              organizationId: shopifyShopRedactionJobs.organizationId,
+              storeId: shopifyShopRedactionJobs.storeId,
+              privacyRequestId: shopifyShopRedactionJobs.privacyRequestId,
+            })
+            .from(shopifyShopRedactionJobs)
+            .where(eq(shopifyShopRedactionJobs.id, candidate.jobId))
+            .limit(1);
+          if (shopJob?.privacyRequestId !== null && shopJob?.privacyRequestId !== undefined) {
+            await tx
+              .update(shopifyPrivacyRequests)
+              .set({ status: "failed_retryable", completionNote: "durable_queue_unavailable" })
+              .where(
+                and(
+                  eq(shopifyPrivacyRequests.id, shopJob.privacyRequestId),
+                  eq(shopifyPrivacyRequests.organizationId, shopJob.organizationId),
+                  eq(shopifyPrivacyRequests.storeId, shopJob.storeId),
+                  eq(shopifyPrivacyRequests.topic, "shop/redact"),
+                  inArray(shopifyPrivacyRequests.status, ["received", "failed_retryable"]),
+                ),
+              );
+          }
+        }
       });
       failed += 1;
     }

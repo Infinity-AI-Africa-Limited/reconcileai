@@ -1,9 +1,11 @@
 import crypto from "node:crypto";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { organizations, users } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
   shopifyConnectorTokens,
+  shopifyPrivacyQueueOutbox,
+  shopifyPrivacyRequests,
   shopifyShopRedactionJobs,
   type ShopifyConnectorStore,
 } from "../../../drizzle/shopify_schema";
@@ -13,10 +15,9 @@ import type { DbTransaction } from "../../db";
  * Durable admission for Shopify's `shop/redact` compliance webhook.
  *
  * This deliberately performs only the reversible, safety-critical first stage:
- * create an idempotent job, fence the tenant, revoke Shopify credentials and
- * deactivate merchant identities. The separate processor is responsible for
- * completing the reviewed deletion manifest; this function must never claim
- * redaction is complete.
+ * create an idempotent job and queue intent, fence the tenant, revoke Shopify
+ * credentials and deactivate merchant identities. The separate processor is
+ * report-only and must never claim redaction is complete.
  */
 export async function admitShopifyShopRedaction(
   tx: DbTransaction,
@@ -25,9 +26,9 @@ export async function admitShopifyShopRedaction(
     requestHash: string;
     webhookId: string;
   },
-): Promise<{ runId: string; status: "admitted" | "duplicate" }> {
+): Promise<{ jobId: number; runId: string; status: "admitted" | "duplicate" }> {
   const [existing] = await tx
-    .select({ runId: shopifyShopRedactionJobs.runId })
+    .select({ jobId: shopifyShopRedactionJobs.id, runId: shopifyShopRedactionJobs.runId })
     .from(shopifyShopRedactionJobs)
     .where(
       or(
@@ -36,17 +37,43 @@ export async function admitShopifyShopRedaction(
       ),
     )
     .limit(1);
-  if (existing) return { runId: existing.runId, status: "duplicate" };
+  if (existing) return { ...existing, status: "duplicate" };
+
+  const [request] = await tx
+    .select({ id: shopifyPrivacyRequests.id })
+    .from(shopifyPrivacyRequests)
+    .where(
+      and(
+        eq(shopifyPrivacyRequests.organizationId, params.store.organizationId),
+        eq(shopifyPrivacyRequests.storeId, params.store.id),
+        eq(shopifyPrivacyRequests.topic, "shop/redact"),
+        eq(shopifyPrivacyRequests.requestHash, params.requestHash),
+      ),
+    )
+    .limit(1)
+    .for("update");
+  if (!request) throw new Error("Admitted Shopify shop-redact request could not be resolved");
 
   const runId = crypto.randomUUID();
-  await tx.insert(shopifyShopRedactionJobs).values({
+  const inserted = await tx.insert(shopifyShopRedactionJobs).values({
     runId,
     organizationId: params.store.organizationId,
     storeId: params.store.id,
+    privacyRequestId: request.id,
     requestHash: params.requestHash,
     webhookId: params.webhookId,
     status: "admitted",
+    lastCheckpoint: "admitted",
+    manifestVersion: 1,
   });
+  const jobId = Number((inserted as unknown as [{ insertId?: number }])[0]?.insertId ?? 0);
+  if (!Number.isSafeInteger(jobId) || jobId <= 0) {
+    throw new Error("Shopify shop-redact execution id unavailable");
+  }
+  await tx
+    .insert(shopifyPrivacyQueueOutbox)
+    .values({ kind: "shop_redact", jobId, status: "pending" })
+    .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
 
   // The fence comes before deleting credentials or deactivating identities. A
   // request that races a reinstallation must fail closed rather than recreate
@@ -64,7 +91,7 @@ export async function admitShopifyShopRedaction(
     .set({ status: "redacting", statusReason: "shop_redact_requested", lastWebhookAt: new Date() })
     .where(and(eq(shopifyConnectorStores.id, params.store.id), eq(shopifyConnectorStores.organizationId, params.store.organizationId)));
 
-  return { runId, status: "admitted" };
+  return { jobId, runId, status: "admitted" };
 }
 
 /** Tenant work must not create, persist, or egress data after redaction begins. */

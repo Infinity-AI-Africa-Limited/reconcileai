@@ -380,7 +380,7 @@ export const shopifyPrivacyQueueOutbox = mysqlTable(
   "shopify_privacy_queue_outbox",
   {
     id: int("id").autoincrement().primaryKey(),
-    kind: mysqlEnum("kind", ["customer_request", "customer_redact"]).notNull(),
+    kind: mysqlEnum("kind", ["customer_request", "customer_redact", "shop_redact"]).notNull(),
     jobId: int("jobId").notNull(),
     status: mysqlEnum("status", ["pending", "dispatching", "failed_retryable", "failed_terminal", "dispatched"])
       .default("pending")
@@ -447,10 +447,11 @@ export const shopifyPrivacyArtifacts = mysqlTable(
 export type ShopifyPrivacyArtifact = typeof shopifyPrivacyArtifacts.$inferSelect;
 
 /**
- * Durable, short-lived admission record for a `shop/redact` request. It exists
- * only while the processor removes the tenant. Completion must remove the
- * merchant-identifying job and leave, at most, a separately reviewed,
- * de-identified receipt.
+ * Durable report-only execution state for a `shop/redact` request. This first
+ * processor records an immutable count-only inventory and stops in a blocked
+ * state. It never deletes tenant data and never represents Shopify deletion as
+ * complete; the legacy request hash and webhook id remain only because they
+ * predate the report-only executor.
  */
 export const shopifyShopRedactionJobs = mysqlTable(
   "shopify_shop_redaction_jobs",
@@ -459,14 +460,36 @@ export const shopifyShopRedactionJobs = mysqlTable(
     runId: varchar("runId", { length: 36 }).notNull(),
     organizationId: int("organizationId").notNull(),
     storeId: int("storeId").notNull(),
+    /** Exact internal parent; nullable only for jobs admitted before this migration. */
+    privacyRequestId: int("privacyRequestId"),
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     webhookId: varchar("webhookId", { length: 128 }).notNull(),
-    status: mysqlEnum("status", ["admitted", "redacting", "failed", "completed"])
+    status: mysqlEnum("status", [
+      "admitted",
+      "processing",
+      "blocked_dependency",
+      "manual_review",
+      "failed_retryable",
+      "failed_terminal",
+      "completed",
+      // Legacy values retained so the enum migration cannot invalidate an older row.
+      "redacting",
+      "failed",
+    ])
       .default("admitted")
       .notNull(),
     attempts: int("attempts").default(0).notNull(),
+    leaseId: varchar("leaseId", { length: 36 }),
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
+    nextAttemptAt: timestamp("nextAttemptAt"),
     lastCheckpoint: varchar("lastCheckpoint", { length: 80 }),
+    /** Bounded machine code only; never a provider value, payload or free text. */
     failureCode: varchar("failureCode", { length: 80 }),
+    manifestVersion: int("manifestVersion").default(1).notNull(),
+    /** Fixed allowlisted numeric counters only; see shopRedaction.ts. */
+    manifestSummary: json("manifestSummary"),
+    startedAt: timestamp("startedAt"),
+    completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
@@ -474,7 +497,9 @@ export const shopifyShopRedactionJobs = mysqlTable(
     uniqueIndex("uq_shopify_redaction_request").on(t.requestHash),
     uniqueIndex("uq_shopify_redaction_run").on(t.runId),
     uniqueIndex("uq_shopify_redaction_store").on(t.storeId),
+    uniqueIndex("uq_shopify_redaction_privacy_request").on(t.privacyRequestId),
     index("idx_shopify_redaction_org_status").on(t.organizationId, t.status),
+    index("idx_shopify_redaction_claim").on(t.status, t.nextAttemptAt, t.leaseExpiresAt),
   ],
 );
 export type ShopifyShopRedactionJob = typeof shopifyShopRedactionJobs.$inferSelect;
