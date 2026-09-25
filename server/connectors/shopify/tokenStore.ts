@@ -8,6 +8,7 @@ import {
   shopifyConnectorTokens,
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
+import { organizations } from "../../../drizzle/schema";
 import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
 import { decryptForTenant, encryptForTenant } from "../../_core/tenantKeys";
 import { ENV } from "../../_core/env";
@@ -150,12 +151,16 @@ async function readActiveToken(db: Db, params: { storeId: number; organizationId
     .select({ token: shopifyConnectorTokens, shopDomain: shopifyConnectorStores.shopDomain })
     .from(shopifyConnectorTokens)
     .innerJoin(shopifyConnectorStores, eq(shopifyConnectorTokens.storeId, shopifyConnectorStores.id))
+    .innerJoin(organizations, eq(organizations.id, shopifyConnectorStores.organizationId))
     .where(
       and(
         eq(shopifyConnectorTokens.storeId, params.storeId),
         eq(shopifyConnectorTokens.organizationId, params.organizationId),
         eq(shopifyConnectorStores.organizationId, params.organizationId),
         eq(shopifyConnectorStores.status, "active"),
+        // A tenant fenced for redaction hands out no credential, whatever any
+        // single store row says — the fence is the tenant's, not the store's.
+        eq(organizations.deletionState, "active"),
       ),
     )
     .limit(1);
