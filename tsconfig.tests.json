@@ -1,0 +1,27 @@
+{
+  // Test files that MUST type-check, enforced in CI by `pnpm check:tests`.
+  //
+  // tsconfig.json excludes every *.test.ts, so until this file no test was
+  // type-checked at all: a fixture typed `any`, or a fixture of the wrong
+  // shape, passed CI and was caught only in review (#150, #151 — follow-up
+  // #157). Switching the exclusion off surfaces dozens of errors in older
+  // tests, so tests join this list one at a time as they are made clean.
+  // The list only grows.
+  //
+  // "files", not "include": a listed file that is renamed or deleted fails
+  // the check (TS6053) instead of silently dropping out of it. "include" is
+  // emptied so the base config's source globs are not checked a second time.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": false
+  },
+  "include": [],
+  "files": [
+    "server/appOrigin.test.ts",
+    "server/reviewerLinkOrigin.test.ts",
+    "server/sessionCookie.test.ts",
+    "server/shoplineCallbackUrl.test.ts",
+    "server/ssoFlowCookie.test.ts"
+  ]
+}
