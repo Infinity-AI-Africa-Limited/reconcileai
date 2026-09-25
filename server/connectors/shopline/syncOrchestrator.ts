@@ -18,8 +18,13 @@
  *   - Manual "Sync Now" from the merchant dashboard
  */
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
-import { getDb } from "../../db";
-import { insertTransactions, createUploadBatch, updateUploadBatch, insertExceptionsBatch } from "../../db";
+import { getDb, type DbExecutor } from "../../db";
+import {
+  insertTransactions,
+  createUploadBatch,
+  updateUploadBatch,
+  insertExceptionsBatchWithExecutor,
+} from "../../db";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { transactions, channels } from "../../../drizzle/schema";
 import { getValidToken } from "./tokenStore";
@@ -185,7 +190,7 @@ const DEDUPE_LOOKUP_CHUNK = 500;
  * cycles — the BullMQ/REDIS_URL item in CLAUDE.md §10.
  */
 export async function rejectAlreadyIngested(
-  db: Db,
+  db: DbExecutor,
   rows: InsertTransaction[],
   channelIds: number[],
 ): Promise<InsertTransaction[]> {
@@ -563,7 +568,7 @@ export async function resolveChannelIds(
  * Run the retail reconciliation engine on persisted transactions for the given window.
  */
 export async function runReconciliationOnPersistedData(
-  db: Db,
+  db: DbExecutor,
   organizationId: number,
   ordersChannelId: number,
   paymentsChannelId: number,
@@ -653,7 +658,7 @@ export async function runReconciliationOnPersistedData(
       status: "open" as const,
       currency,
     }));
-    await insertExceptionsBatch(exceptionRows);
+    await insertExceptionsBatchWithExecutor(db, exceptionRows);
   }
 
   return {

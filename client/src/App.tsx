@@ -76,6 +76,7 @@ import Login from "./pages/Login";
 import SuperAdminDashboard from "./pages/SuperAdminDashboard";
 import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
 import { ShopifyWelcome, ShopifyError } from "./pages/ShopifyConnect";
+import ShopifyAppHome from "./pages/ShopifyAppHome";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import Support from "./pages/Support";
@@ -320,6 +321,9 @@ function Router() {
       {/* Shopify mirrors the standalone OAuth landing pattern: the initial
           redirect has no ReconcileAI session, while the welcome page later
           recognises the emailed merchant administrator session. */}
+      {/* Shopify App Home has its own App Bridge ID-token boundary and must not
+          depend on a ReconcileAI browser cookie or DashboardLayout. */}
+      <Route path="/shopify/app" component={ShopifyAppHome} />
       <Route path="/shopify/welcome">{() => <CallbackGuard component={ShopifyWelcome} />}</Route>
       <Route path="/shopify/error">{() => <CallbackGuard component={ShopifyError} />}</Route>
       <Route path="/privacy" component={Privacy} />
