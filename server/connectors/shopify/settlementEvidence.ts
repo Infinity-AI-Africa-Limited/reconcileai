@@ -10,20 +10,21 @@ import {
   createAuditLog,
   getDb,
   insertTransactionsWithExecutor,
+  sanitizeRef,
   type DbExecutor,
 } from "../../db";
 import {
   detectColumns,
   mapSettlementRows,
   parseSettlementFile,
+  resolveConfirmedColumns,
+  selectUnimportedSettlementEvents,
+  settlementEventKey,
   type ColumnMap,
   type ParsedFile,
   type SettlementField,
 } from "../shopline/settlementFileImport";
-import {
-  rejectAlreadyIngested,
-  runReconciliationOnPersistedData,
-} from "../shopline/syncOrchestrator";
+import { runReconciliationOnPersistedData } from "../shopline/syncOrchestrator";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
 import {
   resolveAuthorizedShopifyActor,
@@ -40,7 +41,12 @@ export interface ShopifySettlementEvidenceInput {
   content: string;
   contentEncoding: "utf8" | "base64";
   sourceLabel: string;
-  columnOverrides?: ColumnMap;
+  /**
+   * The mapping the merchant confirmed, taken as the whole answer: a field it
+   * omits stays unmapped. Absent, columns are detected. See
+   * `resolveConfirmedColumns` for why a confirmed mapping is not a set of hints.
+   */
+  columnMapping?: ColumnMap;
   dryRun: boolean;
 }
 
@@ -72,6 +78,7 @@ export type ShopifySettlementEvidenceErrorCode =
   | "INVALID_REQUEST"
   | "ORDER_SYNC_REQUIRED"
   | "ACTOR_UNAVAILABLE"
+  | "STORE_UNAVAILABLE"
   | "SERVICE_UNAVAILABLE";
 
 export class ShopifySettlementEvidenceError extends Error {
@@ -87,6 +94,8 @@ type ParseFile = (content: Buffer | string, fileName: string) => Promise<ParsedF
 type Reconcile = typeof runReconciliationOnPersistedData;
 type AuditCommitted = (params: {
   actorId: number;
+  /** The Shopify staff member who submitted the file (the token's `sub`). */
+  shopifyUserId: string;
   organizationId: number;
   storeId: number;
   imported: number;
@@ -227,6 +236,85 @@ async function resolveSettlementChannel(
   return created;
 }
 
+/**
+ * Serialise imports for one store, and refuse a store that stopped being active
+ * after the request was authenticated. Two imports of overlapping files could
+ * otherwise both check for existing evidence before either inserts — settlement
+ * rows carry no Shopify order id, so no unique index stops the second copy.
+ * This must be the transaction's first statement.
+ */
+async function lockStoreForImport(db: DbExecutor, context: ShopifyEmbeddedContext): Promise<void> {
+  const [locked] = await db
+    .select({ id: shopifyConnectorStores.id })
+    .from(shopifyConnectorStores)
+    .where(
+      and(
+        eq(shopifyConnectorStores.id, context.storeId),
+        eq(shopifyConnectorStores.organizationId, context.organizationId),
+        eq(shopifyConnectorStores.status, "active"),
+      ),
+    )
+    .limit(1)
+    .for("update");
+  if (!locked) throw new ShopifySettlementEvidenceError("STORE_UNAVAILABLE");
+}
+
+function originalOrderRefOf(row: InsertTransaction): string | null {
+  const provenance = (row.rawData ?? {}) as Record<string, unknown>;
+  return typeof provenance.originalOrderRef === "string" ? provenance.originalOrderRef : null;
+}
+
+/**
+ * The rows whose settlement EVENT is not already recorded for this store.
+ *
+ * Identity is the event, not the order (`settlementEventKey`), so a payment and
+ * its refund are both kept while a re-upload or an overlapping export adds
+ * nothing. Stored rows are found under every reference they may have been
+ * written with: the canonical order id, or the file's own reference when the
+ * order had not synced yet.
+ *
+ * The read LOCKS what it finds. Under the store lock a second import waits for
+ * the first to commit, and a locking read returns the latest committed rows —
+ * a plain read may answer from a snapshot taken before that commit.
+ */
+async function rejectAlreadyImportedEvidence(
+  db: DbExecutor,
+  params: { organizationId: number; settlementChannelId: number; rows: InsertTransaction[] },
+): Promise<InsertTransaction[]> {
+  const refs = new Set<string>();
+  for (const row of params.rows) {
+    if (row.transactionRef) refs.add(row.transactionRef);
+    const original = sanitizeRef(originalOrderRefOf(row));
+    if (original) refs.add(original);
+  }
+
+  const lookup = [...refs];
+  const storedKeys: string[] = [];
+  for (let index = 0; index < lookup.length; index += ORDER_REFERENCE_LOOKUP_CHUNK) {
+    const chunk = lookup.slice(index, index + ORDER_REFERENCE_LOOKUP_CHUNK);
+    const stored = await db
+      .select({
+        transactionRef: transactions.transactionRef,
+        amount: transactions.amount,
+        debitCredit: transactions.debitCredit,
+        currency: transactions.currency,
+        valueDate: transactions.valueDate,
+        rawData: transactions.rawData,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.organizationId, params.organizationId),
+          eq(transactions.channelId, params.settlementChannelId),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      )
+      .for("update");
+    for (const row of stored) storedKeys.push(settlementEventKey(row));
+  }
+  return selectUnimportedSettlementEvents(storedKeys, params.rows, settlementEventKey);
+}
+
 async function alignShopifyOrderReferences(
   db: DbExecutor,
   params: { organizationId: number; ordersChannelId: number; rows: InsertTransaction[] },
@@ -281,6 +369,7 @@ async function alignShopifyOrderReferences(
 export function minimizeShopifySettlementEvidenceRows(
   rows: InsertTransaction[],
   sourceLabel: string,
+  submittedByShopifyUserId?: string,
 ): InsertTransaction[] {
   return rows.map((row) => {
     const provenance = (row.rawData ?? {}) as Record<string, unknown>;
@@ -295,6 +384,9 @@ export function minimizeShopifySettlementEvidenceRows(
         gatewayRef: typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : undefined,
         feeAmount: typeof provenance.feeAmount === "number" ? provenance.feeAmount : undefined,
         importedFrom: sourceLabel,
+        // Each row names who submitted it, so attribution survives an audit
+        // outage (the audit write below is deliberately not fatal).
+        submittedByShopifyUserId,
       },
     } as InsertTransaction;
   });
@@ -303,12 +395,16 @@ export function minimizeShopifySettlementEvidenceRows(
 async function defaultAuditCommitted(params: Parameters<AuditCommitted>[0]): Promise<void> {
   await createAuditLog({
     organizationId: params.organizationId,
+    // The accountable administrator, NOT the submitter: ReconcileAI has no user
+    // row for a Shopify staff member. `details` says which is which.
     userId: params.actorId,
     action: "shopify_settlement_evidence_imported",
     entityType: "shopify_store",
     entityId: params.storeId,
     details: {
       source: "merchant_provided_settlement_evidence",
+      submittedBy: { kind: "shopify_staff_member", shopifyUserId: params.shopifyUserId },
+      accountableAdministratorId: params.actorId,
       imported: params.imported,
       duplicates: params.duplicates,
       failed: params.failed,
@@ -355,7 +451,9 @@ export async function importShopifySettlementEvidence(
     throw new ShopifySettlementEvidenceError("INVALID_REQUEST");
   }
 
-  const { mapping, missingRequired } = detectColumns(parsed.headers, input.columnOverrides);
+  const { mapping, missingRequired } = input.columnMapping
+    ? resolveConfirmedColumns(parsed.headers, input.columnMapping)
+    : detectColumns(parsed.headers);
   if (input.dryRun || missingRequired.length > 0) {
     return dryRunResult(parsed, mapping, missingRequired);
   }
@@ -378,6 +476,7 @@ export async function importShopifySettlementEvidence(
 
   try {
     const committed = await db.transaction(async (tx) => {
+      await lockStoreForImport(tx, context);
       const { rows: mappedRows, failures } = mapSettlementRows(parsed.rows, mapping, {
         organizationId: context.organizationId,
         paymentsChannelId: settlementChannelId,
@@ -386,14 +485,28 @@ export async function importShopifySettlementEvidence(
         defaultCurrency: context.currency ?? "USD",
         sourceLabel: input.sourceLabel,
       });
-      const rows = minimizeShopifySettlementEvidenceRows(mappedRows, input.sourceLabel);
+      const rows = minimizeShopifySettlementEvidenceRows(
+        mappedRows,
+        input.sourceLabel,
+        context.shopifyUserId,
+      );
       const alignedRows = await alignShopifyOrderReferences(tx, {
         organizationId: context.organizationId,
         ordersChannelId,
         rows,
       });
-      const fresh = await rejectAlreadyIngested(tx, alignedRows, [settlementChannelId]);
-      const duplicates = alignedRows.length - fresh.length;
+      // Compare and scope on the references as they will be STORED.
+      const storedForm = alignedRows.map((row) => ({
+        ...row,
+        transactionRef: sanitizeRef(row.transactionRef),
+        externalRef: sanitizeRef(row.externalRef),
+      }));
+      const fresh = await rejectAlreadyImportedEvidence(tx, {
+        organizationId: context.organizationId,
+        settlementChannelId,
+        rows: storedForm,
+      });
+      const duplicates = storedForm.length - fresh.length;
       await insertTransactionsWithExecutor(tx, fresh);
 
       let matchedCount = 0;
@@ -410,6 +523,13 @@ export async function importShopifySettlementEvidence(
           from,
           to,
           context.currency ?? "USD",
+          // Only the orders this file speaks to. Orders whose evidence is in a
+          // file not yet imported must not be flagged for its absence.
+          {
+            orderRefs: fresh
+              .map((row) => row.transactionRef)
+              .filter((ref): ref is string => Boolean(ref)),
+          },
         );
         matchedCount = result.matchedCount;
         exceptionCount = result.exceptionCount;
@@ -446,6 +566,7 @@ export async function importShopifySettlementEvidence(
     try {
       await (deps.auditCommitted ?? defaultAuditCommitted)({
         actorId,
+        shopifyUserId: context.shopifyUserId,
         organizationId: context.organizationId,
         storeId: context.storeId,
         ...committed,

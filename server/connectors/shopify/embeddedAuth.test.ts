@@ -24,6 +24,7 @@ async function idToken(overrides: {
   issuer?: string;
   expiration?: number;
   notBefore?: number;
+  subject?: string;
 } = {}): Promise<string> {
   return new SignJWT({
     dest: overrides.destination ?? `https://${SHOP}`,
@@ -32,7 +33,7 @@ async function idToken(overrides: {
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuer(overrides.issuer ?? `https://${SHOP}/admin`)
     .setAudience(overrides.audience ?? CLIENT_ID)
-    .setSubject("gid://shopify/User/123")
+    .setSubject(overrides.subject ?? "gid://shopify/User/123")
     .setJti("token-id")
     .setIssuedAt(NOW_SECONDS - 5)
     .setNotBefore(overrides.notBefore ?? NOW_SECONDS - 5)
@@ -60,9 +61,24 @@ describe("Shopify embedded App Home authentication", () => {
   it("accepts a valid HS256 ID token and returns only the active store's minimal context", async () => {
     const { result, db } = auth(await idToken());
 
-    await expect(result).resolves.toEqual(activeStore);
+    await expect(result).resolves.toEqual({ ...activeStore, shopifyUserId: "gid://shopify/User/123" });
     const lookup = db.ops.find((op) => op.kind === "select" && op.table === STORES);
     expect(lookup?.where?.params).toEqual([SHOP, "active"]);
+  });
+
+  describe("when the token names the Shopify staff member acting", () => {
+    it("should carry that verified subject as the submitter of any write", async () => {
+      const { result } = auth(await idToken({ subject: "548380009" }));
+      await expect(result).resolves.toMatchObject({ shopifyUserId: "548380009" });
+    });
+
+    it("should refuse a subject that is not a Shopify user id, before any store lookup", async () => {
+      for (const subject of ["person@example.com", "gid://shopify/Order/1", "12 34", "x".repeat(30)]) {
+        const attempt = auth(await idToken({ subject }));
+        await expectCode(attempt.result, "CLAIMS_INVALID");
+        expect(attempt.db.ops).toEqual([]);
+      }
+    });
   });
 
   it("rejects malformed and expired tokens before any store lookup", async () => {

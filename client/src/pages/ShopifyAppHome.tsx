@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   loadShopifyAppHomeContext,
   shopifyAppHomeErrorMessage,
@@ -16,9 +17,18 @@ import {
   type ShopifySettlementField,
   type ShopifySyncReport,
 } from "@/lib/shopifyAppBridge";
+import {
+  assignSettlementColumn,
+  confirmedSettlementMapping,
+  sameSettlementMapping,
+  SETTLEMENT_MAPPING_FIELDS,
+  type SettlementMapping,
+} from "@/lib/shopifySettlementMapping";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const SPREADSHEET_FILE = /\.(xlsx|xlsm|xlsb|xls)$/i;
+/** Radix Select forbids an empty item value, so "no column" needs a sentinel. */
+const NOT_IN_FILE = "__reconcileai_not_in_file__";
 
 const FIELD_LABELS: Record<ShopifySettlementField, string> = {
   orderRef: "Order reference (match key)",
@@ -68,6 +78,10 @@ export default function ShopifyAppHome() {
   const [settlementPreview, setSettlementPreview] = useState<ShopifySettlementEvidenceDryRun | null>(null);
   const [settlementResult, setSettlementResult] = useState<ShopifySettlementEvidenceCommitted | null>(null);
   const [settlementError, setSettlementError] = useState<string | null>(null);
+  // The merchant's working mapping, and the one the last check confirmed.
+  // Import sends only the confirmed one; an edit since must be checked again.
+  const [columnMapping, setColumnMapping] = useState<SettlementMapping | null>(null);
+  const [checkedMapping, setCheckedMapping] = useState<SettlementMapping | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -104,6 +118,8 @@ export default function ShopifyAppHome() {
     setSettlementPreview(null);
     setSettlementResult(null);
     setSettlementError(null);
+    setColumnMapping(null);
+    setCheckedMapping(null);
   };
 
   const updateSourceLabel = (value: string) => {
@@ -111,6 +127,13 @@ export default function ShopifyAppHome() {
     setSettlementPreview(null);
     setSettlementResult(null);
     setSettlementError(null);
+    // The columns have not changed; keep the merchant's mapping for the next check.
+    setCheckedMapping(null);
+  };
+
+  const changeColumn = (field: ShopifySettlementField, header: string | null) => {
+    setColumnMapping((current) => assignSettlementColumn(current ?? {}, field, header));
+    setSettlementResult(null);
   };
 
   const submitSettlementFile = async (dryRun: boolean) => {
@@ -125,16 +148,23 @@ export default function ShopifyAppHome() {
     if (dryRun) setSettlementResult(null);
     try {
       const encoded = await readSettlementFile(settlementFile);
+      // First check: detect. Later checks send the merchant's mapping as the
+      // whole answer; the import sends exactly what the last check confirmed.
+      const mappingToSend = dryRun ? columnMapping : checkedMapping;
       const result = await submitShopifySettlementEvidence({
         fileName: settlementFile.name,
         sourceLabel: sourceLabel.trim(),
         ...encoded,
+        ...(mappingToSend ? { columnMapping: mappingToSend } : {}),
         dryRun,
       });
       if (result.committed) {
         setSettlementResult(result);
       } else {
+        const confirmed = confirmedSettlementMapping(result.mapping);
         setSettlementPreview(result);
+        setColumnMapping(confirmed);
+        setCheckedMapping(confirmed);
       }
     } catch (err) {
       setSettlementError(shopifyAppHomeErrorMessage(err));
@@ -176,6 +206,8 @@ export default function ShopifyAppHome() {
   }
 
   const hasPriorSyncIssue = Boolean(context.sync.lastErrorCode);
+  const mappingEdited = columnMapping !== null && checkedMapping !== null
+    && !sameSettlementMapping(columnMapping, checkedMapping);
   return (
     <main className="min-h-screen bg-[#F8F9FA] px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -303,7 +335,14 @@ export default function ShopifyAppHome() {
               </Button>
               <Button
                 className="bg-[#1B365D] hover:bg-[#102A43]"
-                disabled={!settlementPreview || settlementPreview.missingRequired.length > 0 || settlementBusy !== null || Boolean(settlementResult)}
+                disabled={
+                  !settlementPreview
+                  || settlementPreview.missingRequired.length > 0
+                  || mappingEdited
+                  || checkedMapping === null
+                  || settlementBusy !== null
+                  || Boolean(settlementResult)
+                }
                 onClick={() => void submitSettlementFile(false)}
               >
                 {settlementBusy === "importing" ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
@@ -341,22 +380,43 @@ export default function ShopifyAppHome() {
                 </div>
 
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Detected mapping</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Column mapping</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Confirm which column holds each value, or correct one ReconcileAI detected wrongly. Fields marked Required must be mapped.
+                  </p>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                    {(Object.entries(settlementPreview.mapping) as Array<[ShopifySettlementField, string]>).map(([field, header]) => (
-                      <div key={field} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-xs">
-                        <span className="text-slate-600">{FIELD_LABELS[field]}</span>
-                        <Badge variant={field === "orderRef" || field === "amount" ? "default" : "secondary"} className="max-w-[55%] truncate font-mono">
-                          {header}
-                        </Badge>
+                    {SETTLEMENT_MAPPING_FIELDS.map(({ field, required }) => (
+                      <div key={field} className="space-y-1.5 rounded-md bg-white px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label htmlFor={`settlement-map-${field}`} className="text-xs text-slate-600">{FIELD_LABELS[field]}</Label>
+                          {required ? <Badge variant="secondary" className="text-[10px]">Required</Badge> : null}
+                        </div>
+                        <Select
+                          value={columnMapping?.[field] ?? NOT_IN_FILE}
+                          disabled={settlementBusy !== null}
+                          onValueChange={(value) => changeColumn(field, value === NOT_IN_FILE ? null : value)}
+                        >
+                          <SelectTrigger id={`settlement-map-${field}`} className="h-8 font-mono text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={NOT_IN_FILE}>{required ? "Choose a column" : "Not in this file"}</SelectItem>
+                            {settlementPreview.headers.map((header, index) => (header ? (
+                              <SelectItem key={`${index}:${header}`} value={header} className="font-mono text-xs">{header}</SelectItem>
+                            ) : null))}
+                          </SelectContent>
+                        </Select>
                       </div>
                     ))}
                   </div>
-                </div>
-
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Headers found</p>
-                  <p className="mt-1 break-words font-mono text-xs text-slate-700">{settlementPreview.headers.join(", ") || "No headers detected"}</p>
+                  {settlementPreview.headers.length === 0 ? (
+                    <p className="mt-2 text-xs text-amber-700">No column headers were found in this file.</p>
+                  ) : null}
+                  {mappingEdited ? (
+                    <p className="mt-2 text-xs text-amber-700">
+                      You changed the mapping. Check columns again to confirm it before importing.
+                    </p>
+                  ) : null}
                 </div>
 
                 {settlementPreview.parseErrors.length > 0 ? (

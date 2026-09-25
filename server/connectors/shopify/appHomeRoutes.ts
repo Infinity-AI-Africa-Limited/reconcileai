@@ -64,7 +64,8 @@ const settlementEvidenceBody = z.object({
   content: z.string().min(1).max(14_000_000),
   contentEncoding: z.enum(["utf8", "base64"]),
   sourceLabel: z.string().min(1).max(80),
-  columnOverrides: z.record(settlementField, z.string().min(1).max(200)).optional(),
+  /** The merchant-confirmed mapping; absent means detect. */
+  columnMapping: z.record(settlementField, z.string().min(1).max(200)).optional(),
   dryRun: z.boolean(),
 });
 
@@ -99,6 +100,11 @@ async function authenticated(
     res.status(503).json({ error: { code: "service_unavailable" } });
     return null;
   }
+}
+
+/** Log fields for a failure, when authentication got far enough to know the tenant. */
+function tenantOf(context: ShopifyEmbeddedContext | null) {
+  return context ? { storeId: context.storeId, organizationId: context.organizationId } : {};
 }
 
 function safeSyncReport(report: ShopifyOrderSyncReport) {
@@ -171,11 +177,13 @@ export function createShopifyAppHomeRouter(deps: ShopifyAppHomeRouteDeps = {}): 
     return res.json({ apiKey });
   });
 
+  // Every await in these handlers sits inside a try. Express 4 does not catch a
+  // rejected handler promise; it reaches the process, and Node 22 exits on it.
   router.get("/api/shopify/app-home/context", async (req, res) => {
-    const context = await authenticated(req, res, authenticate);
-    if (!context) return;
-
+    let context: ShopifyEmbeddedContext | null = null;
     try {
+      context = await authenticated(req, res, authenticate);
+      if (!context) return;
       const db = await getDatabase();
       if (!db) return res.status(503).json({ error: { code: "service_unavailable" } });
       const [cursor] = await db
@@ -205,19 +213,17 @@ export function createShopifyAppHomeRouter(deps: ShopifyAppHomeRouteDeps = {}): 
         capabilities,
       });
     } catch {
-      console.error("[shopify-app-home] context lookup failed", {
-        storeId: context.storeId,
-        organizationId: context.organizationId,
-      });
+      console.error("[shopify-app-home] context lookup failed", tenantOf(context));
+      if (res.headersSent) return;
       return res.status(503).json({ error: { code: "service_unavailable" } });
     }
   });
 
   router.post("/api/shopify/app-home/sync", async (req, res) => {
-    const context = await authenticated(req, res, authenticate);
-    if (!context) return;
-
+    let context: ShopifyEmbeddedContext | null = null;
     try {
+      context = await authenticated(req, res, authenticate);
+      if (!context) return;
       const report = await runSync({
         storeId: context.storeId,
         organizationId: context.organizationId,
@@ -227,26 +233,27 @@ export function createShopifyAppHomeRouter(deps: ShopifyAppHomeRouteDeps = {}): 
     } catch (error) {
       const status = syncFailureStatus(error);
       console.error("[shopify-app-home] manual sync failed", {
-        storeId: context.storeId,
-        organizationId: context.organizationId,
+        ...tenantOf(context),
         category: status === 409 ? "conflict" : status === 422 ? "action_required" : "unavailable",
       });
+      if (res.headersSent) return;
       const code = status === 409 ? "sync_in_progress" : status === 422 ? "store_action_required" : "service_unavailable";
       return res.status(status).json({ error: { code } });
     }
   });
 
   router.post("/api/shopify/app-home/settlement-evidence", async (req, res) => {
-    const context = await authenticated(req, res, authenticate);
-    if (!context) return;
-
-    // z.object intentionally strips unknown browser fields. A store, tenant or
-    // channel identifier can therefore neither be accepted nor forwarded; the
-    // only authority is the verified App Bridge context above.
-    const parsed = settlementEvidenceBody.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request" } });
-
+    let context: ShopifyEmbeddedContext | null = null;
     try {
+      context = await authenticated(req, res, authenticate);
+      if (!context) return;
+
+      // z.object intentionally strips unknown browser fields. A store, tenant or
+      // channel identifier can therefore neither be accepted nor forwarded; the
+      // only authority is the verified App Bridge context above.
+      const parsed = settlementEvidenceBody.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request" } });
+
       const db = await getDatabase();
       if (!db) return res.status(503).json({ error: { code: "service_unavailable" } });
       const result = await importSettlementEvidence(context, parsed.data, db);
@@ -262,11 +269,12 @@ export function createShopifyAppHomeRouter(deps: ShopifyAppHomeRouteDeps = {}): 
         if (error.code === "ACTOR_UNAVAILABLE") {
           return res.status(403).json({ error: { code: "active_admin_required" } });
         }
+        if (error.code === "STORE_UNAVAILABLE") {
+          return res.status(422).json({ error: { code: "store_action_required" } });
+        }
       }
-      console.error("[shopify-app-home] settlement evidence import failed", {
-        storeId: context.storeId,
-        organizationId: context.organizationId,
-      });
+      console.error("[shopify-app-home] settlement evidence import failed", tenantOf(context));
+      if (res.headersSent) return;
       return res.status(503).json({ error: { code: "service_unavailable" } });
     }
   });

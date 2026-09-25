@@ -12,6 +12,14 @@ export interface ShopifyEmbeddedContext {
   shopDomain: string;
   displayName: string;
   currency: string | null;
+  /**
+   * The Shopify staff member the token was issued to (its signed `sub`). This
+   * is who is acting. ReconcileAI holds no user row for a Shopify staff member,
+   * so a write still names the store's accountable ReconcileAI administrator as
+   * its `userId` — and must record this id as the submitter, or the ledger
+   * would say that administrator did something they may never have seen.
+   */
+  shopifyUserId: string;
 }
 
 export type ShopifyEmbeddedAuthErrorCode =
@@ -62,6 +70,9 @@ function bearerToken(authorization: string | undefined): string {
   if (!match) throw new ShopifyEmbeddedAuthError("AUTHORIZATION_REQUIRED");
   return match[1];
 }
+
+/** Shopify user ids are numeric; the pattern also admits a GID form, never free text. */
+const SHOPIFY_USER_SUBJECT = /^(?:\d{1,20}|gid:\/\/shopify\/(?:StaffMember|User)\/\d{1,20})$/;
 
 function httpsUrl(value: unknown): URL | null {
   if (typeof value !== "string") return null;
@@ -118,6 +129,13 @@ export async function authenticateShopifyEmbeddedRequest(
     throw new ShopifyEmbeddedAuthError("CLAIMS_INVALID");
   }
 
+  // `sub` is required above but only as present; it must also be a Shopify
+  // user id, because it becomes the recorded submitter of any write.
+  if (typeof payload.sub !== "string" || !SHOPIFY_USER_SUBJECT.test(payload.sub)) {
+    throw new ShopifyEmbeddedAuthError("CLAIMS_INVALID");
+  }
+  const shopifyUserId = payload.sub;
+
   const destinationShop = normalizeShopDomain(destination.hostname);
   const issuerShop = normalizeShopDomain(issuer.hostname);
   if (!destinationShop || !issuerShop || destinationShop !== issuerShop) {
@@ -156,6 +174,7 @@ export async function authenticateShopifyEmbeddedRequest(
       shopDomain: store.shopDomain,
       displayName: store.displayName,
       currency: store.currency,
+      shopifyUserId,
     };
   } catch (error) {
     if (error instanceof ShopifyEmbeddedAuthError) throw error;

@@ -102,7 +102,11 @@ function sanitizeText(input: string | null | undefined): string | null {
     .substring(0, 10000); // Max text length
 }
 
-function sanitizeRef(input: string | null | undefined): string | null {
+/**
+ * Exported so a caller that looks rows up by reference can ask for the value
+ * `insertTransactions` actually stores, rather than the one it was handed.
+ */
+export function sanitizeRef(input: string | null | undefined): string | null {
   if (!input) return null;
   // Shopify canonical order references are GIDs (`gid://shopify/Order/...`), so
   // colon is a valid reference character alongside the existing safe set.

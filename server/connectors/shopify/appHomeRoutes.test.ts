@@ -14,6 +14,7 @@ const context: ShopifyEmbeddedContext = {
   shopDomain: "merchant.myshopify.com",
   displayName: "Merchant Store",
   currency: "USD",
+  shopifyUserId: "548380009",
 };
 
 const servers: Array<ReturnType<express.Express["listen"]>> = [];
@@ -273,7 +274,7 @@ describe("Shopify embedded App Home routes", () => {
     expect(text).not.toMatch(/PII-SECRET|112233|batchId|sampleRows/);
   });
 
-  it("rejects malformed or extra column-override keys with one generic response", async () => {
+  it("rejects malformed or extra column-mapping keys with one generic response", async () => {
     const importSettlementEvidence = vi.fn();
     const base = await start(createShopifyAppHomeRouter({
       authenticate: async () => context,
@@ -289,7 +290,7 @@ describe("Shopify embedded App Home routes", () => {
         contentEncoding: "utf8",
         sourceLabel: "Bank",
         dryRun: true,
-        columnOverrides: { customerEmail: "Email" },
+        columnMapping: { customerEmail: "Email" },
       }),
     });
     expect(response.status).toBe(400);
@@ -301,6 +302,7 @@ describe("Shopify embedded App Home routes", () => {
     const cases = [
       { serviceCode: "ORDER_SYNC_REQUIRED", status: 422, responseCode: "order_sync_required" },
       { serviceCode: "ACTOR_UNAVAILABLE", status: 403, responseCode: "active_admin_required" },
+      { serviceCode: "STORE_UNAVAILABLE", status: 422, responseCode: "store_action_required" },
     ] as const;
 
     for (const testCase of cases) {

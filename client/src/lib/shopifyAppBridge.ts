@@ -40,7 +40,8 @@ export type ShopifySettlementEvidenceRequest = {
   content: string;
   contentEncoding: "utf8" | "base64";
   sourceLabel: string;
-  columnOverrides?: Partial<Record<ShopifySettlementField, string>>;
+  /** The merchant-confirmed mapping; omit on the first check to detect columns. */
+  columnMapping?: Partial<Record<ShopifySettlementField, string>>;
   dryRun: boolean;
 };
 
@@ -80,6 +81,10 @@ declare global {
 
 const APP_BRIDGE_SCRIPT = "https://cdn.shopify.com/shopifycloud/app-bridge.js";
 const CONFIG_PATH = "/api/shopify/app-home/config";
+/** Records the script's outcome on the element, so a later caller need not have heard its events. */
+const SCRIPT_STATE = "data-reconcileai-app-bridge";
+const APP_BRIDGE_LOAD_TIMEOUT_MS = 10_000;
+const APP_BRIDGE_POLL_MS = 50;
 let bridgeReady: Promise<ShopifyAppBridgeApi> | null = null;
 
 export class ShopifyAppHomeClientError extends Error {
@@ -121,23 +126,63 @@ function apiKeyMeta(apiKey: string): HTMLMetaElement {
   return meta;
 }
 
-function loadScript(): Promise<void> {
+function recordScriptState(script: HTMLScriptElement): void {
+  script.addEventListener("load", () => script.setAttribute(SCRIPT_STATE, "loaded"), { once: true });
+  script.addEventListener("error", () => script.setAttribute(SCRIPT_STATE, "failed"), { once: true });
+}
+
+/**
+ * Settles on the script's load or error event, on App Bridge becoming usable,
+ * or on a timeout — never on an event alone. An element that already loaded
+ * (or failed) will not fire again, so waiting for its events could leave the
+ * workspace on its spinner forever instead of showing an error and retry.
+ */
+function waitForScript(script: HTMLScriptElement, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: ShopifyAppHomeClientError) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      script.removeEventListener("load", onLoad);
+      script.removeEventListener("error", onError);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onLoad = () => finish();
+    const onError = () => finish(new ShopifyAppHomeClientError("APP_BRIDGE_UNAVAILABLE"));
+    script.addEventListener("load", onLoad, { once: true });
+    script.addEventListener("error", onError, { once: true });
+    const poll = setInterval(() => {
+      if (window.shopify?.idToken) finish();
+    }, APP_BRIDGE_POLL_MS);
+    const timer = setTimeout(
+      () => finish(new ShopifyAppHomeClientError("APP_BRIDGE_UNAVAILABLE")),
+      timeoutMs,
+    );
+  });
+}
+
+function loadScript(timeoutMs = APP_BRIDGE_LOAD_TIMEOUT_MS): Promise<void> {
+  if (window.shopify?.idToken) return Promise.resolve();
   const existing = document.querySelector<HTMLScriptElement>(`script[src="${APP_BRIDGE_SCRIPT}"]`);
   if (existing) {
-    if (window.shopify?.idToken) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new ShopifyAppHomeClientError("APP_BRIDGE_UNAVAILABLE")), { once: true });
-    });
+    const state = existing.getAttribute(SCRIPT_STATE);
+    // Loaded without App Bridge becoming usable: the caller reports it.
+    if (state === "loaded") return Promise.resolve();
+    // Still loading, or placed by someone else: wait, but not forever.
+    if (state !== "failed") return waitForScript(existing, timeoutMs);
+    // A failed script never retries by itself; replace it so "Try again" can.
+    existing.remove();
   }
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = APP_BRIDGE_SCRIPT;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new ShopifyAppHomeClientError("APP_BRIDGE_UNAVAILABLE"));
-    document.head.appendChild(script);
-  });
+  const script = document.createElement("script");
+  script.src = APP_BRIDGE_SCRIPT;
+  script.async = true;
+  recordScriptState(script);
+  const ready = waitForScript(script, timeoutMs);
+  document.head.appendChild(script);
+  return ready;
 }
 
 /**
@@ -224,4 +269,9 @@ export function shopifyAppHomeErrorMessage(error: unknown): string {
 /** Test-only reset for deterministic module-level App Bridge loading. */
 export function resetShopifyAppBridgeForTest(): void {
   bridgeReady = null;
+}
+
+/** Test-only access to the script loader with a short timeout. */
+export function loadShopifyAppBridgeScriptForTest(timeoutMs: number): Promise<void> {
+  return loadScript(timeoutMs);
 }
