@@ -13,6 +13,8 @@
  *     matching what the provider has registered.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Type-only, so it is erased: the module itself is imported fresh per case below.
+import type { ProxiedRequest } from "./_core/clientIp";
 
 const KEYS = ["APP_URL", "TRUSTED_PROXY_HOPS", "NODE_ENV"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -27,7 +29,7 @@ afterEach(() => {
   }
 });
 
-async function originFor(req: any, env: Record<string, string | undefined> = {}) {
+async function originFor(req: ProxiedRequest | null, env: Record<string, string | undefined> = {}) {
   vi.resetModules();
   process.env.NODE_ENV = "production";
   process.env.TRUSTED_PROXY_HOPS = "2";

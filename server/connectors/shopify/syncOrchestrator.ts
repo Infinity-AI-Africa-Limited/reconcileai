@@ -58,6 +58,8 @@ interface ExistingOrderRow {
   shopifyCancelledAt?: Date | null;
   status?: string;
   matchId?: number | null;
+  /** The upload batch that last wrote the row — identifies which sync inserted it. */
+  batchId?: number | null;
 }
 
 /**
@@ -205,6 +207,7 @@ async function loadExistingOrders(
           shopifyCancelledAt: transactions.shopifyCancelledAt,
           status: transactions.status,
           matchId: transactions.matchId,
+          batchId: transactions.batchId,
         })
         .from(transactions)
         .where(
@@ -240,10 +243,22 @@ export function materialShopifyOrderEvidenceChanged(
   );
 }
 
+const ACTIVE_MATCH_STATUSES = ["confirmed", "pending_review"] as const;
+/** Statuses a match put there — the only ones a rejected match may take back. */
+const MATCHED_STATUSES = ["matched", "manually_matched"] as const;
+
 /**
- * Reopen only the corrected transaction and directly evidenced counterparts.
- * Generic match rows are retained as audit evidence and moved to `rejected`;
- * the legacy reciprocal matchId path is cleared only when it still points back.
+ * Reopen the corrected transaction and the counterparts of the matches it was in.
+ *
+ * Match rows are the evidence; `transactions.status` is a summary of them. So a
+ * correction rejects the order's active matches (kept as audit evidence) and
+ * then takes back only the `matched` summaries those matches produced. It never
+ * touches state that has a different source:
+ *   - a counterpart still in another active match stays matched;
+ *   - an `exception` status belongs to an exception record, which this sync does
+ *     not resolve, so it is left for that workflow;
+ *   - a counterpart whose legacy `matchId` points at some other transaction is
+ *     paired elsewhere, and is left alone.
  */
 async function reopenAffectedReconciliation(
   tx: DbExecutor,
@@ -259,7 +274,7 @@ async function reopenAffectedReconciliation(
     .where(
       and(
         eq(matches.organizationId, params.organizationId),
-        inArray(matches.status, ["confirmed", "pending_review"]),
+        inArray(matches.status, [...ACTIVE_MATCH_STATUSES]),
         or(
           eq(matches.sourceTransactionId, params.transactionId),
           eq(matches.targetTransactionId, params.transactionId),
@@ -276,53 +291,92 @@ async function reopenAffectedReconciliation(
         and(
           eq(matches.organizationId, params.organizationId),
           inArray(matches.id, matchRowIds),
-          inArray(matches.status, ["confirmed", "pending_review"]),
+          inArray(matches.status, [...ACTIVE_MATCH_STATUSES]),
         ),
       );
   }
 
-  const genericCounterparts = [
+  const counterparts = [
     ...new Set(
-      activeMatches
-        .map((match) =>
+      [
+        ...activeMatches.map((match) =>
           match.sourceTransactionId === params.transactionId
             ? match.targetTransactionId
             : match.sourceTransactionId,
-        )
-        .filter((id) => id !== params.transactionId),
+        ),
+        ...(params.legacyMatchId ? [params.legacyMatchId] : []),
+      ].filter((id) => id !== params.transactionId),
     ),
   ];
-  if (genericCounterparts.length > 0) {
-    await tx
-      .update(transactions)
-      .set({ status: "unmatched", matchId: null })
+
+  if (counterparts.length > 0) {
+    // Read AFTER rejecting ours, so what remains is independent of this order.
+    const stillMatched = await tx
+      .select({ sourceTransactionId: matches.sourceTransactionId, targetTransactionId: matches.targetTransactionId })
+      .from(matches)
       .where(
         and(
-          eq(transactions.organizationId, params.organizationId),
-          inArray(transactions.id, genericCounterparts),
-          inArray(transactions.status, ["matched", "manually_matched", "exception"]),
+          eq(matches.organizationId, params.organizationId),
+          inArray(matches.status, [...ACTIVE_MATCH_STATUSES]),
+          or(inArray(matches.sourceTransactionId, counterparts), inArray(matches.targetTransactionId, counterparts)),
         ),
       );
+    const pairedElsewhere = new Set(
+      stillMatched.flatMap((match) => [match.sourceTransactionId, match.targetTransactionId]),
+    );
+    const reopenable = counterparts.filter((id) => !pairedElsewhere.has(id));
+    if (reopenable.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.organizationId, params.organizationId),
+            inArray(transactions.id, reopenable),
+            inArray(transactions.status, [...MATCHED_STATUSES]),
+            or(isNull(transactions.matchId), eq(transactions.matchId, params.transactionId)),
+          ),
+        );
+    }
   }
 
-  if (params.legacyMatchId && !genericCounterparts.includes(params.legacyMatchId)) {
-    await tx
-      .update(transactions)
-      .set({ status: "unmatched", matchId: null })
-      .where(
-        and(
-          eq(transactions.id, params.legacyMatchId),
-          eq(transactions.organizationId, params.organizationId),
-          eq(transactions.matchId, params.transactionId),
-          inArray(transactions.status, ["matched", "manually_matched"]),
-        ),
-      );
-  }
-
+  // Every active match the corrected order was in is now rejected, so a matched
+  // summary has nothing behind it. Any other status has its own source.
   await tx
     .update(transactions)
     .set({ status: "unmatched", matchId: null })
-    .where(and(eq(transactions.id, params.transactionId), eq(transactions.organizationId, params.organizationId)));
+    .where(
+      and(
+        eq(transactions.id, params.transactionId),
+        eq(transactions.organizationId, params.organizationId),
+        inArray(transactions.status, [...MATCHED_STATUSES]),
+      ),
+    );
+}
+
+/**
+ * Serialise writers per store. A manual sync and a webhook sync can overlap;
+ * holding the store row for the whole write means the second one's locking
+ * reads see the first one's committed rows, rather than both deciding from the
+ * same stale picture and racing on the unique key.
+ */
+async function lockStoreForSync(
+  tx: DbExecutor,
+  store: { id: number; organizationId: number },
+): Promise<void> {
+  const [locked] = await tx
+    .select({ id: shopifyConnectorStores.id })
+    .from(shopifyConnectorStores)
+    .where(
+      and(
+        eq(shopifyConnectorStores.id, store.id),
+        eq(shopifyConnectorStores.organizationId, store.organizationId),
+        eq(shopifyConnectorStores.status, "active"),
+      ),
+    )
+    .limit(1)
+    .for("update");
+  if (!locked) throw new Error("Shopify store not found for tenant or inactive");
 }
 
 function transactionFields(order: NormalizedShopifyOrder) {
@@ -417,6 +471,8 @@ export async function runShopifyOrderSync(
     });
 
     const result = await db.transaction(async (tx) => {
+      // First statement: one writer per store from here to commit.
+      await lockStoreForSync(tx, store);
       const channelId = await resolveOrdersChannel(tx, store);
       const existing = await loadExistingOrders(tx, {
         organizationId: store.organizationId,
@@ -426,6 +482,7 @@ export async function runShopifyOrderSync(
       const partition = partitionShopifyOrders(fetched, existing);
       const changed = partition.inserts.length + partition.updates.length;
       let batchId: number | null = null;
+      let inserted = 0;
       let updated = 0;
       let unchanged = partition.unchanged;
 
@@ -473,7 +530,16 @@ export async function runShopifyOrderSync(
           storeId: store.id,
           gids: partition.inserts.map((order) => order.gid),
         });
-        const racedCorrections = partitionShopifyOrders(partition.inserts, racedRows).updates;
+        // A row this cycle inserted carries this cycle's batch. Anything else
+        // was written by another sync first: it is not an insert of ours. It is
+        // an update if our evidence is newer, and otherwise unchanged.
+        inserted = racedRows.filter((row) => row.batchId === batchId).length;
+        const raced = partitionShopifyOrders(
+          partition.inserts,
+          racedRows.filter((row) => row.batchId !== batchId),
+        );
+        const racedCorrections = raced.updates;
+        unchanged += raced.unchanged;
 
         for (const update of [...partition.updates, ...racedCorrections]) {
           const current = [...existing, ...racedRows].find((row) => row.id === update.transactionId);
@@ -504,6 +570,21 @@ export async function runShopifyOrderSync(
               legacyMatchId: current.matchId ?? null,
             });
           }
+        }
+
+        // The batch was sized from the plan; record what was actually written.
+        // If another sync wrote everything first, this batch holds nothing.
+        const written = inserted + updated;
+        if (written === 0) {
+          await tx
+            .delete(uploadBatches)
+            .where(and(eq(uploadBatches.id, batchId), eq(uploadBatches.organizationId, store.organizationId)));
+          batchId = null;
+        } else if (written !== changed) {
+          await tx
+            .update(uploadBatches)
+            .set({ validRows: written })
+            .where(and(eq(uploadBatches.id, batchId), eq(uploadBatches.organizationId, store.organizationId)));
         }
       }
 
@@ -542,7 +623,7 @@ export async function runShopifyOrderSync(
       }
 
       return {
-        inserted: partition.inserts.length,
+        inserted,
         updated,
         unchanged,
         batchId,
