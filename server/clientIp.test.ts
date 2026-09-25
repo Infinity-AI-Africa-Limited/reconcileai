@@ -36,7 +36,11 @@ import {
   edgeProofIsFresh,
   effectiveHopsFor,
   normalizeIp,
+  requestIsSecure,
+  requestIsSecureFrom,
+  requestScheme,
   resetEdgeProof,
+  resetProtoShapeLog,
   resolveTrustedProxyHops,
   type ProxiedRequest,
 } from "./_core/clientIp";
@@ -332,5 +336,157 @@ describe("when resolving how many proxies to trust", () => {
     }
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+/**
+ * The scheme, which is the same question as the address and was getting a
+ * different answer. Behind a TLS-terminating proxy the socket is plaintext, so
+ * `req.protocol` reads `http` — and the SSO flow cookie holding the PKCE
+ * verifier, state and nonce was therefore set WITHOUT Secure on every
+ * production sign-in.
+ */
+describe("when deciding whether a request was HTTPS", () => {
+  const req = (xfp: string | string[] | undefined, protocol = "http") => ({
+    headers: xfp === undefined ? {} : { "x-forwarded-proto": xfp },
+    socket: { remoteAddress: SOCKET },
+    protocol,
+  });
+
+  it("should read the proxy's answer, not the plaintext socket", () => {
+    // The production shape: Cloudflare terminates TLS, the app sees http.
+    expect(requestIsSecureFrom(req("https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("https,https"), 2)).toBe(true);
+    expect(requestIsSecure(req("https"))).toBe(true);
+    expect(requestScheme(req("https"))).toBe("https");
+  });
+
+  it("should not let a caller downgrade its own cookie by claiming http", () => {
+    // The caller's entry is on the LEFT, outside the trusted window.
+    expect(requestIsSecureFrom(req("http,https,https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("http,http,https,https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("https,https"), 2)).toBe(true);
+  });
+
+  it("should be right whether the proxies APPEND or OVERWRITE the header", () => {
+    // Greptile P2 on PR #151: X-Forwarded-For is append-only by spec, but
+    // X-Forwarded-Proto is not — proxies differ, and indexing into it would be
+    // asserting a shape nobody documents. Every plausible shape of an https
+    // request must read as https.
+    for (const chain of [
+      "https",             // one proxy, overwriting
+      "https,https",       // both appending
+      "http,https",        // one appended (keeping the caller's), one overwrote
+      "http,https,https",  // caller's entry plus two appends
+    ]) {
+      expect(requestIsSecureFrom(req(chain), 2), chain).toBe(true);
+    }
+  });
+
+  it("should still refuse a caller who claims https on a plaintext deployment", () => {
+    // The window holds only what the trusted hops wrote, so an upgrade attempt
+    // from the left is ignored.
+    expect(requestIsSecureFrom(req("https,http,http"), 2)).toBe(false);
+    expect(requestIsSecureFrom(req("http,http"), 2)).toBe(false);
+  });
+
+  it("should believe the connection when nothing is in front of the app", () => {
+    expect(requestIsSecureFrom(req("https"), 0)).toBe(false); // header ignored at 0 hops
+    expect(requestIsSecureFrom(req(undefined, "https"), 0)).toBe(true);
+    expect(requestIsSecureFrom({ socket: { encrypted: true } }, 0)).toBe(true);
+    expect(requestIsSecureFrom({ secure: true }, 0)).toBe(true);
+  });
+
+  it("should fall back to the connection when the header says nothing usable", () => {
+    expect(requestIsSecureFrom(req("", "https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req("gopher", "https"), 2)).toBe(true);
+    expect(requestIsSecureFrom(req(undefined), 2)).toBe(false);
+  });
+
+  it("should read a repeated header the same as a joined one", () => {
+    expect(requestIsSecureFrom(req(["http,https", "https"]), 2)).toBe(true);
+    expect(requestIsSecureFrom(req(["https", "https"]), 2)).toBe(true);
+  });
+
+  it("should answer plainly for a missing request rather than guessing https", () => {
+    expect(requestIsSecure(null)).toBe(false);
+    expect(requestScheme(undefined)).toBe("http");
+  });
+});
+
+describe("when the forwarded-proto chain is shorter than the configured window", () => {
+  const req = (xfp: string, headers: Record<string, string> = {}) => ({
+    headers: { "x-forwarded-proto": xfp, ...headers },
+    socket: { remoteAddress: SOCKET },
+    protocol: "http",
+  });
+
+  beforeEach(() => resetEdgeProof());
+
+  it("should read a caller's own https prefix as secure — ACCEPTED, and pinned", () => {
+    // Greptile P1 on PR #151. One real proxy while two hops are configured (the
+    // direct origin hostname): the caller's "https" falls inside the window, so
+    // its plaintext request reads as secure and the browser discards that
+    // caller's OWN cookie. Self-inflicted, and bounded to that caller.
+    //
+    // The alternative — trusting only the rightmost entry — fixes this and fails
+    // the other way: a last hop recording its internal leg ("…,http") would strip
+    // Secure from EVERY session cookie. This assertion exists so the choice stays
+    // deliberate; if it ever flips, that must be a decision, not a drift.
+    expect(requestIsSecureFrom(req("https,http"), 2)).toBe(true);
+  });
+
+  it("should resolve that same request correctly once the edge can vouch for it", () => {
+    // Not a standing gap: the edge secret narrows an unverified request to one
+    // hop, shrinking the window to what the real proxy wrote.
+    const SECRET = "edge-secret-value";
+    const T0 = 1_700_000_000_000;
+    // The edge proves itself with a genuine stamped request…
+    effectiveHopsFor(
+      { headers: { [ORIGIN_VERIFY_HEADER]: SECRET }, socket: { remoteAddress: SOCKET } },
+      2,
+      SECRET,
+      T0,
+    );
+    const direct = req("https,http");
+    const hops = effectiveHopsFor(direct, 2, SECRET, T0);
+    expect(hops).toBe(1);
+    expect(requestIsSecureFrom(direct, hops)).toBe(false);
+  });
+});
+
+describe("when logging what the proxy actually sends", () => {
+  beforeEach(() => resetProtoShapeLog());
+
+  const req = (xfp: string) => ({ headers: { "x-forwarded-proto": xfp }, socket: { remoteAddress: SOCKET } });
+
+  it("should record distinct shapes, not just whatever arrived first", () => {
+    // Greptile P2 on PR #151: the first request may carry a caller prefix, and
+    // one odd sample must not be the only record.
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    requestIsSecureFrom(req("http,https,https"), 2); // an unusual first witness
+    requestIsSecureFrom(req("https,https"), 2); // the normal shape, still recorded
+    requestIsSecureFrom(req("https,https"), 2); // a repeat is not
+    expect(log).toHaveBeenCalledTimes(2);
+    log.mockRestore();
+  });
+
+  it("should log the shape rather than the caller's raw header", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    requestIsSecureFrom(req(`https,${"x".repeat(500)},https`), 2);
+    const line = String(log.mock.calls[0]?.[0] ?? "");
+    expect(line).not.toContain("xxxxx"); // the junk entry is filtered, not echoed
+    expect(line.length).toBeLessThan(200);
+    expect(line).toContain("trusted window");
+    log.mockRestore();
+  });
+
+  it("should stop logging after a few shapes rather than growing without bound", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const chain of ["https", "https,https", "http,https", "http,http", "https,http"]) {
+      requestIsSecureFrom(req(chain), 2);
+    }
+    expect(log.mock.calls.length).toBeLessThanOrEqual(3);
+    log.mockRestore();
   });
 });

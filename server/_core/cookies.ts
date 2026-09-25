@@ -1,4 +1,5 @@
 import type { CookieOptions, Request } from "express";
+import { requestIsSecure } from "./clientIp";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -8,17 +9,13 @@ function isIpAddress(host: string) {
   return host.includes(":");
 }
 
+/**
+ * Delegates to the one place that decides what a proxy header means
+ * (`_core/clientIp.ts`). Two implementations of "is this https" is how the SSO
+ * flow cookie ended up non-Secure in production while session cookies were fine.
+ */
 function isSecureRequest(req: Request) {
-  if (req.protocol === "https") return true;
-
-  const forwardedProto = req.headers["x-forwarded-proto"];
-  if (!forwardedProto) return false;
-
-  const protoList = Array.isArray(forwardedProto)
-    ? forwardedProto
-    : forwardedProto.split(",");
-
-  return protoList.some(proto => proto.trim().toLowerCase() === "https");
+  return requestIsSecure(req);
 }
 
 export function getSessionCookieOptions(

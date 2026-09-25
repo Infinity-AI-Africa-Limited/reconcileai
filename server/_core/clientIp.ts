@@ -50,7 +50,10 @@ import { ENV } from "./env";
 /** The shape we need — an Express request, or a tRPC ctx's `req`, or a test stub. */
 export interface ProxiedRequest {
   headers?: Record<string, string | string[] | undefined> | undefined;
-  socket?: { remoteAddress?: string | null } | null | undefined;
+  socket?: { remoteAddress?: string | null; encrypted?: boolean } | null | undefined;
+  /** Express's own view of the scheme, which without `trust proxy` is the raw connection. */
+  protocol?: string | undefined;
+  secure?: boolean | undefined;
 }
 
 /** client → Cloudflare → Railway edge → app. */
@@ -267,4 +270,131 @@ export function clientIp(req: ProxiedRequest | null | undefined): string | null 
 /** For the call sites that want a string in hand (limiter keys, audit rows). */
 export function clientIpOrUnknown(req: ProxiedRequest | null | undefined): string {
   return clientIp(req) ?? "unknown";
+}
+
+/** The scheme of the connection this process actually accepted. */
+/**
+ * Record the X-Forwarded-Proto shapes this process sees.
+ *
+ * The append-vs-overwrite question is answered by what the edge actually sends,
+ * and that is not documented anywhere we control. But the FIRST request is a
+ * poor witness: it may carry a caller-supplied prefix, and one unusual sample
+ * would then be the only record. So distinct shapes are logged, up to a small
+ * cap, and what is logged is the SHAPE — entry count plus the trusted-window
+ * values — not the caller's raw header, which is neither bounded nor trusted.
+ */
+const MAX_LOGGED_PROTO_SHAPES = 3;
+const seenProtoShapes = new Set<string>();
+function noteForwardedProtoShape(entries: string[], trustedProxyHops: number): void {
+  const window = entries.slice(-trustedProxyHops);
+  const shape = `${entries.length}:${window.join(",")}`;
+  if (seenProtoShapes.has(shape)) return;
+  if (seenProtoShapes.size >= MAX_LOGGED_PROTO_SHAPES) return;
+  seenProtoShapes.add(shape);
+  console.log(
+    `[clientIp] x-forwarded-proto shape: ${entries.length} entr${entries.length === 1 ? "y" : "ies"}, ` +
+      `trusted window = [${window.join(", ")}]`,
+  );
+}
+
+/** Tests: forget what this process has logged. */
+export function resetProtoShapeLog(): void {
+  seenProtoShapes.clear();
+}
+
+function rawSchemeIsSecure(req: ProxiedRequest): boolean {
+  if (req.secure === true) return true;
+  if (req.socket?.encrypted === true) return true;
+  return (req.protocol ?? "").toLowerCase() === "https";
+}
+
+/**
+ * Was the request HTTPS end to end?
+ *
+ * Behind a TLS-terminating proxy the socket is plaintext, so `req.protocol` says
+ * `http` and anything derived from it is wrong. That is why the SSO flow cookie
+ * (PKCE verifier, state, nonce) shipped WITHOUT the Secure attribute.
+ *
+ * ⚠️ This header is NOT read the same way as `X-Forwarded-For`, on purpose.
+ * XFF is append-only by specification, so the client's address sits at a known
+ * index. `X-Forwarded-Proto` has no such guarantee — some proxies append, some
+ * OVERWRITE — so indexing into it would be asserting a shape nobody documents,
+ * and getting it wrong drops `Secure` from an auth cookie.
+ *
+ * So instead: look only at the RIGHTMOST `trustedProxyHops` entries — the ones
+ * trusted infrastructure can have written — and say https if ANY of them does.
+ * That is correct whether the proxies append or overwrite, and whether the chain
+ * is shorter than the window:
+ *
+ *   "https,https"        → https ✔        (both proxies appended)
+ *   "https"              → https ✔        (a proxy overwrote)
+ *   "http,https,https"   → https ✔        (caller's entry is outside the window)
+ *   "http,https"         → https ✔        (one appended, one overwrote)
+ *   "https,http,http"    → http  ✔        (a caller cannot claim https)
+ *   "http,http"          → http  ✔        (genuinely plaintext)
+ *   "https,http"         → https ✖ ACCEPTED (see below)
+ *
+ * The asymmetry is deliberate: a wrong `false` drops Secure from a live auth
+ * cookie, while a wrong `true` only makes the browser discard a cookie the
+ * caller themselves mislabelled. Only one of those is someone else's problem.
+ *
+ * The last row is the cost of that choice, and it is accepted knowingly. When
+ * the chain is SHORTER than the configured window — one real proxy, two hops
+ * configured, i.e. the direct origin hostname — a caller's own `https` prefix
+ * falls inside the window and its plaintext request reads as secure. The
+ * browser then discards that caller's own cookie. Reading only the rightmost
+ * entry would fix it and fail the other way: if the last hop records its
+ * INTERNAL leg (`…,http`), every session cookie loses Secure, which is the bug
+ * this module exists to fix, for everyone rather than for one caller.
+ *
+ * It is also not a standing gap. `CLOUDFLARE_ORIGIN_SECRET` already narrows an
+ * unverified request to one hop (`effectiveHopsFor`), which shrinks the window
+ * to the entry the real proxy wrote and resolves this case as `http`.
+ */
+export function requestIsSecureFrom(req: ProxiedRequest, trustedProxyHops: number): boolean {
+  if (trustedProxyHops <= 0) return rawSchemeIsSecure(req);
+
+  const raw = req.headers?.["x-forwarded-proto"];
+  const header = Array.isArray(raw) ? raw.join(",") : raw;
+  const entries = (header ?? "")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(s => s === "http" || s === "https");
+  if (entries.length === 0) return rawSchemeIsSecure(req);
+
+  noteForwardedProtoShape(entries, trustedProxyHops);
+  return entries.slice(-trustedProxyHops).includes("https");
+}
+
+/** Was the request HTTPS end to end, under this deployment's proxy policy? */
+export function requestIsSecure(req: ProxiedRequest | null | undefined): boolean {
+  if (!req) return false;
+  return requestIsSecureFrom(req, effectiveHopsFor(req, TRUSTED_PROXY_HOPS, ENV.cloudflareOriginSecret));
+}
+
+/** `https` or `http`, for building a URL back to this deployment. */
+export function requestScheme(req: ProxiedRequest | null | undefined): "https" | "http" {
+  return requestIsSecure(req) ? "https" : "http";
+}
+
+/**
+ * This deployment's own origin, for building a URL that points back at it —
+ * an OAuth redirect_uri, a post-install redirect, a reviewer link.
+ *
+ * `APP_URL` first, because it is the only value that is not derived from the
+ * request. The fallback uses `Host` (what actually routed the request) and
+ * NEVER `X-Forwarded-Host`: that header is caller-supplied, and a redirect
+ * built from it sends the visitor wherever the caller asked — while a
+ * redirect_uri built from it stops matching what the provider has registered.
+ *
+ * The scheme comes from the hop policy above, so a proxied deployment does not
+ * advertise `http://` URLs for an https site.
+ */
+export function appOriginFor(req: ProxiedRequest | null | undefined): string {
+  const configured = (ENV.appUrl ?? "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+
+  const rawHost = req?.headers?.host;
+  const host = (Array.isArray(rawHost) ? rawHost[0] : rawHost)?.trim();
+  return host ? `${requestScheme(req)}://${host}` : "";
 }
