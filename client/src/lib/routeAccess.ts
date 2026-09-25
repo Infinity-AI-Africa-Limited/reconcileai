@@ -62,6 +62,11 @@ const NON_NAV_ROUTE_SEGMENTS: Record<string, Segment[]> = {
   // schedules, payouts. See canReachCallback for why they need their own gate.
   "/shopline/welcome": ["retail_commerce"],
   "/shopline/error": ["retail_commerce"],
+  // Shopify public-app OAuth callbacks follow the same isolated retail-merchant
+  // model as SHOPLINE. They are explicitly scoped so a signed-in bank user
+  // cannot use a pasted callback URL to mount a merchant activation screen.
+  "/shopify/welcome": ["retail_commerce"],
+  "/shopify/error": ["retail_commerce"],
 };
 
 /**

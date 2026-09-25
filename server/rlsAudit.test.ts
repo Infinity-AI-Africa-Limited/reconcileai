@@ -14,6 +14,7 @@
  * the moment it is written". The prose companion (enforcement points, gaps,
  * remediation plan) lives in docs/security/RLS_AUDIT.md.
  */
+import { readFileSync } from "node:fs";
 import { getTableColumns, getTableName } from "drizzle-orm";
 import { MySqlTable } from "drizzle-orm/mysql-core";
 import { describe, expect, it } from "vitest";
@@ -23,6 +24,29 @@ import * as pocSchema from "../drizzle/poc_schema";
 import * as mmSchema from "../drizzle/mobile_money_schema";
 import * as connectorSchema from "../drizzle/connector_schema";
 import * as tenantSchema from "../drizzle/tenant_schema";
+import * as shopifySchema from "../drizzle/shopify_schema";
+
+/**
+ * The schema files this audit reads. It must equal the set drizzle-kit
+ * migrates (drizzle.config.ts) — see the "every migrated schema file is
+ * audited" test, which is what keeps this list from going stale.
+ */
+const AUDITED_SCHEMA_FILES: Record<string, Record<string, unknown>> = {
+  "schema.ts": mainSchema as unknown as Record<string, unknown>,
+  "woodcore_schema.ts": woodcoreSchema as unknown as Record<string, unknown>,
+  "poc_schema.ts": pocSchema as unknown as Record<string, unknown>,
+  "mobile_money_schema.ts": mmSchema as unknown as Record<string, unknown>,
+  "connector_schema.ts": connectorSchema as unknown as Record<string, unknown>,
+  "tenant_schema.ts": tenantSchema as unknown as Record<string, unknown>,
+  "shopify_schema.ts": shopifySchema as unknown as Record<string, unknown>,
+};
+
+/** The schema files drizzle-kit generates migrations from, read from its config. */
+function migratedSchemaFiles(): string[] {
+  const config = readFileSync("drizzle.config.ts", "utf8");
+  const schemaArray = config.match(/schema:\s*\[([^\]]*)\]/)?.[1] ?? "";
+  return [...schemaArray.matchAll(/["']\.\/drizzle\/([^"']+)["']/g)].map((m) => m[1]);
+}
 
 type TenancyClass =
   /** organizationId NOT NULL — the standard for all new tenant data. */
@@ -178,6 +202,22 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // for audit. Queries scope by org when present.
   sl_connector_gdpr_requests: "tenant_nullable",
 
+  // Shopify public-app connector (drizzle/shopify_schema.ts)
+  shopify_connector_stores: "tenant_required",
+  shopify_connector_tokens: "tenant_required",
+  shopify_sync_cursors: "tenant_required",
+  // A verified delivery can arrive for a shop with no store record (a late
+  // uninstall or redaction after offboarding); it is acknowledged and recorded
+  // without inventing a tenant, so organizationId is nullable by design.
+  shopify_webhook_events: "tenant_nullable",
+  shopify_privacy_requests: "tenant_nullable",
+  // Hash-only single-use OAuth states, keyed by a random secret held in the
+  // browser's flow cookie; created before any tenant exists.
+  shopify_oauth_states: "token",
+  // A pre-tenant platform lock — one installation in flight per shop domain.
+  // Holds a lease id and expiry only; no tenant data, and it exists before any tenant does.
+  shopify_install_leases: "global",
+
   // Tenant infrastructure (this hardening work)
   tenant_encryption_keys: "tenant_required",
   tenant_quotas: "tenant_required",
@@ -185,14 +225,7 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
 
 // ─── Collect every table from every schema module ────────────────────────────
 function collectTables(): Array<{ name: string; hasOrg: boolean; orgNotNull: boolean }> {
-  const modules: Record<string, unknown>[] = [
-    mainSchema as unknown as Record<string, unknown>,
-    woodcoreSchema as unknown as Record<string, unknown>,
-    pocSchema as unknown as Record<string, unknown>,
-    mmSchema as unknown as Record<string, unknown>,
-    connectorSchema as unknown as Record<string, unknown>,
-    tenantSchema as unknown as Record<string, unknown>,
-  ];
+  const modules = Object.values(AUDITED_SCHEMA_FILES);
   const out: Array<{ name: string; hasOrg: boolean; orgNotNull: boolean }> = [];
   const seen = new Set<string>();
   for (const mod of modules) {
@@ -214,6 +247,26 @@ describe("RLS audit ratchet — every table classified, classification true", ()
 
   it("finds a sane number of tables", () => {
     expect(tables.length).toBeGreaterThan(60);
+  });
+
+  it("every migrated schema file is audited", () => {
+    // The module list above was maintained by hand, and a schema file missing
+    // from it is invisible to every other check here: its tables are never
+    // collected, so none is ever "unclassified". That is how the six Shopify
+    // tables reached a green suite unaudited (PR #134). drizzle.config.ts is
+    // what decides which tables reach production, so it is the list to match.
+    const migrated = migratedSchemaFiles();
+    const unaudited = migrated.filter((file) => !(file in AUDITED_SCHEMA_FILES));
+    expect(
+      unaudited,
+      `drizzle.config.ts migrates schema files this audit does not import — add them to AUDITED_SCHEMA_FILES: ${unaudited.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("reads the migrated schema list, so the check above cannot pass vacuously", () => {
+    // An unparseable config would yield [] and every file would "pass".
+    expect(migratedSchemaFiles()).toEqual(expect.arrayContaining(["schema.ts", "shopify_schema.ts"]));
+    expect(migratedSchemaFiles().length).toBe(Object.keys(AUDITED_SCHEMA_FILES).length);
   });
 
   it("every table is classified (new tables must be added to the audit)", () => {

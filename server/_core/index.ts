@@ -755,6 +755,12 @@ async function startServer() {
   // SHOPLINE App Store connector routes (OAuth install, webhooks, GDPR)
   const { createShoplineRouter } = await import("../connectors/shopline/routes");
   app.use(createShoplineRouter());
+  // Shopify public-app foundation: route-level OAuth and HMAC-verified webhooks
+  // stay outside tRPC because Shopify initiates both without a ReconcileAI session.
+  const { createShopifyRouter } = await import("../connectors/shopify/routes");
+  const { createShopifyWebhookRouter } = await import("../connectors/shopify/webhooks");
+  app.use(createShopifyRouter());
+  app.use(createShopifyWebhookRouter());
 
   // tRPC API
   app.use(
