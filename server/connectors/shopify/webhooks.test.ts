@@ -233,7 +233,7 @@ describe("when a signed customer privacy delivery arrives", () => {
     const res = await delivery("customers/data_request", body).run();
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ received: true, status: "queued_for_privacy_control" });
+    expect(res.body).toEqual({ received: true, status: "privacy_work_admitted" });
     expect(fake.writes("insert", PRIVACY_SELECTORS)[0]?.data).toEqual([
       expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "customer", position: 0 }),
       expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "order", position: 0 }),
@@ -243,6 +243,17 @@ describe("when a signed customer privacy delivery arrives", () => {
     const eventWrite = fake.writes("update", EVENTS).at(-1);
     expect(eventWrite?.data).toMatchObject({ status: "processed", errorCode: null });
     expect(eventWrite?.txId).not.toBeNull();
+    expect(fake.writes("insert", "shopify_privacy_data_request_jobs")[0]?.data).toMatchObject({
+      requestId: 901,
+      organizationId: 42,
+      storeId: 7,
+      status: "received",
+    });
+    expect(fake.writes("insert", "shopify_privacy_queue_outbox")[0]?.data).toEqual({
+      kind: "customer_request",
+      jobId: 901,
+      status: "pending",
+    });
   });
 
   it("should acknowledge a processed duplicate without encrypting or inserting selectors again", async () => {

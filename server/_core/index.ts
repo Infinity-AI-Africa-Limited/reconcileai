@@ -784,6 +784,14 @@ async function startServer() {
     .then((q) => q.recoverStuckReconciliationJobs())
     .catch((e) => console.error("[boot] stuck-job sweep failed:", e instanceof Error ? e.message : e));
 
+  // Shopify privacy admission writes a transactional outbox row. Redis is only
+  // touched after commit; this recovery loop closes the commit/enqueue crash gap.
+  // Failure is visible and leaves the outbox pending/retryable — it never turns
+  // an accepted request into a false queued/completed state.
+  import("../connectors/shopify/privacyQueue")
+    .then((q) => q.startShopifyPrivacyRecoveryLoop())
+    .catch((e) => console.error("[boot] Shopify privacy outbox recovery unavailable:", e instanceof Error ? e.message : e));
+
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).
   seedDefaultResolutionTemplates()

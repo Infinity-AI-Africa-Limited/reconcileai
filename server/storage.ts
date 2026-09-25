@@ -109,17 +109,42 @@ export async function storagePut(
 }
 
 /**
+ * Upload a private object without creating any bearer URL. Purpose-built flows
+ * (for example privacy exports) persist the key and authorize every later read
+ * before requesting a short-lived presign.
+ */
+export async function storagePutPrivate(
+  relKey: string,
+  data: Buffer | Uint8Array | string,
+  contentType = "application/octet-stream",
+): Promise<{ key: string }> {
+  const { s3, bucket } = getClient();
+  const key = normalizeKey(relKey);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: toBody(data),
+      ContentType: contentType,
+      CacheControl: "no-store",
+    }),
+  );
+  return { key };
+}
+
+/**
  * Return a fresh presigned download URL for an existing object.
  */
 export async function storageGet(
-  relKey: string
+  relKey: string,
+  expiresInSeconds = PRESIGN_TTL_SECONDS,
 ): Promise<{ key: string; url: string }> {
   const { s3, bucket } = getClient();
   const key = normalizeKey(relKey);
   const url = await getSignedUrl(
     s3,
     new GetObjectCommand({ Bucket: bucket, Key: key }),
-    { expiresIn: PRESIGN_TTL_SECONDS }
+    { expiresIn: expiresInSeconds }
   );
   return { key, url };
 }

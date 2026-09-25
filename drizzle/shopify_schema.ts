@@ -175,7 +175,19 @@ export const shopifyPrivacyRequests = mysqlTable(
     topic: mysqlEnum("topic", ["customers/data_request", "customers/redact", "shop/redact"]).notNull(),
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     subjectHash: varchar("subjectHash", { length: 64 }),
-    status: mysqlEnum("status", ["received", "manual_review", "completed", "blocked_legal_retention", "failed"])
+    status: mysqlEnum("status", [
+      "received",
+      "processing",
+      "awaiting_delivery",
+      "manual_review",
+      "blocked_dependency",
+      "blocked_legal_retention",
+      "failed_retryable",
+      "failed_terminal",
+      "completed",
+      // Legacy value retained so the enum migration cannot invalidate an older row.
+      "failed",
+    ])
       .default("received")
       .notNull(),
     /** Bounded validation code only; never a payload value or free-form provider error. */
@@ -218,6 +230,130 @@ export const shopifyPrivacyRequestSelectors = mysqlTable(
   ],
 );
 export type ShopifyPrivacyRequestSelector = typeof shopifyPrivacyRequestSelectors.$inferSelect;
+
+/**
+ * One-to-one execution state for `customers/data_request`. The request id is the
+ * internal job id, so no provider/store/customer identifier ever has to cross
+ * the durable queue boundary. A DB lease, not BullMQ de-duplication, arbitrates
+ * concurrent or recovered workers.
+ */
+export const shopifyPrivacyDataRequestJobs = mysqlTable(
+  "shopify_privacy_data_request_jobs",
+  {
+    requestId: int("requestId").primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    storeId: int("storeId").notNull(),
+    status: mysqlEnum("status", [
+      "received",
+      "processing",
+      "awaiting_delivery",
+      "manual_review",
+      "blocked_dependency",
+      "blocked_legal_retention",
+      "failed_retryable",
+      "failed_terminal",
+      "completed",
+    ])
+      .default("received")
+      .notNull(),
+    attempts: int("attempts").default(0).notNull(),
+    leaseId: varchar("leaseId", { length: 36 }),
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
+    nextAttemptAt: timestamp("nextAttemptAt"),
+    lastCheckpoint: varchar("lastCheckpoint", { length: 80 }),
+    /** Bounded machine code only; never free text or a provider/customer value. */
+    failureCode: varchar("failureCode", { length: 80 }),
+    manifestVersion: int("manifestVersion").default(1).notNull(),
+    startedAt: timestamp("startedAt"),
+    completedAt: timestamp("completedAt"),
+    artifactId: int("artifactId"),
+    recordsFound: int("recordsFound").default(0).notNull(),
+    recordsAffected: int("recordsAffected").default(0).notNull(),
+    selectorDestroyedAt: timestamp("selectorDestroyedAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    index("idx_shopify_privacy_data_job_org_status").on(t.organizationId, t.status),
+    index("idx_shopify_privacy_data_job_claim").on(t.status, t.nextAttemptAt, t.leaseExpiresAt),
+  ],
+);
+export type ShopifyPrivacyDataRequestJob = typeof shopifyPrivacyDataRequestJobs.$inferSelect;
+
+/**
+ * Transactional queue outbox. Deliberately contains only a kind and internal
+ * job id plus dispatch mechanics: Redis inspection and dispatcher diagnostics
+ * cannot reveal tenant, store, request hashes or selectors.
+ */
+export const shopifyPrivacyQueueOutbox = mysqlTable(
+  "shopify_privacy_queue_outbox",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    kind: mysqlEnum("kind", ["customer_request"]).notNull(),
+    jobId: int("jobId").notNull(),
+    status: mysqlEnum("status", ["pending", "dispatching", "failed_retryable", "failed_terminal", "dispatched"])
+      .default("pending")
+      .notNull(),
+    attempts: int("attempts").default(0).notNull(),
+    leaseId: varchar("leaseId", { length: 36 }),
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
+    nextAttemptAt: timestamp("nextAttemptAt"),
+    failureCode: varchar("failureCode", { length: 80 }),
+    dispatchedAt: timestamp("dispatchedAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_shopify_privacy_outbox_job").on(t.kind, t.jobId),
+    index("idx_shopify_privacy_outbox_dispatch").on(t.status, t.nextAttemptAt, t.leaseExpiresAt),
+  ],
+);
+export type ShopifyPrivacyQueueOutboxRow = typeof shopifyPrivacyQueueOutbox.$inferSelect;
+
+/**
+ * Dedicated private object metadata for a data-request export or zero-record
+ * attestation. Presigned URLs are intentionally absent. `publicId` is a random
+ * routing handle; authorization still re-proves the active store claimant.
+ */
+export const shopifyPrivacyArtifacts = mysqlTable(
+  "shopify_privacy_artifacts",
+  {
+    /** One artifact per request; also the internal artifact id held by the job. */
+    requestId: int("requestId").primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    storeId: int("storeId").notNull(),
+    publicId: varchar("publicId", { length: 36 }).notNull(),
+    schemaVersion: int("schemaVersion").default(1).notNull(),
+    artifactKind: mysqlEnum("artifactKind", ["order_evidence", "zero_record_attestation"]).notNull(),
+    objectKey: varchar("objectKey", { length: 768 }).notNull(),
+    /** Null only while `status = writing`; mandatory before delivery. */
+    sha256: varchar("sha256", { length: 64 }),
+    sizeBytes: int("sizeBytes"),
+    recordsFound: int("recordsFound").default(0).notNull(),
+    zeroReasonCode: varchar("zeroReasonCode", { length: 80 }),
+    status: mysqlEnum("status", ["writing", "ready", "deleted"]).default("writing").notNull(),
+    recipientUserId: int("recipientUserId").notNull(),
+    deliveryChannel: mysqlEnum("deliveryChannel", ["authenticated_portal"])
+      .default("authenticated_portal")
+      .notNull(),
+    deliveryStatus: mysqlEnum("deliveryStatus", ["pending", "acknowledged"])
+      .default("pending")
+      .notNull(),
+    deliveryAcceptedAt: timestamp("deliveryAcceptedAt"),
+    generatedAt: timestamp("generatedAt").notNull(),
+    expiresAt: timestamp("expiresAt").notNull(),
+    downloadedAt: timestamp("downloadedAt"),
+    deletedAt: timestamp("deletedAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_shopify_privacy_artifact_public").on(t.publicId),
+    index("idx_shopify_privacy_artifact_recipient").on(t.organizationId, t.recipientUserId, t.status),
+    index("idx_shopify_privacy_artifact_expiry").on(t.status, t.expiresAt),
+  ],
+);
+export type ShopifyPrivacyArtifact = typeof shopifyPrivacyArtifacts.$inferSelect;
 
 /**
  * Durable, short-lived admission record for a `shop/redact` request. It exists

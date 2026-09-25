@@ -8,6 +8,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { getSessionCookieOptions } from "../../_core/cookies";
 import { ENV } from "../../_core/env";
+import { sdk } from "../../_core/sdk";
 import { getDb } from "../../db";
 import { isDuplicateKeyError } from "../../dbErrors";
 import {
@@ -24,6 +25,10 @@ import {
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./installLease";
+import {
+  authorizeAndPreparePrivacyDownload,
+  loadPrivacyArtifactForDownload,
+} from "./privacyCompletion";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
@@ -114,6 +119,44 @@ function callbackError(res: express.Response, reason: ShopifyInstallErrorReason)
  */
 export function createShopifyRouter(): express.Router {
   const router = express.Router();
+
+  router.get("/api/shopify/privacy/artifacts/:publicId", async (req, res) => {
+    res.set("Cache-Control", "no-store, private, max-age=0");
+    res.set("Pragma", "no-cache");
+    const publicId = req.params.publicId;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(publicId)) {
+      return res.status(404).send("Artifact unavailable");
+    }
+    try {
+      const actor = await sdk.authenticateRequest(req);
+      const db = await getDb();
+      if (!db) return res.status(503).send("Temporarily unavailable");
+      const artifact = await loadPrivacyArtifactForDownload(db, publicId);
+      const url = artifact
+        ? await authorizeAndPreparePrivacyDownload({
+            db,
+            actor: {
+              id: actor.id,
+              organizationId: actor.organizationId,
+              role: actor.role,
+              isActive: actor.isActive,
+            },
+            artifact,
+          })
+        : null;
+      if (!url) return res.status(403).send("Artifact unavailable");
+      return res.redirect(303, url);
+    } catch (error) {
+      // Authentication failures disclose neither artifact existence nor scope.
+      if (error instanceof Error && /session|forbidden|user not found/i.test(error.message)) {
+        return res.status(401).send("Authentication required");
+      }
+      console.error("[shopify-privacy] artifact access failed", {
+        code: "artifact_access_failed",
+      });
+      return res.status(503).send("Temporarily unavailable");
+    }
+  });
 
   // No database access and no rate limit, deliberately: the state is signed,
   // not stored, so an unauthenticated hit costs one HMAC and a redirect. A

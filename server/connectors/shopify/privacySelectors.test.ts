@@ -103,6 +103,11 @@ describe("customer privacy request admission", () => {
     expect(persistedStrings.map((value) => JSON.parse(value))).not.toEqual(
       expect.arrayContaining(["31", "41", "501", "502", "503"]),
     );
+    const execution = fake.writes("insert", "shopify_privacy_data_request_jobs")[0];
+    const outbox = fake.writes("insert", "shopify_privacy_queue_outbox")[0];
+    expect(execution?.txId).not.toBeNull();
+    expect(outbox?.txId).toBe(execution?.txId);
+    expect(outbox?.data).toEqual({ kind: "customer_request", jobId: 901, status: "pending" });
   });
 
   it("should admit malformed selector payloads only into a safe manual-review state", async () => {

@@ -1,7 +1,7 @@
 import { TRPCError } from "@trpc/server";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, gt } from "drizzle-orm";
 import { z } from "zod";
-import { shopifyConnectorStores } from "../../drizzle/shopify_schema";
+import { shopifyConnectorStores, shopifyPrivacyArtifacts } from "../../drizzle/shopify_schema";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { resolveOrgScope } from "../_core/tenancy";
@@ -54,6 +54,46 @@ export const shopifyConnectorRouter = router({
         .where(eq(shopifyConnectorStores.organizationId, organizationId))
         .orderBy(desc(shopifyConnectorStores.createdAt));
     }),
+
+  /**
+   * Authenticated portal delivery channel for privacy exports. No selector,
+   * object key, digest, internal tenant/store id or presigned URL is projected.
+   * Super admins are intentionally not a substitute for the merchant claimant.
+   */
+  listPrivacyDeliveries: protectedProcedure.query(async ({ ctx }) => {
+    if (ctx.user.role !== "admin" || !ctx.user.isActive || !ctx.user.organizationId) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Merchant administrator access is required" });
+    }
+    const db = await getDb();
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    return db
+      .select({
+        artifactId: shopifyPrivacyArtifacts.publicId,
+        kind: shopifyPrivacyArtifacts.artifactKind,
+        recordsFound: shopifyPrivacyArtifacts.recordsFound,
+        generatedAt: shopifyPrivacyArtifacts.generatedAt,
+        expiresAt: shopifyPrivacyArtifacts.expiresAt,
+        deliveryStatus: shopifyPrivacyArtifacts.deliveryStatus,
+      })
+      .from(shopifyPrivacyArtifacts)
+      .innerJoin(
+        shopifyConnectorStores,
+        and(
+          eq(shopifyConnectorStores.id, shopifyPrivacyArtifacts.storeId),
+          eq(shopifyConnectorStores.organizationId, shopifyPrivacyArtifacts.organizationId),
+          eq(shopifyConnectorStores.claimedByUserId, ctx.user.id),
+        ),
+      )
+      .where(
+        and(
+          eq(shopifyPrivacyArtifacts.organizationId, ctx.user.organizationId),
+          eq(shopifyPrivacyArtifacts.recipientUserId, ctx.user.id),
+          eq(shopifyPrivacyArtifacts.status, "ready"),
+          gt(shopifyPrivacyArtifacts.expiresAt, new Date()),
+        ),
+      )
+      .orderBy(desc(shopifyPrivacyArtifacts.generatedAt));
+  }),
 
   /**
    * Starts a merchant-authorised read-only order evidence sync. It does not

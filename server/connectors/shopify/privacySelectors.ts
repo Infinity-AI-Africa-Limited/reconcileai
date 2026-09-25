@@ -1,6 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import {
   shopifyConnectorStores,
+  shopifyPrivacyDataRequestJobs,
+  shopifyPrivacyQueueOutbox,
   shopifyPrivacyRequestSelectors,
   shopifyPrivacyRequests,
   shopifyWebhookEvents,
@@ -187,6 +189,26 @@ export async function admitShopifyCustomerPrivacyRequest(
         .onDuplicateKeyUpdate({
           set: { externalIdHmac: sql`${shopifyPrivacyRequestSelectors.externalIdHmac}` },
         });
+    }
+
+    if (params.topic === "customers/data_request") {
+      // The execution state and queue intent commit with admission. A crash after
+      // this transaction can delay dispatch, but cannot make the request vanish.
+      await tx
+        .insert(shopifyPrivacyDataRequestJobs)
+        .values({
+          requestId: request.id,
+          organizationId: params.store.organizationId,
+          storeId: params.store.id,
+          status: "received",
+          lastCheckpoint: "admitted",
+          manifestVersion: 1,
+        })
+        .onDuplicateKeyUpdate({ set: { requestId: sql`${shopifyPrivacyDataRequestJobs.requestId}` } });
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "customer_request", jobId: request.id, status: "pending" })
+        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
     }
   }
 
