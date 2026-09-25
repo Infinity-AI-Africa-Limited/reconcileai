@@ -123,6 +123,29 @@ describe("when a handler is written inline", () => {
     expect(scanFile(path.resolve("/virtual/a.ts"), finallyOnly).map(e => e.kind)).toEqual(["await"]);
   });
 
+  it("should flag an await in a concise arrow body, not only in a block", () => {
+    const concise = `${HEADER}
+      app.get("/c1", async (req, res) => await loadData());
+      app.get("/c2", async (req, res) => res.json(await loadData()));`;
+    expect(scanFile(path.resolve("/virtual/a.ts"), concise).map(e => [e.route, e.kind])).toEqual([
+      ["GET /c1", "await"],
+      ["GET /c2", "await"],
+    ]);
+  });
+
+  it("should flag the awaits that are not await expressions — for await, await using", () => {
+    const loops = `${HEADER}
+      app.get("/l1", async (req, res) => { for await (const row of stream()) res.write(row); res.end(); });
+      app.get("/l2", async (req, res) => { await using lock = acquire(); res.end(); });
+      app.get("/l3", async (req, res) => {
+        try { for await (const row of stream()) res.write(row); res.end(); } catch { res.status(500).end(); }
+      });`;
+    expect(scanFile(path.resolve("/virtual/a.ts"), loops).map(e => [e.route, e.kind])).toEqual([
+      ["GET /l1", "await"],
+      ["GET /l2", "await"],
+    ]);
+  });
+
   it("should not trust a function merely NAMED asyncHandler", () => {
     const impostor = `${HEADER}
       const asyncHandler = (fn: unknown) => fn;
@@ -217,6 +240,26 @@ describe("when a handler is defined somewhere other than the route call", () => 
     expect(scanFile(path.resolve("/virtual/a.ts"), sample).map(e => [e.route, e.kind])).toEqual([
       ["POST /g", "opaque"],
       ["POST /h", "opaque"],
+    ]);
+  });
+
+  it("should take apart arrays and spreads of handlers — Express flattens them", () => {
+    const sample = `${HEADER}import { asyncHandler } from "./_core/asyncHandler";
+      const mw = (req: Request, res: Response, next: () => void) => next();
+      const chain = [mw, async (req: Request, res: Response) => { await work(); res.end(); }];
+      app.get("/a1", [mw, async (req, res) => { await work(); res.end(); }]);
+      app.get("/a2", [mw, asyncHandler(async (req, res) => { await work(); res.end(); })]);
+      app.post("/a3", chain);
+      app.post("/a4", ...chain);
+      app.get(["/a5", "/a6"], async (req, res) => { await work(); res.end(); });
+      app.get("/a7", flag ? mw : async (req, res) => { await work(); res.end(); });`;
+    expect(scanFile(path.resolve("/virtual/a.ts"), sample).map(e => [e.route, e.kind, e.wrapped])).toEqual([
+      ["GET /a1", "await", false],
+      ["GET /a2", "await", true],
+      ["POST /a3", "await", false],
+      ["POST /a4", "await", false],
+      ["GET /a5,/a6", "await", false],
+      ["GET /a7", "await", false],
     ]);
   });
 

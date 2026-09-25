@@ -24,11 +24,17 @@
  * value of a factory. The scan enumerates what is provably safe and reports the
  * rest, rather than the other way round.
  *
- * Not decided here: a SYNCHRONOUS throw inside an async handler outside a try
- * (which rejects it just the same). Syntax cannot decide that — a property read
- * on `undefined` throws too — and on today's code every candidate is a builtin
- * or a pure helper. A handler doing non-trivial synchronous work should be
- * wrapped in `asyncHandler` on judgement, not because this said so.
+ * Not decided here, by syntax or at all:
+ *   - a SYNCHRONOUS throw inside an async handler outside a try (it rejects the
+ *     handler just the same). A property read on `undefined` throws too, and on
+ *     today's code every candidate call is a builtin or a pure helper.
+ *   - a FIRE-AND-FORGET promise — a call neither awaited nor returned. Its
+ *     rejection is unhandled too, and neither a try nor asyncHandler catches
+ *     it; only its own `.catch` does. Telling a promise from a value for an
+ *     unknown callee needs types. Every one in the route files today ends in
+ *     `.catch(…)` or is an async IIFE whose body is a try.
+ * A handler doing either should be wrapped, or given its `.catch`, on
+ * judgement — not because this scan said so.
  *
  * It reports EXPOSURE, not bugs: whether an exposed call can actually reject is
  * a question about that callee. `asyncHandler(...)` makes the question moot.
@@ -78,7 +84,24 @@ interface Ctx {
   file: string;
   sf: ts.SourceFile;
 }
-type Target = { kind: "fn"; fn: FnLike; ctx: Ctx } | { kind: "safe" } | { kind: "opaque"; text: string };
+type Target =
+  | { kind: "fn"; fn: FnLike; ctx: Ctx; wrapped?: boolean }
+  | { kind: "safe" }
+  | { kind: "opaque"; text: string; node: ts.Node; ctx: Ctx; wrapped?: boolean };
+
+/** A route path — `"/x"`, a template, a regex — rather than a handler. */
+function isPathLike(e: ts.Expression): boolean {
+  return ts.isStringLiteralLike(e) || ts.isTemplateExpression(e) || ts.isRegularExpressionLiteral(e);
+}
+
+/** `"/x"` → `/x`; `["/a", "/b"]` → `/a,/b`; anything else is middleware. */
+function pathLabel(first: ts.Expression | undefined): string {
+  if (first && ts.isStringLiteralLike(first)) return first.text;
+  if (first && ts.isArrayLiteralExpression(first) && first.elements.length > 0 && first.elements.every(ts.isStringLiteralLike)) {
+    return first.elements.map(el => (el as ts.StringLiteralLike).text).join(",");
+  }
+  return "<middleware>";
+}
 
 function unwrap(e: ts.Expression): ts.Expression {
   while (
@@ -252,10 +275,19 @@ export function createScanner(opts: ScanOptions = {}) {
   /** What a route argument — or a factory's return value — actually is. */
   function resolve(expr: ts.Expression, ctx: Ctx, depth: number): Target[] {
     const e = unwrap(expr);
-    const opaque = (): Target[] => [{ kind: "opaque", text: e.getText(ctx.sf).replace(/\s+/g, " ").slice(0, 80) }];
+    const opaque = (): Target[] => [{ kind: "opaque", text: e.getText(ctx.sf).replace(/\s+/g, " ").slice(0, 80), node: e, ctx }];
     if (depth > MAX_DEPTH) return opaque();
+    if (isPathLike(e)) return [];
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return [{ kind: "fn", fn: e, ctx }];
     if (ts.isIdentifier(e)) return resolveIdentifier(e, ctx, depth);
+    // Express flattens arrays of handlers, spread or not, at any depth.
+    if (ts.isArrayLiteralExpression(e)) return e.elements.flatMap(el => resolve(el, ctx, depth + 1));
+    if (ts.isSpreadElement(e)) return resolve(e.expression, ctx, depth + 1);
+    if (ts.isConditionalExpression(e)) return [...resolve(e.whenTrue, ctx, depth + 1), ...resolve(e.whenFalse, ctx, depth + 1)];
+    if (isAsyncHandlerCall(e)) {
+      const inner = e.arguments[0];
+      return inner ? resolve(inner, ctx, depth + 1).map(t => (t.kind === "safe" ? t : { ...t, wrapped: true })) : [];
+    }
     if ((ts.isCallExpression(e) || ts.isPropertyAccessExpression(e)) && isSafeOrigin(ts.isCallExpression(e) ? e.expression : e, ctx)) {
       return [{ kind: "safe" }];
     }
@@ -277,7 +309,7 @@ export function createScanner(opts: ScanOptions = {}) {
   }
 
   function resolveIdentifier(id: ts.Identifier, ctx: Ctx, depth: number): Target[] {
-    const opaque: Target[] = [{ kind: "opaque", text: id.text }];
+    const opaque: Target[] = [{ kind: "opaque", text: id.text, node: id, ctx }];
     const binding = findBinding(id.text, id);
     if (!binding) return opaque;
     if (ts.isFunctionDeclaration(binding)) return [{ kind: "fn", fn: binding, ctx }];
@@ -374,13 +406,20 @@ export function createScanner(opts: ScanOptions = {}) {
         wrapped,
       });
     for (const r of returnedExpressions(fn)) if (mayBePromise(r, ctx, fn, 0)) push(r, "returned-promise");
-    if (!fn.body || !ts.isBlock(fn.body)) return;
+    // Walk the body whether it is a block or a concise arrow's expression:
+    // `async (req, res) => res.json(await load())` awaits just the same.
     const walk = (n: ts.Node) => {
       if (isFunctionLike(n)) return; // a nested function's rejections are its own
-      if (ts.isAwaitExpression(n) && !isGuarded(n, fn)) push(n, "await");
+      if (!isGuarded(n, fn)) {
+        const awaits =
+          ts.isAwaitExpression(n) ||
+          (ts.isForOfStatement(n) && !!n.awaitModifier) || // for await (…)
+          (ts.isVariableDeclarationList(n) && (n.flags & ts.NodeFlags.AwaitUsing) === ts.NodeFlags.AwaitUsing); // await using
+        if (awaits) push(n, "await");
+      }
       n.forEachChild(walk);
     };
-    fn.body.forEachChild(walk);
+    if (fn.body) walk(fn.body);
   }
 
   /** An Express app or router: built by, typed from, or `.route()`d off "express". */
@@ -421,24 +460,17 @@ export function createScanner(opts: ScanOptions = {}) {
     const out: Exposure[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node) && isRouteCall(node, ctx)) {
-        const first = node.arguments[0];
-        const route = `${node.expression.name.text.toUpperCase()} ${first && ts.isStringLiteralLike(first) ? first.text : "<middleware>"}`;
-        for (const raw of node.arguments) {
-          const arg = unwrap(raw);
-          if (ts.isStringLiteralLike(arg) || ts.isTemplateExpression(arg) || ts.isRegularExpressionLiteral(arg) || ts.isArrayLiteralExpression(arg)) {
-            continue; // the path
-          }
-          const wrapped = isAsyncHandlerCall(arg);
-          const inner = wrapped ? arg.arguments[0] : arg;
-          if (!inner) continue;
-          for (const t of resolve(inner, ctx, 0)) {
-            if (t.kind === "fn") {
-              opts.onHandler?.({ route, name: handlerName(t.fn), file: t.ctx.file, wrapped });
-              analyze(t.fn, t.ctx, route, wrapped, out);
-            } else if (t.kind === "opaque") {
-              const line = ctx.sf.getLineAndCharacterOfPosition(inner.getStart(ctx.sf)).line + 1;
-              out.push({ file, route, line, expression: t.text, kind: "opaque", wrapped });
-            }
+        const route = `${node.expression.name.text.toUpperCase()} ${pathLabel(node.arguments[0])}`;
+        // Every argument goes through resolve(): paths resolve to nothing, and
+        // arrays / spreads / asyncHandler(...) are taken apart there.
+        for (const t of node.arguments.flatMap(arg => resolve(arg, ctx, 0))) {
+          const wrapped = t.kind !== "safe" && !!t.wrapped;
+          if (t.kind === "fn") {
+            opts.onHandler?.({ route, name: handlerName(t.fn), file: t.ctx.file, wrapped });
+            analyze(t.fn, t.ctx, route, wrapped, out);
+          } else if (t.kind === "opaque") {
+            const line = t.ctx.sf.getLineAndCharacterOfPosition(t.node.getStart(t.ctx.sf)).line + 1;
+            out.push({ file: t.ctx.file, route, line, expression: t.text, kind: "opaque", wrapped });
           }
         }
       }
