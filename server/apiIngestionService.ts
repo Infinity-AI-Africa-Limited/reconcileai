@@ -1,5 +1,5 @@
 import { getDb, getChannelByIdForOrg } from "./db";
-import { apiIngestionLogs, uploadBatches, transactions, apiKeys } from "../drizzle/schema";
+import { apiIngestionLogs, uploadBatches, transactions, apiKeys, users, organizations } from "../drizzle/schema";
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "crypto";
 import Papa from "papaparse";
@@ -65,6 +65,28 @@ export async function validateApiKey(apiKey: string): Promise<{
 
   if (key.expiresAt && new Date(key.expiresAt) < new Date()) {
     return { valid: false, error: "API key expired" };
+  }
+
+  // A key is only as live as the account and the tenant behind it. Deactivating
+  // the owner, deactivating the organisation, or fencing it for a Shopify shop
+  // redaction must stop the key writing — not only stop people signing in.
+  const [owner] = await db
+    .select({ isActive: users.isActive })
+    .from(users)
+    .where(eq(users.id, key.userId))
+    .limit(1);
+  if (!owner?.isActive) {
+    return { valid: false, error: "API key owner is inactive" };
+  }
+  if (key.organizationId) {
+    const [org] = await db
+      .select({ isActive: organizations.isActive, deletionState: organizations.deletionState })
+      .from(organizations)
+      .where(eq(organizations.id, key.organizationId))
+      .limit(1);
+    if (!org?.isActive || org.deletionState !== "active") {
+      return { valid: false, error: "API key organisation is inactive" };
+    }
   }
 
   // Update last used timestamp

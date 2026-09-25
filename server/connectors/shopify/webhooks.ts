@@ -66,6 +66,15 @@ export function declaredShopDomain(body: WebhookBody | null): string | null {
  * would delete the new credentials of an installed app.
  */
 export function isStaleUninstall(triggeredAtHeader: string | undefined, claimedAt: Date | null): boolean {
+  return triggeredBeforeAuthorization(triggeredAtHeader, claimedAt);
+}
+
+/**
+ * True when a delivery was triggered before the store's latest authorization.
+ * A destructive topic — uninstall, shop redaction — triggered then is about the
+ * PREVIOUS installation; applied after a reinstall it would destroy the new one.
+ */
+export function triggeredBeforeAuthorization(triggeredAtHeader: string | undefined, claimedAt: Date | null): boolean {
   if (!triggeredAtHeader || !claimedAt) return false;
   const triggeredAt = new Date(triggeredAtHeader);
   return !Number.isNaN(triggeredAt.getTime()) && triggeredAt < claimedAt;
@@ -148,7 +157,12 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       .from(shopifyWebhookEvents)
       .where(eq(shopifyWebhookEvents.webhookId, webhookId))
       .limit(1);
-    if (event && SETTLED_STATUSES.has(event.status)) {
+    // A settled receipt normally ends here. `shop/redact` does not: before
+    // admission existed, a delivery was settled `processed` with no redaction
+    // job and no fence, so "settled" does not prove it was admitted. Admission
+    // is idempotent on its own terms (one job per store or request), so a
+    // redelivery goes back through it instead.
+    if (event && SETTLED_STATUSES.has(event.status) && topic !== "shop/redact") {
       return res.status(200).json({ received: true, status: "duplicate" });
     }
 
@@ -205,6 +219,13 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       const subjectHash = subject === undefined ? null : sha256(String(subject));
 
       if (topic === "shop/redact") {
+        // Shopify retries a failed delivery for 48 hours. One triggered before
+        // the merchant reinstalled is about the previous installation; admitting
+        // it now would fence the new workspace and delete its credentials.
+        if (triggeredBeforeAuthorization(headerValue(req, "x-shopify-triggered-at"), store.claimedAt)) {
+          await settle("ignored", "stale_shop_redact");
+          return res.status(200).json({ received: true, status: "ignored_stale" });
+        }
         // Shopify's 2xx acknowledgement means this request was durably admitted,
         // not that the tenant was deleted. Admission creates a short-lived job,
         // fences new work, revokes credentials, and fails closed on any DB error.
