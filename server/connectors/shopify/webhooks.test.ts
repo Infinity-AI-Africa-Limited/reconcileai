@@ -34,6 +34,9 @@ const SHOP = "merchant.myshopify.com";
 const STORES = "shopify_connector_stores";
 const TOKENS = "shopify_connector_tokens";
 const EVENTS = "shopify_webhook_events";
+const REDACTION_JOBS = "shopify_shop_redaction_jobs";
+const ORGANIZATIONS = "organizations";
+const USERS = "users";
 
 const store = { id: 7, organizationId: 42, shopDomain: SHOP, claimedByUserId: 9, claimedAt: new Date("2026-09-20T12:00:00Z") };
 
@@ -152,6 +155,41 @@ describe("when a verified order event arrives", () => {
     expect(res.body).toMatchObject({ status: "ignored_topic" });
     expect(state.enqueue).not.toHaveBeenCalled();
     expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "ignored", errorCode: "topic_not_allowlisted" });
+  });
+});
+
+describe("when a signed shop/redact delivery arrives", () => {
+  function shopRedact(existingRunId?: string) {
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store]],
+        [EVENTS]: [[{ status: "received" }]],
+        [REDACTION_JOBS]: [existingRunId ? [{ runId: existingRunId }] : []],
+      },
+    });
+    state.db = fake.db;
+    return { fake, run: delivery("shop/redact", { shop_domain: SHOP, shop_id: 17 }).run };
+  }
+
+  it("should durably admit, fence, revoke, and acknowledge a known merchant", async () => {
+    const { fake, run } = shopRedact();
+    const res = await run();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ status: "shop_redact_admitted" });
+    expect(fake.writes("insert", REDACTION_JOBS)).toHaveLength(1);
+    expect(fake.writes("update", ORGANIZATIONS)[0]?.data).toMatchObject({ isActive: false, deletionState: "redacting" });
+    expect(fake.writes("update", USERS)[0]?.data).toMatchObject({ isActive: false });
+    expect(fake.writes("delete", TOKENS)).toHaveLength(1);
+    expect(fake.writes("update", STORES).at(-1)?.data).toMatchObject({ status: "redacting", statusReason: "shop_redact_requested" });
+  });
+
+  it("should treat a second request for the same store as an idempotent admission", async () => {
+    const { fake, run } = shopRedact("existing-redaction-run");
+    const res = await run();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ status: "shop_redact_duplicate" });
+    expect(fake.writes("insert", REDACTION_JOBS)).toEqual([]);
+    expect(fake.writes("delete", TOKENS)).toEqual([]);
   });
 });
 

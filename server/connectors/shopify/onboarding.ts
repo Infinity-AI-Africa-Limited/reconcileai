@@ -54,6 +54,8 @@ export type ShopifyOnboardingErrorCode =
   | "SHOP_IDENTITY_CONFLICT"
   /** The shop's deterministic workspace code is taken, but no store record explains it. */
   | "WORKSPACE_CONFLICT"
+  /** Shopify requested deletion for the existing workspace; reconnection is fenced. */
+  | "REDACTION_IN_PROGRESS"
   /** This callback no longer holds the shop's install lease; a later installation owns the outcome. */
   | "INSTALL_LEASE_LOST";
 
@@ -232,6 +234,21 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
     // the lease row, so no takeover can commit before this does, and it leaves
     // a fresh TTL for the exchange that follows immediately.
     if (!(await renewInstallLease(tx, lease))) return null;
+    const [storeState] = await tx
+      .select({ status: shopifyConnectorStores.status, deletionState: organizations.deletionState })
+      .from(shopifyConnectorStores)
+      .innerJoin(organizations, eq(organizations.id, shopifyConnectorStores.organizationId))
+      .where(eq(shopifyConnectorStores.shopDomain, shopDomain))
+      .limit(1);
+    if (storeState?.status === "redacting" || storeState?.deletionState === "redacting") {
+      // Refuse BEFORE the authorization-code exchange. An exchange retires the
+      // store's prior refresh token, and a redacting tenant must not acquire or
+      // disturb any new credentials while the deletion fence is active.
+      throw new ShopifyOnboardingError(
+        "The Shopify workspace is being redacted and cannot be reauthorized",
+        "REDACTION_IN_PROGRESS",
+      );
+    }
     await tx
       .update(shopifyConnectorStores)
       .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
@@ -301,6 +318,18 @@ async function reauthorizeExistingStore(
   params: Parameters<typeof onboardShopifyMerchant>[0],
   email: string,
 ): Promise<ShopifyOnboardingResult> {
+  const [organizationState] = await db
+    .select({ deletionState: organizations.deletionState })
+    .from(organizations)
+    .where(eq(organizations.id, store.organizationId))
+    .limit(1);
+  if (organizationState?.deletionState === "redacting" || store.status === "redacting") {
+    throw new ShopifyOnboardingError(
+      "The existing Shopify workspace is being redacted and cannot be reauthorized",
+      "REDACTION_IN_PROGRESS",
+    );
+  }
+
   const [admin] = await db
     .select({ id: users.id })
     .from(users)

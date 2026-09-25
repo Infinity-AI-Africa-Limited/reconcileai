@@ -7,7 +7,7 @@ import { SHOPIFY_INSTALL_ERROR_REASONS, type ShopifyInstallErrorReason } from "@
 export type ShopifyConnectionVerdict = "checking" | "connected" | "not_connected" | "confirming";
 
 /** A store's `status` as listStores reports it. */
-export type ShopifyStoreStatus = "pending_claim" | "active" | "reauthorization_required" | "uninstalled";
+export type ShopifyStoreStatus = "pending_claim" | "active" | "reauthorization_required" | "uninstalled" | "redacting";
 
 /**
  * The verdict for a signed-in merchant looking at one store.
@@ -24,7 +24,7 @@ export function shopifyConnectionVerdict(input: {
 }): ShopifyConnectionVerdict {
   if (input.isLoading) return "checking";
   if (input.status === "active") return "connected";
-  if (input.status === "reauthorization_required" || input.status === "uninstalled") return "not_connected";
+  if (input.status === "reauthorization_required" || input.status === "uninstalled" || input.status === "redacting") return "not_connected";
   return "confirming";
 }
 
@@ -55,6 +55,8 @@ const SHOPIFY_INSTALL_ERROR_MESSAGES: Record<ShopifyInstallErrorReason, string> 
     "This store is already connected to a ReconcileAI workspace, and its current contact email does not match that workspace's administrator. For your protection the connection was not transferred. Contact ReconcileAI support to verify ownership.",
   email_already_registered:
     "This store's contact email already belongs to another ReconcileAI workspace, so a new workspace could not be created for it. Contact ReconcileAI support to connect this store.",
+  redaction_in_progress:
+    "This store has an active data-deletion request, so ReconcileAI cannot reconnect it. Contact ReconcileAI support if you believe this is unexpected.",
   missing_contact_email:
     "Shopify did not provide a contact email for this store. Add a store contact email in Shopify settings, then restart installation.",
   store_identity_conflict:

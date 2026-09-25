@@ -10,6 +10,7 @@ import { ENV } from "../../_core/env";
 import { createAuditLog, getDb } from "../../db";
 import { normalizeShopDomain, sha256, verifyShopifyWebhookHmac } from "./auth";
 import { enqueueShopifyWebhookSync } from "./syncOrchestrator";
+import { admitShopifyShopRedaction } from "./redaction";
 
 const PRIVACY_TOPICS = new Set(["customers/data_request", "customers/redact", "shop/redact"]);
 export const SHOPIFY_ORDER_TRIGGER_TOPICS = new Set([
@@ -201,6 +202,33 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       // never email, phone, address or orders, before creating any evidence row.
       const subject = body?.data_request?.id ?? body?.customer?.id ?? body?.shop_id;
       const subjectHash = subject === undefined ? null : sha256(String(subject));
+
+      if (topic === "shop/redact") {
+        // Shopify's 2xx acknowledgement means this request was durably admitted,
+        // not that the tenant was deleted. Admission creates a short-lived job,
+        // fences new work, revokes credentials, and fails closed on any DB error.
+        const admission = await db.transaction(async (tx) => {
+          await tx
+            .insert(shopifyPrivacyRequests)
+            .values({
+              storeId: store.id,
+              organizationId: store.organizationId,
+              topic: "shop/redact",
+              requestHash: payloadSha256,
+              subjectHash,
+              status: "received",
+            })
+            .onDuplicateKeyUpdate({ set: { requestHash: sql`${shopifyPrivacyRequests.requestHash}` } });
+          const admitted = await admitShopifyShopRedaction(tx, { store, requestHash: payloadSha256, webhookId });
+          await tx
+            .update(shopifyWebhookEvents)
+            .set({ status: "processed", processedAt: new Date() })
+            .where(eq(shopifyWebhookEvents.webhookId, webhookId));
+          return admitted;
+        });
+        return res.status(200).json({ received: true, status: `shop_redact_${admission.status}` });
+      }
+
       await db
         .insert(shopifyPrivacyRequests)
         .values({

@@ -6,7 +6,7 @@
 > columns. This document is the human-readable half; the test is the enforced half.
 > **Both must be updated together when a table is added.**
 
-*Audited: August 2026 · 86 tables across 6 schema files · Auditor: Claude (acting CTO)*
+*Audited: 25 September 2026 · 107 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
 
 ## 1. Isolation model
 
@@ -21,11 +21,11 @@ enforced at three layers:
 
 ## 2. Classification summary (see the test for the per-table list)
 
-Measured by `server/rlsAudit.test.ts` on 2026-09-22 (106 tables).
+Measured by `server/rlsAudit.test.ts` on 2026-09-25 (107 tables).
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 24 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 25 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 45 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
 | `derived` | 3 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
@@ -120,5 +120,6 @@ unclassified. The ratchet now also asserts that every schema file listed in
 | `shopify_sync_cursors` | `tenant_required` | Reserved for the order-led sync phase; written by nothing yet. |
 | `shopify_webhook_events` | `tenant_nullable` | Digest-only delivery ledger. A verified delivery for a shop with no store record is acknowledged and recorded without inventing a tenant. |
 | `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |
+| `shopify_shop_redaction_jobs` | `tenant_required` | Short-lived, durable work record for a verified `shop/redact` request. It is scoped to the merchant workspace while deletion is in progress; completion removes or de-identifies the record rather than retaining a merchant identifier. |
 | `shopify_oauth_states` | `token` | Hash-only ledger of CONSUMED OAuth states. States are signed and shop-bound, so a row is written only at the callback, after Shopify's HMAC and our signature verify — the install endpoint writes nothing. The unique `stateHash` enforces single use. |
 | `shopify_install_leases` | `global` | Pre-tenant platform lock serialising installations per shop domain (one authorization-code exchange in flight at a time). Lease id and expiry only; no tenant data. |

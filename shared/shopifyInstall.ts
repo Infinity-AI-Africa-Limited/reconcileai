@@ -15,6 +15,7 @@ export const SHOPIFY_INSTALL_ERROR_REASONS = [
   "required_permissions_not_granted",
   "ownership_verification_required",
   "email_already_registered",
+  "redaction_in_progress",
   "missing_contact_email",
   "store_identity_conflict",
   "install_failed",
