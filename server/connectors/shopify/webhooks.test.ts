@@ -132,6 +132,28 @@ describe("when a verified order event arrives", () => {
     expect(fake.writes("update", EVENTS)).toEqual([]);
   });
 
+  it("should enqueue orders/updated through the same minimal authoritative re-read path", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    state.db = fake.db;
+
+    const res = await delivery("orders/updated", {
+      id: 1001,
+      email: "must-not-be-projected@example.com",
+      customer: { id: 55 },
+    }).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ status: "queued_for_order_sync" });
+    expect(state.enqueue).toHaveBeenCalledWith({
+      storeId: 7,
+      organizationId: 42,
+      webhookId: "wh-orders/updated",
+    });
+    expect(state.enqueue.mock.calls[0]?.[0]).not.toHaveProperty("email");
+    expect(state.enqueue.mock.calls[0]?.[0]).not.toHaveProperty("customer");
+    expect(fake.writes("update", EVENTS)).toEqual([]);
+  });
+
   it("should answer 503 and mark failed when durable enqueue is unavailable", async () => {
     const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
     state.db = fake.db;

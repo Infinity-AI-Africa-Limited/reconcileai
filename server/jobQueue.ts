@@ -28,7 +28,7 @@ export interface EnqueueOptions {
   backoffMs?: number;
 }
 
-export interface QueueCreateOptions extends EnqueueOptions {
+export interface QueueCreateOptions<T = unknown> extends EnqueueOptions {
   /** Refuse the in-process fallback. Required for bank-facing reconciliation. */
   requireDurable?: boolean;
   /**
@@ -43,6 +43,10 @@ export interface QueueCreateOptions extends EnqueueOptions {
    * them into one and silently drop every webhook after the first.
    */
   uniqueJobNames?: boolean;
+  /** Observe a job only after its final configured attempt has failed. */
+  onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>;
+  /** Let a later enqueue replace an exhausted BullMQ entry with the same unique name. */
+  replaceFailedOnEnqueue?: boolean;
 }
 
 export type JobHandler<T> = (job: QueueJob<T>) => Promise<void>;
@@ -116,6 +120,7 @@ class InProcessQueue<T> implements JobQueue<T> {
     private readonly queueName: string,
     private readonly handler: JobHandler<T>,
     private readonly defaults: Required<EnqueueOptions>,
+    private readonly onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>,
   ) {}
 
   async stats(): Promise<QueueStats> {
@@ -152,6 +157,14 @@ class InProcessQueue<T> implements JobQueue<T> {
           // Never keep the process alive just for retries.
           if (typeof timer.unref === "function") timer.unref();
         } else {
+          try {
+            await this.onFinalFailure?.(job, err);
+          } catch (terminalError) {
+            console.error(
+              `[queue:${this.queueName}] terminal failure hook failed for "${job.name}":`,
+              terminalError instanceof Error ? terminalError.message : terminalError,
+            );
+          }
           console.error(
             `[queue:${this.queueName}] job "${job.name}" exhausted ${maxAttempts} attempts:`,
             err instanceof Error ? err.message : err,
@@ -172,6 +185,8 @@ async function createBullMqQueue<T>(
   defaults: Required<EnqueueOptions>,
   redisUrl: string,
   uniqueJobNames: boolean,
+  onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>,
+  replaceFailedOnEnqueue = false,
 ): Promise<JobQueue<T>> {
   const { Queue, Worker } = await import("bullmq");
   const connection = { url: redisUrl } as any;
@@ -198,6 +213,23 @@ async function createBullMqQueue<T>(
     { connection },
   );
   worker.on("error", (err) => console.error(`[queue:${queueName}] worker error:`, err.message));
+  worker.on("failed", async (bullJob, error) => {
+    if (!bullJob || bullJob.attemptsMade < (bullJob.opts.attempts ?? defaults.attempts)) return;
+    const job: QueueJob<T> = {
+      name: bullJob.name,
+      data: bullJob.data as T,
+      attempt: bullJob.attemptsMade,
+    };
+    try {
+      await onFinalFailure?.(job, error);
+    } catch (terminalError) {
+      // Keep the failed BullMQ row as the queue's dead-letter evidence too.
+      console.error(
+        `[queue:${queueName}] terminal failure hook failed for "${bullJob.name}":`,
+        terminalError instanceof Error ? terminalError.message : terminalError,
+      );
+    }
+  });
 
   return {
     backend: "bullmq" as const,
@@ -229,6 +261,15 @@ async function createBullMqQueue<T>(
       }
     },
     async enqueue(name: string, data: T, opts?: EnqueueOptions) {
+      if (uniqueJobNames && replaceFailedOnEnqueue) {
+        const existing = await queue.getJob(name);
+        if (existing && (await existing.isFailed())) {
+          // A failed unique entry is dead work, not an idempotency success. Keep
+          // it until redelivery arrives (for inspection), then replace it so the
+          // same provider delivery can receive a fresh bounded attempt cycle.
+          await existing.remove();
+        }
+      }
       await queue.add(name, data, {
         attempts: opts?.attempts ?? defaults.attempts,
         backoff: { type: "exponential", delay: opts?.backoffMs ?? defaults.backoffMs },
@@ -285,7 +326,7 @@ export async function allQueueStats(): Promise<Record<string, QueueStats>> {
 export async function createQueue<T>(
   queueName: string,
   handler: JobHandler<T>,
-  opts?: QueueCreateOptions,
+  opts?: QueueCreateOptions<T>,
 ): Promise<JobQueue<T>> {
   const defaults: Required<EnqueueOptions> = {
     attempts: opts?.attempts ?? 6,
@@ -295,7 +336,15 @@ export async function createQueue<T>(
   const redisUrl = process.env.REDIS_URL?.trim();
   if (redisUrl) {
     try {
-      const q = await createBullMqQueue<T>(queueName, handler, defaults, redisUrl, opts?.uniqueJobNames === true);
+      const q = await createBullMqQueue<T>(
+        queueName,
+        handler,
+        defaults,
+        redisUrl,
+        opts?.uniqueJobNames === true,
+        opts?.onFinalFailure,
+        opts?.replaceFailedOnEnqueue === true,
+      );
       console.log(`[queue:${queueName}] BullMQ backend active`);
       LIVE_QUEUES.set(queueName, q as JobQueue<unknown>);
       return q;
@@ -315,7 +364,12 @@ export async function createQueue<T>(
   if (opts?.requireDurable) {
     throw new DurableQueueUnavailableError(queueName, "REDIS_URL is not configured");
   }
-  const fallback = new InProcessQueue<T>(queueName, handler, defaults);
+  const fallback = new InProcessQueue<T>(
+    queueName,
+    handler,
+    defaults,
+    opts?.onFinalFailure,
+  );
   LIVE_QUEUES.set(queueName, fallback as JobQueue<unknown>);
   return fallback;
 }

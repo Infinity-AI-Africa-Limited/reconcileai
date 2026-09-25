@@ -185,6 +185,36 @@ describe.skipIf(!REDIS_URL)("durable queue — the contract this platform relies
     expect(failedJobs.map((j) => j.name)).toContain("doomed");
   });
 
+  it("should replace an exhausted unique job when the same work is redelivered", async () => {
+    const seen: number[] = [];
+    const terminal: number[] = [];
+    const q = await createQueue<{ delivery: number }>(
+      queueName("failed-redelivery"),
+      async (job) => {
+        seen.push(job.data.delivery);
+        if (job.data.delivery === 1) throw new Error("first delivery exhausted");
+      },
+      {
+        uniqueJobNames: true,
+        replaceFailedOnEnqueue: true,
+        attempts: 1,
+        backoffMs: 10,
+        onFinalFailure: async (job) => { terminal.push(job.data.delivery); },
+      },
+    );
+    open.push(q as JobQueue<unknown>);
+
+    await q.enqueue("same-receipt", { delivery: 1 });
+    await until(() => terminal.length === 1, 8000, "terminal failure evidence");
+    expect((await q.stats()).counts?.failed).toBe(1);
+
+    await q.enqueue("same-receipt", { delivery: 2 });
+    await until(() => seen.includes(2), 8000, "redelivery");
+
+    expect(seen).toEqual([1, 2]);
+    expect(terminal).toEqual([1]);
+  });
+
   it("should remove a queued entry that has not started", async () => {
     // What the recovery sweep uses to reclaim capacity from a job it abandoned.
     //

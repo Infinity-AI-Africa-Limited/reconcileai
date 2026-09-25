@@ -9,6 +9,10 @@ export const SHOPIFY_ORDER_WATERMARK_OVERLAP_MS = 5 * 60_000;
 export const SHOPIFY_INITIAL_ORDER_WINDOW_MS = 24 * 60 * 60_000;
 export const SHOPIFY_ORDER_PAGE_SIZE = 100;
 const MAX_ORDER_PAGES = 1_000;
+export const SHOPIFY_ORDER_PAGE_ATTEMPTS = 4;
+const SHOPIFY_ORDER_RETRY_BASE_MS = 500;
+const SHOPIFY_ORDER_RETRY_MAX_MS = 30_000;
+const SHOPIFY_ORDER_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * Shopify Admin 2026-07 exposes the current total as currentTotalPriceSet.
@@ -197,6 +201,68 @@ export interface FetchShopifyOrdersParams {
 export interface ShopifyOrderFetchDeps {
   fetchImpl?: typeof fetch;
   getAccessToken?: typeof getValidShopifyAccessToken;
+  sleep?: (delayMs: number) => Promise<void>;
+  now?: () => number;
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function retryAfterMs(response: Response, now: () => number): number | null {
+  const value = response.headers?.get("retry-after")?.trim();
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1_000, SHOPIFY_ORDER_RETRY_MAX_MS);
+  }
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return null;
+  return Math.min(Math.max(0, at - now()), SHOPIFY_ORDER_RETRY_MAX_MS);
+}
+
+function transientHttpStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+async function fetchOrderPage(
+  endpoint: string,
+  init: RequestInit,
+  fetchImpl: typeof fetch,
+  deps: Pick<ShopifyOrderFetchDeps, "sleep" | "now">,
+): Promise<Response> {
+  const sleep = deps.sleep ?? defaultSleep;
+  const now = deps.now ?? Date.now;
+
+  for (let attempt = 1; attempt <= SHOPIFY_ORDER_PAGE_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint, {
+        ...init,
+        // A fresh timeout is required for every attempt; an already-aborted
+        // signal would turn all retries into immediate failures.
+        signal: AbortSignal.timeout(SHOPIFY_ORDER_REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      if (attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+        throw new ShopifyOrderApiError("Shopify order query failed after transient network errors", "HTTP_ERROR");
+      }
+      await sleep(Math.min(SHOPIFY_ORDER_RETRY_BASE_MS * 2 ** (attempt - 1), SHOPIFY_ORDER_RETRY_MAX_MS));
+      continue;
+    }
+
+    if (response.ok) return response;
+    if (!transientHttpStatus(response.status) || attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+      throw new ShopifyOrderApiError(`Shopify order query failed (${response.status})`, "HTTP_ERROR");
+    }
+    await sleep(
+      retryAfterMs(response, now) ??
+        Math.min(SHOPIFY_ORDER_RETRY_BASE_MS * 2 ** (attempt - 1), SHOPIFY_ORDER_RETRY_MAX_MS),
+    );
+  }
+
+  // The bounded loop either returns or throws; this keeps the invariant explicit.
+  throw new ShopifyOrderApiError("Shopify order query failed", "HTTP_ERROR");
 }
 
 /**
@@ -225,7 +291,7 @@ export async function fetchShopifyOrdersWindow(
   let after: string | null = null;
 
   for (let pageNumber = 1; pageNumber <= MAX_ORDER_PAGES; pageNumber += 1) {
-    const response = await fetchImpl(endpoint, {
+    const response = await fetchOrderPage(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -240,11 +306,7 @@ export async function fetchShopifyOrdersWindow(
           query: searchWindow(params.from, params.to),
         },
       }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) {
-      throw new ShopifyOrderApiError(`Shopify order query failed (${response.status})`, "HTTP_ERROR");
-    }
+    }, fetchImpl, deps);
 
     let body: GraphqlResponse<OrdersGraphqlData>;
     try {
