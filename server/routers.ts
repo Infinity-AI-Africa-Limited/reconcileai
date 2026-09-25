@@ -3535,22 +3535,32 @@ export const appRouter = router({
         // The new user's own organisation, which the row names — not the portal
         // on screen: a super admin may create a user for any organisation.
         await logAudit(ctx.user.id, "add_user", "user", newUserId, { email: input.email, role: targetRole, organizationId: targetOrgId }, ip, ua, targetOrgId);
-        // Send welcome email with magic login link
+        // Send welcome email with magic login link.
+        //
+        // The user exists either way — rolling that back because an email did
+        // not go out would be worse. But the caller is TOLD, because an admin
+        // who believes an invitation was sent will not resend it, and the user
+        // then has no way in at all.
+        let invited = false;
         if (input.origin) {
           try {
             const { sendWelcomeEmail } = await import("./magicLinkService");
-            await sendWelcomeEmail({
+            const result = await sendWelcomeEmail({
               userId: newUserId,
               name: input.name,
               email: input.email,
               role: targetRole,
               origin: input.origin,
             });
+            invited = result.success;
+            if (!invited) {
+              console.error("[addUser] welcome email not sent — the user exists but has no sign-in link");
+            }
           } catch (err) {
             console.error("[addUser] Failed to send welcome email:", err);
           }
         }
-        return { success: true, userId: newUserId };
+        return { success: true, userId: newUserId, invited };
       }),
 
     resendWelcomeLink: adminProcedure
@@ -3571,17 +3581,30 @@ export const appRouter = router({
         if (!target.email) throw new TRPCError({ code: "BAD_REQUEST", message: "User has no email address" });
         try {
           const { sendWelcomeEmail } = await import("./magicLinkService");
-          const { magicLink } = await sendWelcomeEmail({
+          const { success, magicLink } = await sendWelcomeEmail({
             userId: target.id,
             name: target.name ?? target.email,
             email: target.email,
             role: target.role,
             origin: input.origin,
           });
+          // Reporting success with an empty link would tell an operator the
+          // invitation went out when nothing was sent.
+          if (!success || !magicLink) {
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Could not send the sign-in link. Check that APP_URL is configured for this deployment.",
+            });
+          }
           await logAudit(ctx.user.id, "resend_welcome_link", "user", target.id, { email: target.email }, ip, ua, tenantOf.get(target.id));
           return { success: true, magicLink };
         } catch (err: any) {
           console.error("[resendWelcomeLink] Failed:", err);
+          // A TRPCError raised inside this try was raised deliberately and says
+          // something the operator can act on ("check APP_URL"). Re-wrapping it
+          // in a generic message throws that guidance away — the admin would
+          // learn the resend failed and nothing about why.
+          if (err instanceof TRPCError) throw err;
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to send welcome link" });
         }
       }),
@@ -6543,7 +6566,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
             .set({ status: 'approved', accessToken: token, tokenExpiresAt: expiresAt, approvedAt: new Date(), approvedByUserId: ctx.user.id })
             .where(eq(roadmapAccessRequests.id, input.id));
           // Notify the requester via owner notification (owner can then email them)
-          const origin = (ENV.appUrl || "https://www.reconcileaiafrica.com").replace(/\/$/, "");
+          const origin = PUBLIC_APP_ORIGIN;
           const { notifyOwner } = await import('./_core/notification');
           await notifyOwner({
             title: `Roadmap Access Approved — ${req.name}`,
