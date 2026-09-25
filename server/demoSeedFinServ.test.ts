@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildFinServDemoBatchHash, buildFinServDemoPlan, FINSERV_OPERATIONAL_CASES } from "./demoSeedFinServ";
+
+/**
+ * routers.ts plus every auth router file. `auth.*` was extracted from routers.ts
+ * and then split again, so pinning a filename means re-editing these tests on
+ * each move; this reads whatever holds the code.
+ */
+function readAuthSurface(): string {
+  const dir = join(__dirname, "routers");
+  const authFiles = readdirSync(dir).filter(f => f.startsWith("auth") && f.endsWith(".ts") && !f.includes(".test."));
+  return [readFileSync(join(__dirname, "routers.ts"), "utf8"), ...authFiles.map(f => readFileSync(join(dir, f), "utf8"))].join("\n");
+}
 
 describe("financial-services operational demo plan", () => {
   it("keeps displayed transaction, match and exception counts internally consistent", () => {
@@ -62,7 +73,9 @@ describe("financial-services operational demo plan", () => {
 // unsuffixed set of channel codes shared between every org-less caller.
 describe("guest demo accounts belong to a real organisation", () => {
   const PREWARM = readFileSync(join(__dirname, "prewarmDemoUser.ts"), "utf8");
-  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8");
+  // `auth.*` now lives in routers/auth.ts. Reading both keeps these assertions
+  // about the CODE rather than about which file currently holds it.
+  const ROUTERS = readAuthSurface();
 
   it("provisions a dedicated demo organisation", () => {
     expect(PREWARM).toMatch(/export async function ensureGuestDemoOrganization\(/);
@@ -118,7 +131,9 @@ describe("guest demo accounts belong to a real organisation", () => {
 // replace the first — it adds another full dataset. Two cold-start guests would
 // double every transaction and exception the demo shows.
 describe("guest fallback seeds the shared demo tenant only once", () => {
-  const ROUTERS = readFileSync(join(__dirname, "routers.ts"), "utf8");
+  // `auth.*` now lives in routers/auth.ts. Reading both keeps these assertions
+  // about the CODE rather than about which file currently holds it.
+  const ROUTERS = readAuthSurface();
   const fallback = ROUTERS.slice(
     ROUTERS.indexOf("const guestOpenId = 'guest_'"),
     ROUTERS.indexOf("const { sdk } = await import"),
