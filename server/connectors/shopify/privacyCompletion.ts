@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   anomalyScores,
   auditLogs,
@@ -18,7 +19,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { decryptForTenantQuiet } from "../../_core/tenantKeys";
 import { createAuditLog, getDb, type DbExecutor } from "../../db";
-import { storageDelete, storageGet, storagePutPrivate } from "../../storage";
+import { storageDelete, storagePutPrivate, storageReadPrivate } from "../../storage";
 import { affectedRows } from "./tokenStore";
 
 export const SHOPIFY_PRIVACY_MANIFEST_VERSION = 1;
@@ -26,7 +27,6 @@ export const SHOPIFY_PRIVACY_ARTIFACT_SCHEMA_VERSION = 1;
 export const SHOPIFY_PRIVACY_JOB_MAX_ATTEMPTS = 6;
 export const SHOPIFY_PRIVACY_LEASE_MS = 5 * 60_000;
 export const SHOPIFY_PRIVACY_ARTIFACT_TTL_MS = 7 * 24 * 60 * 60_000;
-export const SHOPIFY_PRIVACY_DOWNLOAD_TTL_SECONDS = 5 * 60;
 const LOOKUP_CHUNK = 500;
 const OUTBOX_BATCH_SIZE = 100;
 
@@ -102,8 +102,40 @@ export interface ShopifyPrivacyDispatcherDeps {
   db?: Db;
   now?: () => Date;
   uuid?: () => string;
-  enqueue: (payload: ShopifyPrivacyQueuePayload) => Promise<void>;
+  /**
+   * `dispatchAttempt` makes each dispatch a distinct queue entry. With one fixed
+   * id per job, a queue entry that had already settled — completed or failed —
+   * would silently swallow a later re-dispatch of the same job.
+   */
+  enqueue: (payload: ShopifyPrivacyQueuePayload, dispatchAttempt: number) => Promise<void>;
 }
+
+/**
+ * Thrown inside a transaction when this worker's lease has been taken over, to
+ * roll the transaction back. The worker that owns the job now decides its state.
+ */
+class LeaseLostError extends Error {
+  constructor() {
+    super("Shopify privacy job lease was taken over");
+    this.name = "LeaseLostError";
+  }
+}
+
+/**
+ * A job that is still live but cannot be claimed yet — another worker holds an
+ * unexpired lease, or its retry is not due. The queue must keep such work
+ * scheduled; returning would settle the queue entry while the job still needs
+ * to run. (The recovery loop re-arms it from the database if the queue gives up.)
+ */
+export class ShopifyPrivacyJobNotClaimableError extends Error {
+  constructor() {
+    super("Shopify privacy job is live but not claimable yet");
+    this.name = "ShopifyPrivacyJobNotClaimableError";
+  }
+}
+
+/** Job states that still owe work. Anything else is terminal or awaiting a person. */
+const LIVE_JOB_STATUSES = ["received", "failed_retryable", "processing"] as const;
 
 export function canonicalShopifyOrderGid(decrypted: string): string | null {
   return /^[1-9]\d*$/.test(decrypted) ? `gid://shopify/Order/${decrypted}` : null;
@@ -151,6 +183,7 @@ export async function dispatchShopifyPrivacyOutbox(
   if (!db) throw new Error("Database unavailable");
   const now = (deps.now ?? (() => new Date()))();
   const makeUuid = deps.uuid ?? (() => crypto.randomUUID());
+  await rearmStrandedPrivacyDispatches(db, now);
   const candidates = await db
     .select({
       id: shopifyPrivacyQueueOutbox.id,
@@ -201,7 +234,7 @@ export async function dispatchShopifyPrivacyOutbox(
     const attempt = candidate.attempts + 1;
     try {
       const payload: ShopifyPrivacyQueuePayload = { kind: "customer_request", jobId: candidate.jobId };
-      await deps.enqueue(payload);
+      await deps.enqueue(payload, attempt);
       await db
         .update(shopifyPrivacyQueueOutbox)
         .set({
@@ -271,6 +304,33 @@ export async function dispatchShopifyPrivacyOutbox(
   return { scanned: candidates.length, dispatched, failed };
 }
 
+/**
+ * The queue is a trigger; the job row is the truth. An outbox row marked
+ * `dispatched` says only that a queue entry was created — not that the work
+ * ran. If the queue settled that entry while the job still owed work (retries
+ * exhausted against a lease, say), nothing would ever enqueue it again. So any
+ * dispatched row whose job the database says is claimable NOW, dispatched
+ * longer ago than a lease, goes back to `pending` for the next dispatch.
+ */
+async function rearmStrandedPrivacyDispatches(db: Db, now: Date): Promise<void> {
+  const dispatchedBefore = new Date(now.getTime() - SHOPIFY_PRIVACY_LEASE_MS);
+  await db
+    .update(shopifyPrivacyQueueOutbox)
+    .set({ status: "pending", nextAttemptAt: null, failureCode: null })
+    .where(
+      and(
+        eq(shopifyPrivacyQueueOutbox.status, "dispatched"),
+        lte(shopifyPrivacyQueueOutbox.dispatchedAt, dispatchedBefore),
+        exists(
+          new QueryBuilder()
+            .select({ one: sql`1` })
+            .from(shopifyPrivacyDataRequestJobs)
+            .where(and(eq(shopifyPrivacyDataRequestJobs.requestId, shopifyPrivacyQueueOutbox.jobId), claimableJob(now))),
+        ),
+      ),
+    );
+}
+
 interface ClaimedJob {
   requestId: number;
   organizationId: number;
@@ -325,6 +385,12 @@ async function claimDataRequestJob(
   return job ? { ...job, leaseId } : null;
 }
 
+/**
+ * Move the job, and the request ONLY if the job moved. Every job transition is
+ * guarded by this worker's lease; a worker whose lease was taken over matches
+ * no job row, and must not then drag the request — which the owning worker may
+ * already have delivered — back to an earlier state.
+ */
 async function setNonTerminalState(
   db: Db,
   job: ClaimedJob,
@@ -332,7 +398,7 @@ async function setNonTerminalState(
   failureCode: ShopifyPrivacyFailureCode,
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    await tx
+    const moved = await tx
       .update(shopifyPrivacyDataRequestJobs)
       .set({
         status,
@@ -350,6 +416,7 @@ async function setNonTerminalState(
           eq(shopifyPrivacyDataRequestJobs.leaseId, job.leaseId),
         ),
       );
+    if (affectedRows(moved) !== 1) return; // lease lost: the owning worker decides
     await tx
       .update(shopifyPrivacyRequests)
       .set({ status, completionNote: failureCode })
@@ -369,11 +436,11 @@ async function setFailure(
   job: ClaimedJob,
   code: ShopifyPrivacyFailureCode,
   now: Date,
-): Promise<boolean> {
+): Promise<"terminal" | "retry" | "lease_lost"> {
   const terminal = job.attempts >= SHOPIFY_PRIVACY_JOB_MAX_ATTEMPTS;
   const status = terminal ? "failed_terminal" : "failed_retryable";
-  await db.transaction(async (tx) => {
-    await tx
+  return db.transaction(async (tx) => {
+    const moved = await tx
       .update(shopifyPrivacyDataRequestJobs)
       .set({
         status,
@@ -391,6 +458,9 @@ async function setFailure(
           eq(shopifyPrivacyDataRequestJobs.leaseId, job.leaseId),
         ),
       );
+    // A stale worker must not regress a request the owning worker has moved on
+    // — to awaiting_delivery or completed — back to a failure state.
+    if (affectedRows(moved) !== 1) return "lease_lost";
     await tx
       .update(shopifyPrivacyRequests)
       .set({ status, completionNote: code })
@@ -402,8 +472,8 @@ async function setFailure(
           eq(shopifyPrivacyRequests.topic, "customers/data_request"),
         ),
       );
+    return terminal ? "terminal" : "retry";
   });
-  return terminal;
 }
 
 async function loadOrderEvidence(
@@ -584,7 +654,20 @@ export async function handleShopifyPrivacyJob(
   const makeUuid = deps.uuid ?? (() => crypto.randomUUID());
   const leaseId = makeUuid();
   const job = await claimDataRequestJob(db, payload.jobId, now, leaseId);
-  if (!job) return;
+  if (!job) {
+    // Returning here settles the queue entry. That is right only when the job
+    // owes no more work; a job that is still live — leased by a worker that may
+    // have died, or waiting on a retry that is not due — must stay scheduled.
+    const [current] = await db
+      .select({ status: shopifyPrivacyDataRequestJobs.status })
+      .from(shopifyPrivacyDataRequestJobs)
+      .where(eq(shopifyPrivacyDataRequestJobs.requestId, payload.jobId))
+      .limit(1);
+    if (current && (LIVE_JOB_STATUSES as readonly string[]).includes(current.status)) {
+      throw new ShopifyPrivacyJobNotClaimableError();
+    }
+    return;
+  }
 
   try {
     const [request] = await db
@@ -767,7 +850,7 @@ export async function handleShopifyPrivacyJob(
     }
 
     await db.transaction(async (tx) => {
-      await tx
+      const moved = await tx
         .update(shopifyPrivacyDataRequestJobs)
         .set({
           status: "awaiting_delivery",
@@ -788,6 +871,7 @@ export async function handleShopifyPrivacyJob(
             eq(shopifyPrivacyDataRequestJobs.leaseId, job.leaseId),
           ),
         );
+      if (affectedRows(moved) !== 1) throw new LeaseLostError(); // roll back; the owner decides
       await tx
         .update(shopifyPrivacyRequests)
         .set({
@@ -804,9 +888,11 @@ export async function handleShopifyPrivacyJob(
           ),
         );
     });
-  } catch {
-    const terminal = await setFailure(db, job, "worker_failed", now);
-    if (!terminal) throw new Error("Shopify privacy job retry required");
+  } catch (error) {
+    // Another worker owns the job now; whatever it does, this one must not touch it.
+    if (error instanceof LeaseLostError) return;
+    const outcome = await setFailure(db, job, "worker_failed", now);
+    if (outcome === "retry") throw new Error("Shopify privacy job retry required");
   }
 }
 
@@ -887,66 +973,109 @@ export async function loadPrivacyArtifactForDownload(
   return row ?? null;
 }
 
-/** Persist delivery evidence and destroy selectors before a URL is disclosed. */
-export async function acknowledgePrivacyArtifactDelivery(
+/** Raised inside the delivery transaction when a required transition matched nothing. */
+class DeliveryNotConfirmedError extends Error {
+  constructor(step: string) {
+    super(`Shopify privacy delivery could not be confirmed at ${step}`);
+    this.name = "DeliveryNotConfirmedError";
+  }
+}
+
+export type PrivacyDeliveryOutcome = "completed" | "already_completed" | "not_confirmed";
+
+/**
+ * Record that the artifact was DELIVERED — called only after its bytes were
+ * written to the network in full — then destroy the selectors and complete
+ * the request.
+ *
+ * Every transition is checked. If cleanup expired the artifact in the
+ * meantime, or the job or request is no longer where delivery expects it, the
+ * transaction rolls back: no selector is destroyed and nothing is completed.
+ * A second download of an already-delivered artifact changes nothing.
+ */
+export async function confirmPrivacyArtifactDelivery(
   db: Db,
   artifact: AuthorizedPrivacyArtifact,
   actorId: number,
   now: Date,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .update(shopifyPrivacyArtifacts)
-      .set({ deliveryStatus: "acknowledged", deliveryAcceptedAt: now, downloadedAt: now })
-      .where(
-        and(
-          eq(shopifyPrivacyArtifacts.requestId, artifact.requestId),
-          eq(shopifyPrivacyArtifacts.organizationId, artifact.organizationId),
-          eq(shopifyPrivacyArtifacts.storeId, artifact.storeId),
-          eq(shopifyPrivacyArtifacts.recipientUserId, actorId),
-          eq(shopifyPrivacyArtifacts.status, "ready"),
-        ),
-      );
-    await tx
-      .delete(shopifyPrivacyRequestSelectors)
-      .where(
-        and(
-          eq(shopifyPrivacyRequestSelectors.requestId, artifact.requestId),
-          eq(shopifyPrivacyRequestSelectors.organizationId, artifact.organizationId),
-        ),
-      );
-    await tx
-      .update(shopifyPrivacyDataRequestJobs)
-      .set({
-        status: "completed",
-        completedAt: now,
-        selectorDestroyedAt: now,
-        recordsAffected: sql`${shopifyPrivacyDataRequestJobs.recordsFound}`,
-        failureCode: null,
-        lastCheckpoint: "delivery_acknowledged",
-      })
-      .where(
-        and(
-          eq(shopifyPrivacyDataRequestJobs.requestId, artifact.requestId),
-          eq(shopifyPrivacyDataRequestJobs.organizationId, artifact.organizationId),
-          eq(shopifyPrivacyDataRequestJobs.storeId, artifact.storeId),
-          eq(shopifyPrivacyDataRequestJobs.status, "awaiting_delivery"),
-          eq(shopifyPrivacyDataRequestJobs.artifactId, artifact.requestId),
-        ),
-      );
-    await tx
-      .update(shopifyPrivacyRequests)
-      .set({ status: "completed", completedAt: now, completionNote: "authenticated_portal_delivery_acknowledged" })
-      .where(
-        and(
-          eq(shopifyPrivacyRequests.id, artifact.requestId),
-          eq(shopifyPrivacyRequests.organizationId, artifact.organizationId),
-          eq(shopifyPrivacyRequests.storeId, artifact.storeId),
-          eq(shopifyPrivacyRequests.topic, "customers/data_request"),
-          eq(shopifyPrivacyRequests.status, "awaiting_delivery"),
-        ),
-      );
-  });
+): Promise<PrivacyDeliveryOutcome> {
+  try {
+    return await db.transaction(async (tx) => {
+      const accepted = await tx
+        .update(shopifyPrivacyArtifacts)
+        .set({ deliveryStatus: "acknowledged", deliveryAcceptedAt: now, downloadedAt: now })
+        .where(
+          and(
+            eq(shopifyPrivacyArtifacts.requestId, artifact.requestId),
+            eq(shopifyPrivacyArtifacts.organizationId, artifact.organizationId),
+            eq(shopifyPrivacyArtifacts.storeId, artifact.storeId),
+            eq(shopifyPrivacyArtifacts.recipientUserId, actorId),
+            eq(shopifyPrivacyArtifacts.status, "ready"),
+            eq(shopifyPrivacyArtifacts.deliveryStatus, "pending"),
+          ),
+        );
+      if (affectedRows(accepted) !== 1) {
+        const [current] = await tx
+          .select({ deliveryStatus: shopifyPrivacyArtifacts.deliveryStatus, status: shopifyPrivacyArtifacts.status })
+          .from(shopifyPrivacyArtifacts)
+          .where(
+            and(
+              eq(shopifyPrivacyArtifacts.requestId, artifact.requestId),
+              eq(shopifyPrivacyArtifacts.organizationId, artifact.organizationId),
+              eq(shopifyPrivacyArtifacts.storeId, artifact.storeId),
+            ),
+          )
+          .limit(1);
+        if (current?.deliveryStatus === "acknowledged" && current.status === "ready") return "already_completed";
+        throw new DeliveryNotConfirmedError("artifact");
+      }
+      await tx
+        .delete(shopifyPrivacyRequestSelectors)
+        .where(
+          and(
+            eq(shopifyPrivacyRequestSelectors.requestId, artifact.requestId),
+            eq(shopifyPrivacyRequestSelectors.organizationId, artifact.organizationId),
+          ),
+        );
+      const jobCompleted = await tx
+        .update(shopifyPrivacyDataRequestJobs)
+        .set({
+          status: "completed",
+          completedAt: now,
+          selectorDestroyedAt: now,
+          recordsAffected: sql`${shopifyPrivacyDataRequestJobs.recordsFound}`,
+          failureCode: null,
+          lastCheckpoint: "delivery_acknowledged",
+        })
+        .where(
+          and(
+            eq(shopifyPrivacyDataRequestJobs.requestId, artifact.requestId),
+            eq(shopifyPrivacyDataRequestJobs.organizationId, artifact.organizationId),
+            eq(shopifyPrivacyDataRequestJobs.storeId, artifact.storeId),
+            eq(shopifyPrivacyDataRequestJobs.status, "awaiting_delivery"),
+            eq(shopifyPrivacyDataRequestJobs.artifactId, artifact.requestId),
+          ),
+        );
+      if (affectedRows(jobCompleted) !== 1) throw new DeliveryNotConfirmedError("job");
+      const requestCompleted = await tx
+        .update(shopifyPrivacyRequests)
+        .set({ status: "completed", completedAt: now, completionNote: "authenticated_portal_delivery_confirmed" })
+        .where(
+          and(
+            eq(shopifyPrivacyRequests.id, artifact.requestId),
+            eq(shopifyPrivacyRequests.organizationId, artifact.organizationId),
+            eq(shopifyPrivacyRequests.storeId, artifact.storeId),
+            eq(shopifyPrivacyRequests.topic, "customers/data_request"),
+            eq(shopifyPrivacyRequests.status, "awaiting_delivery"),
+          ),
+        );
+      if (affectedRows(requestCompleted) !== 1) throw new DeliveryNotConfirmedError("request");
+      return "completed";
+    });
+  } catch (error) {
+    if (error instanceof DeliveryNotConfirmedError) return "not_confirmed";
+    throw error;
+  }
 }
 
 export interface PrivacyDownloadDeps {
@@ -954,20 +1083,45 @@ export interface PrivacyDownloadDeps {
   actor: PrivacyDownloadActor;
   artifact: AuthorizedPrivacyArtifact;
   now?: Date;
-  getObject?: typeof storageGet;
+  readObject?: typeof storageReadPrivate;
   audit?: typeof createAuditLog;
 }
 
-export async function authorizeAndPreparePrivacyDownload(
+export interface PreparedPrivacyDownload {
+  bytes: Buffer;
+  filename: string;
+}
+
+/** The stored bytes did not match the digest and size recorded when they were written. */
+export class PrivacyArtifactIntegrityError extends Error {
+  constructor() {
+    super("Stored Shopify privacy artifact failed its integrity check");
+    this.name = "PrivacyArtifactIntegrityError";
+  }
+}
+
+/**
+ * Authorize, read and integrity-check the artifact for the SERVER to send.
+ *
+ * Nothing is completed here. Issuing a presigned URL used to count as delivery
+ * — selectors destroyed and the request completed before the browser had
+ * fetched anything — so a dropped connection or a failed download left a
+ * "completed" request whose data never arrived. The route now sends these
+ * bytes itself and calls confirmPrivacyArtifactDelivery only once they have
+ * all been written. Each access is audited here, before any byte is sent.
+ */
+export async function authorizeAndReadPrivacyArtifact(
   deps: PrivacyDownloadDeps,
-): Promise<string | null> {
+): Promise<PreparedPrivacyDownload | null> {
   const now = deps.now ?? new Date();
   if (!mayDownloadShopifyPrivacyArtifact(deps.actor, deps.artifact, now)) return null;
-  const { url } = await (deps.getObject ?? storageGet)(
-    deps.artifact.objectKey,
-    SHOPIFY_PRIVACY_DOWNLOAD_TTL_SECONDS,
-  );
-  // Successful disclosure fails closed when its audit evidence cannot be written.
+  // Throws if cleanup has already deleted the object: nothing is sent, nothing completes.
+  const bytes = await (deps.readObject ?? storageReadPrivate)(deps.artifact.objectKey);
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+  if (digest !== deps.artifact.sha256 || bytes.length !== deps.artifact.sizeBytes) {
+    throw new PrivacyArtifactIntegrityError();
+  }
+  // Disclosure fails closed when its audit evidence cannot be written.
   await (deps.audit ?? createAuditLog)({
     userId: deps.actor.id,
     organizationId: deps.artifact.organizationId,
@@ -976,8 +1130,7 @@ export async function authorizeAndPreparePrivacyDownload(
     entityId: deps.artifact.requestId,
     details: { decision: "allowed", channel: "authenticated_portal" },
   });
-  await acknowledgePrivacyArtifactDelivery(deps.db, deps.artifact, deps.actor.id, now);
-  return url;
+  return { bytes, filename: `shopify-customer-data-request-${deps.artifact.requestId}.json` };
 }
 
 export interface PrivacyCleanupDeps {

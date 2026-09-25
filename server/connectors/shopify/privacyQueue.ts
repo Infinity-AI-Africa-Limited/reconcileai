@@ -27,10 +27,20 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   return queuePromise;
 }
 
-/** Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL. */
-export async function enqueueShopifyPrivacyJob(payload: ShopifyPrivacyQueuePayload): Promise<void> {
+/**
+ * Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL.
+ *
+ * The queue id is unique per DISPATCH, not per job: a re-dispatch after the
+ * queue settled an earlier entry for this job would otherwise be swallowed by
+ * that settled entry. A duplicate run is harmless — the database lease lets
+ * exactly one worker claim the job.
+ */
+export async function enqueueShopifyPrivacyJob(
+  payload: ShopifyPrivacyQueuePayload,
+  dispatchAttempt: number,
+): Promise<void> {
   const durable = await queue();
-  await durable.enqueue(`privacy-request-${payload.jobId}`, payload);
+  await durable.enqueue(`privacy-request-${payload.jobId}-d${dispatchAttempt}`, payload);
 }
 
 /**
