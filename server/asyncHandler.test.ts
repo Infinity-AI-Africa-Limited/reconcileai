@@ -1,15 +1,46 @@
 /**
  * The wrapper's job is to stop a rejected handler reaching the process.
  *
- * The proof that matters is not "res.status was called" — it is that no
- * unhandled rejection is emitted. So each case runs with a real
- * `process.on("unhandledRejection")` listener attached, and there is a
- * POSITIVE CONTROL: the same rejecting handler, unwrapped, must fire it. Without
- * that control these tests would pass just as happily against a wrapper that
- * did nothing.
+ * The proof that matters is not "res.status was called" — it is that the
+ * process survives. So the headline case runs in a FRESH Node process with the
+ * default `--unhandled-rejections=throw`, exactly as production does, with a
+ * POSITIVE CONTROL: the same rejecting handler, unwrapped, must kill that
+ * process. Without the control the test would pass just as happily against a
+ * wrapper that did nothing; running it out of process means the control's
+ * deliberate rejection never lands in the test runner's own process.
+ *
+ * The in-process cases below also run under a `process.on("unhandledRejection")`
+ * watch, as a second line — they never emit one unless the wrapper is broken.
  */
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asyncHandler } from "./_core/asyncHandler";
+
+/**
+ * Call a rejecting handler the way Express 4 does — invoke it, ignore what it
+ * returns — in a fresh Node process, then report whether that process lived.
+ */
+function runInFreshNode(wrap: boolean) {
+  const script = `
+    const { asyncHandler } = await import(${JSON.stringify(pathToFileURL(path.join(__dirname, "_core", "asyncHandler.ts")).href)});
+    const saw = {};
+    const res = { headersSent: false, status(c) { saw.status = c; return res; }, json(b) { saw.body = b; return res; }, end() { return res; } };
+    const req = { path: "/api/scheduled/sync", method: "POST", originalUrl: "/api/scheduled/sync", headers: {} };
+    const failing = async () => { throw new Error("dependency exploded"); };
+    console.error = () => {};
+    (${wrap} ? asyncHandler(failing) : failing)(req, res, () => {});
+    setTimeout(() => process.stdout.write(JSON.stringify({ survived: true, ...saw })), 100);
+  `;
+  return spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: path.resolve(__dirname, ".."),
+    encoding: "utf8",
+    // Production's defaults, not the test runner's: no inherited NODE_OPTIONS.
+    env: { ...process.env, NODE_OPTIONS: "" },
+    timeout: 30_000,
+  });
+}
 
 /** What the handler did to the response — kept separate from the response itself. */
 interface Recorder {
@@ -64,25 +95,20 @@ beforeEach(() => {
 afterEach(() => errorLog.mockRestore());
 
 describe("when a route handler's promise rejects", () => {
-  it("should NOT reach the process — the positive control proves the watch works", async () => {
-    // Unwrapped: this is today's behaviour, and on Node 22 it ends the process.
-    const unwrapped = async () => {
-      throw new Error("dependency exploded");
-    };
-    const escaped = await withRejectionWatch(() => {
-      void unwrapped();
-    });
-    expect(escaped).toHaveLength(1);
+  it("should kill a real Node process unwrapped — the positive control", () => {
+    const run = runInFreshNode(false);
+    expect(run.error).toBeUndefined();
+    expect(run.status).not.toBe(0);
+    expect(run.stdout).not.toContain("survived");
+    expect(run.stderr).toContain("dependency exploded");
+  }, 40_000);
 
-    // Wrapped: nothing escapes.
-    const { res } = fakeRes();
-    const caught = await withRejectionWatch(() => {
-      asyncHandler(async () => {
-        throw new Error("dependency exploded");
-      })(fakeReq(), res as never, (() => {}) as never);
-    });
-    expect(caught).toHaveLength(0);
-  });
+  it("should leave that same process alive, and the caller answered, once wrapped", () => {
+    const run = runInFreshNode(true);
+    expect(run.error).toBeUndefined();
+    expect(run.status, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout)).toEqual({ survived: true, status: 503, body: { error: "internal_error" } });
+  }, 40_000);
 
   it("should answer the caller instead of hanging the request", async () => {
     const { res, saw } = fakeRes();
