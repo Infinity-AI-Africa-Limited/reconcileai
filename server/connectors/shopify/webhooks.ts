@@ -257,6 +257,15 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
         return res.status(200).json({ received: true, status: `shop_redact_${admission.status}` });
       }
 
+      // A tenant fenced for shop redaction takes no new data — not an encrypted
+      // selector, and not the tenant key encrypting one would provision. Its
+      // whole workspace is being deleted, so there is nothing left to fulfil.
+      // Checked here before any encryption; admission re-checks under the lock.
+      if (store.status === "redacting") {
+        await settle("ignored", "organization_redacting");
+        return res.status(200).json({ received: true, status: "ignored_redacting" });
+      }
+
       const customerTopic = topic as ShopifyCustomerPrivacyTopic;
       const validation = validateCustomerPrivacySelectors(customerTopic, body, store);
       const selectors = validation.ok
@@ -272,6 +281,11 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
           selectors,
         }),
       );
+      if (admissionStatus === "fenced") {
+        // The fence landed between the check above and the lock. Nothing was written.
+        await settle("ignored", "organization_redacting");
+        return res.status(200).json({ received: true, status: "ignored_redacting" });
+      }
       // The delivery is settled once the request and any required selectors are
       // durable. `received` and `manual_review` are both explicitly non-terminal.
       return res.status(200).json({

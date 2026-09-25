@@ -1,4 +1,5 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, notExists, sql } from "drizzle-orm";
+import { QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   shopifyConnectorStores,
   shopifyPrivacyRequestSelectors,
@@ -6,7 +7,7 @@ import {
   shopifyWebhookEvents,
   type ShopifyConnectorStore,
 } from "../../../drizzle/shopify_schema";
-import { blindIndexForTenant, encryptForTenant } from "../../_core/tenantKeys";
+import { blindIndexForTenant, encryptForTenant, getTenantDek } from "../../_core/tenantKeys";
 import type { DbTransaction } from "../../db";
 
 export type ShopifyCustomerPrivacyTopic = "customers/data_request" | "customers/redact";
@@ -110,22 +111,76 @@ export function validateCustomerPrivacySelectors(
   };
 }
 
+/** Selectors protected per turn — bounds the work one large delivery does at once. */
+export const PROTECT_SELECTOR_CHUNK = 250;
+
 /** Encrypt and blind-index validated IDs before opening the admission transaction. */
 export async function protectCustomerPrivacySelectors(
   organizationId: number,
   storeId: number,
   selectors: ValidatedSelector[],
 ): Promise<PreparedPrivacySelector[]> {
-  return Promise.all(
-    selectors.map(async ({ resourceType, position, externalId }) => {
-      const context = `shopify:privacy-selector:${storeId}:${resourceType}`;
-      const [externalIdEnc, externalIdHmac] = await Promise.all([
-        encryptForTenant(organizationId, externalId),
-        blindIndexForTenant(organizationId, context, externalId),
-      ]);
-      return { resourceType, position, externalIdEnc, externalIdHmac };
-    }),
-  );
+  // Resolve the tenant key ONCE, before any selector. The key cache does not
+  // coalesce concurrent misses, so a cold process protecting a 10,000-order
+  // delivery all at once started one key lookup — or a racing provisioning
+  // attempt — per operation: about 20,000. After this every call is a cache hit.
+  await getTenantDek(organizationId);
+
+  const prepared: PreparedPrivacySelector[] = [];
+  for (let start = 0; start < selectors.length; start += PROTECT_SELECTOR_CHUNK) {
+    if (start > 0) await new Promise<void>((resolve) => setImmediate(resolve)); // let other requests run
+    const chunk = selectors.slice(start, start + PROTECT_SELECTOR_CHUNK);
+    prepared.push(
+      ...(await Promise.all(
+        chunk.map(async ({ resourceType, position, externalId }) => {
+          const context = `shopify:privacy-selector:${storeId}:${resourceType}`;
+          const [externalIdEnc, externalIdHmac] = await Promise.all([
+            encryptForTenant(organizationId, externalId),
+            blindIndexForTenant(organizationId, context, externalId),
+          ]);
+          return { resourceType, position, externalIdEnc, externalIdHmac };
+        }),
+      )),
+    );
+  }
+  return prepared;
+}
+
+const CUSTOMER_PRIVACY_TOPICS: ShopifyCustomerPrivacyTopic[] = ["customers/data_request", "customers/redact"];
+
+/**
+ * Repeatable repair: a customer request that is `received` but has NO selector
+ * rows was written by the pre-selector handler — during the deploy cutover, say
+ * — and cannot be fulfilled. A valid customer request always has at least the
+ * customer's own selector, so this state is unambiguous. It is moved to manual
+ * review rather than left looking like a fully admitted request.
+ *
+ * Idempotent; runs inside every customer admission for its store, and is
+ * exported for the processor to run before it claims work.
+ */
+export async function quarantineSelectorlessCustomerRequests(
+  tx: DbTransaction,
+  store: Pick<ShopifyConnectorStore, "id" | "organizationId">,
+): Promise<void> {
+  await tx
+    .update(shopifyPrivacyRequests)
+    .set({ status: "manual_review", admissionErrorCode: "selectors_unavailable" })
+    .where(
+      and(
+        eq(shopifyPrivacyRequests.organizationId, store.organizationId),
+        eq(shopifyPrivacyRequests.storeId, store.id),
+        inArray(shopifyPrivacyRequests.topic, CUSTOMER_PRIVACY_TOPICS),
+        eq(shopifyPrivacyRequests.status, "received"),
+        notExists(
+          // Built with the standalone builder, as tokenStore does: a subquery is
+          // SQL, not something to execute, so it must not depend on the executor.
+          new QueryBuilder()
+            .select({ one: sql`1` })
+            .from(shopifyPrivacyRequestSelectors)
+            .where(eq(shopifyPrivacyRequestSelectors.requestId, shopifyPrivacyRequests.id)),
+        ),
+      ),
+    );
 }
 
 /**
@@ -142,7 +197,18 @@ export async function admitShopifyCustomerPrivacyRequest(
     validation: CustomerPrivacyValidation;
     selectors: PreparedPrivacySelector[];
   },
-): Promise<"received" | "manual_review"> {
+): Promise<"received" | "manual_review" | "fenced"> {
+  // Authoritative fence check, under the same store-row lock redaction
+  // admission takes: a customer delivery racing a shop/redact either commits
+  // before the fence or sees it. A fenced tenant takes no new data at all.
+  const [current] = await tx
+    .select({ status: shopifyConnectorStores.status })
+    .from(shopifyConnectorStores)
+    .where(and(eq(shopifyConnectorStores.id, params.store.id), eq(shopifyConnectorStores.organizationId, params.store.organizationId)))
+    .limit(1)
+    .for("update");
+  if (!current || current.status === "redacting") return "fenced";
+
   const status = params.validation.ok ? "received" : "manual_review";
   const admissionErrorCode = params.validation.ok ? null : params.validation.errorCode;
 
@@ -188,7 +254,26 @@ export async function admitShopifyCustomerPrivacyRequest(
           set: { externalIdHmac: sql`${shopifyPrivacyRequestSelectors.externalIdHmac}` },
         });
     }
+
+    // The insert above is a no-op on a replay, so a request first parked for
+    // manual review — before the store's shop id was known, say — would keep
+    // that status and error even once a replay validates and stores its
+    // selectors. Promote it. Only `manual_review` moves; a request further
+    // along is never regressed.
+    await tx
+      .update(shopifyPrivacyRequests)
+      .set({ status: "received", admissionErrorCode: null })
+      .where(
+        and(
+          eq(shopifyPrivacyRequests.id, request.id),
+          eq(shopifyPrivacyRequests.organizationId, params.store.organizationId),
+          eq(shopifyPrivacyRequests.status, "manual_review"),
+        ),
+      );
   }
+
+  // After this request's own selectors are in place, so it cannot catch itself.
+  await quarantineSelectorlessCustomerRequests(tx, params.store);
 
   await tx
     .update(shopifyConnectorStores)

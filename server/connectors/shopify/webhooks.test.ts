@@ -25,7 +25,9 @@ vi.mock("../../_core/env", async (importOriginal) => {
 vi.mock("./syncOrchestrator", () => ({
   enqueueShopifyWebhookSync: (...args: unknown[]) => state.enqueue(...args),
 }));
+const keyState = vi.hoisted(() => ({ getTenantDek: vi.fn(async () => ({ dek: Buffer.alloc(32), version: 1 })) }));
 vi.mock("../../_core/tenantKeys", () => ({
+  getTenantDek: keyState.getTenantDek,
   encryptForTenant: vi.fn(async (organizationId: number, plaintext: string) =>
     `tk1:${organizationId}:1:iv:tag:${Buffer.from(plaintext).toString("hex")}`,
   ),
@@ -310,7 +312,7 @@ describe("when a signed customer privacy delivery arrives", () => {
   it("should durably admit the request and all ordered selectors before acknowledging", async () => {
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ status: "active" }]],
         [EVENTS]: [[{ status: "received" }]],
         [PRIVACY_REQUESTS]: [[{ id: 901 }]],
       },
@@ -346,7 +348,7 @@ describe("when a signed customer privacy delivery arrives", () => {
   });
 
   it("should retain malformed payloads as manual review without selector material", async () => {
-    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    const fake = scriptedDb({ select: { [STORES]: [[store], [{ status: "active" }]], [EVENTS]: [[{ status: "received" }]] } });
     state.db = fake.db;
 
     const res = await delivery("customers/redact", {
@@ -444,5 +446,44 @@ describe("when the shop is read from a webhook body", () => {
   it("should say nothing when the body names no shop", () => {
     expect(declaredShopDomain({ myshopify_domain: null })).toBeNull();
     expect(declaredShopDomain(null)).toBeNull();
+  });
+});
+
+describe("when a customer privacy delivery arrives for a tenant fenced for redaction", () => {
+  const body = {
+    shop_id: 17,
+    shop_domain: SHOP,
+    data_request: { id: 31 },
+    customer: { id: 41 },
+    orders_requested: [501],
+  };
+
+  it("should store nothing and provision no tenant key", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[{ ...store, status: "redacting" }]], [EVENTS]: [[{ status: "received" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ received: true, status: "ignored_redacting" });
+    expect(keyState.getTenantDek).not.toHaveBeenCalled();
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
+    expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "ignored", errorCode: "organization_redacting" });
+  });
+
+  it("should still refuse when the fence lands between the first read and the admission lock", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[store], [{ status: "redacting" }]], [EVENTS]: [[{ status: "received" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.body).toEqual({ received: true, status: "ignored_redacting" });
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
   });
 });
