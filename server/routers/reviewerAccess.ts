@@ -14,6 +14,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { router } from "../_core/trpc";
 import { ENV } from "../_core/env";
+import { appOriginFor } from "../_core/clientIp";
 import { superAdminProcedure } from "./shared";
 import {
   DEFAULT_REVIEWER_LINK_TTL_DAYS,
@@ -39,11 +40,9 @@ import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
  * submission.
  */
 function resolveAppUrl(ctx: { req?: { headers?: Record<string, unknown>; protocol?: string } }): string {
-  if (ENV.appUrl) return ENV.appUrl;
-  const headers = ctx.req?.headers ?? {};
-  const proto = (headers["x-forwarded-proto"] as string) || ctx.req?.protocol || "https";
-  const host = (headers["x-forwarded-host"] as string) || (headers.host as string) || "";
-  return host ? `${proto}://${host}` : "";
+  // Shared with the OAuth redirect_uri and the SHOPLINE post-install redirect:
+  // APP_URL, else Host with the proxy-aware scheme, never `x-forwarded-host`.
+  return appOriginFor(ctx.req as never);
 }
 
 export const reviewerAccessRouter = router({
