@@ -19,6 +19,7 @@ import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, getReportById, type DbTransaction } from "../db";
 import { organizations, users } from "../../drizzle/schema";
 import { ENV } from "../_core/env";
+import { DEFAULT_APP_ORIGIN } from "@shared/appOrigin";
 
 // Prefer the configured APP_URL; fall back to the live production domain. The historical
 // hardcoded "reconcileai.vip" is NOT the live site, so links built from it are broken for
@@ -26,7 +27,7 @@ import { ENV } from "../_core/env";
 //
 // Lives here rather than in routers.ts so the extracted routers can share ONE
 // definition — a second copy of a production URL is a copy that drifts.
-export const PUBLIC_APP_ORIGIN = (ENV.appUrl || "https://www.reconcileaiafrica.com").replace(/\/$/, "");
+export const PUBLIC_APP_ORIGIN = (ENV.appUrl || DEFAULT_APP_ORIGIN).replace(/\/$/, "");
 // Host-only form (no scheme) for plain-text references in email footers and notifications.
 export const PUBLIC_APP_HOST = PUBLIC_APP_ORIGIN.replace(/^https?:\/\//, "");
 
