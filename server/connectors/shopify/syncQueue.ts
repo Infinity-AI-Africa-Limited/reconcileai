@@ -1,5 +1,5 @@
 import { createQueue, type JobQueue } from "../../jobQueue";
-import { handleShopifyWebhookSync } from "./syncOrchestrator";
+import { handleShopifyWebhookSync, markShopifyWebhookSyncFailed } from "./syncOrchestrator";
 
 export interface ShopifyOrderSyncPayload {
   storeId: number;
@@ -19,6 +19,8 @@ function queue(): Promise<JobQueue<ShopifyOrderSyncPayload>> {
         backoffMs: 30_000,
         requireDurable: true,
         uniqueJobNames: true,
+        onFinalFailure: async (job) => markShopifyWebhookSyncFailed(job.data),
+        replaceFailedOnEnqueue: true,
       },
     ).catch((error) => {
       queuePromise = null;

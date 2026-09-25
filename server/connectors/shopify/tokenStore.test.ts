@@ -99,6 +99,19 @@ describe("when the stored access token is still fresh", () => {
   });
 });
 
+describe("when the tenant has been fenced for a shop redaction", () => {
+  it("should hand out no credential, whatever the store row says", async () => {
+    // The read joins the tenant and requires it to be live; a fenced tenant's
+    // token is simply not found. The scripted answer is the database's reply.
+    const fake = scriptedDb({ select: { [TOKENS]: [[]] } });
+    state.db = fake.db;
+    expect(await reasonOf(call)).toBe("not_found");
+    const read = fake.ops.find((op) => op.kind === "select" && op.table === TOKENS);
+    expect(read?.where?.sql).toMatch(/`organizations`\.`deletionState` = \?/);
+    expect(read?.where?.params).toEqual(expect.arrayContaining([STORE, ORG, "active"]));
+  });
+});
+
 describe("when a refresh completes with the lease still held", () => {
   it("should store the new pair, fenced on the exact row and version it started from", async () => {
     const fake = scriptedDb({
