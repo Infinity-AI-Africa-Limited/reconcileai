@@ -111,9 +111,27 @@ interface OrdersGraphqlData {
   userErrors?: Array<{ message?: string }>;
 }
 
+/**
+ * Shopify's GraphQL Admin API is rate-limited by query COST, not request
+ * count, and a throttled query is answered HTTP 200 with a `THROTTLED` error —
+ * never 429. `extensions.cost.throttleStatus` reports the bucket after each call.
+ */
+interface GraphqlThrottleStatus {
+  maximumAvailable?: number;
+  currentlyAvailable?: number;
+  restoreRate?: number;
+}
+
+interface GraphqlCost {
+  requestedQueryCost?: number;
+  actualQueryCost?: number | null;
+  throttleStatus?: GraphqlThrottleStatus;
+}
+
 interface GraphqlResponse<T> {
   data?: T;
-  errors?: Array<{ message?: string }>;
+  errors?: Array<{ message?: string; extensions?: { code?: string } }>;
+  extensions?: { cost?: GraphqlCost };
 }
 
 export class ShopifyOrderApiError extends Error {
@@ -124,7 +142,8 @@ export class ShopifyOrderApiError extends Error {
       | "INVALID_RESPONSE"
       | "GRAPHQL_ERROR"
       | "USER_ERROR"
-      | "PAGINATION_ERROR",
+      | "PAGINATION_ERROR"
+      | "THROTTLED",
   ) {
     super(message);
     this.name = "ShopifyOrderApiError";
@@ -225,12 +244,48 @@ function transientHttpStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/** Every GraphQL error is a cost throttle — the only GraphQL error worth retrying. */
+function onlyThrottled(errors: GraphqlResponse<unknown>["errors"]): boolean {
+  return !!errors?.length && errors.every((error) => error.extensions?.code === "THROTTLED");
+}
+
+/**
+ * How long until the bucket holds enough for another query of this cost, from
+ * the throttle status Shopify returned. Null when Shopify did not report one.
+ */
+export function shopifyThrottleWaitMs(cost: GraphqlCost | undefined): number | null {
+  const status = cost?.throttleStatus;
+  const available = status?.currentlyAvailable;
+  const restoreRate = status?.restoreRate;
+  const needed = cost?.requestedQueryCost;
+  if (
+    typeof available !== "number" ||
+    typeof restoreRate !== "number" ||
+    typeof needed !== "number" ||
+    !(restoreRate > 0)
+  ) {
+    return null;
+  }
+  const deficit = needed - available;
+  if (deficit <= 0) return 0;
+  return Math.min(Math.ceil((deficit / restoreRate) * 1_000), SHOPIFY_ORDER_RETRY_MAX_MS);
+}
+
+function backoffMs(attempt: number): number {
+  return Math.min(SHOPIFY_ORDER_RETRY_BASE_MS * 2 ** (attempt - 1), SHOPIFY_ORDER_RETRY_MAX_MS);
+}
+
+/**
+ * One page, parsed. Retries a dropped connection, a 429/5xx, and a GraphQL
+ * cost throttle — which Shopify answers with HTTP 200, so an HTTP-only retry
+ * would never see it and a busy store's whole window would fail.
+ */
 async function fetchOrderPage(
   endpoint: string,
   init: RequestInit,
   fetchImpl: typeof fetch,
   deps: Pick<ShopifyOrderFetchDeps, "sleep" | "now">,
-): Promise<Response> {
+): Promise<GraphqlResponse<OrdersGraphqlData>> {
   const sleep = deps.sleep ?? defaultSleep;
   const now = deps.now ?? Date.now;
 
@@ -247,18 +302,31 @@ async function fetchOrderPage(
       if (attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
         throw new ShopifyOrderApiError("Shopify order query failed after transient network errors", "HTTP_ERROR");
       }
-      await sleep(Math.min(SHOPIFY_ORDER_RETRY_BASE_MS * 2 ** (attempt - 1), SHOPIFY_ORDER_RETRY_MAX_MS));
+      await sleep(backoffMs(attempt));
       continue;
     }
 
-    if (response.ok) return response;
-    if (!transientHttpStatus(response.status) || attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
-      throw new ShopifyOrderApiError(`Shopify order query failed (${response.status})`, "HTTP_ERROR");
+    if (!response.ok) {
+      if (!transientHttpStatus(response.status) || attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+        throw new ShopifyOrderApiError(`Shopify order query failed (${response.status})`, "HTTP_ERROR");
+      }
+      await sleep(retryAfterMs(response, now) ?? backoffMs(attempt));
+      continue;
     }
-    await sleep(
-      retryAfterMs(response, now) ??
-        Math.min(SHOPIFY_ORDER_RETRY_BASE_MS * 2 ** (attempt - 1), SHOPIFY_ORDER_RETRY_MAX_MS),
-    );
+
+    let body: GraphqlResponse<OrdersGraphqlData>;
+    try {
+      body = (await response.json()) as GraphqlResponse<OrdersGraphqlData>;
+    } catch {
+      throw new ShopifyOrderApiError("Shopify order query returned invalid JSON", "INVALID_RESPONSE");
+    }
+    if (!onlyThrottled(body.errors)) return body;
+    if (attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+      throw new ShopifyOrderApiError("Shopify order query stayed throttled after retries", "THROTTLED");
+    }
+    // Wait for the reported deficit to restore; fall back to backoff when the
+    // response carried no throttle status.
+    await sleep(Math.max(shopifyThrottleWaitMs(body.extensions?.cost) ?? 0, backoffMs(attempt)));
   }
 
   // The bounded loop either returns or throws; this keeps the invariant explicit.
@@ -291,7 +359,7 @@ export async function fetchShopifyOrdersWindow(
   let after: string | null = null;
 
   for (let pageNumber = 1; pageNumber <= MAX_ORDER_PAGES; pageNumber += 1) {
-    const response = await fetchOrderPage(endpoint, {
+    const body = await fetchOrderPage(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -308,12 +376,6 @@ export async function fetchShopifyOrdersWindow(
       }),
     }, fetchImpl, deps);
 
-    let body: GraphqlResponse<OrdersGraphqlData>;
-    try {
-      body = (await response.json()) as GraphqlResponse<OrdersGraphqlData>;
-    } catch {
-      throw new ShopifyOrderApiError("Shopify order query returned invalid JSON", "INVALID_RESPONSE");
-    }
     if (body.errors?.length) {
       throw new ShopifyOrderApiError("Shopify order query returned GraphQL errors", "GRAPHQL_ERROR");
     }
@@ -347,6 +409,10 @@ export async function fetchShopifyOrdersWindow(
     if (pageNumber === MAX_ORDER_PAGES) {
       throw new ShopifyOrderApiError("Shopify order pagination exceeded its safety limit", "PAGINATION_ERROR");
     }
+    // Pace the next page by the bucket Shopify just reported, rather than
+    // spending it down and waiting to be throttled.
+    const pause = shopifyThrottleWaitMs(body.extensions?.cost);
+    if (pause) await (deps.sleep ?? defaultSleep)(pause);
   }
 
   return [...byGid.values()].sort(

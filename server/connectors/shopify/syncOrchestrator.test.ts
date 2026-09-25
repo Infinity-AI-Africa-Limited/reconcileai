@@ -128,7 +128,7 @@ describe("tenant-isolated sync orchestration", () => {
   it("uses the onboarded active actor, scopes every lookup, and persists a replay only once", async () => {
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ id: store.id }]],
         [CURSORS]: [[{ watermarkUpdatedAt: new Date("2026-09-20T10:00:00Z") }]],
         [USERS]: [[{ id: 9 }]],
         [CHANNELS]: [[{ id: 70 }]],
@@ -160,12 +160,14 @@ describe("tenant-isolated sync orchestration", () => {
   it("falls back to an active administrator of the same tenant when the claimant is absent", async () => {
     const fake = scriptedDb({
       select: {
-        [STORES]: [[{ ...store, claimedByUserId: null }]],
+        [STORES]: [[{ ...store, claimedByUserId: null }], [{ id: store.id }]],
         [CURSORS]: [[]],
         [USERS]: [[{ id: 12 }]],
         [CHANNELS]: [[{ id: 70 }]],
-        [TRANSACTIONS]: [[]],
+        // Absent at partition time; present after the insert, carrying our batch.
+        [TRANSACTIONS]: [[], [{ id: 900, transactionRef: order().gid, shopifyUpdatedAt: new Date(order().updatedAt), batchId: 80 }]],
       },
+      insert: { [BATCHES]: [80] },
     });
     const fetchOrders = vi.fn(async () => [order()]);
     const report = await runShopifyOrderSync(
@@ -181,7 +183,7 @@ describe("tenant-isolated sync orchestration", () => {
   it("tries a same-tenant active admin fallback only after an inactive claimant and rejects non-admin absence", async () => {
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ id: store.id }]],
         [CURSORS]: [[]],
         [USERS]: [[], []],
       },
@@ -217,7 +219,7 @@ describe("tenant-isolated sync orchestration", () => {
     };
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ id: store.id }]],
         [CURSORS]: [[]],
         [USERS]: [[{ id: 9 }]],
         [CHANNELS]: [[{ id: 70 }]],
@@ -257,7 +259,7 @@ describe("tenant-isolated sync orchestration", () => {
     };
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ id: store.id }]],
         [CURSORS]: [[]],
         [USERS]: [[{ id: 9 }]],
         [CHANNELS]: [[{ id: 70 }]],
@@ -298,7 +300,7 @@ describe("tenant-isolated sync orchestration", () => {
     };
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ id: store.id }]],
         [CURSORS]: [[]],
         [USERS]: [[{ id: 9 }]],
         [CHANNELS]: [[{ id: 70 }]],
@@ -336,7 +338,7 @@ describe("tenant-isolated sync orchestration", () => {
     };
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ id: store.id }]],
         [CURSORS]: [[]],
         [USERS]: [[{ id: 9 }]],
         [CHANNELS]: [[{ id: 70 }]],
@@ -354,6 +356,178 @@ describe("tenant-isolated sync orchestration", () => {
       .find((op) => op.where?.params.includes(777) && op.where.params.includes(501));
     expect(legacyCounterpart?.data).toMatchObject({ status: "unmatched", matchId: null });
     expect(legacyCounterpart?.where?.params).toEqual(expect.arrayContaining([777, 42, 501, "matched", "manually_matched"]));
+  });
+});
+
+/** The corrected order as it stood before this sync: older evidence, matched. */
+const matchedBefore = (over: Record<string, unknown> = {}) => ({
+  id: 501,
+  transactionRef: order().gid,
+  shopifyUpdatedAt: new Date("2026-09-20T10:04:00Z"),
+  amount: "18.95",
+  currency: "USD",
+  transactionDate: new Date(order().createdAt),
+  valueDate: new Date(order().processedAt!),
+  shopifyOrderCurrency: "USD",
+  shopifyFinancialStatus: "AUTHORIZED",
+  shopifyCancelledAt: null,
+  status: "matched",
+  matchId: null,
+  ...over,
+});
+
+const baseSelects = () => ({
+  [STORES]: [[store], [{ id: store.id }]],
+  [CURSORS]: [[]],
+  [USERS]: [[{ id: 9 }]],
+  [CHANNELS]: [[{ id: 70 }]],
+});
+
+describe("when a corrected order reopens its reconciliation", () => {
+  it("should leave a counterpart that is still matched to another transaction", async () => {
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [[matchedBefore()]],
+        // Our match, then — read after rejecting it — the counterpart's other one.
+        [MATCHES]: [[{ id: 88, sourceTransactionId: 501, targetTransactionId: 777 }], [{ sourceTransactionId: 777, targetTransactionId: 900 }]],
+      },
+    });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "webhook" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+
+    const reopened = fake.writes("update", TRANSACTIONS).filter((op) => op.data?.status === "unmatched");
+    expect(reopened.some((op) => op.where?.params.includes(777))).toBe(false);
+    expect(reopened.some((op) => op.where?.params.includes(501))).toBe(true);
+    // The still-matched check is scoped to the tenant and to active matches only.
+    const check = fake.ops.filter((op) => op.kind === "select" && op.table === MATCHES)[1];
+    expect(check?.where?.params).toEqual(expect.arrayContaining([42, "confirmed", "pending_review", 777]));
+  });
+
+  it("should take back only a matched summary, never an exception or a pairing elsewhere", async () => {
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [[matchedBefore()]],
+        [MATCHES]: [[{ id: 88, sourceTransactionId: 501, targetTransactionId: 777 }], []],
+      },
+    });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "webhook" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+
+    const counterpart = fake
+      .writes("update", TRANSACTIONS)
+      .find((op) => op.data?.status === "unmatched" && op.where?.params.includes(777));
+    expect(counterpart?.where?.params).toEqual(expect.arrayContaining([42, 777, "matched", "manually_matched", 501]));
+    // An open exception record owns an `exception` status; this sync does not resolve it.
+    expect(counterpart?.where?.params).not.toContain("exception");
+    // Only a legacy pointer that is empty or points back at this order is cleared.
+    expect(counterpart?.where?.sql).toMatch(/`matchId` is null or `transactions`\.`matchId` = \?/i);
+  });
+
+  it("should leave the corrected order's own non-matched status alone", async () => {
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [[matchedBefore({ status: "exception" })]],
+        [MATCHES]: [[]],
+      },
+    });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "webhook" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+
+    const self = fake
+      .writes("update", TRANSACTIONS)
+      .find((op) => op.data?.status === "unmatched" && op.where?.params.includes(501));
+    expect(self?.where?.params).toEqual(expect.arrayContaining([501, 42, "matched", "manually_matched"]));
+    expect(self?.where?.params).not.toContain("exception");
+  });
+});
+
+describe("when two syncs of one store overlap", () => {
+  it("should take the store row lock before reading or writing any order", async () => {
+    const fake = scriptedDb({
+      select: { ...baseSelects(), [TRANSACTIONS]: [[]] },
+    });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+
+    const inTx = fake.ops.filter((op) => op.txId !== null);
+    expect(inTx[0]).toMatchObject({ kind: "select", table: STORES, locked: true });
+    expect(inTx[0]?.where?.params).toEqual(expect.arrayContaining([7, 42, "active"]));
+  });
+
+  it("should count as inserted only the rows this cycle wrote", async () => {
+    const a = order({ gid: "gid://shopify/Order/A", name: "#A" });
+    const b = order({ gid: "gid://shopify/Order/B", name: "#B" });
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [
+          [],
+          [
+            { id: 1, transactionRef: a.gid, shopifyUpdatedAt: new Date(a.updatedAt), batchId: 80 },
+            // Inserted by the other sync first, with the same evidence.
+            { id: 2, transactionRef: b.gid, shopifyUpdatedAt: new Date(b.updatedAt), batchId: 55 },
+          ],
+        ],
+      },
+      insert: { [BATCHES]: [80] },
+    });
+    const report = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [a, b]) },
+    );
+
+    expect(report).toMatchObject({ inserted: 1, updated: 0, unchanged: 1, batchId: 80 });
+    // The batch was sized from the plan (2); it records what was written (1).
+    const resize = fake.writes("update", BATCHES)[0];
+    expect(resize?.data).toEqual({ validRows: 1 });
+    expect(resize?.where?.params).toEqual(expect.arrayContaining([80, 42]));
+  });
+
+  it("should count a raced row with newer evidence as updated, not inserted", async () => {
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [[], [matchedBefore({ status: "unmatched", batchId: 55 })]],
+        [MATCHES]: [[]],
+      },
+      insert: { [BATCHES]: [80] },
+    });
+    const report = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "webhook" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+
+    expect(report).toMatchObject({ inserted: 0, updated: 1, unchanged: 0, batchId: 80 });
+    expect(fake.writes("update", BATCHES)).toEqual([]); // planned 1, wrote 1
+  });
+
+  it("should discard its batch when the other sync wrote everything first", async () => {
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [[], [{ id: 2, transactionRef: order().gid, shopifyUpdatedAt: new Date(order().updatedAt), batchId: 55 }]],
+      },
+      insert: { [BATCHES]: [80] },
+    });
+    const report = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+
+    expect(report).toMatchObject({ inserted: 0, updated: 0, unchanged: 1, batchId: null });
+    const discard = fake.writes("delete", BATCHES)[0];
+    expect(discard?.where?.params).toEqual(expect.arrayContaining([80, 42]));
   });
 });
 

@@ -204,6 +204,90 @@ describe("Shopify order window fetching", () => {
     expect(fetchImpl.mock.calls.every(([, init]) => init?.signal instanceof AbortSignal)).toBe(true);
   });
 
+  describe("when Shopify throttles by query cost", () => {
+    // GraphQL cost throttling is answered HTTP 200 with a THROTTLED error, not 429.
+    const throttledBody = (currentlyAvailable: number) => ({
+      errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+      extensions: {
+        cost: {
+          requestedQueryCost: 100,
+          actualQueryCost: null,
+          throttleStatus: { maximumAvailable: 1000, currentlyAvailable, restoreRate: 50 },
+        },
+      },
+    });
+    const page = (over: Record<string, unknown> = {}) => ({
+      data: { orders: { nodes: [rawOrder()], pageInfo: { hasNextPage: false, endCursor: null } } },
+      ...over,
+    });
+    const run = (fetchImpl: ReturnType<typeof vi.fn>, sleep: ReturnType<typeof vi.fn>) =>
+      fetchShopifyOrdersWindow(
+        {
+          storeId: 7,
+          organizationId: 42,
+          shopDomain: "merchant.myshopify.com",
+          from: new Date("2026-09-20T10:00:00Z"),
+          to: new Date("2026-09-20T11:00:00Z"),
+        },
+        { getAccessToken: vi.fn(async () => "token"), fetchImpl: fetchImpl as unknown as typeof fetch, sleep },
+      );
+
+    it("should wait out the reported cost deficit and retry the page", async () => {
+      const sleep = vi.fn(async () => {});
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(throttledBody(20)))
+        .mockResolvedValueOnce(jsonResponse(page()));
+
+      const result = await run(fetchImpl, sleep);
+
+      expect(result).toHaveLength(1);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      // (100 needed − 20 available) ÷ 50 restored per second = 1.6s.
+      expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_600]);
+    });
+
+    it("should give up with a THROTTLED code once its attempts are spent", async () => {
+      const sleep = vi.fn(async () => {});
+      const fetchImpl = vi.fn(async () => jsonResponse(throttledBody(0)));
+
+      await expect(run(fetchImpl, sleep)).rejects.toMatchObject({ code: "THROTTLED" });
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
+    });
+
+    it("should still fail at once on a GraphQL error that is not a throttle", async () => {
+      const sleep = vi.fn(async () => {});
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse({ errors: [{ message: "x", extensions: { code: "THROTTLED" } }, { message: "y" }] }),
+      );
+
+      await expect(run(fetchImpl, sleep)).rejects.toMatchObject({ code: "GRAPHQL_ERROR" });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("should pace the next page when the bucket runs low, and not when it is full", async () => {
+      const sleep = vi.fn(async () => {});
+      const withCost = (hasNextPage: boolean, endCursor: string | null, currentlyAvailable: number) =>
+        jsonResponse({
+          data: { orders: { nodes: [rawOrder()], pageInfo: { hasNextPage, endCursor } } },
+          extensions: {
+            cost: { requestedQueryCost: 100, throttleStatus: { maximumAvailable: 1000, currentlyAvailable, restoreRate: 50 } },
+          },
+        });
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(withCost(true, "c1", 900)) // plenty left: no pause
+        .mockResolvedValueOnce(withCost(true, "c2", 10)) // 90 short: 1.8s pause
+        .mockResolvedValueOnce(withCost(false, null, 10)); // last page: nothing to pace
+
+      await run(fetchImpl, sleep);
+
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_800]);
+    });
+  });
+
   it("retries transient network failures only to the capped attempt count", async () => {
     const sleep = vi.fn(async () => {});
     const fetchImpl = vi.fn(async () => {
