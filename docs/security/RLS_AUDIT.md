@@ -21,15 +21,17 @@ enforced at three layers:
 
 ## 2. Classification summary (see the test for the per-table list)
 
+Measured by `server/rlsAudit.test.ts` on 2026-09-22 (106 tables).
+
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 17 | `organizationId NOT NULL` | **The standard for all new tables.** |
-| `tenant_nullable` | 39 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
-| `derived` | 6 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
+| `tenant_required` | 24 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_nullable` | 45 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
+| `derived` | 3 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
 | `mirror_single_tenant` | 13 | `wc_*` Fineract mirror (Woodcore POC) | **Known caveat** — see finding F2. |
-| `global` | 7 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
-| `token` | 4 | random-secret keyed | Entropy-gated, not org-gated. |
+| `global` | 9 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
+| `token` | 5 | random-secret keyed | Entropy-gated, not org-gated. |
 
 ## 3. Findings & remediation plan
 
@@ -101,3 +103,22 @@ justification comment in the classification map and a row in §2/§3 here.
 |---|---|---|
 | `corporate_b2b_pilot_configs` | `tenant_required` | One auditable policy/evidence register per Corporate B2B customer. It records only the customer’s declared no-write scope, source-contract readiness, recovery posture and approval references; it never stores payment authority. |
 | `corporate_b2b_pilot_sources` | `tenant_required` | Metadata-only evidence-source registry. Provider credentials and source-file contents stay in the approved customer-owned ingestion route, never in this table. |
+
+## 7. Shopify public-app connector tables (September 2026, PR #134)
+
+Defined in `drizzle/shopify_schema.ts`, migration `0095`. These tables reached a
+green suite **unaudited** on the PR's first revision: `server/rlsAudit.test.ts`
+read a hand-maintained list of schema modules, and `shopify_schema.ts` was not on
+it, so none of its tables was ever collected — and therefore never reported as
+unclassified. The ratchet now also asserts that every schema file listed in
+`drizzle.config.ts` is audited, so a new schema file cannot repeat this.
+
+| Table | Class | Notes |
+|---|---|---|
+| `shopify_connector_stores` | `tenant_required` | One row per installed Shopify store, owned by the merchant workspace created at install. `statusReason` records why a store left `active` (ownership unverified, refresh rejected, token write failed, uninstalled). |
+| `shopify_connector_tokens` | `tenant_required` | Expiring offline access + refresh tokens, encrypted under the tenant's envelope key. Every write after a refresh is fenced on the row id and `rotationVersion`. |
+| `shopify_sync_cursors` | `tenant_required` | Reserved for the order-led sync phase; written by nothing yet. |
+| `shopify_webhook_events` | `tenant_nullable` | Digest-only delivery ledger. A verified delivery for a shop with no store record is acknowledged and recorded without inventing a tenant. |
+| `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |
+| `shopify_oauth_states` | `token` | Hash-only ledger of CONSUMED OAuth states. States are signed and shop-bound, so a row is written only at the callback, after Shopify's HMAC and our signature verify — the install endpoint writes nothing. The unique `stateHash` enforces single use. |
+| `shopify_install_leases` | `global` | Pre-tenant platform lock serialising installations per shop domain (one authorization-code exchange in flight at a time). Lease id and expiry only; no tenant data. |

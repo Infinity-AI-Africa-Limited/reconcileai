@@ -75,6 +75,7 @@ import MagicLogin from "./pages/MagicLogin";
 import Login from "./pages/Login";
 import SuperAdminDashboard from "./pages/SuperAdminDashboard";
 import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
+import { ShopifyWelcome, ShopifyError } from "./pages/ShopifyConnect";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import Support from "./pages/Support";
@@ -316,6 +317,11 @@ function Router() {
           for. CallbackGuard turns away a signed-in OTHER vertical instead. */}
       <Route path="/shopline/welcome">{() => <CallbackGuard component={ShoplineWelcome} />}</Route>
       <Route path="/shopline/error">{() => <CallbackGuard component={ShoplineError} />}</Route>
+      {/* Shopify mirrors the standalone OAuth landing pattern: the initial
+          redirect has no ReconcileAI session, while the welcome page later
+          recognises the emailed merchant administrator session. */}
+      <Route path="/shopify/welcome">{() => <CallbackGuard component={ShopifyWelcome} />}</Route>
+      <Route path="/shopify/error">{() => <CallbackGuard component={ShopifyError} />}</Route>
       <Route path="/privacy" component={Privacy} />
       <Route path="/terms" component={Terms} />
       <Route path="/support" component={Support} />

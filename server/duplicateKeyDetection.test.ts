@@ -232,13 +232,44 @@ describe("no hand-rolled duplicate detection", () => {
    */
   const HAND_ROLLED = [/\/duplicate\/i/, /["'`]Duplicate entry/i, /\bER_DUP_ENTRY\b/, /\berrno\s*===?\s*1062\b/];
 
+  /**
+   * Test-only modules, skipped by the scan below.
+   *
+   * A suite that proves detection works has to RAISE the driver's error, so a
+   * faithful fixture necessarily contains the very spellings this suite
+   * forbids — `code: "ER_DUP_ENTRY"` and the `Duplicate entry …` message. This
+   * file's own `mysqlDuplicateEntry` is one, and it is skipped only because it
+   * is a `.test.ts`. A shared kit doing the same job (the Shopify connector's
+   * `scriptedDb.testkit.ts`) was flagged for it — construction read as
+   * detection, which is the opposite of the mistake this ratchet exists for.
+   *
+   * No pattern can tell the two apart: a fixture is convincing precisely when
+   * it looks like the real thing. So the discriminator is the file's role, and
+   * the exclusion is not taken on trust — "a test kit is imported only by
+   * tests" below proves it, so this cannot become a place to hide a real
+   * detector.
+   */
+  const TEST_ONLY = /\.(test|testkit)\.ts$/;
+
   function sourceFiles(dir: string): string[] {
     return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) return entry.name === "node_modules" ? [] : sourceFiles(full);
-      return /\.ts$/.test(entry.name) && !/\.test\.ts$/.test(entry.name) ? [full] : [];
+      return /\.ts$/.test(entry.name) && !TEST_ONLY.test(entry.name) ? [full] : [];
     });
   }
+
+  /** Every .ts under `dir`, tests and kits included. */
+  function everyTsFile(dir: string): string[] {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return entry.name === "node_modules" ? [] : everyTsFile(full);
+      return /\.ts$/.test(entry.name) ? [full] : [];
+    });
+  }
+
+  /** `import … from "./x.testkit"`, `import("./x.testkit")`, `require("./x.testkit")`. */
+  const importsATestKit = (source: string) => /["'][^"']*\.testkit["']/.test(source);
 
   const offendingLines = (source: string) =>
     source.split(/\r?\n/).filter((line) => HAND_ROLLED.some((pattern) => pattern.test(line)));
@@ -263,6 +294,26 @@ describe("no hand-rolled duplicate detection", () => {
     for (const file of Object.keys(AWAITING_FIX)) {
       expect(offendingLines(fs.readFileSync(file, "utf8")), `${file} no longer offends — remove it from AWAITING_FIX`).not.toEqual([]);
     }
+  });
+
+  it("should keep a test kit out of production, so skipping it hides nothing", () => {
+    // The scan above trusts `.testkit.ts` to be test-only. That is worth
+    // nothing unless it is true, so it is checked rather than assumed: the
+    // moment production code imports one, this fails and the exclusion is
+    // no longer a place a real detector could sit unseen.
+    const offenders = everyTsFile("server")
+      .filter((file) => !TEST_ONLY.test(path.basename(file)))
+      .filter((file) => importsATestKit(fs.readFileSync(file, "utf8")))
+      .map(normalise);
+    expect(offenders, "A .testkit.ts is test-only; production code must not import one").toEqual([]);
+  });
+
+  it("should see a test kit imported from production, so the check above cannot pass vacuously", () => {
+    expect(importsATestKit('import { scriptedDb } from "./scriptedDb.testkit";')).toBe(true);
+    expect(importsATestKit('const kit = await import("../connectors/shopify/scriptedDb.testkit");')).toBe(true);
+    expect(importsATestKit('import { getDb } from "./db";')).toBe(false);
+    // And there is a kit to find, or the exclusion is guarding nothing.
+    expect(everyTsFile("server").filter((f) => /\.testkit\.ts$/.test(f)).length).toBeGreaterThan(0);
   });
 
   it("should recognise each spelling it forbids, so the check above cannot pass vacuously", () => {
