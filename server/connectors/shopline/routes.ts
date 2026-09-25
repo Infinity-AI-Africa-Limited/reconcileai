@@ -17,6 +17,7 @@ import { Router as createRouter } from "express";
 import { createHmac } from "crypto";
 import { parse as parseUrl } from "url";
 import { ENV } from "../../_core/env";
+import { appOriginFor } from "../../_core/clientIp";
 import {
   buildAuthorizationUrl,
   verifyCallbackSignature,
@@ -193,10 +194,11 @@ export function createShoplineRouter(): Router {
         return res.status(403).json({ error: "Invalid signature" });
       }
 
-      // Build the callback URL using the request's origin
-      const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-      const host = req.headers["x-forwarded-host"] || req.get("host");
-      const callbackUrl = `${protocol}://${host}/api/shopline/callback`;
+      // The callback URL must equal what is registered in the Partner Portal.
+      // Built from APP_URL rather than request headers: `x-forwarded-proto`
+      // can arrive as a LIST ("https,https") — which produced the malformed
+      // `https,https://host` — and `x-forwarded-host` is caller-supplied.
+      const callbackUrl = `${appOriginFor(req)}/api/shopline/callback`;
 
       // Generate CSRF state token
       const state = `${handle}:${Date.now()}`;
@@ -284,17 +286,14 @@ export function createShoplineRouter(): Router {
           });
       }
 
-      // Redirect to the ReconcileAI dashboard with success indicator
-      const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-      const host = req.headers["x-forwarded-host"] || req.get("host");
-      const dashboardUrl = `${protocol}://${host}/shopline/welcome?org=${result.organizationCode}&reconnect=${result.isReconnection}`;
+      // Same origin policy as the callback: a redirect built from
+      // `x-forwarded-host` would send the merchant wherever the caller asked.
+      const dashboardUrl = `${appOriginFor(req)}/shopline/welcome?org=${result.organizationCode}&reconnect=${result.isReconnection}`;
 
       return res.redirect(302, dashboardUrl);
     } catch (err) {
       console.error("[shopline-callback] error:", err);
-      const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-      const host = req.headers["x-forwarded-host"] || req.get("host");
-      return res.redirect(302, `${protocol}://${host}/shopline/error?reason=install_failed`);
+      return res.redirect(302, `${appOriginFor(req)}/shopline/error?reason=install_failed`);
     }
   });
 
