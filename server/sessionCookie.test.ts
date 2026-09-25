@@ -8,6 +8,9 @@
  * otherwise unguarded: reverting it broke no test at all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Request } from "express";
+// Type-only, so it is erased: the module itself is imported fresh per case below.
+import type { ProxiedRequest } from "./_core/clientIp";
 
 const KEYS = ["TRUSTED_PROXY_HOPS", "NODE_ENV"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -22,12 +25,18 @@ afterEach(() => {
   }
 });
 
-async function cookieOptionsFor(req: any, hops = "2") {
+/**
+ * `getSessionCookieOptions` is typed with Express's full `Request`, but reads
+ * only the proxy-facing slice of it — the part `ProxiedRequest` describes. The
+ * fixture is typed as that slice, and widened once, here, rather than being
+ * `any` everywhere it is built.
+ */
+async function cookieOptionsFor(req: ProxiedRequest, hops = "2") {
   vi.resetModules();
   process.env.NODE_ENV = "production";
   process.env.TRUSTED_PROXY_HOPS = hops;
   const { getSessionCookieOptions } = await import("./_core/cookies");
-  return getSessionCookieOptions(req);
+  return getSessionCookieOptions(req as unknown as Request);
 }
 
 const request = (headers: Record<string, string | string[]> = {}, protocol = "http") => ({

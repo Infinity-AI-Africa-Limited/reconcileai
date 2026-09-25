@@ -18,6 +18,7 @@ export const SHOPIFY_ORDER_TRIGGER_TOPICS = new Set([
   "orders/paid",
   "orders/cancelled",
   "orders/edited",
+  "orders/updated",
 ]);
 
 /** Deliveries already handled; a redelivery of one is acknowledged without being re-applied. */
