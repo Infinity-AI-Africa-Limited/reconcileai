@@ -163,8 +163,8 @@ export type ShopifyWebhookEvent = typeof shopifyWebhookEvents.$inferSelect;
 
 /**
  * Minimal, non-identifying evidence for Shopify's required privacy requests.
- * Subject values are hashed at admission; raw customer email, phone, address and
- * order payloads are never written to this ledger.
+ * Raw customer email, phone, address, selector IDs and order payloads are never
+ * written to this parent ledger.
  */
 export const shopifyPrivacyRequests = mysqlTable(
   "shopify_privacy_requests",
@@ -175,9 +175,11 @@ export const shopifyPrivacyRequests = mysqlTable(
     topic: mysqlEnum("topic", ["customers/data_request", "customers/redact", "shop/redact"]).notNull(),
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     subjectHash: varchar("subjectHash", { length: 64 }),
-    status: mysqlEnum("status", ["received", "completed", "blocked_legal_retention", "failed"])
+    status: mysqlEnum("status", ["received", "manual_review", "completed", "blocked_legal_retention", "failed"])
       .default("received")
       .notNull(),
+    /** Bounded validation code only; never a payload value or free-form provider error. */
+    admissionErrorCode: varchar("admissionErrorCode", { length: 80 }),
     recordsAffected: int("recordsAffected").default(0).notNull(),
     completionNote: text("completionNote"),
     receivedAt: timestamp("receivedAt").defaultNow().notNull(),
@@ -190,6 +192,32 @@ export const shopifyPrivacyRequests = mysqlTable(
   ],
 );
 export type ShopifyPrivacyRequest = typeof shopifyPrivacyRequests.$inferSelect;
+
+/**
+ * Fulfilment selectors for customer privacy topics. Provider identifiers are
+ * retained only as tenant-encrypted ciphertext plus a versioned tenant-keyed
+ * blind index. `position` preserves Shopify's order-selector sequence while the
+ * unique request/type/position tuple makes a redelivery safe to replay.
+ */
+export const shopifyPrivacyRequestSelectors = mysqlTable(
+  "shopify_privacy_request_selectors",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    requestId: int("requestId").notNull(),
+    organizationId: int("organizationId").notNull(),
+    resourceType: mysqlEnum("resourceType", ["customer", "order"]).notNull(),
+    position: int("position").notNull(),
+    externalIdEnc: text("externalIdEnc").notNull(),
+    externalIdHmac: varchar("externalIdHmac", { length: 80 }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_shopify_privacy_selector_position").on(t.requestId, t.resourceType, t.position),
+    index("idx_shopify_privacy_selector_org_request").on(t.organizationId, t.requestId),
+    index("idx_shopify_privacy_selector_lookup").on(t.organizationId, t.resourceType, t.externalIdHmac),
+  ],
+);
+export type ShopifyPrivacyRequestSelector = typeof shopifyPrivacyRequestSelectors.$inferSelect;
 
 /**
  * Durable, short-lived admission record for a `shop/redact` request. It exists

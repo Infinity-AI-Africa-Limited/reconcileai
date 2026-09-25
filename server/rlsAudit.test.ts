@@ -211,6 +211,9 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // without inventing a tenant, so organizationId is nullable by design.
   shopify_webhook_events: "tenant_nullable",
   shopify_privacy_requests: "tenant_nullable",
+  // Encrypted provider selectors exist only for a resolved store and carry the
+  // owning org directly; blind-index lookups are always org-scoped.
+  shopify_privacy_request_selectors: "tenant_required",
   // Transient redaction jobs carry organizationId NOT NULL while the provider
   // request is being processed; completed jobs are removed or de-identified.
   shopify_shop_redaction_jobs: "tenant_required",
