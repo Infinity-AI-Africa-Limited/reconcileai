@@ -6,6 +6,7 @@ import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { resolveOrgScope } from "../_core/tenancy";
 import { canActOnTenant } from "./shared";
+import { runShopifyOrderSync } from "../connectors/shopify/syncOrchestrator";
 
 /**
  * The merchant-safe view of a store. Tokens live in another table and never
@@ -52,5 +53,33 @@ export const shopifyConnectorRouter = router({
         .from(shopifyConnectorStores)
         .where(eq(shopifyConnectorStores.organizationId, organizationId))
         .orderBy(desc(shopifyConnectorStores.createdAt));
+    }),
+
+  /**
+   * Starts a merchant-authorised read-only order evidence sync. It does not
+   * mutate Shopify and it intentionally stays admin-gated because it writes
+   * only the caller's tenant reconciliation workspace.
+   */
+  syncOrdersNow: protectedProcedure
+    .input(z.object({ storeId: z.number().int().positive(), organizationId: z.number().int().positive().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      if (ctx.user.role !== "admin" && ctx.user.role !== "super_admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Administrator access is required to start a Shopify sync" });
+      }
+      const organizationId = resolveOrgScope(ctx.user, input.organizationId);
+      if (!canActOnTenant(ctx.user, organizationId)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Leave this organisation's portal to sync another" });
+      }
+      try {
+        return await runShopifyOrderSync({
+          storeId: input.storeId,
+          organizationId,
+          trigger: "manual",
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Shopify order sync could not start";
+        console.error("[shopify-sync] manual order sync failed", { organizationId, storeId: input.storeId, message });
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Shopify order sync could not complete. Reconnect the store or contact support." });
+      }
     }),
 });

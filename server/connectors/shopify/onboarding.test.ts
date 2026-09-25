@@ -43,6 +43,7 @@ const STORES = "shopify_connector_stores";
 const TOKENS = "shopify_connector_tokens";
 const USERS = "users";
 const ORGS = "organizations";
+const CHANNELS = "channels";
 
 const metadata = {
   id: SHOP_ID,
@@ -77,7 +78,14 @@ const LEASE = { shopDomain: SHOP, leaseId: "lease-1" };
 
 /** A database in which this callback still holds the shop's lease (a standing answer). */
 const held = (script: Parameters<typeof scriptedDb>[0] = {}) =>
-  scriptedDb({ ...script, standing: { [LEASES]: [{ leaseId: LEASE.leaseId }], ...script.standing } });
+  scriptedDb({
+    ...script,
+    standing: {
+      [LEASES]: [{ leaseId: LEASE.leaseId }],
+      [CHANNELS]: [{ id: 77 }],
+      ...script.standing,
+    },
+  });
 
 const onboardFirst = () =>
   onboardShopifyMerchant({

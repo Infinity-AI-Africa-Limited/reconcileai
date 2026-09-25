@@ -200,6 +200,13 @@ export const transactions = mysqlTable("transactions", {
   channelId: int("channelId").notNull(),
   userId: int("userId").notNull(),
   organizationId: int("organizationId"),
+  /**
+   * Internal Shopify store owner for a field-minimised order row. NULL for every
+   * other ingestion path. Together with organizationId + transactionRef this is
+   * the connector-specific idempotency key; nullable legacy/non-Shopify rows are
+   * deliberately unaffected by the unique index below.
+   */
+  shopifyStoreId: int("shopifyStoreId"),
   transactionRef: varchar("transactionRef", { length: 255 }),
   externalRef: varchar("externalRef", { length: 255 }),
   description: text("description"),
@@ -207,6 +214,11 @@ export const transactions = mysqlTable("transactions", {
   currency: varchar("currency", { length: 3 }).default("NGN").notNull(),
   transactionDate: timestamp("transactionDate").notNull(),
   valueDate: timestamp("valueDate"),
+  /** Minimal Shopify lifecycle evidence; never a raw provider payload. */
+  shopifyOrderCurrency: varchar("shopifyOrderCurrency", { length: 3 }),
+  shopifyUpdatedAt: timestamp("shopifyUpdatedAt"),
+  shopifyFinancialStatus: varchar("shopifyFinancialStatus", { length: 64 }),
+  shopifyCancelledAt: timestamp("shopifyCancelledAt"),
   debitCredit: mysqlEnum("debitCredit", ["debit", "credit"]).notNull(),
   counterparty: varchar("counterparty", { length: 255 }),
   // Reversal tracking
@@ -227,6 +239,11 @@ export const transactions = mysqlTable("transactions", {
   index("idx_txn_ext_ref").on(table.externalRef),
   index("idx_txn_status").on(table.status),
   index("idx_txn_match").on(table.matchId),
+  uniqueIndex("uq_txn_shopify_order").on(
+    table.organizationId,
+    table.shopifyStoreId,
+    table.transactionRef,
+  ),
   // Composite index for reconciliation queries
   index("idx_txn_channel_date_status").on(table.channelId, table.transactionDate, table.status),
   // Composite index for duplicate detection

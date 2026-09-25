@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { and, eq, or, sql } from "drizzle-orm";
-import { organizations, users } from "../../../drizzle/schema";
+import { channels, organizations, users } from "../../../drizzle/schema";
 import {
   SHOPIFY_API_VERSION,
   SHOPIFY_ORDER_LED_SCOPES,
@@ -9,7 +9,7 @@ import {
   type ShopifyConnectorStore,
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
-import { createAuditLog, getDb, type DbTransaction } from "../../db";
+import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
 import { isDuplicateKeyError } from "../../dbErrors";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { sha256, type ShopifyTokenResponse } from "./auth";
@@ -38,6 +38,7 @@ export interface ShopifyOnboardingResult {
   organizationId: number;
   organizationCode: string;
   connectedUserId: number;
+  ordersChannelId: number;
   isReinstallation: boolean;
   welcomeEmailSent: boolean;
 }
@@ -87,6 +88,43 @@ const ORGANIZATION_NAME_MAX = 255;
 /** Deterministic, non-identifying tenant code; a shop's display name is not a safe key. */
 export function deriveShopifyOrganizationCode(shopDomain: string): string {
   return `SHP_${sha256(shopDomain).slice(0, 14).toUpperCase()}`;
+}
+
+export function shopifyOrdersChannelCode(storeId: number): string {
+  return `shopify_orders_${storeId}`;
+}
+
+async function provisionShopifyOrdersChannel(
+  db: DbExecutor,
+  store: { id: number; organizationId: number; displayName: string; currency: string | null },
+): Promise<number> {
+  const code = shopifyOrdersChannelCode(store.id);
+  await db
+    .insert(channels)
+    .values({
+      organizationId: store.organizationId,
+      name: `Shopify Orders — ${store.displayName}`.slice(0, 100),
+      code,
+      description: "Field-minimised Shopify financial order data",
+      channelType: "ecommerce_gateway",
+      country: "GLB",
+      defaultCurrency: (store.currency ?? "USD").slice(0, 3),
+      matchingConfig: {
+        provider: "shopify",
+        resource: "orders",
+        refFormat: "shopify_order_gid",
+        readOnly: true,
+      },
+      isActive: true,
+    })
+    .onDuplicateKeyUpdate({ set: { code: sql`${channels.code}` } });
+  const [channel] = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(and(eq(channels.organizationId, store.organizationId), eq(channels.code, code)))
+    .limit(1);
+  if (!channel) throw new ShopifyOnboardingError("Could not provision Shopify orders channel", "DB_UNAVAILABLE");
+  return channel.id;
 }
 
 function validEmail(value: string): boolean {
@@ -287,9 +325,10 @@ async function reauthorizeExistingStore(
     );
   }
 
+  let ordersChannelId = 0;
   try {
     const tokens = await encryptShopifyTokens(store.organizationId, params.tokenResponse);
-    await db.transaction(async (tx) => {
+    ordersChannelId = await db.transaction(async (tx) => {
       await assertLeaseHeld(tx, params.lease);
       // Store state, credentials and the record of both commit together. The
       // store becomes `active` only in the same commit that stores the pair it
@@ -321,6 +360,12 @@ async function reauthorizeExistingStore(
       );
       if (updated !== 1) throw new Error(`Shopify store ${store.id} was not updated (affected ${updated})`);
       await writeShopifyTokens(tx, { storeId: store.id, organizationId: store.organizationId, tokens });
+      const channelId = await provisionShopifyOrdersChannel(tx, {
+        id: store.id,
+        organizationId: store.organizationId,
+        displayName: params.metadata.name,
+        currency: params.metadata.currencyCode,
+      });
       await createAuditLog(
         {
           organizationId: store.organizationId,
@@ -332,6 +377,7 @@ async function reauthorizeExistingStore(
         },
         tx,
       );
+      return channelId;
     });
   } catch (error) {
     if (isLeaseLost(error)) throw error;
@@ -353,6 +399,7 @@ async function reauthorizeExistingStore(
     organizationId: store.organizationId,
     organizationCode: organization?.code ?? "",
     connectedUserId: admin.id,
+    ordersChannelId,
     isReinstallation: true,
     welcomeEmailSent: false,
   };
@@ -377,7 +424,7 @@ async function createMerchantWorkspace(
   //    stored, so a crash between the two steps leaves a store that truthfully
   //    says it is not connected, and the merchant's retry completes it through
   //    the reauthorization path.
-  const { organizationId, userId, storeId } = await db.transaction(async (tx) => {
+  const { organizationId, userId, storeId, ordersChannelId } = await db.transaction(async (tx) => {
     await assertLeaseHeld(tx, params.lease);
     const orgResult = await tx.insert(organizations).values({
       name: params.metadata.name.slice(0, ORGANIZATION_NAME_MAX),
@@ -422,6 +469,13 @@ async function createMerchantWorkspace(
     const storeId = Number((storeResult as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
     if (!storeId) throw new ShopifyOnboardingError("Could not create Shopify store record", "DB_UNAVAILABLE");
 
+    const ordersChannelId = await provisionShopifyOrdersChannel(tx, {
+      id: storeId,
+      organizationId,
+      displayName: params.metadata.name,
+      currency: params.metadata.currencyCode,
+    });
+
     await createAuditLog(
       {
         organizationId,
@@ -430,10 +484,10 @@ async function createMerchantWorkspace(
         entityType: "shopify_store",
         entityId: storeId,
         details: { shopDomain: params.shopDomain, provider: "shopify" },
-      },
-      tx,
-    );
-    return { organizationId, userId, storeId };
+        },
+        tx,
+      );
+    return { organizationId, userId, storeId, ordersChannelId };
   });
 
   // 2) Tenant baseline — the same step every other organisation-creation path
@@ -499,10 +553,18 @@ async function createMerchantWorkspace(
       storeId,
       organizationId,
       message: error instanceof Error ? error.message : String(error),
-    });
+      });
   }
 
-  return { storeId, organizationId, organizationCode, connectedUserId: userId, isReinstallation: false, welcomeEmailSent };
+  return {
+    storeId,
+    organizationId,
+    organizationCode,
+    connectedUserId: userId,
+    ordersChannelId,
+    isReinstallation: false,
+    welcomeEmailSent,
+  };
 }
 
 /**

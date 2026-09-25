@@ -9,8 +9,15 @@ import {
 import { ENV } from "../../_core/env";
 import { createAuditLog, getDb } from "../../db";
 import { normalizeShopDomain, sha256, verifyShopifyWebhookHmac } from "./auth";
+import { enqueueShopifyWebhookSync } from "./syncOrchestrator";
 
 const PRIVACY_TOPICS = new Set(["customers/data_request", "customers/redact", "shop/redact"]);
+export const SHOPIFY_ORDER_TRIGGER_TOPICS = new Set([
+  "orders/create",
+  "orders/paid",
+  "orders/cancelled",
+  "orders/edited",
+]);
 
 /** Deliveries already handled; a redelivery of one is acknowledged without being re-applied. */
 const SETTLED_STATUSES = new Set(["processed", "ignored"]);
@@ -215,15 +222,43 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       return res.status(200).json({ received: true, status: "queued_for_privacy_control" });
     }
 
-    // The order-led sync processor will claim only allowlisted order events in
-    // the next phase. The foundation records all verified deliveries — left
-    // `received` for that processor — without using them to mutate
-    // reconciliation data prematurely.
+    if (SHOPIFY_ORDER_TRIGGER_TOPICS.has(topic)) {
+      // The webhook body is a trigger only. No order/customer field is projected
+      // from it; the worker re-reads the authoritative minimal record via Admin
+      // GraphQL. enqueueShopifyWebhookSync requires BullMQ, so a successful return
+      // proves durable admission. If Redis is unavailable, the catch below marks
+      // this receipt failed and answers 503 for Shopify to retry — never 2xx on a
+      // volatile in-process promise.
+      await enqueueShopifyWebhookSync({
+        storeId: store.id,
+        organizationId: store.organizationId,
+        webhookId,
+      });
+      await db
+        .update(shopifyConnectorStores)
+        .set({ lastWebhookAt: new Date() })
+        .where(
+          and(
+            eq(shopifyConnectorStores.id, store.id),
+            eq(shopifyConnectorStores.organizationId, store.organizationId),
+          ),
+        );
+      return res.status(200).json({ received: true, status: "queued_for_order_sync" });
+    }
+
+    // Verified, but not a topic this bounded connector is allowed to act on.
+    // Settle it as ignored rather than leaving an unclaimable receipt pending.
     await db
       .update(shopifyConnectorStores)
       .set({ lastWebhookAt: new Date() })
-      .where(eq(shopifyConnectorStores.id, store.id));
-    return res.status(200).json({ received: true, status: "recorded" });
+      .where(
+        and(
+          eq(shopifyConnectorStores.id, store.id),
+          eq(shopifyConnectorStores.organizationId, store.organizationId),
+        ),
+      );
+    await settle("ignored", "topic_not_allowlisted");
+    return res.status(200).json({ received: true, status: "ignored_topic" });
   } catch (error) {
     console.error("[shopify-webhook] processing failed", {
       topic,

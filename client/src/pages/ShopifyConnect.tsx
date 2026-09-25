@@ -1,5 +1,5 @@
 import { useLocation, useSearch } from "wouter";
-import { CheckCircle2, ChevronRight, Mail, ShieldCheck, TriangleAlert } from "lucide-react";
+import { CheckCircle2, ChevronRight, LoaderCircle, Mail, ShieldCheck, TriangleAlert } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ export function ShopifyWelcome() {
     retry: false,
     refetchOnWindowFocus: false,
   });
+  const syncOrders = trpc.shopifyConnector.syncOrdersNow.useMutation();
   const store = connection.data?.find((item) => item.shopDomain === shop);
 
   if (loading) {
@@ -68,14 +69,36 @@ export function ShopifyWelcome() {
       </div>
       <CardTitle className="text-2xl text-[#1B365D]">Administrator account confirmed</CardTitle>
       <CardDescription className="text-base leading-relaxed">{connectionText}</CardDescription>
-      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-left text-sm text-amber-950">
-        <div className="flex gap-3">
-          <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
-          <p><strong>Development foundation:</strong> this release secures the install, token lifecycle and privacy-webhook boundary. The next reviewed release enables the order-led sync and reconciliation workspace; it is not yet a production App Store submission.</p>
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-left text-sm text-amber-950">
+          <div className="flex gap-3">
+            <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
+          <p><strong>Development release:</strong> use the first read-only order sync below to retrieve the most recent 24-hour order window. ReconcileAI does not change Shopify orders, payments, refunds or settings. App Store submission remains subject to separate privacy-completion, developer-store and reviewer-evidence gates.</p>
+          </div>
         </div>
-      </div>
-      <Button className="w-full bg-[#1B365D] hover:bg-[#102A43]" onClick={() => navigate("/settlement-monitor")}>
-        Open ReconcileAI workspace <ChevronRight className="ml-2 h-4 w-4" />
+        {store?.status === "active" ? (
+          <div className="space-y-2">
+            <Button
+              className="w-full bg-[#F47458] hover:bg-[#dd5e45]"
+              disabled={syncOrders.isPending}
+              onClick={() => syncOrders.mutate({ storeId: store.id })}
+            >
+              {syncOrders.isPending ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Sync recent Shopify order evidence
+            </Button>
+            {syncOrders.isSuccess ? (
+              <p className="rounded-md bg-emerald-50 p-3 text-center text-sm text-emerald-800">
+                Sync complete: {syncOrders.data.inserted} new, {syncOrders.data.updated} updated and {syncOrders.data.unchanged} unchanged order record(s).
+              </p>
+            ) : null}
+            {syncOrders.isError ? (
+              <p className="rounded-md bg-red-50 p-3 text-center text-sm text-red-800">
+                The order sync could not complete. Reconnect the Shopify store or contact support.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        <Button className="w-full bg-[#1B365D] hover:bg-[#102A43]" onClick={() => navigate("/settlement-monitor")}>
+          Open ReconcileAI workspace <ChevronRight className="ml-2 h-4 w-4" />
       </Button>
     </Shell>
   );

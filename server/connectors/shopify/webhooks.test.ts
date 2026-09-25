@@ -4,7 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
-const state = vi.hoisted(() => ({ db: null as unknown, secret: "whsec" }));
+const state = vi.hoisted(() => ({
+  db: null as unknown,
+  secret: "whsec",
+  enqueue: vi.fn(async () => {}),
+}));
 
 vi.mock("../../db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../db")>()),
@@ -18,6 +22,9 @@ vi.mock("../../_core/env", async (importOriginal) => {
     ENV: new Proxy(mod.ENV, { get: (target, key) => (key === "shopifyClientSecret" ? state.secret : Reflect.get(target, key)) }),
   };
 });
+vi.mock("./syncOrchestrator", () => ({
+  enqueueShopifyWebhookSync: (...args: unknown[]) => state.enqueue(...args),
+}));
 
 import type express from "express";
 import { declaredShopDomain, handleShopifyWebhook, isStaleUninstall } from "./webhooks";
@@ -58,6 +65,7 @@ function delivery(topic: string, body: object, headers: Record<string, string> =
 beforeEach(() => {
   vi.clearAllMocks();
   state.secret = "whsec";
+  state.enqueue.mockResolvedValue(undefined);
 });
 
 describe("when the database fails mid-delivery", () => {
@@ -108,6 +116,42 @@ describe("when an app/uninstalled delivery arrives", () => {
     const res = await run();
     expect(res.body).toMatchObject({ status: "duplicate" });
     expect(fake.writes("delete", TOKENS)).toEqual([]);
+  });
+});
+
+describe("when a verified order event arrives", () => {
+  it("should durably enqueue only an allowlisted topic and leave the receipt unsettled for the worker", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    state.db = fake.db;
+
+    const res = await delivery("orders/paid", { id: 1001 }).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ status: "queued_for_order_sync" });
+    expect(state.enqueue).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, webhookId: "wh-orders/paid" });
+    expect(fake.writes("update", EVENTS)).toEqual([]);
+  });
+
+  it("should answer 503 and mark failed when durable enqueue is unavailable", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    state.db = fake.db;
+    state.enqueue.mockRejectedValueOnce(new Error("Redis unavailable"));
+
+    const res = await delivery("orders/edited", { id: 1001 }).run();
+
+    expect(res.statusCode).toBe(503);
+    expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "failed", errorCode: "processing_error" });
+  });
+
+  it("should settle a verified non-allowlisted topic as ignored without enqueueing it", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    state.db = fake.db;
+
+    const res = await delivery("orders/fulfilled", { id: 1001 }).run();
+
+    expect(res.body).toMatchObject({ status: "ignored_topic" });
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "ignored", errorCode: "topic_not_allowlisted" });
   });
 });
 
