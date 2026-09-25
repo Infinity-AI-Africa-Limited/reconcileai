@@ -79,6 +79,9 @@ export const ENV = {
   // Shared secret guarding maintenance/cron endpoints (e.g. Woodcore mirror sync).
   // Falls back to JWT_SECRET when unset, so no extra var is strictly required.
   cronSecret: process.env.CRON_SECRET ?? "",
+  // Shared secret the CDN injects so the origin can tell edge traffic from a
+  // direct hit on the platform hostname. Unset = the check is inert.
+  cloudflareOriginSecret: cleanSecret(process.env.CLOUDFLARE_ORIGIN_SECRET),
   // Bank deployments set this to true. Reconciliation work then refuses to run
   // unless BullMQ/Redis is available; an in-memory retry queue is not evidence
   // of durable financial-operations processing.

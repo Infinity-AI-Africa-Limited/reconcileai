@@ -28,6 +28,7 @@ import {
   canActOnTenant,
   runOwner,
   requireOwnedChannels,
+  auditTenant,
 } from "./shared";
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
@@ -403,7 +404,9 @@ export const reconciliationRouter = router({
       });
       // Audit: log data access event
       const { ip, ua } = getClientInfo(ctx);
-      await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua);
+      // The job's tenant: staff outside a portal may open any tenant's job.
+      await logAudit(ctx.user.id, "view_reconciliation_job", "reconciliation_job", input.id, { jobName: job.name }, ip, ua,
+        auditTenant(job.organizationId));
       return { job, matches: jobMatches, exceptions: jobExceptions };
     }),
 });

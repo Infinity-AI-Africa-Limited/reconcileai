@@ -1565,6 +1565,18 @@ export async function createReport(data: InsertReconciliationReport) {
 }
 
 /** Saved reports for ONE organization. See getUploadBatches for the history. */
+/**
+ * One report by id — ANY tenant's. The caller decides access from the row's own
+ * `organizationId` (routers/shared.ts, assertReportVisible), never by assuming
+ * the row is theirs. Returns undefined when there is no such report.
+ */
+export async function getReportById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const [row] = await db.select().from(reconciliationReports).where(eq(reconciliationReports.id, id)).limit(1);
+  return row;
+}
+
 export async function getReports(organizationId: number | null) {
   const db = await getDb();
   if (!db) return [];

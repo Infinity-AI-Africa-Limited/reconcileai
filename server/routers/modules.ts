@@ -183,11 +183,13 @@ export const modulesRouter = router({
           setByUserId: ctx.user.id,
         });
       }
+      // Names the tenant whose modules the operator forced — a platform
+      // procedure's record would otherwise join the global chain.
       await logAudit(ctx.user.id, "set_org_module_override", "module_override", input.organizationId, {
         moduleType: input.moduleType,
         isEnabled: input.isEnabled,
         reason: input.reason,
-      }, ip, ua);
+      }, ip, ua, input.organizationId);
       return { success: true };
     }),
 
@@ -209,7 +211,7 @@ export const modulesRouter = router({
         ));
       await logAudit(ctx.user.id, "clear_org_module_override", "module_override", input.organizationId, {
         moduleType: input.moduleType,
-      }, ip, ua);
+      }, ip, ua, input.organizationId);
       return { success: true };
     }),
 });

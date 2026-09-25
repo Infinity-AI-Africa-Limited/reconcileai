@@ -29,9 +29,12 @@ const defaults: Record<string, Omit<z.infer<typeof briefInput>, "organizationId"
 };
 
 async function load(user: { role: string; organizationId?: number | null }, requested?: number) {
+  // Scope before the connection, so a refusal never depends on the database
+  // being up (a cross-tenant attempt during an outage would otherwise answer
+  // INTERNAL_SERVER_ERROR rather than FORBIDDEN).
+  const organizationId = resolveOrgScope(user, requested);
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-  const organizationId = resolveOrgScope(user, requested);
   const [org] = await db.select({ segment: organizations.segment }).from(organizations).where(eq(organizations.id, organizationId)).limit(1);
   if (!org || org.segment === "super_admin") throw new TRPCError({ code: "FORBIDDEN", message: "Control Fit Briefs are available only inside a client portal." });
   const [brief] = await db.select().from(controlFitBriefs).where(eq(controlFitBriefs.organizationId, organizationId)).limit(1);

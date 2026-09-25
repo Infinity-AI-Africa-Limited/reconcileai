@@ -1016,8 +1016,8 @@ organisation (never the operator's own). `ctx.actor` is the signed-in account
 (`auth.me` returns it); `ctx.viewingAs` is the tenant. So every procedure that
 keys on the caller's organisation — reads AND writes — follows the portal
 without passing `viewAsOrgId`. Audit entries written without an explicit
-organisation default to the portal tenant (`server/_core/requestScope.ts`).
-The monitoring SSE stream takes the same id as `?portalOrg=`. Reads that widen
+organisation default to the tenant the request acts for (see "Where an audit
+record lands" below). The monitoring SSE stream takes the same id as `?portalOrg=`. Reads that widen
 to "all tenants" by ROLE (e.g. `channelListScope`) must also take `ctx.viewingAs`.
 The React Query cache is reset on entering/leaving a portal (keys carry no tenant).
 
@@ -1040,6 +1040,30 @@ about the portal too.** Two rules follow, both found by review on PR #141:
   Events about the account rather than a tenant (sign-out, personal email
   preferences, super-admin grants, moving a user between organisations) pass an
   explicit `null`.
+
+**Where an audit record lands (since 2026-09-22).** A tenant's Audit Trail,
+export and chain verification read `organizationId = tenant` exactly, so a
+record in the global chain (`null`) is invisible to every tenant. `logAudit`'s
+omitted `organizationId` defaults to the request scope's `auditOrganizationId`
+(`auditOrganizationFor` in `server/_core/requestScope.ts`) — a **separate field**
+from the portal, because the by-id gates must keep reading "no portal" for staff:
+
+| Caller | Default chain |
+|---|---|
+| Tenant user | their own organisation (`isTenantId` — org 0 / none → global) |
+| Staff inside a portal | the tenant on screen |
+| Staff outside a portal, `superAdminProcedure`, unauthenticated, no tRPC call | global |
+
+The default only knows who is asking, not whose row was touched. So a call site
+**names the row's own tenant** (`auditTenant(row.organizationId)`) wherever staff
+can reach another tenant's row from outside a portal — user management (the
+tenant from `assertCanManageUsers`'s returned map), organisation settings and
+module overrides (`input.organizationId`), job export/view/report/email (the
+job's tenant) — and for work outside a request (`complete_reconciliation` runs on
+the job queue; its trail must not depend on the queue backend). The storage
+proxy files allowed access under the object's tenant and denied access globally.
+Until 2026-09-22 the default was the portal alone, so a bank's own staff
+resolving exceptions or approving matches never appeared in the bank's trail.
 
 ### Segment-Specific Navigation
 - `financialServicesMenuItems` — includes CBN Reports, Multi-Channel, Email Settings, Module Configuration
@@ -1184,6 +1208,42 @@ segment".** An org whose segment is unset keeps its capability. A caller with no
 organisation at all is refused — otherwise every such account pools into one shared
 pseudo-tenant (22 accounts currently have no organisation). Ask this question of
 every tenant-scoped guard.
+
+### A row named by id is gated on the row's OWN tenant (since 2026-09-22)
+
+A write, or a read, that takes a row id from the caller must be tenant-scoped in
+ONE of two ways — what is forbidden is the id alone:
+
+1. **Scoped to the caller's organisation** in the WHERE (`requireOrg(ctx)`, the
+   org-scoped db functions, the whole exceptions router). Inside a portal
+   `ctx.user.organizationId` IS the tenant on screen (§6), so this follows the
+   portal; staff outside a portal reach only their own organisation's rows —
+   deliberately, for tenant data they should change from inside that portal.
+2. **Gated on the row's own tenant** — load it, `assertRowVisible(user, row,
+   notFound)` / `assertReportVisible` / `assertJobVisible` in
+   `server/routers/shared.ts` (all `canActOnTenant`, so staff outside a portal
+   may reach any tenant) — and carry that tenant into the write's WHERE.
+
+Six procedures acted by id alone and were
+fixed together: resolution template update/delete, share-link revoke, the Super
+Agent memory's exception read, `exceptions.checkStaleness` (read AND write), and
+the POC router's exception review, run exceptions, run uploads, share link and
+saved-file run. **`byIdTenantGates.test.ts` ratchets it:** any `.update()` /
+`.delete()` in a router whose WHERE names the row by a caller's id
+(`eq`/`inArray(<t>.id, input.<x>)`, however wrapped) and carries no tenant
+(`organizationId`, `orgFilter(`, `requireOrg(`, `pocSlug`) fails CI unless its
+table is in `GATED_ELSEWHERE` with a reason.
+
+- **Shared rows** (`organizationId` NULL — the default resolution templates every
+  tenant is shown) may be changed by **staff outside a portal only**:
+  `canActOnTenant` refuses NULL to everyone else, including staff inside a
+  tenant's portal. A caller with no tenant cannot CREATE one either — they would
+  have written text shown to every tenant.
+- **One answer for missing and for someone else's** (NOT_FOUND, same message), so
+  the response cannot be used to learn which ids exist.
+- **A POC link proves only its slug**: every POC id (exception, run, upload) is
+  looked up WITH `pocSlug`, inside `server/poc-engine.ts` where possible so no
+  caller can forget it.
 
 ---
 

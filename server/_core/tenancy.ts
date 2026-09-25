@@ -12,7 +12,8 @@
  *   - Regular users are hard-locked to their own organizationId. Requesting
  *     another org is FORBIDDEN, full stop.
  *   - super_admin (Infinity AI staff) may pass an explicit organizationId
- *     override (portal context / cross-tenant management).
+ *     override (portal context / cross-tenant management) — inside a
+ *     tenant's portal, only for the tenant on screen.
  *   - A user with no organization gets PRECONDITION_FAILED on org-scoped
  *     calls — dangling accounts never fall through to "no filter".
  *   - Deactivated organizations fail closed at every login path (magic link,
@@ -48,6 +49,14 @@ export function requireOwnOrg(user: TenantActor): number {
  * Resolve which organization a call operates on.
  * Super admins may pass an explicit override; everyone else is locked to
  * their own organization.
+ *
+ * Inside a tenant's portal a super admin's override reaches that tenant alone —
+ * the rule assertSameOrg and canActOnTenant apply to by-id reach (PR #141). The
+ * role does not change in a portal, so the role alone let an override name ANY
+ * tenant: a stale link or stale client state from tenant B, sent from inside A's
+ * portal, would read or write B's data under A's banner. Outside a portal (and
+ * under superAdminProcedure, which runs outside the portal scope) the override
+ * is unrestricted, as before.
  */
 export function resolveOrgScope(user: TenantActor, requestedOrgId?: number): number {
   if (requestedOrgId !== undefined) {
@@ -55,6 +64,13 @@ export function resolveOrgScope(user: TenantActor, requestedOrgId?: number): num
       throw new TRPCError({
         code: "FORBIDDEN",
         message: "Only super admins can act on another organization",
+      });
+    }
+    const portal = currentPortalOrganizationId();
+    if (portal !== null && requestedOrgId !== portal) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "Leave this organisation's portal to act on another organization",
       });
     }
     return requestedOrgId;

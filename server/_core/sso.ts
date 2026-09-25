@@ -30,6 +30,7 @@ import { getDb } from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { assertEgressAllowed } from "./egress";
 import { ENV } from "./env";
+import { appOriginFor, clientIpOrUnknown, requestIsSecure } from "./clientIp";
 import { sdk } from "./sdk";
 import { isOrgLoginAllowed } from "./tenancy";
 
@@ -265,11 +266,10 @@ function jwksFor(url: string) {
 }
 
 // ─── Route handlers ──────────────────────────────────────────────────────────
-function appOrigin(req: Request): string {
-  if (ENV.appUrl) return ENV.appUrl.replace(/\/+$/, "");
-  const host = req.get("host");
-  return `${req.protocol}://${host}`;
-}
+// APP_URL, else Host with the proxy-aware scheme. `req.protocol` alone is the
+// raw connection — `http` behind a TLS-terminating proxy — and an OAuth
+// redirect_uri must match the provider's registration exactly, scheme included.
+const appOrigin = appOriginFor;
 
 function redirectUriFor(req: Request, provider: SsoProviderId): string {
   return `${appOrigin(req)}/api/oauth/${provider}/callback`;
@@ -294,7 +294,10 @@ export function registerSsoRoutes(app: Express): void {
       const cookie = await signFlowCookie({ p: def.id, s: state, v: verifier, n: nonce });
       res.cookie(FLOW_COOKIE, cookie, {
         httpOnly: true,
-        secure: req.protocol === "https",
+        // The PKCE verifier, state and nonce live in this cookie. `req.protocol`
+        // is the raw connection — `http` behind the proxy — so this attribute was
+        // absent in production on every SSO sign-in.
+        secure: requestIsSecure(req),
         sameSite: "lax", // must survive the top-level redirect back from the IdP
         maxAge: FLOW_TTL_SECONDS * 1000,
         path: "/api/oauth",
@@ -410,10 +413,7 @@ export function registerSsoRoutes(app: Express): void {
 
       try {
         const { createAuditLog } = await import("../db");
-        const ip =
-          (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
-          req.socket?.remoteAddress ||
-          "unknown";
+        const ip = clientIpOrUnknown(req);
         await createAuditLog({
           userId: user.id,
           organizationId: user.organizationId ?? null,

@@ -158,6 +158,66 @@ PORT=3000
 APP_URL=https://reconcileai.vip
 ```
 
+### Trusted proxies — who the client is
+
+`TRUSTED_PROXY_HOPS` is how many proxies sit between the client and this
+process. `X-Forwarded-For` is appended to by each of them, so the client's
+address is that many entries in **from the right**; everything further left is
+whatever the caller chose to send. Rate limits and audit `ipAddress` values are
+derived from it (`server/_core/clientIp.ts`).
+
+Leave it unset unless the topology differs from the default for the deployment:
+
+| Deployment | Default | Chain |
+|---|---|---|
+| Cloud production | `2` | client → Cloudflare → Railway edge → app |
+| `DEPLOYMENT_MODE=on_premise` | `1` | client → nginx → app |
+| Anything not `NODE_ENV=production` | `0` | client → app; the header is ignored |
+
+```bash
+# Only when the topology differs from the table above — e.g. an extra load
+# balancer in front (3), or the app exposed directly in production (0).
+TRUSTED_PROXY_HOPS=2
+```
+
+> ⚠️ **Too HIGH and the count reads into caller-supplied entries**, which is the
+> bug this replaced. **Too LOW and every caller collapses onto the proxy's own
+> address** — one shared rate-limit bucket, and one address in every audit row.
+> The boot log prints the effective value (`[clientIp] trusted proxy hops = …`).
+
+**One deployment can be reached two ways.** `*.up.railway.app` skips Cloudflare,
+so it crosses one hop fewer — and nothing inside the request settles which path
+it took (`Host` is what *routes* it, so a caller can send either). Set
+`CLOUDFLARE_ORIGIN_SECRET` and the edge can say so itself:
+
+```bash
+# Generate in the Railway dashboard; never transcribe it (CLAUDE.md §18).
+CLOUDFLARE_ORIGIN_SECRET=<random 32+ chars>
+```
+
+Then add a Cloudflare **Transform Rule → Modify Request Header** on the zone:
+set `x-origin-verify` to the same value, for all requests. The rule overwrites
+any caller-supplied value, so only genuine edge traffic carries it.
+
+The app then gives a **verified** request the configured hop count and an
+**unverified** one *one hop fewer*, which on the direct hostname is exactly the
+address Railway appended — so a caller there can no longer shift the window. It
+**never rejects** a request: an origin lock that can black-hole the site on a
+half-deployed rule is the worse trade. Unset, the check is inert and the direct
+hostname stays a bypass — of this control and of every other Cloudflare
+protection in front of the app.
+
+**The order of the two steps does not matter**, which is the point. A missing
+header is not on its own evidence of anything: between setting the variable and
+publishing the rule, *every* request arrives unverified, and dropping a hop for
+all of them would resolve every caller to Cloudflare's egress address — one
+shared login rate-limit bucket and one address in every audit row. So the app
+waits for **evidence**: it only starts distinguishing the direct hostname once
+it has seen a request the edge actually stamped, and it stops again if those
+stop arriving (the rule was removed). Before that first proof it behaves exactly
+as it did before the check existed. The boot log states which state the process
+is in, and a line is logged the first time the header is observed.
+
 ## Scheduler authentication (Woodcore mirror sync, SHOPLINE sync)
 
 Two accepted paths. **GitHub OIDC is preferred**; the shared secret remains for
