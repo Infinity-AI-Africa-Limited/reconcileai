@@ -10,7 +10,7 @@ import {
   verifyShopifyWebhookHmac,
 } from "./auth";
 
-describe("signed OAuth state", () => {
+describe("when the state carried through an install is signed and read back", () => {
   const SECRET = "client-secret";
   const TTL = 10 * 60_000;
   const NOW = 1_790_000_000_000;
@@ -60,15 +60,15 @@ describe("signed OAuth state", () => {
   });
 });
 
-describe("Shopify connector security helpers", () => {
-  it("accepts only canonical myshopify.com store hostnames", () => {
+describe("when a shop domain, callback signature or granted scope is checked", () => {
+  it("should accept only canonical myshopify.com store hostnames", () => {
     expect(normalizeShopDomain("My-Test-Shop.MYSHOPIFY.COM.")).toBe("my-test-shop.myshopify.com");
     expect(normalizeShopDomain("https://shop.myshopify.com")).toBeNull();
     expect(normalizeShopDomain("shop.myshopify.com.evil.example")).toBeNull();
     expect(normalizeShopDomain("shop.myshopify.com:443")).toBeNull();
   });
 
-  it("builds an authorization URL with only the requested read scope", () => {
+  it("should build an authorization URL with only the requested read scope", () => {
     const url = new URL(
       buildShopifyAuthorizationUrl({
         shopDomain: "merchant.myshopify.com",
@@ -83,7 +83,7 @@ describe("Shopify connector security helpers", () => {
     expect(url.searchParams.get("state")).toBe("high-entropy-state");
   });
 
-  it("verifies the exact OAuth callback HMAC and rejects altered parameters", () => {
+  it("should verify the exact OAuth callback HMAC and reject altered parameters", () => {
     const secret = "shopify-secret";
     const params: Record<string, string> = {
       code: "authorization-code",
@@ -100,7 +100,7 @@ describe("Shopify connector security helpers", () => {
     expect(verifyShopifyCallbackHmac({ ...params, shop: "attacker.myshopify.com" }, secret)).toBe(false);
   });
 
-  it("sorts callback parameters in code-unit order, as Shopify's reference does", () => {
+  it("should sort callback parameters in code-unit order, as Shopify's reference does", () => {
     // "Z" (0x5A) sorts before "a" (0x61) by code unit, but after it under locale
     // collation. Shopify signs with `Object.entries(params).sort()`.
     const secret = "shopify-secret";
@@ -112,7 +112,7 @@ describe("Shopify connector security helpers", () => {
     expect(verifyShopifyCallbackHmac({ ...params, hmac }, secret)).toBe(true);
   });
 
-  it("verifies raw webhook bytes rather than reserialized JSON", () => {
+  it("should verify raw webhook bytes rather than reserialized JSON", () => {
     const raw = Buffer.from('{"shop_id":7,"customer":{"email":"not-stored@example.com"}}');
     const secret = "shopify-webhook-secret";
     const hmac = crypto.createHmac("sha256", secret).update(raw).digest("base64");
@@ -120,7 +120,7 @@ describe("Shopify connector security helpers", () => {
     expect(verifyShopifyWebhookHmac(Buffer.from('{"shop_id":7}'), hmac, secret)).toBe(false);
   });
 
-  it("requires the planned read scope and permits Shopify's write superscope", () => {
+  it("should require the planned read scope and permit Shopify's write superscope", () => {
     expect(requiredScopesGranted("read_orders", ["read_orders"])).toBe(true);
     expect(requiredScopesGranted("write_orders,read_products", ["read_orders"])).toBe(true);
     expect(requiredScopesGranted("read_products", ["read_orders"])).toBe(false);

@@ -6,7 +6,7 @@ const SHOP = "merchant.myshopify.com";
 const LEASES = "shopify_install_leases";
 const NOW = new Date("2026-09-22T12:00:00Z");
 
-describe("acquireInstallLease", () => {
+describe("when a callback claims the install lease for a shop", () => {
   it("should take a shop's lease when none exists", async () => {
     const fake = scriptedDb();
     const leaseId = await acquireInstallLease(fake.db as never, SHOP, NOW);
@@ -36,7 +36,7 @@ describe("acquireInstallLease", () => {
   });
 });
 
-describe("releaseInstallLease", () => {
+describe("when a callback releases the lease it holds", () => {
   it("should release only the lease this callback holds", async () => {
     const fake = scriptedDb();
     await releaseInstallLease(fake.db as never, SHOP, "lease-a");
@@ -44,7 +44,7 @@ describe("releaseInstallLease", () => {
   });
 });
 
-describe("renewInstallLease", () => {
+describe("when a callback extends its lease mid-install", () => {
   it("should extend a lease this callback still holds", async () => {
     const fake = scriptedDb({ update: { [LEASES]: [1] } });
     expect(await renewInstallLease(fake.db as never, { shopDomain: SHOP, leaseId: "lease-a" }, NOW)).toBe(true);
@@ -57,7 +57,7 @@ describe("renewInstallLease", () => {
   });
 });
 
-describe("holdsInstallLease", () => {
+describe("when a callback checks it still holds the lease", () => {
   it("should answer with a locking read, so a takeover cannot commit before the caller does", async () => {
     const fake = scriptedDb({ select: { [LEASES]: [[{ leaseId: "lease-a" }]] } });
     expect(await holdsInstallLease(fake.db as never, { shopDomain: SHOP, leaseId: "lease-a" })).toBe(true);

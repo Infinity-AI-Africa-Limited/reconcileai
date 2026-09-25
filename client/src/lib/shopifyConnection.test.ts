@@ -7,7 +7,7 @@ import {
   type ShopifyStoreStatus,
 } from "./shopifyConnection";
 
-describe("shopifyConnectionVerdict", () => {
+describe("when a merchant's connection is judged from the store list", () => {
   it("should say it is checking while the store list loads, whatever it held before", () => {
     expect(shopifyConnectionVerdict({ isLoading: true, status: "active" })).toBe("checking");
   });
@@ -37,7 +37,7 @@ describe("shopifyConnectionVerdict", () => {
   });
 });
 
-describe("shopifyInstallErrorMessage", () => {
+describe("when an install attempt comes back with a server reason", () => {
   it.each(SHOPIFY_INSTALL_ERROR_REASONS.map((reason) => [reason]))(
     "should explain the server reason %s specifically",
     (reason) => {

@@ -85,7 +85,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("GET /api/shopify/install", () => {
+describe("when a merchant starts an install (GET /api/shopify/install)", () => {
   it("should redirect to the shop's authorize page with a signed state, writing nothing", async () => {
     const fake = scriptedDb();
     state.db = fake.db;
@@ -117,7 +117,7 @@ describe("GET /api/shopify/install", () => {
   });
 });
 
-describe("GET /api/shopify/callback", () => {
+describe("when Shopify calls back with an authorization code (GET /api/shopify/callback)", () => {
   const signed = (shopDomain = SHOP) => signOAuthState({ shopDomain, secret: "client-secret", ttlMs: 10 * 60_000 }).state;
 
   it("should refuse a state issued for another shop before touching the database", async () => {
@@ -237,7 +237,7 @@ describe("GET /api/shopify/callback", () => {
  * refusal that collapses to "install_failed" tells a merchant whose store was
  * protected from a cross-tenant attachment only that something broke.
  */
-describe("callbackReasonFor", () => {
+describe("when a failed callback is turned into a reason the merchant sees", () => {
   it.each<[ShopifyOnboardingErrorCode, string]>([
     ["OWNERSHIP_UNVERIFIED", "ownership_verification_required"],
     ["EMAIL_CONFLICT", "email_already_registered"],

@@ -128,7 +128,7 @@ describe("when the HMAC does not verify", () => {
   });
 });
 
-describe("isStaleUninstall", () => {
+describe("when an uninstall's trigger time is weighed against the latest authorization", () => {
   const claimed = new Date("2026-09-20T12:00:00Z");
   it("should be stale only when triggered strictly before the latest claim", () => {
     expect(isStaleUninstall("2026-09-20T11:59:59Z", claimed)).toBe(true);
@@ -141,7 +141,7 @@ describe("isStaleUninstall", () => {
   });
 });
 
-describe("declaredShopDomain", () => {
+describe("when the shop is read from a webhook body", () => {
   it("should read the shop from compliance and uninstall bodies, normalised", () => {
     expect(declaredShopDomain({ shop_domain: "Merchant.MyShopify.com" })).toBe(SHOP);
     expect(declaredShopDomain({ myshopify_domain: SHOP })).toBe(SHOP);
