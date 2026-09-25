@@ -60,6 +60,8 @@ describe("when the real server code is scanned", () => {
         "POST /api/webhooks/cbs/:configId -> cbsWebhookHandler @ _core/index.ts",
         "USE <middleware> -> requireApiKey @ api/gateway.ts",
         "POST /api/shopline/gdpr/shop-data-request -> <anonymous> @ connectors/shopline/routes.ts",
+        // Imported from another file — and the route where this crash class was first found (#134).
+        "POST /api/webhooks/shopify -> handleShopifyWebhook @ connectors/shopify/webhooks.ts",
         "GET /developers -> <anonymous> @ _core/index.ts [wrapped]",
       ]),
     );
