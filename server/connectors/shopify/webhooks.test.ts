@@ -32,7 +32,9 @@ vi.mock("../../_core/env", async (importOriginal) => {
 vi.mock("./syncOrchestrator", () => ({
   enqueueShopifyWebhookSync: (...args: unknown[]) => state.enqueue(...args),
 }));
+const keyState = vi.hoisted(() => ({ getTenantDek: vi.fn(async () => ({ dek: Buffer.alloc(32), version: 1 })) }));
 vi.mock("../../_core/tenantKeys", () => ({
+  getTenantDek: keyState.getTenantDek,
   encryptForTenant: vi.fn(async (organizationId: number, plaintext: string) =>
     `tk1:${organizationId}:1:iv:tag:${Buffer.from(plaintext).toString("hex")}`,
   ),
@@ -161,6 +163,28 @@ describe("when a verified order event arrives", () => {
     expect(fake.writes("update", EVENTS)).toEqual([]);
   });
 
+  it("should enqueue orders/updated through the same minimal authoritative re-read path", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    state.db = fake.db;
+
+    const res = await delivery("orders/updated", {
+      id: 1001,
+      email: "must-not-be-projected@example.com",
+      customer: { id: 55 },
+    }).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ status: "queued_for_order_sync" });
+    expect(state.enqueue).toHaveBeenCalledWith({
+      storeId: 7,
+      organizationId: 42,
+      webhookId: "wh-orders/updated",
+    });
+    expect(state.enqueue.mock.calls[0]?.[0]).not.toHaveProperty("email");
+    expect(state.enqueue.mock.calls[0]?.[0]).not.toHaveProperty("customer");
+    expect(fake.writes("update", EVENTS)).toEqual([]);
+  });
+
   it("should answer 503 and mark failed when durable enqueue is unavailable", async () => {
     const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
     state.db = fake.db;
@@ -185,16 +209,21 @@ describe("when a verified order event arrives", () => {
 });
 
 describe("when a signed shop/redact delivery arrives", () => {
-  function shopRedact(existingRunId?: string) {
+  function shopRedact(
+    existingRunId?: string,
+    opts: { eventStatus?: string; triggeredAt?: string; organizationUpdate?: Error } = {},
+  ) {
     const fake = scriptedDb({
       select: {
         [STORES]: [[store]],
-        [EVENTS]: [[{ status: "received" }]],
+        [EVENTS]: [[{ status: opts.eventStatus ?? "received" }]],
         [REDACTION_JOBS]: [existingRunId ? [{ runId: existingRunId }] : []],
       },
+      ...(opts.organizationUpdate ? { update: { [ORGANIZATIONS]: [opts.organizationUpdate] } } : {}),
     });
     state.db = fake.db;
-    return { fake, run: delivery("shop/redact", { shop_domain: SHOP, shop_id: 17 }).run };
+    const headers = opts.triggeredAt ? { "x-shopify-triggered-at": opts.triggeredAt } : {};
+    return { fake, run: delivery("shop/redact", { shop_domain: SHOP, shop_id: 17 }, headers).run };
   }
 
   it("should durably admit, fence, revoke, and acknowledge a known merchant", async () => {
@@ -206,7 +235,78 @@ describe("when a signed shop/redact delivery arrives", () => {
     expect(fake.writes("update", ORGANIZATIONS)[0]?.data).toMatchObject({ isActive: false, deletionState: "redacting" });
     expect(fake.writes("update", USERS)[0]?.data).toMatchObject({ isActive: false });
     expect(fake.writes("delete", TOKENS)).toHaveLength(1);
-    expect(fake.writes("update", STORES).at(-1)?.data).toMatchObject({ status: "redacting", statusReason: "shop_redact_requested" });
+    const requested = fake.writes("update", STORES).find((op) => op.data?.statusReason === "shop_redact_requested");
+    expect(requested?.data).toMatchObject({ status: "redacting" });
+    expect(requested?.where?.params).toEqual(expect.arrayContaining([7, 42]));
+  });
+
+  it("should lock the store row before admitting, so an in-flight order sync is ordered against it", async () => {
+    const { fake, run } = shopRedact();
+    await run();
+    const inTx = fake.ops.filter((op) => op.txId !== null);
+    // The privacy ledger row comes first, then admission opens with the lock.
+    const firstStoreOp = inTx.find((op) => op.table === STORES);
+    expect(firstStoreOp).toMatchObject({ kind: "select", locked: true });
+    expect(firstStoreOp?.where?.params).toEqual(expect.arrayContaining([7, 42]));
+  });
+
+  it("should lock the organisation before the store, the order every credential write takes", async () => {
+    const { fake, run } = shopRedact();
+    await run();
+    const inTx = fake.ops.filter((op) => op.txId !== null);
+    const orgLock = inTx.findIndex((op) => op.table === ORGANIZATIONS);
+    const storeLock = inTx.findIndex((op) => op.table === STORES);
+    expect(inTx[orgLock]).toMatchObject({ kind: "select", locked: true });
+    expect(inTx[orgLock]?.where?.params).toEqual([42]);
+    expect(orgLock).toBeLessThan(storeLock);
+  });
+
+  it("should revoke the credentials of EVERY store of the tenant, not only this one", async () => {
+    const { fake, run } = shopRedact();
+    await run();
+    const revoke = fake.writes("delete", TOKENS)[0];
+    // Scoped by tenant alone: another store of the same organisation loses its token too.
+    expect(revoke?.where?.params).toEqual([42]);
+    const siblings = fake.writes("update", STORES).find((op) => op.data?.statusReason === "organization_redacting");
+    expect(siblings?.data).toMatchObject({ status: "redacting" });
+    expect(siblings?.where?.params).toEqual(expect.arrayContaining([42, 7, "redacting"]));
+  });
+
+  it("should ignore a retry triggered before the merchant reinstalled, leaving the new workspace intact", async () => {
+    const { fake, run } = shopRedact(undefined, { triggeredAt: "2026-09-19T08:00:00Z" });
+    const res = await run();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ status: "ignored_stale" });
+    expect(fake.writes("insert", REDACTION_JOBS)).toEqual([]);
+    expect(fake.writes("update", ORGANIZATIONS)).toEqual([]);
+    expect(fake.writes("delete", TOKENS)).toEqual([]);
+    expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "ignored", errorCode: "stale_shop_redact" });
+  });
+
+  it("should admit a redelivery that an earlier release settled without admitting it", async () => {
+    // Before admission existed, shop/redact was settled `processed` with no job
+    // and no fence. "Settled" is therefore no proof it was admitted.
+    const { fake, run } = shopRedact(undefined, { eventStatus: "processed" });
+    const res = await run();
+    expect(res.body).toMatchObject({ status: "shop_redact_admitted" });
+    expect(fake.writes("insert", REDACTION_JOBS)).toHaveLength(1);
+  });
+
+  it("should roll the whole admission back and ask for a retry when the fence fails", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fake, run } = shopRedact(undefined, { organizationUpdate: new Error("lock wait timeout") });
+    const res = await run();
+    log.mockRestore();
+
+    expect(res.statusCode).toBe(503);
+    // The job insert ran — and was rolled back with the transaction it was in.
+    expect(fake.ops.some((op) => op.kind === "insert" && op.table === REDACTION_JOBS)).toBe(true);
+    expect(fake.writes("insert", REDACTION_JOBS)).toEqual([]);
+    expect(fake.writes("delete", TOKENS)).toEqual([]);
+    // Nothing committed marks the delivery processed; the receipt is left failed for the retry.
+    const settled = fake.writes("update", EVENTS).map((op) => op.data?.status);
+    expect(settled).not.toContain("processed");
+    expect(settled).toContain("failed");
   });
 
   it("should treat a second request for the same store as an idempotent admission", async () => {
@@ -231,7 +331,7 @@ describe("when a signed customer privacy delivery arrives", () => {
   it("should durably admit the request and all ordered selectors before acknowledging", async () => {
     const fake = scriptedDb({
       select: {
-        [STORES]: [[store]],
+        [STORES]: [[store], [{ status: "active" }]],
         [EVENTS]: [[{ status: "received" }]],
         [PRIVACY_REQUESTS]: [[{ id: 901 }]],
       },
@@ -278,7 +378,7 @@ describe("when a signed customer privacy delivery arrives", () => {
   });
 
   it("should retain malformed payloads as manual review without selector material", async () => {
-    const fake = scriptedDb({ select: { [STORES]: [[store]], [EVENTS]: [[{ status: "received" }]] } });
+    const fake = scriptedDb({ select: { [STORES]: [[store], [{ status: "active" }]], [EVENTS]: [[{ status: "received" }]] } });
     state.db = fake.db;
 
     const res = await delivery("customers/redact", {
@@ -387,5 +487,44 @@ describe("when the shop is read from a webhook body", () => {
   it("should say nothing when the body names no shop", () => {
     expect(declaredShopDomain({ myshopify_domain: null })).toBeNull();
     expect(declaredShopDomain(null)).toBeNull();
+  });
+});
+
+describe("when a customer privacy delivery arrives for a tenant fenced for redaction", () => {
+  const body = {
+    shop_id: 17,
+    shop_domain: SHOP,
+    data_request: { id: 31 },
+    customer: { id: 41 },
+    orders_requested: [501],
+  };
+
+  it("should store nothing and provision no tenant key", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[{ ...store, status: "redacting" }]], [EVENTS]: [[{ status: "received" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ received: true, status: "ignored_redacting" });
+    expect(keyState.getTenantDek).not.toHaveBeenCalled();
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
+    expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "ignored", errorCode: "organization_redacting" });
+  });
+
+  it("should still refuse when the fence lands between the first read and the admission lock", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[store], [{ status: "redacting" }]], [EVENTS]: [[{ status: "received" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.body).toEqual({ received: true, status: "ignored_redacting" });
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
   });
 });

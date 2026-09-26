@@ -29,10 +29,15 @@ vi.mock("../../magicLinkService", () => ({
 vi.mock("../../provisioning", () => ({
   provisionTenantBaseline: vi.fn(async (organizationId: number) => ({ organizationId, ok: true, steps: [] })),
 }));
+vi.mock("../../exceptions/retail-commerce", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../exceptions/retail-commerce")>()),
+  seedRetailResolutionTemplates: vi.fn(async () => ({ inserted: 25, existing: 0 })),
+}));
 
 import { encryptForTenant } from "../../_core/tenantKeys";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { provisionTenantBaseline } from "../../provisioning";
+import { seedRetailResolutionTemplates } from "../../exceptions/retail-commerce";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 import type { TokenGeneration } from "./tokenStore";
 import { duplicateKeyError, scriptedDb, type RecordedOp } from "./scriptedDb.testkit";
@@ -85,6 +90,8 @@ const held = (script: Parameters<typeof scriptedDb>[0] = {}) =>
     standing: {
       [LEASES]: [{ leaseId: LEASE.leaseId }],
       [CHANNELS]: [{ id: 77 }],
+      // The tenant is not being redacted (read again, locked, before any write).
+      [ORGS]: [{ deletionState: "active", code: "SHP_ABC" }],
       ...script.standing,
     },
   });
@@ -229,6 +236,76 @@ describe("when a shop we already know is reauthorized", () => {
   });
 });
 
+describe("when a shop redaction fences the tenant after the early check", () => {
+  // The pre-transaction check is advice only: a redaction admitted between it
+  // and the write must still stop the write. Greptile #156 (stacked review).
+  const fenced = { deletionState: "redacting", code: "SHP_ABC" };
+
+  it("should refuse a reauthorization without storing a pair or reactivating the store", async () => {
+    const fake = held({
+      select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ deletionState: "active" }], [fenced]] },
+    });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    // Nothing relabels the store either: the fence owns its state now.
+    expect(storeUpdates(fake.committed())).toEqual([]);
+  });
+
+  it("should take the organisation lock before the store lock, inside the transaction that writes", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+    await onboard();
+
+    const inTx = fake.ops.filter((op) => op.txId !== null);
+    const orgLock = inTx.findIndex((op) => op.table === ORGS && op.locked);
+    const storeLock = inTx.findIndex((op) => op.table === STORES && op.kind === "select" && op.locked);
+    expect(orgLock).toBeGreaterThanOrEqual(0);
+    expect(storeLock).toBeGreaterThan(orgLock);
+    expect(inTx.findIndex((op) => op.table === TOKENS && op.kind === "insert")).toBeGreaterThan(storeLock);
+  });
+
+  it("should refuse when this store has itself been fenced as a sibling of the redacted one", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore], [{ status: "redacting" }]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+  });
+
+  it("should refuse while a customer redaction holds this store's write fence", async () => {
+    const fake = held({
+      select: { [STORES]: [[existingStore], [{ status: "active", privacyRedactionState: "customer_redacting" }]], [USERS]: [[{ id: 9 }]] },
+    });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    expect(storeUpdates(fake.committed())).toEqual([]);
+  });
+
+  it("should activate a store only while it is not fenced, in the statement itself", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+    await onboard();
+
+    expect(fake.writes("update", STORES)[0]?.where?.params).toContain("redacting");
+  });
+
+  it("should refuse to finish a first install whose new tenant was fenced before its credentials were stored", async () => {
+    const fake = held({
+      select: { [STORES]: [[]], [USERS]: [[]], [ORGS]: [[fenced]] },
+      insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7] },
+    });
+    state.db = fake.db;
+
+    expect(await codeOf(onboardFirst)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    expect(storeUpdates(fake.committed())).not.toContainEqual(expect.objectContaining({ status: "active" }));
+  });
+});
+
 describe("when a shop installs for the first time", () => {
   const onboard = () => onboardFirst();
   function firstInstall(extra: Parameters<typeof scriptedDb>[0] = {}) {
@@ -261,6 +338,18 @@ describe("when a shop installs for the first time", () => {
     const baselineAt = vi.mocked(provisionTenantBaseline).mock.invocationCallOrder[0];
     const encryptAt = vi.mocked(encryptForTenant).mock.invocationCallOrder[0];
     expect(baselineAt).toBeLessThan(encryptAt);
+  });
+
+  it("should give the new tenant its own retail resolution templates (§9A)", async () => {
+    firstInstall();
+    await onboard();
+    expect(seedRetailResolutionTemplates).toHaveBeenCalledWith(42);
+  });
+
+  it("should still finish installing when the templates cannot be seeded", async () => {
+    firstInstall();
+    vi.mocked(seedRetailResolutionTemplates).mockRejectedValueOnce(new Error("database busy"));
+    await expect(onboard()).resolves.toMatchObject({ storeId: 7, organizationId: 42 });
   });
 
   it("should send the welcome link to the default landing, with no redirect continuation", async () => {

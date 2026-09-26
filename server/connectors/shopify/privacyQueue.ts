@@ -7,6 +7,16 @@ import {
 } from "./privacyCompletion";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 
+/** Queue-name prefix per job kind: a job id is unique only within its own table. */
+export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
+  switch (kind) {
+    case "customer_request":
+      return "privacy-request";
+    case "customer_redact":
+      return "privacy-redact";
+  }
+}
+
 let queuePromise: Promise<JobQueue<ShopifyPrivacyQueuePayload>> | null = null;
 
 function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
@@ -31,17 +41,20 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   return queuePromise;
 }
 
-/** Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL. */
-export async function enqueueShopifyPrivacyJob(payload: ShopifyPrivacyQueuePayload): Promise<void> {
+/**
+ * Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL.
+ *
+ * The queue id is unique per DISPATCH, not per job: a re-dispatch after the
+ * queue settled an earlier entry for this job would otherwise be swallowed by
+ * that settled entry. A duplicate run is harmless — the database lease lets
+ * exactly one worker claim the job.
+ */
+export async function enqueueShopifyPrivacyJob(
+  payload: ShopifyPrivacyQueuePayload,
+  dispatchAttempt: number,
+): Promise<void> {
   const durable = await queue();
-  const prefix = payload.kind === "customer_redact" ? "privacy-redact" : "privacy-request";
-  const name = `${prefix}-${payload.jobId}`;
-  // BullMQ retains failed jobs for inspection. Re-adding the same deterministic
-  // id would return that failed row without running it, stranding DB-retryable
-  // work. Remove any non-active prior entry first; an active job refuses removal
-  // and leaves the outbox retryable until the next scanner pass.
-  await durable.remove?.(name);
-  await durable.enqueue(name, payload);
+  await durable.enqueue(`${shopifyPrivacyJobPrefix(payload.kind)}-${payload.jobId}-d${dispatchAttempt}`, payload);
 }
 
 /**

@@ -150,6 +150,21 @@ export async function storageGet(
 }
 
 /**
+ * Read a private object's bytes on the server.
+ *
+ * For flows that must PROVE delivery — privacy exports — the server sends the
+ * bytes itself and records delivery only once they were written, rather than
+ * handing out a bearer URL whose use it can never observe.
+ */
+export async function storageReadPrivate(relKey: string): Promise<Buffer> {
+  const { s3, bucket } = getClient();
+  const key = normalizeKey(relKey);
+  const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  if (!out.Body) throw new Error("Stored object has no body");
+  return Buffer.from(await out.Body.transformToByteArray());
+}
+
+/**
  * Delete an object. Missing objects are treated as success.
  */
 export async function storageDelete(relKey: string): Promise<void> {

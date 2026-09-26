@@ -310,6 +310,24 @@ class SDKServer {
     }
 
     /**
+     * A deactivated account loses access on its NEXT request, not when its
+     * session cookie happens to expire.
+     *
+     * Magic-link sign-in already refuses an inactive user, but the session is a
+     * stateless JWT, so until this check a user deactivated by an administrator
+     * — or by a Shopify `shop/redact` fence, which deactivates every user of the
+     * tenant — kept a working session for its full lifetime. Here, at the one
+     * gate every surface authenticates through (tRPC, the monitoring stream,
+     * the storage proxy), it cannot be missed by a surface added later.
+     *
+     * The tRPC context treats an authentication failure as "signed out", so
+     * `auth.logout` still clears the cookie of an account that was deactivated.
+     */
+    if (!user.isActive) {
+      throw ForbiddenError("This account has been deactivated");
+    }
+
+    /**
      * A revoked reviewer link must stop working everywhere, not just in tRPC.
      *
      * The session cookie is a stateless JWT, so revocation can only bite if

@@ -17,11 +17,18 @@ import {
   type ShopifyPrivacySuppressionKey,
 } from "./privacySuppression";
 import { canonicalShopifyOrderGid } from "./privacyCompletion";
+import {
+  claimableCustomerRedactionJob,
+  isLivePrivacyJobStatus,
+  ShopifyPrivacyJobNotClaimableError,
+} from "./privacyJobState";
 
 export const SHOPIFY_CUSTOMER_REDACTION_MANIFEST_VERSION = 1;
 export const SHOPIFY_CUSTOMER_REDACTION_LEASE_MS = 5 * 60_000;
 export const SHOPIFY_CUSTOMER_REDACTION_MAX_ATTEMPTS = 6;
 const LOOKUP_CHUNK = 500;
+/** How soon a run that found the store fenced by another request tries again. */
+export const SHOPIFY_CUSTOMER_REDACTION_FENCE_WAIT_MS = 60_000;
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Decrypt = typeof decryptForTenantQuiet;
@@ -31,6 +38,8 @@ export type ShopifyCustomerRedactionFailureCode =
   | "selector_integrity_failed"
   | "suppression_key_unavailable"
   | "unsupported_transaction_footprint"
+  /** Another customer redaction holds the store's write fence; this one waits its turn. */
+  | "store_fence_busy"
   | "worker_failed";
 
 export interface ShopifyCustomerRedactionWorkerDeps {
@@ -58,6 +67,8 @@ interface SelectedOrderRow {
   counterparty: string | null;
   originalTransactionRef: string | null;
   isReversal: boolean;
+  debitCredit: "debit" | "credit";
+  currency: string;
   shopifyOrderCurrency: string | null;
   shopifyUpdatedAt: Date | null;
   shopifyFinancialStatus: string | null;
@@ -66,22 +77,6 @@ interface SelectedOrderRow {
 
 function retryDelayMs(attempt: number): number {
   return Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000);
-}
-
-function claimableRedactionJob(now: Date) {
-  return or(
-    and(
-      inArray(shopifyPrivacyCustomerRedactionJobs.status, ["received", "failed_retryable"]),
-      or(
-        isNull(shopifyPrivacyCustomerRedactionJobs.nextAttemptAt),
-        lte(shopifyPrivacyCustomerRedactionJobs.nextAttemptAt, now),
-      ),
-    ),
-    and(
-      eq(shopifyPrivacyCustomerRedactionJobs.status, "processing"),
-      lte(shopifyPrivacyCustomerRedactionJobs.leaseExpiresAt, now),
-    ),
-  );
 }
 
 async function claimCustomerRedactionJob(
@@ -105,7 +100,7 @@ async function claimCustomerRedactionJob(
     .where(
       and(
         eq(shopifyPrivacyCustomerRedactionJobs.requestId, jobId),
-        claimableRedactionJob(now),
+        claimableCustomerRedactionJob(now),
       ),
     );
   if (affectedRows(result) !== 1) return null;
@@ -127,6 +122,29 @@ async function claimCustomerRedactionJob(
     )
     .limit(1);
   return job ? { ...job, leaseId } : null;
+}
+
+/**
+ * Release this request's store write fence, and only this request's.
+ *
+ * The fence exists while the request's job still owes work. A job that ends —
+ * completed, parked for a person, or out of attempts — must hand it back, or the
+ * store stays fenced indefinitely: order sync and reauthorization refused, and
+ * every other customer's redaction left waiting behind one that is not running.
+ * Re-running a parked request re-acquires the fence when its worker claims it.
+ */
+async function releaseStoreFence(tx: DbExecutor, job: Pick<ClaimedRedactionJob, "requestId" | "organizationId" | "storeId">) {
+  await tx
+    .update(shopifyConnectorStores)
+    .set({ privacyRedactionState: "active", privacyRedactionRequestId: null })
+    .where(
+      and(
+        eq(shopifyConnectorStores.id, job.storeId),
+        eq(shopifyConnectorStores.organizationId, job.organizationId),
+        eq(shopifyConnectorStores.privacyRedactionState, "customer_redacting"),
+        eq(shopifyConnectorStores.privacyRedactionRequestId, job.requestId),
+      ),
+    );
 }
 
 async function setBlocked(
@@ -158,6 +176,8 @@ async function setBlocked(
     // executor. Never let the stale worker overwrite that executor's request
     // state (or a successful completion) after its conditional job write lost.
     if (affectedRows(jobWrite) !== 1) return;
+    // Parked for a person: no work is running, so nothing needs the fence.
+    await releaseStoreFence(tx, job);
     await tx
       .update(shopifyPrivacyRequests)
       .set({ status, completionNote: failureCode })
@@ -204,6 +224,9 @@ async function setRetryableFailure(
     // Preserve a newer worker's state on stale-lease failure. The transactional
     // outbox is created only by the worker that still owns this job lease.
     if (affectedRows(jobWrite) !== 1) return;
+    // Out of attempts: the job will not run again by itself, so release the
+    // fence. A retryable failure keeps it — the job still owes work.
+    if (terminal) await releaseStoreFence(tx, job);
     if (!terminal) {
       await tx
         .insert(shopifyPrivacyQueueOutbox)
@@ -238,6 +261,43 @@ async function setRetryableFailure(
   });
 }
 
+/**
+ * Another customer redaction holds this store's fence. Wait for it — without
+ * spending one of this job's bounded attempts, which exist for failures, not
+ * for queueing — and ask the dispatcher to try again shortly.
+ */
+async function deferForStoreFence(db: Db, job: ClaimedRedactionJob, now: Date): Promise<void> {
+  const nextAttemptAt = new Date(now.getTime() + SHOPIFY_CUSTOMER_REDACTION_FENCE_WAIT_MS);
+  await db.transaction(async (tx) => {
+    const jobWrite = await tx
+      .update(shopifyPrivacyCustomerRedactionJobs)
+      .set({
+        status: "failed_retryable",
+        failureCode: "store_fence_busy",
+        attempts: sql`GREATEST(${shopifyPrivacyCustomerRedactionJobs.attempts} - 1, 0)`,
+        leaseId: null,
+        leaseExpiresAt: null,
+        nextAttemptAt,
+        lastCheckpoint: "waiting_for_store_fence",
+      })
+      .where(
+        and(
+          eq(shopifyPrivacyCustomerRedactionJobs.requestId, job.requestId),
+          eq(shopifyPrivacyCustomerRedactionJobs.organizationId, job.organizationId),
+          eq(shopifyPrivacyCustomerRedactionJobs.storeId, job.storeId),
+          eq(shopifyPrivacyCustomerRedactionJobs.leaseId, job.leaseId),
+        ),
+      );
+    if (affectedRows(jobWrite) !== 1) return;
+    await tx
+      .insert(shopifyPrivacyQueueOutbox)
+      .values({ kind: "customer_redact", jobId: job.requestId, status: "failed_retryable", nextAttemptAt, failureCode: "store_fence_busy" })
+      .onDuplicateKeyUpdate({
+        set: { status: "failed_retryable", nextAttemptAt, failureCode: "store_fence_busy", leaseId: null, leaseExpiresAt: null },
+      });
+  });
+}
+
 async function loadSelectedOrders(
   db: DbExecutor,
   organizationId: number,
@@ -258,6 +318,8 @@ async function loadSelectedOrders(
           counterparty: transactions.counterparty,
           originalTransactionRef: transactions.originalTransactionRef,
           isReversal: transactions.isReversal,
+          debitCredit: transactions.debitCredit,
+          currency: transactions.currency,
           shopifyOrderCurrency: transactions.shopifyOrderCurrency,
           shopifyUpdatedAt: transactions.shopifyUpdatedAt,
           shopifyFinancialStatus: transactions.shopifyFinancialStatus,
@@ -296,6 +358,11 @@ function isFieldMinimizedScopeAOrder(row: SelectedOrderRow): boolean {
     row.counterparty !== "Shopify" ||
     row.originalTransactionRef !== null ||
     row.isReversal !== false ||
+    // The order projection always writes a credit in an ISO currency code. A
+    // row that differs was not written by it, whatever else it looks like.
+    row.debitCredit !== "credit" ||
+    typeof row.currency !== "string" ||
+    !/^[A-Z]{3}$/.test(row.currency) ||
     typeof row.shopifyOrderCurrency !== "string" ||
     !/^[A-Z]{3}$/.test(row.shopifyOrderCurrency) ||
     !(row.shopifyUpdatedAt instanceof Date) ||
@@ -318,7 +385,18 @@ export async function handleShopifyCustomerRedactionJob(
   const now = (deps.now ?? (() => new Date()))();
   const leaseId = (deps.uuid ?? (() => crypto.randomUUID()))();
   const job = await claimCustomerRedactionJob(db, jobId, now, leaseId);
-  if (!job) return;
+  if (!job) {
+    // Not claimable. If the job still owes work (a dead worker's lease has not
+    // expired, or its retry is not due), keep the queue entry alive: settling
+    // it would leave the outbox `dispatched` with nothing left to run it.
+    const [current] = await db
+      .select({ status: shopifyPrivacyCustomerRedactionJobs.status })
+      .from(shopifyPrivacyCustomerRedactionJobs)
+      .where(eq(shopifyPrivacyCustomerRedactionJobs.requestId, jobId))
+      .limit(1);
+    if (current && isLivePrivacyJobStatus(current.status)) throw new ShopifyPrivacyJobNotClaimableError();
+    return;
+  }
 
   try {
     const [request] = await db
@@ -409,9 +487,24 @@ export async function handleShopifyCustomerRedactionJob(
         )
         .limit(1)
         .for("update");
-      if (!store || store.privacyRedactionState !== "customer_redacting" ||
-          store.privacyRedactionRequestId !== job.requestId) {
-        return { blocked: "invalid_request_scope" as const };
+      if (!store) return { blocked: "invalid_request_scope" as const, deferred: false };
+      const heldByThisRequest =
+        store.privacyRedactionState === "customer_redacting" && store.privacyRedactionRequestId === job.requestId;
+      if (!heldByThisRequest) {
+        // Take the fence now if it is free; admission takes it only when it can.
+        // Held by another request: wait for it, never run beside it.
+        if (store.privacyRedactionState !== "active") return { blocked: null, deferred: true };
+        const acquired = await tx
+          .update(shopifyConnectorStores)
+          .set({ privacyRedactionState: "customer_redacting", privacyRedactionRequestId: job.requestId })
+          .where(
+            and(
+              eq(shopifyConnectorStores.id, job.storeId),
+              eq(shopifyConnectorStores.organizationId, job.organizationId),
+              eq(shopifyConnectorStores.privacyRedactionState, "active"),
+            ),
+          );
+        if (affectedRows(acquired) !== 1) return { blocked: null, deferred: true };
       }
 
       const selected = await loadSelectedOrders(tx, job.organizationId, job.storeId, gids);
@@ -420,7 +513,7 @@ export async function handleShopifyCustomerRedactionJob(
       // audit, report, or learning evidence: those systems may be active and
       // their records are intentionally outside this narrow merchant-order app.
       if (!selected.every(isFieldMinimizedScopeAOrder)) {
-        return { blocked: "unsupported_transaction_footprint" as const };
+        return { blocked: "unsupported_transaction_footprint" as const, deferred: false };
       }
 
       if (digests.length > 0) {
@@ -503,9 +596,13 @@ export async function handleShopifyCustomerRedactionJob(
             eq(shopifyConnectorStores.privacyRedactionRequestId, job.requestId),
           ),
         );
-      return { blocked: null };
+      return { blocked: null, deferred: false };
     });
 
+    if (outcome.deferred) {
+      await deferForStoreFence(db, job, now);
+      return;
+    }
     if (outcome.blocked) {
       await setBlocked(db, job, outcome.blocked === "invalid_request_scope" ? "manual_review" : "blocked_dependency", outcome.blocked);
     }

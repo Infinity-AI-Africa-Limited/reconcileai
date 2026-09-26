@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { SettlementFileImport } from "@/components/SettlementFileImport";
+import { ShopifyPrivacyDeliveries } from "@/components/ShopifyPrivacyDeliveries";
 import { CountLink } from "@/components/CountLink";
 import { useReachableHref } from "@/hooks/useReachableHref";
 import { exceptionsHref } from "@/lib/listLinks";
@@ -116,6 +117,9 @@ export default function SettlementMonitor() {
 
   return (
     <div className="space-y-6">
+      {/* A merchant admin's pending customer data-request exports. Renders
+          nothing unless there is something to deliver. */}
+      <ShopifyPrivacyDeliveries />
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>

@@ -59,6 +59,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm check
+      # `pnpm check` excludes every *.test.ts, so a test's fixture types were
+      # never enforced — a numeric `protocol` or an `any` passed CI. The tests
+      # listed in tsconfig.tests.json must type-check; the list only grows.
+      - name: Typecheck tests
+        run: pnpm check:tests
       # One rule: react-hooks/rules-of-hooks. It runs here rather than in Tests
       # because it needs no database and answers in seconds, and because the two
       # defects it exists for were both invisible to tsc — a hook below an early
