@@ -30,11 +30,12 @@ import { scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
 const OWN_ORG = 42;
 const OTHER_ORG = 60001;
 const STORES = "shopify_connector_stores";
+const ARTIFACTS = "shopify_privacy_artifacts";
 
 type Role = "admin" | "user" | "operations" | "compliance" | "cfo" | "super_admin";
 
-function caller(role: Role | null, organizationId: number | null = OWN_ORG, viewingAs: number | null = null) {
-  const user = role === null ? null : { id: 7, role, organizationId, isReadOnly: false, email: "person@example.com" };
+function caller(role: Role | null, organizationId: number | null = OWN_ORG, viewingAs: number | null = null, isActive = true) {
+  const user = role === null ? null : { id: 7, role, organizationId, isReadOnly: false, isActive, email: "person@example.com" };
   return shopifyConnectorRouter.createCaller({ user, viewingAs, req: { headers: {} }, res: {} } as never);
 }
 
@@ -161,6 +162,39 @@ describe("what a store summary exposes", () => {
     for (const forbidden of ["accessTokenEnc", "refreshTokenEnc", "claimedByUserId", "shopId", "organizationId"]) {
       expect(keys).not.toContain(forbidden);
     }
+  });
+});
+
+describe("when privacy artifact delivery is staged in the authenticated portal", () => {
+  it("should project only non-sensitive notice fields to the exact claimant admin", async () => {
+    const notice = {
+      artifactId: "11111111-1111-4111-8111-111111111111",
+      kind: "order_evidence",
+      recordsFound: 1,
+      generatedAt: new Date("2026-09-25T12:00:00Z"),
+      expiresAt: new Date("2026-10-02T12:00:00Z"),
+      deliveryStatus: "pending",
+    };
+    fake = scriptedDb({ select: { [ARTIFACTS]: [[notice]] } });
+    state.db = fake.db;
+    expect(await caller("admin").listPrivacyDeliveries()).toEqual([notice]);
+    expect(fake.ops[0]?.where?.params).toEqual(expect.arrayContaining([OWN_ORG, 7, "ready"]));
+    for (const forbidden of ["objectKey", "sha256", "organizationId", "storeId", "recipientUserId", "requestId"]) {
+      expect(Object.keys(notice)).not.toContain(forbidden);
+    }
+  });
+
+  it.each<Role>(["user", "operations", "compliance", "cfo", "super_admin"])(
+    "should deny %s before reading artifact metadata",
+    async (role) => {
+      expect(await codeOf(() => caller(role).listPrivacyDeliveries())).toBe("FORBIDDEN");
+      expect(fake.ops).toEqual([]);
+    },
+  );
+
+  it("should deny an inactive admin before reading artifact metadata", async () => {
+    expect(await codeOf(() => caller("admin", OWN_ORG, null, false).listPrivacyDeliveries())).toBe("FORBIDDEN");
+    expect(fake.ops).toEqual([]);
   });
 });
 

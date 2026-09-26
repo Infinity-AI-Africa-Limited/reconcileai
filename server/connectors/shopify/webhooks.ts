@@ -287,10 +287,12 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
         return res.status(200).json({ received: true, status: "ignored_redacting" });
       }
       // The delivery is settled once the request and any required selectors are
-      // durable. `received` and `manual_review` are both explicitly non-terminal.
+      // durable. For data requests, `received` includes a transactional outbox
+      // intent; it does NOT assert that Redis accepted the job. Recovery dispatch
+      // reports queue failures separately and the request remains non-terminal.
       return res.status(200).json({
         received: true,
-        status: admissionStatus === "received" ? "queued_for_privacy_control" : "privacy_manual_review",
+        status: admissionStatus === "received" ? "privacy_work_admitted" : "privacy_manual_review",
       });
     }
 

@@ -694,6 +694,13 @@
       "when": 1790313345504,
       "tag": "0098_careful_galactus",
       "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "5",
+      "when": 1790354338118,
+      "tag": "0099_shopify_privacy_completion",
+      "breakpoints": true
     }
   ]
 }

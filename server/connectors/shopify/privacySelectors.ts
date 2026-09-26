@@ -1,7 +1,9 @@
-import { and, eq, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, notExists, sql } from "drizzle-orm";
 import { QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   shopifyConnectorStores,
+  shopifyPrivacyDataRequestJobs,
+  shopifyPrivacyQueueOutbox,
   shopifyPrivacyRequestSelectors,
   shopifyPrivacyRequests,
   shopifyWebhookEvents,
@@ -9,6 +11,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { blindIndexForTenant, encryptForTenant, getTenantDek } from "../../_core/tenantKeys";
 import type { DbTransaction } from "../../db";
+import { affectedRows } from "./tokenStore";
 
 export type ShopifyCustomerPrivacyTopic = "customers/data_request" | "customers/redact";
 export type ShopifyPrivacyResourceType = "customer" | "order";
@@ -148,6 +151,9 @@ export async function protectCustomerPrivacySelectors(
 
 const CUSTOMER_PRIVACY_TOPICS: ShopifyCustomerPrivacyTopic[] = ["customers/data_request", "customers/redact"];
 
+/** Why admission parked a request, and its job with it. */
+const SELECTORS_UNAVAILABLE = "selectors_unavailable";
+
 /**
  * Repeatable repair: a customer request that is `received` but has NO selector
  * rows was written by the pre-selector handler — during the deploy cutover, say
@@ -164,7 +170,7 @@ export async function quarantineSelectorlessCustomerRequests(
 ): Promise<void> {
   await tx
     .update(shopifyPrivacyRequests)
-    .set({ status: "manual_review", admissionErrorCode: "selectors_unavailable" })
+    .set({ status: "manual_review", admissionErrorCode: SELECTORS_UNAVAILABLE })
     .where(
       and(
         eq(shopifyPrivacyRequests.organizationId, store.organizationId),
@@ -178,6 +184,34 @@ export async function quarantineSelectorlessCustomerRequests(
             .select({ one: sql`1` })
             .from(shopifyPrivacyRequestSelectors)
             .where(eq(shopifyPrivacyRequestSelectors.requestId, shopifyPrivacyRequests.id)),
+        ),
+      ),
+    );
+  // The job is the truth a worker acts on; the request only mirrors it. A
+  // parked request whose job stayed runnable would be processed anyway, with no
+  // selectors to answer it from. Park the job with it. A job already leased is
+  // left to its worker, whose every write is lease-guarded.
+  await tx
+    .update(shopifyPrivacyDataRequestJobs)
+    .set({ status: "manual_review", failureCode: SELECTORS_UNAVAILABLE, lastCheckpoint: "manual_review" })
+    .where(
+      and(
+        eq(shopifyPrivacyDataRequestJobs.organizationId, store.organizationId),
+        eq(shopifyPrivacyDataRequestJobs.storeId, store.id),
+        inArray(shopifyPrivacyDataRequestJobs.status, ["received", "failed_retryable"]),
+        inArray(
+          shopifyPrivacyDataRequestJobs.requestId,
+          new QueryBuilder()
+            .select({ id: shopifyPrivacyRequests.id })
+            .from(shopifyPrivacyRequests)
+            .where(
+              and(
+                eq(shopifyPrivacyRequests.organizationId, store.organizationId),
+                eq(shopifyPrivacyRequests.storeId, store.id),
+                eq(shopifyPrivacyRequests.status, "manual_review"),
+                eq(shopifyPrivacyRequests.admissionErrorCode, SELECTORS_UNAVAILABLE),
+              ),
+            ),
         ),
       ),
     );
@@ -256,10 +290,14 @@ export async function admitShopifyCustomerPrivacyRequest(
     }
 
     // The insert above is a no-op on a replay, so a request first parked for
-    // manual review — before the store's shop id was known, say — would keep
-    // that status and error even once a replay validates and stores its
-    // selectors. Promote it. Only `manual_review` moves; a request further
-    // along is never regressed.
+    // manual review AT ADMISSION — before the store's shop id was known, say —
+    // would keep that status and error even once a replay validates and stores
+    // its selectors. Promote it.
+    //
+    // Only a request admission parked moves (it carries admissionErrorCode). A
+    // request its JOB sent to manual review — an expired or unconfirmed export,
+    // a failed dependency — is a person's decision now: a replay must not
+    // un-flag it and leave its job parked behind a request that says `received`.
     await tx
       .update(shopifyPrivacyRequests)
       .set({ status: "received", admissionErrorCode: null })
@@ -268,8 +306,50 @@ export async function admitShopifyCustomerPrivacyRequest(
           eq(shopifyPrivacyRequests.id, request.id),
           eq(shopifyPrivacyRequests.organizationId, params.store.organizationId),
           eq(shopifyPrivacyRequests.status, "manual_review"),
+          isNotNull(shopifyPrivacyRequests.admissionErrorCode),
         ),
       );
+
+    if (params.topic === "customers/data_request") {
+      // The execution state and queue intent commit with admission. A crash after
+      // this transaction can delay dispatch, but cannot make the request vanish.
+      await tx
+        .insert(shopifyPrivacyDataRequestJobs)
+        .values({
+          requestId: request.id,
+          organizationId: params.store.organizationId,
+          storeId: params.store.id,
+          status: "received",
+          lastCheckpoint: "admitted",
+          manifestVersion: 1,
+        })
+        .onDuplicateKeyUpdate({ set: { requestId: sql`${shopifyPrivacyDataRequestJobs.requestId}` } });
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "customer_request", jobId: request.id, status: "pending" })
+        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
+      // Both inserts are no-ops for a job that already exists. If admission
+      // parked it with its request (quarantine, below), bring it back with the
+      // request, and queue it again — a request that is `received` again must
+      // have work behind it. A job parked for any other reason stays parked.
+      const rearmed = await tx
+        .update(shopifyPrivacyDataRequestJobs)
+        .set({ status: "received", failureCode: null, lastCheckpoint: "admitted", nextAttemptAt: null })
+        .where(
+          and(
+            eq(shopifyPrivacyDataRequestJobs.requestId, request.id),
+            eq(shopifyPrivacyDataRequestJobs.organizationId, params.store.organizationId),
+            eq(shopifyPrivacyDataRequestJobs.status, "manual_review"),
+            eq(shopifyPrivacyDataRequestJobs.failureCode, SELECTORS_UNAVAILABLE),
+          ),
+        );
+      if (affectedRows(rearmed) === 1) {
+        await tx
+          .update(shopifyPrivacyQueueOutbox)
+          .set({ status: "pending", nextAttemptAt: null, failureCode: null })
+          .where(eq(shopifyPrivacyQueueOutbox.jobId, request.id));
+      }
+    }
   }
 
   // After this request's own selectors are in place, so it cannot catch itself.

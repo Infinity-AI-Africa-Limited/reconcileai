@@ -106,7 +106,8 @@ justification comment in the classification map and a row in §2/§3 here.
 
 ## 7. Shopify public-app connector tables (September 2026, PR #134)
 
-Defined in `drizzle/shopify_schema.ts`, migration `0095`. These tables reached a
+Defined in `drizzle/shopify_schema.ts`, initially in migration `0095` and extended
+for data-request completion in migration `0099`. These tables reached a
 green suite **unaudited** on the PR's first revision: `server/rlsAudit.test.ts`
 read a hand-maintained list of schema modules, and `shopify_schema.ts` was not on
 it, so none of its tables was ever collected — and therefore never reported as
@@ -121,6 +122,9 @@ unclassified. The ratchet now also asserts that every schema file listed in
 | `shopify_webhook_events` | `tenant_nullable` | Digest-only delivery ledger. A verified delivery for a shop with no store record is acknowledged and recorded without inventing a tenant. |
 | `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |
 | `shopify_privacy_request_selectors` | `tenant_required` | Minimal child records for future customer-topic fulfilment. Provider IDs are tenant-encrypted and tenant-keyed blind-indexed; lookups include `organizationId`, and no raw payload or direct identity field is retained. |
+| `shopify_privacy_data_request_jobs` | `tenant_required` | Durable, leased execution state for `customers/data_request`. Carries only internal scope and bounded status/failure codes; authoritative selectors stay in the encrypted child table. |
+| `shopify_privacy_queue_outbox` | `derived` | Transactional dispatch intent keyed only by internal job id and kind. It deliberately contains no organization/store/provider identifiers, selector values, hashes, domains, URLs, or customer data; tenant scope is loaded from the job after dequeue. |
+| `shopify_privacy_artifacts` | `tenant_required` | Metadata for a private org-scoped data-request object: key, digest, size, expiry and delivery evidence. It never persists a presigned URL or selector. Download additionally requires the active store-claiming tenant admin. |
 | `shopify_shop_redaction_jobs` | `tenant_required` | Short-lived, durable work record for a verified `shop/redact` request. It is scoped to the merchant workspace while deletion is in progress; completion removes or de-identifies the record rather than retaining a merchant identifier. |
 | `shopify_oauth_states` | `token` | Hash-only ledger of CONSUMED OAuth states. States are signed and shop-bound, so a row is written only at the callback, after Shopify's HMAC and our signature verify — the install endpoint writes nothing. The unique `stateHash` enforces single use. |
 | `shopify_install_leases` | `global` | Pre-tenant platform lock serialising installations per shop domain (one authorization-code exchange in flight at a time). Lease id and expiry only; no tenant data. |

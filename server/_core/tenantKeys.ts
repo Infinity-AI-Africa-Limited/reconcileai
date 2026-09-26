@@ -277,14 +277,20 @@ export async function blindIndexForTenant(
  * resolved tenant — a ciphertext copied across tenant boundaries refuses to
  * decrypt even though the bytes are present.
  */
-export async function decryptForTenant(organizationId: number, stored: string): Promise<string | null> {
+async function decryptTenantCiphertext(
+  organizationId: number,
+  stored: string,
+  logScopeMismatch: boolean,
+): Promise<string | null> {
   const parts = stored.split(":");
   if (parts.length !== 6 || parts[0] !== TENANT_CIPHERTEXT_PREFIX) return null;
   const [, orgStr, , ivHex, tagHex, ctHex] = parts;
   if (Number(orgStr) !== organizationId) {
-    console.error(
-      `[tenantKeys] cross-tenant decrypt refused: ciphertext org ${orgStr}, caller org ${organizationId}`,
-    );
+    if (logScopeMismatch) {
+      console.error(
+        `[tenantKeys] cross-tenant decrypt refused: ciphertext org ${orgStr}, caller org ${organizationId}`,
+      );
+    }
     return null;
   }
   try {
@@ -295,4 +301,13 @@ export async function decryptForTenant(organizationId: number, stored: string): 
   } catch {
     return null; // wrong key / corrupted — treat as unreadable, never throw into callers
   }
+}
+
+export async function decryptForTenant(organizationId: number, stored: string): Promise<string | null> {
+  return decryptTenantCiphertext(organizationId, stored, true);
+}
+
+/** Privacy/background-job variant: same fail-closed semantics, no tenant ids in logs. */
+export async function decryptForTenantQuiet(organizationId: number, stored: string): Promise<string | null> {
+  return decryptTenantCiphertext(organizationId, stored, false);
 }
