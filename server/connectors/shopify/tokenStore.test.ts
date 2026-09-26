@@ -175,6 +175,23 @@ describe("when Shopify rejects the refresh token", () => {
     );
   });
 
+  it("should never relabel a store a shop redaction has fenced", async () => {
+    const fake = scriptedDb({
+      select: { [TOKENS]: [[joined(tokenRow())], [tokenRow()]] },
+      update: { [TOKENS]: [1, 0] },
+      delete: { [TOKENS]: [1] },
+    });
+    state.db = fake.db;
+    vi.mocked(refreshExpiringOfflineToken).mockResolvedValue({ kind: "reauthorize" });
+
+    await reasonOf(call);
+    // The dead pair is still deleted; the store's label changes only if it is not `redacting`.
+    expect(fake.writes("delete", TOKENS)).toHaveLength(1);
+    const relabel = fake.writes("update", STORES)[0];
+    expect(relabel?.where?.sql).toMatch(/`status` <> \?/);
+    expect(relabel?.where?.params).toContain("redacting");
+  });
+
   it("should leave a reinstall's new credentials alone when the rejection was about the pair it replaced", async () => {
     // A reinstall mid-refresh retires the refresh token this worker presented,
     // so Shopify answers 401 — about credentials the store no longer holds.

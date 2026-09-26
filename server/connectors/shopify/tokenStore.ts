@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, eq, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, ne, notExists, or, sql } from "drizzle-orm";
 import { QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   SHOPIFY_ACCESS_TOKEN_REFRESH_SKEW_MS,
@@ -338,6 +338,10 @@ export async function markReauthorizationRequired(
     const storeScope = and(
       eq(shopifyConnectorStores.id, params.storeId),
       eq(shopifyConnectorStores.organizationId, params.organizationId),
+      // A redaction fence outranks every other store state: deleting a dead
+      // credential is still right, but relabelling the store would lift the
+      // fence and invite a reauthorization into a workspace being deleted.
+      ne(shopifyConnectorStores.status, "redacting"),
     );
     if (fence === "none") {
       // Nothing to retire; mark the store only if no pair has been stored

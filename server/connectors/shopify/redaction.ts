@@ -26,7 +26,19 @@ export async function admitShopifyShopRedaction(
     webhookId: string;
   },
 ): Promise<{ runId: string; status: "admitted" | "duplicate" }> {
-  // Order against order syncs: they hold this same row for their whole write
+  // Organisation FIRST: it is where every credential write for this tenant
+  // serialises (onboarding's assertTenantNotFenced locks it before storing a
+  // pair or activating any store), so a reauthorization of ANY store of the
+  // tenant either commits before this fence — and its pair is deleted below —
+  // or waits and then sees it. Organisation, then store, everywhere, so the two
+  // cannot deadlock.
+  await tx
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.id, params.store.organizationId))
+    .limit(1)
+    .for("update");
+  // Then against order syncs: they hold this same row for their whole write
   // (syncOrchestrator's per-store lock), so admission waits for an in-flight
   // sync to commit, and a sync that starts afterwards sees the fence.
   await tx
