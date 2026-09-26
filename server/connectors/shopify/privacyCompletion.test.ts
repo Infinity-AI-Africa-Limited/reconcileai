@@ -254,7 +254,7 @@ describe("Shopify privacy outbox recovery", () => {
     });
 
     expect(result).toEqual({ scanned: 1, dispatched: 1, failed: 0 });
-    expect(enqueue).toHaveBeenCalledWith({ kind: "shop_redact", jobId: 903 });
+    expect(enqueue).toHaveBeenCalledWith({ kind: "shop_redact", jobId: 903 }, 1);
     expect(Object.keys(enqueue.mock.calls[0][0])).toEqual(["kind", "jobId"]);
     expect(JSON.stringify(enqueue.mock.calls[0][0])).not.toMatch(/organization|storeId|domain|webhook|hash|payload/i);
     expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "dispatched" });

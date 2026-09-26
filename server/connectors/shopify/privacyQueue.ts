@@ -58,7 +58,7 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
  */
 export async function enqueueShopifyPrivacyJob(
   payload: ShopifyPrivacyQueuePayload,
-  dispatchAttempt: number,
+  dispatchAttempt = 1,
 ): Promise<void> {
   const durable = await queue();
   await durable.enqueue(`${shopifyPrivacyJobPrefix(payload.kind)}-${payload.jobId}-d${dispatchAttempt}`, payload);

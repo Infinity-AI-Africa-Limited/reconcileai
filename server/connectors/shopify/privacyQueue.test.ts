@@ -39,7 +39,7 @@ describe("Shopify privacy durable queue boundary", () => {
     await enqueueShopifyPrivacyJob({ kind: "shop_redact", jobId: 903 });
 
     expect(state.enqueue).toHaveBeenCalledWith(
-      "privacy-shop-redact-903",
+      "privacy-shop-redact-903-d1",
       { kind: "shop_redact", jobId: 903 },
     );
     const payload = state.enqueue.mock.calls[0][1];
