@@ -8,6 +8,18 @@ import {
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 import { handleShopifyShopRedactionJob } from "./shopRedaction";
 
+/** Queue-name prefix per job kind: a job id is unique only within its own table. */
+export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
+  switch (kind) {
+    case "customer_request":
+      return "privacy-request";
+    case "customer_redact":
+      return "privacy-redact";
+    case "shop_redact":
+      return "privacy-shop-redact";
+  }
+}
+
 let queuePromise: Promise<JobQueue<ShopifyPrivacyQueuePayload>> | null = null;
 
 function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
@@ -37,21 +49,19 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   return queuePromise;
 }
 
-/** Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL. */
-export async function enqueueShopifyPrivacyJob(payload: ShopifyPrivacyQueuePayload): Promise<void> {
+/**
+ * Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL.
+ *
+ * The queue id is unique per dispatch. A later database re-dispatch must not be
+ * swallowed by a settled BullMQ entry for the same job; the database lease keeps
+ * duplicate worker delivery harmless.
+ */
+export async function enqueueShopifyPrivacyJob(
+  payload: ShopifyPrivacyQueuePayload,
+  dispatchAttempt: number,
+): Promise<void> {
   const durable = await queue();
-  const prefix = payload.kind === "customer_request"
-    ? "privacy-request"
-    : payload.kind === "customer_redact"
-      ? "privacy-redact"
-      : "privacy-shop-redact";
-  const name = `${prefix}-${payload.jobId}`;
-  // BullMQ retains failed jobs for inspection. Re-adding the same deterministic
-  // id would return that failed row without running it, stranding DB-retryable
-  // work. Remove any non-active prior entry first; an active job refuses removal
-  // and leaves the outbox retryable until the next scanner pass.
-  await durable.remove?.(name);
-  await durable.enqueue(name, payload);
+  await durable.enqueue(`${shopifyPrivacyJobPrefix(payload.kind)}-${payload.jobId}-d${dispatchAttempt}`, payload);
 }
 
 /**
@@ -71,7 +81,7 @@ export function startShopifyPrivacyRecoveryLoop(intervalMs = 30_000): void {
   const sweep = async () => {
     try {
       await recoverShopifyPrivacyOutbox();
-    } catch (error) {
+    } catch {
       console.error("[shopify-privacy] durable dispatch unavailable", { code: "durable_queue_unavailable" });
     }
     try {

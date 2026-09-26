@@ -5,6 +5,7 @@ import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SHOPIFY_CONNECTION_MESSAGES, shopifyConnectionVerdict, shopifyInstallErrorMessage } from "@/lib/shopifyConnection";
+import { ShopifyPrivacyDeliveries } from "@/components/ShopifyPrivacyDeliveries";
 
 export function ShopifyWelcome() {
   const search = useSearch();
@@ -97,6 +98,9 @@ export function ShopifyWelcome() {
             ) : null}
           </div>
         ) : null}
+        <div className="text-left">
+          <ShopifyPrivacyDeliveries />
+        </div>
         <Button className="w-full bg-[#1B365D] hover:bg-[#102A43]" onClick={() => navigate("/settlement-monitor")}>
           Open ReconcileAI Dev Store workspace <ChevronRight className="ml-2 h-4 w-4" />
       </Button>

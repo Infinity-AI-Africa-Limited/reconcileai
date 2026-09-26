@@ -1,5 +1,13 @@
-import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { channels, transactions, uploadBatches, users, type InsertTransaction } from "../../../drizzle/schema";
+import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  channels,
+  exceptions,
+  matches,
+  transactions,
+  uploadBatches,
+  users,
+  type InsertTransaction,
+} from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
   shopifyOrderRedactionTombstones,
@@ -18,6 +26,7 @@ import {
   fetchShopifyOrdersWindow,
   type NormalizedShopifyOrder,
 } from "./orders";
+import { affectedRows } from "./tokenStore";
 
 const ORDER_RESOURCE = "orders" as const;
 const TRANSACTION_LOOKUP_CHUNK = 500;
@@ -54,6 +63,17 @@ interface ExistingOrderRow {
   id: number;
   transactionRef: string | null;
   shopifyUpdatedAt: Date | null;
+  amount?: string | null;
+  currency?: string | null;
+  transactionDate?: Date | null;
+  valueDate?: Date | null;
+  shopifyOrderCurrency?: string | null;
+  shopifyFinancialStatus?: string | null;
+  shopifyCancelledAt?: Date | null;
+  status?: string;
+  matchId?: number | null;
+  /** The upload batch that last wrote the row — identifies which sync inserted it. */
+  batchId?: number | null;
 }
 
 /**
@@ -144,20 +164,39 @@ async function resolveAuthorizedActor(
   db: DbExecutor,
   store: { id: number; organizationId: number; claimedByUserId: number | null },
 ): Promise<number> {
-  if (!store.claimedByUserId) throw new Error("Shopify store has no authorised sync actor");
-  const [actor] = await db
+  if (store.claimedByUserId) {
+    const [claimant] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(
+        and(
+          eq(users.id, store.claimedByUserId),
+          eq(users.organizationId, store.organizationId),
+          eq(users.role, "admin"),
+          eq(users.isActive, true),
+        ),
+      )
+      .limit(1);
+    if (claimant) return claimant.id;
+  }
+
+  // Store ownership remains tenant-bound even if its original claimant is later
+  // deactivated. The deterministic fallback is another active administrator of
+  // that SAME tenant; no ordinary role and no cross-tenant super-admin is valid.
+  const [fallback] = await db
     .select({ id: users.id })
     .from(users)
     .where(
       and(
-        eq(users.id, store.claimedByUserId),
         eq(users.organizationId, store.organizationId),
+        eq(users.role, "admin"),
         eq(users.isActive, true),
       ),
     )
+    .orderBy(users.id)
     .limit(1);
-  if (!actor) throw new Error("Shopify store sync actor is not an active member of the tenant");
-  return actor.id;
+  if (!fallback) throw new Error("Shopify store has no authorised sync actor: active tenant administrator unavailable");
+  return fallback.id;
 }
 
 async function resolveOrdersChannel(
@@ -217,6 +256,16 @@ async function loadExistingOrders(
           id: transactions.id,
           transactionRef: transactions.transactionRef,
           shopifyUpdatedAt: transactions.shopifyUpdatedAt,
+          amount: transactions.amount,
+          currency: transactions.currency,
+          transactionDate: transactions.transactionDate,
+          valueDate: transactions.valueDate,
+          shopifyOrderCurrency: transactions.shopifyOrderCurrency,
+          shopifyFinancialStatus: transactions.shopifyFinancialStatus,
+          shopifyCancelledAt: transactions.shopifyCancelledAt,
+          status: transactions.status,
+          matchId: transactions.matchId,
+          batchId: transactions.batchId,
         })
         .from(transactions)
         .where(
@@ -225,10 +274,243 @@ async function loadExistingOrders(
             eq(transactions.shopifyStoreId, params.storeId),
             inArray(transactions.transactionRef, chunk),
           ),
-        )),
+        )
+        .for("update")),
     );
   }
   return out;
+}
+
+function sameInstant(left: Date | null | undefined, right: string | null): boolean {
+  return (left?.getTime() ?? null) === (right === null ? null : new Date(right).getTime());
+}
+
+/** Fields that can change whether, or to what, this order reconciles. */
+export function materialShopifyOrderEvidenceChanged(
+  existing: ExistingOrderRow,
+  order: NormalizedShopifyOrder,
+): boolean {
+  return (
+    String(existing.amount) !== order.currentTotalPrice.amount ||
+    existing.currency !== order.currentTotalPrice.currencyCode ||
+    !sameInstant(existing.transactionDate, order.createdAt) ||
+    !sameInstant(existing.valueDate, order.processedAt) ||
+    existing.shopifyOrderCurrency !== order.currencyCode ||
+    (existing.shopifyFinancialStatus ?? null) !== order.displayFinancialStatus ||
+    !sameInstant(existing.shopifyCancelledAt, order.cancelledAt)
+  );
+}
+
+const ACTIVE_MATCH_STATUSES = ["confirmed", "pending_review"] as const;
+/** Statuses a match put there — the only ones a rejected match may take back. */
+const MATCHED_STATUSES = ["matched", "manually_matched"] as const;
+/** Exception records that still await a person, and so still back an `exception` status. */
+const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
+
+/**
+ * Reopen the corrected transaction and the counterparts of the matches it was in.
+ *
+ * Match rows are the evidence; `transactions.status` is a summary of them. So a
+ * correction rejects the order's active matches (kept as audit evidence) and
+ * then takes back only the `matched` summaries those matches produced. It never
+ * touches state that has a different source:
+ *   - a counterpart still in another active match stays matched;
+ *   - an `exception` status is taken back only where a rejected `pending_review`
+ *     match put it there — the job engine marks both sides of a review match
+ *     `exception` without writing any exception record — and only if no
+ *     unresolved exception record backs it. A status an exception record owns
+ *     is left for that workflow;
+ *   - a counterpart whose legacy `matchId` points at some other transaction is
+ *     paired elsewhere, and is left alone.
+ */
+async function reopenAffectedReconciliation(
+  tx: DbExecutor,
+  params: { organizationId: number; transactionId: number; legacyMatchId: number | null },
+): Promise<void> {
+  const activeMatches = await tx
+    .select({
+      id: matches.id,
+      status: matches.status,
+      sourceTransactionId: matches.sourceTransactionId,
+      targetTransactionId: matches.targetTransactionId,
+    })
+    .from(matches)
+    .where(
+      and(
+        eq(matches.organizationId, params.organizationId),
+        inArray(matches.status, [...ACTIVE_MATCH_STATUSES]),
+        or(
+          eq(matches.sourceTransactionId, params.transactionId),
+          eq(matches.targetTransactionId, params.transactionId),
+        ),
+      ),
+    );
+
+  const matchRowIds = activeMatches.map((match) => match.id);
+  if (matchRowIds.length > 0) {
+    await tx
+      .update(matches)
+      .set({ status: "rejected" })
+      .where(
+        and(
+          eq(matches.organizationId, params.organizationId),
+          inArray(matches.id, matchRowIds),
+          inArray(matches.status, [...ACTIVE_MATCH_STATUSES]),
+        ),
+      );
+  }
+
+  const counterparts = [
+    ...new Set(
+      [
+        ...activeMatches.map((match) =>
+          match.sourceTransactionId === params.transactionId
+            ? match.targetTransactionId
+            : match.sourceTransactionId,
+        ),
+        ...(params.legacyMatchId ? [params.legacyMatchId] : []),
+      ].filter((id) => id !== params.transactionId),
+    ),
+  ];
+
+  const pairedElsewhere = new Set<number>();
+  if (counterparts.length > 0) {
+    // Read AFTER rejecting ours, so what remains is independent of this order.
+    const stillMatched = await tx
+      .select({ sourceTransactionId: matches.sourceTransactionId, targetTransactionId: matches.targetTransactionId })
+      .from(matches)
+      .where(
+        and(
+          eq(matches.organizationId, params.organizationId),
+          inArray(matches.status, [...ACTIVE_MATCH_STATUSES]),
+          or(inArray(matches.sourceTransactionId, counterparts), inArray(matches.targetTransactionId, counterparts)),
+        ),
+      );
+    for (const match of stillMatched) {
+      pairedElsewhere.add(match.sourceTransactionId);
+      pairedElsewhere.add(match.targetTransactionId);
+    }
+    const reopenable = counterparts.filter((id) => !pairedElsewhere.has(id));
+    if (reopenable.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.organizationId, params.organizationId),
+            inArray(transactions.id, reopenable),
+            inArray(transactions.status, [...MATCHED_STATUSES]),
+            or(isNull(transactions.matchId), eq(transactions.matchId, params.transactionId)),
+          ),
+        );
+    }
+  }
+
+  // Both parties to a rejected review match were marked `exception` by it.
+  // Take that back where nothing else still stands behind the status.
+  const reviewMatches = activeMatches.filter((match) => match.status === "pending_review");
+  const reviewCounterparts = [
+    ...new Set(
+      reviewMatches
+        .map((match) =>
+          match.sourceTransactionId === params.transactionId ? match.targetTransactionId : match.sourceTransactionId,
+        )
+        .filter((id) => id !== params.transactionId),
+    ),
+  ];
+  const reviewParties = [
+    ...new Set(
+      reviewMatches
+        .flatMap((match) => [match.sourceTransactionId, match.targetTransactionId])
+        .filter((id) => !pairedElsewhere.has(id)),
+    ),
+  ];
+  if (reviewParties.length > 0) {
+    const backed = await tx
+      .select({ transactionId: exceptions.transactionId })
+      .from(exceptions)
+      .where(
+        and(
+          eq(exceptions.organizationId, params.organizationId),
+          inArray(exceptions.transactionId, reviewParties),
+          inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+        ),
+      );
+    const backedIds = new Set(backed.map((row) => row.transactionId));
+    const stale = reviewParties.filter((id) => !backedIds.has(id));
+    // A legacy `matchId` naming some OTHER transaction is a pairing this
+    // correction does not own, exactly as for the matched summaries above: a
+    // row is released only while its pointer is empty or names the other side
+    // of the review match being rejected.
+    if (stale.includes(params.transactionId) && reviewCounterparts.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.id, params.transactionId),
+            eq(transactions.organizationId, params.organizationId),
+            eq(transactions.status, "exception"),
+            or(isNull(transactions.matchId), inArray(transactions.matchId, reviewCounterparts)),
+          ),
+        );
+    }
+    const staleCounterparts = stale.filter((id) => id !== params.transactionId);
+    if (staleCounterparts.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.organizationId, params.organizationId),
+            inArray(transactions.id, staleCounterparts),
+            eq(transactions.status, "exception"),
+            or(isNull(transactions.matchId), eq(transactions.matchId, params.transactionId)),
+          ),
+        );
+    }
+  }
+
+  // Every active match the corrected order was in is now rejected, so a matched
+  // summary has nothing behind it. Any other status has its own source.
+  await tx
+    .update(transactions)
+    .set({ status: "unmatched", matchId: null })
+    .where(
+      and(
+        eq(transactions.id, params.transactionId),
+        eq(transactions.organizationId, params.organizationId),
+        inArray(transactions.status, [...MATCHED_STATUSES]),
+      ),
+    );
+}
+
+/**
+ * Serialise writers per store. A manual sync and a webhook sync can overlap;
+ * holding the store row for the whole write means the second one's locking
+ * reads see the first one's committed rows, rather than both deciding from the
+ * same stale picture and racing on the unique key.
+ */
+async function lockStoreForSync(
+  tx: DbExecutor,
+  store: { id: number; organizationId: number },
+): Promise<void> {
+  const [locked] = await tx
+    .select({ id: shopifyConnectorStores.id })
+    .from(shopifyConnectorStores)
+    .where(
+      and(
+        eq(shopifyConnectorStores.id, store.id),
+        eq(shopifyConnectorStores.organizationId, store.organizationId),
+        eq(shopifyConnectorStores.status, "active"),
+        // A customer redaction fences the store's writes; the API read may have
+        // started before it was admitted, so this is re-checked under the lock.
+        eq(shopifyConnectorStores.privacyRedactionState, "active"),
+      ),
+    )
+    .limit(1)
+    .for("update");
+  if (!locked) throw new Error("Shopify store write fence is active or the store is not active");
 }
 
 function transactionFields(order: NormalizedShopifyOrder) {
@@ -323,26 +605,9 @@ export async function runShopifyOrderSync(
     });
 
     const result = await db.transaction(async (tx) => {
-      // The API read may have started before redaction admission. Re-lock and
-      // re-check the exact store immediately before any durable sync write.
-      const [writableStore] = await tx
-        .select({
-          id: shopifyConnectorStores.id,
-          status: shopifyConnectorStores.status,
-          privacyRedactionState: shopifyConnectorStores.privacyRedactionState,
-        })
-        .from(shopifyConnectorStores)
-        .where(
-          and(
-            eq(shopifyConnectorStores.id, store.id),
-            eq(shopifyConnectorStores.organizationId, store.organizationId),
-          ),
-        )
-        .limit(1)
-        .for("update");
-      if (!writableStore || writableStore.status !== "active" || writableStore.privacyRedactionState !== "active") {
-        throw new Error("Shopify store write fence is active");
-      }
+      // First statement: one writer per store from here to commit. The lock
+      // also refuses a store fenced for redaction since the API read began.
+      await lockStoreForSync(tx, store);
       // Computing every retained-key digest and loading tombstones happens under
       // the same lock. Missing rotation material throws and aborts fail-closed.
       const eligible = await filterSuppressedOrders(tx, store, fetched, deps.suppressionKeys);
@@ -355,6 +620,9 @@ export async function runShopifyOrderSync(
       const partition = partitionShopifyOrders(eligible, existing);
       const changed = partition.inserts.length + partition.updates.length;
       let batchId: number | null = null;
+      let inserted = 0;
+      let updated = 0;
+      let unchanged = partition.unchanged;
 
       if (changed > 0) {
         const batch = await tx.insert(uploadBatches).values({
@@ -384,30 +652,36 @@ export async function runShopifyOrderSync(
         );
         if (rows.length > 0) {
           // The unique key is the concurrency backstop. A racing cycle may have
-          // inserted the same GID after our lookup; in that case update only the
-          // minimal fields and only when the provider updatedAt is newer.
+          // inserted the same GID after our locking lookup. Do not overwrite any
+          // evidence in the duplicate branch: re-read the winning row below and
+          // route a genuinely newer correction through the same guarded update
+          // and reconciliation-invalidation path as every ordinary update.
           await tx.insert(transactions).values(rows).onDuplicateKeyUpdate({
             set: {
-              batchId: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.batchId}), ${transactions.batchId})`,
-              channelId: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.channelId}), ${transactions.channelId})`,
-              userId: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.userId}), ${transactions.userId})`,
-              externalRef: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.externalRef}), ${transactions.externalRef})`,
-              description: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.description}), ${transactions.description})`,
-              amount: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.amount}), ${transactions.amount})`,
-              currency: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.currency}), ${transactions.currency})`,
-              transactionDate: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.transactionDate}), ${transactions.transactionDate})`,
-              valueDate: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.valueDate}), ${transactions.valueDate})`,
-              shopifyOrderCurrency: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.shopifyOrderCurrency}), ${transactions.shopifyOrderCurrency})`,
-              shopifyFinancialStatus: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.shopifyFinancialStatus}), ${transactions.shopifyFinancialStatus})`,
-              shopifyCancelledAt: sql`IF(VALUES(${transactions.shopifyUpdatedAt}) > ${transactions.shopifyUpdatedAt}, VALUES(${transactions.shopifyCancelledAt}), ${transactions.shopifyCancelledAt})`,
-              shopifyUpdatedAt: sql`GREATEST(VALUES(${transactions.shopifyUpdatedAt}), ${transactions.shopifyUpdatedAt})`,
-              rawData: null,
+              transactionRef: sql`${transactions.transactionRef}`,
             },
           });
         }
 
-        for (const update of partition.updates) {
-          await tx
+        const racedRows = await loadExistingOrders(tx, {
+          organizationId: store.organizationId,
+          storeId: store.id,
+          gids: partition.inserts.map((order) => order.gid),
+        });
+        // A row this cycle inserted carries this cycle's batch. Anything else
+        // was written by another sync first: it is not an insert of ours. It is
+        // an update if our evidence is newer, and otherwise unchanged.
+        inserted = racedRows.filter((row) => row.batchId === batchId).length;
+        const raced = partitionShopifyOrders(
+          partition.inserts,
+          racedRows.filter((row) => row.batchId !== batchId),
+        );
+        const racedCorrections = raced.updates;
+        unchanged += raced.unchanged;
+
+        for (const update of [...partition.updates, ...racedCorrections]) {
+          const current = [...existing, ...racedRows].find((row) => row.id === update.transactionId);
+          const write = await tx
             .update(transactions)
             .set({ ...transactionFields(update.order), batchId, channelId, userId })
             .where(
@@ -416,8 +690,39 @@ export async function runShopifyOrderSync(
                 eq(transactions.organizationId, store.organizationId),
                 eq(transactions.shopifyStoreId, store.id),
                 eq(transactions.transactionRef, update.order.gid),
+                or(
+                  isNull(transactions.shopifyUpdatedAt),
+                  lt(transactions.shopifyUpdatedAt, new Date(update.order.updatedAt)),
+                ),
               ),
             );
+          if (affectedRows(write) === 0) {
+            unchanged += 1;
+            continue;
+          }
+          updated += 1;
+          if (current && materialShopifyOrderEvidenceChanged(current, update.order)) {
+            await reopenAffectedReconciliation(tx, {
+              organizationId: store.organizationId,
+              transactionId: update.transactionId,
+              legacyMatchId: current.matchId ?? null,
+            });
+          }
+        }
+
+        // The batch was sized from the plan; record what was actually written.
+        // If another sync wrote everything first, this batch holds nothing.
+        const written = inserted + updated;
+        if (written === 0) {
+          await tx
+            .delete(uploadBatches)
+            .where(and(eq(uploadBatches.id, batchId), eq(uploadBatches.organizationId, store.organizationId)));
+          batchId = null;
+        } else if (written !== changed) {
+          await tx
+            .update(uploadBatches)
+            .set({ validRows: written })
+            .where(and(eq(uploadBatches.id, batchId), eq(uploadBatches.organizationId, store.organizationId)));
         }
       }
 
@@ -456,9 +761,9 @@ export async function runShopifyOrderSync(
       }
 
       return {
-        inserted: partition.inserts.length,
-        updated: partition.updates.length,
-        unchanged: partition.unchanged,
+        inserted,
+        updated,
+        unchanged,
         batchId,
       };
     });
@@ -491,6 +796,26 @@ type ShopifyWebhookSyncPayload = { storeId: number; organizationId: number; webh
 /** A webhook worker hook; queue integration stays injectable and independently testable. */
 export async function handleShopifyWebhookSync(payload: ShopifyWebhookSyncPayload): Promise<void> {
   await runShopifyOrderSync({ ...payload, trigger: "webhook" });
+}
+
+/** Terminal queue evidence: retained for operators and eligible for redelivery. */
+export async function markShopifyWebhookSyncFailed(
+  payload: ShopifyWebhookSyncPayload,
+  deps: { db?: Db } = {},
+): Promise<void> {
+  const db = deps.db ?? (await getDb());
+  if (!db) throw new Error("Database unavailable while recording failed Shopify order sync");
+  await db
+    .update(shopifyWebhookEvents)
+    .set({ status: "failed", errorCode: "order_sync_attempts_exhausted", processedAt: new Date() })
+    .where(
+      and(
+        eq(shopifyWebhookEvents.webhookId, payload.webhookId),
+        eq(shopifyWebhookEvents.storeId, payload.storeId),
+        eq(shopifyWebhookEvents.organizationId, payload.organizationId),
+        eq(shopifyWebhookEvents.status, "received"),
+      ),
+    );
 }
 
 /**

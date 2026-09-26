@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, eq, ne, or, sql } from "drizzle-orm";
 import { organizations, users } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
@@ -27,13 +27,34 @@ export async function admitShopifyShopRedaction(
     webhookId: string;
   },
 ): Promise<{ jobId: number; runId: string; status: "admitted" | "duplicate" }> {
+  // Organisation FIRST: it is where every credential write for this tenant
+  // serialises. A reauthorization of any store either commits before this fence
+  // (and its credential pair is deleted below), or waits and then sees it.
+  await tx
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.id, params.store.organizationId))
+    .limit(1)
+    .for("update");
+  // Then against order syncs: they hold this same row for their whole write, so
+  // admission waits for an in-flight sync to commit and later syncs see the fence.
+  await tx
+    .select({ id: shopifyConnectorStores.id })
+    .from(shopifyConnectorStores)
+    .where(and(eq(shopifyConnectorStores.id, params.store.id), eq(shopifyConnectorStores.organizationId, params.store.organizationId)))
+    .limit(1)
+    .for("update");
+
   const [existing] = await tx
     .select({ jobId: shopifyShopRedactionJobs.id, runId: shopifyShopRedactionJobs.runId })
     .from(shopifyShopRedactionJobs)
     .where(
-      or(
-        eq(shopifyShopRedactionJobs.requestHash, params.requestHash),
-        eq(shopifyShopRedactionJobs.storeId, params.store.id),
+      and(
+        eq(shopifyShopRedactionJobs.organizationId, params.store.organizationId),
+        or(
+          eq(shopifyShopRedactionJobs.requestHash, params.requestHash),
+          eq(shopifyShopRedactionJobs.storeId, params.store.id),
+        ),
       ),
     )
     .limit(1);
@@ -83,13 +104,26 @@ export async function admitShopifyShopRedaction(
     .set({ isActive: false, deletionState: "redacting", redactionRunId: runId, redactingAt: new Date() })
     .where(and(eq(organizations.id, params.store.organizationId), eq(organizations.deletionState, "active")));
   await tx.update(users).set({ isActive: false }).where(eq(users.organizationId, params.store.organizationId));
+  // The fence is tenant-wide, so the credentials are too. A multi-store tenant
+  // keeping another store's token would leave a live credential inside a
+  // workspace that is being redacted.
   await tx
     .delete(shopifyConnectorTokens)
-    .where(and(eq(shopifyConnectorTokens.storeId, params.store.id), eq(shopifyConnectorTokens.organizationId, params.store.organizationId)));
+    .where(eq(shopifyConnectorTokens.organizationId, params.store.organizationId));
   await tx
     .update(shopifyConnectorStores)
     .set({ status: "redacting", statusReason: "shop_redact_requested", lastWebhookAt: new Date() })
     .where(and(eq(shopifyConnectorStores.id, params.store.id), eq(shopifyConnectorStores.organizationId, params.store.organizationId)));
+  await tx
+    .update(shopifyConnectorStores)
+    .set({ status: "redacting", statusReason: "organization_redacting" })
+    .where(
+      and(
+        eq(shopifyConnectorStores.organizationId, params.store.organizationId),
+        ne(shopifyConnectorStores.id, params.store.id),
+        ne(shopifyConnectorStores.status, "redacting"),
+      ),
+    );
 
   return { jobId, runId, status: "admitted" };
 }

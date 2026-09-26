@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import type { SQL } from "drizzle-orm";
+import { MySqlDialect } from "drizzle-orm/mysql-core";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 import { computeShopifyOrderSuppressionDigest } from "./privacySuppression";
 import { scriptedDb } from "./scriptedDb.testkit";
@@ -38,6 +40,8 @@ const SCOPE_A_ROW = {
   counterparty: "Shopify",
   originalTransactionRef: null,
   isReversal: false,
+  debitCredit: "credit",
+  currency: "USD",
   shopifyOrderCurrency: "USD",
   shopifyUpdatedAt: NOW,
   shopifyFinancialStatus: "PAID",
@@ -252,5 +256,135 @@ describe("Shopify Scope A customer-redaction execution", () => {
     const payload = { kind: "customer_redact" as const, jobId: JOB.requestId };
     expect(Object.keys(payload)).toEqual(["kind", "jobId"]);
     expect(JSON.stringify(payload)).not.toMatch(/organization|store|shop|domain|selector|hash|url/i);
+  });
+});
+
+/** The update, if any, that handed this request's store fence back. */
+function fenceRelease(fake: ReturnType<typeof scriptedDb>) {
+  return fake
+    .writes("update", STORES)
+    .find((op) => (op.data as Record<string, unknown> | null)?.privacyRedactionState === "active");
+}
+
+describe("when a customer redaction stops without completing", () => {
+  // Greptile #160: a parked job kept the store fenced indefinitely — sync and
+  // reauthorization refused, every other customer's redaction left waiting.
+  it("should release the store fence when the job is parked as blocked", async () => {
+    const fake = baseScript({ select: { [TXNS]: [[{ ...SCOPE_A_ROW, rawData: { unexpected: true } }]] } });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "blocked_dependency" });
+    // Only this request's fence: exact state and request id.
+    expect(fenceRelease(fake)?.where?.params).toEqual([7, 42, "customer_redacting", 901]);
+  });
+
+  it("should release the store fence when the job is parked for manual review", async () => {
+    const fake = baseScript({ select: { [SELECTORS]: [[{ resourceType: "order", position: 0, externalIdEnc: "enc-order-501" }]] } });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "manual_review", failureCode: "selector_integrity_failed" });
+    expect(fenceRelease(fake)?.where?.params).toEqual([7, 42, "customer_redacting", 901]);
+  });
+
+  it("should release the store fence when the job runs out of attempts", async () => {
+    const fake = baseScript({
+      select: { [JOBS]: [[{ ...JOB, attempts: 6 }]], [TXNS]: [[SCOPE_A_ROW]] },
+      insert: { [TOMBSTONES]: [new Error("database unavailable")] },
+    });
+
+    await expect(handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake))).rejects.toThrow(/retry required/);
+
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "failed_terminal" });
+    expect(fenceRelease(fake)?.where?.params).toEqual([7, 42, "customer_redacting", 901]);
+  });
+
+  it("should keep the fence while a retryable failure still owes work", async () => {
+    const fake = baseScript({
+      select: { [TXNS]: [[SCOPE_A_ROW]] },
+      insert: { [TOMBSTONES]: [new Error("database unavailable")] },
+    });
+
+    await expect(handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake))).rejects.toThrow(/retry required/);
+
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "failed_retryable" });
+    expect(fenceRelease(fake)).toBeUndefined();
+  });
+});
+
+describe("when another customer redaction holds the store fence", () => {
+  it("should wait its turn without spending an attempt, and write nothing else", async () => {
+    const fake = baseScript({
+      select: {
+        [STORES]: [[{ ...FENCED_STORE, privacyRedactionRequestId: 999 }]],
+        [TXNS]: [[SCOPE_A_ROW]],
+      },
+    });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    const deferred = fake.writes("update", JOBS).at(-1);
+    expect(deferred?.data).toMatchObject({
+      status: "failed_retryable",
+      failureCode: "store_fence_busy",
+      nextAttemptAt: new Date(NOW.getTime() + 60_000),
+      lastCheckpoint: "waiting_for_store_fence",
+    });
+    // The claim's increment is undone: queueing is not a failure.
+    const attempts = new MySqlDialect().sqlToQuery(deferred?.data?.attempts as SQL).sql;
+    expect(attempts).toMatch(/GREATEST\(`shopify_privacy_customer_redaction_jobs`\.`attempts` - 1, 0\)/);
+    expect(fake.writes("insert", OUTBOX).at(-1)?.data).toMatchObject({ kind: "customer_redact", jobId: 901, failureCode: "store_fence_busy" });
+    expect(fake.writes("insert", TOMBSTONES)).toEqual([]);
+    expect(fake.writes("delete", SELECTORS)).toEqual([]);
+    expect(fake.writes("update", REQUESTS)).toEqual([]);
+    expect(fenceRelease(fake)).toBeUndefined();
+  });
+});
+
+describe("when the store fence is free as the worker runs", () => {
+  it("should take the fence for this request before verifying, then complete and release it", async () => {
+    const fake = baseScript({
+      select: { [STORES]: [[{ ...FENCED_STORE, privacyRedactionState: "active", privacyRedactionRequestId: null }]], [TXNS]: [[]] },
+    });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    const stores = fake.writes("update", STORES);
+    expect(stores[0]?.data).toEqual({ privacyRedactionState: "customer_redacting", privacyRedactionRequestId: 901 });
+    expect(stores[0]?.where?.params).toEqual([7, 42, "active"]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "completed" });
+    expect(fenceRelease(fake)?.where?.params).toEqual([7, 42, "customer_redacting", 901]);
+  });
+});
+
+describe("when a queued run cannot claim its job", () => {
+  it("should keep the queue entry alive while the job still owes work", async () => {
+    const fake = baseScript({ select: { [JOBS]: [[{ status: "processing" }]] }, update: { [JOBS]: [0] } });
+
+    await expect(handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake))).rejects.toThrow(/not claimable/);
+  });
+
+  it("should settle quietly when the job has ended", async () => {
+    const fake = baseScript({ select: { [JOBS]: [[{ status: "completed" }]] }, update: { [JOBS]: [0] } });
+
+    await expect(handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake))).resolves.toBeUndefined();
+  });
+});
+
+describe("when a persisted order deviates from the fixed projection", () => {
+  it.each([
+    ["a debit", { debitCredit: "debit" }],
+    ["a currency that is not an ISO code", { currency: "us dollars" }],
+  ])("should block completion for %s", async (_name, deviation) => {
+    const fake = baseScript({ select: { [TXNS]: [[{ ...SCOPE_A_ROW, ...deviation }]] } });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    expect(fake.writes("insert", TOMBSTONES)).toEqual([]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+      status: "blocked_dependency",
+      failureCode: "unsupported_transaction_footprint",
+    });
   });
 });

@@ -10,9 +10,43 @@
  * Asserted against the handler rather than the helper, because the helper being
  * right is not the part that was broken.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CookieOptions, Express, Request, Response } from "express";
 
-type Handler = (req: any, res: any) => Promise<void> | void;
+// The first import of the SSO module transforms its whole dependency graph.
+// That took ~4–5s on a cold local runner — right at vitest's 5s per-test limit,
+// so the first case failed intermittently. Pay it once, outside any test's
+// budget; each case still re-imports a fresh instance after vi.resetModules().
+beforeAll(async () => {
+  await import("./_core/sso");
+}, 60_000);
+
+/** What `registerSsoRoutes` hands `app.get` — Express's own handler shape. */
+type Handler = (req: Request, res: Response) => Promise<void> | void;
+
+/** The slice of a request the start route reads. */
+interface FakeRequest {
+  params: { provider: string };
+  headers: Record<string, string>;
+  socket: { remoteAddress: string };
+  protocol: string;
+  get: (header: string) => string | undefined;
+}
+
+/** The slice of a response the start route writes, plus what it recorded. */
+interface CapturedResponse {
+  cookies: Array<{ name: string; value: string; options: CookieOptions }>;
+  redirects: string[];
+  cookie(name: string, value: string, options: CookieOptions): void;
+  redirect(status: number, url: string): void;
+}
+
+/**
+ * The fakes implement only what the route touches, so they are widened to
+ * Express's types once, here — typed on both sides, rather than `any`.
+ */
+const asRequest = (req: FakeRequest) => req as unknown as Request;
+const asResponse = (res: CapturedResponse) => res as unknown as Response;
 
 const ENV_KEYS = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "JWT_SECRET", "APP_URL", "TRUSTED_PROXY_HOPS", "NODE_ENV"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -39,9 +73,10 @@ async function startHandler(env: Record<string, string | undefined>): Promise<Ha
   }
 
   const routes = new Map<string, Handler>();
-  const app = { get: (path: string, h: Handler) => routes.set(path, h) } as any;
+  // A fake app that only records `get` registrations — the one method used.
+  const app = { get: (path: string, h: Handler) => routes.set(path, h) };
   const { registerSsoRoutes } = await import("./_core/sso");
-  registerSsoRoutes(app);
+  registerSsoRoutes(app as unknown as Express);
 
   const handler = routes.get("/api/oauth/:provider/start");
   if (!handler) throw new Error("start route not registered");
@@ -49,7 +84,7 @@ async function startHandler(env: Record<string, string | undefined>): Promise<Ha
 }
 
 /** A request as it arrives in production: TLS ends at the edge, the socket is plaintext. */
-function behindTlsProxy() {
+function behindTlsProxy(): FakeRequest {
   return {
     params: { provider: "google" },
     // Node always populates `host`; a fixture without it is not a real request.
@@ -64,12 +99,12 @@ function behindTlsProxy() {
   };
 }
 
-function captureRes() {
-  const cookies: Array<{ name: string; value: string; options: any }> = [];
+function captureRes(): CapturedResponse {
+  const cookies: CapturedResponse["cookies"] = [];
   return {
     cookies,
-    redirects: [] as string[],
-    cookie(name: string, value: string, options: any) {
+    redirects: [],
+    cookie(name: string, value: string, options: CookieOptions) {
       cookies.push({ name, value, options });
     },
     redirect(_status: number, url: string) {
@@ -82,7 +117,7 @@ describe("when starting an SSO sign-in from behind the TLS proxy", () => {
   it("should mark the flow cookie Secure", async () => {
     const handler = await startHandler({ NODE_ENV: "production", TRUSTED_PROXY_HOPS: "2" });
     const res = captureRes();
-    await handler(behindTlsProxy(), res);
+    await handler(asRequest(behindTlsProxy()), asResponse(res));
 
     expect(res.cookies).toHaveLength(1);
     const cookie = res.cookies[0];
@@ -100,7 +135,7 @@ describe("when starting an SSO sign-in from behind the TLS proxy", () => {
     // and a redirect_uri must match the provider's registration exactly.
     const handler = await startHandler({ NODE_ENV: "production", TRUSTED_PROXY_HOPS: "2", APP_URL: "" });
     const res = captureRes();
-    await handler(behindTlsProxy(), res);
+    await handler(asRequest(behindTlsProxy()), asResponse(res));
 
     expect(res.redirects).toHaveLength(1);
     const redirectUri = new URL(res.redirects[0]).searchParams.get("redirect_uri");
@@ -114,7 +149,7 @@ describe("when starting an SSO sign-in from behind the TLS proxy", () => {
       APP_URL: "https://reconcile.bank.internal",
     });
     const res = captureRes();
-    await handler(behindTlsProxy(), res);
+    await handler(asRequest(behindTlsProxy()), asResponse(res));
 
     const redirectUri = new URL(res.redirects[0]).searchParams.get("redirect_uri");
     expect(redirectUri).toBe("https://reconcile.bank.internal/api/oauth/google/callback");
@@ -128,14 +163,14 @@ describe("when starting an SSO sign-in over plain http locally", () => {
     const handler = await startHandler({ NODE_ENV: "development", TRUSTED_PROXY_HOPS: undefined });
     const res = captureRes();
     await handler(
-      {
+      asRequest({
         params: { provider: "google" },
         headers: { host: "localhost:3000" },
         socket: { remoteAddress: "127.0.0.1" },
         protocol: "http",
         get: (h: string) => (h.toLowerCase() === "host" ? "localhost:3000" : undefined),
-      },
-      res,
+      }),
+      asResponse(res),
     );
 
     expect(res.cookies[0].options.secure).toBe(false);

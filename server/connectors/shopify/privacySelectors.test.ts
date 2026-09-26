@@ -8,14 +8,17 @@ const cryptoState = vi.hoisted(() => ({
   blind: vi.fn(async (organizationId: number, context: string, value: string) =>
     `tbi1:1:${crypto.createHash("sha256").update(`${organizationId}:${context}:${value}`).digest("hex")}`,
   ),
+  dek: vi.fn(async () => ({ dek: Buffer.alloc(32), version: 1 })),
 }));
 
 vi.mock("../../_core/tenantKeys", () => ({
   encryptForTenant: cryptoState.encrypt,
   blindIndexForTenant: cryptoState.blind,
+  getTenantDek: cryptoState.dek,
 }));
 
 import {
+  PROTECT_SELECTOR_CHUNK,
   admitShopifyCustomerPrivacyRequest,
   protectCustomerPrivacySelectors,
   validateCustomerPrivacySelectors,
@@ -26,6 +29,9 @@ const SHOP = "merchant.myshopify.com";
 const REQUESTS = "shopify_privacy_requests";
 const SELECTORS = "shopify_privacy_request_selectors";
 const EVENTS = "shopify_webhook_events";
+const STORES = "shopify_connector_stores";
+const JOBS = "shopify_privacy_data_request_jobs";
+const OUTBOX = "shopify_privacy_queue_outbox";
 const STORE = { id: 7, organizationId: 42, shopId: "gid://shopify/Shop/17", shopDomain: SHOP };
 const BODY = {
   shop_id: 17,
@@ -76,7 +82,7 @@ describe("customer privacy request admission", () => {
     const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
     if (!validation.ok) throw new Error("fixture should validate");
     const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
-    const fake = scriptedDb({ select: { [REQUESTS]: [[{ id: 901 }]] } });
+    const fake = scriptedDb({ select: { [STORES]: [[{ status: "active" }]], [REQUESTS]: [[{ id: 901 }]] } });
 
     const status = await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
       admitShopifyCustomerPrivacyRequest(tx, {
@@ -117,7 +123,7 @@ describe("customer privacy request admission", () => {
       STORE,
     );
     if (validation.ok) throw new Error("fixture should fail validation");
-    const fake = scriptedDb();
+    const fake = scriptedDb({ select: { [STORES]: [[{ status: "active" }]] } });
 
     const status = await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
       admitShopifyCustomerPrivacyRequest(tx, {
@@ -155,7 +161,8 @@ describe("customer privacy request admission", () => {
     const fake = scriptedDb({
       select: {
         [REQUESTS]: [[{ id: 902 }]],
-        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active", privacyRedactionRequestId: null }]],
+        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active" }]],
+        shopify_privacy_customer_redaction_jobs: [[{ status: "received" }]],
       },
     });
 
@@ -175,7 +182,8 @@ describe("customer privacy request admission", () => {
       (op.data as Record<string, unknown> | null)?.privacyRedactionState === "customer_redacting",
     );
     expect(fence?.data).toMatchObject({ privacyRedactionState: "customer_redacting", privacyRedactionRequestId: 902 });
-    expect(fence?.where?.params).toEqual(expect.arrayContaining([7, 42, "active", "active"]));
+    // Taken only while free; the store's lifecycle status is not a condition.
+    expect(fence?.where?.params).toEqual([7, 42, "active"]);
     const execution = fake.writes("insert", "shopify_privacy_customer_redaction_jobs")[0];
     const outbox = fake.writes("insert", "shopify_privacy_queue_outbox")[0];
     expect(execution?.data).toMatchObject({ requestId: 902, organizationId: 42, storeId: 7, status: "received" });
@@ -184,7 +192,7 @@ describe("customer privacy request admission", () => {
     expect(outbox?.txId).toBe(fence?.txId);
   });
 
-  it("rolls back a customer-redaction acknowledgement when the exact store fence cannot be acquired", async () => {
+  it("admits durably when another request holds the store fence, leaving the fence to the worker", async () => {
     const validation = validateCustomerPrivacySelectors(
       "customers/redact",
       { shop_id: 17, shop_domain: SHOP, customer: { id: 41 }, orders_to_redact: [501] },
@@ -192,29 +200,75 @@ describe("customer privacy request admission", () => {
     );
     if (!validation.ok) throw new Error("fixture should validate");
     const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+    // A mandatory compliance webhook is never refused over contention: the
+    // old behaviour threw here, Shopify retried for 48 hours and then dropped it.
     const fake = scriptedDb({
       select: {
         [REQUESTS]: [[{ id: 902 }]],
-        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active", privacyRedactionRequestId: null }]],
+        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "customer_redacting" }]],
+        shopify_privacy_customer_redaction_jobs: [[{ status: "received" }]],
       },
-      update: { shopify_connector_stores: [0] },
     });
 
-    await expect(
-      (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
+    const status = await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
+      admitShopifyCustomerPrivacyRequest(tx, {
+        store: STORE,
+        topic: "customers/redact",
+        requestHash: "redact-payload-digest",
+        webhookId: "wh-customer-redact",
+        validation,
+        selectors,
+      }),
+    );
+
+    expect(status).toBe("received");
+    expect(fake.writes("insert", REQUESTS)).toHaveLength(1);
+    expect(fake.writes("insert", SELECTORS)).toHaveLength(1);
+    expect(fake.writes("insert", "shopify_privacy_customer_redaction_jobs")).toHaveLength(1);
+    expect(fake.writes("insert", "shopify_privacy_queue_outbox")[0]?.data).toEqual({ kind: "customer_redact", jobId: 902, status: "pending" });
+    // The other request's fence is left alone.
+    expect(
+      fake.writes("update", "shopify_connector_stores").some(
+        (op) => (op.data as Record<string, unknown> | null)?.privacyRedactionState === "customer_redacting",
+      ),
+    ).toBe(false);
+  });
+
+  it("takes no fence and queues nothing when replaying a request whose job has ended", async () => {
+    const validation = validateCustomerPrivacySelectors(
+      "customers/redact",
+      { shop_id: 17, shop_domain: SHOP, customer: { id: 41 }, orders_to_redact: [501] },
+      STORE,
+    );
+    if (!validation.ok) throw new Error("fixture should validate");
+    const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+    for (const ended of ["manual_review", "blocked_dependency", "failed_terminal", "completed"]) {
+      const fake = scriptedDb({
+        select: {
+          [REQUESTS]: [[{ id: 902, status: "manual_review" }]],
+          shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active" }]],
+          shopify_privacy_customer_redaction_jobs: [[{ status: ended }]],
+        },
+      });
+      await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
         admitShopifyCustomerPrivacyRequest(tx, {
           store: STORE,
           topic: "customers/redact",
           requestHash: "redact-payload-digest",
-          webhookId: "wh-customer-redact",
+          webhookId: "wh-replay",
           validation,
           selectors,
         }),
-      ),
-    ).rejects.toThrow(/fence lost/);
-    expect(fake.committed().filter((op) => op.table === REQUESTS || op.table === SELECTORS)).toEqual([]);
-    expect(fake.committed().filter((op) => op.table === "shopify_privacy_customer_redaction_jobs")).toEqual([]);
-    expect(fake.committed().filter((op) => op.table === "shopify_privacy_queue_outbox")).toEqual([]);
+      );
+      // Nothing would run to release the fence, or to consume the dispatch.
+      expect(
+        fake.writes("update", "shopify_connector_stores").some(
+          (op) => (op.data as Record<string, unknown> | null)?.privacyRedactionState === "customer_redacting",
+        ),
+        ended,
+      ).toBe(false);
+      expect(fake.writes("insert", "shopify_privacy_queue_outbox"), ended).toEqual([]);
+    }
   });
 
   it("settles a new delivery of a completed redaction without reviving selectors, work, or the store fence", async () => {
@@ -225,7 +279,12 @@ describe("customer privacy request admission", () => {
     );
     if (!validation.ok) throw new Error("fixture should validate");
     const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
-    const fake = scriptedDb({ select: { [REQUESTS]: [[{ id: 902, status: "completed" }]] } });
+    const fake = scriptedDb({
+      select: {
+        [REQUESTS]: [[{ id: 902, status: "completed" }]],
+        shopify_connector_stores: [[{ status: "active", privacyRedactionState: "active" }]],
+      },
+    });
 
     const status = await (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
       admitShopifyCustomerPrivacyRequest(tx, {
@@ -248,5 +307,173 @@ describe("customer privacy request admission", () => {
       ),
     ).toBe(false);
     expect(fake.writes("update", EVENTS).at(-1)?.data).toMatchObject({ status: "processed", errorCode: null });
+  });
+});
+
+const admit = (fake: ReturnType<typeof scriptedDb>, params: Parameters<typeof admitShopifyCustomerPrivacyRequest>[1]) =>
+  (fake.db as { transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> }).transaction((tx) =>
+    admitShopifyCustomerPrivacyRequest(tx, params),
+  );
+
+describe("when a large delivery is protected", () => {
+  it("should resolve the tenant key once, before any selector is protected", async () => {
+    const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
+    if (!validation.ok) throw new Error("fixture should validate");
+    await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+
+    expect(cryptoState.dek).toHaveBeenCalledTimes(1);
+    expect(cryptoState.dek).toHaveBeenCalledWith(42);
+    const keyResolved = cryptoState.dek.mock.invocationCallOrder[0];
+    expect(Math.min(...cryptoState.encrypt.mock.invocationCallOrder)).toBeGreaterThan(keyResolved);
+    expect(Math.min(...cryptoState.blind.mock.invocationCallOrder)).toBeGreaterThan(keyResolved);
+  });
+
+  it("should bound how many selectors are in flight at once", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    cryptoState.encrypt.mockImplementation(async (organizationId: number, value: string) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      inFlight -= 1;
+      return `tk1:${organizationId}:1:iv:tag:${value}`;
+    });
+    const many = Array.from({ length: PROTECT_SELECTOR_CHUNK * 2 + 17 }, (_, position) => ({
+      resourceType: "order" as const,
+      position,
+      externalId: String(position + 1),
+    }));
+
+    const prepared = await protectCustomerPrivacySelectors(42, 7, many);
+
+    expect(prepared).toHaveLength(many.length);
+    expect(prepared.map((selector) => selector.position)).toEqual(many.map((selector) => selector.position));
+    expect(peak).toBeLessThanOrEqual(PROTECT_SELECTOR_CHUNK);
+    expect(cryptoState.dek).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("when the tenant has been fenced for shop redaction", () => {
+  it("should write nothing at all, checked under the store-row lock", async () => {
+    const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
+    if (!validation.ok) throw new Error("fixture should validate");
+    const fake = scriptedDb({ select: { [STORES]: [[{ status: "redacting" }]] } });
+
+    const status = await admit(fake, {
+      store: STORE,
+      topic: "customers/data_request",
+      requestHash: "late-delivery",
+      webhookId: "wh-late",
+      validation,
+      selectors: [],
+    });
+
+    expect(status).toBe("fenced");
+    expect(fake.ops.filter((op) => op.kind !== "select")).toEqual([]);
+    const lock = fake.ops.find((op) => op.table === STORES);
+    expect(lock).toMatchObject({ kind: "select", locked: true });
+    expect(lock?.where?.params).toEqual(expect.arrayContaining([7, 42]));
+  });
+});
+
+describe("when a request parked for manual review is replayed and now validates", () => {
+  it("should promote it to received — and never regress a request further along", async () => {
+    const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
+    if (!validation.ok) throw new Error("fixture should validate");
+    const fake = scriptedDb({ select: { [STORES]: [[{ status: "active" }]], [REQUESTS]: [[{ id: 901 }]] } });
+
+    await admit(fake, {
+      store: STORE,
+      topic: "customers/data_request",
+      requestHash: "replayed-payload",
+      webhookId: "wh-replay",
+      validation,
+      selectors: [],
+    });
+
+    const promote = fake.writes("update", REQUESTS).find((op) => op.data?.status === "received");
+    expect(promote?.data).toEqual({ status: "received", admissionErrorCode: null });
+    // Only a manual-review row moves.
+    expect(promote?.where?.params).toEqual(expect.arrayContaining([901, 42, "manual_review"]));
+  });
+
+  async function replay(script: Parameters<typeof scriptedDb>[0] = {}) {
+    const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
+    if (!validation.ok) throw new Error("fixture should validate");
+    const fake = scriptedDb({
+      ...script,
+      select: { [STORES]: [[{ status: "active" }]], [REQUESTS]: [[{ id: 901 }]], ...script.select },
+    });
+    await admit(fake, {
+      store: STORE,
+      topic: "customers/data_request",
+      requestHash: "replayed-payload",
+      webhookId: "wh-replay",
+      validation,
+      selectors: [],
+    });
+    return fake;
+  }
+
+  it("should never un-flag a request its job sent to manual review", async () => {
+    const fake = await replay();
+
+    // A job-driven review (expired or unconfirmed export, blocked dependency)
+    // carries no admission error; only an admission-parked request moves.
+    const promote = fake.writes("update", REQUESTS).find((op) => op.data?.status === "received");
+    expect(promote?.where?.sql).toMatch(/`admissionErrorCode` is not null/i);
+  });
+
+  it("should bring back the job admission parked with it, and queue it again", async () => {
+    const fake = await replay();
+
+    const rearm = fake.writes("update", JOBS).find((op) => op.data?.status === "received");
+    expect(rearm?.data).toMatchObject({ status: "received", failureCode: null });
+    expect(rearm?.where?.params).toEqual([901, 42, "manual_review", "selectors_unavailable"]);
+    expect(fake.writes("update", OUTBOX)[0]?.data).toMatchObject({ status: "pending" });
+    expect(fake.writes("update", OUTBOX)[0]?.where?.params).toEqual([901]);
+  });
+
+  it("should leave a job parked for any other reason, and queue nothing", async () => {
+    const fake = await replay({ update: { [JOBS]: [0] } });
+
+    expect(fake.writes("update", OUTBOX)).toEqual([]);
+  });
+});
+
+describe("when a received customer request has no selectors", () => {
+  it("should be quarantined for manual review by every admission for its store, after that admission's own selectors", async () => {
+    const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
+    if (!validation.ok) throw new Error("fixture should validate");
+    const selectors = await protectCustomerPrivacySelectors(STORE.organizationId, STORE.id, validation.selectors);
+    const fake = scriptedDb({ select: { [STORES]: [[{ status: "active" }]], [REQUESTS]: [[{ id: 901 }]] } });
+
+    await admit(fake, {
+      store: STORE,
+      topic: "customers/data_request",
+      requestHash: "fresh",
+      webhookId: "wh-fresh",
+      validation,
+      selectors,
+    });
+
+    const repair = fake.writes("update", REQUESTS).find((op) => op.data?.admissionErrorCode === "selectors_unavailable");
+    expect(repair?.data).toEqual({ status: "manual_review", admissionErrorCode: "selectors_unavailable" });
+    expect(repair?.where?.sql).toMatch(/not exists \(select 1 from `shopify_privacy_request_selectors`/i);
+    expect(repair?.where?.params).toEqual(
+      expect.arrayContaining([42, 7, "customers/data_request", "customers/redact", "received"]),
+    );
+    // The job is parked with its request, so no worker answers it without selectors.
+    const parked = fake.writes("update", JOBS).find((op) => op.data?.status === "manual_review");
+    expect(parked?.data).toEqual({ status: "manual_review", failureCode: "selectors_unavailable", lastCheckpoint: "manual_review" });
+    expect(parked?.where?.params).toEqual(
+      expect.arrayContaining([42, 7, "received", "failed_retryable", "manual_review", "selectors_unavailable"]),
+    );
+    expect(parked?.where?.params).not.toContain("processing");
+    // This request's own selectors were inserted first, so it cannot quarantine itself.
+    const selectorInsertAt = fake.ops.findIndex((op) => op.kind === "insert" && op.table === SELECTORS);
+    const repairAt = fake.ops.findIndex((op) => op === repair);
+    expect(selectorInsertAt).toBeGreaterThanOrEqual(0);
+    expect(repairAt).toBeGreaterThan(selectorInsertAt);
   });
 });

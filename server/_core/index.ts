@@ -18,6 +18,7 @@ import { sql } from "drizzle-orm";
 import { storagePut, storageGet, storageDelete } from "../storage";
 import { sdk } from "./sdk";
 import { applyPortalView } from "./portalView";
+import { asyncHandler } from "./asyncHandler";
 import { clientIpOrUnknown, describeTrustedProxyConfig } from "./clientIp";
 import { ENV } from "./env";
 
@@ -564,18 +565,18 @@ async function startServer() {
     }
     return result.ok;
   };
-  app.post("/api/woodcore/sync", async (req, res) => {
+  app.post("/api/woodcore/sync", asyncHandler(async (req, res) => {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncWoodcoreMirror, syncState } = await import("../woodcoreSync");
     if (syncState.running) return res.status(409).json({ error: "already running", state: syncState });
     syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", e));
     res.status(202).json({ started: true });
-  });
-  app.get("/api/woodcore/sync", async (req, res) => {
+  }));
+  app.get("/api/woodcore/sync", asyncHandler(async (req, res) => {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncState } = await import("../woodcoreSync");
     res.json(syncState);
-  });
+  }));
 
   // ── CBS connector: inbound webhooks (all core-banking platforms) ──────────
   // POST /api/webhooks/cbs/:configId       — canonical path (any CBS type)
@@ -620,16 +621,16 @@ async function startServer() {
       res.status(500).json({ code: "INTERNAL", message: "API unavailable" });
     }
   });
-  app.get("/developers", async (_req, res) => {
+  app.get("/developers", asyncHandler(async (_req, res) => {
     const { developerDocsHtml } = await import("../api/developerDocs");
     res.type("html").send(developerDocsHtml());
-  });
+  }));
 
   // ── WoodCore connector: scheduled tick (daily batch sync + DLQ retries) ───
   // POST /api/scheduled/woodcoreConnectorSync — guarded by x-sync-secret, same
   // scheme as /api/woodcore/sync. Point a Railway/host cron at this hourly;
   // each connector's own batchSyncHourUtc decides when it actually pulls.
-  app.post("/api/scheduled/woodcoreConnectorSync", async (req, res) => {
+  app.post("/api/scheduled/woodcoreConnectorSync", asyncHandler(async (req, res) => {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     try {
       const { runConnectorTick } = await import("../connectors/woodcore");
@@ -639,7 +640,7 @@ async function startServer() {
       console.error("[woodcoreConnectorSync] error:", err);
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
-  });
+  }));
 
   // ── Inbound email (Tier A email-forward ingestion) ──────────────────────────
   // Resend posts `email.received` here. Verification, address resolution and
@@ -672,23 +673,23 @@ async function startServer() {
 
   // ── SHOPLINE Scheduled Sync Handlers ────────────────────────────────────────
   // POST /api/scheduled/shoplineSyncCycle — 15-min incremental sync for all stores
-  app.post("/api/scheduled/shoplineSyncCycle", async (req, res) => {
+  app.post("/api/scheduled/shoplineSyncCycle", asyncHandler(async (req, res) => {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineSyncCycle } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineSyncCycle(req, res);
-  });
+  }));
   // POST /api/scheduled/shoplineDailyBatch — daily full 24h reconciliation
-  app.post("/api/scheduled/shoplineDailyBatch", async (req, res) => {
+  app.post("/api/scheduled/shoplineDailyBatch", asyncHandler(async (req, res) => {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineDailyBatch } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineDailyBatch(req, res);
-  });
+  }));
   // POST /api/scheduled/shoplineWebhookReconciler — daily webhook health check
-  app.post("/api/scheduled/shoplineWebhookReconciler", async (req, res) => {
+  app.post("/api/scheduled/shoplineWebhookReconciler", asyncHandler(async (req, res) => {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { handleShoplineWebhookReconciler } = await import("../connectors/shopline/scheduledSync");
     return handleShoplineWebhookReconciler(req, res);
-  });
+  }));
 
   // ── Live monitoring stream (SSE) ───────────────────────────────────────────
   // GET /api/monitoring/stream — relays reconciliation job-progress events to the
@@ -700,7 +701,7 @@ async function startServer() {
   // which carry match counts, exception counts and match rates. Authentication
   // is not authorisation, and a stream needs the tenant check as much as a query
   // does.
-  app.get("/api/monitoring/stream", async (req, res) => {
+  app.get("/api/monitoring/stream", asyncHandler(async (req, res) => {
     let viewerOrganizationId: number | null;
     try {
       const user = await sdk.authenticateRequest(req);
@@ -742,7 +743,7 @@ async function startServer() {
       jobEvents.off("progress", onProgress);
       res.end();
     });
-  });
+  }));
 
   // Storage proxy — serves /manus-storage/* assets via signed S3 URLs
   registerStorageProxy(app);

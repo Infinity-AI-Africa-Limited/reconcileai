@@ -26,7 +26,9 @@ import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./installLease";
 import {
-  authorizeAndPreparePrivacyDownload,
+  PrivacyArtifactIntegrityError,
+  authorizeAndReadPrivacyArtifact,
+  confirmPrivacyArtifactDeliveryWithRetry,
   loadPrivacyArtifactForDownload,
 } from "./privacyCompletion";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
@@ -132,8 +134,8 @@ export function createShopifyRouter(): express.Router {
       const db = await getDb();
       if (!db) return res.status(503).send("Temporarily unavailable");
       const artifact = await loadPrivacyArtifactForDownload(db, publicId);
-      const url = artifact
-        ? await authorizeAndPreparePrivacyDownload({
+      const prepared = artifact
+        ? await authorizeAndReadPrivacyArtifact({
             db,
             actor: {
               id: actor.id,
@@ -144,12 +146,44 @@ export function createShopifyRouter(): express.Router {
             artifact,
           })
         : null;
-      if (!url) return res.status(403).send("Artifact unavailable");
-      return res.redirect(303, url);
+      if (!artifact || !prepared) return res.status(403).send("Artifact unavailable");
+
+      // The server sends the bytes itself, and delivery is confirmed only once
+      // every byte has been handed to the network ('finish'). A client that
+      // disconnects first fires 'close' without 'finish': nothing is completed,
+      // the selectors survive, and the artifact stays downloadable. (A redirect
+      // to a presigned URL gave no such evidence — it counted as delivery before
+      // the browser had fetched anything.)
+      // A failed confirmation write is retried; if it still fails the export
+      // stays downloadable, and expiry records it as served-but-unconfirmed.
+      res.once("finish", () => {
+        void confirmPrivacyArtifactDeliveryWithRetry(db, artifact, actor.id, new Date())
+          .then((outcome) => {
+            if (outcome === "not_confirmed") {
+              console.warn("[shopify-privacy] delivery sent but not recorded", { code: "delivery_not_confirmed" });
+            }
+          })
+          .catch(() => {
+            console.error("[shopify-privacy] DELIVERY CONFIRMATION LOST after retries", {
+              code: "delivery_evidence_failed",
+              requestId: artifact.requestId,
+            });
+          });
+      });
+      res.set("Content-Type", "application/json; charset=utf-8");
+      res.set("Content-Disposition", `attachment; filename="${prepared.filename}"`);
+      res.set("X-Content-Type-Options", "nosniff");
+      res.set("Content-Length", String(prepared.bytes.length));
+      return res.status(200).end(prepared.bytes);
     } catch (error) {
       // Authentication failures disclose neither artifact existence nor scope.
-      if (error instanceof Error && /session|forbidden|user not found/i.test(error.message)) {
+      if (error instanceof Error && /session|forbidden|user not found|deactivated/i.test(error.message)) {
         return res.status(401).send("Authentication required");
+      }
+      if (error instanceof PrivacyArtifactIntegrityError) {
+        // Never serve bytes that do not match what was written.
+        console.error("[shopify-privacy] artifact integrity check failed", { code: "artifact_integrity_failed" });
+        return res.status(409).send("Artifact unavailable");
       }
       console.error("[shopify-privacy] artifact access failed", {
         code: "artifact_access_failed",
