@@ -31,6 +31,8 @@ import { ENV } from "./env";
 
 const ALGO = "aes-256-gcm";
 export const TENANT_CIPHERTEXT_PREFIX = "tk1";
+export const TENANT_BLIND_INDEX_PREFIX = "tbi1";
+const BLIND_INDEX_SALT = Buffer.from("reconcileai:tenant-blind-index:v1", "utf8");
 
 // ─── Master-key providers ────────────────────────────────────────────────────
 export interface MasterKeyProvider {
@@ -238,6 +240,36 @@ export async function encryptForTenant(organizationId: number, plaintext: string
 
 export function isTenantCiphertext(value: string | null | undefined): boolean {
   return typeof value === "string" && value.startsWith(`${TENANT_CIPHERTEXT_PREFIX}:`);
+}
+
+/**
+ * Build a deterministic lookup token without making a predictable provider id
+ * available to an offline dictionary attack. HKDF gives HMAC a purpose-specific
+ * sub-key instead of reusing the tenant's AES key directly; the key version in
+ * the result lets a future rotation-aware reader select the correct generation.
+ */
+export function computeTenantBlindIndex(
+  dek: Buffer,
+  keyVersion: number,
+  context: string,
+  plaintext: string,
+): string {
+  if (!context || !plaintext) throw new Error("Blind-index context and value are required");
+  const hmacKey = Buffer.from(
+    crypto.hkdfSync("sha256", dek, BLIND_INDEX_SALT, Buffer.from(context, "utf8"), 32),
+  );
+  const digest = crypto.createHmac("sha256", hmacKey).update(plaintext, "utf8").digest("hex");
+  return `${TENANT_BLIND_INDEX_PREFIX}:${keyVersion}:${digest}`;
+}
+
+/** Derive a versioned blind index from the tenant's active envelope key. */
+export async function blindIndexForTenant(
+  organizationId: number,
+  context: string,
+  plaintext: string,
+): Promise<string> {
+  const { dek, version } = await getTenantDek(organizationId);
+  return computeTenantBlindIndex(dek, version, context, plaintext);
 }
 
 /**

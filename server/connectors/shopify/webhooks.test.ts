@@ -25,8 +25,19 @@ vi.mock("../../_core/env", async (importOriginal) => {
 vi.mock("./syncOrchestrator", () => ({
   enqueueShopifyWebhookSync: (...args: unknown[]) => state.enqueue(...args),
 }));
+const keyState = vi.hoisted(() => ({ getTenantDek: vi.fn(async () => ({ dek: Buffer.alloc(32), version: 1 })) }));
+vi.mock("../../_core/tenantKeys", () => ({
+  getTenantDek: keyState.getTenantDek,
+  encryptForTenant: vi.fn(async (organizationId: number, plaintext: string) =>
+    `tk1:${organizationId}:1:iv:tag:${Buffer.from(plaintext).toString("hex")}`,
+  ),
+  blindIndexForTenant: vi.fn(async (organizationId: number, context: string, plaintext: string) =>
+    `tbi1:1:${organizationId}:${context}:${plaintext}`,
+  ),
+}));
 
 import type express from "express";
+import { validateCustomerPrivacySelectors } from "./privacySelectors";
 import { declaredShopDomain, handleShopifyWebhook, isStaleUninstall } from "./webhooks";
 import { scriptedDb } from "./scriptedDb.testkit";
 
@@ -34,11 +45,20 @@ const SHOP = "merchant.myshopify.com";
 const STORES = "shopify_connector_stores";
 const TOKENS = "shopify_connector_tokens";
 const EVENTS = "shopify_webhook_events";
+const PRIVACY_REQUESTS = "shopify_privacy_requests";
+const PRIVACY_SELECTORS = "shopify_privacy_request_selectors";
 const REDACTION_JOBS = "shopify_shop_redaction_jobs";
 const ORGANIZATIONS = "organizations";
 const USERS = "users";
 
-const store = { id: 7, organizationId: 42, shopDomain: SHOP, claimedByUserId: 9, claimedAt: new Date("2026-09-20T12:00:00Z") };
+const store = {
+  id: 7,
+  organizationId: 42,
+  shopId: "gid://shopify/Shop/17",
+  shopDomain: SHOP,
+  claimedByUserId: 9,
+  claimedAt: new Date("2026-09-20T12:00:00Z"),
+};
 
 function delivery(topic: string, body: object, headers: Record<string, string> = {}) {
   const raw = Buffer.from(JSON.stringify(body));
@@ -291,6 +311,75 @@ describe("when a signed shop/redact delivery arrives", () => {
   });
 });
 
+describe("when a signed customer privacy delivery arrives", () => {
+  const body = {
+    shop_id: 17,
+    shop_domain: SHOP,
+    data_request: { id: 31 },
+    customer: { id: 41 },
+    orders_requested: [501, 502, 503],
+  };
+
+  it("should durably admit the request and all ordered selectors before acknowledging", async () => {
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store], [{ status: "active" }]],
+        [EVENTS]: [[{ status: "received" }]],
+        [PRIVACY_REQUESTS]: [[{ id: 901 }]],
+      },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ received: true, status: "queued_for_privacy_control" });
+    expect(fake.writes("insert", PRIVACY_SELECTORS)[0]?.data).toEqual([
+      expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "customer", position: 0 }),
+      expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "order", position: 0 }),
+      expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "order", position: 1 }),
+      expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "order", position: 2 }),
+    ]);
+    const eventWrite = fake.writes("update", EVENTS).at(-1);
+    expect(eventWrite?.data).toMatchObject({ status: "processed", errorCode: null });
+    expect(eventWrite?.txId).not.toBeNull();
+  });
+
+  it("should acknowledge a processed duplicate without encrypting or inserting selectors again", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[store]], [EVENTS]: [[{ status: "processed" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.body).toEqual({ received: true, status: "duplicate" });
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
+  });
+
+  it("should retain malformed payloads as manual review without selector material", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store], [{ status: "active" }]], [EVENTS]: [[{ status: "received" }]] } });
+    state.db = fake.db;
+
+    const res = await delivery("customers/redact", {
+      shop_id: 17,
+      shop_domain: SHOP,
+      orders_to_redact: [501],
+    }).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ received: true, status: "privacy_manual_review" });
+    expect(fake.writes("insert", PRIVACY_REQUESTS)[0]?.data).toMatchObject({
+      status: "manual_review",
+      admissionErrorCode: "invalid_customer_id",
+      subjectHash: null,
+    });
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
+    expect(JSON.stringify(fake.committed())).not.toContain("501");
+  });
+});
+
 describe("when the HMAC does not verify", () => {
   it("should answer 401 for a wrong signature", async () => {
     state.db = scriptedDb().db;
@@ -305,6 +394,45 @@ describe("when the HMAC does not verify", () => {
     expect((await delivery("customers/redact", { shop_domain: SHOP }).run()).statusCode).toBe(401);
     expect(log.mock.calls.flat().join(" ")).toMatch(/SHOPIFY_CLIENT_SECRET is not configured/);
     log.mockRestore();
+  });
+});
+
+describe("when customer privacy selectors are validated", () => {
+  const identity = { shopId: "gid://shopify/Shop/17", shopDomain: SHOP };
+
+  it("should preserve the ordered order-selector set for a data request", () => {
+    expect(
+      validateCustomerPrivacySelectors(
+        "customers/data_request",
+        {
+          shop_id: 17,
+          shop_domain: SHOP,
+          data_request: { id: 31 },
+          customer: { id: 41 },
+          orders_requested: [501, "502", 503],
+        },
+        identity,
+      ),
+    ).toEqual({
+      ok: true,
+      selectors: [
+        { resourceType: "customer", position: 0, externalId: "41" },
+        { resourceType: "order", position: 0, externalId: "501" },
+        { resourceType: "order", position: 1, externalId: "502" },
+        { resourceType: "order", position: 2, externalId: "503" },
+      ],
+    });
+  });
+
+  it.each([
+    ["missing customer", { shop_id: 17, shop_domain: SHOP, data_request: { id: 31 } }],
+    ["wrong shop", { shop_id: 18, shop_domain: SHOP, data_request: { id: 31 }, customer: { id: 41 } }],
+    ["unsafe numeric id", { shop_id: 17, shop_domain: SHOP, data_request: { id: 31 }, customer: { id: 2 ** 54 } }],
+    ["duplicate order", { shop_id: 17, shop_domain: SHOP, data_request: { id: 31 }, customer: { id: 41 }, orders_requested: [501, 501] }],
+  ])("should reject %s without returning any raw selector", (_case, body) => {
+    const result = validateCustomerPrivacySelectors("customers/data_request", body, identity);
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toMatch(/31|41|501/);
   });
 });
 
@@ -329,5 +457,44 @@ describe("when the shop is read from a webhook body", () => {
   it("should say nothing when the body names no shop", () => {
     expect(declaredShopDomain({ myshopify_domain: null })).toBeNull();
     expect(declaredShopDomain(null)).toBeNull();
+  });
+});
+
+describe("when a customer privacy delivery arrives for a tenant fenced for redaction", () => {
+  const body = {
+    shop_id: 17,
+    shop_domain: SHOP,
+    data_request: { id: 31 },
+    customer: { id: 41 },
+    orders_requested: [501],
+  };
+
+  it("should store nothing and provision no tenant key", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[{ ...store, status: "redacting" }]], [EVENTS]: [[{ status: "received" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ received: true, status: "ignored_redacting" });
+    expect(keyState.getTenantDek).not.toHaveBeenCalled();
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
+    expect(fake.writes("update", EVENTS)[0]?.data).toMatchObject({ status: "ignored", errorCode: "organization_redacting" });
+  });
+
+  it("should still refuse when the fence lands between the first read and the admission lock", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[store], [{ status: "redacting" }]], [EVENTS]: [[{ status: "received" }]] },
+    });
+    state.db = fake.db;
+
+    const res = await delivery("customers/data_request", body).run();
+
+    expect(res.body).toEqual({ received: true, status: "ignored_redacting" });
+    expect(fake.writes("insert", PRIVACY_REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
   });
 });

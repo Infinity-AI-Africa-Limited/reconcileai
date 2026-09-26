@@ -75,6 +75,20 @@ describe("tenant ciphertext hygiene", () => {
   });
 });
 
+describe("tenant blind indexes", () => {
+  it("is deterministic only within the same tenant key, version, context and value", () => {
+    const tenantA = Buffer.alloc(32, 0x11);
+    const tenantB = Buffer.alloc(32, 0x22);
+    const a = tk.computeTenantBlindIndex(tenantA, 1, "shopify:privacy-selector:7:customer", "41");
+
+    expect(a).toBe(tk.computeTenantBlindIndex(tenantA, 1, "shopify:privacy-selector:7:customer", "41"));
+    expect(a).not.toBe(tk.computeTenantBlindIndex(tenantB, 1, "shopify:privacy-selector:7:customer", "41"));
+    expect(a).not.toBe(tk.computeTenantBlindIndex(tenantA, 1, "shopify:privacy-selector:7:order", "41"));
+    expect(a).toMatch(/^tbi1:1:[0-9a-f]{64}$/);
+    expect(a).not.toContain("41");
+  });
+});
+
 describe("tenancy guards", () => {
   const admin = { role: "admin", organizationId: 10 };
   const superAdmin = { role: "super_admin", organizationId: 1 };

@@ -10,6 +10,12 @@ import { ENV } from "../../_core/env";
 import { createAuditLog, getDb } from "../../db";
 import { normalizeShopDomain, sha256, verifyShopifyWebhookHmac } from "./auth";
 import { enqueueShopifyWebhookSync } from "./syncOrchestrator";
+import {
+  admitShopifyCustomerPrivacyRequest,
+  protectCustomerPrivacySelectors,
+  validateCustomerPrivacySelectors,
+  type ShopifyCustomerPrivacyTopic,
+} from "./privacySelectors";
 import { admitShopifyShopRedaction } from "./redaction";
 
 const PRIVACY_TOPICS = new Set(["customers/data_request", "customers/redact", "shop/redact"]);
@@ -32,6 +38,8 @@ type WebhookBody = {
   myshopify_domain?: string | null;
   data_request?: { id?: string | number };
   customer?: { id?: string | number };
+  orders_requested?: Array<string | number>;
+  orders_to_redact?: Array<string | number>;
 };
 
 function headerValue(req: express.Request, key: string): string | undefined {
@@ -213,11 +221,6 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
     }
 
     if (PRIVACY_TOPICS.has(topic)) {
-      // Privacy data is a transient input to identify the request. Hash IDs,
-      // never email, phone, address or orders, before creating any evidence row.
-      const subject = body?.data_request?.id ?? body?.customer?.id ?? body?.shop_id;
-      const subjectHash = subject === undefined ? null : sha256(String(subject));
-
       if (topic === "shop/redact") {
         // Shopify retries a failed delivery for 48 hours. One triggered before
         // the merchant reinstalled is about the previous installation; admitting
@@ -226,6 +229,9 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
           await settle("ignored", "stale_shop_redact");
           return res.status(200).json({ received: true, status: "ignored_stale" });
         }
+        // Shop identity is retained only as the pre-existing digest evidence;
+        // customer/order selectors use the encrypted child records below.
+        const subjectHash = body?.shop_id === undefined ? null : sha256(String(body.shop_id));
         // Shopify's 2xx acknowledgement means this request was durably admitted,
         // not that the tenant was deleted. Admission creates a short-lived job,
         // fences new work, revokes credentials, and fails closed on any DB error.
@@ -251,25 +257,41 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
         return res.status(200).json({ received: true, status: `shop_redact_${admission.status}` });
       }
 
-      await db
-        .insert(shopifyPrivacyRequests)
-        .values({
-          storeId: store.id,
-          organizationId: store.organizationId,
-          topic: topic as "customers/data_request" | "customers/redact" | "shop/redact",
+      // A tenant fenced for shop redaction takes no new data — not an encrypted
+      // selector, and not the tenant key encrypting one would provision. Its
+      // whole workspace is being deleted, so there is nothing left to fulfil.
+      // Checked here before any encryption; admission re-checks under the lock.
+      if (store.status === "redacting") {
+        await settle("ignored", "organization_redacting");
+        return res.status(200).json({ received: true, status: "ignored_redacting" });
+      }
+
+      const customerTopic = topic as ShopifyCustomerPrivacyTopic;
+      const validation = validateCustomerPrivacySelectors(customerTopic, body, store);
+      const selectors = validation.ok
+        ? await protectCustomerPrivacySelectors(store.organizationId, store.id, validation.selectors)
+        : [];
+      const admissionStatus = await db.transaction((tx) =>
+        admitShopifyCustomerPrivacyRequest(tx, {
+          store,
+          topic: customerTopic,
           requestHash: payloadSha256,
-          subjectHash,
-          status: "received",
-        })
-        .onDuplicateKeyUpdate({ set: { requestHash: sql`${shopifyPrivacyRequests.requestHash}` } });
-      await db
-        .update(shopifyConnectorStores)
-        .set({ lastWebhookAt: new Date() })
-        .where(eq(shopifyConnectorStores.id, store.id));
-      // The delivery is settled once the request is on the privacy ledger; the
-      // request itself stays `received` there until it is completed.
-      await settle("processed");
-      return res.status(200).json({ received: true, status: "queued_for_privacy_control" });
+          webhookId,
+          validation,
+          selectors,
+        }),
+      );
+      if (admissionStatus === "fenced") {
+        // The fence landed between the check above and the lock. Nothing was written.
+        await settle("ignored", "organization_redacting");
+        return res.status(200).json({ received: true, status: "ignored_redacting" });
+      }
+      // The delivery is settled once the request and any required selectors are
+      // durable. `received` and `manual_review` are both explicitly non-terminal.
+      return res.status(200).json({
+        received: true,
+        status: admissionStatus === "received" ? "queued_for_privacy_control" : "privacy_manual_review",
+      });
     }
 
     if (SHOPIFY_ORDER_TRIGGER_TOPICS.has(topic)) {
