@@ -13,11 +13,15 @@ import { TRPCError } from "@trpc/server";
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
-const state = vi.hoisted(() => ({ db: null as unknown }));
+const state = vi.hoisted(() => ({ db: null as unknown, runSync: vi.fn() }));
 
 vi.mock("../db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../db")>()),
   getDb: vi.fn(async () => state.db),
+}));
+vi.mock("../connectors/shopify/syncOrchestrator", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../connectors/shopify/syncOrchestrator")>()),
+  runShopifyOrderSync: state.runSync,
 }));
 
 import { SHOPIFY_STORE_PUBLIC_FIELDS, shopifyConnectorRouter } from "./shopifyConnector";
@@ -157,5 +161,65 @@ describe("what a store summary exposes", () => {
     for (const forbidden of ["accessTokenEnc", "refreshTokenEnc", "claimedByUserId", "shopId", "organizationId"]) {
       expect(keys).not.toContain(forbidden);
     }
+  });
+});
+
+describe("when someone starts a manual Shopify order sync", () => {
+  const REPORT = { success: true, fetched: 3, inserted: 1, updated: 1, unchanged: 1 };
+  beforeEach(() => {
+    state.runSync.mockReset();
+    state.runSync.mockResolvedValue(REPORT);
+  });
+
+  it("should sync the store within the administrator's own organisation", async () => {
+    await expect(caller("admin").syncOrdersNow({ storeId: 7 })).resolves.toEqual(REPORT);
+    // The tenant comes from the session, never the input; the orchestrator
+    // then selects the store by (storeId, organizationId).
+    expect(state.runSync).toHaveBeenCalledWith({ storeId: 7, organizationId: OWN_ORG, trigger: "manual" });
+  });
+
+  it.each<Role>(["user", "operations", "compliance", "cfo"])(
+    "should refuse %s before anything runs — it writes the tenant's reconciliation workspace",
+    async (role) => {
+      expect(await codeOf(() => caller(role).syncOrdersNow({ storeId: 7 }))).toBe("FORBIDDEN");
+      expect(state.runSync).not.toHaveBeenCalled();
+    },
+  );
+
+  it("should refuse an administrator naming another organisation", async () => {
+    expect(await codeOf(() => caller("admin").syncOrdersNow({ storeId: 7, organizationId: OTHER_ORG }))).toBe("FORBIDDEN");
+    expect(state.runSync).not.toHaveBeenCalled();
+  });
+
+  it("should refuse a read-only session, whatever its role", async () => {
+    const readOnly = shopifyConnectorRouter.createCaller({
+      user: { id: 7, role: "admin", organizationId: OWN_ORG, isReadOnly: true, email: "reviewer@example.com" },
+      viewingAs: null,
+      req: { headers: {} },
+      res: {},
+    } as never);
+    expect(await codeOf(() => readOnly.syncOrdersNow({ storeId: 7 }))).toBe("FORBIDDEN");
+    expect(state.runSync).not.toHaveBeenCalled();
+  });
+
+  it("should let staff outside a portal sync the tenant they name", async () => {
+    await caller("super_admin", 1).syncOrdersNow({ storeId: 7, organizationId: OTHER_ORG });
+    expect(state.runSync).toHaveBeenCalledWith({ storeId: 7, organizationId: OTHER_ORG, trigger: "manual" });
+  });
+
+  it("should confine staff inside a portal to the tenant on screen", async () => {
+    expect(
+      await codeOf(() => caller("super_admin", OTHER_ORG, OTHER_ORG).syncOrdersNow({ storeId: 7, organizationId: OWN_ORG })),
+    ).toBe("FORBIDDEN");
+    expect(state.runSync).not.toHaveBeenCalled();
+  });
+
+  it("should answer a failed sync with a generic precondition error, not the internal message", async () => {
+    state.runSync.mockRejectedValue(new Error("token decrypt failed for store 7: key tk1:abc"));
+    const error = await caller("admin").syncOrdersNow({ storeId: 7 }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(TRPCError);
+    expect((error as TRPCError).code).toBe("PRECONDITION_FAILED");
+    expect((error as TRPCError).message).not.toMatch(/decrypt|tk1/);
   });
 });

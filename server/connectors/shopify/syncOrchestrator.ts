@@ -351,10 +351,19 @@ async function reopenAffectedReconciliation(
 
   // Both parties to a rejected review match were marked `exception` by it.
   // Take that back where nothing else still stands behind the status.
+  const reviewMatches = activeMatches.filter((match) => match.status === "pending_review");
+  const reviewCounterparts = [
+    ...new Set(
+      reviewMatches
+        .map((match) =>
+          match.sourceTransactionId === params.transactionId ? match.targetTransactionId : match.sourceTransactionId,
+        )
+        .filter((id) => id !== params.transactionId),
+    ),
+  ];
   const reviewParties = [
     ...new Set(
-      activeMatches
-        .filter((match) => match.status === "pending_review")
+      reviewMatches
         .flatMap((match) => [match.sourceTransactionId, match.targetTransactionId])
         .filter((id) => !pairedElsewhere.has(id)),
     ),
@@ -372,15 +381,34 @@ async function reopenAffectedReconciliation(
       );
     const backedIds = new Set(backed.map((row) => row.transactionId));
     const stale = reviewParties.filter((id) => !backedIds.has(id));
-    if (stale.length > 0) {
+    // A legacy `matchId` naming some OTHER transaction is a pairing this
+    // correction does not own, exactly as for the matched summaries above: a
+    // row is released only while its pointer is empty or names the other side
+    // of the review match being rejected.
+    if (stale.includes(params.transactionId) && reviewCounterparts.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.id, params.transactionId),
+            eq(transactions.organizationId, params.organizationId),
+            eq(transactions.status, "exception"),
+            or(isNull(transactions.matchId), inArray(transactions.matchId, reviewCounterparts)),
+          ),
+        );
+    }
+    const staleCounterparts = stale.filter((id) => id !== params.transactionId);
+    if (staleCounterparts.length > 0) {
       await tx
         .update(transactions)
         .set({ status: "unmatched", matchId: null })
         .where(
           and(
             eq(transactions.organizationId, params.organizationId),
-            inArray(transactions.id, stale),
+            inArray(transactions.id, staleCounterparts),
             eq(transactions.status, "exception"),
+            or(isNull(transactions.matchId), eq(transactions.matchId, params.transactionId)),
           ),
         );
     }
