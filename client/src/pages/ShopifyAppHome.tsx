@@ -9,24 +9,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   loadShopifyAppHomeContext,
   shopifyAppHomeErrorMessage,
-  submitShopifySettlementEvidence,
   triggerShopifyOrderSync,
   type ShopifyAppBridgeContext,
-  type ShopifySettlementEvidenceCommitted,
-  type ShopifySettlementEvidenceDryRun,
   type ShopifySettlementField,
   type ShopifySyncReport,
 } from "@/lib/shopifyAppBridge";
-import {
-  assignSettlementColumn,
-  confirmedSettlementMapping,
-  sameSettlementMapping,
-  SETTLEMENT_MAPPING_FIELDS,
-  type SettlementMapping,
-} from "@/lib/shopifySettlementMapping";
+import { SETTLEMENT_MAPPING_FIELDS } from "@/lib/shopifySettlementMapping";
+import { useShopifySettlementEvidence } from "@/hooks/useShopifySettlementEvidence";
 
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
-const SPREADSHEET_FILE = /\.(xlsx|xlsm|xlsb|xls)$/i;
 /** Radix Select forbids an empty item value, so "no column" needs a sentinel. */
 const NOT_IN_FILE = "__reconcileai_not_in_file__";
 
@@ -39,19 +29,6 @@ const FIELD_LABELS: Record<ShopifySettlementField, string> = {
   fee: "Fee",
   description: "Description",
 };
-
-async function readSettlementFile(file: File): Promise<{ content: string; contentEncoding: "utf8" | "base64" }> {
-  if (!SPREADSHEET_FILE.test(file.name)) {
-    return { content: await file.text(), contentEncoding: "utf8" };
-  }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return { content: btoa(binary), contentEncoding: "base64" };
-}
 
 function formatTimestamp(value: string | null): string {
   if (!value) return "Not yet synced";
@@ -72,16 +49,7 @@ export default function ShopifyAppHome() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [settlementFile, setSettlementFile] = useState<File | null>(null);
-  const [sourceLabel, setSourceLabel] = useState("");
-  const [settlementBusy, setSettlementBusy] = useState<"checking" | "importing" | null>(null);
-  const [settlementPreview, setSettlementPreview] = useState<ShopifySettlementEvidenceDryRun | null>(null);
-  const [settlementResult, setSettlementResult] = useState<ShopifySettlementEvidenceCommitted | null>(null);
-  const [settlementError, setSettlementError] = useState<string | null>(null);
-  // The merchant's working mapping, and the one the last check confirmed.
-  // Import sends only the confirmed one; an edit since must be checked again.
-  const [columnMapping, setColumnMapping] = useState<SettlementMapping | null>(null);
-  const [checkedMapping, setCheckedMapping] = useState<SettlementMapping | null>(null);
+  const settlement = useShopifySettlementEvidence();
 
   const load = async () => {
     setLoading(true);
@@ -110,66 +78,6 @@ export default function ShopifyAppHome() {
       setError(shopifyAppHomeErrorMessage(err));
     } finally {
       setSyncing(false);
-    }
-  };
-
-  const selectSettlementFile = (file: File | null) => {
-    setSettlementFile(file);
-    setSettlementPreview(null);
-    setSettlementResult(null);
-    setSettlementError(null);
-    setColumnMapping(null);
-    setCheckedMapping(null);
-  };
-
-  const updateSourceLabel = (value: string) => {
-    setSourceLabel(value);
-    setSettlementPreview(null);
-    setSettlementResult(null);
-    setSettlementError(null);
-    // The columns have not changed; keep the merchant's mapping for the next check.
-    setCheckedMapping(null);
-  };
-
-  const changeColumn = (field: ShopifySettlementField, header: string | null) => {
-    setColumnMapping((current) => assignSettlementColumn(current ?? {}, field, header));
-    setSettlementResult(null);
-  };
-
-  const submitSettlementFile = async (dryRun: boolean) => {
-    if (!settlementFile || !sourceLabel.trim()) return;
-    if (settlementFile.size > MAX_FILE_BYTES) {
-      setSettlementError("This file is larger than 10MB. Split it by date range, then try again.");
-      return;
-    }
-
-    setSettlementBusy(dryRun ? "checking" : "importing");
-    setSettlementError(null);
-    if (dryRun) setSettlementResult(null);
-    try {
-      const encoded = await readSettlementFile(settlementFile);
-      // First check: detect. Later checks send the merchant's mapping as the
-      // whole answer; the import sends exactly what the last check confirmed.
-      const mappingToSend = dryRun ? columnMapping : checkedMapping;
-      const result = await submitShopifySettlementEvidence({
-        fileName: settlementFile.name,
-        sourceLabel: sourceLabel.trim(),
-        ...encoded,
-        ...(mappingToSend ? { columnMapping: mappingToSend } : {}),
-        dryRun,
-      });
-      if (result.committed) {
-        setSettlementResult(result);
-      } else {
-        const confirmed = confirmedSettlementMapping(result.mapping);
-        setSettlementPreview(result);
-        setColumnMapping(confirmed);
-        setCheckedMapping(confirmed);
-      }
-    } catch (err) {
-      setSettlementError(shopifyAppHomeErrorMessage(err));
-    } finally {
-      setSettlementBusy(null);
     }
   };
 
@@ -206,8 +114,6 @@ export default function ShopifyAppHome() {
   }
 
   const hasPriorSyncIssue = Boolean(context.sync.lastErrorCode);
-  const mappingEdited = columnMapping !== null && checkedMapping !== null
-    && !sameSettlementMapping(columnMapping, checkedMapping);
   return (
     <main className="min-h-screen bg-[#F8F9FA] px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -305,8 +211,8 @@ export default function ShopifyAppHome() {
                   id="settlement-file"
                   type="file"
                   accept=".csv,.txt,.xlsx,.xlsm,.xlsb,.xls"
-                  disabled={settlementBusy !== null}
-                  onChange={(event) => selectSettlementFile(event.target.files?.[0] ?? null)}
+                  disabled={settlement.busy !== null}
+                  onChange={(event) => settlement.chooseFile(event.target.files?.[0] ?? null)}
                 />
                 <p className="text-xs text-slate-500">CSV or Excel, up to 10MB. File contents are never shown in this workspace.</p>
               </div>
@@ -314,11 +220,11 @@ export default function ShopifyAppHome() {
                 <Label htmlFor="settlement-source">Evidence source</Label>
                 <Input
                   id="settlement-source"
-                  value={sourceLabel}
+                  value={settlement.sourceLabel}
                   maxLength={80}
-                  disabled={settlementBusy !== null}
+                  disabled={settlement.busy !== null}
                   placeholder="For example: bank export or courier COD"
-                  onChange={(event) => updateSourceLabel(event.target.value)}
+                  onChange={(event) => settlement.updateSourceLabel(event.target.value)}
                 />
                 <p className="text-xs text-slate-500">Use a label that identifies where you obtained this merchant-provided evidence.</p>
               </div>
@@ -327,53 +233,46 @@ export default function ShopifyAppHome() {
             <div className="flex flex-wrap gap-3">
               <Button
                 variant="outline"
-                disabled={!settlementFile || !sourceLabel.trim() || settlementBusy !== null}
-                onClick={() => void submitSettlementFile(true)}
+                disabled={!settlement.canCheck}
+                onClick={() => void settlement.checkColumns()}
               >
-                {settlementBusy === "checking" ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
-                {settlementBusy === "checking" ? "Checking columns…" : "Check columns"}
+                {settlement.busy === "checking" ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+                {settlement.busy === "checking" ? "Checking columns…" : "Check columns"}
               </Button>
               <Button
                 className="bg-[#1B365D] hover:bg-[#102A43]"
-                disabled={
-                  !settlementPreview
-                  || settlementPreview.missingRequired.length > 0
-                  || mappingEdited
-                  || checkedMapping === null
-                  || settlementBusy !== null
-                  || Boolean(settlementResult)
-                }
-                onClick={() => void submitSettlementFile(false)}
+                disabled={!settlement.canImport}
+                onClick={() => void settlement.importEvidence()}
               >
-                {settlementBusy === "importing" ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                {settlementBusy === "importing" ? "Importing evidence…" : `Import${settlementPreview ? ` ${settlementPreview.totalRows} row(s)` : " evidence"}`}
+                {settlement.busy === "importing" ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                {settlement.busy === "importing" ? "Importing evidence…" : `Import${settlement.preview ? ` ${settlement.preview.totalRows} row(s)` : " evidence"}`}
               </Button>
             </div>
 
-            {settlementError ? (
+            {settlement.error ? (
               <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
                 <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
-                <p>{settlementError}</p>
+                <p>{settlement.error}</p>
               </div>
             ) : null}
 
-            {settlementPreview ? (
+            {settlement.preview ? (
               <div className="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
                 <div className="flex items-start gap-3 text-sm">
-                  {settlementPreview.missingRequired.length === 0 ? (
+                  {settlement.preview.missingRequired.length === 0 ? (
                     <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
                   ) : (
                     <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
                   )}
                   <div>
                     <p className="font-semibold text-slate-900">
-                      {settlementPreview.missingRequired.length === 0
-                        ? `${settlementPreview.totalRows} row(s) are ready for import`
+                      {settlement.preview.missingRequired.length === 0
+                        ? `${settlement.preview.totalRows} row(s) are ready for import`
                         : "Required columns are missing"}
                     </p>
-                    {settlementPreview.missingRequired.length > 0 ? (
+                    {settlement.preview.missingRequired.length > 0 ? (
                       <p className="mt-1 text-slate-600">
-                        ReconcileAI needs {settlementPreview.missingRequired.map((field) => FIELD_LABELS[field]).join(" and ")}.
+                        ReconcileAI needs {settlement.preview.missingRequired.map((field) => FIELD_LABELS[field]).join(" and ")}.
                       </p>
                     ) : null}
                   </div>
@@ -392,16 +291,16 @@ export default function ShopifyAppHome() {
                           {required ? <Badge variant="secondary" className="text-[10px]">Required</Badge> : null}
                         </div>
                         <Select
-                          value={columnMapping?.[field] ?? NOT_IN_FILE}
-                          disabled={settlementBusy !== null}
-                          onValueChange={(value) => changeColumn(field, value === NOT_IN_FILE ? null : value)}
+                          value={settlement.columnMapping?.[field] ?? NOT_IN_FILE}
+                          disabled={settlement.busy !== null}
+                          onValueChange={(value) => settlement.changeColumn(field, value === NOT_IN_FILE ? null : value)}
                         >
                           <SelectTrigger id={`settlement-map-${field}`} className="h-8 font-mono text-xs">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value={NOT_IN_FILE}>{required ? "Choose a column" : "Not in this file"}</SelectItem>
-                            {settlementPreview.headers.map((header, index) => (header ? (
+                            {(settlement.preview?.headers ?? []).map((header, index) => (header ? (
                               <SelectItem key={`${index}:${header}`} value={header} className="font-mono text-xs">{header}</SelectItem>
                             ) : null))}
                           </SelectContent>
@@ -409,29 +308,29 @@ export default function ShopifyAppHome() {
                       </div>
                     ))}
                   </div>
-                  {settlementPreview.headers.length === 0 ? (
+                  {settlement.preview.headers.length === 0 ? (
                     <p className="mt-2 text-xs text-amber-700">No column headers were found in this file.</p>
                   ) : null}
-                  {mappingEdited ? (
+                  {settlement.mappingEdited ? (
                     <p className="mt-2 text-xs text-amber-700">
                       You changed the mapping. Check columns again to confirm it before importing.
                     </p>
                   ) : null}
                 </div>
 
-                {settlementPreview.parseErrors.length > 0 ? (
-                  <p className="text-xs text-amber-700">Some rows have file-structure errors: {settlementPreview.parseErrors.join(" · ")}</p>
+                {settlement.preview.parseErrors.length > 0 ? (
+                  <p className="text-xs text-amber-700">Some rows have file-structure errors: {settlement.preview.parseErrors.join(" · ")}</p>
                 ) : null}
               </div>
             ) : null}
 
-            {settlementResult ? (
+            {settlement.result ? (
               <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
                 <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
                 <div>
                   <p className="font-semibold">Merchant-provided settlement evidence imported</p>
                   <p className="mt-1">
-                    {settlementResult.imported} imported, {settlementResult.duplicates} duplicate(s), {settlementResult.failed} failed; {settlementResult.matchedCount} matched and {settlementResult.exceptionCount} exception(s) identified.
+                    {settlement.result.imported} imported, {settlement.result.duplicates} duplicate(s), {settlement.result.failed} failed; {settlement.result.matchedCount} matched and {settlement.result.exceptionCount} exception(s) identified.
                   </p>
                 </div>
               </div>
