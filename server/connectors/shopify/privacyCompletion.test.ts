@@ -6,6 +6,7 @@ import {
   authorizeAndReadPrivacyArtifact,
   canonicalShopifyOrderGid,
   confirmPrivacyArtifactDelivery,
+  confirmPrivacyArtifactDeliveryWithRetry,
   cleanupExpiredShopifyPrivacyArtifacts,
   dispatchShopifyPrivacyOutbox,
   handleShopifyPrivacyJob,
@@ -545,8 +546,30 @@ describe("privacy artifact authorization and lifecycle", () => {
         action: "shopify_privacy_artifact_access",
         details: { decision: "allowed", channel: "authenticated_portal" },
       }));
-      // Issuing the file is not delivering it: no selector destroyed, nothing completed.
-      expect(fake.ops.filter((op) => op.kind !== "select")).toEqual([]);
+      // Issuing the file is not delivering it: no selector destroyed, nothing
+      // completed. The ONE write is the record that it was served.
+      expect(fake.ops.filter((op) => op.kind !== "select")).toEqual([
+        expect.objectContaining({ kind: "update", table: ARTIFACTS, data: { downloadedAt: NOW } }),
+      ]);
+    });
+
+    it("should record that the export was served before handing out any byte, while it is still pending", async () => {
+      const fake = scriptedDb();
+      await authorizeAndReadPrivacyArtifact({
+        db: fake.db as never, actor, artifact: stored, now: NOW,
+        readObject: vi.fn(async () => bytes), audit: vi.fn(async () => 1) as never,
+      });
+
+      const served = fake.writes("update", ARTIFACTS)[0];
+      expect(served?.where?.params).toEqual([901, 42, 7, "ready", "pending"]);
+    });
+
+    it("should serve nothing when the record of serving cannot be written", async () => {
+      const fake = scriptedDb({ update: { [ARTIFACTS]: [new Error("connection reset")] } });
+      await expect(authorizeAndReadPrivacyArtifact({
+        db: fake.db as never, actor, artifact: stored, now: NOW,
+        readObject: vi.fn(async () => bytes), audit: vi.fn(async () => 1) as never,
+      })).rejects.toThrow("connection reset");
     });
 
     it("should refuse to serve bytes that do not match what was written", async () => {
@@ -612,6 +635,49 @@ describe("privacy artifact authorization and lifecycle", () => {
     });
   });
 
+  describe("when the confirmation after a finished download fails", () => {
+    const target = { requestId: 901, organizationId: 42, storeId: 7 };
+
+    it("should retry a write that threw, and stop at the first answer", async () => {
+      const confirm = vi.fn()
+        .mockRejectedValueOnce(new Error("connection reset"))
+        .mockResolvedValueOnce("completed");
+
+      await expect(confirmPrivacyArtifactDeliveryWithRetry(
+        scriptedDb().db as never, target, 9, NOW, { confirm: confirm as never, backoffMs: 0 },
+      )).resolves.toBe("completed");
+      expect(confirm).toHaveBeenCalledTimes(2);
+    });
+
+    it("should not retry a definite refusal", async () => {
+      const confirm = vi.fn(async () => "not_confirmed");
+      await expect(confirmPrivacyArtifactDeliveryWithRetry(
+        scriptedDb().db as never, target, 9, NOW, { confirm: confirm as never, backoffMs: 0 },
+      )).resolves.toBe("not_confirmed");
+      expect(confirm).toHaveBeenCalledTimes(1);
+    });
+
+    it("should surface the failure after its bounded attempts", async () => {
+      const confirm = vi.fn(async () => { throw new Error("database down"); });
+      await expect(confirmPrivacyArtifactDeliveryWithRetry(
+        scriptedDb().db as never, target, 9, NOW, { confirm: confirm as never, backoffMs: 0 },
+      )).rejects.toThrow("database down");
+      expect(confirm).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it("should send a served-but-unconfirmed export to review as unconfirmed, never as undelivered", async () => {
+    const fake = scriptedDb({ select: { [ARTIFACTS]: [[{
+      requestId: 901, organizationId: 42, storeId: 7, objectKey: artifact.objectKey,
+      deliveryStatus: "pending", downloadedAt: new Date(NOW.getTime() - 60_000),
+    }]] } });
+    expect(await cleanupExpiredShopifyPrivacyArtifacts({ db: fake.db as never, now: () => NOW, deleteObject: vi.fn(async () => {}) })).toBe(1);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "manual_review", failureCode: "delivery_unconfirmed" });
+    expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({ status: "manual_review", completionNote: "delivery_unconfirmed" });
+    // Still never completed: delivery was not proven.
+    expect(fake.writes("delete", SELECTORS)).toEqual([]);
+  });
+
   it("should clean expired objects idempotently and move undelivered work to manual review", async () => {
     const fake = scriptedDb({ select: { [ARTIFACTS]: [[{
       requestId: 901, organizationId: 42, storeId: 7, objectKey: artifact.objectKey, deliveryStatus: "pending",
@@ -622,7 +688,7 @@ describe("privacy artifact authorization and lifecycle", () => {
     expect(deleteObject).toHaveBeenCalledTimes(1);
     expect(fake.writes("update", ARTIFACTS)[0]?.data).toMatchObject({ status: "deleted", deletedAt: NOW });
     expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "manual_review", failureCode: "artifact_expired" });
-    expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({ status: "manual_review" });
+    expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({ status: "manual_review", completionNote: "artifact_expired" });
   });
 
   it("should serialize deterministic exact bytes for digest evidence", () => {

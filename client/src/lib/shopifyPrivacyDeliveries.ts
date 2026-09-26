@@ -54,3 +54,25 @@ export function privacyDeliveriesToShow(rows: PrivacyDeliveryRow[], now: Date = 
     .sort((left, right) => Number(left.view.delivered) - Number(right.view.delivered) || left.expiresAt - right.expiresAt)
     .map(({ view }) => view);
 }
+
+/** How often an open page re-checks for exports that have become ready. */
+export const PRIVACY_DELIVERY_REFRESH_MS = 60_000;
+
+/**
+ * Query policy for the merchant's delivery list.
+ *
+ * An export is prepared in the background, and it has a limited lifetime. A
+ * page left open — the Settlement Monitor is a working screen — must notice one
+ * becoming ready rather than wait for a remount or a focus change, so the list
+ * re-checks on an interval while the page is visible. Not in the background:
+ * nobody sees a hidden tab, and focus refetches it on return.
+ */
+export function privacyDeliveryQueryOptions(isMerchantAdmin: boolean) {
+  return {
+    enabled: isMerchantAdmin,
+    retry: false,
+    refetchInterval: isMerchantAdmin ? PRIVACY_DELIVERY_REFRESH_MS : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  } as const;
+}

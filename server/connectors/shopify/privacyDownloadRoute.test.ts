@@ -30,7 +30,7 @@ vi.mock("./privacyCompletion", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./privacyCompletion")>()),
   loadPrivacyArtifactForDownload: state.load,
   authorizeAndReadPrivacyArtifact: state.read,
-  confirmPrivacyArtifactDelivery: state.confirm,
+  confirmPrivacyArtifactDeliveryWithRetry: state.confirm,
 }));
 
 import type express from "express";

@@ -28,7 +28,7 @@ import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./i
 import {
   PrivacyArtifactIntegrityError,
   authorizeAndReadPrivacyArtifact,
-  confirmPrivacyArtifactDelivery,
+  confirmPrivacyArtifactDeliveryWithRetry,
   loadPrivacyArtifactForDownload,
 } from "./privacyCompletion";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
@@ -154,15 +154,20 @@ export function createShopifyRouter(): express.Router {
       // the selectors survive, and the artifact stays downloadable. (A redirect
       // to a presigned URL gave no such evidence — it counted as delivery before
       // the browser had fetched anything.)
+      // A failed confirmation write is retried; if it still fails the export
+      // stays downloadable, and expiry records it as served-but-unconfirmed.
       res.once("finish", () => {
-        void confirmPrivacyArtifactDelivery(db, artifact, actor.id, new Date())
+        void confirmPrivacyArtifactDeliveryWithRetry(db, artifact, actor.id, new Date())
           .then((outcome) => {
             if (outcome === "not_confirmed") {
               console.warn("[shopify-privacy] delivery sent but not recorded", { code: "delivery_not_confirmed" });
             }
           })
           .catch(() => {
-            console.error("[shopify-privacy] delivery confirmation failed", { code: "delivery_evidence_failed" });
+            console.error("[shopify-privacy] DELIVERY CONFIRMATION LOST after retries", {
+              code: "delivery_evidence_failed",
+              requestId: artifact.requestId,
+            });
           });
       });
       res.set("Content-Type", "application/json; charset=utf-8");

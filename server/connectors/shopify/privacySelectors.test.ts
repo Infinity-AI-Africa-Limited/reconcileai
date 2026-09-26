@@ -30,6 +30,8 @@ const REQUESTS = "shopify_privacy_requests";
 const SELECTORS = "shopify_privacy_request_selectors";
 const EVENTS = "shopify_webhook_events";
 const STORES = "shopify_connector_stores";
+const JOBS = "shopify_privacy_data_request_jobs";
+const OUTBOX = "shopify_privacy_queue_outbox";
 const STORE = { id: 7, organizationId: 42, shopId: "gid://shopify/Shop/17", shopDomain: SHOP };
 const BODY = {
   shop_id: 17,
@@ -235,6 +237,49 @@ describe("when a request parked for manual review is replayed and now validates"
     // Only a manual-review row moves.
     expect(promote?.where?.params).toEqual(expect.arrayContaining([901, 42, "manual_review"]));
   });
+
+  async function replay(script: Parameters<typeof scriptedDb>[0] = {}) {
+    const validation = validateCustomerPrivacySelectors("customers/data_request", BODY, STORE);
+    if (!validation.ok) throw new Error("fixture should validate");
+    const fake = scriptedDb({
+      ...script,
+      select: { [STORES]: [[{ status: "active" }]], [REQUESTS]: [[{ id: 901 }]], ...script.select },
+    });
+    await admit(fake, {
+      store: STORE,
+      topic: "customers/data_request",
+      requestHash: "replayed-payload",
+      webhookId: "wh-replay",
+      validation,
+      selectors: [],
+    });
+    return fake;
+  }
+
+  it("should never un-flag a request its job sent to manual review", async () => {
+    const fake = await replay();
+
+    // A job-driven review (expired or unconfirmed export, blocked dependency)
+    // carries no admission error; only an admission-parked request moves.
+    const promote = fake.writes("update", REQUESTS).find((op) => op.data?.status === "received");
+    expect(promote?.where?.sql).toMatch(/`admissionErrorCode` is not null/i);
+  });
+
+  it("should bring back the job admission parked with it, and queue it again", async () => {
+    const fake = await replay();
+
+    const rearm = fake.writes("update", JOBS).find((op) => op.data?.status === "received");
+    expect(rearm?.data).toMatchObject({ status: "received", failureCode: null });
+    expect(rearm?.where?.params).toEqual([901, 42, "manual_review", "selectors_unavailable"]);
+    expect(fake.writes("update", OUTBOX)[0]?.data).toMatchObject({ status: "pending" });
+    expect(fake.writes("update", OUTBOX)[0]?.where?.params).toEqual([901]);
+  });
+
+  it("should leave a job parked for any other reason, and queue nothing", async () => {
+    const fake = await replay({ update: { [JOBS]: [0] } });
+
+    expect(fake.writes("update", OUTBOX)).toEqual([]);
+  });
 });
 
 describe("when a received customer request has no selectors", () => {
@@ -259,6 +304,13 @@ describe("when a received customer request has no selectors", () => {
     expect(repair?.where?.params).toEqual(
       expect.arrayContaining([42, 7, "customers/data_request", "customers/redact", "received"]),
     );
+    // The job is parked with its request, so no worker answers it without selectors.
+    const parked = fake.writes("update", JOBS).find((op) => op.data?.status === "manual_review");
+    expect(parked?.data).toEqual({ status: "manual_review", failureCode: "selectors_unavailable", lastCheckpoint: "manual_review" });
+    expect(parked?.where?.params).toEqual(
+      expect.arrayContaining([42, 7, "received", "failed_retryable", "manual_review", "selectors_unavailable"]),
+    );
+    expect(parked?.where?.params).not.toContain("processing");
     // This request's own selectors were inserted first, so it cannot quarantine itself.
     const selectorInsertAt = fake.ops.findIndex((op) => op.kind === "insert" && op.table === SELECTORS);
     const repairAt = fake.ops.findIndex((op) => op === repair);

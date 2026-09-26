@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  PRIVACY_DELIVERY_REFRESH_MS,
+  privacyDeliveryQueryOptions,
   describePrivacyDelivery,
   privacyDeliveriesToShow,
   privacyDeliveryHref,
@@ -50,5 +52,20 @@ describe("when a customer data-request export is listed for the merchant", () =>
     );
     expect(shown.map((view) => view.artifactId)).toEqual(["sooner", "later", "delivered"]);
     expect(shown.map((view) => view.delivered)).toEqual([false, false, true]);
+  });
+});
+
+describe("when the merchant's delivery list is open", () => {
+  it("should re-check on an interval, so an export that becomes ready appears without a reload", () => {
+    const options = privacyDeliveryQueryOptions(true);
+    expect(options.refetchInterval).toBe(PRIVACY_DELIVERY_REFRESH_MS);
+    expect(options.refetchOnWindowFocus).toBe(true);
+    // Well inside an export's lifetime, which is measured in days.
+    expect(PRIVACY_DELIVERY_REFRESH_MS).toBeLessThanOrEqual(5 * 60_000);
+  });
+
+  it("should not poll for anyone who cannot download, nor from a hidden tab", () => {
+    expect(privacyDeliveryQueryOptions(false)).toMatchObject({ enabled: false, refetchInterval: false });
+    expect(privacyDeliveryQueryOptions(true).refetchIntervalInBackground).toBe(false);
   });
 });

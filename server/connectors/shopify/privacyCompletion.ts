@@ -37,6 +37,8 @@ export type ShopifyPrivacyQueuePayload = {
 
 export type ShopifyPrivacyFailureCode =
   | "artifact_expired"
+  /** Served at least once, never confirmed delivered, then expired: a person decides. */
+  | "delivery_unconfirmed"
   | "artifact_integrity_failed"
   | "artifact_storage_failed"
   | "delivery_evidence_failed"
@@ -1130,7 +1132,63 @@ export async function authorizeAndReadPrivacyArtifact(
     entityId: deps.artifact.requestId,
     details: { decision: "allowed", channel: "authenticated_portal" },
   });
+  // Evidence BEFORE the first byte that this export was handed out. It is not
+  // delivery — only deliveryStatus says that, and only after 'finish'. But the
+  // confirmation after 'finish' can be lost (its write fails; the process
+  // stops), and the server cannot record anything once the bytes are gone. So
+  // this is written first, and it fails closed like the audit: expiry cleanup
+  // then tells "served, never confirmed" from "never downloaded" instead of
+  // reporting a possibly-delivered export as undelivered.
+  await deps.db
+    .update(shopifyPrivacyArtifacts)
+    .set({ downloadedAt: now })
+    .where(
+      and(
+        eq(shopifyPrivacyArtifacts.requestId, deps.artifact.requestId),
+        eq(shopifyPrivacyArtifacts.organizationId, deps.artifact.organizationId),
+        eq(shopifyPrivacyArtifacts.storeId, deps.artifact.storeId),
+        eq(shopifyPrivacyArtifacts.status, "ready"),
+        eq(shopifyPrivacyArtifacts.deliveryStatus, "pending"),
+      ),
+    );
   return { bytes, filename: `shopify-customer-data-request-${deps.artifact.requestId}.json` };
+}
+
+export const DELIVERY_CONFIRMATION_ATTEMPTS = 3;
+const DELIVERY_CONFIRMATION_BACKOFF_MS = 500;
+
+/**
+ * Confirm a finished delivery, retrying a write that FAILED.
+ *
+ * The realistic loss is transient — TiDB drops an idle connection and the pool
+ * hands the retry a fresh one — and nothing else will ever record this delivery:
+ * the bytes have left, and no later request knows they did. A definite answer
+ * (`completed`, `already_completed`, `not_confirmed`) is final and never
+ * retried; only a thrown write is. If every attempt throws, the error reaches
+ * the caller, the export stays downloadable (a re-download confirms it), and
+ * expiry marks it `delivery_unconfirmed` for a person rather than `artifact_expired`.
+ */
+export async function confirmPrivacyArtifactDeliveryWithRetry(
+  db: Db,
+  artifact: Pick<AuthorizedPrivacyArtifact, "requestId" | "organizationId" | "storeId">,
+  actorId: number,
+  now: Date,
+  deps: { confirm?: typeof confirmPrivacyArtifactDelivery; backoffMs?: number } = {},
+): Promise<Awaited<ReturnType<typeof confirmPrivacyArtifactDelivery>>> {
+  const confirm = deps.confirm ?? confirmPrivacyArtifactDelivery;
+  const backoffMs = deps.backoffMs ?? DELIVERY_CONFIRMATION_BACKOFF_MS;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= DELIVERY_CONFIRMATION_ATTEMPTS; attempt += 1) {
+    try {
+      return await confirm(db, artifact as AuthorizedPrivacyArtifact, actorId, now);
+    } catch (error) {
+      lastError = error;
+      if (attempt < DELIVERY_CONFIRMATION_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, backoffMs * 2 ** (attempt - 1)));
+      }
+    }
+  }
+  throw lastError;
 }
 
 export interface PrivacyCleanupDeps {
@@ -1153,6 +1211,7 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
       storeId: shopifyPrivacyArtifacts.storeId,
       objectKey: shopifyPrivacyArtifacts.objectKey,
       deliveryStatus: shopifyPrivacyArtifacts.deliveryStatus,
+      downloadedAt: shopifyPrivacyArtifacts.downloadedAt,
     })
     .from(shopifyPrivacyArtifacts)
     .where(
@@ -1178,9 +1237,14 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
           ),
         );
       if (row.deliveryStatus !== "acknowledged") {
+        // Served but never confirmed is NOT "undelivered": the merchant may well
+        // hold the file. Say which it is, so the person reviewing it does not
+        // re-send, or report non-delivery, on a guess. Neither case completes:
+        // completing destroys the selectors, and delivery was never proven.
+        const outcome: ShopifyPrivacyFailureCode = row.downloadedAt ? "delivery_unconfirmed" : "artifact_expired";
         await tx
           .update(shopifyPrivacyDataRequestJobs)
-          .set({ status: "manual_review", failureCode: "artifact_expired", lastCheckpoint: "artifact_deleted" })
+          .set({ status: "manual_review", failureCode: outcome, lastCheckpoint: "artifact_deleted" })
           .where(
             and(
               eq(shopifyPrivacyDataRequestJobs.requestId, row.requestId),
@@ -1191,7 +1255,7 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
           );
         await tx
           .update(shopifyPrivacyRequests)
-          .set({ status: "manual_review", completionNote: "artifact_expired" })
+          .set({ status: "manual_review", completionNote: outcome })
           .where(
             and(
               eq(shopifyPrivacyRequests.id, row.requestId),

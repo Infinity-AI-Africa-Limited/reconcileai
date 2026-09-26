@@ -4,7 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { privacyDeliveriesToShow } from "@/lib/shopifyPrivacyDeliveries";
+import { privacyDeliveriesToShow, privacyDeliveryQueryOptions } from "@/lib/shopifyPrivacyDeliveries";
 
 /**
  * Customer data-request exports waiting for the store's claiming administrator.
@@ -16,10 +16,10 @@ import { privacyDeliveriesToShow } from "@/lib/shopifyPrivacyDeliveries";
 export function ShopifyPrivacyDeliveries() {
   const { user } = useAuth();
   const isMerchantAdmin = user?.role === "admin";
-  const deliveries = trpc.shopifyConnector.listPrivacyDeliveries.useQuery(undefined, {
-    enabled: isMerchantAdmin,
-    retry: false,
-  });
+  const deliveries = trpc.shopifyConnector.listPrivacyDeliveries.useQuery(
+    undefined,
+    privacyDeliveryQueryOptions(isMerchantAdmin),
+  );
   const rows = privacyDeliveriesToShow(deliveries.data ?? []);
   if (!isMerchantAdmin || rows.length === 0) return null;
 
