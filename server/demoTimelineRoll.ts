@@ -101,7 +101,10 @@ export const ROLL_PLAN = [
     name: "transactions",
     scope: "org",
     roll: ["transactionDate", "valueDate", "createdAt"],
-    exempt: {},
+    exempt: {
+      shopifyUpdatedAt: "Provider-source update timestamp; Shopify-connected tenants are excluded from demo rolling and this must never be rewritten",
+      shopifyCancelledAt: "Provider-source cancellation timestamp; Shopify-connected tenants are excluded from demo rolling and this must never be rewritten",
+    },
     mayBeFuture: { valueDate: "a value date may legitimately follow the transaction (forward-dated settlement)" },
   },
   { table: uploadBatches, name: "uploadBatches", scope: "org", roll: ["createdAt", "completedAt"], exempt: {}, mayBeFuture: {} },

@@ -1,0 +1,437 @@
+import { assertEgressAllowed } from "../../_core/egress";
+import { SHOPIFY_API_VERSION } from "../../../drizzle/shopify_schema";
+import { normalizeShopDomain } from "./auth";
+import { getValidShopifyAccessToken } from "./tokenStore";
+
+/** Five minutes re-read on every cycle so records landing on a watermark seam are recovered. */
+export const SHOPIFY_ORDER_WATERMARK_OVERLAP_MS = 5 * 60_000;
+/** The first order sync stays well inside read_orders' recent-order access window. */
+export const SHOPIFY_INITIAL_ORDER_WINDOW_MS = 24 * 60 * 60_000;
+export const SHOPIFY_ORDER_PAGE_SIZE = 100;
+const MAX_ORDER_PAGES = 1_000;
+export const SHOPIFY_ORDER_PAGE_ATTEMPTS = 4;
+const SHOPIFY_ORDER_RETRY_BASE_MS = 500;
+const SHOPIFY_ORDER_RETRY_MAX_MS = 30_000;
+const SHOPIFY_ORDER_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Shopify Admin 2026-07 exposes the current total as currentTotalPriceSet.
+ * Alias it to the product name and select only shopMoney's MoneyV2 fields; no
+ * presentment/customer/order-detail object crosses the connector boundary.
+ */
+export const SHOPIFY_ORDERS_QUERY = `query ReconcileAIOrders($first: Int!, $after: String, $query: String!) {
+  orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
+    nodes {
+      id
+      name
+      createdAt
+      updatedAt
+      processedAt
+      currencyCode
+      currentTotalPrice: currentTotalPriceSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      displayFinancialStatus
+      cancelledAt
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}`;
+
+/** There is deliberately no generic arbitrary-query entry point in this client. */
+export const SHOPIFY_READ_ONLY_QUERY_ALLOWLIST = Object.freeze({
+  orders: SHOPIFY_ORDERS_QUERY,
+});
+
+const DENIED_ORDER_FIELDS = [
+  "customer",
+  "email",
+  "phone",
+  "billingAddress",
+  "shippingAddress",
+  "displayAddress",
+  "note",
+  "lineItems",
+  "checkoutToken",
+  "cartToken",
+] as const;
+
+/** Build-time/testable guard against accidentally widening the fixed operation. */
+export function assertMinimalReadOnlyOrderQuery(query: string): void {
+  if (!/^\s*query\b/.test(query) || /\bmutation\b/i.test(query)) {
+    throw new Error("Shopify order operation must be a read-only query");
+  }
+  for (const field of DENIED_ORDER_FIELDS) {
+    if (new RegExp(`\\b${field}\\b`).test(query)) {
+      throw new Error(`Shopify order operation requests denied field ${field}`);
+    }
+  }
+  if (query !== SHOPIFY_READ_ONLY_QUERY_ALLOWLIST.orders) {
+    throw new Error("Shopify order operation is not allowlisted");
+  }
+}
+
+export interface NormalizedShopifyOrder {
+  gid: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Shopify returns null until an order has been processed; keep that absence explicit. */
+  processedAt: string | null;
+  currencyCode: string;
+  currentTotalPrice: { amount: string; currencyCode: string };
+  displayFinancialStatus: string | null;
+  cancelledAt: string | null;
+}
+
+interface ShopifyOrderNode {
+  id?: unknown;
+  name?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  processedAt?: unknown;
+  currencyCode?: unknown;
+  currentTotalPrice?: { shopMoney?: { amount?: unknown; currencyCode?: unknown } | null } | null;
+  displayFinancialStatus?: unknown;
+  cancelledAt?: unknown;
+}
+
+interface OrdersGraphqlData {
+  orders?: {
+    nodes?: ShopifyOrderNode[];
+    pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+    userErrors?: Array<{ message?: string }>;
+  };
+  userErrors?: Array<{ message?: string }>;
+}
+
+/**
+ * Shopify's GraphQL Admin API is rate-limited by query COST, not request
+ * count, and a throttled query is answered HTTP 200 with a `THROTTLED` error —
+ * never 429. `extensions.cost.throttleStatus` reports the bucket after each call.
+ */
+interface GraphqlThrottleStatus {
+  maximumAvailable?: number;
+  currentlyAvailable?: number;
+  restoreRate?: number;
+}
+
+interface GraphqlCost {
+  requestedQueryCost?: number;
+  actualQueryCost?: number | null;
+  throttleStatus?: GraphqlThrottleStatus;
+}
+
+interface GraphqlResponse<T> {
+  data?: T;
+  errors?: Array<{ message?: string; extensions?: { code?: string } }>;
+  extensions?: { cost?: GraphqlCost };
+}
+
+export class ShopifyOrderApiError extends Error {
+  constructor(
+    message: string,
+    public readonly code:
+      | "HTTP_ERROR"
+      | "INVALID_RESPONSE"
+      | "GRAPHQL_ERROR"
+      | "USER_ERROR"
+      | "PAGINATION_ERROR"
+      | "THROTTLED",
+  ) {
+    super(message);
+    this.name = "ShopifyOrderApiError";
+  }
+}
+
+function endpointFor(shopDomain: string): string {
+  const normalized = normalizeShopDomain(shopDomain);
+  if (!normalized) throw new Error("Invalid Shopify shop domain");
+  return `https://${normalized}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+}
+
+function iso(value: unknown, field: string): string {
+  if (typeof value !== "string" || Number.isNaN(new Date(value).getTime())) {
+    throw new ShopifyOrderApiError(`Shopify order ${field} is invalid`, "INVALID_RESPONSE");
+  }
+  return new Date(value).toISOString();
+}
+
+function nullableIso(value: unknown, field: string): string | null {
+  return value === null || value === undefined ? null : iso(value, field);
+}
+
+function text(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ShopifyOrderApiError(`Shopify order ${field} is invalid`, "INVALID_RESPONSE");
+  }
+  return value;
+}
+
+export function normalizeShopifyOrder(node: ShopifyOrderNode): NormalizedShopifyOrder {
+  const amount = text(node.currentTotalPrice?.shopMoney?.amount, "currentTotalPrice.amount");
+  if (!/^-?\d+(?:\.\d+)?$/.test(amount)) {
+    throw new ShopifyOrderApiError("Shopify order currentTotalPrice.amount is invalid", "INVALID_RESPONSE");
+  }
+  const currencyCode = text(node.currencyCode, "currencyCode");
+  const moneyCurrency = text(node.currentTotalPrice?.shopMoney?.currencyCode, "currentTotalPrice.currencyCode");
+  return {
+    gid: text(node.id, "id"),
+    name: text(node.name, "name"),
+    createdAt: iso(node.createdAt, "createdAt"),
+    updatedAt: iso(node.updatedAt, "updatedAt"),
+    processedAt: nullableIso(node.processedAt, "processedAt"),
+    currencyCode,
+    currentTotalPrice: { amount, currencyCode: moneyCurrency },
+    displayFinancialStatus:
+      node.displayFinancialStatus === null || node.displayFinancialStatus === undefined
+        ? null
+        : text(node.displayFinancialStatus, "displayFinancialStatus"),
+    cancelledAt:
+      node.cancelledAt === null || node.cancelledAt === undefined
+        ? null
+        : iso(node.cancelledAt, "cancelledAt"),
+  };
+}
+
+function searchWindow(from: Date, to: Date): string {
+  // Dates are generated by this process, not interpolated from provider/user text.
+  return `updated_at:>='${from.toISOString()}' updated_at:<='${to.toISOString()}'`;
+}
+
+function userErrors(data: OrdersGraphqlData | undefined): Array<{ message?: string }> {
+  return [...(data?.userErrors ?? []), ...(data?.orders?.userErrors ?? [])];
+}
+
+export interface FetchShopifyOrdersParams {
+  storeId: number;
+  organizationId: number;
+  shopDomain: string;
+  from: Date;
+  to: Date;
+}
+
+export interface ShopifyOrderFetchDeps {
+  fetchImpl?: typeof fetch;
+  getAccessToken?: typeof getValidShopifyAccessToken;
+  sleep?: (delayMs: number) => Promise<void>;
+  now?: () => number;
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function retryAfterMs(response: Response, now: () => number): number | null {
+  const value = response.headers?.get("retry-after")?.trim();
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1_000, SHOPIFY_ORDER_RETRY_MAX_MS);
+  }
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return null;
+  return Math.min(Math.max(0, at - now()), SHOPIFY_ORDER_RETRY_MAX_MS);
+}
+
+function transientHttpStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/** Every GraphQL error is a cost throttle — the only GraphQL error worth retrying. */
+function onlyThrottled(errors: GraphqlResponse<unknown>["errors"]): boolean {
+  return !!errors?.length && errors.every((error) => error.extensions?.code === "THROTTLED");
+}
+
+/**
+ * How long until the bucket holds enough for another query of this cost, from
+ * the throttle status Shopify returned. Null when Shopify did not report one.
+ */
+export function shopifyThrottleWaitMs(cost: GraphqlCost | undefined): number | null {
+  const status = cost?.throttleStatus;
+  const available = status?.currentlyAvailable;
+  const restoreRate = status?.restoreRate;
+  const needed = cost?.requestedQueryCost;
+  if (
+    typeof available !== "number" ||
+    typeof restoreRate !== "number" ||
+    typeof needed !== "number" ||
+    !(restoreRate > 0)
+  ) {
+    return null;
+  }
+  const deficit = needed - available;
+  if (deficit <= 0) return 0;
+  return Math.min(Math.ceil((deficit / restoreRate) * 1_000), SHOPIFY_ORDER_RETRY_MAX_MS);
+}
+
+function backoffMs(attempt: number): number {
+  return Math.min(SHOPIFY_ORDER_RETRY_BASE_MS * 2 ** (attempt - 1), SHOPIFY_ORDER_RETRY_MAX_MS);
+}
+
+/**
+ * One page, parsed. Retries a dropped connection, a 429/5xx, and a GraphQL
+ * cost throttle — which Shopify answers with HTTP 200, so an HTTP-only retry
+ * would never see it and a busy store's whole window would fail.
+ */
+async function fetchOrderPage(
+  endpoint: string,
+  init: RequestInit,
+  fetchImpl: typeof fetch,
+  deps: Pick<ShopifyOrderFetchDeps, "sleep" | "now">,
+): Promise<GraphqlResponse<OrdersGraphqlData>> {
+  const sleep = deps.sleep ?? defaultSleep;
+  const now = deps.now ?? Date.now;
+
+  for (let attempt = 1; attempt <= SHOPIFY_ORDER_PAGE_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint, {
+        ...init,
+        // A fresh timeout is required for every attempt; an already-aborted
+        // signal would turn all retries into immediate failures.
+        signal: AbortSignal.timeout(SHOPIFY_ORDER_REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      if (attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+        throw new ShopifyOrderApiError("Shopify order query failed after transient network errors", "HTTP_ERROR");
+      }
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+
+    if (!response.ok) {
+      if (!transientHttpStatus(response.status) || attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+        throw new ShopifyOrderApiError(`Shopify order query failed (${response.status})`, "HTTP_ERROR");
+      }
+      await sleep(retryAfterMs(response, now) ?? backoffMs(attempt));
+      continue;
+    }
+
+    let body: GraphqlResponse<OrdersGraphqlData>;
+    try {
+      body = (await response.json()) as GraphqlResponse<OrdersGraphqlData>;
+    } catch {
+      throw new ShopifyOrderApiError("Shopify order query returned invalid JSON", "INVALID_RESPONSE");
+    }
+    if (!onlyThrottled(body.errors)) return body;
+    if (attempt === SHOPIFY_ORDER_PAGE_ATTEMPTS) {
+      throw new ShopifyOrderApiError("Shopify order query stayed throttled after retries", "THROTTLED");
+    }
+    // Wait for the reported deficit to restore; fall back to backoff when the
+    // response carried no throttle status.
+    await sleep(Math.max(shopifyThrottleWaitMs(body.extensions?.cost) ?? 0, backoffMs(attempt)));
+  }
+
+  // The bounded loop either returns or throws; this keeps the invariant explicit.
+  throw new ShopifyOrderApiError("Shopify order query failed", "HTTP_ERROR");
+}
+
+/**
+ * Fetch a complete updated_at window using the tenant-scoped, refreshing token
+ * store. The returned records are de-duplicated and sorted deterministically;
+ * raw responses are neither returned nor logged.
+ */
+export async function fetchShopifyOrdersWindow(
+  params: FetchShopifyOrdersParams,
+  deps: ShopifyOrderFetchDeps = {},
+): Promise<NormalizedShopifyOrder[]> {
+  assertMinimalReadOnlyOrderQuery(SHOPIFY_ORDERS_QUERY);
+  if (!(params.from instanceof Date) || !(params.to instanceof Date) || params.from > params.to) {
+    throw new Error("Invalid Shopify order sync window");
+  }
+
+  const accessToken = await (deps.getAccessToken ?? getValidShopifyAccessToken)({
+    storeId: params.storeId,
+    organizationId: params.organizationId,
+  });
+  const endpoint = endpointFor(params.shopDomain);
+  assertEgressAllowed(endpoint, "Shopify order sync");
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const byGid = new Map<string, NormalizedShopifyOrder>();
+  const seenCursors = new Set<string>();
+  let after: string | null = null;
+
+  for (let pageNumber = 1; pageNumber <= MAX_ORDER_PAGES; pageNumber += 1) {
+    const body = await fetchOrderPage(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Shopify-Access-Token": accessToken,
+      },
+      body: JSON.stringify({
+        query: SHOPIFY_ORDERS_QUERY,
+        variables: {
+          first: SHOPIFY_ORDER_PAGE_SIZE,
+          after,
+          query: searchWindow(params.from, params.to),
+        },
+      }),
+    }, fetchImpl, deps);
+
+    if (body.errors?.length) {
+      throw new ShopifyOrderApiError("Shopify order query returned GraphQL errors", "GRAPHQL_ERROR");
+    }
+    if (userErrors(body.data).length) {
+      throw new ShopifyOrderApiError("Shopify order query returned user errors", "USER_ERROR");
+    }
+    const connection = body.data?.orders;
+    if (!connection || !Array.isArray(connection.nodes) || !connection.pageInfo) {
+      throw new ShopifyOrderApiError("Shopify order query response is incomplete", "INVALID_RESPONSE");
+    }
+
+    for (const node of connection.nodes) {
+      const normalized = normalizeShopifyOrder(node);
+      const existing = byGid.get(normalized.gid);
+      if (
+        !existing ||
+        normalized.updatedAt > existing.updatedAt ||
+        (normalized.updatedAt === existing.updatedAt && normalized.gid < existing.gid)
+      ) {
+        byGid.set(normalized.gid, normalized);
+      }
+    }
+
+    if (!connection.pageInfo.hasNextPage) break;
+    const next = connection.pageInfo.endCursor;
+    if (!next || seenCursors.has(next)) {
+      throw new ShopifyOrderApiError("Shopify order pagination cursor did not advance", "PAGINATION_ERROR");
+    }
+    seenCursors.add(next);
+    after = next;
+    if (pageNumber === MAX_ORDER_PAGES) {
+      throw new ShopifyOrderApiError("Shopify order pagination exceeded its safety limit", "PAGINATION_ERROR");
+    }
+    // Pace the next page by the bucket Shopify just reported, rather than
+    // spending it down and waiting to be throttled.
+    const pause = shopifyThrottleWaitMs(body.extensions?.cost);
+    if (pause) await (deps.sleep ?? defaultSleep)(pause);
+  }
+
+  return [...byGid.values()].sort(
+    (left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.gid.localeCompare(right.gid),
+  );
+}
+
+export function computeShopifyOrderWindow(params: {
+  now: Date;
+  watermark: Date | null;
+  overlapMs?: number;
+  initialWindowMs?: number;
+}): { from: Date; to: Date } {
+  const overlap = params.overlapMs ?? SHOPIFY_ORDER_WATERMARK_OVERLAP_MS;
+  const initial = params.initialWindowMs ?? SHOPIFY_INITIAL_ORDER_WINDOW_MS;
+  const to = new Date(params.now);
+  const candidate = params.watermark
+    ? new Date(params.watermark.getTime() - overlap)
+    : new Date(to.getTime() - initial);
+  const from = candidate > to ? new Date(to.getTime() - overlap) : candidate;
+  return { from, to };
+}

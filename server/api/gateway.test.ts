@@ -3,7 +3,7 @@
  * Queue abstraction (in-process backend), sandbox determinism, and the
  * backoff math used by webhook delivery.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createQueue, backoffDelayMs, DurableQueueUnavailableError } from "../jobQueue";
 import { runSandboxReconciliation } from "./sandbox";
 import { publicApiRateKey } from "../rateLimiter";
@@ -55,6 +55,26 @@ describe("jobQueue — in-process backend", () => {
     await q.enqueue("job", null);
     await new Promise((r) => setTimeout(r, 200));
     expect(attempts).toEqual([1, 2]);
+  });
+
+  it("observes terminal failure once, after the final attempted delivery", async () => {
+    const attempts: number[] = [];
+    const onFinalFailure = vi.fn(async () => {});
+    const q = await createQueue<{ receiptId: string }>("test-final-failure", async (job) => {
+      attempts.push(job.attempt);
+      throw new Error("always fails");
+    }, { attempts: 2, backoffMs: 10, onFinalFailure });
+
+    await q.enqueue("job", { receiptId: "receipt-1" });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(attempts).toEqual([1, 2]);
+    expect(onFinalFailure).toHaveBeenCalledOnce();
+    expect(onFinalFailure.mock.calls[0]?.[0]).toEqual({
+      name: "job",
+      data: { receiptId: "receipt-1" },
+      attempt: 2,
+    });
   });
 
   it("backoff grows exponentially and caps at 10 minutes", () => {
