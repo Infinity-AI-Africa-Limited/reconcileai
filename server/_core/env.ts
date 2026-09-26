@@ -158,4 +158,15 @@ export const ENV = {
   // offline tokens; credentials and OAuth tokens must never be browser-visible.
   shopifyClientId: cleanSecret(process.env.SHOPIFY_CLIENT_ID),
   shopifyClientSecret: cleanSecret(process.env.SHOPIFY_CLIENT_SECRET),
+  // 64 hex characters. This separate HMAC secret protects the durable replay
+  // digest of a Shopify webhook body. It must never fall back to raw SHA-256:
+  // customer-data payloads can contain low-entropy identifiers that are
+  // otherwise vulnerable to offline confirmation by a database reader.
+  shopifyWebhookDigestKey: cleanSecret(process.env.SHOPIFY_WEBHOOK_DIGEST_KEY),
+  /**
+   * Stable, versioned HMAC key ring for permanent Shopify order suppression.
+   * Format: `v1:<64 hex>[,v2:<64 hex>]`. Retain old keys through rotations so
+   * every historical tombstone can still be checked. The first key is active.
+   */
+  shopifyPrivacySuppressionKeys: cleanSecret(process.env.SHOPIFY_PRIVACY_SUPPRESSION_KEYS),
 };

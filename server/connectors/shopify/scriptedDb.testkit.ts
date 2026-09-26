@@ -24,7 +24,7 @@ export interface RecordedOp {
   /** Rendered WHERE clause, when the operation had one. */
   where: { sql: string; params: unknown[] } | null;
   /** INSERT values or UPDATE set-clause, as passed. */
-  data: Record<string, unknown> | null;
+  data: Record<string, unknown> | Record<string, unknown>[] | null;
   /** Set when the INSERT carried ON DUPLICATE KEY UPDATE. */
   upsert: boolean;
   /** The transaction this ran in, or null outside one. */
@@ -119,7 +119,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
       insert(t: Table) {
         const table = getTableName(t);
         return {
-          values(values: Record<string, unknown>) {
+          values(values: Record<string, unknown> | Record<string, unknown>[]) {
             let upsert = false;
             const compute = () => {
               record({ kind: "insert", table, where: null, data: values, upsert });

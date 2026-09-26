@@ -73,6 +73,8 @@ const existingStore = {
   displayName: "Merchant Ltd",
   status: "active",
   statusReason: null,
+  privacyRedactionState: "active",
+  privacyRedactionRequestId: null,
   claimedByUserId: 9,
   claimedAt: new Date("2026-09-01T00:00:00Z"),
 };
@@ -88,6 +90,8 @@ const held = (script: Parameters<typeof scriptedDb>[0] = {}) =>
     standing: {
       [LEASES]: [{ leaseId: LEASE.leaseId }],
       [CHANNELS]: [{ id: 77 }],
+      // The tenant is not being redacted (read again, locked, before any write).
+      [ORGS]: [{ deletionState: "active", code: "SHP_ABC" }],
       ...script.standing,
     },
   });
@@ -172,7 +176,13 @@ describe("when a shop we already know is reauthorized", () => {
 
   describe("and its contact email matches an active administrator", () => {
     it("should store the new pair and mark the store active in the same committed transaction", async () => {
-      const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
+      const fake = held({
+        select: {
+          [STORES]: [[existingStore], [{ privacyRedactionState: "active" }]],
+          [USERS]: [[{ id: 9 }]],
+          [ORGS]: [[{ code: "SHP_ABC" }]],
+        },
+      });
       state.db = fake.db;
 
       const result = await onboard();
@@ -223,6 +233,76 @@ describe("when a shop we already know is reauthorized", () => {
       expect(await codeOf(onboard)).toBe("SHOP_IDENTITY_CONFLICT");
       expect(fake.ops.filter((op) => op.kind !== "select")).toEqual([]);
     });
+  });
+});
+
+describe("when a shop redaction fences the tenant after the early check", () => {
+  // The pre-transaction check is advice only: a redaction admitted between it
+  // and the write must still stop the write. Greptile #156 (stacked review).
+  const fenced = { deletionState: "redacting", code: "SHP_ABC" };
+
+  it("should refuse a reauthorization without storing a pair or reactivating the store", async () => {
+    const fake = held({
+      select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ deletionState: "active" }], [fenced]] },
+    });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    // Nothing relabels the store either: the fence owns its state now.
+    expect(storeUpdates(fake.committed())).toEqual([]);
+  });
+
+  it("should take the organisation lock before the store lock, inside the transaction that writes", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+    await onboard();
+
+    const inTx = fake.ops.filter((op) => op.txId !== null);
+    const orgLock = inTx.findIndex((op) => op.table === ORGS && op.locked);
+    const storeLock = inTx.findIndex((op) => op.table === STORES && op.kind === "select" && op.locked);
+    expect(orgLock).toBeGreaterThanOrEqual(0);
+    expect(storeLock).toBeGreaterThan(orgLock);
+    expect(inTx.findIndex((op) => op.table === TOKENS && op.kind === "insert")).toBeGreaterThan(storeLock);
+  });
+
+  it("should refuse when this store has itself been fenced as a sibling of the redacted one", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore], [{ status: "redacting" }]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+  });
+
+  it("should refuse while a customer redaction holds this store's write fence", async () => {
+    const fake = held({
+      select: { [STORES]: [[existingStore], [{ status: "active", privacyRedactionState: "customer_redacting" }]], [USERS]: [[{ id: 9 }]] },
+    });
+    state.db = fake.db;
+
+    expect(await codeOf(onboard)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    expect(storeUpdates(fake.committed())).toEqual([]);
+  });
+
+  it("should activate a store only while it is not fenced, in the statement itself", async () => {
+    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] } });
+    state.db = fake.db;
+    await onboard();
+
+    expect(fake.writes("update", STORES)[0]?.where?.params).toContain("redacting");
+  });
+
+  it("should refuse to finish a first install whose new tenant was fenced before its credentials were stored", async () => {
+    const fake = held({
+      select: { [STORES]: [[]], [USERS]: [[]], [ORGS]: [[fenced]] },
+      insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7] },
+    });
+    state.db = fake.db;
+
+    expect(await codeOf(onboardFirst)).toBe("REDACTION_IN_PROGRESS");
+    expect(fake.writes("insert", TOKENS)).toEqual([]);
+    expect(storeUpdates(fake.committed())).not.toContainEqual(expect.objectContaining({ status: "active" }));
   });
 });
 
@@ -326,7 +406,11 @@ describe("when a shop installs for the first time", () => {
     it("should complete as a reauthorization of the winning store", async () => {
       const winner = { ...existingStore, status: "pending_claim" };
       const fake = held({
-        select: { [STORES]: [[], [winner]], [USERS]: [[], [{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] },
+        select: {
+          [STORES]: [[], [winner], [{ privacyRedactionState: "active" }]],
+          [USERS]: [[], [{ id: 9 }]],
+          [ORGS]: [[{ code: "SHP_ABC" }]],
+        },
         insert: { [ORGS]: [duplicateKeyError()] },
       });
       state.db = fake.db;
@@ -436,7 +520,13 @@ describe("when this callback's install lease was taken over mid-install", () => 
   });
 
   it("should check the lease with a locking read inside the transaction that writes", async () => {
-    const fake = held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]], [ORGS]: [[{ code: "SHP_ABC" }]] } });
+    const fake = held({
+      select: {
+        [STORES]: [[existingStore], [{ privacyRedactionState: "active" }]],
+        [USERS]: [[{ id: 9 }]],
+        [ORGS]: [[{ code: "SHP_ABC" }]],
+      },
+    });
     state.db = fake.db;
     await onboard();
     const check = fake.ops.find((op) => op.kind === "select" && op.table === LEASES);

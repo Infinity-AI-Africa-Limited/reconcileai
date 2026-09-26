@@ -211,6 +211,22 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // without inventing a tenant, so organizationId is nullable by design.
   shopify_webhook_events: "tenant_nullable",
   shopify_privacy_requests: "tenant_nullable",
+  // Encrypted provider selectors exist only for a resolved store and carry the
+  // owning org directly; blind-index lookups are always org-scoped.
+  shopify_privacy_request_selectors: "tenant_required",
+  // Durable customer data-request execution and private artifact metadata carry
+  // mandatory org scope. Customer-redaction jobs do the same independently, and
+  // permanent order tombstones retain only tenant/store-scoped keyed digests.
+  // The outbox intentionally contains no tenant data: only a kind and internal
+  // job id, with scope reloaded from the execution row.
+  shopify_privacy_data_request_jobs: "tenant_required",
+  shopify_privacy_customer_redaction_jobs: "tenant_required",
+  shopify_order_redaction_tombstones: "tenant_required",
+  shopify_privacy_queue_outbox: "derived",
+  shopify_privacy_artifacts: "tenant_required",
+  // Transient redaction jobs carry organizationId NOT NULL while the provider
+  // request is being processed; completed jobs are removed or de-identified.
+  shopify_shop_redaction_jobs: "tenant_required",
   // Hash-only single-use OAuth states, keyed by a random secret held in the
   // browser's flow cookie; created before any tenant exists.
   shopify_oauth_states: "token",

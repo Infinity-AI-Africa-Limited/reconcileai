@@ -19,6 +19,7 @@
   "include": [],
   "files": [
     "server/appOrigin.test.ts",
+    "server/deactivatedAccess.test.ts",
     "server/jobQueue.replaceFailed.test.ts",
     "server/reviewerLinkOrigin.test.ts",
     "server/sessionCookie.test.ts",

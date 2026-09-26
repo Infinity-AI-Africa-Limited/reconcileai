@@ -1,0 +1,2 @@
+ALTER TABLE `shopify_privacy_requests` DROP INDEX `uq_shopify_privacy_request`;--> statement-breakpoint
+ALTER TABLE `shopify_privacy_requests` ADD CONSTRAINT `uq_shopify_privacy_request_scoped` UNIQUE(`organizationId`,`storeId`,`topic`,`requestHash`);

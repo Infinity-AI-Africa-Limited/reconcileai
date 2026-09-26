@@ -10,11 +10,16 @@ import {
 } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
+  shopifyOrderRedactionTombstones,
   shopifySyncCursors,
   shopifyWebhookEvents,
 } from "../../../drizzle/shopify_schema";
 import { getDb, type DbExecutor } from "../../db";
 import { toShopifyOrderTransaction } from "./ingest";
+import {
+  allShopifyOrderSuppressionDigests,
+  type ShopifyPrivacySuppressionKey,
+} from "./privacySuppression";
 import {
   ShopifyOrderApiError,
   computeShopifyOrderWindow,
@@ -47,6 +52,7 @@ export interface ShopifyOrderSyncDeps {
   db?: Db;
   now?: () => Date;
   fetchOrders?: typeof fetchShopifyOrdersWindow;
+  suppressionKeys?: ShopifyPrivacySuppressionKey[];
 }
 
 export function shopifyOrdersChannelCode(storeId: number): string {
@@ -101,6 +107,57 @@ export function partitionShopifyOrders(
     }
   }
   return { inserts, updates, unchanged };
+}
+
+export function filterTombstonedShopifyOrders(
+  orders: NormalizedShopifyOrder[],
+  tombstoned: Set<string>,
+): NormalizedShopifyOrder[] {
+  return orders.filter((order) => !tombstoned.has(order.gid));
+}
+
+async function filterSuppressedOrders(
+  db: DbExecutor,
+  store: { id: number; organizationId: number },
+  orders: NormalizedShopifyOrder[],
+  keys?: ShopifyPrivacySuppressionKey[],
+): Promise<NormalizedShopifyOrder[]> {
+  if (orders.length === 0) return [];
+  const candidates = orders.flatMap((order) =>
+    allShopifyOrderSuppressionDigests(store.organizationId, store.id, order.gid, keys).map((digest) => ({
+      gid: order.gid,
+      ...digest,
+    })),
+  );
+  const suppressed = new Set<string>();
+  for (let offset = 0; offset < candidates.length; offset += TRANSACTION_LOOKUP_CHUNK) {
+    const chunk = candidates.slice(offset, offset + TRANSACTION_LOOKUP_CHUNK);
+    const rows = await db
+      .select({
+        keyVersion: shopifyOrderRedactionTombstones.keyVersion,
+        orderDigest: shopifyOrderRedactionTombstones.orderDigest,
+      })
+      .from(shopifyOrderRedactionTombstones)
+      .where(
+        and(
+          eq(shopifyOrderRedactionTombstones.organizationId, store.organizationId),
+          eq(shopifyOrderRedactionTombstones.storeId, store.id),
+          or(
+            ...chunk.map((candidate) =>
+              and(
+                eq(shopifyOrderRedactionTombstones.keyVersion, candidate.keyVersion),
+                eq(shopifyOrderRedactionTombstones.orderDigest, candidate.orderDigest),
+              ),
+            ),
+          ),
+        ),
+      );
+    const hits = new Set(rows.map((row) => `${row.keyVersion}:${row.orderDigest}`));
+    for (const candidate of chunk) {
+      if (hits.has(`${candidate.keyVersion}:${candidate.orderDigest}`)) suppressed.add(candidate.gid);
+    }
+  }
+  return filterTombstonedShopifyOrders(orders, suppressed);
 }
 
 async function resolveAuthorizedActor(
@@ -446,11 +503,14 @@ async function lockStoreForSync(
         eq(shopifyConnectorStores.id, store.id),
         eq(shopifyConnectorStores.organizationId, store.organizationId),
         eq(shopifyConnectorStores.status, "active"),
+        // A customer redaction fences the store's writes; the API read may have
+        // started before it was admitted, so this is re-checked under the lock.
+        eq(shopifyConnectorStores.privacyRedactionState, "active"),
       ),
     )
     .limit(1)
     .for("update");
-  if (!locked) throw new Error("Shopify store not found for tenant or inactive");
+  if (!locked) throw new Error("Shopify store write fence is active or the store is not active");
 }
 
 function transactionFields(order: NormalizedShopifyOrder) {
@@ -545,15 +605,19 @@ export async function runShopifyOrderSync(
     });
 
     const result = await db.transaction(async (tx) => {
-      // First statement: one writer per store from here to commit.
+      // First statement: one writer per store from here to commit. The lock
+      // also refuses a store fenced for redaction since the API read began.
       await lockStoreForSync(tx, store);
+      // Computing every retained-key digest and loading tombstones happens under
+      // the same lock. Missing rotation material throws and aborts fail-closed.
+      const eligible = await filterSuppressedOrders(tx, store, fetched, deps.suppressionKeys);
       const channelId = await resolveOrdersChannel(tx, store);
       const existing = await loadExistingOrders(tx, {
         organizationId: store.organizationId,
         storeId: store.id,
-        gids: fetched.map((order) => order.gid),
+        gids: eligible.map((order) => order.gid),
       });
-      const partition = partitionShopifyOrders(fetched, existing);
+      const partition = partitionShopifyOrders(eligible, existing);
       const changed = partition.inserts.length + partition.updates.length;
       let batchId: number | null = null;
       let inserted = 0;
@@ -568,7 +632,7 @@ export async function runShopifyOrderSync(
           fileName: `shopify_orders_${store.id}_${window.from.toISOString()}`,
           fileHash: `shopify_orders_${store.id}_${window.from.getTime()}_${window.to.getTime()}`,
           detectedFormat: "shopify_graphql_orders",
-          totalRows: fetched.length,
+          totalRows: eligible.length,
           validRows: changed,
           invalidRows: 0,
           status: "completed",
