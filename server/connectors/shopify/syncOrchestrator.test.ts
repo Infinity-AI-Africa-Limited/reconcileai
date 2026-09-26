@@ -450,6 +450,54 @@ describe("when a corrected order reopens its reconciliation", () => {
   });
 });
 
+describe("when a corrected order was in a match still awaiting review", () => {
+  const EXCEPTIONS = "exceptions";
+  const reviewMatch = { id: 88, status: "pending_review", sourceTransactionId: 501, targetTransactionId: 777 };
+
+  async function correct(select: Record<string, unknown[][]>) {
+    const fake = scriptedDb({ select: { ...baseSelects(), [TRANSACTIONS]: [[matchedBefore({ status: "exception" })]], ...select } });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "webhook" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]) },
+    );
+    return fake;
+  }
+
+  const releasedFromReview = (fake: ReturnType<typeof scriptedDb>) =>
+    fake.writes("update", TRANSACTIONS).find((op) => op.data?.status === "unmatched" && op.where?.params.includes("exception"));
+
+  it("should take back the `exception` status the rejected review match put on both sides", async () => {
+    const fake = await correct({ [MATCHES]: [[reviewMatch], []], [EXCEPTIONS]: [[]] });
+
+    const released = releasedFromReview(fake);
+    expect(released?.where?.params).toEqual([42, 501, 777, "exception"]);
+    const lookup = fake.ops.find((op) => op.kind === "select" && op.table === EXCEPTIONS);
+    expect(lookup?.where?.params).toEqual([42, 501, 777, "open", "in_review", "escalated"]);
+  });
+
+  it("should leave an `exception` status that an unresolved exception record still owns", async () => {
+    const fake = await correct({ [MATCHES]: [[reviewMatch], []], [EXCEPTIONS]: [[{ transactionId: 777 }]] });
+
+    expect(releasedFromReview(fake)?.where?.params).toEqual([42, 501, "exception"]);
+  });
+
+  it("should leave a counterpart the review match shares with another active match", async () => {
+    const fake = await correct({
+      [MATCHES]: [[reviewMatch], [{ sourceTransactionId: 777, targetTransactionId: 900 }]],
+      [EXCEPTIONS]: [[]],
+    });
+
+    expect(releasedFromReview(fake)?.where?.params).toEqual([42, 501, "exception"]);
+  });
+
+  it("should not touch an `exception` status when the rejected match was already confirmed", async () => {
+    const fake = await correct({ [MATCHES]: [[{ ...reviewMatch, status: "confirmed" }], []] });
+
+    expect(releasedFromReview(fake)).toBeUndefined();
+    expect(fake.ops.some((op) => op.table === EXCEPTIONS)).toBe(false);
+  });
+});
+
 describe("when two syncs of one store overlap", () => {
   it("should take the store row lock before reading or writing any order", async () => {
     const fake = scriptedDb({
