@@ -222,6 +222,17 @@ describe("when a signed shop/redact delivery arrives", () => {
     expect(firstStoreOp?.where?.params).toEqual(expect.arrayContaining([7, 42]));
   });
 
+  it("should lock the organisation before the store, the order every credential write takes", async () => {
+    const { fake, run } = shopRedact();
+    await run();
+    const inTx = fake.ops.filter((op) => op.txId !== null);
+    const orgLock = inTx.findIndex((op) => op.table === ORGANIZATIONS);
+    const storeLock = inTx.findIndex((op) => op.table === STORES);
+    expect(inTx[orgLock]).toMatchObject({ kind: "select", locked: true });
+    expect(inTx[orgLock]?.where?.params).toEqual([42]);
+    expect(orgLock).toBeLessThan(storeLock);
+  });
+
   it("should revoke the credentials of EVERY store of the tenant, not only this one", async () => {
     const { fake, run } = shopRedact();
     await run();
