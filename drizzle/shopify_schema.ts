@@ -33,7 +33,7 @@ export const shopifyConnectorStores = mysqlTable(
     /** Read-only Order-led foundation; future scope changes must be explicit. */
     requestedScopes: text("requestedScopes").notNull(),
     apiVersion: varchar("apiVersion", { length: 16 }).default("2026-07").notNull(),
-    status: mysqlEnum("status", ["pending_claim", "active", "reauthorization_required", "uninstalled"])
+    status: mysqlEnum("status", ["pending_claim", "active", "reauthorization_required", "uninstalled", "redacting"])
       .default("pending_claim")
       .notNull(),
     /**
@@ -192,6 +192,39 @@ export const shopifyPrivacyRequests = mysqlTable(
 export type ShopifyPrivacyRequest = typeof shopifyPrivacyRequests.$inferSelect;
 
 /**
+ * Durable, short-lived admission record for a `shop/redact` request. It exists
+ * only while the processor removes the tenant. Completion must remove the
+ * merchant-identifying job and leave, at most, a separately reviewed,
+ * de-identified receipt.
+ */
+export const shopifyShopRedactionJobs = mysqlTable(
+  "shopify_shop_redaction_jobs",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    runId: varchar("runId", { length: 36 }).notNull(),
+    organizationId: int("organizationId").notNull(),
+    storeId: int("storeId").notNull(),
+    requestHash: varchar("requestHash", { length: 64 }).notNull(),
+    webhookId: varchar("webhookId", { length: 128 }).notNull(),
+    status: mysqlEnum("status", ["admitted", "redacting", "failed", "completed"])
+      .default("admitted")
+      .notNull(),
+    attempts: int("attempts").default(0).notNull(),
+    lastCheckpoint: varchar("lastCheckpoint", { length: 80 }),
+    failureCode: varchar("failureCode", { length: 80 }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_shopify_redaction_request").on(t.requestHash),
+    uniqueIndex("uq_shopify_redaction_run").on(t.runId),
+    uniqueIndex("uq_shopify_redaction_store").on(t.storeId),
+    index("idx_shopify_redaction_org_status").on(t.organizationId, t.status),
+  ],
+);
+export type ShopifyShopRedactionJob = typeof shopifyShopRedactionJobs.$inferSelect;
+
+/**
  * Versioned sync cursor/evidence reserved for the next order-led sync phase.
  * Creating this small record now means the future corrective-sync job has a
  * tenant-owned, auditable cursor rather than inferring progress from webhooks.
@@ -231,6 +264,8 @@ export const SHOPIFY_STATUS_REASONS = [
   "token_store_failed",
   /** Shopify reported the app uninstalled. */
   "uninstalled",
+  /** Shopify issued a `shop/redact` request and the tenant is deletion-fenced. */
+  "shop_redact_requested",
 ] as const;
 export type ShopifyStatusReason = (typeof SHOPIFY_STATUS_REASONS)[number];
 

@@ -39,6 +39,8 @@ export function callbackReasonFor(error: unknown): ShopifyInstallErrorReason {
       return "ownership_verification_required";
     case "EMAIL_CONFLICT":
       return "email_already_registered";
+    case "REDACTION_IN_PROGRESS":
+      return "redaction_in_progress";
     case "MISSING_CONTACT_EMAIL":
       return "missing_contact_email";
     case "SHOP_IDENTITY_CONFLICT":

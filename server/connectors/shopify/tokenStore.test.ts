@@ -99,6 +99,19 @@ describe("when the stored access token is still fresh", () => {
   });
 });
 
+describe("when the tenant has been fenced for a shop redaction", () => {
+  it("should hand out no credential, whatever the store row says", async () => {
+    // The read joins the tenant and requires it to be live; a fenced tenant's
+    // token is simply not found. The scripted answer is the database's reply.
+    const fake = scriptedDb({ select: { [TOKENS]: [[]] } });
+    state.db = fake.db;
+    expect(await reasonOf(call)).toBe("not_found");
+    const read = fake.ops.find((op) => op.kind === "select" && op.table === TOKENS);
+    expect(read?.where?.sql).toMatch(/`organizations`\.`deletionState` = \?/);
+    expect(read?.where?.params).toEqual(expect.arrayContaining([STORE, ORG, "active"]));
+  });
+});
+
 describe("when a refresh completes with the lease still held", () => {
   it("should store the new pair, fenced on the exact row and version it started from", async () => {
     const fake = scriptedDb({
@@ -160,6 +173,23 @@ describe("when Shopify rejects the refresh token", () => {
     expect(db.createAuditLog).toHaveBeenCalledWith(
       expect.objectContaining({ action: "shopify_store_reauthorization_required", details: expect.objectContaining({ reason: "refresh_rejected" }) }),
     );
+  });
+
+  it("should never relabel a store a shop redaction has fenced", async () => {
+    const fake = scriptedDb({
+      select: { [TOKENS]: [[joined(tokenRow())], [tokenRow()]] },
+      update: { [TOKENS]: [1, 0] },
+      delete: { [TOKENS]: [1] },
+    });
+    state.db = fake.db;
+    vi.mocked(refreshExpiringOfflineToken).mockResolvedValue({ kind: "reauthorize" });
+
+    await reasonOf(call);
+    // The dead pair is still deleted; the store's label changes only if it is not `redacting`.
+    expect(fake.writes("delete", TOKENS)).toHaveLength(1);
+    const relabel = fake.writes("update", STORES)[0];
+    expect(relabel?.where?.sql).toMatch(/`status` <> \?/);
+    expect(relabel?.where?.params).toContain("redacting");
   });
 
   it("should leave a reinstall's new credentials alone when the rejection was about the pair it replaced", async () => {
