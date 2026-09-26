@@ -34,4 +34,16 @@ describe("Shopify privacy durable queue boundary", () => {
     expect(Object.keys(payload)).toEqual(["kind", "jobId"]);
     expect(JSON.stringify(payload)).not.toMatch(/organization|store|shop|domain|selector|customerId|orderId|hash|url/i);
   });
+
+  it("should assign shop redaction a deterministic name without provider identifiers", async () => {
+    await enqueueShopifyPrivacyJob({ kind: "shop_redact", jobId: 903 });
+
+    expect(state.enqueue).toHaveBeenCalledWith(
+      "privacy-shop-redact-903-d1",
+      { kind: "shop_redact", jobId: 903 },
+    );
+    const payload = state.enqueue.mock.calls[0][1];
+    expect(Object.keys(payload)).toEqual(["kind", "jobId"]);
+    expect(JSON.stringify(payload)).not.toMatch(/organization|storeId|domain|webhook|hash|payload/i);
+  });
 });

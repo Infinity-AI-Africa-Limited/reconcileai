@@ -6,6 +6,7 @@ import {
   type ShopifyPrivacyQueuePayload,
 } from "./privacyCompletion";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
+import { handleShopifyShopRedactionJob } from "./shopRedaction";
 
 /** Queue-name prefix per job kind: a job id is unique only within its own table. */
 export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
@@ -14,6 +15,8 @@ export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]
       return "privacy-request";
     case "customer_redact":
       return "privacy-redact";
+    case "shop_redact":
+      return "privacy-shop-redact";
   }
 }
 
@@ -23,10 +26,15 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   if (!queuePromise) {
     queuePromise = createQueue<ShopifyPrivacyQueuePayload>(
       "shopify-privacy",
-      async (job) =>
-        job.data.kind === "customer_redact"
-          ? handleShopifyCustomerRedactionJob(job.data.jobId)
-          : handleShopifyPrivacyJob(job.data),
+      async (job) => {
+        if (job.data.kind === "customer_redact") {
+          return handleShopifyCustomerRedactionJob(job.data.jobId);
+        }
+        if (job.data.kind === "shop_redact") {
+          return handleShopifyShopRedactionJob(job.data.jobId);
+        }
+        return handleShopifyPrivacyJob(job.data);
+      },
       {
         attempts: 6,
         backoffMs: 30_000,
@@ -44,14 +52,13 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
 /**
  * Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL.
  *
- * The queue id is unique per DISPATCH, not per job: a re-dispatch after the
- * queue settled an earlier entry for this job would otherwise be swallowed by
- * that settled entry. A duplicate run is harmless — the database lease lets
- * exactly one worker claim the job.
+ * The queue id is unique per dispatch. A later database re-dispatch must not be
+ * swallowed by a settled BullMQ entry for the same job; the database lease keeps
+ * duplicate worker delivery harmless.
  */
 export async function enqueueShopifyPrivacyJob(
   payload: ShopifyPrivacyQueuePayload,
-  dispatchAttempt: number,
+  dispatchAttempt = 1,
 ): Promise<void> {
   const durable = await queue();
   await durable.enqueue(`${shopifyPrivacyJobPrefix(payload.kind)}-${payload.jobId}-d${dispatchAttempt}`, payload);
@@ -74,7 +81,7 @@ export function startShopifyPrivacyRecoveryLoop(intervalMs = 30_000): void {
   const sweep = async () => {
     try {
       await recoverShopifyPrivacyOutbox();
-    } catch (error) {
+    } catch {
       console.error("[shopify-privacy] durable dispatch unavailable", { code: "durable_queue_unavailable" });
     }
     try {
