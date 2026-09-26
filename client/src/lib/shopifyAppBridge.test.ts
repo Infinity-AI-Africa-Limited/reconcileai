@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TRPCClientError } from "@trpc/client";
 import {
+  appHomeErrorCode,
   loadShopifyAppBridgeScriptForTest,
+  loadShopifyAppHomeContext,
+  resetShopifyAppBridgeForTest,
   ShopifyAppHomeClientError,
 } from "./shopifyAppBridge";
 
@@ -119,5 +123,56 @@ describe("loading the App Bridge script", () => {
       expect(outcome.ok).toBe(false);
       expect(page.scripts[0]?.getAttribute("data-reconcileai-app-bridge")).toBe("failed");
     });
+  });
+});
+
+describe("when an App Home call fails", () => {
+  const serverError = (message: string, code: string) =>
+    TRPCClientError.from({ error: { message, code: -32600, data: { code, httpStatus: 400 } } });
+
+  it("should read the server's stable code from the message", () => {
+    expect(appHomeErrorCode(serverError("order_sync_required", "PRECONDITION_FAILED"))).toBe("ORDER_SYNC_REQUIRED");
+    expect(appHomeErrorCode(serverError("store_action_required", "PRECONDITION_FAILED"))).toBe("STORE_ACTION_REQUIRED");
+    expect(appHomeErrorCode(serverError("authentication_required", "UNAUTHORIZED"))).toBe("AUTHENTICATION_REQUIRED");
+    expect(appHomeErrorCode(serverError("active_admin_required", "FORBIDDEN"))).toBe("ACTIVE_ADMIN_REQUIRED");
+    expect(appHomeErrorCode(serverError("sync_in_progress", "CONFLICT"))).toBe("SYNC_IN_PROGRESS");
+  });
+
+  it("should treat an input the schema refused as an invalid request", () => {
+    expect(appHomeErrorCode(serverError("[{ \"code\": \"invalid_key\" }]", "BAD_REQUEST"))).toBe("INVALID_REQUEST");
+  });
+
+  it("should keep an App Bridge failure raised while attaching the token", () => {
+    const wrapped = TRPCClientError.from(new ShopifyAppHomeClientError("APP_BRIDGE_UNAVAILABLE"));
+    expect(appHomeErrorCode(wrapped)).toBe("APP_BRIDGE_UNAVAILABLE");
+  });
+
+  it("should call anything else an outage, never guess", () => {
+    expect(appHomeErrorCode(new Error("network down"))).toBe("SERVICE_UNAVAILABLE");
+    expect(appHomeErrorCode(serverError("something new", "INTERNAL_SERVER_ERROR"))).toBe("SERVICE_UNAVAILABLE");
+  });
+});
+
+describe("when the workspace calls its API", () => {
+  it("should call the tRPC procedure with a fresh App Bridge token, and nothing else identifying", async () => {
+    vi.useRealTimers();
+    resetShopifyAppBridgeForTest();
+    page.window.shopify = { idToken: vi.fn(async () => "id-token-1") };
+    const view = {
+      store: { shopDomain: "merchant.myshopify.com", displayName: "Merchant", currency: "USD" },
+      sync: { lastSuccessfulAt: null, lastErrorCode: null },
+      capabilities: { scope: "read_orders", readOrders: true, manualSync: true, shopifyPayments: false, mutations: false },
+    };
+    const fetchStub = vi.fn(async () => new Response(JSON.stringify({ result: { data: { json: view } } }), {
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchStub);
+
+    await expect(loadShopifyAppHomeContext()).resolves.toEqual(view);
+
+    const [url, init] = fetchStub.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/^\/api\/trpc\/shopifyAppHome\.context/);
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer id-token-1");
+    expect(url).not.toMatch(/organizationId|storeId/);
   });
 });

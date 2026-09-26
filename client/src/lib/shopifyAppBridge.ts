@@ -1,3 +1,7 @@
+import { createTRPCClient, httpLink, TRPCClientError } from "@trpc/client";
+import superjson from "superjson";
+import type { AppRouter } from "../../../server/routers";
+
 export type ShopifyAppBridgeContext = {
   store: {
     shopDomain: string;
@@ -80,7 +84,6 @@ declare global {
 }
 
 const APP_BRIDGE_SCRIPT = "https://cdn.shopify.com/shopifycloud/app-bridge.js";
-const CONFIG_PATH = "/api/shopify/app-home/config";
 /** Records the script's outcome on the element, so a later caller need not have heard its events. */
 const SCRIPT_STATE = "data-reconcileai-app-bridge";
 const APP_BRIDGE_LOAD_TIMEOUT_MS = 10_000;
@@ -94,25 +97,63 @@ export class ShopifyAppHomeClientError extends Error {
   }
 }
 
-function apiErrorCode(status: number, body: unknown): ShopifyAppHomeClientError["code"] {
-  const code = body && typeof body === "object" && "error" in body
-    ? (body as { error?: { code?: unknown } }).error?.code
-    : undefined;
-  if (status === 401 || code === "authentication_required") return "AUTHENTICATION_REQUIRED";
-  if (status === 409 || code === "sync_in_progress") return "SYNC_IN_PROGRESS";
-  if (code === "order_sync_required") return "ORDER_SYNC_REQUIRED";
-  if (status === 403 || code === "active_admin_required") return "ACTIVE_ADMIN_REQUIRED";
-  if (status === 400 || code === "invalid_request") return "INVALID_REQUEST";
-  if (status === 422 || code === "store_action_required") return "STORE_ACTION_REQUIRED";
-  if (code === "configuration_unavailable") return "CONFIGURATION_UNAVAILABLE";
+const MESSAGE_CODES: Record<string, ShopifyAppHomeClientError["code"]> = {
+  authentication_required: "AUTHENTICATION_REQUIRED",
+  sync_in_progress: "SYNC_IN_PROGRESS",
+  order_sync_required: "ORDER_SYNC_REQUIRED",
+  active_admin_required: "ACTIVE_ADMIN_REQUIRED",
+  invalid_request: "INVALID_REQUEST",
+  store_action_required: "STORE_ACTION_REQUIRED",
+  configuration_unavailable: "CONFIGURATION_UNAVAILABLE",
+  service_unavailable: "SERVICE_UNAVAILABLE",
+};
+
+/**
+ * What a failed App Home call means for the merchant. The server answers with
+ * stable machine codes as the error message (server/connectors/shopify/appHome.ts),
+ * never free text; an input the schema refused is a BAD_REQUEST with no code of
+ * ours. An App Bridge failure raised while attaching the token keeps its own code.
+ */
+export function appHomeErrorCode(error: unknown): ShopifyAppHomeClientError["code"] {
+  if (error instanceof ShopifyAppHomeClientError) return error.code;
+  if (error instanceof TRPCClientError) {
+    if (error.cause instanceof ShopifyAppHomeClientError) return error.cause.code;
+    const known = MESSAGE_CODES[error.message];
+    if (known) return known;
+    const shape = error.data as { code?: string } | undefined;
+    if (shape?.code === "BAD_REQUEST") return "INVALID_REQUEST";
+    if (shape?.code === "UNAUTHORIZED") return "AUTHENTICATION_REQUIRED";
+  }
   return "SERVICE_UNAVAILABLE";
 }
 
-async function responseJson(response: Response): Promise<unknown> {
+/**
+ * The App Home's tRPC clients. The workspace authenticates with a Shopify App
+ * Bridge ID token, requested afresh for every call and sent only as a header —
+ * never stored, logged, or put in React state. `config` is the one public call:
+ * it is what App Bridge needs before any token can exist.
+ */
+const publicClient = createTRPCClient<AppRouter>({
+  links: [httpLink({ url: "/api/trpc", transformer: superjson })],
+});
+const embeddedClient = createTRPCClient<AppRouter>({
+  links: [
+    httpLink({
+      url: "/api/trpc",
+      transformer: superjson,
+      async headers() {
+        const bridge = await getShopifyAppBridge();
+        return { authorization: `Bearer ${await bridge.idToken()}` };
+      },
+    }),
+  ],
+});
+
+async function appHomeCall<T>(call: () => Promise<T>): Promise<T> {
   try {
-    return await response.json();
-  } catch {
-    return null;
+    return await call();
+  } catch (error) {
+    throw new ShopifyAppHomeClientError(appHomeErrorCode(error));
   }
 }
 
@@ -194,12 +235,13 @@ export async function getShopifyAppBridge(): Promise<ShopifyAppBridgeApi> {
   if (!bridgeReady) {
     bridgeReady = (async () => {
       if (window.shopify?.idToken) return window.shopify;
-      const configResponse = await fetch(CONFIG_PATH, { credentials: "same-origin" });
-      const config = await responseJson(configResponse);
-      if (!configResponse.ok || !config || typeof config !== "object" || typeof (config as { apiKey?: unknown }).apiKey !== "string") {
+      let apiKey: string;
+      try {
+        ({ apiKey } = await publicClient.shopifyAppHome.config.query());
+      } catch {
         throw new ShopifyAppHomeClientError("CONFIGURATION_UNAVAILABLE");
       }
-      apiKeyMeta((config as { apiKey: string }).apiKey);
+      apiKeyMeta(apiKey);
       await loadScript();
       if (!window.shopify?.idToken) throw new ShopifyAppHomeClientError("APP_BRIDGE_UNAVAILABLE");
       return window.shopify;
@@ -211,33 +253,18 @@ export async function getShopifyAppBridge(): Promise<ShopifyAppBridgeApi> {
   return bridgeReady;
 }
 
-async function appHomeFetch(path: string, init: RequestInit = {}): Promise<unknown> {
-  const bridge = await getShopifyAppBridge();
-  const token = await bridge.idToken();
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
-  const body = await responseJson(response);
-  if (!response.ok) throw new ShopifyAppHomeClientError(apiErrorCode(response.status, body));
-  return body;
-}
-
 export async function loadShopifyAppHomeContext(): Promise<ShopifyAppBridgeContext> {
-  return appHomeFetch("/api/shopify/app-home/context") as Promise<ShopifyAppBridgeContext>;
+  return appHomeCall(() => embeddedClient.shopifyAppHome.context.query());
 }
 
 export async function triggerShopifyOrderSync(): Promise<ShopifySyncReport> {
-  return appHomeFetch("/api/shopify/app-home/sync", { method: "POST" }) as Promise<ShopifySyncReport>;
+  return appHomeCall(() => embeddedClient.shopifyAppHome.syncNow.mutate());
 }
 
 export async function submitShopifySettlementEvidence(
   input: ShopifySettlementEvidenceRequest,
 ): Promise<ShopifySettlementEvidenceResult> {
-  return appHomeFetch("/api/shopify/app-home/settlement-evidence", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  }) as Promise<ShopifySettlementEvidenceResult>;
+  return appHomeCall(() => embeddedClient.shopifyAppHome.importSettlementEvidence.mutate(input));
 }
 
 export function shopifyAppHomeErrorMessage(error: unknown): string {
