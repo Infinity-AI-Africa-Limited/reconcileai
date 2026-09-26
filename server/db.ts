@@ -102,10 +102,15 @@ function sanitizeText(input: string | null | undefined): string | null {
     .substring(0, 10000); // Max text length
 }
 
-function sanitizeRef(input: string | null | undefined): string | null {
+/**
+ * Exported so a caller that looks rows up by reference can ask for the value
+ * `insertTransactions` actually stores, rather than the one it was handed.
+ */
+export function sanitizeRef(input: string | null | undefined): string | null {
   if (!input) return null;
-  // Allow only alphanumeric, hyphens, slashes, dots, underscores for references
-  return input.replace(/[^\w\-\/\.\s]/g, "").trim().substring(0, 255);
+  // Shopify canonical order references are GIDs (`gid://shopify/Order/...`), so
+  // colon is a valid reference character alongside the existing safe set.
+  return input.replace(/[^\w\-:\/\.\s]/g, "").trim().substring(0, 255);
 }
 
 // ─── Organizations ──────────────────────────────────────────────────
@@ -465,6 +470,11 @@ export async function getUploadBatches(organizationId: number | null) {
 export async function insertTransactions(txns: InsertTransaction[]) {
   const db = await getDb();
   if (!db) return;
+  await insertTransactionsWithExecutor(db, txns);
+}
+
+/** Insert canonical transactions on a caller-owned transaction when atomicity matters. */
+export async function insertTransactionsWithExecutor(db: DbExecutor, txns: InsertTransaction[]) {
   if (txns.length === 0) return;
   // Sanitize all text fields before insertion
   const sanitized = txns.map((txn) => ({
@@ -1186,6 +1196,13 @@ export async function insertExceptionsBatch(dataArray: InsertException[]) {
   for (const data of dataArray) assertExceptionTenantOwnership(data);
   const db = await getDb();
   if (!db || dataArray.length === 0) return [];
+  return insertExceptionsBatchWithExecutor(db, dataArray);
+}
+
+/** Insert exception evidence on a caller-owned transaction when atomicity matters. */
+export async function insertExceptionsBatchWithExecutor(db: DbExecutor, dataArray: InsertException[]) {
+  for (const data of dataArray) assertExceptionTenantOwnership(data);
+  if (dataArray.length === 0) return [];
   const ids: number[] = [];
   for (let i = 0; i < dataArray.length; i += BATCH_INSERT_SIZE) {
     const batch = dataArray.slice(i, i + BATCH_INSERT_SIZE);

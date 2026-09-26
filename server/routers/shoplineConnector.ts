@@ -822,8 +822,10 @@ export const shoplineConnectorRouter = router({
         content: z.string().min(1).max(14_000_000), // ~10MB decoded
         contentEncoding: z.enum(["utf8", "base64"]).default("utf8"),
         sourceLabel: z.string().min(1).max(80).default("Settlement file"),
+        // partialRecord: under zod 4 an enum-keyed `record` is exhaustive and
+        // refused any override that named fewer than all seven fields.
         columnOverrides: z
-          .record(
+          .partialRecord(
             z.enum(["orderRef", "gatewayRef", "amount", "currency", "settledAt", "fee", "description"]),
             z.string().max(200),
           )

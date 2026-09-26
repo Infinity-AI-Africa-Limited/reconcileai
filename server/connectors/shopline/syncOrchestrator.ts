@@ -18,10 +18,15 @@
  *   - Manual "Sync Now" from the merchant dashboard
  */
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
-import { getDb } from "../../db";
-import { insertTransactions, createUploadBatch, updateUploadBatch, insertExceptionsBatch } from "../../db";
+import { getDb, type DbExecutor } from "../../db";
+import {
+  insertTransactions,
+  createUploadBatch,
+  updateUploadBatch,
+  insertExceptionsBatchWithExecutor,
+} from "../../db";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
-import { transactions, channels } from "../../../drizzle/schema";
+import { transactions, channels, exceptions } from "../../../drizzle/schema";
 import { getValidToken } from "./tokenStore";
 import {
   fetchOrders,
@@ -185,7 +190,7 @@ const DEDUPE_LOOKUP_CHUNK = 500;
  * cycles — the BullMQ/REDIS_URL item in CLAUDE.md §10.
  */
 export async function rejectAlreadyIngested(
-  db: Db,
+  db: DbExecutor,
   rows: InsertTransaction[],
   channelIds: number[],
 ): Promise<InsertTransaction[]> {
@@ -560,43 +565,95 @@ export async function resolveChannelIds(
 }
 
 /**
+ * Narrows a reconciliation run to the orders a new piece of evidence concerns.
+ *
+ * A window alone is the right scope for a full sync, which holds every leg of
+ * every order in it. It is the wrong scope for a merchant's file, which may
+ * cover a fraction of one provider's settlements: reconciling every unmatched
+ * order in the window flags orders whose evidence simply has not arrived, and
+ * flags them again on every later import. With a scope, only the named orders
+ * (on both legs) are reconciled, and an exception already unresolved for the
+ * same transaction and category is not raised a second time.
+ */
+export interface ReconciliationScope {
+  /** Order references as stored in `transactionRef` on both legs. */
+  orderRefs: string[];
+}
+
+/** Exception states that still await a person — raising another is a duplicate. */
+const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
+const SCOPE_LOOKUP_CHUNK = 500;
+
+async function selectUnmatchedLeg(
+  db: DbExecutor,
+  params: { organizationId: number; channelId: number; from: Date; to: Date; orderRefs?: string[] },
+): Promise<Array<typeof transactions.$inferSelect>> {
+  const conditions = (refs?: string[]) =>
+    and(
+      eq(transactions.organizationId, params.organizationId),
+      eq(transactions.channelId, params.channelId),
+      eq(transactions.status, "unmatched"),
+      gte(transactions.transactionDate, params.from),
+      lte(transactions.transactionDate, params.to),
+      refs ? inArray(transactions.transactionRef, refs) : undefined,
+    );
+  if (!params.orderRefs) return db.select().from(transactions).where(conditions());
+
+  const rows: Array<typeof transactions.$inferSelect> = [];
+  for (let i = 0; i < params.orderRefs.length; i += SCOPE_LOOKUP_CHUNK) {
+    const chunk = params.orderRefs.slice(i, i + SCOPE_LOOKUP_CHUNK);
+    rows.push(...(await db.select().from(transactions).where(conditions(chunk))));
+  }
+  return rows;
+}
+
+/** `transactionId::subCategory` for every exception still awaiting a person. */
+async function unresolvedExceptionKeys(
+  db: DbExecutor,
+  organizationId: number,
+  transactionIds: number[],
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  for (let i = 0; i < transactionIds.length; i += SCOPE_LOOKUP_CHUNK) {
+    const chunk = transactionIds.slice(i, i + SCOPE_LOOKUP_CHUNK);
+    const open = await db
+      .select({ transactionId: exceptions.transactionId, subCategory: exceptions.subCategory })
+      .from(exceptions)
+      .where(
+        and(
+          eq(exceptions.organizationId, organizationId),
+          inArray(exceptions.transactionId, chunk),
+          inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+        ),
+      );
+    for (const row of open) keys.add(`${row.transactionId}::${row.subCategory ?? ""}`);
+  }
+  return keys;
+}
+
+/**
  * Run the retail reconciliation engine on persisted transactions for the given window.
  */
 export async function runReconciliationOnPersistedData(
-  db: Db,
+  db: DbExecutor,
   organizationId: number,
   ordersChannelId: number,
   paymentsChannelId: number,
   from: Date,
   to: Date,
   currency: string,
+  scope?: ReconciliationScope,
 ): Promise<{ matchedCount: number; exceptionCount: number }> {
-  // Fetch persisted transactions for the window
-  const sourceRows = await db
-    .select()
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.organizationId, organizationId),
-        eq(transactions.channelId, ordersChannelId),
-        eq(transactions.status, "unmatched"),
-        gte(transactions.transactionDate, from),
-        lte(transactions.transactionDate, to),
-      ),
-    );
+  const orderRefs = scope ? [...new Set(scope.orderRefs.filter(Boolean))] : undefined;
+  if (orderRefs && orderRefs.length === 0) return { matchedCount: 0, exceptionCount: 0 };
 
-  const targetRows = await db
-    .select()
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.organizationId, organizationId),
-        eq(transactions.channelId, paymentsChannelId),
-        eq(transactions.status, "unmatched"),
-        gte(transactions.transactionDate, from),
-        lte(transactions.transactionDate, to),
-      ),
-    );
+  // Fetch persisted transactions for the window
+  const sourceRows = await selectUnmatchedLeg(db, {
+    organizationId, channelId: ordersChannelId, from, to, orderRefs,
+  });
+  const targetRows = await selectUnmatchedLeg(db, {
+    organizationId, channelId: paymentsChannelId, from, to, orderRefs,
+  });
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
     return { matchedCount: 0, exceptionCount: 0 };
@@ -635,10 +692,20 @@ export async function runReconciliationOnPersistedData(
   // core enum (for list filters/reports); the PRECISE retail category is stored
   // in `subCategory` so the exception intelligence flywheel learns on it (both
   // the intra-org agentMemory recall and the cross-org shared pool key on it).
-  if (result.retailExceptions.length > 0) {
+  let raised = result.retailExceptions;
+  if (scope && raised.length > 0) {
+    const unresolved = await unresolvedExceptionKeys(
+      db,
+      organizationId,
+      [...new Set(raised.map((ex) => ex.transactionId))],
+    );
+    raised = raised.filter((ex) => !unresolved.has(`${ex.transactionId}::${ex.category}`));
+  }
+
+  if (raised.length > 0) {
     const { mapRetailToCoreCategory } = await import("./retailIntelligence");
 
-    const exceptionRows = result.retailExceptions.map((ex) => ({
+    const exceptionRows = raised.map((ex) => ({
       jobId: 0, // synthetic — no reconciliation job for inline sync
       // With jobId 0 there is no parent to derive the tenant from, so these
       // rows were previously unattributable to any organization. This is the
@@ -653,12 +720,12 @@ export async function runReconciliationOnPersistedData(
       status: "open" as const,
       currency,
     }));
-    await insertExceptionsBatch(exceptionRows);
+    await insertExceptionsBatchWithExecutor(db, exceptionRows);
   }
 
   return {
     matchedCount: result.matches.length,
-    exceptionCount: result.retailExceptions.length,
+    exceptionCount: raised.length,
   };
 }
 

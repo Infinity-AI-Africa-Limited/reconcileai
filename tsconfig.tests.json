@@ -18,9 +18,16 @@
   },
   "include": [],
   "files": [
+    "client/src/lib/shopifyAppBridge.test.ts",
+    "client/src/lib/shopifySettlementMapping.test.ts",
     "server/appOrigin.test.ts",
+    "server/connectors/shopify/appHomeRoutes.test.ts",
+    "server/connectors/shopify/embeddedAuth.test.ts",
+    "server/connectors/shopify/settlementEvidence.test.ts",
+    "server/connectors/shopline/settlementEvents.test.ts",
     "server/jobQueue.replaceFailed.test.ts",
     "server/reviewerLinkOrigin.test.ts",
+    "server/routers/shopifyAppHome.test.ts",
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
     "server/ssoFlowCookie.test.ts"
