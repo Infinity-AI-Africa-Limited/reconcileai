@@ -110,6 +110,19 @@ describe("Shopify shop-redact report-only execution", () => {
     expect(fake.writes("update", JOBS).filter((op) => op.data?.status === "blocked_dependency")).toHaveLength(1);
   });
 
+  it("keeps an early redelivery retryable while another worker holds the lease", async () => {
+    const fake = scriptedDb({
+      select: { [JOBS]: [[{ status: "processing" }]] },
+      update: { [JOBS]: [0] },
+    });
+
+    await expect(handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW }))
+      .rejects.toMatchObject({ name: "ShopifyPrivacyJobNotClaimableError" });
+
+    expect(fake.writes("update", JOBS)).toHaveLength(1);
+    expect(fake.ops.some((op) => op.kind === "update" && op.table === REQUESTS)).toBe(false);
+  });
+
   it("records only scoped numeric counts and ends blocked, never completed", async () => {
     const fake = workerDb();
 

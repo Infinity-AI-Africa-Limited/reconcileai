@@ -18,6 +18,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { getDb, type DbExecutor } from "../../db";
 import { affectedRows } from "./tokenStore";
+import { ShopifyPrivacyJobNotClaimableError } from "./privacyJobState";
 
 export const SHOPIFY_SHOP_REDACTION_MANIFEST_VERSION = 1;
 export const SHOPIFY_SHOP_REDACTION_LEASE_MS = 5 * 60_000;
@@ -352,7 +353,21 @@ export async function handleShopifyShopRedactionJob(
   const now = (deps.now ?? (() => new Date()))();
   const leaseId = (deps.uuid ?? (() => crypto.randomUUID()))();
   const job = await claimShopRedactionJob(db, jobId, now, leaseId);
-  if (!job) return;
+  if (!job) {
+    // An at-least-once queue delivery can arrive while the original worker's
+    // database lease is still live. Returning would settle this delivery while
+    // the outbox already says `dispatched`; throwing retains the durable queue
+    // retry until that lease is either released or expires and becomes claimable.
+    const [current] = await db
+      .select({ status: shopifyShopRedactionJobs.status })
+      .from(shopifyShopRedactionJobs)
+      .where(eq(shopifyShopRedactionJobs.id, jobId))
+      .limit(1);
+    if (current && ["admitted", "failed_retryable", "processing"].includes(current.status)) {
+      throw new ShopifyPrivacyJobNotClaimableError();
+    }
+    return;
+  }
 
   try {
     if (job.privacyRequestId === null) {

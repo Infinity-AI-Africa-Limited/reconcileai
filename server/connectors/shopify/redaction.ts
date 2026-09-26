@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, eq, ne, or, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { organizations, users } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
@@ -10,6 +10,7 @@ import {
   type ShopifyConnectorStore,
 } from "../../../drizzle/shopify_schema";
 import type { DbTransaction } from "../../db";
+import { affectedRows } from "./tokenStore";
 
 /**
  * Durable admission for Shopify's `shop/redact` compliance webhook.
@@ -46,7 +47,12 @@ export async function admitShopifyShopRedaction(
     .for("update");
 
   const [existing] = await tx
-    .select({ jobId: shopifyShopRedactionJobs.id, runId: shopifyShopRedactionJobs.runId })
+    .select({
+      jobId: shopifyShopRedactionJobs.id,
+      runId: shopifyShopRedactionJobs.runId,
+      privacyRequestId: shopifyShopRedactionJobs.privacyRequestId,
+      status: shopifyShopRedactionJobs.status,
+    })
     .from(shopifyShopRedactionJobs)
     .where(
       and(
@@ -58,7 +64,63 @@ export async function admitShopifyShopRedaction(
       ),
     )
     .limit(1);
-  if (existing) return { ...existing, status: "duplicate" };
+  if (existing) {
+    const dispatchable = ["admitted", "failed_retryable", "processing"];
+    if (existing.privacyRequestId === null) {
+      // `shop/redact` jobs admitted before the report-only worker had no parent
+      // request or outbox intent. A verified redelivery is the only safe source
+      // of the matching request hash, so backfill just those durable links and
+      // resume the non-destructive inventory gate—never a deletion operation.
+      const [legacyRequest] = await tx
+        .select({ id: shopifyPrivacyRequests.id })
+        .from(shopifyPrivacyRequests)
+        .where(
+          and(
+            eq(shopifyPrivacyRequests.organizationId, params.store.organizationId),
+            eq(shopifyPrivacyRequests.storeId, params.store.id),
+            eq(shopifyPrivacyRequests.topic, "shop/redact"),
+            eq(shopifyPrivacyRequests.requestHash, params.requestHash),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (!legacyRequest) throw new Error("Legacy Shopify shop-redact request could not be resolved");
+      const backfill = await tx
+        .update(shopifyShopRedactionJobs)
+        .set({
+          privacyRequestId: legacyRequest.id,
+          status: "admitted",
+          lastCheckpoint: "legacy_dispatch_backfilled",
+          failureCode: null,
+          leaseId: null,
+          leaseExpiresAt: null,
+          nextAttemptAt: null,
+        })
+        .where(
+          and(
+            eq(shopifyShopRedactionJobs.id, existing.jobId),
+            eq(shopifyShopRedactionJobs.organizationId, params.store.organizationId),
+            eq(shopifyShopRedactionJobs.storeId, params.store.id),
+            isNull(shopifyShopRedactionJobs.privacyRequestId),
+          ),
+        );
+      if (affectedRows(backfill) !== 1) {
+        throw new Error("Legacy Shopify shop-redact job changed during backfill");
+      }
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "shop_redact", jobId: existing.jobId, status: "pending" })
+        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
+    } else if (dispatchable.includes(existing.status)) {
+      // Heal a missing outbox intent without resurrecting a terminal report-only
+      // record. Queue payload remains internal job id only.
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "shop_redact", jobId: existing.jobId, status: "pending" })
+        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
+    }
+    return { jobId: existing.jobId, runId: existing.runId, status: "duplicate" };
+  }
 
   const [request] = await tx
     .select({ id: shopifyPrivacyRequests.id })
