@@ -265,9 +265,28 @@ async function createBullMqQueue<T>(
         const existing = await queue.getJob(name);
         if (existing && (await existing.isFailed())) {
           // A failed unique entry is dead work, not an idempotency success. Keep
-          // it until redelivery arrives (for inspection), then replace it so the
-          // same provider delivery can receive a fresh bounded attempt cycle.
-          await existing.remove();
+          // it until redelivery arrives (for inspection), then re-arm it so the
+          // same provider delivery receives a fresh bounded attempt cycle.
+          //
+          // Re-arm with retry(), never remove()+add(): retry moves the entry
+          // out of the failed set in ONE Redis script, and only while it is
+          // still there. With remove()+add(), two concurrent redeliveries could
+          // each hold the failed entry; the slower one's remove() then either
+          // deleted the fresh entry the faster one had just queued, or threw
+          // because the entry was already gone — failing a delivery whose work
+          // was in fact queued.
+          try {
+            await existing.updateData(data);
+            await existing.retry("failed", { resetAttemptsMade: true, resetAttemptsStarted: true });
+            return;
+          } catch (error) {
+            // Losing that race is success: a concurrent redelivery re-armed the
+            // same unit of work. Only an entry that is STILL failed is an error.
+            const current = await queue.getJob(name);
+            if (current && !(await current.isFailed())) return;
+            if (current) throw error;
+            // Gone entirely (retention trimmed it): queue it afresh below.
+          }
         }
       }
       await queue.add(name, data, {
