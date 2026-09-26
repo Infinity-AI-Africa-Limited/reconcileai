@@ -545,6 +545,23 @@ async function createMerchantWorkspace(
     });
   }
 
+  // The retail vertical's intelligence artifacts (CLAUDE.md §9A) as this
+  // tenant's OWN resolution templates: one per retail exception category, each
+  // carrying its recommended resolution, regulatory context, severity and SLA.
+  // The shared defaults already reach every tenant; these are the copies the
+  // merchant edits and the learning loop attributes to them — the same seeding
+  // the super-admin organisation path performs. Idempotent and best-effort: a
+  // failure leaves the shared defaults in place and never blocks installation.
+  try {
+    const { seedRetailResolutionTemplates } = await import("../../exceptions/retail-commerce");
+    await seedRetailResolutionTemplates(organizationId);
+  } catch (error) {
+    console.error("[shopify-onboarding] retail resolution templates not seeded", {
+      organizationId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   // 3) Credentials, and only with them, `active`.
   try {
     const tokens = await encryptShopifyTokens(organizationId, params.tokenResponse);
