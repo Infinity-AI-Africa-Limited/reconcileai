@@ -1,5 +1,13 @@
 import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
-import { channels, matches, transactions, uploadBatches, users, type InsertTransaction } from "../../../drizzle/schema";
+import {
+  channels,
+  exceptions,
+  matches,
+  transactions,
+  uploadBatches,
+  users,
+  type InsertTransaction,
+} from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
   shopifySyncCursors,
@@ -246,6 +254,8 @@ export function materialShopifyOrderEvidenceChanged(
 const ACTIVE_MATCH_STATUSES = ["confirmed", "pending_review"] as const;
 /** Statuses a match put there — the only ones a rejected match may take back. */
 const MATCHED_STATUSES = ["matched", "manually_matched"] as const;
+/** Exception records that still await a person, and so still back an `exception` status. */
+const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
 
 /**
  * Reopen the corrected transaction and the counterparts of the matches it was in.
@@ -255,8 +265,11 @@ const MATCHED_STATUSES = ["matched", "manually_matched"] as const;
  * then takes back only the `matched` summaries those matches produced. It never
  * touches state that has a different source:
  *   - a counterpart still in another active match stays matched;
- *   - an `exception` status belongs to an exception record, which this sync does
- *     not resolve, so it is left for that workflow;
+ *   - an `exception` status is taken back only where a rejected `pending_review`
+ *     match put it there — the job engine marks both sides of a review match
+ *     `exception` without writing any exception record — and only if no
+ *     unresolved exception record backs it. A status an exception record owns
+ *     is left for that workflow;
  *   - a counterpart whose legacy `matchId` points at some other transaction is
  *     paired elsewhere, and is left alone.
  */
@@ -267,6 +280,7 @@ async function reopenAffectedReconciliation(
   const activeMatches = await tx
     .select({
       id: matches.id,
+      status: matches.status,
       sourceTransactionId: matches.sourceTransactionId,
       targetTransactionId: matches.targetTransactionId,
     })
@@ -309,6 +323,7 @@ async function reopenAffectedReconciliation(
     ),
   ];
 
+  const pairedElsewhere = new Set<number>();
   if (counterparts.length > 0) {
     // Read AFTER rejecting ours, so what remains is independent of this order.
     const stillMatched = await tx
@@ -321,9 +336,10 @@ async function reopenAffectedReconciliation(
           or(inArray(matches.sourceTransactionId, counterparts), inArray(matches.targetTransactionId, counterparts)),
         ),
       );
-    const pairedElsewhere = new Set(
-      stillMatched.flatMap((match) => [match.sourceTransactionId, match.targetTransactionId]),
-    );
+    for (const match of stillMatched) {
+      pairedElsewhere.add(match.sourceTransactionId);
+      pairedElsewhere.add(match.targetTransactionId);
+    }
     const reopenable = counterparts.filter((id) => !pairedElsewhere.has(id));
     if (reopenable.length > 0) {
       await tx
@@ -334,6 +350,71 @@ async function reopenAffectedReconciliation(
             eq(transactions.organizationId, params.organizationId),
             inArray(transactions.id, reopenable),
             inArray(transactions.status, [...MATCHED_STATUSES]),
+            or(isNull(transactions.matchId), eq(transactions.matchId, params.transactionId)),
+          ),
+        );
+    }
+  }
+
+  // Both parties to a rejected review match were marked `exception` by it.
+  // Take that back where nothing else still stands behind the status.
+  const reviewMatches = activeMatches.filter((match) => match.status === "pending_review");
+  const reviewCounterparts = [
+    ...new Set(
+      reviewMatches
+        .map((match) =>
+          match.sourceTransactionId === params.transactionId ? match.targetTransactionId : match.sourceTransactionId,
+        )
+        .filter((id) => id !== params.transactionId),
+    ),
+  ];
+  const reviewParties = [
+    ...new Set(
+      reviewMatches
+        .flatMap((match) => [match.sourceTransactionId, match.targetTransactionId])
+        .filter((id) => !pairedElsewhere.has(id)),
+    ),
+  ];
+  if (reviewParties.length > 0) {
+    const backed = await tx
+      .select({ transactionId: exceptions.transactionId })
+      .from(exceptions)
+      .where(
+        and(
+          eq(exceptions.organizationId, params.organizationId),
+          inArray(exceptions.transactionId, reviewParties),
+          inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+        ),
+      );
+    const backedIds = new Set(backed.map((row) => row.transactionId));
+    const stale = reviewParties.filter((id) => !backedIds.has(id));
+    // A legacy `matchId` naming some OTHER transaction is a pairing this
+    // correction does not own, exactly as for the matched summaries above: a
+    // row is released only while its pointer is empty or names the other side
+    // of the review match being rejected.
+    if (stale.includes(params.transactionId) && reviewCounterparts.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.id, params.transactionId),
+            eq(transactions.organizationId, params.organizationId),
+            eq(transactions.status, "exception"),
+            or(isNull(transactions.matchId), inArray(transactions.matchId, reviewCounterparts)),
+          ),
+        );
+    }
+    const staleCounterparts = stale.filter((id) => id !== params.transactionId);
+    if (staleCounterparts.length > 0) {
+      await tx
+        .update(transactions)
+        .set({ status: "unmatched", matchId: null })
+        .where(
+          and(
+            eq(transactions.organizationId, params.organizationId),
+            inArray(transactions.id, staleCounterparts),
+            eq(transactions.status, "exception"),
             or(isNull(transactions.matchId), eq(transactions.matchId, params.transactionId)),
           ),
         );

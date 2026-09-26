@@ -29,10 +29,15 @@ vi.mock("../../magicLinkService", () => ({
 vi.mock("../../provisioning", () => ({
   provisionTenantBaseline: vi.fn(async (organizationId: number) => ({ organizationId, ok: true, steps: [] })),
 }));
+vi.mock("../../exceptions/retail-commerce", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../exceptions/retail-commerce")>()),
+  seedRetailResolutionTemplates: vi.fn(async () => ({ inserted: 25, existing: 0 })),
+}));
 
 import { encryptForTenant } from "../../_core/tenantKeys";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { provisionTenantBaseline } from "../../provisioning";
+import { seedRetailResolutionTemplates } from "../../exceptions/retail-commerce";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 import type { TokenGeneration } from "./tokenStore";
 import { duplicateKeyError, scriptedDb, type RecordedOp } from "./scriptedDb.testkit";
@@ -253,6 +258,18 @@ describe("when a shop installs for the first time", () => {
     const baselineAt = vi.mocked(provisionTenantBaseline).mock.invocationCallOrder[0];
     const encryptAt = vi.mocked(encryptForTenant).mock.invocationCallOrder[0];
     expect(baselineAt).toBeLessThan(encryptAt);
+  });
+
+  it("should give the new tenant its own retail resolution templates (§9A)", async () => {
+    firstInstall();
+    await onboard();
+    expect(seedRetailResolutionTemplates).toHaveBeenCalledWith(42);
+  });
+
+  it("should still finish installing when the templates cannot be seeded", async () => {
+    firstInstall();
+    vi.mocked(seedRetailResolutionTemplates).mockRejectedValueOnce(new Error("database busy"));
+    await expect(onboard()).resolves.toMatchObject({ storeId: 7, organizationId: 42 });
   });
 
   it("should send the welcome link to the default landing, with no redirect continuation", async () => {

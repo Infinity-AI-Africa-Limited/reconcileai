@@ -24,6 +24,7 @@
     "server/connectors/shopify/embeddedAuth.test.ts",
     "server/connectors/shopify/settlementEvidence.test.ts",
     "server/connectors/shopline/settlementEvents.test.ts",
+    "server/jobQueue.replaceFailed.test.ts",
     "server/reviewerLinkOrigin.test.ts",
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
