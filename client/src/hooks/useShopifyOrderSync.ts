@@ -13,9 +13,8 @@ import {
 
 /**
  * Requests a queued order sync and follows it through the workspace context.
- * `refresh` reloads the context without the page's full loading state, keeping
- * the previous context when a reload fails, and must be stable (useCallback),
- * or polling restarts on every render.
+ * `refresh` reloads the context without the page's full loading state, and
+ * must be stable (useCallback), or polling restarts on every render.
  */
 export function useShopifyOrderSync(
   sync: ShopifyAppBridgeContext["sync"] | null,
@@ -23,14 +22,13 @@ export function useShopifyOrderSync(
 ) {
   const [requesting, setRequesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // OUR request, and the context on screen when we made it: until a later
-  // context has loaded, the one on screen cannot show the request, so the page
-  // follows it itself even if the reload right after asking fails.
-  const [ownRequest, setOwnRequest] = useState<{ requestedAt: string; syncOnScreen: typeof sync } | null>(null);
+  // OUR request, numbered among the store's: until a loaded context counts it,
+  // the page follows it itself — even if the reload right after asking fails,
+  // or an older poll answers after it.
+  const [ownRequest, setOwnRequest] = useState<{ requestNumber: number; requestedAt: string } | null>(null);
   const [now, setNow] = useState(() => new Date());
 
-  const own = ownRequest ? { requestedAt: ownRequest.requestedAt, loadedSince: sync !== ownRequest.syncOnScreen } : null;
-  const progress = sync ? shopifySyncProgress(withOwnRequest(sync, own), now) : "never";
+  const progress = sync ? shopifySyncProgress(withOwnRequest(sync, ownRequest), now) : "never";
   const pollMs = shopifySyncPollIntervalMs(progress);
 
   useEffect(() => {
@@ -47,7 +45,7 @@ export function useShopifyOrderSync(
     setError(null);
     try {
       const queued = await triggerShopifyOrderSync();
-      setOwnRequest({ requestedAt: queued.requestedAt, syncOnScreen: sync });
+      setOwnRequest({ requestNumber: queued.requestNumber, requestedAt: queued.requestedAt });
       setNow(new Date());
       await refresh();
     } catch (requestError) {

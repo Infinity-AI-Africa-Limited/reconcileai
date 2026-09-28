@@ -137,6 +137,7 @@ describe("when the workspace loads its context", () => {
         [REQUESTS]: [
           [{ status: "succeeded", answeredAt: new Date("2026-09-25T07:30:00.000Z") }],
           [],
+          [{ requests: 4 }],
         ],
       },
     });
@@ -154,6 +155,7 @@ describe("when the workspace loads its context", () => {
         lastErrorAt: null,
         latestRequest: { status: "succeeded", answeredAt: "2026-09-25T07:30:00.000Z" },
         pendingSince: null,
+        requestCount: 4,
       },
       capabilities: { scope: "read_orders", readOrders: true, manualSync: true, shopifyPayments: false, mutations: false },
     });
@@ -161,17 +163,23 @@ describe("when the workspace loads its context", () => {
     expect(JSON.stringify(view)).not.toMatch(/owner@example\.com|must-not-leak|storeId|organizationId|shopifyUserId|"id"/);
     expect(db.ops[0]?.where?.params).toEqual([7, 42, "orders"]);
     const requestLookups = db.ops.filter((op) => op.kind === "select" && op.table === REQUESTS);
-    expect(requestLookups.map((op) => op.where?.params)).toEqual([[7, 42], [7, 42, "queued"]]);
+    expect(requestLookups.map((op) => op.where?.params)).toEqual([[7, 42], [7, 42, "queued"], [7, 42]]);
+    // Every read in one transaction, so one snapshot: a run settling between
+    // separate reads could make a pending request look finished.
+    const reads = db.ops.filter((op) => op.kind === "select");
+    expect(reads).toHaveLength(4);
+    expect(new Set(reads.map((op) => op.txId)).size).toBe(1);
+    expect(reads[0]?.txId).not.toBeNull();
   });
 });
 
 describe("when the merchant starts a sync", () => {
   it("should queue a sync for only the store the token names, even if the browser also holds a ReconcileAI session", async () => {
-    state.requestSync.mockResolvedValue({ requestId: 88, requestedAt: new Date("2026-09-25T08:00:00.000Z") });
+    state.requestSync.mockResolvedValue({ requestId: 88, requestNumber: 5, requestedAt: new Date("2026-09-25T08:00:00.000Z") });
     const result = await caller(TOKEN, { id: 1, role: "super_admin", organizationId: 999, isReadOnly: false }).syncNow();
 
     expect(state.requestSync).toHaveBeenCalledWith({ storeId: 7, organizationId: 42 });
-    expect(result).toEqual({ status: "queued", requestedAt: "2026-09-25T08:00:00.000Z" });
+    expect(result).toEqual({ status: "queued", requestNumber: 5, requestedAt: "2026-09-25T08:00:00.000Z" });
     expect(JSON.stringify(result)).not.toMatch(/storeId|organizationId|88/);
   });
 

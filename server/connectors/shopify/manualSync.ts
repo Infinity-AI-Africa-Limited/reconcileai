@@ -15,7 +15,13 @@
  *   - a run settles the rows that were `queued` when it STARTED, with its own
  *     outcome. A request made after that is left for the follow-up run the
  *     queue keeps for it (coalesceKey); a row another run has already settled
- *     is not `queued`, so an overlapping run can never overwrite its outcome.
+ *     is not `queued`, so an overlapping run can never overwrite its outcome;
+ *   - one exception, in one direction only: a run that SUCCEEDS may turn its
+ *     own request from failed to succeeded. A request recorded in the moment
+ *     between an earlier run starting and reading the queue is settled by that
+ *     run although the queue also kept a follow-up for it; if the earlier run
+ *     failed, the follow-up's success is the request's real outcome. A failure
+ *     never replaces a success.
  *
  * Earlier revisions held counters on the sync cursor instead, and every review
  * found another race in them: answering request N answered every request below
@@ -23,12 +29,13 @@
  * worse — the columns hold whole seconds, so they cannot order two events in
  * one second.
  */
-import { and, desc, eq, lte } from "drizzle-orm";
+import { and, count, desc, eq, lte, or } from "drizzle-orm";
 import { shopifyConnectorStores, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import { getDb } from "../../db";
 import { runShopifyOrderSyncToNow, shopifySyncFailureCode } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /** The store a manual sync is for. */
 export interface ShopifyManualSyncTarget {
@@ -79,6 +86,19 @@ function requestsOf(target: ShopifyManualSyncTarget) {
   );
 }
 
+/**
+ * How many requests this store had made up to and including `requestId`. A page
+ * waits for its request by this number, which is the store's own — the row ids
+ * are a platform-wide count and do not leave the server.
+ */
+export async function shopifyRequestNumber(db: Db | Tx, target: ShopifyManualSyncTarget, requestId?: number) {
+  const [row] = await db
+    .select({ requests: count() })
+    .from(shopifySyncRequests)
+    .where(requestId === undefined ? requestsOf(target) : and(requestsOf(target), lte(shopifySyncRequests.id, requestId)));
+  return Number(row?.requests ?? 0);
+}
+
 function insertedId(result: unknown): number {
   return Number((result as [{ insertId?: number }])?.[0]?.insertId ?? 0);
 }
@@ -102,7 +122,7 @@ async function defaultEnqueue(payload: ShopifyManualSyncPayload): Promise<void> 
 export async function requestShopifyManualSync(
   params: ShopifyManualSyncTarget,
   deps: ShopifyManualSyncDeps = {},
-): Promise<{ requestId: number; requestedAt: Date }> {
+): Promise<{ requestId: number; requestNumber: number; requestedAt: Date }> {
   const db = await databaseFrom(deps);
   if (!db) throw new ShopifyManualSyncError("SERVICE_UNAVAILABLE");
   const now = deps.now ?? (() => new Date());
@@ -120,17 +140,22 @@ export async function requestShopifyManualSync(
     .limit(1);
   if (!store) throw new ShopifyManualSyncError("STORE_UNAVAILABLE");
 
-  // Recorded BEFORE the enqueue, so the run that settles it cannot start first.
+  // Recorded BEFORE the enqueue, so the run that settles it cannot start first;
+  // numbered in the same transaction, so a failure there leaves no row behind
+  // that no job will ever settle.
   const requestedAt = toWholeSecond(now());
-  const requestId = insertedId(
-    await db.insert(shopifySyncRequests).values({
-      storeId: params.storeId,
-      organizationId: params.organizationId,
-      status: "queued",
-      requestedAt,
-    }),
-  );
-  if (!requestId) throw new ShopifyManualSyncError("SERVICE_UNAVAILABLE");
+  const { requestId, requestNumber } = await db.transaction(async (tx) => {
+    const id = insertedId(
+      await tx.insert(shopifySyncRequests).values({
+        storeId: params.storeId,
+        organizationId: params.organizationId,
+        status: "queued",
+        requestedAt,
+      }),
+    );
+    if (!id) throw new ShopifyManualSyncError("SERVICE_UNAVAILABLE");
+    return { requestId: id, requestNumber: await shopifyRequestNumber(tx, params, id) };
+  });
 
   try {
     await (deps.enqueue ?? defaultEnqueue)({ ...params, requestId });
@@ -160,7 +185,7 @@ export async function requestShopifyManualSync(
     }
     throw new ShopifyManualSyncError("QUEUE_UNAVAILABLE");
   }
-  return { requestId, requestedAt };
+  return { requestId, requestNumber, requestedAt };
 }
 
 /** The newest request still queued for this store, or 0. */
@@ -177,15 +202,17 @@ async function latestQueuedRequestId(db: Db, target: ShopifyManualSyncTarget): P
 /**
  * Settle every request of this store that is still `queued` and no newer than
  * `throughId`, with one run's outcome. Rows another run has settled are not
- * `queued`, so they keep that run's outcome.
+ * `queued`, so they keep that run's outcome — except that a success also turns
+ * the run's own request from failed to succeeded (see the header).
  */
 export async function settleShopifyManualSyncRequests(
   db: Db,
-  target: ShopifyManualSyncTarget,
+  run: ShopifyManualSyncPayload,
   throughId: number,
   outcome: { status: "succeeded" } | { status: "failed"; errorCode: string },
   deps: { now?: () => Date } = {},
 ): Promise<void> {
+  const queuedAndSeen = and(eq(shopifySyncRequests.status, "queued"), lte(shopifySyncRequests.id, throughId));
   await db
     .update(shopifySyncRequests)
     .set({
@@ -195,9 +222,10 @@ export async function settleShopifyManualSyncRequests(
     })
     .where(
       and(
-        requestsOf(target),
-        eq(shopifySyncRequests.status, "queued"),
-        lte(shopifySyncRequests.id, throughId),
+        requestsOf(run),
+        outcome.status === "succeeded"
+          ? or(queuedAndSeen, and(eq(shopifySyncRequests.id, run.requestId), eq(shopifySyncRequests.status, "failed")))
+          : queuedAndSeen,
       ),
     );
 }

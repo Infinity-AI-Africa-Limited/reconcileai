@@ -3,7 +3,7 @@ import {
   canRequestShopifySync,
   SHOPIFY_SYNC_POLL_MS,
   SHOPIFY_SYNC_STALL_MS,
-  SHOPIFY_SYNC_STALLED_POLL_MS,
+  SHOPIFY_SYNC_SLOW_POLL_MS,
   shopifySyncPollIntervalMs,
   shopifySyncProgress,
   type ShopifySyncView,
@@ -22,6 +22,7 @@ function view(overrides: Partial<ShopifySyncView> = {}): ShopifySyncView {
     lastErrorAt: null,
     latestRequest: null,
     pendingSince: null,
+    requestCount: 0,
     ...overrides,
   };
 }
@@ -53,7 +54,7 @@ describe("when a manual sync request is still queued", () => {
     const progress = shopifySyncProgress(view({ pendingSince: REQUESTED, latestRequest: queued }), later);
     expect(progress).toBe("stalled");
     // A slow run can still finish; the page must see it when it does.
-    expect(shopifySyncPollIntervalMs(progress)).toBe(SHOPIFY_SYNC_STALLED_POLL_MS);
+    expect(shopifySyncPollIntervalMs(progress)).toBe(SHOPIFY_SYNC_SLOW_POLL_MS);
     expect(canRequestShopifySync(progress, false)).toBe(true);
   });
 });
@@ -63,7 +64,9 @@ describe("when nothing is queued", () => {
     expect(shopifySyncProgress(view({ lastSuccessfulAt: T1, latestRequest: succeededAt(T1) }), NOW)).toBe("current");
     const failed = shopifySyncProgress(view({ lastSuccessfulAt: T1, latestRequest: failedAt(T2) }), NOW);
     expect(failed).toBe("failed");
-    expect(shopifySyncPollIntervalMs(failed)).toBeNull();
+    // Still checked, slowly: a follow-up run for the same request, or a webhook
+    // sync, can correct a failure, and the open page must show it.
+    expect(shopifySyncPollIntervalMs(failed)).toBe(SHOPIFY_SYNC_SLOW_POLL_MS);
     expect(canRequestShopifySync(failed, false)).toBe(true);
   });
 
@@ -101,23 +104,31 @@ describe("when nothing is queued", () => {
   it("should not allow a second request while one is being sent", () => {
     expect(canRequestShopifySync("current", true)).toBe(false);
   });
+
+  it("should stop checking once the latest outcome is a success", () => {
+    expect(shopifySyncPollIntervalMs("current")).toBeNull();
+    expect(shopifySyncPollIntervalMs("never")).toBeNull();
+  });
 });
 
-describe("when the page made a request the view on screen does not show yet", () => {
-  const onScreen = view({ lastSuccessfulAt: T1, latestRequest: succeededAt(T1) });
+describe("when the page made a request the view on screen does not count yet", () => {
+  const onScreen = view({ lastSuccessfulAt: T1, latestRequest: succeededAt(T1), requestCount: 4 });
 
-  it("should follow the page's own request until a later view loads, so polling starts even if the reload failed", () => {
-    const judged = withOwnRequest(onScreen, { requestedAt: REQUESTED, loadedSince: false });
+  it("should follow the page's own request, so polling starts even if the reload after it failed", () => {
+    const judged = withOwnRequest(onScreen, { requestNumber: 5, requestedAt: REQUESTED });
     expect(shopifySyncProgress(judged, NOW)).toBe("pending");
   });
 
-  it("should let the server's record decide once a view loaded after the request", () => {
-    expect(withOwnRequest(onScreen, { requestedAt: REQUESTED, loadedSince: true })).toBe(onScreen);
-    expect(withOwnRequest(onScreen, null)).toBe(onScreen);
+  it("should keep following it when an older poll answers late with a view read before the request", () => {
+    // Whatever order responses arrive in, a view that counts 4 requests was
+    // read before request 5 was recorded.
+    const lateOlderView = view({ lastSuccessfulAt: T2, latestRequest: succeededAt(T2), requestCount: 4 });
+    expect(shopifySyncProgress(withOwnRequest(lateOlderView, { requestNumber: 5, requestedAt: REQUESTED }), NOW)).toBe("pending");
   });
 
-  it("should keep the server's pending record when it is at least as recent", () => {
-    const newer = view({ pendingSince: T1 });
-    expect(withOwnRequest(newer, { requestedAt: REQUESTED, loadedSince: false })).toBe(newer);
+  it("should let the server's record decide once a view counts the request", () => {
+    const counted = view({ lastSuccessfulAt: T2, latestRequest: succeededAt(T2), requestCount: 5 });
+    expect(withOwnRequest(counted, { requestNumber: 5, requestedAt: REQUESTED })).toBe(counted);
+    expect(withOwnRequest(counted, null)).toBe(counted);
   });
 });

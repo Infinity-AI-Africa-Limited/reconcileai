@@ -16,6 +16,8 @@ export type ShopifyAppBridgeContext = {
     latestRequest: { status: "queued" | "succeeded" | "failed"; answeredAt: string | null } | null;
     /** When the newest request still queued was made, or null when none is. */
     pendingSince: string | null;
+    /** How many manual requests this store has made. */
+    requestCount: number;
   };
   capabilities: {
     scope: "read_orders";
@@ -29,6 +31,8 @@ export type ShopifyAppBridgeContext = {
 /** A manual sync is queued, not run, by the request; `context` reports its outcome. */
 export type ShopifySyncRequest = {
   status: "queued";
+  /** This request's number among the store's requests: the context's requestCount reaches it once it is recorded. */
+  requestNumber: number;
   requestedAt: string;
 };
 

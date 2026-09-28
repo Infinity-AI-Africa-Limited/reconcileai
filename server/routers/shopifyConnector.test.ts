@@ -169,12 +169,13 @@ describe("when someone starts a manual Shopify order sync", () => {
   const REQUESTED_AT = new Date("2026-09-28T10:00:00.000Z");
   beforeEach(() => {
     state.requestSync.mockReset();
-    state.requestSync.mockResolvedValue({ requestId: 88, requestedAt: REQUESTED_AT });
+    state.requestSync.mockResolvedValue({ requestId: 88, requestNumber: 5, requestedAt: REQUESTED_AT });
   });
 
   it("should queue a sync of the store within the administrator's own organisation, and answer at once", async () => {
     await expect(caller("admin").syncOrdersNow({ storeId: 7 })).resolves.toEqual({
       status: "queued",
+      requestNumber: 5,
       requestedAt: REQUESTED_AT.toISOString(),
     });
     // The tenant comes from the session, never the input; the request then

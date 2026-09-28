@@ -8,7 +8,9 @@
  *   stalled  pending for longer than any sync should take — the run may have
  *            been lost with a restart; asking again is safe (repeat requests
  *            for one store coalesce), and the page keeps checking, slowly
- *   failed   the most recent recorded outcome is a failure
+ *   failed   the most recent recorded outcome is a failure — still checked,
+ *            slowly: a later run can correct it (a follow-up run for the same
+ *            request, or a webhook sync)
  *   current  the most recent recorded outcome is a success
  *   never    nothing has been synced or requested yet
  *
@@ -35,6 +37,8 @@ export type ShopifySyncView = {
   latestRequest: { status: "queued" | "succeeded" | "failed"; answeredAt: string | null } | null;
   /** When the newest request still queued was made, or null when none is. */
   pendingSince: string | null;
+  /** How many requests this store has made. */
+  requestCount: number;
 };
 
 function time(value: string | null | undefined): number | null {
@@ -75,13 +79,13 @@ export function shopifySyncProgress(sync: ShopifySyncView, now: Date): ShopifySy
 }
 
 export const SHOPIFY_SYNC_POLL_MS = 5_000;
-/** Still checked when stalled — a slow run can finish — but no longer eagerly. */
-export const SHOPIFY_SYNC_STALLED_POLL_MS = 60_000;
+/** Still checked when stalled or failed — a later run can change it — but no longer eagerly. */
+export const SHOPIFY_SYNC_SLOW_POLL_MS = 60_000;
 
 /** How often the page should ask the server for the outcome, or null for not at all. */
 export function shopifySyncPollIntervalMs(progress: ShopifySyncProgress): number | null {
   if (progress === "pending") return SHOPIFY_SYNC_POLL_MS;
-  if (progress === "stalled") return SHOPIFY_SYNC_STALLED_POLL_MS;
+  if (progress === "stalled" || progress === "failed") return SHOPIFY_SYNC_SLOW_POLL_MS;
   return null;
 }
 
@@ -91,19 +95,15 @@ export function canRequestShopifySync(progress: ShopifySyncProgress, requesting:
 }
 
 /**
- * The view as the page should judge it, given a request this page made. Until
- * a view loaded AFTER the request arrives (`loadedSince` false), the view on
- * screen cannot show the request, so the page treats it as pending itself —
- * otherwise a failed reload right after asking would read as "nothing to wait
- * for". Once a later view has loaded, the server's record decides.
+ * The view as the page should judge it, given a request this page made. The
+ * request is numbered among the store's requests; a view that counts fewer was
+ * read before it was recorded — a reload that failed, or a poll that started
+ * earlier and answered late — so the page treats the request as pending itself.
  */
 export function withOwnRequest(
   sync: ShopifySyncView,
-  own: { requestedAt: string; loadedSince: boolean } | null,
+  own: { requestNumber: number; requestedAt: string } | null,
 ): ShopifySyncView {
-  if (!own || own.loadedSince) return sync;
-  const pendingSince = time(sync.pendingSince);
-  const requested = time(own.requestedAt);
-  if (requested === null || (pendingSince !== null && pendingSince >= requested)) return sync;
+  if (!own || own.requestNumber <= sync.requestCount) return sync;
   return { ...sync, pendingSince: own.requestedAt };
 }

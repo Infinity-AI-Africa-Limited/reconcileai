@@ -70,11 +70,11 @@ export const shopifyAppHomeRouter = router({
    */
   syncNow: embeddedProcedure.mutation(async ({ ctx }) => {
     try {
-      const { requestedAt } = await requestShopifyManualSync({
+      const { requestNumber, requestedAt } = await requestShopifyManualSync({
         storeId: ctx.shopify.storeId,
         organizationId: ctx.shopify.organizationId,
       });
-      return { status: "queued" as const, requestedAt: requestedAt.toISOString() };
+      return { status: "queued" as const, requestNumber, requestedAt: requestedAt.toISOString() };
     } catch (error) {
       const refusal = manualSyncFailure(error);
       console.error("[shopify-app-home] manual sync could not be queued", {

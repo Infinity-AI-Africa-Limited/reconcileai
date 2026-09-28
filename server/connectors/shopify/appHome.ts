@@ -13,7 +13,7 @@ import { z } from "zod";
 import { shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
-import { ShopifyManualSyncError } from "./manualSync";
+import { ShopifyManualSyncError, shopifyRequestNumber } from "./manualSync";
 import { ShopifySettlementEvidenceError, type ShopifySettlementEvidenceResult } from "./settlementEvidence";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -67,37 +67,50 @@ export function appHomeError(code: TRPCError["code"], message: ShopifyAppHomeErr
 
 /** The store and sync evidence the workspace shows; no id leaves the server. */
 export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
-  const [cursor] = await db
-    .select({
-      lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
-      lastErrorCode: shopifySyncCursors.lastErrorCode,
-      lastErrorAt: shopifySyncCursors.lastErrorAt,
-    })
-    .from(shopifySyncCursors)
-    .where(
-      and(
-        eq(shopifySyncCursors.storeId, context.storeId),
-        eq(shopifySyncCursors.organizationId, context.organizationId),
-        eq(shopifySyncCursors.resource, "orders"),
-      ),
-    )
-    .limit(1);
+  const target = { storeId: context.storeId, organizationId: context.organizationId };
   const requests = and(
     eq(shopifySyncRequests.storeId, context.storeId),
     eq(shopifySyncRequests.organizationId, context.organizationId),
   );
-  const [latestRequest] = await db
-    .select({ status: shopifySyncRequests.status, answeredAt: shopifySyncRequests.answeredAt })
-    .from(shopifySyncRequests)
-    .where(requests)
-    .orderBy(desc(shopifySyncRequests.id))
-    .limit(1);
-  const [pending] = await db
-    .select({ requestedAt: shopifySyncRequests.requestedAt })
-    .from(shopifySyncRequests)
-    .where(and(requests, eq(shopifySyncRequests.status, "queued")))
-    .orderBy(desc(shopifySyncRequests.id))
-    .limit(1);
+  // One transaction, so one snapshot (REPEATABLE READ, the default on MySQL and
+  // TiDB): read separately, a run settling between the reads could pair a
+  // request still queued in one with no pending request in the next, and the
+  // page would stop waiting with the outcome unseen.
+  const { cursor, latestRequest, pending, requestCount } = await db.transaction(async (tx) => {
+    const [cursorRow] = await tx
+      .select({
+        lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
+        lastErrorCode: shopifySyncCursors.lastErrorCode,
+        lastErrorAt: shopifySyncCursors.lastErrorAt,
+      })
+      .from(shopifySyncCursors)
+      .where(
+        and(
+          eq(shopifySyncCursors.storeId, context.storeId),
+          eq(shopifySyncCursors.organizationId, context.organizationId),
+          eq(shopifySyncCursors.resource, "orders"),
+        ),
+      )
+      .limit(1);
+    const [latestRow] = await tx
+      .select({ status: shopifySyncRequests.status, answeredAt: shopifySyncRequests.answeredAt })
+      .from(shopifySyncRequests)
+      .where(requests)
+      .orderBy(desc(shopifySyncRequests.id))
+      .limit(1);
+    const [pendingRow] = await tx
+      .select({ requestedAt: shopifySyncRequests.requestedAt })
+      .from(shopifySyncRequests)
+      .where(and(requests, eq(shopifySyncRequests.status, "queued")))
+      .orderBy(desc(shopifySyncRequests.id))
+      .limit(1);
+    return {
+      cursor: cursorRow,
+      latestRequest: latestRow,
+      pending: pendingRow,
+      requestCount: await shopifyRequestNumber(tx, target),
+    };
+  });
   return {
     store: { shopDomain: context.shopDomain, displayName: context.displayName, currency: context.currency },
     sync: {
@@ -110,6 +123,8 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
         : null,
       /** When the newest request still queued was made, or null when none is. */
       pendingSince: pending?.requestedAt.toISOString() ?? null,
+      /** How many requests this store has made: a page waits until this counts its own. */
+      requestCount,
     },
     capabilities: { ...SHOPIFY_APP_HOME_CAPABILITIES },
   };

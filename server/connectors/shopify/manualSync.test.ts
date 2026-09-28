@@ -33,8 +33,11 @@ beforeEach(() => {
 });
 
 describe("when a manual sync is requested", () => {
-  function requestDb(requestId = 55) {
-    return scriptedDb({ select: { [STORES]: [[{ id: 7 }]] }, insert: { [REQUESTS]: [requestId] } });
+  function requestDb(requestId = 55, requestNumber = 3) {
+    return scriptedDb({
+      select: { [STORES]: [[{ id: 7 }]], [REQUESTS]: [[{ requests: requestNumber }]] },
+      insert: { [REQUESTS]: [requestId] },
+    });
   }
 
   it("should record the request as queued, then queue it with its id", async () => {
@@ -46,7 +49,7 @@ describe("when a manual sync is requested", () => {
 
     const result = await requestShopifyManualSync(target, { db: fake.db as never, now: () => CLOCK, enqueue });
 
-    expect(result).toEqual({ requestId: 55, requestedAt: REQUESTED_AT });
+    expect(result).toEqual({ requestId: 55, requestNumber: 3, requestedAt: REQUESTED_AT });
     expect(enqueue).toHaveBeenCalledWith({ ...target, requestId: 55 });
     // Recorded BEFORE the enqueue, so the run that settles it cannot start first.
     expect(recordedAtEnqueue).toBe(1);
@@ -56,6 +59,28 @@ describe("when a manual sync is requested", () => {
       status: "queued",
       requestedAt: REQUESTED_AT,
     });
+  });
+
+  it("should number the request among the store's own, in the transaction that recorded it", async () => {
+    const fake = requestDb(55, 3);
+    await requestShopifyManualSync(target, { db: fake.db as never, enqueue: vi.fn(async () => {}) });
+    const record = fake.ops.find((op) => op.kind === "insert" && op.table === REQUESTS);
+    const numbering = fake.ops.find((op) => op.kind === "select" && op.table === REQUESTS);
+    expect(record?.txId).not.toBeNull();
+    expect(numbering?.txId).toBe(record?.txId);
+    // Counted within this store and tenant, up to this request: the platform-wide id never leaves.
+    expect(numbering?.where?.params).toEqual([7, 42, 55]);
+  });
+
+  it("should leave no request behind when numbering it fails", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[{ id: 7 }]], [REQUESTS]: [new Error("lock wait timeout")] },
+      insert: { [REQUESTS]: [55] },
+    });
+    const enqueue = vi.fn(async () => {});
+    await expect(requestShopifyManualSync(target, { db: fake.db as never, enqueue })).rejects.toThrow("lock wait timeout");
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(fake.writes("insert", REQUESTS)).toEqual([]);
   });
 
   it("should look the store up by id, tenant and status together", async () => {
@@ -81,7 +106,10 @@ describe("when a manual sync is requested", () => {
 
 describe("when the queue refuses a manual sync", () => {
   it("should settle its own request as failed — that row alone, and only while still queued", async () => {
-    const fake = scriptedDb({ select: { [STORES]: [[{ id: 7 }]] }, insert: { [REQUESTS]: [55] } });
+    const fake = scriptedDb({
+      select: { [STORES]: [[{ id: 7 }]], [REQUESTS]: [[{ requests: 3 }]] },
+      insert: { [REQUESTS]: [55] },
+    });
     const enqueue = vi.fn(async () => {
       throw new Error("connect ECONNREFUSED redis");
     });
@@ -128,9 +156,9 @@ describe("when the queue runs a manual sync", () => {
     const settle = fake.writes("update", REQUESTS);
     expect(settle).toHaveLength(1);
     expect(settle[0]?.data).toEqual({ status: "succeeded", errorCode: null, answeredAt: CLOCK });
-    // Only rows still queued: a row an overlapping run has settled keeps its outcome.
-    expect(settle[0]?.where?.sql).toContain("`status` = ?");
-    expect(settle[0]?.where?.params).toEqual([7, 42, "queued", 57]);
+    // Rows still queued that it saw — a row an overlapping run has settled keeps
+    // its outcome — or its OWN request, and that only from failed to succeeded.
+    expect(settle[0]?.where?.params).toEqual([7, 42, "queued", 57, 55, "failed"]);
   });
 
   it("should settle the requests it saw as failed, with the sync's own code", async () => {
@@ -143,6 +171,7 @@ describe("when the queue runs a manual sync", () => {
     const settle = fake.writes("update", REQUESTS);
     expect(settle).toHaveLength(1);
     expect(settle[0]?.data).toEqual({ status: "failed", errorCode: "code:pagination_error", answeredAt: CLOCK });
+    // A failure never replaces an outcome already recorded: queued rows only.
     expect(settle[0]?.where?.params).toEqual([7, 42, "queued", 57]);
   });
 
