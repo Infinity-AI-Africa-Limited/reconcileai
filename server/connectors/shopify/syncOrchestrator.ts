@@ -491,6 +491,17 @@ function errorCode(error: unknown): string {
 }
 
 /**
+ * Failures `runShopifyOrderSync` has already recorded on the cursor (with their
+ * precise code). A caller that records an outcome of its own asks this rather
+ * than inferring it from timestamps, which the cursor holds only to the second.
+ */
+const failuresRecordedOnCursor = new WeakSet<object>();
+
+export function isShopifySyncFailureRecorded(error: unknown): boolean {
+  return typeof error === "object" && error !== null && failuresRecordedOnCursor.has(error);
+}
+
+/**
  * Fetch and persist one tenant-owned store. The store lookup, token call,
  * transaction lookup, writes and cursor update all carry organizationId.
  */
@@ -734,6 +745,7 @@ export async function runShopifyOrderSync(
         lastErrorAt: failedAt,
       })
       .onDuplicateKeyUpdate({ set: { lastErrorCode: code, lastErrorAt: failedAt } });
+    if (typeof error === "object" && error !== null) failuresRecordedOnCursor.add(error);
     throw error;
   }
 }

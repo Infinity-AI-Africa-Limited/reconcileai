@@ -11,12 +11,11 @@ export type ShopifyAppBridgeContext = {
   sync: {
     lastSuccessfulAt: string | null;
     lastErrorCode: string | null;
-    /** When a manual sync was last requested. */
+    /** When a manual sync was last requested (display and stall detection only). */
     requestedAt: string | null;
-    /** The latest manual request a finished manual run answered. */
-    answeredAt: string | null;
-    /** Orders are synced through this time, whichever sync did it. */
-    syncedThrough: string | null;
+    /** Manual requests made, and answered by a finished run. */
+    requestSeq: number;
+    answeredSeq: number;
   };
   capabilities: {
     scope: "read_orders";
@@ -31,6 +30,8 @@ export type ShopifyAppBridgeContext = {
 export type ShopifySyncRequest = {
   status: "queued";
   requestedAt: string;
+  /** This request's number: it is answered once the context's answeredSeq reaches it. */
+  requestSeq: number;
 };
 
 export type ShopifySettlementField =

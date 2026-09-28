@@ -3,8 +3,8 @@
  *
  * Manual syncs run on the job queue, so the page cannot wait on the request —
  * it reads the cursor instead, and so still knows after a reload:
- *   pending  a sync was requested and is not yet answered: no manual run has
- *            finished for it, and orders are not yet synced through it
+ *   pending  a manual sync was requested and no run that started after it has
+ *            finished yet (requestSeq > answeredSeq)
  *   stalled  pending for longer than any sync should take — the run may have
  *            been lost with a restart; asking again is safe (repeat requests
  *            for one store coalesce), and the page keeps checking, slowly
@@ -12,16 +12,17 @@
  *   current  the latest recorded outcome is a success
  *   never    nothing has been synced or requested yet
  *
- * "Answered" is deliberately NOT "some outcome was recorded after the request":
- * every sync writes the same cursor, and a webhook sync that began before the
- * request but finished after it would pass that test without covering it.
+ * Requests are counted, not timed (server/connectors/shopify/manualSync.ts): a
+ * run answers exactly the requests made before it started, so neither a webhook
+ * sync finishing mid-request nor two events in the same second can end a wait
+ * early. requestedAt is used only to notice a stall.
  */
 export type ShopifySyncProgress = "pending" | "stalled" | "failed" | "current" | "never";
 
 /**
- * A first sync reads 60 days; at Shopify's pacing the largest stores this
- * connector can take (100,000 orders) need around half an hour, so a request
- * still pending after that is treated as stalled.
+ * A first sync reads 60 days in 7-day steps; at Shopify's pacing the largest
+ * stores need around half an hour, so a request still pending after this is
+ * treated as stalled.
  */
 export const SHOPIFY_SYNC_STALL_MS = 45 * 60_000;
 
@@ -29,10 +30,8 @@ export type ShopifySyncCursorView = {
   lastSuccessfulAt: string | null;
   lastErrorCode: string | null;
   requestedAt: string | null;
-  /** The latest request a finished manual run answered. */
-  answeredAt: string | null;
-  /** Orders are synced through this time, whichever sync did it. */
-  syncedThrough: string | null;
+  requestSeq: number;
+  answeredSeq: number;
 };
 
 function time(value: string | null): number | null {
@@ -42,13 +41,9 @@ function time(value: string | null): number | null {
 }
 
 export function shopifySyncProgress(sync: ShopifySyncCursorView, now: Date): ShopifySyncProgress {
-  const requested = time(sync.requestedAt);
-  const reaches = (value: string | null) => {
-    const at = time(value);
-    return at !== null && requested !== null && at >= requested;
-  };
-  if (requested !== null && !reaches(sync.answeredAt) && !reaches(sync.syncedThrough)) {
-    return now.getTime() - requested > SHOPIFY_SYNC_STALL_MS ? "stalled" : "pending";
+  if (sync.requestSeq > sync.answeredSeq) {
+    const requested = time(sync.requestedAt);
+    return requested !== null && now.getTime() - requested > SHOPIFY_SYNC_STALL_MS ? "stalled" : "pending";
   }
   // A success clears lastErrorCode, so a code that is still set is the latest outcome.
   if (sync.lastErrorCode) return "failed";
@@ -72,9 +67,10 @@ export function canRequestShopifySync(progress: ShopifySyncProgress, requesting:
 }
 
 /** The cursor as the page should judge it, given a request this page made itself. */
-export function withLatestRequest(sync: ShopifySyncCursorView, requestedAt: string | null): ShopifySyncCursorView {
-  const own = time(requestedAt);
-  const recorded = time(sync.requestedAt);
-  if (own === null || (recorded !== null && recorded >= own)) return sync;
-  return { ...sync, requestedAt };
+export function withLatestRequest(
+  sync: ShopifySyncCursorView,
+  own: { requestSeq: number; requestedAt: string } | null,
+): ShopifySyncCursorView {
+  if (!own || own.requestSeq <= sync.requestSeq) return sync;
+  return { ...sync, requestSeq: own.requestSeq, requestedAt: own.requestedAt };
 }

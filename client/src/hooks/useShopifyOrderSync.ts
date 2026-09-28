@@ -24,10 +24,10 @@ export function useShopifyOrderSync(
   const [error, setError] = useState<string | null>(null);
   // The server's answer to OUR request, so the page follows it even if the
   // context reload right after it fails.
-  const [requestedAt, setRequestedAt] = useState<string | null>(null);
+  const [ownRequest, setOwnRequest] = useState<{ requestSeq: number; requestedAt: string } | null>(null);
   const [now, setNow] = useState(() => new Date());
 
-  const progress = sync ? shopifySyncProgress(withLatestRequest(sync, requestedAt), now) : "never";
+  const progress = sync ? shopifySyncProgress(withLatestRequest(sync, ownRequest), now) : "never";
   const pollMs = shopifySyncPollIntervalMs(progress);
 
   useEffect(() => {
@@ -44,7 +44,7 @@ export function useShopifyOrderSync(
     setError(null);
     try {
       const queued = await triggerShopifyOrderSync();
-      setRequestedAt(queued.requestedAt);
+      setOwnRequest({ requestSeq: queued.requestSeq, requestedAt: queued.requestedAt });
       setNow(new Date());
       await refresh();
     } catch (requestError) {
@@ -59,7 +59,7 @@ export function useShopifyOrderSync(
     requesting,
     error,
     /** True once this page requested a sync, so a success can be announced rather than merely shown. */
-    requestedHere: requestedAt !== null,
+    requestedHere: ownRequest !== null,
     canRequest: canRequestShopifySync(progress, requesting),
     request,
   };

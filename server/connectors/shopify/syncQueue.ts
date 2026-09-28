@@ -1,10 +1,6 @@
 import { createQueue, type EnqueueOptions, type JobQueue } from "../../jobQueue";
 import { handleShopifyWebhookSync, markShopifyWebhookSyncFailed } from "./syncOrchestrator";
-import {
-  handleShopifyManualSync,
-  markShopifyManualSyncFailed,
-  type ShopifyManualSyncPayload,
-} from "./manualSync";
+import { handleShopifyManualSync, type ShopifyManualSyncPayload } from "./manualSync";
 
 export interface ShopifyOrderSyncPayload {
   storeId: number;
@@ -69,12 +65,9 @@ export function createShopifyManualSyncQueue(
   return createQueue<ShopifyManualSyncPayload>(
     name,
     async (job) => handleShopifyManualSync(job.data),
-    {
-      attempts: 1,
-      backoffMs: 30_000,
-      concurrency: MANUAL_SYNC_CONCURRENCY,
-      onFinalFailure: async (job) => markShopifyManualSyncFailed(job.data),
-    },
+    // No onFinalFailure: the handler records every outcome it reaches itself
+    // (see handleShopifyManualSync).
+    { attempts: 1, backoffMs: 30_000, concurrency: MANUAL_SYNC_CONCURRENCY },
   );
 }
 

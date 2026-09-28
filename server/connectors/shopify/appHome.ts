@@ -72,8 +72,8 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
       lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
       lastErrorCode: shopifySyncCursors.lastErrorCode,
       syncRequestedAt: shopifySyncCursors.syncRequestedAt,
-      syncAnsweredAt: shopifySyncCursors.syncAnsweredAt,
-      watermarkUpdatedAt: shopifySyncCursors.watermarkUpdatedAt,
+      syncRequestSeq: shopifySyncCursors.syncRequestSeq,
+      syncAnsweredSeq: shopifySyncCursors.syncAnsweredSeq,
     })
     .from(shopifySyncCursors)
     .where(
@@ -89,11 +89,11 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
     sync: {
       lastSuccessfulAt: cursor?.lastSuccessfulAt?.toISOString() ?? null,
       lastErrorCode: cursor?.lastErrorCode ?? null,
-      /** The latest manual request, and the latest one a manual run finished for. */
+      /** When the latest manual request was made (display and stall detection only). */
       requestedAt: cursor?.syncRequestedAt?.toISOString() ?? null,
-      answeredAt: cursor?.syncAnsweredAt?.toISOString() ?? null,
-      /** Orders are synced through this time (the watermark), whichever sync did it. */
-      syncedThrough: cursor?.watermarkUpdatedAt?.toISOString() ?? null,
+      /** Manual requests made, and answered by a finished run: pending while requestSeq > answeredSeq. */
+      requestSeq: cursor?.syncRequestSeq ?? 0,
+      answeredSeq: cursor?.syncAnsweredSeq ?? 0,
     },
     capabilities: { ...SHOPIFY_APP_HOME_CAPABILITIES },
   };

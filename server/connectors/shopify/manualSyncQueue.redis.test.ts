@@ -5,7 +5,7 @@
  *   REDIS_URL=redis://127.0.0.1:6379 npx vitest run server/connectors/shopify/manualSyncQueue.redis.test.ts
  *
  * The sync cycle itself is replaced: this pins the QUEUE's behaviour — stores
- * run in parallel, one store never twice at once, and a failed run is final.
+ * run in parallel, one store never twice at once, and a failed run is not retried.
  *
  * ISOLATED BY NAME, like jobQueue.durability.test.ts. The queue is built by the
  * production factory (same options) and fed by the production job builder (same
@@ -20,12 +20,10 @@ import type { ShopifyManualSyncPayload } from "./manualSync";
 
 const REDIS_URL = process.env.REDIS_URL?.trim();
 const QUEUE_NAME = `test-shopify-manual-sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-const REQUESTED_AT = "2026-09-28T10:00:00.000Z";
 
 const state = vi.hoisted(() => ({
   started: [] as number[],
   release: new Map<number, Array<(error?: Error) => void>>(),
-  markFailed: vi.fn(async () => undefined),
 }));
 
 vi.mock("./manualSync", () => ({
@@ -36,7 +34,6 @@ vi.mock("./manualSync", () => ({
       waiting.push((error) => (error ? reject(error) : resolve()));
       state.release.set(payload.storeId, waiting);
     }),
-  markShopifyManualSyncFailed: state.markFailed,
 }));
 vi.mock("./syncOrchestrator", () => ({
   handleShopifyWebhookSync: vi.fn(),
@@ -64,7 +61,7 @@ describe.skipIf(!REDIS_URL)("the Shopify manual-sync queue on BullMQ", () => {
     const { createShopifyManualSyncQueue, shopifyManualSyncJob } = await import("./syncQueue");
     queue ??= await createShopifyManualSyncQueue(QUEUE_NAME);
     expect(queue.backend).toBe("bullmq");
-    await queue.enqueue(...shopifyManualSyncJob({ ...request, requestedAt: REQUESTED_AT }));
+    await queue.enqueue(...shopifyManualSyncJob(request));
   }
 
   afterAll(async () => {
@@ -97,16 +94,21 @@ describe.skipIf(!REDIS_URL)("the Shopify manual-sync queue on BullMQ", () => {
     expect(state.started.filter((id) => id === 1)).toHaveLength(2);
   });
 
-  it("should not retry a failed run, and should hand it to the failure hook once", async () => {
+  it("should not retry a failed run — the handler has already recorded it for the page", async () => {
     const before = state.started.filter((id) => id === 3).length;
 
     await enqueueShopifyManualSync({ storeId: 3, organizationId: 42 });
     await until(() => state.started.filter((id) => id === 3).length === before + 1, "store 3 to run");
     finish(3, new Error("shopify said no"));
 
-    await until(() => state.markFailed.mock.calls.length === 1, "the failure hook");
-    await new Promise((r) => setTimeout(r, 600));
+    // A retry would sit in "delayed" for the 30s backoff; a final failure goes
+    // straight to "failed". Waiting on the counts proves it without the 30s.
+    const counts = async () => (await queue!.stats()).counts;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline && ((await counts())?.failed ?? 0) < 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(await counts()).toMatchObject({ failed: 1, delayed: 0 });
     expect(state.started.filter((id) => id === 3)).toHaveLength(before + 1);
-    expect(state.markFailed).toHaveBeenCalledWith({ storeId: 3, organizationId: 42, requestedAt: REQUESTED_AT });
   });
 });

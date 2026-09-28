@@ -5,7 +5,6 @@ const state = vi.hoisted(() => ({
   handle: vi.fn(async () => {}),
   markFailed: vi.fn(async () => {}),
   handleManual: vi.fn(async () => {}),
-  markManualFailed: vi.fn(async () => {}),
 }));
 
 vi.mock("../../jobQueue", () => ({
@@ -17,7 +16,6 @@ vi.mock("./syncOrchestrator", () => ({
 }));
 vi.mock("./manualSync", () => ({
   handleShopifyManualSync: (...args: unknown[]) => state.handleManual(...args),
-  markShopifyManualSyncFailed: (...args: unknown[]) => state.markManualFailed(...args),
 }));
 
 const enqueue = vi.fn(async () => {});
@@ -83,14 +81,14 @@ describe("Shopify order sync durable queue", () => {
 describe("when a merchant asks for a manual sync", () => {
   it("should queue it on its own queue, which falls back in-process rather than refusing without Redis", async () => {
     const { enqueueShopifyManualSync } = await import("./syncQueue");
-    const payload = { storeId: 7, organizationId: 42, requestedAt: "2026-09-28T10:00:00.000Z" };
+    const payload = { storeId: 7, organizationId: 42 };
 
     await enqueueShopifyManualSync(payload);
 
     const [name, handler, options] = state.createQueue.mock.calls[0] as [
       string,
       (job: { data: typeof payload }) => Promise<void>,
-      Record<string, unknown> & { onFinalFailure(job: { data: typeof payload }): Promise<void> },
+      Record<string, unknown>,
     ];
     expect(name).toBe("shopify-manual-sync");
     // Losing a manual sync loses nothing (the watermark has not moved), unlike
@@ -101,24 +99,24 @@ describe("when a merchant asks for a manual sync", () => {
     expect(options).toMatchObject({ attempts: 1 });
     expect(options.uniqueJobNames).toBeUndefined();
     expect(options.concurrency).toBeGreaterThan(1);
+    // The handler records a failed run itself, in the same step that answers
+    // the request; a queue-level hook could not know which requests it answered.
+    expect(options.onFinalFailure).toBeUndefined();
 
     await handler({ data: payload });
     expect(state.handleManual).toHaveBeenCalledWith(payload);
-    await options.onFinalFailure({ data: payload });
-    expect(state.markManualFailed).toHaveBeenCalledWith(payload);
   });
 
   it("should coalesce repeated requests per store, and only per store", async () => {
     const { enqueueShopifyManualSync } = await import("./syncQueue");
 
-    const requestedAt = "2026-09-28T10:00:00.000Z";
-    await enqueueShopifyManualSync({ storeId: 7, organizationId: 42, requestedAt });
-    await enqueueShopifyManualSync({ storeId: 8, organizationId: 42, requestedAt });
+    await enqueueShopifyManualSync({ storeId: 7, organizationId: 42 });
+    await enqueueShopifyManualSync({ storeId: 8, organizationId: 42 });
 
-    expect(enqueue).toHaveBeenNthCalledWith(1, "manual-7", { storeId: 7, organizationId: 42, requestedAt }, {
+    expect(enqueue).toHaveBeenNthCalledWith(1, "manual-7", { storeId: 7, organizationId: 42 }, {
       coalesceKey: "shopify-manual-sync:42:7",
     });
-    expect(enqueue).toHaveBeenNthCalledWith(2, "manual-8", { storeId: 8, organizationId: 42, requestedAt }, {
+    expect(enqueue).toHaveBeenNthCalledWith(2, "manual-8", { storeId: 8, organizationId: 42 }, {
       coalesceKey: "shopify-manual-sync:42:8",
     });
   });

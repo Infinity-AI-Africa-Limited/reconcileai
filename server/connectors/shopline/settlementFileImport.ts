@@ -280,11 +280,15 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  *
  * The key is built only from values that survive storage unchanged, so a stored
  * row and the same row re-imported produce the same key:
- *   - the order and gateway references as the FILE wrote them (`rawData`, kept
- *     verbatim — `transactionRef` itself may be rewritten to a canonical order
- *     id once the order has synced), compared in their STORED form: `#1001` in
- *     one export and `1001` in an overlapping one name the same order, are
- *     stored identically, and must not count one payment twice;
+ *   - the ORDER reference as the file wrote it (`rawData`, kept verbatim —
+ *     `transactionRef` itself may be rewritten to a canonical order id once the
+ *     order has synced), compared in its STORED form: `#1001` in one export and
+ *     `1001` in an overlapping one are stored as one order, match as one order,
+ *     and must not count one payment twice;
+ *   - the GATEWAY reference exactly as the file wrote it. It is the provider's
+ *     own id for one payment, so it is NOT normalised: `GW:A` and `GWA` may be
+ *     two payments, and merging them would drop one silently — whereas a
+ *     double count at least surfaces as a duplicate exception;
  *   - direction, amount in cents, currency;
  *   - the settlement date to the second (the column's precision), or nothing
  *     when the file had no date — `transactionDate` then holds the import time
@@ -295,7 +299,7 @@ export function settlementEventKey(row: SettlementEventFields): string {
   const orderRef = sanitizeRef(
     typeof provenance.originalOrderRef === "string" ? provenance.originalOrderRef : row.transactionRef,
   ) ?? "";
-  const gatewayRef = sanitizeRef(typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : null) ?? "";
+  const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : "";
   const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
   return JSON.stringify([
     orderRef,

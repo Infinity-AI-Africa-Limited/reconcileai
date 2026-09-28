@@ -219,11 +219,15 @@ export const shopifySyncCursors = mysqlTable(
      */
     syncRequestedAt: timestamp("syncRequestedAt"),
     /**
-     * The syncRequestedAt of the latest manual request a finished manual run
-     * answered. Every sync writes this cursor, so without it a webhook sync
-     * finishing mid-request would read as the request's own outcome.
+     * Manual requests are counted, not timed. Every request increments
+     * syncRequestSeq; a manual run reads it when it STARTS and, when it
+     * finishes, records it as syncAnsweredSeq — so a request is pending while
+     * syncRequestSeq > syncAnsweredSeq. Timestamps could not decide this: the
+     * columns hold whole seconds, so a request made in the second a run started
+     * looked answered by a run that never covered it.
      */
-    syncAnsweredAt: timestamp("syncAnsweredAt"),
+    syncRequestSeq: int("syncRequestSeq").default(0).notNull(),
+    syncAnsweredSeq: int("syncAnsweredSeq").default(0).notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },

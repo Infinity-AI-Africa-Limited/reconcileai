@@ -2,12 +2,17 @@ import { MySqlDialect } from "drizzle-orm/mysql-core";
 import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runToNow } = vi.hoisted(() => ({ runToNow: vi.fn(async () => []) }));
-vi.mock("./syncOrchestrator", () => ({ runShopifyOrderSyncToNow: runToNow }));
+const { runToNow, recorded } = vi.hoisted(() => ({
+  runToNow: vi.fn(async () => []),
+  recorded: new WeakSet<object>(),
+}));
+vi.mock("./syncOrchestrator", () => ({
+  runShopifyOrderSyncToNow: runToNow,
+  isShopifySyncFailureRecorded: (error: unknown) => typeof error === "object" && error !== null && recorded.has(error),
+}));
 
 import {
   handleShopifyManualSync,
-  recordShopifyManualSyncAnswered,
   requestShopifyManualSync,
   SHOPIFY_SYNC_NOT_COMPLETED,
   SHOPIFY_SYNC_QUEUE_UNAVAILABLE,
@@ -22,11 +27,10 @@ const CURSORS = "shopify_sync_cursors";
 const CLOCK = new Date("2026-09-28T10:00:00.700Z");
 const REQUESTED_AT = new Date("2026-09-28T10:00:00.000Z");
 const request = { storeId: 7, organizationId: 42 };
-const payload = { ...request, requestedAt: REQUESTED_AT.toISOString() };
 const dialect = new MySqlDialect();
 
-function activeStore() {
-  return scriptedDb({ select: { [STORES]: [[{ id: 7 }]] } });
+function rendered(value: unknown) {
+  return dialect.sqlToQuery(value as SQL);
 }
 
 async function codeOf(run: Promise<unknown>): Promise<string> {
@@ -35,38 +39,35 @@ async function codeOf(run: Promise<unknown>): Promise<string> {
   return (error as ShopifyManualSyncError).code;
 }
 
-function rendered(value: unknown) {
-  return dialect.sqlToQuery(value as SQL);
-}
-
 beforeEach(() => {
   runToNow.mockReset().mockResolvedValue([]);
 });
 
 describe("when a manual sync is requested", () => {
-  it("should record the request at whole-second precision and then queue it carrying that time", async () => {
-    const fake = activeStore();
-    let cursorWritesAtEnqueue = -1;
+  function requestDb(countAfter = 5) {
+    return scriptedDb({ select: { [STORES]: [[{ id: 7 }]], [CURSORS]: [[{ requestSeq: countAfter }]] } });
+  }
+
+  it("should count the request, then queue it, answering with its number", async () => {
+    const fake = requestDb(5);
+    let countedAtEnqueue = -1;
     const enqueue = vi.fn(async () => {
-      cursorWritesAtEnqueue = fake.writes("insert", CURSORS).length;
+      countedAtEnqueue = fake.writes("insert", CURSORS).length;
     });
 
     const result = await requestShopifyManualSync(request, { db: fake.db as never, now: () => CLOCK, enqueue });
 
-    // The columns hold whole seconds: a millisecond request time could put a
-    // sync finishing in the same second "before" it, and pending for ever.
-    expect(result).toEqual({ requestedAt: REQUESTED_AT });
-    expect(enqueue).toHaveBeenCalledWith(payload);
-    // Written BEFORE the enqueue, or a fast worker would answer a request not yet recorded.
-    expect(cursorWritesAtEnqueue).toBe(1);
-    expect(fake.writes("insert", CURSORS)[0]).toMatchObject({
-      data: { storeId: 7, organizationId: 42, resource: "orders", syncRequestedAt: REQUESTED_AT },
-      upsert: true,
-    });
+    expect(result).toEqual({ requestedAt: REQUESTED_AT, requestSeq: 5 });
+    expect(enqueue).toHaveBeenCalledWith(request);
+    // Counted BEFORE the enqueue, so the run that answers it cannot start first.
+    expect(countedAtEnqueue).toBe(1);
+    const count = fake.writes("insert", CURSORS)[0];
+    expect(count?.data).toMatchObject({ storeId: 7, organizationId: 42, resource: "orders", syncRequestedAt: REQUESTED_AT, syncRequestSeq: 1 });
+    expect(count?.upsert).toBe(true);
   });
 
   it("should look the store up by id, tenant and status together", async () => {
-    const fake = activeStore();
+    const fake = requestDb();
     await requestShopifyManualSync(request, { db: fake.db as never, enqueue: vi.fn(async () => {}) });
     const lookup = fake.ops.find((op) => op.kind === "select" && op.table === STORES);
     expect(lookup?.where?.params).toEqual([7, 42, "active"]);
@@ -82,17 +83,18 @@ describe("when a manual sync is requested", () => {
   });
 
   it("should record a refused enqueue as answered AND failed, so it shows as failed rather than pending", async () => {
-    const fake = activeStore();
+    const fake = requestDb(5);
     const enqueue = vi.fn(async () => {
       throw new Error("connect ECONNREFUSED redis");
     });
 
     expect(await codeOf(requestShopifyManualSync(request, { db: fake.db as never, now: () => CLOCK, enqueue })))
       .toBe("QUEUE_UNAVAILABLE");
-    expect(fake.writes("update", CURSORS)[0]?.data).toEqual({
-      lastErrorCode: SHOPIFY_SYNC_QUEUE_UNAVAILABLE,
-      lastErrorAt: CLOCK,
-      syncAnsweredAt: REQUESTED_AT,
+    const data = fake.writes("update", CURSORS)[0]?.data ?? {};
+    expect(data).toMatchObject({ lastErrorCode: SHOPIFY_SYNC_QUEUE_UNAVAILABLE, lastErrorAt: CLOCK });
+    expect(rendered(data.syncAnsweredSeq)).toMatchObject({
+      sql: "GREATEST(`shopify_sync_cursors`.`syncAnsweredSeq`, ?)",
+      params: [5],
     });
   });
 
@@ -102,60 +104,48 @@ describe("when a manual sync is requested", () => {
 });
 
 describe("when the queue runs a manual sync", () => {
-  it("should catch the store up as a manual trigger, then record the request answered", async () => {
-    const record = vi.fn(async () => {});
-    await handleShopifyManualSync(payload, { record });
+  it("should answer exactly the requests counted when it STARTED — not one made while it ran", async () => {
+    // Counted 3 when the run starts; a 4th request arrives mid-run. That one is
+    // left pending for the follow-up run the queue keeps for it.
+    const fake = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 3 }]] } });
+    runToNow.mockImplementation(async () => {
+      fake.ops.push({ kind: "insert", table: CURSORS, where: null, data: { note: "request 4 mid-run" }, upsert: true, txId: null, locked: false });
+      return [];
+    });
+
+    await handleShopifyManualSync(request, { db: fake.db as never });
 
     expect(runToNow).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, trigger: "manual" });
-    expect(record).toHaveBeenCalledWith(payload, { failed: false });
+    const snapshot = fake.ops.findIndex((op) => op.kind === "select" && op.table === CURSORS);
+    const midRun = fake.ops.findIndex((op) => op.data?.note === "request 4 mid-run");
+    expect(snapshot).toBeLessThan(midRun);
+    const answered = fake.writes("update", CURSORS)[0]?.data ?? {};
+    expect(Object.keys(answered)).toEqual(["syncAnsweredSeq"]);
+    expect(rendered(answered.syncAnsweredSeq).params).toEqual([3]);
   });
 
-  it("should record the request answered as failed, and still fail the job", async () => {
-    runToNow.mockRejectedValue(new Error("pagination_error"));
-    const record = vi.fn(async () => {});
+  it("should keep the precise code a failed sync recorded, and add a generic one only when it recorded none", async () => {
+    const precise = new Error("pagination_error");
+    recorded.add(precise);
+    const withCode = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 2 }]] } });
+    runToNow.mockRejectedValueOnce(precise);
+    await expect(handleShopifyManualSync(request, { db: withCode.db as never })).rejects.toBe(precise);
+    expect(Object.keys(withCode.writes("update", CURSORS)[0]?.data ?? {})).toEqual(["syncAnsweredSeq"]);
 
-    await expect(handleShopifyManualSync(payload, { record })).rejects.toThrow("pagination_error");
-    expect(record).toHaveBeenCalledWith(payload, { failed: true });
-  });
-
-  it("should not report a synced store as failed when only the bookkeeping write fails", async () => {
-    const record = vi.fn(async () => {
-      throw new Error("deadlock");
+    const withoutCode = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 2 }]] } });
+    runToNow.mockRejectedValueOnce(new Error("Shopify store not found for tenant or inactive"));
+    await expect(handleShopifyManualSync(request, { db: withoutCode.db as never, now: () => CLOCK })).rejects.toThrow();
+    // Answered and failed in ONE statement: the page never sees one without the other.
+    expect(withoutCode.writes("update", CURSORS)).toHaveLength(1);
+    expect(withoutCode.writes("update", CURSORS)[0]?.data).toMatchObject({
+      lastErrorCode: SHOPIFY_SYNC_NOT_COMPLETED,
+      lastErrorAt: CLOCK,
     });
-    await expect(handleShopifyManualSync(payload, { record })).resolves.toBeUndefined();
-  });
-});
-
-describe("when a finished manual run is recorded", () => {
-  it("should never move the answered request backwards, and encode its time as UTC like the column does", async () => {
-    const fake = scriptedDb();
-    await recordShopifyManualSyncAnswered(payload, { failed: false }, { db: fake.db as never });
-
-    const write = fake.writes("update", CURSORS)[0];
-    expect(Object.keys(write?.data ?? {})).toEqual(["syncAnsweredAt"]);
-    const answered = rendered(write?.data?.syncAnsweredAt);
-    expect(answered.sql).toBe("GREATEST(COALESCE(`shopify_sync_cursors`.`syncAnsweredAt`, ?), ?)");
-    // Through the column's own encoder, not the driver's local-time formatting.
-    expect(answered.params).toEqual(["2026-09-28 10:00:00.000", "2026-09-28 10:00:00.000"]);
-    expect(write?.where?.params).toEqual([7, 42, "orders"]);
   });
 
-  it("should add a generic failure code only if the run recorded none since the request, in the same statement", async () => {
-    const fake = scriptedDb();
-    await recordShopifyManualSyncAnswered(payload, { failed: true }, { db: fake.db as never, now: () => CLOCK });
-
-    const data = fake.writes("update", CURSORS)[0]?.data ?? {};
-    expect(Object.keys(data).sort()).toEqual(["lastErrorAt", "lastErrorCode", "syncAnsweredAt"]);
-    const code = rendered(data.lastErrorCode);
-    expect(code.sql).toMatch(/^CASE WHEN \(`shopify_sync_cursors`\.`lastErrorAt` IS NULL OR `shopify_sync_cursors`\.`lastErrorAt` < \?\) THEN \? ELSE `shopify_sync_cursors`\.`lastErrorCode` END$/);
-    expect(code.params).toEqual(["2026-09-28 10:00:00.000", SHOPIFY_SYNC_NOT_COMPLETED]);
-    expect(rendered(data.lastErrorAt).params).toEqual(["2026-09-28 10:00:00.000", "2026-09-28 10:00:00.700"]);
-  });
-
-  it("should write nothing for a payload without a usable request time", async () => {
-    const fake = scriptedDb();
-    await recordShopifyManualSyncAnswered({ ...request, requestedAt: "not-a-time" }, { failed: true }, { db: fake.db as never });
-    expect(fake.ops).toEqual([]);
+  it("should not fail a job whose sync succeeded when only the bookkeeping write fails", async () => {
+    const fake = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 1 }]] }, update: { [CURSORS]: [new Error("deadlock")] } });
+    await expect(handleShopifyManualSync(request, { db: fake.db as never })).resolves.toBeUndefined();
   });
 });
 

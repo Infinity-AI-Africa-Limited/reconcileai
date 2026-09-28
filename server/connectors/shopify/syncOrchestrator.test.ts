@@ -6,6 +6,7 @@ vi.hoisted(() => {
 
 import { toShopifyOrderTransaction } from "./ingest";
 import {
+  isShopifySyncFailureRecorded,
   markShopifyWebhookSyncFailed,
   materialShopifyOrderEvidenceChanged,
   partitionShopifyOrders,
@@ -116,13 +117,17 @@ describe("tenant-isolated sync orchestration", () => {
   it("refuses a tenant/store mismatch before fetching protected order data", async () => {
     const fake = scriptedDb({ select: { [STORES]: [[]] } });
     const fetchOrders = vi.fn(async () => [order()]);
-    await expect(
-      runShopifyOrderSync(
-        { storeId: 7, organizationId: 999, trigger: "manual" },
-        { db: fake.db as never, fetchOrders },
-      ),
-    ).rejects.toThrow(/not found for tenant/);
+    const refusal = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 999, trigger: "manual" },
+      { db: fake.db as never, fetchOrders },
+    ).then(() => null, (e: unknown) => e);
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toMatch(/not found for tenant/);
     expect(fetchOrders).not.toHaveBeenCalled();
+    // Nothing was written for a store it could not find, so a manual run must
+    // record its own failure rather than assume this one did.
+    expect(isShopifySyncFailureRecorded(refusal)).toBe(false);
+    expect(fake.writes("insert", CURSORS)).toEqual([]);
     const lookup = fake.ops.find((op) => op.kind === "select" && op.table === STORES);
     expect(lookup?.where?.params).toEqual(expect.arrayContaining([7, 999, "active"]));
   });
@@ -191,18 +196,18 @@ describe("tenant-isolated sync orchestration", () => {
       },
     });
     const fetchOrders = vi.fn(async () => [order()]);
-    await expect(
-      runShopifyOrderSync(
-        { storeId: 7, organizationId: 42, trigger: "manual" },
-        { db: fake.db as never, fetchOrders },
-      ),
-    ).rejects.toThrow(/active tenant administrator unavailable/);
+    const failed = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, fetchOrders },
+    ).then(() => null, (e: unknown) => e);
+    expect((failed as Error).message).toMatch(/active tenant administrator unavailable/);
     expect(fetchOrders).not.toHaveBeenCalled();
-    // The failure is recorded WITH its time: a queued manual sync is judged by
-    // whether an outcome was recorded after it was requested.
+    // The precise code is recorded, with its time, and the error says so — so a
+    // manual run answering a request keeps this code rather than a generic one.
     const failure = fake.writes("insert", CURSORS)[0];
     expect(failure?.data).toMatchObject({ lastErrorCode: "sync_actor_unavailable", lastErrorAt: expect.any(Date) });
     expect(failure?.data?.lastErrorAt).toBeInstanceOf(Date);
+    expect(isShopifySyncFailureRecorded(failed)).toBe(true);
     const actorLookups = fake.ops.filter((op) => op.kind === "select" && op.table === USERS);
     expect(actorLookups).toHaveLength(2);
     expect(actorLookups[0]?.where?.params).toEqual(expect.arrayContaining([9, 42, "admin", true]));

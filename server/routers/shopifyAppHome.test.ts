@@ -132,8 +132,8 @@ describe("when the workspace loads its context", () => {
           lastSuccessfulAt: new Date("2026-09-25T07:30:00.000Z"),
           lastErrorCode: null,
           syncRequestedAt: new Date("2026-09-25T07:29:00.000Z"),
-          syncAnsweredAt: new Date("2026-09-25T07:29:00.000Z"),
-          watermarkUpdatedAt: new Date("2026-09-25T07:29:30.000Z"),
+          syncRequestSeq: 3,
+          syncAnsweredSeq: 3,
         }]],
       },
     });
@@ -149,8 +149,8 @@ describe("when the workspace loads its context", () => {
         lastSuccessfulAt: "2026-09-25T07:30:00.000Z",
         lastErrorCode: null,
         requestedAt: "2026-09-25T07:29:00.000Z",
-        answeredAt: "2026-09-25T07:29:00.000Z",
-        syncedThrough: "2026-09-25T07:29:30.000Z",
+        requestSeq: 3,
+        answeredSeq: 3,
       },
       capabilities: { scope: "read_orders", readOrders: true, manualSync: true, shopifyPayments: false, mutations: false },
     });
@@ -161,11 +161,11 @@ describe("when the workspace loads its context", () => {
 
 describe("when the merchant starts a sync", () => {
   it("should queue a sync for only the store the token names, even if the browser also holds a ReconcileAI session", async () => {
-    state.requestSync.mockResolvedValue({ requestedAt: new Date("2026-09-25T08:00:00.000Z") });
+    state.requestSync.mockResolvedValue({ requestedAt: new Date("2026-09-25T08:00:00.000Z"), requestSeq: 4 });
     const result = await caller(TOKEN, { id: 1, role: "super_admin", organizationId: 999, isReadOnly: false }).syncNow();
 
     expect(state.requestSync).toHaveBeenCalledWith({ storeId: 7, organizationId: 42 });
-    expect(result).toEqual({ status: "queued", requestedAt: "2026-09-25T08:00:00.000Z" });
+    expect(result).toEqual({ status: "queued", requestedAt: "2026-09-25T08:00:00.000Z", requestSeq: 4 });
     expect(JSON.stringify(result)).not.toMatch(/storeId|organizationId/);
   });
 
