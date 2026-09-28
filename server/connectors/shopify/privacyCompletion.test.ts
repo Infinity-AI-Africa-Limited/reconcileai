@@ -96,7 +96,9 @@ function baseWorkerScript(overrides: Parameters<typeof scriptedDb>[0] = {}) {
     update: overrides.update,
     insert: overrides.insert,
     delete: overrides.delete,
-    standing: overrides.standing,
+    // The tenant is not being redacted: read (and, at the final write, locked)
+    // before any tenant data is created.
+    standing: { organizations: [{ deletionState: "active" }], ...overrides.standing },
   });
 }
 
@@ -803,5 +805,66 @@ describe("privacy artifact authorization and lifecycle", () => {
       dataClassesNotStored: ["email"],
     });
     expect(bytes.toString("utf8")).toBe(`${JSON.stringify(JSON.parse(bytes.toString("utf8")))}\n`);
+  });
+});
+
+describe("when a shop redaction fences the tenant", () => {
+  // Greptile #160 (review of 88a3ec5): tenant work must not create, persist or
+  // egress data after shop/redact begins — an export is all three.
+  const zeroRecordRun = (organizations: unknown[][], deleteObject = vi.fn(async () => {})) => {
+    const fake = baseWorkerScript({
+      select: {
+        organizations,
+        [TXNS]: [[]],
+        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json" }]],
+      },
+    });
+    const putObject = vi.fn(async (key: string) => ({ key, url: "" }));
+    const run = handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_org, value) => value === "enc-customer" ? "41" : "501"),
+        putObject,
+        deleteObject,
+      },
+    );
+    return { fake, run, putObject, deleteObject };
+  };
+
+  it("should create no export when the tenant is already fenced", async () => {
+    const { fake, run, putObject } = zeroRecordRun([[{ deletionState: "redacting" }]]);
+    await run;
+
+    expect(putObject).not.toHaveBeenCalled();
+    expect(fake.writes("insert", ARTIFACTS)).toEqual([]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+      status: "blocked_dependency",
+      failureCode: "shop_redaction_in_progress",
+    });
+  });
+
+  it("should offer no delivery, and take the export back, when the fence lands while it is written", async () => {
+    // Active at the early check; fenced by the time the final transition locks.
+    const { fake, run, putObject, deleteObject } = zeroRecordRun([[{ deletionState: "active" }], [{ deletionState: "redacting" }]]);
+    await run;
+
+    expect(putObject).toHaveBeenCalledTimes(1);
+    expect(fake.writes("update", JOBS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "blocked_dependency", failureCode: "shop_redaction_in_progress" });
+    expect(deleteObject).toHaveBeenCalledWith("org/42/shopify-privacy/901.json");
+    expect(fake.writes("update", ARTIFACTS).at(-1)?.data).toMatchObject({ status: "deleted" });
+  });
+
+  it("should lock the organisation before the store at the final transition", async () => {
+    const { fake, run } = zeroRecordRun([[{ deletionState: "active" }], [{ deletionState: "active" }]]);
+    await run;
+
+    const finalTx = fake.ops.filter((op) => op.txId !== null && op.locked);
+    expect(finalTx.map((op) => op.table).slice(-2)).toEqual(["organizations", STORES]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "awaiting_delivery" });
   });
 });

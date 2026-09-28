@@ -60,7 +60,9 @@ function baseScript(overrides: Parameters<typeof scriptedDb>[0] = {}) {
     update: overrides.update,
     insert: overrides.insert,
     delete: overrides.delete,
-    standing: overrides.standing,
+    // The tenant is not being redacted: read (and, at the final write, locked)
+    // before any tenant data is created.
+    standing: { organizations: [{ deletionState: "active" }], ...overrides.standing },
   });
 }
 
@@ -386,5 +388,35 @@ describe("when a persisted order deviates from the fixed projection", () => {
       status: "blocked_dependency",
       failureCode: "unsupported_transaction_footprint",
     });
+  });
+});
+
+describe("when a shop redaction fences the tenant", () => {
+  // Greptile #160 (review of 88a3ec5): the worker must write nothing into a
+  // tenant whose shop/redact has begun — tombstones are new tenant rows.
+  it.each([
+    ["the organisation", { standing: { organizations: [{ deletionState: "redacting" }] } }],
+    ["the store", { select: { [STORES]: [[{ ...FENCED_STORE, status: "redacting" }]] } }],
+  ])("should park without writing when %s is fenced, and release its own fence", async (_where, script) => {
+    const fake = baseScript({ ...script, select: { [TXNS]: [[SCOPE_A_ROW]], ...(script as { select?: object }).select } } as never);
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    expect(fake.writes("insert", TOMBSTONES)).toEqual([]);
+    expect(fake.writes("delete", SELECTORS)).toEqual([]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+      status: "blocked_dependency",
+      failureCode: "shop_redaction_in_progress",
+    });
+    expect(fenceRelease(fake)?.where?.params).toEqual([7, 42, "customer_redacting", 901]);
+  });
+
+  it("should lock the organisation before the store, the order shop-redaction admission uses", async () => {
+    const fake = baseScript({ select: { [TXNS]: [[]] } });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    const locks = fake.ops.filter((op) => op.txId !== null && op.locked).map((op) => op.table);
+    expect(locks.slice(0, 2)).toEqual(["organizations", STORES]);
   });
 });
