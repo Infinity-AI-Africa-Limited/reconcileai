@@ -179,6 +179,11 @@ describe("when privacy artifact delivery is staged in the authenticated portal",
     state.db = fake.db;
     expect(await caller("admin").listPrivacyDeliveries()).toEqual([notice]);
     expect(fake.ops[0]?.where?.params).toEqual(expect.arrayContaining([OWN_ORG, 7, "ready"]));
+    // Offered only while its job awaits delivery, and never after the shop fence.
+    expect(fake.ops[0]?.where?.params).toEqual(expect.arrayContaining(["awaiting_delivery", "active", "redacting"]));
+    expect(fake.ops[0]?.where?.sql).toMatch(/`shopify_privacy_data_request_jobs`\.`status` = \?/);
+    expect(fake.ops[0]?.where?.sql).toMatch(/`organizations`\.`deletionState` = \?/);
+    expect(fake.ops[0]?.where?.sql).toMatch(/`shopify_connector_stores`\.`status` <> \?/);
     for (const forbidden of ["objectKey", "sha256", "organizationId", "storeId", "recipientUserId", "requestId"]) {
       expect(Object.keys(notice)).not.toContain(forbidden);
     }

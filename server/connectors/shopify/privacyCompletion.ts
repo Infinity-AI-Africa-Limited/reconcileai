@@ -940,7 +940,10 @@ export async function handleShopifyPrivacyJob(
             eq(shopifyPrivacyArtifacts.status, "writing"),
           ),
         );
-      if (affectedRows(readyWrite) !== 1) throw new Error("Artifact metadata write lost");
+      if (affectedRows(readyWrite) !== 1) {
+        await reclaimLateUpload(db, job, artifact.objectKey, deps.deleteObject ?? storageDelete, now);
+        throw new Error("Artifact metadata write lost");
+      }
     }
 
     await db.transaction(async (tx) => {
@@ -1016,6 +1019,59 @@ export async function handleShopifyPrivacyJob(
   }
 }
 
+/**
+ * This worker's upload finished after its artifact stopped being `writing`.
+ *
+ * An upload can outlive the lease it started under. Meanwhile another worker
+ * may park the job for shop redaction, or the sweep may expire the artifact, and
+ * either one deletes the object and marks the row `deleted` — before this upload
+ * lands and writes the object again. Nothing would then ever delete it: the sweep
+ * only looks at `writing`/`ready` rows. So the row is put back as `writing` and
+ * due now, BEFORE the delete is tried, making the sweep responsible for the
+ * object again even if this process stops or the delete fails. The delete here
+ * only saves waiting for the next sweep.
+ *
+ * A row that is `ready` belongs to another worker that finished this artifact;
+ * its object is not this worker's to delete.
+ */
+async function reclaimLateUpload(
+  db: Db,
+  job: Pick<ClaimedJob, "requestId" | "organizationId" | "storeId">,
+  objectKey: string,
+  deleteObject: DeleteObject,
+  now: Date,
+): Promise<void> {
+  const artifactScope = and(
+    eq(shopifyPrivacyArtifacts.requestId, job.requestId),
+    eq(shopifyPrivacyArtifacts.organizationId, job.organizationId),
+    eq(shopifyPrivacyArtifacts.storeId, job.storeId),
+    eq(shopifyPrivacyArtifacts.objectKey, objectKey),
+  );
+  const [current] = await db
+    .select({ status: shopifyPrivacyArtifacts.status })
+    .from(shopifyPrivacyArtifacts)
+    .where(artifactScope)
+    .limit(1);
+  if (current?.status === "ready") return;
+  if (current?.status === "deleted") {
+    await db
+      .update(shopifyPrivacyArtifacts)
+      .set({ status: "writing", deletedAt: null, expiresAt: now })
+      .where(and(artifactScope, eq(shopifyPrivacyArtifacts.status, "deleted")));
+  }
+  try {
+    await deleteObject(objectKey);
+    await db
+      .update(shopifyPrivacyArtifacts)
+      .set({ status: "deleted", deletedAt: now })
+      .where(and(artifactScope, eq(shopifyPrivacyArtifacts.status, "writing")));
+  } catch {
+    console.error("[shopify-privacy] late upload not discarded yet; the recovery sweep will retry", {
+      code: "artifact_discard_deferred",
+    });
+  }
+}
+
 async function discardUndeliveredArtifact(
   db: Db,
   job: Pick<ClaimedJob, "requestId" | "organizationId" | "storeId">,
@@ -1024,7 +1080,7 @@ async function discardUndeliveredArtifact(
 ): Promise<void> {
   try {
     const [artifact] = await db
-      .select({ objectKey: shopifyPrivacyArtifacts.objectKey })
+      .select({ objectKey: shopifyPrivacyArtifacts.objectKey, status: shopifyPrivacyArtifacts.status })
       .from(shopifyPrivacyArtifacts)
       .where(
         and(
@@ -1038,6 +1094,9 @@ async function discardUndeliveredArtifact(
       .limit(1);
     if (!artifact) return;
     await deleteObject(artifact.objectKey);
+    // Only the state whose object was just deleted. A late upload that finished
+    // in between moved `writing` to `ready` and may have written the object
+    // again; that row stays due, and the sweep deletes it next time round.
     await db
       .update(shopifyPrivacyArtifacts)
       .set({ status: "deleted", deletedAt: now })
@@ -1046,6 +1105,7 @@ async function discardUndeliveredArtifact(
           eq(shopifyPrivacyArtifacts.requestId, job.requestId),
           eq(shopifyPrivacyArtifacts.organizationId, job.organizationId),
           eq(shopifyPrivacyArtifacts.storeId, job.storeId),
+          eq(shopifyPrivacyArtifacts.status, artifact.status),
           eq(shopifyPrivacyArtifacts.deliveryStatus, "pending"),
         ),
       );
@@ -1078,6 +1138,10 @@ export interface AuthorizedPrivacyArtifact {
   schemaVersion: number;
   sha256: string | null;
   sizeBytes: number | null;
+  /** The data-request job's state: only `awaiting_delivery` offers the export. */
+  jobStatus: string;
+  organizationDeletionState: string;
+  storeStatus: string;
 }
 
 export function mayDownloadShopifyPrivacyArtifact(
@@ -1099,7 +1163,15 @@ export function mayDownloadShopifyPrivacyArtifact(
       /^[0-9a-f]{64}$/.test(artifact.sha256) &&
       typeof artifact.sizeBytes === "number" &&
       artifact.sizeBytes > 0 &&
-      artifact.expiresAt > now,
+      artifact.expiresAt > now &&
+      // On offer only once its job says so. An export written by an attempt that
+      // crashed before its final transition is `ready` but was never offered: a
+      // later attempt may still discard it (the shop fence does), so serving it
+      // would put bytes in a merchant's hands that the system then forgets.
+      artifact.jobStatus === "awaiting_delivery" &&
+      // And never once shop/redact has fenced the tenant: that is egress of a
+      // tenant's data after its erasure began.
+      !shopRedactionFenced({ deletionState: artifact.organizationDeletionState }, { status: artifact.storeStatus }),
   );
 }
 
@@ -1121,6 +1193,9 @@ export async function loadPrivacyArtifactForDownload(
       sha256: shopifyPrivacyArtifacts.sha256,
       sizeBytes: shopifyPrivacyArtifacts.sizeBytes,
       claimedByUserId: shopifyConnectorStores.claimedByUserId,
+      jobStatus: shopifyPrivacyDataRequestJobs.status,
+      organizationDeletionState: organizations.deletionState,
+      storeStatus: shopifyConnectorStores.status,
     })
     .from(shopifyPrivacyArtifacts)
     .innerJoin(
@@ -1130,6 +1205,15 @@ export async function loadPrivacyArtifactForDownload(
         eq(shopifyConnectorStores.organizationId, shopifyPrivacyArtifacts.organizationId),
       ),
     )
+    .innerJoin(
+      shopifyPrivacyDataRequestJobs,
+      and(
+        eq(shopifyPrivacyDataRequestJobs.requestId, shopifyPrivacyArtifacts.requestId),
+        eq(shopifyPrivacyDataRequestJobs.organizationId, shopifyPrivacyArtifacts.organizationId),
+        eq(shopifyPrivacyDataRequestJobs.storeId, shopifyPrivacyArtifacts.storeId),
+      ),
+    )
+    .innerJoin(organizations, eq(organizations.id, shopifyPrivacyArtifacts.organizationId))
     .where(eq(shopifyPrivacyArtifacts.publicId, publicId))
     .limit(1);
   return row ?? null;
@@ -1370,6 +1454,7 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
       organizationId: shopifyPrivacyArtifacts.organizationId,
       storeId: shopifyPrivacyArtifacts.storeId,
       objectKey: shopifyPrivacyArtifacts.objectKey,
+      status: shopifyPrivacyArtifacts.status,
       deliveryStatus: shopifyPrivacyArtifacts.deliveryStatus,
       downloadedAt: shopifyPrivacyArtifacts.downloadedAt,
     })
@@ -1385,8 +1470,12 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
   let deleted = 0;
   for (const row of rows) {
     await (deps.deleteObject ?? storageDelete)(row.objectKey);
-    await db.transaction(async (tx) => {
-      await tx
+    const marked = await db.transaction(async (tx) => {
+      // Only the state whose object was just deleted. A late upload that
+      // finished in between moved `writing` to `ready` and may have written the
+      // object again: that row stays due, so the next sweep deletes it again,
+      // rather than being marked `deleted` over an object that exists.
+      const moved = await tx
         .update(shopifyPrivacyArtifacts)
         .set({ status: "deleted", deletedAt: now })
         .where(
@@ -1394,8 +1483,10 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
             eq(shopifyPrivacyArtifacts.requestId, row.requestId),
             eq(shopifyPrivacyArtifacts.organizationId, row.organizationId),
             eq(shopifyPrivacyArtifacts.storeId, row.storeId),
+            eq(shopifyPrivacyArtifacts.status, row.status),
           ),
         );
+      if (affectedRows(moved) !== 1) return false;
       if (row.deliveryStatus !== "acknowledged") {
         // Served but never confirmed is NOT "undelivered": the merchant may well
         // hold the file. Say which it is, so the person reviewing it does not
@@ -1426,8 +1517,9 @@ export async function cleanupExpiredShopifyPrivacyArtifacts(
             ),
           );
       }
+      return true;
     });
-    deleted += 1;
+    if (marked) deleted += 1;
   }
   return deleted;
 }
