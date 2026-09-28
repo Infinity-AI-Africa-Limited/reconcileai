@@ -3,8 +3,8 @@
  *
  * The authority here is the App Bridge ID token in `Authorization`, never the
  * ReconcileAI session, and every answer is an allow-list. Calls go through the
- * real procedures; only the token verifier, the sync, the import and the
- * database are replaced.
+ * real procedures; only the token verifier, the sync request, the import and
+ * the database are replaced.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TRPCError } from "@trpc/server";
@@ -15,7 +15,7 @@ vi.hoisted(() => {
 const state = vi.hoisted(() => ({
   db: null as unknown,
   authenticate: vi.fn(),
-  runSync: vi.fn(),
+  requestSync: vi.fn(),
   importEvidence: vi.fn(),
 }));
 
@@ -27,9 +27,9 @@ vi.mock("../connectors/shopify/embeddedAuth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../connectors/shopify/embeddedAuth")>()),
   authenticateShopifyEmbeddedRequest: state.authenticate,
 }));
-vi.mock("../connectors/shopify/syncOrchestrator", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../connectors/shopify/syncOrchestrator")>()),
-  runShopifyOrderSync: state.runSync,
+vi.mock("../connectors/shopify/manualSync", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../connectors/shopify/manualSync")>()),
+  requestShopifyManualSync: state.requestSync,
 }));
 vi.mock("../connectors/shopify/settlementEvidence", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../connectors/shopify/settlementEvidence")>()),
@@ -39,8 +39,8 @@ vi.mock("../connectors/shopify/settlementEvidence", async (importOriginal) => ({
 import { ENV } from "../_core/env";
 import { ShopifyEmbeddedAuthError, type ShopifyEmbeddedContext } from "../connectors/shopify/embeddedAuth";
 import { scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
+import { ShopifyManualSyncError } from "../connectors/shopify/manualSync";
 import { ShopifySettlementEvidenceError } from "../connectors/shopify/settlementEvidence";
-import { ShopifyTokenUnavailableError } from "../connectors/shopify/tokenStore";
 import { shopifyAppHomeRouter } from "./shopifyAppHome";
 
 const CURSORS = "shopify_sync_cursors";
@@ -86,7 +86,7 @@ let clientId: string;
 beforeEach(() => {
   clientId = ENV.shopifyClientId;
   state.authenticate.mockReset().mockResolvedValue(context);
-  state.runSync.mockReset();
+  state.requestSync.mockReset();
   state.importEvidence.mockReset();
   state.db = scriptedDb().db;
 });
@@ -113,7 +113,7 @@ describe("when the ID token does not verify", () => {
   it("should refuse as unauthenticated before anything runs", async () => {
     state.authenticate.mockRejectedValue(new ShopifyEmbeddedAuthError("TOKEN_INVALID"));
     expect(await refusal(() => caller().syncNow())).toEqual({ code: "UNAUTHORIZED", message: "authentication_required" });
-    expect(state.runSync).not.toHaveBeenCalled();
+    expect(state.requestSync).not.toHaveBeenCalled();
   });
 
   it("should answer an outage, not an authentication failure, when verification itself is unavailable", async () => {
@@ -127,7 +127,14 @@ describe("when the ID token does not verify", () => {
 describe("when the workspace loads its context", () => {
   it("should return a PII-free store view, scoped cursor evidence and fixed Scope A capabilities", async () => {
     const db = scriptedDb({
-      select: { [CURSORS]: [[{ lastSuccessfulAt: new Date("2026-09-25T07:30:00.000Z"), lastErrorCode: null }]] },
+      select: {
+        [CURSORS]: [[{
+          lastSuccessfulAt: new Date("2026-09-25T07:30:00.000Z"),
+          lastErrorCode: null,
+          lastErrorAt: new Date("2026-09-24T07:30:00.000Z"),
+          syncRequestedAt: new Date("2026-09-25T07:29:00.000Z"),
+        }]],
+      },
     });
     state.db = db.db;
     state.authenticate.mockResolvedValue({ ...context, contactEmail: "owner@example.com", accessToken: "must-not-leak" });
@@ -137,7 +144,12 @@ describe("when the workspace loads its context", () => {
     expect(state.authenticate).toHaveBeenCalledWith(TOKEN);
     expect(view).toEqual({
       store: { shopDomain: context.shopDomain, displayName: context.displayName, currency: context.currency },
-      sync: { lastSuccessfulAt: "2026-09-25T07:30:00.000Z", lastErrorCode: null },
+      sync: {
+        lastSuccessfulAt: "2026-09-25T07:30:00.000Z",
+        lastErrorCode: null,
+        lastErrorAt: "2026-09-24T07:30:00.000Z",
+        requestedAt: "2026-09-25T07:29:00.000Z",
+      },
       capabilities: { scope: "read_orders", readOrders: true, manualSync: true, shopifyPayments: false, mutations: false },
     });
     expect(JSON.stringify(view)).not.toMatch(/owner@example\.com|must-not-leak|storeId|organizationId|shopifyUserId/);
@@ -146,40 +158,21 @@ describe("when the workspace loads its context", () => {
 });
 
 describe("when the merchant starts a sync", () => {
-  const report = {
-    success: true,
-    organizationId: 42,
-    storeId: 7,
-    window: { from: new Date("2026-09-25T07:00:00.000Z"), to: new Date("2026-09-25T08:00:00.000Z") },
-    fetched: 3,
-    inserted: 2,
-    updated: 1,
-    unchanged: 0,
-    batchId: 998,
-  };
-
-  it("should sync only the store the token names, even if the browser also holds a ReconcileAI session", async () => {
-    state.runSync.mockResolvedValue(report);
+  it("should queue a sync for only the store the token names, even if the browser also holds a ReconcileAI session", async () => {
+    state.requestSync.mockResolvedValue({ requestedAt: new Date("2026-09-25T08:00:00.000Z") });
     const result = await caller(TOKEN, { id: 1, role: "super_admin", organizationId: 999, isReadOnly: false }).syncNow();
 
-    expect(state.runSync).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, trigger: "manual" });
-    expect(result).toEqual({
-      success: true,
-      window: { from: "2026-09-25T07:00:00.000Z", to: "2026-09-25T08:00:00.000Z" },
-      fetched: 3,
-      inserted: 2,
-      updated: 1,
-      unchanged: 0,
-    });
-    expect(JSON.stringify(result)).not.toMatch(/998|storeId|organizationId/);
+    expect(state.requestSync).toHaveBeenCalledWith({ storeId: 7, organizationId: 42 });
+    expect(result).toEqual({ status: "queued", requestedAt: "2026-09-25T08:00:00.000Z" });
+    expect(JSON.stringify(result)).not.toMatch(/storeId|organizationId/);
   });
 
   it.each([
-    [new ShopifyTokenUnavailableError("another worker holds lease secret-123", "refresh_in_progress"), "CONFLICT", "sync_in_progress"],
-    [new ShopifyTokenUnavailableError("provider rejected private credential", "reauthorize"), "PRECONDITION_FAILED", "store_action_required"],
+    [new ShopifyManualSyncError("STORE_UNAVAILABLE"), "PRECONDITION_FAILED", "store_action_required"],
+    [new ShopifyManualSyncError("QUEUE_UNAVAILABLE"), "SERVICE_UNAVAILABLE", "service_unavailable"],
     [new Error("database host and password details"), "SERVICE_UNAVAILABLE", "service_unavailable"],
-  ] as const)("should map %s to a stable code without its detail", async (error, code, message) => {
-    state.runSync.mockRejectedValue(error);
+  ] as const)("should map a refused request (%s) to a stable code without its detail", async (error, code, message) => {
+    state.requestSync.mockRejectedValue(error);
     expect(await refusal(() => caller().syncNow())).toEqual({ code, message });
   });
 });

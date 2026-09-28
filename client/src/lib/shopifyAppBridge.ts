@@ -11,6 +11,10 @@ export type ShopifyAppBridgeContext = {
   sync: {
     lastSuccessfulAt: string | null;
     lastErrorCode: string | null;
+    /** When lastErrorCode was recorded; null for errors recorded before this was tracked. */
+    lastErrorAt: string | null;
+    /** When a manual sync was last requested. */
+    requestedAt: string | null;
   };
   capabilities: {
     scope: "read_orders";
@@ -21,13 +25,10 @@ export type ShopifyAppBridgeContext = {
   };
 };
 
-export type ShopifySyncReport = {
-  success: boolean;
-  window: { from: string; to: string };
-  fetched: number;
-  inserted: number;
-  updated: number;
-  unchanged: number;
+/** A manual sync is queued, not run, by the request; `context` reports its outcome. */
+export type ShopifySyncRequest = {
+  status: "queued";
+  requestedAt: string;
 };
 
 export type ShopifySettlementField =
@@ -264,7 +265,7 @@ export async function loadShopifyAppHomeContext(): Promise<ShopifyAppBridgeConte
   return appHomeCall(() => embeddedClient.shopifyAppHome.context.query());
 }
 
-export async function triggerShopifyOrderSync(): Promise<ShopifySyncReport> {
+export async function triggerShopifyOrderSync(): Promise<ShopifySyncRequest> {
   return appHomeCall(() => embeddedClient.shopifyAppHome.syncNow.mutate());
 }
 

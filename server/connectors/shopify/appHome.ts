@@ -13,10 +13,8 @@ import { z } from "zod";
 import { shopifySyncCursors } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
-import { ShopifyOrderApiError } from "./orders";
+import { ShopifyManualSyncError } from "./manualSync";
 import { ShopifySettlementEvidenceError, type ShopifySettlementEvidenceResult } from "./settlementEvidence";
-import type { ShopifyOrderSyncReport } from "./syncOrchestrator";
-import { ShopifyTokenUnavailableError } from "./tokenStore";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -73,6 +71,8 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
     .select({
       lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
       lastErrorCode: shopifySyncCursors.lastErrorCode,
+      lastErrorAt: shopifySyncCursors.lastErrorAt,
+      syncRequestedAt: shopifySyncCursors.syncRequestedAt,
     })
     .from(shopifySyncCursors)
     .where(
@@ -88,21 +88,13 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
     sync: {
       lastSuccessfulAt: cursor?.lastSuccessfulAt?.toISOString() ?? null,
       lastErrorCode: cursor?.lastErrorCode ?? null,
+      lastErrorAt: cursor?.lastErrorAt?.toISOString() ?? null,
+      requestedAt: cursor?.syncRequestedAt?.toISOString() ?? null,
     },
     capabilities: { ...SHOPIFY_APP_HOME_CAPABILITIES },
   };
 }
 
-export function safeSyncReport(report: ShopifyOrderSyncReport) {
-  return {
-    success: report.success,
-    window: { from: report.window.from.toISOString(), to: report.window.to.toISOString() },
-    fetched: report.fetched,
-    inserted: report.inserted,
-    updated: report.updated,
-    unchanged: report.unchanged,
-  };
-}
 
 export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceResult) {
   if (result.committed) {
@@ -129,14 +121,12 @@ export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceRe
   };
 }
 
-/** A failed manual sync, as the merchant may see it. */
-export function syncFailure(error: unknown): TRPCError {
-  if (error instanceof ShopifyTokenUnavailableError) {
-    if (error.reason === "refresh_in_progress") return appHomeError("CONFLICT", "sync_in_progress");
-    if (error.reason === "refresh_retry") return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
-    return appHomeError("PRECONDITION_FAILED", "store_action_required");
-  }
-  if (error instanceof ShopifyOrderApiError && error.code !== "HTTP_ERROR") {
+/**
+ * A manual sync that could not be QUEUED, as the merchant may see it. A sync
+ * that fails once running is reported through `context` instead.
+ */
+export function manualSyncFailure(error: unknown): TRPCError {
+  if (error instanceof ShopifyManualSyncError && error.code === "STORE_UNAVAILABLE") {
     return appHomeError("PRECONDITION_FAILED", "store_action_required");
   }
   return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");

@@ -721,6 +721,9 @@ export async function runShopifyOrderSync(
     };
   } catch (error) {
     const code = errorCode(error);
+    // With the time: a queued manual sync is judged by whether an outcome was
+    // recorded AFTER it was requested, and a code alone cannot say that.
+    const failedAt = new Date();
     await db
       .insert(shopifySyncCursors)
       .values({
@@ -728,8 +731,9 @@ export async function runShopifyOrderSync(
         organizationId: store.organizationId,
         resource: ORDER_RESOURCE,
         lastErrorCode: code,
+        lastErrorAt: failedAt,
       })
-      .onDuplicateKeyUpdate({ set: { lastErrorCode: code } });
+      .onDuplicateKeyUpdate({ set: { lastErrorCode: code, lastErrorAt: failedAt } });
     throw error;
   }
 }

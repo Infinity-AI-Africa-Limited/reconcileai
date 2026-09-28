@@ -196,6 +196,11 @@ describe("tenant-isolated sync orchestration", () => {
       ),
     ).rejects.toThrow(/active tenant administrator unavailable/);
     expect(fetchOrders).not.toHaveBeenCalled();
+    // The failure is recorded WITH its time: a queued manual sync is judged by
+    // whether an outcome was recorded after it was requested.
+    const failure = fake.writes("insert", CURSORS)[0];
+    expect(failure?.data).toMatchObject({ lastErrorCode: "sync_actor_unavailable", lastErrorAt: expect.any(Date) });
+    expect(failure?.data?.lastErrorAt).toBeInstanceOf(Date);
     const actorLookups = fake.ops.filter((op) => op.kind === "select" && op.table === USERS);
     expect(actorLookups).toHaveLength(2);
     expect(actorLookups[0]?.where?.params).toEqual(expect.arrayContaining([9, 42, "admin", true]));

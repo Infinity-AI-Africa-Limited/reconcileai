@@ -207,6 +207,17 @@ export const shopifySyncCursors = mysqlTable(
     watermarkUpdatedAt: timestamp("watermarkUpdatedAt"),
     lastSuccessfulAt: timestamp("lastSuccessfulAt"),
     lastErrorCode: varchar("lastErrorCode", { length: 80 }),
+    /**
+     * When lastErrorCode was last recorded. Without it an error left over from
+     * an earlier run is indistinguishable from the one just requested.
+     */
+    lastErrorAt: timestamp("lastErrorAt"),
+    /**
+     * When a manual sync was last requested. Manual syncs run on the job
+     * queue, so this — compared with lastSuccessfulAt and lastErrorAt — is how
+     * a page knows one is still pending, including after a reload.
+     */
+    syncRequestedAt: timestamp("syncRequestedAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
