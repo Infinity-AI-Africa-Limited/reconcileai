@@ -22,7 +22,7 @@ import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import { organizations } from "../../../drizzle/schema";
 import { shopifyConnectorStores, shopifySyncCursors } from "../../../drizzle/shopify_schema";
 import { ENV } from "../../_core/env";
-import { getDb } from "../../db";
+import { getDb, type DbExecutor } from "../../db";
 import { loggableError } from "../../dbErrors";
 import { singleFlight } from "./privacyQueue";
 import { runShopifyOrderSync } from "./syncOrchestrator";
@@ -85,7 +85,7 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
         ),
       )
       // Whose turn came least recently. `updatedAt` moves on every attempt (see
-      // recordAttempt) and on every cursor write; a store with no cursor yet
+      // recordShopifyBackstopAttempt) and on every cursor write; a store with no cursor yet
       // sorts first, as MySQL puts NULL first ascending.
       .orderBy(asc(shopifySyncCursors.updatedAt), asc(shopifyConnectorStores.id))
       .limit(deps.batchSize ?? SHOPIFY_ORDER_BACKSTOP_BATCH);
@@ -101,7 +101,7 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
   for (const store of stores) {
     report.scanned += 1;
     try {
-      await recordAttempt(deps.db ?? (await getDb()), store);
+      await recordShopifyBackstopAttempt(deps.db ?? (await getDb()), store);
       await sync({ storeId: store.storeId, organizationId: store.organizationId, trigger: "backstop" });
       report.synced += 1;
     } catch (error) {
@@ -127,9 +127,13 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
  * clock, like the column's own ON UPDATE, so the ordering compares like with
  * like. Explicit because ON UPDATE fires only when a value changes, and a store
  * failing the same way every time changes nothing. Creates the cursor for a
- * store that has none; a cursor with no watermark syncs exactly as no cursor.
+ * store that has none; a cursor with no watermark syncs exactly as no cursor,
+ * and the next success sets it (advancedOrderWatermark never keeps a NULL).
  */
-async function recordAttempt(db: Db | null, store: { storeId: number; organizationId: number }): Promise<void> {
+export async function recordShopifyBackstopAttempt(
+  db: DbExecutor | null,
+  store: { storeId: number; organizationId: number },
+): Promise<void> {
   if (!db) throw new Error("Database unavailable");
   await db
     .insert(shopifySyncCursors)

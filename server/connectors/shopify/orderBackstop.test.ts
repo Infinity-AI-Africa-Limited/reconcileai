@@ -256,3 +256,13 @@ describe("when the backstop loop starts", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("when a successful sync writes its watermark", () => {
+  it("should never keep a NULL: GREATEST is wrapped so a missing watermark takes the new one", async () => {
+    const { advancedOrderWatermark } = await import("./syncOrchestrator");
+    const { MySqlDialect: Dialect } = await import("drizzle-orm/mysql-core");
+    expect(new Dialect().sqlToQuery(advancedOrderWatermark()).sql).toBe(
+      "COALESCE(GREATEST(`shopify_sync_cursors`.`watermarkUpdatedAt`, VALUES(`shopify_sync_cursors`.`watermarkUpdatedAt`)), VALUES(`shopify_sync_cursors`.`watermarkUpdatedAt`))",
+    );
+  });
+});

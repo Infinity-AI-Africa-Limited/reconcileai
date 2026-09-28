@@ -28,6 +28,7 @@
     "server/connectors/shopify/onboarding.test.ts",
     "server/connectors/shopify/orderBackstop.test.ts",
     "server/connectors/shopify/settlementEvidence.test.ts",
+    "server/connectors/shopify/syncCursor.db.test.ts",
     "server/connectors/shopify/webhookBody.test.ts",
     "server/connectors/shopline/settlementEvents.test.ts",
     "server/dbErrors.test.ts",
