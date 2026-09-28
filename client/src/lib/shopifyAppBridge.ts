@@ -227,7 +227,10 @@ function loadScript(timeoutMs = APP_BRIDGE_LOAD_TIMEOUT_MS): Promise<void> {
 }
 
 /**
- * Loads the current Shopify App Bridge only in the App Home route. The API key
+ * Loads the current Shopify App Bridge only in the App Home route. In
+ * production the server has already placed it in the HTML as the first script
+ * (server/connectors/shopify/appHomeRoutes.ts), as Shopify requires, so this
+ * returns at once; loading it here is the fallback for dev. The API key
  * is public configuration; credentials and ID tokens never enter this module's
  * storage, URL, logs, or React state. The token is requested afresh per API call.
  */
