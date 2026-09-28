@@ -9,6 +9,7 @@ import {
 } from "../../drizzle/shopify_schema";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
+import { loggableError } from "../dbErrors";
 import { resolveOrgScope } from "../_core/tenancy";
 import { canActOnTenant } from "./shared";
 import { runShopifyOrderSync } from "../connectors/shopify/syncOrchestrator";
@@ -137,8 +138,11 @@ export const shopifyConnectorRouter = router({
           trigger: "manual",
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Shopify order sync could not start";
-        console.error("[shopify-sync] manual order sync failed", { organizationId, storeId: input.storeId, message });
+        console.error("[shopify-sync] manual order sync failed", {
+          organizationId,
+          storeId: input.storeId,
+          ...loggableError(error),
+        });
         throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Shopify order sync could not complete. Reconnect the store or contact support." });
       }
     }),

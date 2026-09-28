@@ -18,6 +18,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const DIR = path.resolve(__dirname);
+const ROUTERS = path.resolve(__dirname, "../../routers");
 
 /** How this connector names a caught error. */
 const ERROR_NAME = String.raw`(?:e|err|error|caught|cause|lastError|\w+Error|\w+Err)`;
@@ -54,9 +55,23 @@ function logCalls(source: string): string[] {
   return calls;
 }
 
-function leaksRawError(call: string): boolean {
+/**
+ * Exact expressions a file may log although they read `.message`, each with the
+ * reason it is safe. Scoped to one file and one expression, never a name.
+ */
+const SANCTIONED: Record<string, { expression: string; reason: string }[]> = {
+  "routers/shopifyAppHome.ts": [
+    {
+      expression: "category: refusal.message",
+      reason: "appHomeError() builds `refusal`, and its message is the typed static ShopifyAppHomeErrorMessage category",
+    },
+  ],
+};
+
+function leaksRawError(call: string, file = ""): boolean {
   // The one sanctioned way to put an error in a log.
-  const rest = call.replace(/loggableError\(\s*\w+\s*\)/g, "");
+  let rest = call.replace(/loggableError\(\s*\w+\s*\)/g, "");
+  for (const { expression } of SANCTIONED[file] ?? []) rest = rest.split(expression).join("");
   return RAW_ERROR_IN_LOG.some((pattern) => pattern.test(rest));
 }
 
@@ -77,6 +92,12 @@ describe("when the ratchet judges a log call", () => {
     expect(leaksRawError(call)).toBe(true);
   });
 
+  it("should allow a sanctioned expression only in the file it is sanctioned for", () => {
+    const call = 'console.error("x", { category: refusal.message })';
+    expect(leaksRawError(call, "routers/shopifyAppHome.ts")).toBe(false);
+    expect(leaksRawError(call, "routers/shopifyConnector.ts")).toBe(true);
+  });
+
   it.each([
     'console.error("x", { code: "durable_queue_unavailable", ...loggableError(error) })',
     'console.error("x", {\n  storeId,\n  ...loggableError(lastError),\n})',
@@ -88,11 +109,19 @@ describe("when the ratchet judges a log call", () => {
 });
 
 describe("when the Shopify connector logs an error", () => {
-  const files = readdirSync(DIR).filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && !name.includes("testkit"));
-  const sources = files.map((name) => ({ name, source: readFileSync(path.join(DIR, name), "utf8") }));
+  const isSource = (name: string) => name.endsWith(".ts") && !name.endsWith(".test.ts") && !name.includes("testkit");
+  // The connector, and the routers that call into it (their catch blocks see
+  // the same database errors).
+  const files = [
+    ...readdirSync(DIR).filter(isSource).map((name) => path.join(DIR, name)),
+    ...readdirSync(ROUTERS).filter((name) => /^shopify\w*\.ts$/.test(name) && isSource(name)).map((name) => path.join(ROUTERS, name)),
+  ];
+  const sources = files.map((file) => ({ name: path.relative(path.resolve(__dirname, "../.."), file), source: readFileSync(file, "utf8") }));
 
-  it("should scan real connector modules, so a clean result means something", () => {
-    expect(files).toEqual(expect.arrayContaining(["webhooks.ts", "onboarding.ts", "routes.ts", "privacyQueue.ts"]));
+  it("should scan real connector modules and routers, so a clean result means something", () => {
+    expect(files.map((file) => path.basename(file))).toEqual(
+      expect.arrayContaining(["webhooks.ts", "onboarding.ts", "routes.ts", "privacyQueue.ts", "shopifyConnector.ts", "shopifyAppHome.ts"]),
+    );
     const total = sources.reduce((sum, { source }) => sum + logCalls(source).length, 0);
     expect(total).toBeGreaterThan(20);
   });
@@ -100,7 +129,7 @@ describe("when the Shopify connector logs an error", () => {
   it("should never print an error's raw text", () => {
     const offenders = sources.flatMap(({ name, source }) =>
       logCalls(source)
-        .filter(leaksRawError)
+        .filter((call) => leaksRawError(call, name.split(path.sep).join("/")))
         .map((call) => `${name}: ${call.split("\n")[0]}`),
     );
     expect(offenders, "log loggableError(error), never the error or its text").toEqual([]);
