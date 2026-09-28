@@ -27,6 +27,7 @@ import {
   type NormalizedShopifyOrder,
 } from "./orders";
 import { affectedRows } from "./tokenStore";
+import { shopifyOrdersChannelCode } from "./channelCodes";
 
 const ORDER_RESOURCE = "orders" as const;
 const TRANSACTION_LOOKUP_CHUNK = 500;
@@ -55,9 +56,8 @@ export interface ShopifyOrderSyncDeps {
   suppressionKeys?: ShopifyPrivacySuppressionKey[];
 }
 
-export function shopifyOrdersChannelCode(storeId: number): string {
-  return `shopify_orders_${storeId}`;
-}
+// Defined once in channelCodes.ts; re-exported for existing importers.
+export { shopifyOrdersChannelCode };
 
 interface ExistingOrderRow {
   id: number;

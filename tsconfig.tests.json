@@ -22,6 +22,7 @@
     "client/src/lib/shopifySettlementMapping.test.ts",
     "server/appOrigin.test.ts",
     "server/connectors/shopify/appHomeRoutes.test.ts",
+    "server/connectors/shopify/channelCodes.test.ts",
     "server/connectors/shopify/embeddedAuth.test.ts",
     "server/connectors/shopify/logSafety.test.ts",
     "server/connectors/shopify/onboarding.test.ts",

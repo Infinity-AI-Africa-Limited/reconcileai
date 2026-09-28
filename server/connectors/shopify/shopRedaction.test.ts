@@ -21,6 +21,9 @@ const TOMBSTONES = "shopify_order_redaction_tombstones";
 const TRANSACTIONS = "transactions";
 const CHANNELS = "channels";
 const BATCHES = "upload_batches";
+const MATCHES = "matches";
+const EXCEPTIONS = "exceptions";
+const ANOMALIES = "anomaly_scores";
 const NOW = new Date("2026-09-25T12:00:00.000Z");
 
 const JOB = {
@@ -47,6 +50,16 @@ const COUNTS: Record<string, number> = {
   [TRANSACTIONS]: 6,
   [CHANNELS]: 1,
   [BATCHES]: 2,
+  [MATCHES]: 9,
+  [EXCEPTIONS]: 4,
+  [ANOMALIES]: 3,
+};
+
+/** Tables counted twice per run: the orders channel first, then settlement evidence. */
+const SETTLEMENT_COUNTS: Record<string, number> = {
+  [TRANSACTIONS]: 5,
+  [CHANNELS]: 1,
+  [BATCHES]: 7,
 };
 
 function workerDb(options: {
@@ -68,14 +81,22 @@ function workerDb(options: {
       [EVENTS]: [[{ count: countRows[EVENTS] }], [{ count: countRows[EVENTS] }]],
       [CURSORS]: [[{ count: countRows[CURSORS] }], [{ count: countRows[CURSORS] }]],
       [TOMBSTONES]: [[{ count: countRows[TOMBSTONES] }], [{ count: countRows[TOMBSTONES] }]],
-      [TRANSACTIONS]: [[{ count: countRows[TRANSACTIONS] }], [{ count: countRows[TRANSACTIONS] }]],
-      [CHANNELS]: [[{ count: countRows[CHANNELS] }], [{ count: countRows[CHANNELS] }]],
-      [BATCHES]: [[{ count: countRows[BATCHES] }], [{ count: countRows[BATCHES] }]],
+      [TRANSACTIONS]: twice([{ count: countRows[TRANSACTIONS] }], [{ count: SETTLEMENT_COUNTS[TRANSACTIONS] }]),
+      [CHANNELS]: twice([{ count: countRows[CHANNELS] }], [{ count: SETTLEMENT_COUNTS[CHANNELS] }]),
+      [BATCHES]: twice([{ count: countRows[BATCHES] }], [{ count: SETTLEMENT_COUNTS[BATCHES] }]),
+      [MATCHES]: [[{ count: countRows[MATCHES] }], [{ count: countRows[MATCHES] }]],
+      [EXCEPTIONS]: [[{ count: countRows[EXCEPTIONS] }], [{ count: countRows[EXCEPTIONS] }]],
+      [ANOMALIES]: [[{ count: countRows[ANOMALIES] }], [{ count: countRows[ANOMALIES] }]],
     },
     update: {
       [JOBS]: [...(options.claimRows ?? [1]), options.finalRows ?? 1],
     },
   });
+}
+
+/** One run's orders-then-settlement answers, for each of up to two runs. */
+function twice(orders: unknown[], settlement: unknown[]): unknown[][] {
+  return [orders, settlement, orders, settlement];
 }
 
 function uuidSequence() {
@@ -152,6 +173,12 @@ describe("when the report-only shop-redaction worker runs", () => {
         orderTransactions: 6,
         directShopifyChannels: 1,
         directShopifyBatches: 2,
+        settlementEvidenceChannels: 1,
+        settlementEvidenceTransactions: 5,
+        settlementEvidenceBatches: 7,
+        reconciliationMatches: 9,
+        reconciliationExceptions: 4,
+        anomalyScores: 3,
       },
     });
     expect(Object.values((finalJob?.data?.manifestSummary ?? {}) as Record<string, unknown>)
@@ -176,13 +203,13 @@ describe("when the report-only shop-redaction worker runs", () => {
     await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
 
     for (const table of [STORES, TOKENS, REQUESTS, SELECTORS, DATA_JOBS, REDACTION_JOBS, ARTIFACTS,
-      EVENTS, CURSORS, TOMBSTONES, TRANSACTIONS, CHANNELS, BATCHES]) {
+      EVENTS, CURSORS, TOMBSTONES, TRANSACTIONS, CHANNELS, BATCHES, MATCHES, EXCEPTIONS, ANOMALIES]) {
       const countSelect = fake.ops.find((op) => op.kind === "select" && op.table === table && op.where);
       expect(countSelect, `missing scoped count for ${table}`).toBeDefined();
       expect(countSelect?.where?.params).toContain(42);
     }
     for (const table of [STORES, TOKENS, REQUESTS, DATA_JOBS, REDACTION_JOBS, ARTIFACTS,
-      EVENTS, CURSORS, TOMBSTONES, TRANSACTIONS, SELECTORS]) {
+      EVENTS, CURSORS, TOMBSTONES, TRANSACTIONS, SELECTORS, MATCHES, EXCEPTIONS, ANOMALIES]) {
       const countSelect = fake.ops.find((op) => op.kind === "select" && op.table === table && op.where);
       expect(countSelect?.where?.params).toContain(7);
     }
@@ -248,5 +275,40 @@ describe("when the report-only shop-redaction worker runs", () => {
     expect(source).not.toMatch(/storage(Delete|Put|Get)|createAuditLog|tenantEncryptionKeys|\busers\b|\borganizations\b/);
     expect(source).not.toMatch(/status:\s*["']completed["']/);
     expect(source.match(/completedAt:\s*null/g)).toHaveLength(4);
+  });
+});
+
+describe("when the store's data reaches beyond the orders channel", () => {
+  // Greptile #161 (review of 21ba605): settlement evidence imported through App
+  // Home lives in its own channel, on rows without `shopifyStoreId`, so the
+  // inventory missed its channel, rows and batches. The reconciliation output
+  // derived from the store's rows was missing too.
+  const counted = (fake: ReturnType<typeof workerDb>, table: string) =>
+    fake.ops.filter((op) => op.kind === "select" && op.table === table && op.where);
+
+  it("should count settlement evidence by its own channel, scoped to the tenant", async () => {
+    const fake = workerDb();
+    await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
+
+    for (const table of [TRANSACTIONS, CHANNELS, BATCHES]) {
+      const settlement = counted(fake, table).find((op) => op.where?.params.includes("shopify_settlement_evidence_7"));
+      expect(settlement, `no settlement-evidence count for ${table}`).toBeDefined();
+      expect(settlement?.where?.params).toContain(42);
+    }
+  });
+
+  it("should count matches, exceptions and anomaly scores from both the orders and the settlement rows", async () => {
+    const fake = workerDb();
+    await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
+
+    for (const table of [MATCHES, EXCEPTIONS, ANOMALIES]) {
+      const [op] = counted(fake, table);
+      // Scoped to the tenant, and to the store's rows by either route.
+      expect(op?.where?.params).toEqual(expect.arrayContaining([42, 7, "shopify_settlement_evidence_7"]));
+      expect(op?.where?.sql).toMatch(/`transactions`\.`shopifyStoreId` = \?/);
+    }
+    const [matchCount] = counted(fake, MATCHES);
+    expect(matchCount?.where?.sql).toMatch(/`matches`\.`sourceTransactionId` in \(select/);
+    expect(matchCount?.where?.sql).toMatch(/`matches`\.`targetTransactionId` in \(select/);
   });
 });
