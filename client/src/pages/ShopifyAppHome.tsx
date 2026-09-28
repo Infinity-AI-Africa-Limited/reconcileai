@@ -16,6 +16,7 @@ import {
 } from "@/lib/shopifyAppBridge";
 import { SETTLEMENT_MAPPING_FIELDS } from "@/lib/shopifySettlementMapping";
 import { useShopifySettlementEvidence } from "@/hooks/useShopifySettlementEvidence";
+import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "@shared/shopifyOrderSync";
 
 /** Radix Select forbids an empty item value, so "no column" needs a sentinel. */
 const NOT_IN_FILE = "__reconcileai_not_in_file__";
@@ -172,7 +173,7 @@ export default function ShopifyAppHome() {
           <CardHeader>
             <CardTitle className="text-xl text-[#1B365D]">1. Refresh Shopify order evidence</CardTitle>
             <CardDescription>
-              The first controlled sync reads the most recent 24-hour window. Subsequent syncs use a corrective overlap so order updates are rechecked safely.
+              The first controlled sync reads the last {SHOPIFY_INITIAL_ORDER_WINDOW_DAYS} days of orders, the most this read-only permission allows, and can take a few minutes for a busy store. Subsequent syncs use a corrective overlap so order updates are rechecked safely.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">

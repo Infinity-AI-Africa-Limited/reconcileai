@@ -1,12 +1,26 @@
 import { assertEgressAllowed } from "../../_core/egress";
 import { SHOPIFY_API_VERSION } from "../../../drizzle/shopify_schema";
+import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "../../../shared/shopifyOrderSync";
 import { normalizeShopDomain } from "./auth";
 import { getValidShopifyAccessToken } from "./tokenStore";
 
 /** Five minutes re-read on every cycle so records landing on a watermark seam are recovered. */
 export const SHOPIFY_ORDER_WATERMARK_OVERLAP_MS = 5 * 60_000;
-/** The first order sync stays well inside read_orders' recent-order access window. */
-export const SHOPIFY_INITIAL_ORDER_WINDOW_MS = 24 * 60 * 60_000;
+/**
+ * The first order sync reads the whole of read_orders' 60-day access window, so
+ * a merchant's settlement files from before the install still have orders to
+ * match. At one day, nearly every row of a historical file named an order
+ * ReconcileAI had never synced and was flagged as an exception.
+ *
+ * Known limits of a window this long, all failing closed rather than partially:
+ *   - MAX_ORDER_PAGES × SHOPIFY_ORDER_PAGE_SIZE is 100,000 orders per window, so
+ *     a store averaging more than ~1,670 orders a day fails its first sync with
+ *     PAGINATION_ERROR (and keeps failing: no watermark is written).
+ *   - The whole window is fetched, then written in ONE transaction.
+ *   - A manual first sync runs inline in the request; for a busy store it can
+ *     outlast a proxy timeout. The work still completes server-side.
+ */
+export const SHOPIFY_INITIAL_ORDER_WINDOW_MS = SHOPIFY_INITIAL_ORDER_WINDOW_DAYS * 24 * 60 * 60_000;
 export const SHOPIFY_ORDER_PAGE_SIZE = 100;
 const MAX_ORDER_PAGES = 1_000;
 export const SHOPIFY_ORDER_PAGE_ATTEMPTS = 4;

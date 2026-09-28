@@ -366,9 +366,22 @@ describe("the persisted watermark window", () => {
     });
   });
 
-  it("uses only the last 24 hours for a first read_orders sync", () => {
+  it("reads read_orders' whole 60-day window on a store's first sync", () => {
     expect(
-      computeShopifyOrderWindow({ now: new Date("2026-09-20T12:00:00Z"), watermark: null }).from,
-    ).toEqual(new Date("2026-09-19T12:00:00Z"));
+      computeShopifyOrderWindow({ now: new Date("2026-09-20T12:00:00Z"), watermark: null }),
+    ).toEqual({
+      from: new Date("2026-07-22T12:00:00Z"),
+      to: new Date("2026-09-20T12:00:00Z"),
+    });
+  });
+
+  it("starts from the watermark, not 60 days back, once a store has synced", () => {
+    // An idle store resuming after a month must not re-read the 60-day window.
+    expect(
+      computeShopifyOrderWindow({
+        now: new Date("2026-09-20T12:00:00Z"),
+        watermark: new Date("2026-08-20T12:00:00Z"),
+      }).from,
+    ).toEqual(new Date("2026-08-20T11:55:00Z"));
   });
 });
