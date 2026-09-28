@@ -6,54 +6,51 @@ import {
   SHOPIFY_SYNC_STALLED_POLL_MS,
   shopifySyncPollIntervalMs,
   shopifySyncProgress,
-  type ShopifySyncCursorView,
-  withLatestRequest,
+  type ShopifySyncView,
+  withOwnRequest,
 } from "./shopifyOrderSyncProgress";
 
 const REQUESTED = "2026-09-28T10:00:00.000Z";
 const NOW = new Date("2026-09-28T10:05:00.000Z");
+const T1 = "2026-09-28T10:01:00.000Z";
+const T2 = "2026-09-28T10:02:00.000Z";
 
-function cursor(overrides: Partial<ShopifySyncCursorView> = {}): ShopifySyncCursorView {
+function view(overrides: Partial<ShopifySyncView> = {}): ShopifySyncView {
   return {
     lastSuccessfulAt: null,
     lastErrorCode: null,
-    requestedAt: null,
-    requestSeq: 0,
-    answeredSeq: 0,
+    lastErrorAt: null,
+    latestRequest: null,
+    pendingSince: null,
     ...overrides,
   };
 }
 
-describe("when a sync has been requested and not yet answered", () => {
+const queued = { status: "queued" as const, answeredAt: null };
+const succeededAt = (answeredAt: string) => ({ status: "succeeded" as const, answeredAt });
+const failedAt = (answeredAt: string) => ({ status: "failed" as const, answeredAt });
+
+describe("when a manual sync request is still queued", () => {
   it("should be pending, and keep the page polling", () => {
-    const progress = shopifySyncProgress(
-      cursor({ requestedAt: REQUESTED, requestSeq: 3, answeredSeq: 2, lastSuccessfulAt: "2026-09-27T10:00:00.000Z" }),
-      NOW,
-    );
+    const progress = shopifySyncProgress(view({ pendingSince: REQUESTED, latestRequest: queued, lastSuccessfulAt: T1 }), NOW);
     expect(progress).toBe("pending");
     expect(shopifySyncPollIntervalMs(progress)).toBe(SHOPIFY_SYNC_POLL_MS);
     expect(canRequestShopifySync(progress, false)).toBe(false);
   });
 
-  it("should stay pending when a webhook sync records a success after the request", () => {
-    // Only a manual run answers a request; a webhook sync's success moves no count.
-    expect(
-      shopifySyncProgress(
-        cursor({ requestedAt: REQUESTED, requestSeq: 1, answeredSeq: 0, lastSuccessfulAt: "2026-09-28T10:02:00.000Z" }),
-        NOW,
-      ),
-    ).toBe("pending");
+  it("should stay pending whatever other syncs record meanwhile", () => {
+    expect(shopifySyncProgress(view({ pendingSince: REQUESTED, lastSuccessfulAt: T2 }), NOW)).toBe("pending");
+    expect(shopifySyncProgress(view({ pendingSince: REQUESTED, lastErrorCode: "x", lastErrorAt: T2 }), NOW)).toBe("pending");
   });
 
-  it("should stay pending when another sync's failure is recorded after the request", () => {
-    expect(
-      shopifySyncProgress(cursor({ requestedAt: REQUESTED, requestSeq: 1, lastErrorCode: "pagination_error" }), NOW),
-    ).toBe("pending");
+  it("should stay pending while an earlier request is queued, even if a later one was refused", () => {
+    // The refused request is the newest, and failed; the earlier one is still running.
+    expect(shopifySyncProgress(view({ pendingSince: REQUESTED, latestRequest: failedAt(T1) }), NOW)).toBe("pending");
   });
 
   it("should call it stalled once it has waited longer than any sync should take, still checking but slowly", () => {
     const later = new Date(Date.parse(REQUESTED) + SHOPIFY_SYNC_STALL_MS + 1);
-    const progress = shopifySyncProgress(cursor({ requestedAt: REQUESTED, requestSeq: 1 }), later);
+    const progress = shopifySyncProgress(view({ pendingSince: REQUESTED, latestRequest: queued }), later);
     expect(progress).toBe("stalled");
     // A slow run can still finish; the page must see it when it does.
     expect(shopifySyncPollIntervalMs(progress)).toBe(SHOPIFY_SYNC_STALLED_POLL_MS);
@@ -61,42 +58,44 @@ describe("when a sync has been requested and not yet answered", () => {
   });
 });
 
-describe("when the request has been answered", () => {
-  it("should be current once a run has answered it and succeeded", () => {
+describe("when nothing is queued", () => {
+  it("should report a settled request's outcome when it is the most recent", () => {
+    expect(shopifySyncProgress(view({ lastSuccessfulAt: T1, latestRequest: succeededAt(T1) }), NOW)).toBe("current");
+    const failed = shopifySyncProgress(view({ lastSuccessfulAt: T1, latestRequest: failedAt(T2) }), NOW);
+    expect(failed).toBe("failed");
+    expect(shopifySyncPollIntervalMs(failed)).toBeNull();
+    expect(canRequestShopifySync(failed, false)).toBe(true);
+  });
+
+  it("should keep a failed request failed when a webhook sync succeeded between the failure and its settling", () => {
+    // The webhook success cleared the cursor's code at T1; the request was
+    // settled failed at T2, so its failure is the latest outcome.
+    expect(shopifySyncProgress(view({ lastSuccessfulAt: T1, latestRequest: failedAt(T2) }), NOW)).toBe("failed");
+  });
+
+  it("should report a sync that succeeded after a failed request as current", () => {
+    expect(shopifySyncProgress(view({ lastSuccessfulAt: T2, latestRequest: failedAt(T1) }), NOW)).toBe("current");
+  });
+
+  it("should report a sync that failed after a successful request as failed", () => {
     expect(
-      shopifySyncProgress(
-        cursor({ requestedAt: REQUESTED, requestSeq: 2, answeredSeq: 2, lastSuccessfulAt: "2026-09-28T10:03:00.000Z" }),
-        NOW,
-      ),
-    ).toBe("current");
+      shopifySyncProgress(view({ lastSuccessfulAt: T1, lastErrorCode: "x", lastErrorAt: T2, latestRequest: succeededAt(T1) }), NOW),
+    ).toBe("failed");
   });
 
-  it("should be current when the run finished in the same second the request was made", () => {
-    // Whole-second timestamps cannot order these two events; the counts do.
-    expect(
-      shopifySyncProgress(
-        cursor({ requestedAt: REQUESTED, requestSeq: 1, answeredSeq: 1, lastSuccessfulAt: REQUESTED }),
-        NOW,
-      ),
-    ).toBe("current");
+  it("should call a tie failed — whole seconds cannot order it, and a false failure is fixed by asking again", () => {
+    expect(shopifySyncProgress(view({ lastSuccessfulAt: T1, latestRequest: failedAt(T1) }), NOW)).toBe("failed");
+    expect(shopifySyncProgress(view({ lastErrorCode: "x", lastErrorAt: T1, latestRequest: succeededAt(T1) }), NOW)).toBe("failed");
   });
 
-  it("should be failed when the manual run for it failed, and let the merchant ask again", () => {
-    const progress = shopifySyncProgress(
-      cursor({ requestedAt: REQUESTED, requestSeq: 1, answeredSeq: 1, lastErrorCode: "pagination_error" }),
-      NOW,
-    );
-    expect(progress).toBe("failed");
-    expect(shopifySyncPollIntervalMs(progress)).toBeNull();
-    expect(canRequestShopifySync(progress, false)).toBe(true);
+  it("should treat an error recorded without a time as no older than the last success", () => {
+    expect(shopifySyncProgress(view({ lastSuccessfulAt: T1, lastErrorCode: "x" }), NOW)).toBe("failed");
   });
-});
 
-describe("when no manual sync is outstanding", () => {
-  it("should report the latest outcome, whatever triggered it", () => {
-    expect(shopifySyncProgress(cursor({ lastSuccessfulAt: "2026-09-28T09:00:00.000Z" }), NOW)).toBe("current");
-    expect(shopifySyncProgress(cursor({ lastErrorCode: "sync_failed" }), NOW)).toBe("failed");
-    expect(shopifySyncProgress(cursor(), NOW)).toBe("never");
+  it("should report the latest sync, whatever triggered it, when no request was ever made", () => {
+    expect(shopifySyncProgress(view({ lastSuccessfulAt: T1 }), NOW)).toBe("current");
+    expect(shopifySyncProgress(view({ lastErrorCode: "sync_failed", lastErrorAt: T1 }), NOW)).toBe("failed");
+    expect(shopifySyncProgress(view(), NOW)).toBe("never");
   });
 
   it("should not allow a second request while one is being sent", () => {
@@ -104,17 +103,21 @@ describe("when no manual sync is outstanding", () => {
   });
 });
 
-describe("when the page made a request the loaded cursor does not show yet", () => {
-  it("should follow the page's own request, so polling starts even if the reload after it failed", () => {
-    const stale = cursor({ lastSuccessfulAt: "2026-09-28T09:00:00.000Z", requestSeq: 4, answeredSeq: 4 });
-    const judged = withLatestRequest(stale, { requestSeq: 5, requestedAt: REQUESTED });
+describe("when the page made a request the view on screen does not show yet", () => {
+  const onScreen = view({ lastSuccessfulAt: T1, latestRequest: succeededAt(T1) });
+
+  it("should follow the page's own request until a later view loads, so polling starts even if the reload failed", () => {
+    const judged = withOwnRequest(onScreen, { requestedAt: REQUESTED, loadedSince: false });
     expect(shopifySyncProgress(judged, NOW)).toBe("pending");
   });
 
-  it("should keep the server's record when it counts as many requests or more", () => {
-    const newer = cursor({ requestedAt: "2026-09-28T10:04:00.000Z", requestSeq: 6, answeredSeq: 6 });
-    expect(withLatestRequest(newer, { requestSeq: 5, requestedAt: REQUESTED })).toBe(newer);
-    expect(withLatestRequest(newer, { requestSeq: 6, requestedAt: REQUESTED })).toBe(newer);
-    expect(withLatestRequest(newer, null)).toBe(newer);
+  it("should let the server's record decide once a view loaded after the request", () => {
+    expect(withOwnRequest(onScreen, { requestedAt: REQUESTED, loadedSince: true })).toBe(onScreen);
+    expect(withOwnRequest(onScreen, null)).toBe(onScreen);
+  });
+
+  it("should keep the server's pending record when it is at least as recent", () => {
+    const newer = view({ pendingSince: T1 });
+    expect(withOwnRequest(newer, { requestedAt: REQUESTED, loadedSince: false })).toBe(newer);
   });
 });

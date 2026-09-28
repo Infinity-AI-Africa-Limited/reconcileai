@@ -207,33 +207,43 @@ export const shopifySyncCursors = mysqlTable(
     watermarkUpdatedAt: timestamp("watermarkUpdatedAt"),
     lastSuccessfulAt: timestamp("lastSuccessfulAt"),
     lastErrorCode: varchar("lastErrorCode", { length: 80 }),
-    /**
-     * When lastErrorCode was last recorded. Without it an error left over from
-     * an earlier run is indistinguishable from the one just requested.
-     */
+    /** When lastErrorCode was last recorded. */
     lastErrorAt: timestamp("lastErrorAt"),
-    /**
-     * When a manual sync was last requested. Manual syncs run on the job
-     * queue, so this — compared with lastSuccessfulAt and lastErrorAt — is how
-     * a page knows one is still pending, including after a reload.
-     */
-    syncRequestedAt: timestamp("syncRequestedAt"),
-    /**
-     * Manual requests are counted, not timed. Every request increments
-     * syncRequestSeq; a manual run reads it when it STARTS and, when it
-     * finishes, records it as syncAnsweredSeq — so a request is pending while
-     * syncRequestSeq > syncAnsweredSeq. Timestamps could not decide this: the
-     * columns hold whole seconds, so a request made in the second a run started
-     * looked answered by a run that never covered it.
-     */
-    syncRequestSeq: int("syncRequestSeq").default(0).notNull(),
-    syncAnsweredSeq: int("syncAnsweredSeq").default(0).notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
   (t) => [
     uniqueIndex("uq_shopify_sync_cursor").on(t.storeId, t.resource),
     index("idx_shopify_sync_org").on(t.organizationId),
+  ],
+);
+
+/**
+ * One row per manual ("refresh now") order sync request. Manual syncs run on
+ * the job queue, so this is how a page learns the outcome, including after a
+ * reload.
+ *
+ * Each writer settles only the rows it can vouch for: a refused enqueue its own
+ * row; a run the rows still `queued` when it STARTED — a request made after that
+ * is left for the follow-up run the queue keeps for it. Counters on the sync
+ * cursor could not do this: answering request N answered every request below
+ * it, whoever had made them and whatever had become of them.
+ */
+export const shopifySyncRequests = mysqlTable(
+  "shopify_sync_requests",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    storeId: int("storeId").notNull(),
+    organizationId: int("organizationId").notNull(),
+    status: mysqlEnum("status", ["queued", "succeeded", "failed"]).default("queued").notNull(),
+    /** Why a failed request failed: the sync's own code, or the queue's refusal. */
+    errorCode: varchar("errorCode", { length: 80 }),
+    requestedAt: timestamp("requestedAt").notNull(),
+    answeredAt: timestamp("answeredAt"),
+  },
+  (t) => [
+    index("idx_shopify_sync_request_store").on(t.storeId, t.organizationId, t.status),
+    index("idx_shopify_sync_request_org").on(t.organizationId),
   ],
 );
 export type ShopifySyncCursor = typeof shopifySyncCursors.$inferSelect;

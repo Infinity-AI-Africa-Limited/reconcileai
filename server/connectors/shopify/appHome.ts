@@ -8,9 +8,9 @@
  * internal — ids, batch numbers, row data, operational error text — may reach it.
  */
 import { TRPCError } from "@trpc/server";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { shopifySyncCursors } from "../../../drizzle/shopify_schema";
+import { shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
 import { ShopifyManualSyncError } from "./manualSync";
@@ -71,9 +71,7 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
     .select({
       lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
       lastErrorCode: shopifySyncCursors.lastErrorCode,
-      syncRequestedAt: shopifySyncCursors.syncRequestedAt,
-      syncRequestSeq: shopifySyncCursors.syncRequestSeq,
-      syncAnsweredSeq: shopifySyncCursors.syncAnsweredSeq,
+      lastErrorAt: shopifySyncCursors.lastErrorAt,
     })
     .from(shopifySyncCursors)
     .where(
@@ -84,16 +82,34 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
       ),
     )
     .limit(1);
+  const requests = and(
+    eq(shopifySyncRequests.storeId, context.storeId),
+    eq(shopifySyncRequests.organizationId, context.organizationId),
+  );
+  const [latestRequest] = await db
+    .select({ status: shopifySyncRequests.status, answeredAt: shopifySyncRequests.answeredAt })
+    .from(shopifySyncRequests)
+    .where(requests)
+    .orderBy(desc(shopifySyncRequests.id))
+    .limit(1);
+  const [pending] = await db
+    .select({ requestedAt: shopifySyncRequests.requestedAt })
+    .from(shopifySyncRequests)
+    .where(and(requests, eq(shopifySyncRequests.status, "queued")))
+    .orderBy(desc(shopifySyncRequests.id))
+    .limit(1);
   return {
     store: { shopDomain: context.shopDomain, displayName: context.displayName, currency: context.currency },
     sync: {
       lastSuccessfulAt: cursor?.lastSuccessfulAt?.toISOString() ?? null,
       lastErrorCode: cursor?.lastErrorCode ?? null,
-      /** When the latest manual request was made (display and stall detection only). */
-      requestedAt: cursor?.syncRequestedAt?.toISOString() ?? null,
-      /** Manual requests made, and answered by a finished run: pending while requestSeq > answeredSeq. */
-      requestSeq: cursor?.syncRequestSeq ?? 0,
-      answeredSeq: cursor?.syncAnsweredSeq ?? 0,
+      lastErrorAt: cursor?.lastErrorAt?.toISOString() ?? null,
+      /** The newest manual request, settled or not. */
+      latestRequest: latestRequest
+        ? { status: latestRequest.status, answeredAt: latestRequest.answeredAt?.toISOString() ?? null }
+        : null,
+      /** When the newest request still queued was made, or null when none is. */
+      pendingSince: pending?.requestedAt.toISOString() ?? null,
     },
     capabilities: { ...SHOPIFY_APP_HOME_CAPABILITIES },
   };

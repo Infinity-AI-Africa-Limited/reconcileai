@@ -483,7 +483,7 @@ function maxUpdatedAt(orders: NormalizedShopifyOrder[], fallback: Date): Date {
   }, fallback);
 }
 
-/** The cursor code for a failed sync. The manual-sync job records it again when it answers a request. */
+/** The code recorded for a failed sync, on the cursor and on the manual requests a run settles. */
 export function shopifySyncFailureCode(error: unknown): string {
   if (error instanceof ShopifyOrderApiError) return error.code.toLowerCase();
   if (error instanceof Error && /authorised sync actor/.test(error.message)) return "sync_actor_unavailable";

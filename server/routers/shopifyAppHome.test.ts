@@ -44,6 +44,7 @@ import { ShopifySettlementEvidenceError } from "../connectors/shopify/settlement
 import { shopifyAppHomeRouter } from "./shopifyAppHome";
 
 const CURSORS = "shopify_sync_cursors";
+const REQUESTS = "shopify_sync_requests";
 const TOKEN = "Bearer signed-id-token";
 const context: ShopifyEmbeddedContext = {
   storeId: 7,
@@ -125,16 +126,18 @@ describe("when the ID token does not verify", () => {
 });
 
 describe("when the workspace loads its context", () => {
-  it("should return a PII-free store view, scoped cursor evidence and fixed Scope A capabilities", async () => {
+  it("should return a PII-free store view, scoped sync evidence and fixed Scope A capabilities", async () => {
     const db = scriptedDb({
       select: {
         [CURSORS]: [[{
           lastSuccessfulAt: new Date("2026-09-25T07:30:00.000Z"),
           lastErrorCode: null,
-          syncRequestedAt: new Date("2026-09-25T07:29:00.000Z"),
-          syncRequestSeq: 3,
-          syncAnsweredSeq: 3,
+          lastErrorAt: null,
         }]],
+        [REQUESTS]: [
+          [{ status: "succeeded", answeredAt: new Date("2026-09-25T07:30:00.000Z") }],
+          [],
+        ],
       },
     });
     state.db = db.db;
@@ -148,25 +151,28 @@ describe("when the workspace loads its context", () => {
       sync: {
         lastSuccessfulAt: "2026-09-25T07:30:00.000Z",
         lastErrorCode: null,
-        requestedAt: "2026-09-25T07:29:00.000Z",
-        requestSeq: 3,
-        answeredSeq: 3,
+        lastErrorAt: null,
+        latestRequest: { status: "succeeded", answeredAt: "2026-09-25T07:30:00.000Z" },
+        pendingSince: null,
       },
       capabilities: { scope: "read_orders", readOrders: true, manualSync: true, shopifyPayments: false, mutations: false },
     });
-    expect(JSON.stringify(view)).not.toMatch(/owner@example\.com|must-not-leak|storeId|organizationId|shopifyUserId/);
+    // No id leaves the server — not even a request id, which is a platform-wide count.
+    expect(JSON.stringify(view)).not.toMatch(/owner@example\.com|must-not-leak|storeId|organizationId|shopifyUserId|"id"/);
     expect(db.ops[0]?.where?.params).toEqual([7, 42, "orders"]);
+    const requestLookups = db.ops.filter((op) => op.kind === "select" && op.table === REQUESTS);
+    expect(requestLookups.map((op) => op.where?.params)).toEqual([[7, 42], [7, 42, "queued"]]);
   });
 });
 
 describe("when the merchant starts a sync", () => {
   it("should queue a sync for only the store the token names, even if the browser also holds a ReconcileAI session", async () => {
-    state.requestSync.mockResolvedValue({ requestedAt: new Date("2026-09-25T08:00:00.000Z"), requestSeq: 4 });
+    state.requestSync.mockResolvedValue({ requestId: 88, requestedAt: new Date("2026-09-25T08:00:00.000Z") });
     const result = await caller(TOKEN, { id: 1, role: "super_admin", organizationId: 999, isReadOnly: false }).syncNow();
 
     expect(state.requestSync).toHaveBeenCalledWith({ storeId: 7, organizationId: 42 });
-    expect(result).toEqual({ status: "queued", requestedAt: "2026-09-25T08:00:00.000Z", requestSeq: 4 });
-    expect(JSON.stringify(result)).not.toMatch(/storeId|organizationId/);
+    expect(result).toEqual({ status: "queued", requestedAt: "2026-09-25T08:00:00.000Z" });
+    expect(JSON.stringify(result)).not.toMatch(/storeId|organizationId|88/);
   });
 
   it.each([

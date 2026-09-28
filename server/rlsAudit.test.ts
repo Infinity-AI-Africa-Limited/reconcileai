@@ -206,6 +206,7 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   shopify_connector_stores: "tenant_required",
   shopify_connector_tokens: "tenant_required",
   shopify_sync_cursors: "tenant_required",
+  shopify_sync_requests: "tenant_required",
   // A verified delivery can arrive for a shop with no store record (a late
   // uninstall or redaction after offboarding); it is acknowledged and recorded
   // without inventing a tenant, so organizationId is nullable by design.

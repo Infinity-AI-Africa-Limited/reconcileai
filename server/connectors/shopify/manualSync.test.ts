@@ -1,5 +1,3 @@
-import { MySqlDialect } from "drizzle-orm/mysql-core";
-import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { runToNow } = vi.hoisted(() => ({ runToNow: vi.fn(async () => []) }));
@@ -18,16 +16,11 @@ import {
 import { scriptedDb } from "./scriptedDb.testkit";
 
 const STORES = "shopify_connector_stores";
-const CURSORS = "shopify_sync_cursors";
+const REQUESTS = "shopify_sync_requests";
 /** Mid-second, as a real clock almost always is. */
 const CLOCK = new Date("2026-09-28T10:00:00.700Z");
 const REQUESTED_AT = new Date("2026-09-28T10:00:00.000Z");
 const target = { storeId: 7, organizationId: 42 };
-const dialect = new MySqlDialect();
-
-function rendered(value: unknown) {
-  return dialect.sqlToQuery(value as SQL);
-}
 
 async function codeOf(run: Promise<unknown>): Promise<string> {
   const error = await run.then(() => null, (e: unknown) => e);
@@ -40,35 +33,29 @@ beforeEach(() => {
 });
 
 describe("when a manual sync is requested", () => {
-  function requestDb(ownSeq = 5) {
-    return scriptedDb({ select: { [STORES]: [[{ id: 7 }]], [CURSORS]: [[{ requestSeq: ownSeq }]] } });
+  function requestDb(requestId = 55) {
+    return scriptedDb({ select: { [STORES]: [[{ id: 7 }]] }, insert: { [REQUESTS]: [requestId] } });
   }
 
-  it("should count the request, then queue it with its own number", async () => {
-    const fake = requestDb(5);
-    let countedAtEnqueue = -1;
+  it("should record the request as queued, then queue it with its id", async () => {
+    const fake = requestDb(55);
+    let recordedAtEnqueue = -1;
     const enqueue = vi.fn(async () => {
-      countedAtEnqueue = fake.writes("insert", CURSORS).length;
+      recordedAtEnqueue = fake.writes("insert", REQUESTS).length;
     });
 
     const result = await requestShopifyManualSync(target, { db: fake.db as never, now: () => CLOCK, enqueue });
 
-    expect(result).toEqual({ requestedAt: REQUESTED_AT, requestSeq: 5 });
-    expect(enqueue).toHaveBeenCalledWith({ ...target, requestSeq: 5 });
-    // Counted BEFORE the enqueue, so the run that answers it cannot start first.
-    expect(countedAtEnqueue).toBe(1);
-    const count = fake.writes("insert", CURSORS)[0];
-    expect(count?.data).toMatchObject({ storeId: 7, organizationId: 42, resource: "orders", syncRequestedAt: REQUESTED_AT, syncRequestSeq: 1 });
-    expect(count?.upsert).toBe(true);
-  });
-
-  it("should read its number back in the transaction that counted it, so it is its own and not a concurrent one's", async () => {
-    const fake = requestDb();
-    await requestShopifyManualSync(target, { db: fake.db as never, enqueue: vi.fn(async () => {}) });
-    const count = fake.ops.find((op) => op.kind === "insert" && op.table === CURSORS);
-    const readBack = fake.ops.find((op) => op.kind === "select" && op.table === CURSORS);
-    expect(count?.txId).not.toBeNull();
-    expect(readBack?.txId).toBe(count?.txId);
+    expect(result).toEqual({ requestId: 55, requestedAt: REQUESTED_AT });
+    expect(enqueue).toHaveBeenCalledWith({ ...target, requestId: 55 });
+    // Recorded BEFORE the enqueue, so the run that settles it cannot start first.
+    expect(recordedAtEnqueue).toBe(1);
+    expect(fake.writes("insert", REQUESTS)[0]?.data).toEqual({
+      storeId: 7,
+      organizationId: 42,
+      status: "queued",
+      requestedAt: REQUESTED_AT,
+    });
   });
 
   it("should look the store up by id, tenant and status together", async () => {
@@ -93,86 +80,85 @@ describe("when a manual sync is requested", () => {
 });
 
 describe("when the queue refuses a manual sync", () => {
-  async function refused(ownSeq: number) {
-    const fake = scriptedDb({ select: { [STORES]: [[{ id: 7 }]], [CURSORS]: [[{ requestSeq: ownSeq }]] } });
+  it("should settle its own request as failed — that row alone, and only while still queued", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[{ id: 7 }]] }, insert: { [REQUESTS]: [55] } });
     const enqueue = vi.fn(async () => {
       throw new Error("connect ECONNREFUSED redis");
     });
+
     const code = await codeOf(requestShopifyManualSync(target, { db: fake.db as never, now: () => CLOCK, enqueue }));
-    return { code, answer: fake.writes("update", CURSORS)[0] };
-  }
 
-  it("should answer its own request as failed, so the page shows a failure rather than waiting", async () => {
-    const { code, answer } = await refused(5);
     expect(code).toBe("QUEUE_UNAVAILABLE");
-    expect(answer?.data).toEqual({ lastErrorCode: SHOPIFY_SYNC_QUEUE_UNAVAILABLE, lastErrorAt: CLOCK, syncAnsweredSeq: 5 });
-  });
-
-  it("should answer only while its request is the sole one outstanding — never one another request queued", async () => {
-    // Answering 5 answers everything below it too. So the write applies only
-    // when 5 is the latest request counted AND every earlier one is answered.
-    const { answer } = await refused(5);
-    expect(answer?.where?.sql).toContain("`syncRequestSeq` = ?");
-    expect(answer?.where?.sql).toContain("`syncAnsweredSeq` = ?");
-    expect(answer?.where?.params).toEqual([7, 42, "orders", 5, 4]);
+    const settle = fake.writes("update", REQUESTS);
+    expect(settle).toHaveLength(1);
+    expect(settle[0]?.data).toEqual({ status: "failed", errorCode: SHOPIFY_SYNC_QUEUE_UNAVAILABLE, answeredAt: CLOCK });
+    // Its own id, its own store and tenant, and still queued: a request another
+    // run is serving is never touched, and one a run already settled keeps its outcome.
+    expect(settle[0]?.where?.params).toEqual([7, 42, 55, "queued"]);
   });
 });
 
 describe("when the queue runs a manual sync", () => {
-  const payload = { ...target, requestSeq: 3 };
+  const payload = { ...target, requestId: 55 };
 
-  it("should answer exactly the requests counted when it STARTED — not one made while it ran", async () => {
-    // Counted 4 when the run starts; a 5th request arrives mid-run. That one is
-    // left pending for the follow-up run the queue keeps for it.
-    const fake = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 4 }]] } });
+  function runDb(newestQueued: number | Error) {
+    return scriptedDb({
+      select: { [REQUESTS]: [newestQueued instanceof Error ? newestQueued : [{ id: newestQueued }]] },
+    });
+  }
+
+  it("should settle exactly the requests queued when it STARTED — not one made while it ran", async () => {
+    // 57 is the newest queued request when the run starts; 58 arrives mid-run
+    // and is left for the follow-up run the queue keeps for it.
+    const fake = runDb(57);
     runToNow.mockImplementation(async () => {
-      fake.ops.push({ kind: "insert", table: CURSORS, where: null, data: { note: "request 5 mid-run" }, upsert: true, txId: null, locked: false });
+      fake.ops.push({ kind: "insert", table: REQUESTS, where: null, data: { note: "request 58 mid-run" }, upsert: false, txId: null, locked: false });
       return [];
     });
 
-    await handleShopifyManualSync(payload, { db: fake.db as never });
+    await handleShopifyManualSync(payload, { db: fake.db as never, now: () => CLOCK });
 
     expect(runToNow).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, trigger: "manual" });
-    const snapshot = fake.ops.findIndex((op) => op.kind === "select" && op.table === CURSORS);
-    const midRun = fake.ops.findIndex((op) => op.data?.note === "request 5 mid-run");
+    const snapshot = fake.ops.findIndex((op) => op.kind === "select" && op.table === REQUESTS);
+    const midRun = fake.ops.findIndex((op) => op.data?.note === "request 58 mid-run");
     expect(snapshot).toBeLessThan(midRun);
-    const answered = fake.writes("update", CURSORS)[0]?.data ?? {};
-    // A success leaves the error code alone: it errs towards "failed", never
-    // towards a success that did not happen.
-    expect(Object.keys(answered)).toEqual(["syncAnsweredSeq"]);
-    expect(rendered(answered.syncAnsweredSeq)).toMatchObject({
-      sql: "GREATEST(`shopify_sync_cursors`.`syncAnsweredSeq`, ?)",
-      params: [4],
-    });
+    const lookup = fake.ops[snapshot];
+    expect(lookup?.where?.params).toEqual([7, 42, "queued"]);
+
+    const settle = fake.writes("update", REQUESTS);
+    expect(settle).toHaveLength(1);
+    expect(settle[0]?.data).toEqual({ status: "succeeded", errorCode: null, answeredAt: CLOCK });
+    // Only rows still queued: a row an overlapping run has settled keeps its outcome.
+    expect(settle[0]?.where?.sql).toContain("`status` = ?");
+    expect(settle[0]?.where?.params).toEqual([7, 42, "queued", 57]);
   });
 
-  it("should write a failed run's code again as it answers, so a webhook success in between cannot hide the failure", async () => {
-    const fake = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 3 }]] } });
+  it("should settle the requests it saw as failed, with the sync's own code", async () => {
+    const fake = runDb(57);
     const failure = new Error("pagination_error");
     runToNow.mockRejectedValueOnce(failure);
 
     await expect(handleShopifyManualSync(payload, { db: fake.db as never, now: () => CLOCK })).rejects.toBe(failure);
 
-    // Answered and failed in ONE statement: the page never sees one without the other.
-    const writes = fake.writes("update", CURSORS);
-    expect(writes).toHaveLength(1);
-    expect(writes[0]?.data).toMatchObject({ lastErrorCode: "code:pagination_error", lastErrorAt: CLOCK });
-    expect(rendered(writes[0]?.data?.syncAnsweredSeq).params).toEqual([3]);
+    const settle = fake.writes("update", REQUESTS);
+    expect(settle).toHaveLength(1);
+    expect(settle[0]?.data).toEqual({ status: "failed", errorCode: "code:pagination_error", answeredAt: CLOCK });
+    expect(settle[0]?.where?.params).toEqual([7, 42, "queued", 57]);
   });
 
-  it("should still answer the request that queued it, failed, when it cannot read the count", async () => {
-    const fake = scriptedDb({ select: { [CURSORS]: [new Error("read timeout")] } });
+  it("should still settle the request that queued it, failed, when it cannot read the queued requests", async () => {
+    const fake = runDb(new Error("read timeout"));
 
     await expect(handleShopifyManualSync(payload, { db: fake.db as never, now: () => CLOCK })).rejects.toThrow("read timeout");
 
     expect(runToNow).not.toHaveBeenCalled();
-    const answer = fake.writes("update", CURSORS)[0]?.data ?? {};
-    expect(answer).toMatchObject({ lastErrorCode: "code:read timeout", lastErrorAt: CLOCK });
-    expect(rendered(answer.syncAnsweredSeq).params).toEqual([3]);
+    const settle = fake.writes("update", REQUESTS);
+    expect(settle[0]?.data).toMatchObject({ status: "failed", errorCode: "code:read timeout" });
+    expect(settle[0]?.where?.params).toEqual([7, 42, "queued", 55]);
   });
 
   it("should not fail a job whose sync succeeded when only the bookkeeping write fails", async () => {
-    const fake = scriptedDb({ select: { [CURSORS]: [[{ requestSeq: 3 }]] }, update: { [CURSORS]: [new Error("deadlock")] } });
+    const fake = scriptedDb({ select: { [REQUESTS]: [[{ id: 55 }]] }, update: { [REQUESTS]: [new Error("deadlock")] } });
     await expect(handleShopifyManualSync(payload, { db: fake.db as never })).resolves.toBeUndefined();
   });
 

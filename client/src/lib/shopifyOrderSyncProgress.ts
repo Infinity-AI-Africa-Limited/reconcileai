@@ -1,21 +1,22 @@
 /**
- * Where a store's order-evidence sync stands, from the sync cursor alone.
+ * Where a store's order-evidence sync stands, from the workspace context.
  *
  * Manual syncs run on the job queue, so the page cannot wait on the request —
- * it reads the cursor instead, and so still knows after a reload:
- *   pending  a manual sync was requested and no run that started after it has
- *            finished yet (requestSeq > answeredSeq)
+ * it reads each request's own record instead, and so still knows after a
+ * reload:
+ *   pending  a manual sync request has not been settled by a run yet
  *   stalled  pending for longer than any sync should take — the run may have
  *            been lost with a restart; asking again is safe (repeat requests
  *            for one store coalesce), and the page keeps checking, slowly
- *   failed   the latest recorded outcome is an error
- *   current  the latest recorded outcome is a success
+ *   failed   the most recent recorded outcome is a failure
+ *   current  the most recent recorded outcome is a success
  *   never    nothing has been synced or requested yet
  *
- * Requests are counted, not timed (server/connectors/shopify/manualSync.ts): a
- * run answers exactly the requests made before it started, so neither a webhook
- * sync finishing mid-request nor two events in the same second can end a wait
- * early. requestedAt is used only to notice a stall.
+ * Outcomes come from two records: the sync cursor (every sync, whatever
+ * triggered it) and the latest manual request (its run's outcome, or the
+ * queue's refusal). The most recent of them decides, and a tie goes to failure:
+ * the times are whole seconds, and a false "failed" is resolved by asking
+ * again, where a false "current" would hide a failure.
  */
 export type ShopifySyncProgress = "pending" | "stalled" | "failed" | "current" | "never";
 
@@ -26,28 +27,51 @@ export type ShopifySyncProgress = "pending" | "stalled" | "failed" | "current" |
  */
 export const SHOPIFY_SYNC_STALL_MS = 45 * 60_000;
 
-export type ShopifySyncCursorView = {
+export type ShopifySyncView = {
   lastSuccessfulAt: string | null;
   lastErrorCode: string | null;
-  requestedAt: string | null;
-  requestSeq: number;
-  answeredSeq: number;
+  lastErrorAt: string | null;
+  /** The newest manual request, settled or not. */
+  latestRequest: { status: "queued" | "succeeded" | "failed"; answeredAt: string | null } | null;
+  /** When the newest request still queued was made, or null when none is. */
+  pendingSince: string | null;
 };
 
-function time(value: string | null): number | null {
+function time(value: string | null | undefined): number | null {
   if (!value) return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-export function shopifySyncProgress(sync: ShopifySyncCursorView, now: Date): ShopifySyncProgress {
-  if (sync.requestSeq > sync.answeredSeq) {
-    const requested = time(sync.requestedAt);
-    return requested !== null && now.getTime() - requested > SHOPIFY_SYNC_STALL_MS ? "stalled" : "pending";
+type Outcome = { at: number; failed: boolean };
+
+function latestOutcome(sync: ShopifySyncView): Outcome | null {
+  const outcomes: Outcome[] = [];
+  const success = time(sync.lastSuccessfulAt);
+  if (success !== null) outcomes.push({ at: success, failed: false });
+  // A success clears lastErrorCode, so a code that is still set is the cursor's
+  // latest outcome — at least as recent as its success, even when it predates
+  // lastErrorAt and so carries no time.
+  if (sync.lastErrorCode) {
+    outcomes.push({ at: time(sync.lastErrorAt) ?? success ?? Number.NEGATIVE_INFINITY, failed: true });
   }
-  // A success clears lastErrorCode, so a code that is still set is the latest outcome.
-  if (sync.lastErrorCode) return "failed";
-  return time(sync.lastSuccessfulAt) !== null ? "current" : "never";
+  const request = sync.latestRequest;
+  const answered = request && request.status !== "queued" ? time(request.answeredAt) : null;
+  if (request && answered !== null) outcomes.push({ at: answered, failed: request.status === "failed" });
+  return outcomes.reduce<Outcome | null>((latest, outcome) => {
+    if (!latest || outcome.at > latest.at) return outcome;
+    return outcome.at === latest.at && outcome.failed ? outcome : latest;
+  }, null);
+}
+
+export function shopifySyncProgress(sync: ShopifySyncView, now: Date): ShopifySyncProgress {
+  const pendingSince = time(sync.pendingSince);
+  if (pendingSince !== null) {
+    return now.getTime() - pendingSince > SHOPIFY_SYNC_STALL_MS ? "stalled" : "pending";
+  }
+  const outcome = latestOutcome(sync);
+  if (!outcome) return "never";
+  return outcome.failed ? "failed" : "current";
 }
 
 export const SHOPIFY_SYNC_POLL_MS = 5_000;
@@ -66,11 +90,20 @@ export function canRequestShopifySync(progress: ShopifySyncProgress, requesting:
   return !requesting && progress !== "pending";
 }
 
-/** The cursor as the page should judge it, given a request this page made itself. */
-export function withLatestRequest(
-  sync: ShopifySyncCursorView,
-  own: { requestSeq: number; requestedAt: string } | null,
-): ShopifySyncCursorView {
-  if (!own || own.requestSeq <= sync.requestSeq) return sync;
-  return { ...sync, requestSeq: own.requestSeq, requestedAt: own.requestedAt };
+/**
+ * The view as the page should judge it, given a request this page made. Until
+ * a view loaded AFTER the request arrives (`loadedSince` false), the view on
+ * screen cannot show the request, so the page treats it as pending itself —
+ * otherwise a failed reload right after asking would read as "nothing to wait
+ * for". Once a later view has loaded, the server's record decides.
+ */
+export function withOwnRequest(
+  sync: ShopifySyncView,
+  own: { requestedAt: string; loadedSince: boolean } | null,
+): ShopifySyncView {
+  if (!own || own.loadedSince) return sync;
+  const pendingSince = time(sync.pendingSince);
+  const requested = time(own.requestedAt);
+  if (requested === null || (pendingSince !== null && pendingSince >= requested)) return sync;
+  return { ...sync, pendingSince: own.requestedAt };
 }

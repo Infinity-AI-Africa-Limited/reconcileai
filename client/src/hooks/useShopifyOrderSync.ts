@@ -8,13 +8,14 @@ import {
   canRequestShopifySync,
   shopifySyncPollIntervalMs,
   shopifySyncProgress,
-  withLatestRequest,
+  withOwnRequest,
 } from "@/lib/shopifyOrderSyncProgress";
 
 /**
- * Requests a queued order sync and follows it through the sync cursor. `refresh`
- * reloads the workspace context without the page's full loading state, and
- * must be stable (useCallback), or polling restarts on every render.
+ * Requests a queued order sync and follows it through the workspace context.
+ * `refresh` reloads the context without the page's full loading state, keeping
+ * the previous context when a reload fails, and must be stable (useCallback),
+ * or polling restarts on every render.
  */
 export function useShopifyOrderSync(
   sync: ShopifyAppBridgeContext["sync"] | null,
@@ -22,12 +23,14 @@ export function useShopifyOrderSync(
 ) {
   const [requesting, setRequesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The server's answer to OUR request, so the page follows it even if the
-  // context reload right after it fails.
-  const [ownRequest, setOwnRequest] = useState<{ requestSeq: number; requestedAt: string } | null>(null);
+  // OUR request, and the context on screen when we made it: until a later
+  // context has loaded, the one on screen cannot show the request, so the page
+  // follows it itself even if the reload right after asking fails.
+  const [ownRequest, setOwnRequest] = useState<{ requestedAt: string; syncOnScreen: typeof sync } | null>(null);
   const [now, setNow] = useState(() => new Date());
 
-  const progress = sync ? shopifySyncProgress(withLatestRequest(sync, ownRequest), now) : "never";
+  const own = ownRequest ? { requestedAt: ownRequest.requestedAt, loadedSince: sync !== ownRequest.syncOnScreen } : null;
+  const progress = sync ? shopifySyncProgress(withOwnRequest(sync, own), now) : "never";
   const pollMs = shopifySyncPollIntervalMs(progress);
 
   useEffect(() => {
@@ -44,7 +47,7 @@ export function useShopifyOrderSync(
     setError(null);
     try {
       const queued = await triggerShopifyOrderSync();
-      setOwnRequest({ requestSeq: queued.requestSeq, requestedAt: queued.requestedAt });
+      setOwnRequest({ requestedAt: queued.requestedAt, syncOnScreen: sync });
       setNow(new Date());
       await refresh();
     } catch (requestError) {

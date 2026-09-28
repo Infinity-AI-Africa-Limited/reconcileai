@@ -72,8 +72,8 @@ export const shopifyConnectorRouter = router({
         throw new TRPCError({ code: "FORBIDDEN", message: "Leave this organisation's portal to sync another" });
       }
       try {
-        const { requestedAt, requestSeq } = await requestShopifyManualSync({ storeId: input.storeId, organizationId });
-        return { status: "queued" as const, requestedAt: requestedAt.toISOString(), requestSeq };
+        const { requestedAt } = await requestShopifyManualSync({ storeId: input.storeId, organizationId });
+        return { status: "queued" as const, requestedAt: requestedAt.toISOString() };
       } catch (error) {
         // The store is looked up by id, tenant and status together: another
         // tenant's store, an unknown id and a disconnected store get one answer.
