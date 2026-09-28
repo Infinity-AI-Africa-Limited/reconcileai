@@ -28,6 +28,7 @@
     "server/jobQueue.replaceFailed.test.ts",
     "server/reviewerLinkOrigin.test.ts",
     "server/routers/shopifyAppHome.test.ts",
+    "server/sanitizeRef.test.ts",
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
     "server/ssoFlowCookie.test.ts"

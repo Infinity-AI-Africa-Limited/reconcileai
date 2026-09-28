@@ -315,6 +315,31 @@ async function rejectAlreadyImportedEvidence(
   return selectUnimportedSettlementEvents(storedKeys, params.rows, settlementEventKey);
 }
 
+const SHOPIFY_ORDER_GID_PREFIX = "gid://shopify/Order/";
+
+/**
+ * The other spellings under which an export may name the same Shopify order.
+ *
+ * The order leg stores the GID in `transactionRef` and the order NAME (`#1001`)
+ * in `externalRef`, verbatim. Gateways and couriers rarely write either exactly:
+ * they drop the `#` (`1001`), or carry Shopify's numeric order ID, which is the
+ * GID's tail. A reference that aligns to nothing is not merely unmatched — the
+ * scoped reconciliation reads the order leg BY reference, so it raises an
+ * exception for every such row while the real order sits unmatched beside it.
+ */
+function widenedOrderReferences(fileRef: string): string[] {
+  const bare = fileRef.trim().replace(/^#/, "");
+  if (!bare) return [];
+  const forms = [bare, `#${bare}`];
+  if (/^\d{1,20}$/.test(bare)) forms.push(`${SHOPIFY_ORDER_GID_PREFIX}${bare}`);
+  return forms;
+}
+
+/** The single order a set of hits names, or nothing when it names none or several. */
+function soleOrder(hits: Set<string>): string | undefined {
+  return hits.size === 1 ? [...hits][0] : undefined;
+}
+
 async function alignShopifyOrderReferences(
   db: DbExecutor,
   params: { organizationId: number; ordersChannelId: number; rows: InsertTransaction[] },
@@ -326,10 +351,17 @@ async function alignShopifyOrderReferences(
         .filter((ref): ref is string => Boolean(ref)),
     ),
   ];
-  const canonicalByReference = new Map<string, string>();
+  const lookup = [...new Set(refs.flatMap((ref) => [ref, ...widenedOrderReferences(ref)]))];
+  // Every stored reference (GID or name) → the canonical GIDs it names.
+  const ordersByReference = new Map<string, Set<string>>();
+  const record = (reference: string, canonical: string) => {
+    const hits = ordersByReference.get(reference) ?? new Set<string>();
+    hits.add(canonical);
+    ordersByReference.set(reference, hits);
+  };
 
-  for (let index = 0; index < refs.length; index += ORDER_REFERENCE_LOOKUP_CHUNK) {
-    const chunk = refs.slice(index, index + ORDER_REFERENCE_LOOKUP_CHUNK);
+  for (let index = 0; index < lookup.length; index += ORDER_REFERENCE_LOOKUP_CHUNK) {
+    const chunk = lookup.slice(index, index + ORDER_REFERENCE_LOOKUP_CHUNK);
     const orders = await db
       .select({
         transactionRef: transactions.transactionRef,
@@ -348,14 +380,27 @@ async function alignShopifyOrderReferences(
       );
     for (const order of orders) {
       if (!order.transactionRef) continue;
-      canonicalByReference.set(order.transactionRef, order.transactionRef);
-      if (order.externalRef) canonicalByReference.set(order.externalRef, order.transactionRef);
+      record(order.transactionRef, order.transactionRef);
+      if (order.externalRef) record(order.externalRef, order.transactionRef);
     }
   }
 
+  // An exact hit wins; a widened spelling is used only when the exact one
+  // found nothing. Either way a reference that names MORE than one order is
+  // left as the file wrote it — guessing would pin evidence to the wrong order.
+  const canonicalOf = (ref: string): string | undefined => {
+    const exact = ordersByReference.get(ref);
+    if (exact) return soleOrder(exact);
+    const widened = new Set<string>();
+    for (const form of widenedOrderReferences(ref)) {
+      for (const canonical of ordersByReference.get(form) ?? []) widened.add(canonical);
+    }
+    return soleOrder(widened);
+  };
+
   return params.rows.map((row) => {
     const original = row.transactionRef;
-    const canonical = original ? canonicalByReference.get(original) : undefined;
+    const canonical = original ? canonicalOf(original) : undefined;
     return canonical ? { ...row, transactionRef: canonical } : row;
   });
 }
