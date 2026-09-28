@@ -11,6 +11,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import type { DbTransaction } from "../../db";
 import { affectedRows } from "./tokenStore";
+import { isLiveShopRedactionJobStatus } from "./privacyJobState";
 
 /**
  * Durable admission for Shopify's `shop/redact` compliance webhook.
@@ -20,6 +21,9 @@ import { affectedRows } from "./tokenStore";
  * credentials and deactivate merchant identities. The separate processor is
  * report-only and must never claim redaction is complete.
  */
+/** Legacy (pre-0102) job states that still owe the inventory gate its run. */
+const LEGACY_OWED_STATUSES: readonly string[] = ["admitted", "redacting", "failed"];
+
 export async function admitShopifyShopRedaction(
   tx: DbTransaction,
   params: {
@@ -51,6 +55,7 @@ export async function admitShopifyShopRedaction(
       jobId: shopifyShopRedactionJobs.id,
       runId: shopifyShopRedactionJobs.runId,
       privacyRequestId: shopifyShopRedactionJobs.privacyRequestId,
+      requestHash: shopifyShopRedactionJobs.requestHash,
       status: shopifyShopRedactionJobs.status,
     })
     .from(shopifyShopRedactionJobs)
@@ -65,13 +70,16 @@ export async function admitShopifyShopRedaction(
     )
     .limit(1);
   if (existing) {
-    const dispatchable = ["admitted", "failed_retryable", "processing"];
-    if (existing.privacyRequestId === null) {
-      // `shop/redact` jobs admitted before the report-only worker had no parent
-      // request or outbox intent. A verified redelivery is the only safe source
-      // of the matching request hash, so backfill just those durable links and
-      // resume the non-destructive inventory gate—never a deletion operation.
-      const [legacyRequest] = await tx
+    // One job per store. A delivery that found one either IS that job's request
+    // (same digest) or is a further shop/redact for a store already fenced.
+    const legacy = existing.privacyRequestId === null;
+    if (legacy) {
+      // Admitted before jobs carried their parent request (pre-0102): bind the
+      // request THIS JOB represents — found by the job's own digest, never the
+      // delivery's. The store-level match can find the job for a different
+      // payload, and hashing moved to keyed digests since (#160), so a
+      // redelivery of the original payload no longer carries the old digest.
+      const [ownRequest] = await tx
         .select({ id: shopifyPrivacyRequests.id })
         .from(shopifyPrivacyRequests)
         .where(
@@ -79,45 +87,68 @@ export async function admitShopifyShopRedaction(
             eq(shopifyPrivacyRequests.organizationId, params.store.organizationId),
             eq(shopifyPrivacyRequests.storeId, params.store.id),
             eq(shopifyPrivacyRequests.topic, "shop/redact"),
-            eq(shopifyPrivacyRequests.requestHash, params.requestHash),
+            eq(shopifyPrivacyRequests.requestHash, existing.requestHash),
           ),
         )
         .limit(1)
         .for("update");
-      if (!legacyRequest) throw new Error("Legacy Shopify shop-redact request could not be resolved");
-      const backfill = await tx
-        .update(shopifyShopRedactionJobs)
-        .set({
-          privacyRequestId: legacyRequest.id,
-          status: "admitted",
-          lastCheckpoint: "legacy_dispatch_backfilled",
-          failureCode: null,
-          leaseId: null,
-          leaseExpiresAt: null,
-          nextAttemptAt: null,
-        })
+      const legacyScope = and(
+        eq(shopifyShopRedactionJobs.id, existing.jobId),
+        eq(shopifyShopRedactionJobs.organizationId, params.store.organizationId),
+        eq(shopifyShopRedactionJobs.storeId, params.store.id),
+        isNull(shopifyShopRedactionJobs.privacyRequestId),
+      );
+      if (ownRequest) {
+        // Pre-0102 statuses admitted/redacting/failed all mean "work still owed"
+        // (no worker existed then): normalise to `admitted` so it can be claimed.
+        // A legacy `completed` job is bound for the record and left as it is.
+        const owed = LEGACY_OWED_STATUSES.includes(existing.status);
+        const bound = await tx
+          .update(shopifyShopRedactionJobs)
+          .set({
+            privacyRequestId: ownRequest.id,
+            lastCheckpoint: "legacy_request_bound",
+            ...(owed ? { status: "admitted" as const, failureCode: null, leaseId: null, leaseExpiresAt: null, nextAttemptAt: null } : {}),
+          })
+          .where(legacyScope);
+        if (affectedRows(bound) === 1 && owed) {
+          await tx
+            .insert(shopifyPrivacyQueueOutbox)
+            .values({ kind: "shop_redact", jobId: existing.jobId, status: "pending" })
+            .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
+        }
+      } else {
+        // Its request cannot be identified. Never guess (binding the wrong one
+        // is what this code exists to prevent) and never throw — a failed
+        // mandatory compliance webhook is retried for 48 hours, then dropped.
+        await tx
+          .update(shopifyShopRedactionJobs)
+          .set({ status: "manual_review", failureCode: "legacy_request_unresolved", lastCheckpoint: "manual_review" })
+          .where(legacyScope);
+      }
+    } else if (isLiveShopRedactionJobStatus(existing.status)) {
+      // Heal a missing outbox intent; never resurrect an ended job.
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "shop_redact", jobId: existing.jobId, status: "pending" })
+        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
+    }
+    // A delivery with a different digest has its own request row (the webhook
+    // wrote it) and no job of its own. Settle it against the existing job
+    // rather than leave it `received` with nothing ever to run it.
+    if (existing.requestHash !== params.requestHash) {
+      await tx
+        .update(shopifyPrivacyRequests)
+        .set({ status: "blocked_dependency", completionNote: "covered_by_existing_shop_redaction" })
         .where(
           and(
-            eq(shopifyShopRedactionJobs.id, existing.jobId),
-            eq(shopifyShopRedactionJobs.organizationId, params.store.organizationId),
-            eq(shopifyShopRedactionJobs.storeId, params.store.id),
-            isNull(shopifyShopRedactionJobs.privacyRequestId),
+            eq(shopifyPrivacyRequests.organizationId, params.store.organizationId),
+            eq(shopifyPrivacyRequests.storeId, params.store.id),
+            eq(shopifyPrivacyRequests.topic, "shop/redact"),
+            eq(shopifyPrivacyRequests.requestHash, params.requestHash),
+            eq(shopifyPrivacyRequests.status, "received"),
           ),
         );
-      if (affectedRows(backfill) !== 1) {
-        throw new Error("Legacy Shopify shop-redact job changed during backfill");
-      }
-      await tx
-        .insert(shopifyPrivacyQueueOutbox)
-        .values({ kind: "shop_redact", jobId: existing.jobId, status: "pending" })
-        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
-    } else if (dispatchable.includes(existing.status)) {
-      // Heal a missing outbox intent without resurrecting a terminal report-only
-      // record. Queue payload remains internal job id only.
-      await tx
-        .insert(shopifyPrivacyQueueOutbox)
-        .values({ kind: "shop_redact", jobId: existing.jobId, status: "pending" })
-        .onDuplicateKeyUpdate({ set: { jobId: sql`${shopifyPrivacyQueueOutbox.jobId}` } });
     }
     return { jobId: existing.jobId, runId: existing.runId, status: "duplicate" };
   }

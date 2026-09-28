@@ -83,8 +83,8 @@ function uuidSequence() {
   return () => `00000000-0000-4000-8000-${String(++value).padStart(12, "0")}`;
 }
 
-describe("Shopify shop-redact report-only execution", () => {
-  it("allows only one worker claim for a job", async () => {
+describe("when the report-only shop-redaction worker runs", () => {
+  it("should allow only one worker to claim a job", async () => {
     const fake = workerDb({ claimRows: [1, 0] });
     const firstCheckpoint = vi.fn(async () => {});
     const secondCheckpoint = vi.fn(async () => {});
@@ -110,7 +110,7 @@ describe("Shopify shop-redact report-only execution", () => {
     expect(fake.writes("update", JOBS).filter((op) => op.data?.status === "blocked_dependency")).toHaveLength(1);
   });
 
-  it("keeps an early redelivery retryable while another worker holds the lease", async () => {
+  it("should keep an early redelivery retryable while another worker holds the lease", async () => {
     const fake = scriptedDb({
       select: { [JOBS]: [[{ status: "processing" }]] },
       update: { [JOBS]: [0] },
@@ -123,7 +123,7 @@ describe("Shopify shop-redact report-only execution", () => {
     expect(fake.ops.some((op) => op.kind === "update" && op.table === REQUESTS)).toBe(false);
   });
 
-  it("records only scoped numeric counts and ends blocked, never completed", async () => {
+  it("should record only scoped numeric counts and end blocked, never completed", async () => {
     const fake = workerDb();
 
     await handleShopifyShopRedactionJob(903, {
@@ -170,7 +170,7 @@ describe("Shopify shop-redact report-only execution", () => {
     expect(fake.committed().filter((op) => op.kind !== "select" && ![JOBS, REQUESTS].includes(op.table))).toEqual([]);
   });
 
-  it("fences every count by exact organization and store/channel snapshot", async () => {
+  it("should fence every count by exact organization and store/channel snapshot", async () => {
     const fake = workerDb();
 
     await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
@@ -191,9 +191,16 @@ describe("Shopify shop-redact report-only execution", () => {
       expect(countSelect?.where?.params).toContain("shopify_orders_7");
     }
     expect(fake.ops.some((op) => op.kind === "select" && op.table === EVENTS && op.where?.params.includes(null))).toBe(false);
+    // The two membership subqueries are ORM-built and correlated to the row counted.
+    const selectorCount = fake.ops.find((op) => op.kind === "select" && op.table === "shopify_privacy_request_selectors");
+    expect(selectorCount?.where?.sql).toMatch(
+      /exists \(select `id` from `shopify_privacy_requests` where \(`shopify_privacy_requests`\.`id` = `shopify_privacy_request_selectors`\.`requestId`/i,
+    );
+    const batchCount = fake.ops.find((op) => op.kind === "select" && op.table === "upload_batches");
+    expect(batchCount?.where?.sql).toMatch(/exists \(select `id` from `channels` where \(`channels`\.`id` = `upload_batches`\.`channelId`/i);
   });
 
-  it("prevents a stale worker from finalizing or changing the parent request", async () => {
+  it("should prevent a stale worker from finalizing or changing the parent request", async () => {
     const fake = workerDb({ finalRows: 0 });
     const leaseId = "11111111-1111-4111-8111-111111111111";
 
@@ -205,7 +212,7 @@ describe("Shopify shop-redact report-only execution", () => {
     expect(fake.writes("update", REQUESTS)).toEqual([]);
   });
 
-  it("rearms only the matching internal outbox row after a report-only worker crash", async () => {
+  it("should re-arm only the matching internal outbox row after a report-only worker crash", async () => {
     const fake = workerDb();
 
     await handleShopifyShopRedactionJob(903, {
@@ -235,7 +242,7 @@ describe("Shopify shop-redact report-only execution", () => {
     });
   });
 
-  it("contains no destructive database or storage operation in the executor module", () => {
+  it("should contain no destructive database or storage operation in the executor module", () => {
     const source = readFileSync(new URL("./shopRedaction.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/\.delete\s*\(/);
     expect(source).not.toMatch(/storage(Delete|Put|Get)|createAuditLog|tenantEncryptionKeys|\busers\b|\borganizations\b/);

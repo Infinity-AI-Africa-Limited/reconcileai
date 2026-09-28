@@ -609,8 +609,10 @@ describe("when the queue settled a dispatch but the job still owes work", () => 
     // Every kind, each against its OWN job table: a customer-redaction dispatch
     // whose worker died is re-armed from its own job's state, not the data
     // request table's (where it has no row, so it was never re-armed).
-    expect(rearm?.where?.params).toEqual(expect.arrayContaining(["customer_request", "customer_redact"]));
+    expect(rearm?.where?.params).toEqual(expect.arrayContaining(["customer_request", "customer_redact", "shop_redact"]));
     expect(rearm?.where?.sql).toMatch(/exists \(select 1 from `shopify_privacy_customer_redaction_jobs`/i);
+    // A shop-redaction row names the job's own id, not a request id.
+    expect(rearm?.where?.sql).toMatch(/`shopify_shop_redaction_jobs`\.`id` = `shopify_privacy_queue_outbox`\.`jobId`/i);
   });
 });
 

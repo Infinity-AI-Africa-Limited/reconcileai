@@ -431,7 +431,8 @@ describe("when a request parked for manual review is replayed and now validates"
     expect(rearm?.data).toMatchObject({ status: "received", failureCode: null });
     expect(rearm?.where?.params).toEqual([901, 42, "manual_review", "selectors_unavailable"]);
     expect(fake.writes("update", OUTBOX)[0]?.data).toMatchObject({ status: "pending" });
-    expect(fake.writes("update", OUTBOX)[0]?.where?.params).toEqual([901]);
+    // Keyed by (kind, jobId): a bare jobId could name another kind's row.
+    expect(fake.writes("update", OUTBOX)[0]?.where?.params).toEqual(["customer_request", 901]);
   });
 
   it("should leave a job parked for any other reason, and queue nothing", async () => {

@@ -375,7 +375,9 @@ export async function admitShopifyCustomerPrivacyRequest(
         await tx
           .update(shopifyPrivacyQueueOutbox)
           .set({ status: "pending", nextAttemptAt: null, failureCode: null })
-          .where(eq(shopifyPrivacyQueueOutbox.jobId, request.id));
+          // (kind, jobId) is the key: job ids of different kinds come from
+          // different id spaces, so a bare jobId could name another kind's row.
+          .where(and(eq(shopifyPrivacyQueueOutbox.kind, "customer_request"), eq(shopifyPrivacyQueueOutbox.jobId, request.id)));
       }
     } else {
       // A customers/redact is ALWAYS admitted durably — a mandatory compliance

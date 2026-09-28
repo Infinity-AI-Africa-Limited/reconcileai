@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import { and, eq, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
-import type { MySqlTable } from "drizzle-orm/mysql-core";
+import { and, count, eq, exists, inArray, sql, type SQL } from "drizzle-orm";
+import { QueryBuilder, type AnyMySqlColumn, type MySqlTable } from "drizzle-orm/mysql-core";
 import { channels, transactions, uploadBatches } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
@@ -18,7 +18,11 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { getDb, type DbExecutor } from "../../db";
 import { affectedRows } from "./tokenStore";
-import { ShopifyPrivacyJobNotClaimableError } from "./privacyJobState";
+import {
+  claimableShopRedactionJob,
+  isLiveShopRedactionJobStatus,
+  ShopifyPrivacyJobNotClaimableError,
+} from "./privacyJobState";
 
 export const SHOPIFY_SHOP_REDACTION_MANIFEST_VERSION = 1;
 export const SHOPIFY_SHOP_REDACTION_LEASE_MS = 5 * 60_000;
@@ -78,19 +82,6 @@ function retryDelayMs(attempt: number): number {
   return Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000);
 }
 
-function claimableShopRedactionJob(now: Date) {
-  return or(
-    and(
-      inArray(shopifyShopRedactionJobs.status, ["admitted", "failed_retryable"]),
-      or(isNull(shopifyShopRedactionJobs.nextAttemptAt), lte(shopifyShopRedactionJobs.nextAttemptAt, now)),
-    ),
-    and(
-      eq(shopifyShopRedactionJobs.status, "processing"),
-      lte(shopifyShopRedactionJobs.leaseExpiresAt, now),
-    ),
-  );
-}
-
 async function claimShopRedactionJob(
   db: Db,
   jobId: number,
@@ -135,10 +126,7 @@ function numericCount(value: unknown): number {
 }
 
 async function countRows(db: DbExecutor, table: MySqlTable, where: SQL | undefined): Promise<number> {
-  const [row] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(table)
-    .where(where);
+  const [row] = await db.select({ count: count() }).from(table).where(where);
   return numericCount(row?.count);
 }
 
@@ -152,7 +140,7 @@ async function buildManifest(
     eq(shopifyConnectorStores.id, storeId),
     eq(shopifyConnectorStores.organizationId, organizationId),
   );
-  const exactStoreScope = <T extends { organizationId: any; storeId: any }>(table: T) =>
+  const exactStoreScope = (table: { organizationId: AnyMySqlColumn; storeId: AnyMySqlColumn }) =>
     and(eq(table.organizationId, organizationId), eq(table.storeId, storeId));
   const directChannelScope = and(
     eq(channels.organizationId, organizationId),
@@ -181,7 +169,19 @@ async function buildManifest(
       shopifyPrivacyRequestSelectors,
       and(
         eq(shopifyPrivacyRequestSelectors.organizationId, organizationId),
-        sql`EXISTS (SELECT 1 FROM ${shopifyPrivacyRequests} AS scoped_request WHERE scoped_request.id = ${shopifyPrivacyRequestSelectors.requestId} AND scoped_request.organizationId = ${organizationId} AND scoped_request.storeId = ${storeId})`,
+        // A selector belongs to this store through its parent request.
+        exists(
+          new QueryBuilder()
+            .select({ id: shopifyPrivacyRequests.id })
+            .from(shopifyPrivacyRequests)
+            .where(
+              and(
+                eq(shopifyPrivacyRequests.id, shopifyPrivacyRequestSelectors.requestId),
+                eq(shopifyPrivacyRequests.organizationId, organizationId),
+                eq(shopifyPrivacyRequests.storeId, storeId),
+              ),
+            ),
+        ),
       ),
     ),
     countRows(db, shopifyPrivacyDataRequestJobs, exactStoreScope(shopifyPrivacyDataRequestJobs)),
@@ -202,7 +202,13 @@ async function buildManifest(
     uploadBatches,
     and(
       eq(uploadBatches.organizationId, organizationId),
-      sql`EXISTS (SELECT 1 FROM ${channels} AS scoped_channel WHERE scoped_channel.id = ${uploadBatches.channelId} AND scoped_channel.organizationId = ${organizationId} AND scoped_channel.code = ${`shopify_orders_${storeId}`})`,
+      // A batch belongs to this store through its Shopify orders channel.
+      exists(
+        new QueryBuilder()
+          .select({ id: channels.id })
+          .from(channels)
+          .where(and(eq(channels.id, uploadBatches.channelId), directChannelScope)),
+      ),
     ),
   );
 
@@ -363,7 +369,7 @@ export async function handleShopifyShopRedactionJob(
       .from(shopifyShopRedactionJobs)
       .where(eq(shopifyShopRedactionJobs.id, jobId))
       .limit(1);
-    if (current && ["admitted", "failed_retryable", "processing"].includes(current.status)) {
+    if (current && isLiveShopRedactionJobStatus(current.status)) {
       throw new ShopifyPrivacyJobNotClaimableError();
     }
     return;

@@ -11,6 +11,7 @@ import { and, eq, inArray, isNull, lte, or } from "drizzle-orm";
 import {
   shopifyPrivacyCustomerRedactionJobs,
   shopifyPrivacyDataRequestJobs,
+  shopifyShopRedactionJobs,
 } from "../../../drizzle/shopify_schema";
 
 /** Job states that still owe work. Anything else is terminal or awaiting a person. */
@@ -41,6 +42,26 @@ export function claimableDataRequestJob(now: Date) {
     and(
       eq(shopifyPrivacyDataRequestJobs.status, "processing"),
       lte(shopifyPrivacyDataRequestJobs.leaseExpiresAt, now),
+    ),
+  );
+}
+
+/** Shop-redaction jobs start `admitted`, not `received`; otherwise the same rules. */
+export const LIVE_SHOP_REDACTION_JOB_STATUSES = ["admitted", "failed_retryable", "processing"] as const;
+
+export function isLiveShopRedactionJobStatus(status: string | null | undefined): boolean {
+  return (LIVE_SHOP_REDACTION_JOB_STATUSES as readonly string[]).includes(status ?? "");
+}
+
+export function claimableShopRedactionJob(now: Date) {
+  return or(
+    and(
+      inArray(shopifyShopRedactionJobs.status, ["admitted", "failed_retryable"]),
+      or(isNull(shopifyShopRedactionJobs.nextAttemptAt), lte(shopifyShopRedactionJobs.nextAttemptAt, now)),
+    ),
+    and(
+      eq(shopifyShopRedactionJobs.status, "processing"),
+      lte(shopifyShopRedactionJobs.leaseExpiresAt, now),
     ),
   );
 }

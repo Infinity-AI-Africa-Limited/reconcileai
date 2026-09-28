@@ -27,6 +27,7 @@ import { affectedRows } from "./tokenStore";
 import {
   claimableCustomerRedactionJob,
   claimableDataRequestJob,
+  claimableShopRedactionJob,
   isLivePrivacyJobStatus,
   ShopifyPrivacyJobNotClaimableError,
 } from "./privacyJobState";
@@ -413,6 +414,16 @@ async function rearmStrandedPrivacyDispatches(db: Db, now: Date): Promise<void> 
                     claimableCustomerRedactionJob(now),
                   ),
                 ),
+            ),
+          ),
+          // A shop-redaction outbox row names the job's OWN id, not a request id.
+          and(
+            eq(shopifyPrivacyQueueOutbox.kind, "shop_redact"),
+            exists(
+              new QueryBuilder()
+                .select({ one: sql`1` })
+                .from(shopifyShopRedactionJobs)
+                .where(and(eq(shopifyShopRedactionJobs.id, shopifyPrivacyQueueOutbox.jobId), claimableShopRedactionJob(now))),
             ),
           ),
         ),
