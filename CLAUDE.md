@@ -254,7 +254,16 @@ Tier 1 as SHOPLINE-Payments-only.
 Import is `dryRun`-first so the merchant confirms the detected column mapping
 before anything is written, auto-detects across gateway/COD header vocabularies,
 accepts explicit overrides for unknown providers, and dedupes via
-`rejectAlreadyIngested` so re-uploading or overlapping exports never double-count.
+`rejectAlreadyImportedSettlementRows`: by settlement EVENT, on references in
+their STORED form, so re-uploading or overlapping exports never double-count
+while a payment and its refund are both kept. Orders the SHOPLINE Payments API
+already settled stay covered and are not counted twice from a file.
+
+> ⚠️ **Until 2026-09-28 that claim was false.** The guard compared the file's
+> raw reference with the sanitised stored one (`#1001` is stored as `1001`), so
+> every re-upload of such a file was inserted again; and it keyed on the order
+> alone, so a refund sharing an order with its payment was dropped. Production
+> may hold duplicates from before the fix — measure before assuming it does not.
 
 **Verified end-to-end against production (2026-08-02):** a DHL COD remittance
 file matched the real dev-store order `21076388995485181306699745`
