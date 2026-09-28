@@ -685,7 +685,12 @@ export async function runShopifyOrderSync(
         .onDuplicateKeyUpdate({
           set: {
             cursor: null,
-            watermarkUpdatedAt: sql`GREATEST(${shopifySyncCursors.watermarkUpdatedAt}, VALUES(${shopifySyncCursors.watermarkUpdatedAt}))`,
+            // COALESCE, because GREATEST with a NULL argument is NULL: a cursor row
+            // created before the first success (a failed first sync records its
+            // error on one; a manual request numbers itself on one) would keep a
+            // NULL watermark forever, and every sync would re-read the oldest
+            // window, reporting success without reaching recent orders.
+            watermarkUpdatedAt: sql`GREATEST(COALESCE(${shopifySyncCursors.watermarkUpdatedAt}, VALUES(${shopifySyncCursors.watermarkUpdatedAt})), VALUES(${shopifySyncCursors.watermarkUpdatedAt}))`,
             lastSuccessfulAt: new Date(),
             lastErrorCode: null,
           },

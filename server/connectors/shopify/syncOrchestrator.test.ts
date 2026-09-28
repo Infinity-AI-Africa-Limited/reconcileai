@@ -1,3 +1,5 @@
+import { MySqlDialect } from "drizzle-orm/mysql-core";
+import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
@@ -159,6 +161,32 @@ describe("tenant-isolated sync orchestration", () => {
     expect(actorLookup?.where?.params).toEqual(expect.arrayContaining([9, 42, "admin", true]));
     const txnLookup = fake.ops.find((op) => op.kind === "select" && op.table === TRANSACTIONS);
     expect(txnLookup?.where?.params).toEqual(expect.arrayContaining([42, 7, order().gid]));
+  });
+
+  it("advances a watermark the cursor row holds as NULL — GREATEST alone would keep it NULL", async () => {
+    // A cursor row can exist before the first success: a failed first sync
+    // records its error on one, and a manual request numbers itself on one.
+    // GREATEST(NULL, x) is NULL in MySQL and TiDB, so without COALESCE every
+    // later sync would re-read the oldest window and never reach recent orders.
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store], [{ id: store.id }]],
+        [CURSORS]: [[{ watermarkUpdatedAt: null, lastErrorCode: "sync_failed" }]],
+        [USERS]: [[{ id: 9 }]],
+        [CHANNELS]: [[{ id: 70 }]],
+        [TRANSACTIONS]: [[]],
+      },
+    });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => []), now: () => new Date("2026-09-20T11:00:00Z") },
+    );
+
+    const success = fake.writes("insert", CURSORS).find((op) => op.onDuplicate && "watermarkUpdatedAt" in op.onDuplicate);
+    const merge = new MySqlDialect().sqlToQuery(success?.onDuplicate?.watermarkUpdatedAt as SQL).sql;
+    expect(merge).toBe(
+      "GREATEST(COALESCE(`shopify_sync_cursors`.`watermarkUpdatedAt`, VALUES(`shopify_sync_cursors`.`watermarkUpdatedAt`)), VALUES(`shopify_sync_cursors`.`watermarkUpdatedAt`))",
+    );
   });
 
   it("falls back to an active administrator of the same tenant when the claimant is absent", async () => {
