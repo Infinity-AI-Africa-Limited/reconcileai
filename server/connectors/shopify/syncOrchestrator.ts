@@ -738,11 +738,45 @@ export async function runShopifyOrderSync(
   }
 }
 
+/** 60 days in 7-day steps is 9 cycles; the rest is headroom for overlap and clock drift. */
+const MAX_CATCH_UP_CYCLES = 16;
+
+/**
+ * Run sync cycles until the store's orders are current. Each cycle reads at
+ * most one bounded window and commits its watermark (computeShopifyOrderWindow),
+ * so a first sync or a long-idle store walks forward step by step, and a failure
+ * part-way resumes from the last committed step rather than from the start. A
+ * store already current takes one cycle, as before.
+ */
+export async function runShopifyOrderSyncToNow(
+  params: Parameters<typeof runShopifyOrderSync>[0],
+  deps: ShopifyOrderSyncDeps & { runCycle?: typeof runShopifyOrderSync } = {},
+): Promise<ShopifyOrderSyncReport[]> {
+  const runCycle = deps.runCycle ?? runShopifyOrderSync;
+  const reports: ShopifyOrderSyncReport[] = [];
+  let previousEnd = Number.NEGATIVE_INFINITY;
+  for (let cycle = 0; cycle < MAX_CATCH_UP_CYCLES; cycle += 1) {
+    const cycleStart = (deps.now ?? (() => new Date()))().getTime();
+    const report = await runCycle(params, deps);
+    reports.push(report);
+    const end = report.window.to.getTime();
+    // Current once a window reaches the moment its cycle began. Stop, too, if a
+    // window failed to move forward — never spin on a stuck watermark.
+    if (end >= cycleStart || end <= previousEnd) break;
+    previousEnd = end;
+  }
+  return reports;
+}
+
 type ShopifyWebhookSyncPayload = { storeId: number; organizationId: number; webhookId: string };
 
-/** A webhook worker hook; queue integration stays injectable and independently testable. */
+/**
+ * A webhook worker hook; queue integration stays injectable and independently
+ * testable. Catches up in steps, like a manual sync: a store whose FIRST sync is
+ * triggered by a webhook has the same 60-day backfill ahead of it.
+ */
 export async function handleShopifyWebhookSync(payload: ShopifyWebhookSyncPayload): Promise<void> {
-  await runShopifyOrderSync({ ...payload, trigger: "webhook" });
+  await runShopifyOrderSyncToNow({ ...payload, trigger: "webhook" });
 }
 
 /** Terminal queue evidence: retained for operators and eligible for redelivery. */

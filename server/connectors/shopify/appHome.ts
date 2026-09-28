@@ -71,8 +71,9 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
     .select({
       lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
       lastErrorCode: shopifySyncCursors.lastErrorCode,
-      lastErrorAt: shopifySyncCursors.lastErrorAt,
       syncRequestedAt: shopifySyncCursors.syncRequestedAt,
+      syncAnsweredAt: shopifySyncCursors.syncAnsweredAt,
+      watermarkUpdatedAt: shopifySyncCursors.watermarkUpdatedAt,
     })
     .from(shopifySyncCursors)
     .where(
@@ -88,8 +89,11 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
     sync: {
       lastSuccessfulAt: cursor?.lastSuccessfulAt?.toISOString() ?? null,
       lastErrorCode: cursor?.lastErrorCode ?? null,
-      lastErrorAt: cursor?.lastErrorAt?.toISOString() ?? null,
+      /** The latest manual request, and the latest one a manual run finished for. */
       requestedAt: cursor?.syncRequestedAt?.toISOString() ?? null,
+      answeredAt: cursor?.syncAnsweredAt?.toISOString() ?? null,
+      /** Orders are synced through this time (the watermark), whichever sync did it. */
+      syncedThrough: cursor?.watermarkUpdatedAt?.toISOString() ?? null,
     },
     capabilities: { ...SHOPIFY_APP_HOME_CAPABILITIES },
   };

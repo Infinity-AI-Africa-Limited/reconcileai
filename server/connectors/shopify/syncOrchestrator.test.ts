@@ -10,6 +10,8 @@ import {
   materialShopifyOrderEvidenceChanged,
   partitionShopifyOrders,
   runShopifyOrderSync,
+  runShopifyOrderSyncToNow,
+  type ShopifyOrderSyncReport,
 } from "./syncOrchestrator";
 import { scriptedDb } from "./scriptedDb.testkit";
 import type { NormalizedShopifyOrder } from "./orders";
@@ -610,5 +612,64 @@ describe("terminal webhook sync failure evidence", () => {
     });
     expect(write?.data?.status).not.toBe("processed");
     expect(write?.where?.params).toEqual(expect.arrayContaining(["wh-exhausted", 7, 42, "received"]));
+  });
+});
+
+describe("when a store is further behind than one sync window", () => {
+  const NOW = new Date("2026-09-20T12:00:00Z");
+  const DAY = 24 * 60 * 60_000;
+  function cycleReport(to: Date): ShopifyOrderSyncReport {
+    return {
+      success: true,
+      organizationId: 42,
+      storeId: 7,
+      window: { from: new Date(to.getTime() - 7 * DAY), to },
+      fetched: 0,
+      inserted: 0,
+      updated: 0,
+      unchanged: 0,
+      batchId: null,
+    };
+  }
+
+  it("should run cycles until a window reaches now, each committing its own step", async () => {
+    const ends = [
+      new Date(NOW.getTime() - 53 * DAY),
+      new Date(NOW.getTime() - 46 * DAY),
+      NOW,
+    ];
+    const runCycle = vi.fn(async () => cycleReport(ends.shift()!));
+
+    const reports = await runShopifyOrderSyncToNow(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { now: () => NOW, runCycle },
+    );
+
+    expect(runCycle).toHaveBeenCalledTimes(3);
+    expect(reports.at(-1)?.window.to).toEqual(NOW);
+  });
+
+  it("should run exactly one cycle for a store that is already current", async () => {
+    const runCycle = vi.fn(async () => cycleReport(NOW));
+    await runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "webhook" }, { now: () => NOW, runCycle });
+    expect(runCycle).toHaveBeenCalledTimes(1);
+  });
+
+  it("should stop rather than spin when a window does not move forward", async () => {
+    const stuck = new Date(NOW.getTime() - 30 * DAY);
+    const runCycle = vi.fn(async () => cycleReport(stuck));
+    await runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "manual" }, { now: () => NOW, runCycle });
+    expect(runCycle).toHaveBeenCalledTimes(2);
+  });
+
+  it("should stop at the first failing cycle, keeping the steps already committed", async () => {
+    const runCycle = vi
+      .fn()
+      .mockResolvedValueOnce(cycleReport(new Date(NOW.getTime() - 53 * DAY)))
+      .mockRejectedValueOnce(new Error("pagination_error"));
+    await expect(
+      runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "manual" }, { now: () => NOW, runCycle }),
+    ).rejects.toThrow("pagination_error");
+    expect(runCycle).toHaveBeenCalledTimes(2);
   });
 });

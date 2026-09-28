@@ -11,10 +11,12 @@ export type ShopifyAppBridgeContext = {
   sync: {
     lastSuccessfulAt: string | null;
     lastErrorCode: string | null;
-    /** When lastErrorCode was recorded; null for errors recorded before this was tracked. */
-    lastErrorAt: string | null;
     /** When a manual sync was last requested. */
     requestedAt: string | null;
+    /** The latest manual request a finished manual run answered. */
+    answeredAt: string | null;
+    /** Orders are synced through this time, whichever sync did it. */
+    syncedThrough: string | null;
   };
   capabilities: {
     scope: "read_orders";

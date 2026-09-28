@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "bd6c49cd-8eb6-46d0-b2d3-6efdd37c7aee",
+  "id": "99551653-2e75-4cdf-979a-f8dcdef37bee",
   "prevId": "55146906-44d1-4915-8ad1-d1d9dafac496",
   "tables": {
     "agent_action_drafts": {
@@ -14439,6 +14439,13 @@
         },
         "syncRequestedAt": {
           "name": "syncRequestedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "syncAnsweredAt": {
+          "name": "syncAnsweredAt",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false,

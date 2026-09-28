@@ -83,7 +83,7 @@ describe("Shopify order sync durable queue", () => {
 describe("when a merchant asks for a manual sync", () => {
   it("should queue it on its own queue, which falls back in-process rather than refusing without Redis", async () => {
     const { enqueueShopifyManualSync } = await import("./syncQueue");
-    const payload = { storeId: 7, organizationId: 42 };
+    const payload = { storeId: 7, organizationId: 42, requestedAt: "2026-09-28T10:00:00.000Z" };
 
     await enqueueShopifyManualSync(payload);
 
@@ -111,13 +111,14 @@ describe("when a merchant asks for a manual sync", () => {
   it("should coalesce repeated requests per store, and only per store", async () => {
     const { enqueueShopifyManualSync } = await import("./syncQueue");
 
-    await enqueueShopifyManualSync({ storeId: 7, organizationId: 42 });
-    await enqueueShopifyManualSync({ storeId: 8, organizationId: 42 });
+    const requestedAt = "2026-09-28T10:00:00.000Z";
+    await enqueueShopifyManualSync({ storeId: 7, organizationId: 42, requestedAt });
+    await enqueueShopifyManualSync({ storeId: 8, organizationId: 42, requestedAt });
 
-    expect(enqueue).toHaveBeenNthCalledWith(1, "manual-7", { storeId: 7, organizationId: 42 }, {
+    expect(enqueue).toHaveBeenNthCalledWith(1, "manual-7", { storeId: 7, organizationId: 42, requestedAt }, {
       coalesceKey: "shopify-manual-sync:42:7",
     });
-    expect(enqueue).toHaveBeenNthCalledWith(2, "manual-8", { storeId: 8, organizationId: 42 }, {
+    expect(enqueue).toHaveBeenNthCalledWith(2, "manual-8", { storeId: 8, organizationId: 42, requestedAt }, {
       coalesceKey: "shopify-manual-sync:42:8",
     });
   });

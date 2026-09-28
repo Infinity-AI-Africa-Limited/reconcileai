@@ -7,28 +7,20 @@
  * The sync cycle itself is replaced: this pins the QUEUE's behaviour — stores
  * run in parallel, one store never twice at once, and a failed run is final.
  *
- * LOOPBACK ONLY. Unlike jobQueue.durability.test.ts, which names its queues per
- * run, this must use the real queue name to test the real queue — so pointed at
- * a shared Redis it would enqueue jobs a live worker could run, and its cleanup
- * would obliterate the live queue. REDIS_URL is routinely exported during
- * production maintenance, so the test refuses any host that is not provably
- * local (the rule scripts/guardLocalDb.ts follows: allow the provably safe,
- * refuse the rest).
+ * ISOLATED BY NAME, like jobQueue.durability.test.ts. The queue is built by the
+ * production factory (same options) and fed by the production job builder (same
+ * names and coalescing), but under a queue name unique to this run — so no app
+ * sharing the Redis, local or otherwise, has a worker on it, and the cleanup
+ * can only ever delete this run's queue. Using the real queue name here would
+ * let the test's mock worker consume a running app's refresh jobs.
  */
 import { afterAll, describe, expect, it, vi } from "vitest";
+import type { JobQueue } from "../../jobQueue";
+import type { ShopifyManualSyncPayload } from "./manualSync";
 
-function loopbackRedisUrl(raw: string | undefined): string | undefined {
-  const value = raw?.trim();
-  if (!value) return undefined;
-  try {
-    const host = new URL(value).hostname.replace(/^\[|\]$/g, "");
-    return host === "127.0.0.1" || host === "localhost" || host === "::1" ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const REDIS_URL = loopbackRedisUrl(process.env.REDIS_URL);
+const REDIS_URL = process.env.REDIS_URL?.trim();
+const QUEUE_NAME = `test-shopify-manual-sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const REQUESTED_AT = "2026-09-28T10:00:00.000Z";
 
 const state = vi.hoisted(() => ({
   started: [] as number[],
@@ -65,15 +57,25 @@ function finish(storeId: number, error?: Error): void {
 }
 
 describe.skipIf(!REDIS_URL)("the Shopify manual-sync queue on BullMQ", () => {
+  let queue: JobQueue<ShopifyManualSyncPayload> | null = null;
+
+  /** The production queue and enqueue call, under this run's own queue name. */
+  async function enqueueShopifyManualSync(request: { storeId: number; organizationId: number }): Promise<void> {
+    const { createShopifyManualSyncQueue, shopifyManualSyncJob } = await import("./syncQueue");
+    queue ??= await createShopifyManualSyncQueue(QUEUE_NAME);
+    expect(queue.backend).toBe("bullmq");
+    await queue.enqueue(...shopifyManualSyncJob({ ...request, requestedAt: REQUESTED_AT }));
+  }
+
   afterAll(async () => {
+    await queue?.close().catch(() => {});
     const { Queue } = await import("bullmq");
-    const q = new Queue("shopify-manual-sync", { connection: { url: REDIS_URL } as never });
+    const q = new Queue(QUEUE_NAME, { connection: { url: REDIS_URL } as never });
     await q.obliterate({ force: true }).catch(() => {});
     await q.close().catch(() => {});
   });
 
   it("should run different stores at once, never one store twice at once, and keep one follow-up", async () => {
-    const { enqueueShopifyManualSync } = await import("./syncQueue");
 
     await enqueueShopifyManualSync({ storeId: 1, organizationId: 42 });
     await enqueueShopifyManualSync({ storeId: 2, organizationId: 42 });
@@ -96,7 +98,6 @@ describe.skipIf(!REDIS_URL)("the Shopify manual-sync queue on BullMQ", () => {
   });
 
   it("should not retry a failed run, and should hand it to the failure hook once", async () => {
-    const { enqueueShopifyManualSync } = await import("./syncQueue");
     const before = state.started.filter((id) => id === 3).length;
 
     await enqueueShopifyManualSync({ storeId: 3, organizationId: 42 });
@@ -106,6 +107,6 @@ describe.skipIf(!REDIS_URL)("the Shopify manual-sync queue on BullMQ", () => {
     await until(() => state.markFailed.mock.calls.length === 1, "the failure hook");
     await new Promise((r) => setTimeout(r, 600));
     expect(state.started.filter((id) => id === 3)).toHaveLength(before + 1);
-    expect(state.markFailed).toHaveBeenCalledWith({ storeId: 3, organizationId: 42 });
+    expect(state.markFailed).toHaveBeenCalledWith({ storeId: 3, organizationId: 42, requestedAt: REQUESTED_AT });
   });
 });

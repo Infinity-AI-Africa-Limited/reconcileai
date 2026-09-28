@@ -218,6 +218,12 @@ export const shopifySyncCursors = mysqlTable(
      * a page knows one is still pending, including after a reload.
      */
     syncRequestedAt: timestamp("syncRequestedAt"),
+    /**
+     * The syncRequestedAt of the latest manual request a finished manual run
+     * answered. Every sync writes this cursor, so without it a webhook sync
+     * finishing mid-request would read as the request's own outcome.
+     */
+    syncAnsweredAt: timestamp("syncAnsweredAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },

@@ -131,8 +131,9 @@ describe("when the workspace loads its context", () => {
         [CURSORS]: [[{
           lastSuccessfulAt: new Date("2026-09-25T07:30:00.000Z"),
           lastErrorCode: null,
-          lastErrorAt: new Date("2026-09-24T07:30:00.000Z"),
           syncRequestedAt: new Date("2026-09-25T07:29:00.000Z"),
+          syncAnsweredAt: new Date("2026-09-25T07:29:00.000Z"),
+          watermarkUpdatedAt: new Date("2026-09-25T07:29:30.000Z"),
         }]],
       },
     });
@@ -147,8 +148,9 @@ describe("when the workspace loads its context", () => {
       sync: {
         lastSuccessfulAt: "2026-09-25T07:30:00.000Z",
         lastErrorCode: null,
-        lastErrorAt: "2026-09-24T07:30:00.000Z",
         requestedAt: "2026-09-25T07:29:00.000Z",
+        answeredAt: "2026-09-25T07:29:00.000Z",
+        syncedThrough: "2026-09-25T07:29:30.000Z",
       },
       capabilities: { scope: "read_orders", readOrders: true, manualSync: true, shopifyPayments: false, mutations: false },
     });

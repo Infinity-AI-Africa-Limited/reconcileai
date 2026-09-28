@@ -366,11 +366,26 @@ describe("the persisted watermark window", () => {
     });
   });
 
-  it("reads read_orders' whole 60-day window on a store's first sync", () => {
+  it("starts a store's first sync at the beginning of read_orders' 60-day window, one bounded step at a time", () => {
+    // The first cycle covers the oldest 7 days; each commits its watermark and
+    // the next starts there, so a large backfill cannot hit the page cap for
+    // the whole 60 days at once and fail forever.
     expect(
       computeShopifyOrderWindow({ now: new Date("2026-09-20T12:00:00Z"), watermark: null }),
     ).toEqual({
       from: new Date("2026-07-22T12:00:00Z"),
+      to: new Date("2026-07-29T12:00:00Z"),
+    });
+  });
+
+  it("reaches now in one window once the store is within a step of current", () => {
+    expect(
+      computeShopifyOrderWindow({
+        now: new Date("2026-09-20T12:00:00Z"),
+        watermark: new Date("2026-09-15T12:00:00Z"),
+      }),
+    ).toEqual({
+      from: new Date("2026-09-15T11:55:00Z"),
       to: new Date("2026-09-20T12:00:00Z"),
     });
   });

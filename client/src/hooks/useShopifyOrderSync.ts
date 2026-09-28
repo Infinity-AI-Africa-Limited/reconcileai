@@ -6,12 +6,10 @@ import {
 } from "@/lib/shopifyAppBridge";
 import {
   canRequestShopifySync,
+  shopifySyncPollIntervalMs,
   shopifySyncProgress,
-  shouldPollShopifySync,
   withLatestRequest,
 } from "@/lib/shopifyOrderSyncProgress";
-
-const POLL_MS = 5_000;
 
 /**
  * Requests a queued order sync and follows it through the sync cursor. `refresh`
@@ -30,16 +28,16 @@ export function useShopifyOrderSync(
   const [now, setNow] = useState(() => new Date());
 
   const progress = sync ? shopifySyncProgress(withLatestRequest(sync, requestedAt), now) : "never";
-  const polling = shouldPollShopifySync(progress);
+  const pollMs = shopifySyncPollIntervalMs(progress);
 
   useEffect(() => {
-    if (!polling) return;
+    if (pollMs === null) return;
     const timer = setInterval(() => {
       setNow(new Date());
       void refresh();
-    }, POLL_MS);
+    }, pollMs);
     return () => clearInterval(timer);
-  }, [polling, refresh]);
+  }, [pollMs, refresh]);
 
   const request = async () => {
     setRequesting(true);

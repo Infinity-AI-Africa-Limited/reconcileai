@@ -1,4 +1,4 @@
-import { createQueue, type JobQueue } from "../../jobQueue";
+import { createQueue, type EnqueueOptions, type JobQueue } from "../../jobQueue";
 import { handleShopifyWebhookSync, markShopifyWebhookSyncFailed } from "./syncOrchestrator";
 import {
   handleShopifyManualSync,
@@ -55,21 +55,45 @@ export async function enqueueShopifyOrderSync(payload: ShopifyOrderSyncPayload):
  * syncs of one store at once; the worker runs a few stores in parallel so one
  * store's 60-day backfill does not hold every other store's refresh behind it.
  */
+export const SHOPIFY_MANUAL_SYNC_QUEUE = "shopify-manual-sync";
 const MANUAL_SYNC_CONCURRENCY = 4;
+
+/**
+ * The manual-sync queue, under `name`. Production uses the one module-level
+ * queue below; the real-Redis test builds its own under a name no running app
+ * uses, so it can never consume or delete a live refresh.
+ */
+export function createShopifyManualSyncQueue(
+  name: string = SHOPIFY_MANUAL_SYNC_QUEUE,
+): Promise<JobQueue<ShopifyManualSyncPayload>> {
+  return createQueue<ShopifyManualSyncPayload>(
+    name,
+    async (job) => handleShopifyManualSync(job.data),
+    {
+      attempts: 1,
+      backoffMs: 30_000,
+      concurrency: MANUAL_SYNC_CONCURRENCY,
+      onFinalFailure: async (job) => markShopifyManualSyncFailed(job.data),
+    },
+  );
+}
+
+/** How one request is enqueued: named per store, coalesced per store. */
+export function shopifyManualSyncJob(
+  payload: ShopifyManualSyncPayload,
+): [name: string, payload: ShopifyManualSyncPayload, options: EnqueueOptions] {
+  return [
+    `manual-${payload.storeId}`,
+    payload,
+    { coalesceKey: `shopify-manual-sync:${payload.organizationId}:${payload.storeId}` },
+  ];
+}
+
 let manualQueuePromise: Promise<JobQueue<ShopifyManualSyncPayload>> | null = null;
 
 function manualQueue(): Promise<JobQueue<ShopifyManualSyncPayload>> {
   if (!manualQueuePromise) {
-    manualQueuePromise = createQueue<ShopifyManualSyncPayload>(
-      "shopify-manual-sync",
-      async (job) => handleShopifyManualSync(job.data),
-      {
-        attempts: 1,
-        backoffMs: 30_000,
-        concurrency: MANUAL_SYNC_CONCURRENCY,
-        onFinalFailure: async (job) => markShopifyManualSyncFailed(job.data),
-      },
-    ).catch((error) => {
+    manualQueuePromise = createShopifyManualSyncQueue().catch((error) => {
       manualQueuePromise = null;
       throw error;
     });
@@ -79,7 +103,5 @@ function manualQueue(): Promise<JobQueue<ShopifyManualSyncPayload>> {
 
 export async function enqueueShopifyManualSync(payload: ShopifyManualSyncPayload): Promise<void> {
   const queue = await manualQueue();
-  await queue.enqueue(`manual-${payload.storeId}`, payload, {
-    coalesceKey: `shopify-manual-sync:${payload.organizationId}:${payload.storeId}`,
-  });
+  await queue.enqueue(...shopifyManualSyncJob(payload));
 }

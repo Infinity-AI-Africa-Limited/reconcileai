@@ -73,6 +73,14 @@ describe("when a settlement file is uploaded again", () => {
     expect(lookup?.where?.params).toEqual([ORG, PAYMENTS, "1001"]);
   });
 
+  it("should add nothing when an overlapping export spells the same order without its #", async () => {
+    // Both are stored as "1001"; comparing the files' own spellings counted the
+    // same payment twice.
+    const earlier = fileRows([["#1001", "12.34"]]);
+    const { fresh } = await importAgainst(fileRows([["1001", "12.34"]]), earlier.map(asStored));
+    expect(fresh).toEqual([]);
+  });
+
   it("should import only the events an overlapping export adds", async () => {
     const earlier = fileRows([["#1001", "12.34"]]);
     const { fresh } = await importAgainst(fileRows([["#1001", "12.34"], ["#1003", "7.50"]]), earlier.map(asStored));

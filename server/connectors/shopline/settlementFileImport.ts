@@ -24,6 +24,7 @@
  * Pure functions here (parse / detect / map) are unit-testable without a DB.
  */
 import type { InsertTransaction } from "../../../drizzle/schema";
+import { sanitizeRef } from "../../db";
 import {
   parseTabularFile,
   normalizeHeader,
@@ -280,8 +281,10 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  * The key is built only from values that survive storage unchanged, so a stored
  * row and the same row re-imported produce the same key:
  *   - the order and gateway references as the FILE wrote them (`rawData`, kept
- *     verbatim — `transactionRef` itself may be sanitised, or rewritten to a
- *     canonical order id once the order has synced);
+ *     verbatim — `transactionRef` itself may be rewritten to a canonical order
+ *     id once the order has synced), compared in their STORED form: `#1001` in
+ *     one export and `1001` in an overlapping one name the same order, are
+ *     stored identically, and must not count one payment twice;
  *   - direction, amount in cents, currency;
  *   - the settlement date to the second (the column's precision), or nothing
  *     when the file had no date — `transactionDate` then holds the import time
@@ -289,10 +292,10 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  */
 export function settlementEventKey(row: SettlementEventFields): string {
   const provenance = provenanceOf(row.rawData);
-  const orderRef = typeof provenance.originalOrderRef === "string"
-    ? provenance.originalOrderRef
-    : row.transactionRef ?? "";
-  const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : "";
+  const orderRef = sanitizeRef(
+    typeof provenance.originalOrderRef === "string" ? provenance.originalOrderRef : row.transactionRef,
+  ) ?? "";
+  const gatewayRef = sanitizeRef(typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : null) ?? "";
   const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
   return JSON.stringify([
     orderRef,
