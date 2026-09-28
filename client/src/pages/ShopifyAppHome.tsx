@@ -321,6 +321,9 @@ export default function ShopifyAppHome() {
                 {settlement.preview.parseErrors.length > 0 ? (
                   <p className="text-xs text-amber-700">Some rows have file-structure errors: {settlement.preview.parseErrors.join(" · ")}</p>
                 ) : null}
+                {settlement.previewUnalignedNotice ? (
+                  <p className="text-xs text-amber-700">{settlement.previewUnalignedNotice}</p>
+                ) : null}
               </div>
             ) : null}
 
@@ -332,6 +335,9 @@ export default function ShopifyAppHome() {
                   <p className="mt-1">
                     {settlement.result.imported} imported, {settlement.result.duplicates} duplicate(s), {settlement.result.failed} failed; {settlement.result.matchedCount} matched and {settlement.result.exceptionCount} exception(s) identified.
                   </p>
+                  {settlement.resultUnalignedNotice ? (
+                    <p className="mt-2 text-amber-800">{settlement.resultUnalignedNotice}</p>
+                  ) : null}
                 </div>
               </div>
             ) : null}

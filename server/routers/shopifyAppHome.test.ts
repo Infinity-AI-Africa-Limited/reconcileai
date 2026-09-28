@@ -195,6 +195,7 @@ describe("when the merchant imports settlement evidence", () => {
       missingRequired: [],
       totalRows: 1,
       parseErrors: [],
+      unalignedRows: 1,
       sampleRows: [{ "Order ID": "customer@example.com", Amount: "12.34" }],
       channelId: 987,
     });
@@ -214,6 +215,7 @@ describe("when the merchant imports settlement evidence", () => {
       missingRequired: [],
       totalRows: 1,
       parseErrors: [],
+      unalignedRows: 1,
     });
     expect(JSON.stringify(result)).not.toMatch(/customer@example\.com|12\.34|channelId|987/);
   });
@@ -228,12 +230,13 @@ describe("when the merchant imports settlement evidence", () => {
       failed: 0,
       matchedCount: 2,
       exceptionCount: 1,
+      unalignedRows: 1,
       sampleRows: [{ order_number: "PII-SECRET" }],
       batchId: 112233,
     });
     const result = await caller().importSettlementEvidence({ ...evidenceInput, dryRun: false });
     expect(JSON.stringify(result)).not.toMatch(/PII-SECRET|112233|batchId|sampleRows/);
-    expect(result).toMatchObject({ committed: true, imported: 3, duplicates: 1, matchedCount: 2, exceptionCount: 1 });
+    expect(result).toMatchObject({ committed: true, imported: 3, duplicates: 1, matchedCount: 2, exceptionCount: 1, unalignedRows: 1 });
   });
 
   it("should accept a confirmed mapping that names only some fields, and forward it", async () => {

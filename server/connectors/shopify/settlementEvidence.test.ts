@@ -114,6 +114,7 @@ describe("Shopify merchant settlement evidence", () => {
       missingRequired: [],
       totalRows: 1,
       parseErrors: [],
+      unalignedRows: 1,
     });
     expect(JSON.stringify(result)).not.toContain("person@example.com");
     expect(fake.committed().filter((op) => op.kind !== "select")).toEqual([]);
@@ -150,6 +151,7 @@ describe("Shopify merchant settlement evidence", () => {
       failed: 0,
       matchedCount: 1,
       exceptionCount: 0,
+      unalignedRows: 0,
     });
     const storeLookup = fake.ops.find((op) => op.kind === "select" && op.table === STORES);
     expect(storeLookup?.where?.params).toEqual(expect.arrayContaining([7, 42, "active"]));
@@ -203,6 +205,7 @@ describe("Shopify merchant settlement evidence", () => {
       failed: 0,
       matchedCount: 1,
       exceptionCount: 0,
+      unalignedRows: 0,
     });
   });
 
@@ -438,6 +441,73 @@ describe("when an export names the order differently from how Shopify stores it"
     await result;
 
     expect(insertedRows(fake).map((row) => row.transactionRef)).toEqual(["1001"]);
+  });
+});
+
+describe("when a file names orders ReconcileAI has not synced", () => {
+  async function dryRun(orders: unknown[]) {
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store]],
+        [USERS]: [[{ id: 9 }]],
+        [CHANNELS]: [[{ id: 70 }]],
+        [TRANSACTIONS]: [orders],
+      },
+    });
+    const result = await importShopifySettlementEvidence(context, { ...input, dryRun: true }, fake.db as never, {
+      parseFile: vi.fn(async () => fileWith([
+        { order_number: "#1001", settled_amount: "12.34" },
+        { order_number: "#2002", settled_amount: "5.00" },
+        { order_number: "#3003", settled_amount: "7.50" },
+      ])),
+    });
+    return { result, fake };
+  }
+
+  it("should say how many before anything is imported, while there is still time to sync them", async () => {
+    const { result, fake } = await dryRun(alignedOrder);
+    expect(result).toMatchObject({ committed: false, unalignedRows: 2 });
+    expect(fake.committed().filter((op) => op.kind !== "select")).toEqual([]);
+  });
+
+  it("should report none when every row names a synced order", async () => {
+    const { result } = await dryRun([
+      ...alignedOrder,
+      { transactionRef: "gid://shopify/Order/2002", externalRef: "#2002" },
+      { transactionRef: "gid://shopify/Order/3003", externalRef: "#3003" },
+    ]);
+    expect(result).toMatchObject({ unalignedRows: 0 });
+  });
+
+  it("should not guess when the mapping is incomplete and rows cannot be read", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[store]], [USERS]: [[{ id: 9 }]], [CHANNELS]: [[{ id: 70 }]] } });
+    const result = await importShopifySettlementEvidence(
+      context,
+      { ...input, dryRun: true, columnMapping: { orderRef: "order_number" } },
+      fake.db as never,
+      { parseFile: vi.fn(async () => parsedFile()) },
+    );
+    expect(result).toMatchObject({ missingRequired: ["amount"], unalignedRows: null });
+  });
+
+  it("should count, of the rows it imported, those naming no synced order", async () => {
+    const { result, auditCommitted } = await commitFile({
+      rows: [
+        { order_number: "#1001", settled_amount: "12.34" },
+        { order_number: "#2002", settled_amount: "5.00" },
+      ],
+    });
+    await expect(result).resolves.toMatchObject({ imported: 2, unalignedRows: 1 });
+    expect(auditCommitted).toHaveBeenCalledWith(expect.objectContaining({ unalignedRows: 1 }));
+  });
+
+  it("should not count a re-uploaded row it skipped as a duplicate", async () => {
+    const stored = { ...storedEvent("5.00", "credit"), transactionRef: "2002", rawData: { originalOrderRef: "#2002" } };
+    const { result } = await commitFile({
+      rows: [{ order_number: "#2002", settled_amount: "5.00" }],
+      storedEvidence: [stored],
+    });
+    await expect(result).resolves.toMatchObject({ imported: 0, duplicates: 1, unalignedRows: 0 });
   });
 });
 

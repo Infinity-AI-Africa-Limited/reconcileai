@@ -115,6 +115,7 @@ export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceRe
       failed: result.failed,
       matchedCount: result.matchedCount,
       exceptionCount: result.exceptionCount,
+      unalignedRows: result.unalignedRows,
     };
   }
   return {
@@ -124,6 +125,7 @@ export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceRe
     missingRequired: result.missingRequired,
     totalRows: result.totalRows,
     parseErrors: result.parseErrors,
+    unalignedRows: result.unalignedRows,
   };
 }
 

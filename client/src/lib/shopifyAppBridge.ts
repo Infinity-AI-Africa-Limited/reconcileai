@@ -56,6 +56,8 @@ export type ShopifySettlementEvidenceDryRun = {
   missingRequired: ShopifySettlementField[];
   totalRows: number;
   parseErrors: string[];
+  /** Rows naming no Shopify order ReconcileAI has synced; null when rows could not be read. */
+  unalignedRows: number | null;
 };
 
 export type ShopifySettlementEvidenceCommitted = {
@@ -67,6 +69,8 @@ export type ShopifySettlementEvidenceCommitted = {
   failed: number;
   matchedCount: number;
   exceptionCount: number;
+  /** Of the rows imported, those naming no synced Shopify order. */
+  unalignedRows: number;
 };
 
 export type ShopifySettlementEvidenceResult =

@@ -18,6 +18,7 @@ import {
   canImportSettlementEvidence,
   isSettlementSpreadsheet,
   settlementEvidenceInputError,
+  unalignedRowsNotice,
   type SettlementEvidenceFile,
 } from "@/lib/shopifySettlementEvidenceRules";
 
@@ -133,6 +134,8 @@ export function useShopifySettlementEvidence() {
     mappingEdited,
     canCheck: canCheckSettlementEvidence(eligibility),
     canImport: canImportSettlementEvidence(eligibility),
+    previewUnalignedNotice: preview ? unalignedRowsNotice(preview) : null,
+    resultUnalignedNotice: result ? unalignedRowsNotice(result) : null,
     chooseFile,
     updateSourceLabel,
     changeColumn,
