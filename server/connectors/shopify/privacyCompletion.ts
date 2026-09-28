@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, exists, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   anomalyScores,
@@ -35,6 +35,17 @@ export const SHOPIFY_PRIVACY_ARTIFACT_SCHEMA_VERSION = 1;
 export const SHOPIFY_PRIVACY_JOB_MAX_ATTEMPTS = 6;
 export const SHOPIFY_PRIVACY_LEASE_MS = 5 * 60_000;
 export const SHOPIFY_PRIVACY_ARTIFACT_TTL_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * The expiry of an export that is being DISCARDED: long past on every clock.
+ *
+ * Workers compare expiries with the time they started, and a stale worker (its
+ * lease lost mid-upload) started long ago. Had a discard marked an export due
+ * "now", that worker could still read it as live, write `ready` over it or
+ * leave its own late object behind. A fixed past instant is due for every
+ * worker and every instance, however old its clock reading or skewed its host.
+ */
+export const SHOPIFY_PRIVACY_ARTIFACT_DISCARDING = new Date("2000-01-01T00:00:00.000Z");
 const LOOKUP_CHUNK = 500;
 const OUTBOX_BATCH_SIZE = 100;
 
@@ -497,7 +508,7 @@ async function parkForShopRedaction(db: Db, job: ClaimedJob, now: Date, deleteOb
   await setNonTerminalState(db, job, "blocked_dependency", "shop_redaction_in_progress", async (tx) => {
     await tx
       .update(shopifyPrivacyArtifacts)
-      .set({ expiresAt: now })
+      .set({ expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING })
       .where(
         and(
           eq(shopifyPrivacyArtifacts.requestId, job.requestId),
@@ -868,7 +879,10 @@ export async function handleShopifyPrivacyJob(
         ),
       )
       .limit(1);
-    if (artifact?.status === "deleted") {
+    // Due is as good as deleted. An export past its expiry is being discarded
+    // (the sweep, or a fence-park, or a late upload reclaiming its object):
+    // resuming it would upload into an object that is about to be deleted.
+    if (artifact && (artifact.status === "deleted" || artifact.expiresAt <= now)) {
       await setNonTerminalState(db, job, "manual_review", "artifact_expired");
       return;
     }
@@ -938,6 +952,10 @@ export async function handleShopifyPrivacyJob(
             eq(shopifyPrivacyArtifacts.organizationId, job.organizationId),
             eq(shopifyPrivacyArtifacts.storeId, job.storeId),
             eq(shopifyPrivacyArtifacts.status, "writing"),
+            // Not a row made due while this upload ran: another worker may be
+            // deleting its object this moment, and `ready` over a deleted
+            // object is an export that can never be downloaded.
+            gt(shopifyPrivacyArtifacts.expiresAt, now),
           ),
         );
       if (affectedRows(readyWrite) !== 1) {
@@ -1031,8 +1049,8 @@ export async function handleShopifyPrivacyJob(
  * object again even if this process stops or the delete fails. The delete here
  * only saves waiting for the next sweep.
  *
- * A row that is `ready` belongs to another worker that finished this artifact;
- * its object is not this worker's to delete.
+ * A row that is `ready` and not being discarded belongs to another worker that
+ * finished this artifact; its object is not this worker's to delete.
  */
 async function reclaimLateUpload(
   db: Db,
@@ -1048,16 +1066,29 @@ async function reclaimLateUpload(
     eq(shopifyPrivacyArtifacts.objectKey, objectKey),
   );
   const [current] = await db
-    .select({ status: shopifyPrivacyArtifacts.status })
+    .select({ status: shopifyPrivacyArtifacts.status, expiresAt: shopifyPrivacyArtifacts.expiresAt })
     .from(shopifyPrivacyArtifacts)
     .where(artifactScope)
     .limit(1);
-  if (current?.status === "ready") return;
-  if (current?.status === "deleted") {
+  // Another worker's finished export, on offer or about to be: not ours to touch.
+  if (current?.status === "ready" && current.expiresAt > SHOPIFY_PRIVACY_ARTIFACT_DISCARDING) return;
+  if (current) {
+    // Everything else is being discarded. Hand the object to the sweep as
+    // `writing` and discarding BEFORE deleting it. A `ready` row being discarded
+    // is converted too, so the discard's own mark (conditioned on `ready`) misses
+    // and cannot record `deleted` over an object this upload may have rewritten.
     await db
       .update(shopifyPrivacyArtifacts)
-      .set({ status: "writing", deletedAt: null, expiresAt: now })
-      .where(and(artifactScope, eq(shopifyPrivacyArtifacts.status, "deleted")));
+      .set({ status: "writing", deletedAt: null, expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING })
+      .where(
+        and(
+          artifactScope,
+          or(
+            inArray(shopifyPrivacyArtifacts.status, ["deleted", "writing"]),
+            lte(shopifyPrivacyArtifacts.expiresAt, SHOPIFY_PRIVACY_ARTIFACT_DISCARDING),
+          ),
+        ),
+      );
   }
   try {
     await deleteObject(objectKey);
