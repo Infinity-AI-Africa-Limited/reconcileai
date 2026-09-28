@@ -7,13 +7,18 @@
  * not a nicety: without Redis it is the only automatic order sync there is.
  *
  * Every tick syncs the stores that have not synced successfully within the
- * interval, stalest first and a bounded number per tick, one store at a time.
+ * interval, a bounded number per tick, one store at a time — the ones whose
+ * turn came LEAST recently. Each attempt is recorded on the store's sync cursor
+ * before it runs, so a store that keeps failing goes to the back of the line
+ * like any other instead of holding its place: ordered by last success, a
+ * batch's worth of never-synced or broken stores would be picked every tick
+ * and the healthy stores behind them never reached.
  * The sync itself is incremental from the store's watermark, takes the store's
  * row lock, and refuses a store fenced for redaction, so a tick that overlaps a
  * webhook-triggered sync, or runs on several instances at once, serialises on
  * the lock and finds nothing left to do — wasteful at worst, never wrong.
  */
-import { and, asc, eq, isNull, lte, or } from "drizzle-orm";
+import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import { organizations } from "../../../drizzle/schema";
 import { shopifyConnectorStores, shopifySyncCursors } from "../../../drizzle/shopify_schema";
 import { ENV } from "../../_core/env";
@@ -27,8 +32,9 @@ type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 export const SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS = 15 * 60_000;
 
 /**
- * Stores synced per tick. Stalest first, so with more eligible stores than this
- * every store is still reached, once per ceil(stores / batch) ticks.
+ * Stores synced per tick. Least-recently-attempted first, so with more eligible
+ * stores than this every store is still reached, once per ceil(stores / batch)
+ * ticks, however many of them keep failing.
  */
 export const SHOPIFY_ORDER_BACKSTOP_BATCH = 25;
 
@@ -78,8 +84,10 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
           or(isNull(shopifySyncCursors.lastSuccessfulAt), lte(shopifySyncCursors.lastSuccessfulAt, staleBefore)),
         ),
       )
-      // MySQL sorts NULL first ascending: never-synced stores lead.
-      .orderBy(asc(shopifySyncCursors.lastSuccessfulAt), asc(shopifyConnectorStores.id))
+      // Whose turn came least recently. `updatedAt` moves on every attempt (see
+      // recordAttempt) and on every cursor write; a store with no cursor yet
+      // sorts first, as MySQL puts NULL first ascending.
+      .orderBy(asc(shopifySyncCursors.updatedAt), asc(shopifyConnectorStores.id))
       .limit(deps.batchSize ?? SHOPIFY_ORDER_BACKSTOP_BATCH);
   } catch (error) {
     console.error("[shopify-backstop] order sync backstop unavailable", {
@@ -93,6 +101,7 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
   for (const store of stores) {
     report.scanned += 1;
     try {
+      await recordAttempt(deps.db ?? (await getDb()), store);
       await sync({ storeId: store.storeId, organizationId: store.organizationId, trigger: "backstop" });
       report.synced += 1;
     } catch (error) {
@@ -111,6 +120,21 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
     console.log("[shopify-backstop] order sync backstop ran", { code: "shopify_backstop_completed", ...report });
   }
   return report;
+}
+
+/**
+ * Mark the store's turn as taken, before its sync runs. Written on the database
+ * clock, like the column's own ON UPDATE, so the ordering compares like with
+ * like. Explicit because ON UPDATE fires only when a value changes, and a store
+ * failing the same way every time changes nothing. Creates the cursor for a
+ * store that has none; a cursor with no watermark syncs exactly as no cursor.
+ */
+async function recordAttempt(db: Db | null, store: { storeId: number; organizationId: number }): Promise<void> {
+  if (!db) throw new Error("Database unavailable");
+  await db
+    .insert(shopifySyncCursors)
+    .values({ storeId: store.storeId, organizationId: store.organizationId, resource: "orders" })
+    .onDuplicateKeyUpdate({ set: { updatedAt: sql`CURRENT_TIMESTAMP` } });
 }
 
 let backstopTimer: ReturnType<typeof setInterval> | null = null;

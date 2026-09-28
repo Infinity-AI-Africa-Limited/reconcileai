@@ -1,3 +1,4 @@
+import { MySqlDialect } from "drizzle-orm/mysql-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const env = vi.hoisted(() => ({ shopifyClientId: "client-id", shopifyClientSecret: "client-secret" }));
@@ -27,6 +28,7 @@ import {
 import { scriptedDb } from "./scriptedDb.testkit";
 
 const STORES = "shopify_connector_stores";
+const CURSORS = "shopify_sync_cursors";
 const NOW = new Date("2026-09-28T12:00:00.000Z");
 
 afterEach(() => {
@@ -86,6 +88,93 @@ describe("when the order sync backstop ticks", () => {
       errorCode: "ER_LOCK_WAIT_TIMEOUT",
     });
     expect(JSON.stringify(logged.mock.calls)).not.toMatch(/owner@merchant\.com|Failed query|Lock wait/);
+    vi.restoreAllMocks();
+  });
+
+  it("should record each store's turn on its cursor before its sync runs", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const fake = scriptedDb({ select: { [STORES]: [[{ storeId: 7, organizationId: 42 }, { storeId: 8, organizationId: 43 }]] } });
+    const opsAtSync: number[] = [];
+    const sync = vi.fn(async () => {
+      opsAtSync.push(fake.ops.length);
+      return {} as never;
+    });
+
+    await runShopifyOrderBackstop({ db: fake.db as never, now: () => NOW, sync: sync as never });
+
+    const touches = fake.writes("insert", CURSORS);
+    expect(touches.map((op) => op.data)).toEqual([
+      { storeId: 7, organizationId: 42, resource: "orders" },
+      { storeId: 8, organizationId: 43, resource: "orders" },
+    ]);
+    expect(touches.every((op) => op.upsert)).toBe(true);
+    // Each store's touch is already recorded when its sync starts.
+    const touchIndex = (storeId: number) =>
+      fake.ops.findIndex((op) => op.kind === "insert" && op.table === CURSORS && (op.data as { storeId: number }).storeId === storeId);
+    expect(touchIndex(7)).toBeLessThan(opsAtSync[0]);
+    expect(touchIndex(8)).toBeLessThan(opsAtSync[1]);
+    vi.restoreAllMocks();
+  });
+
+  it("should take the stores whose turn came least recently, not the least recently successful", async () => {
+    const orderedBy: unknown[] = [];
+    const chain: Record<string, unknown> = {};
+    for (const step of ["from", "innerJoin", "leftJoin", "where"]) chain[step] = () => chain;
+    chain.orderBy = (...columns: unknown[]) => {
+      orderedBy.push(...columns);
+      return chain;
+    };
+    chain.limit = async () => [];
+
+    await runShopifyOrderBackstop({ db: { select: () => chain } as never, now: () => NOW, sync: vi.fn() });
+
+    const dialect = new MySqlDialect();
+    const rendered = orderedBy.map((column) => dialect.sqlToQuery(column as never).sql);
+    expect(rendered[0]).toBe("`shopify_sync_cursors`.`updatedAt` asc");
+    expect(rendered.join(" ")).not.toMatch(/lastSuccessfulAt/);
+  });
+
+  it("should reach every store even when a full batch of them always fails", async () => {
+    // A model of the table: the pick returns the least recently attempted, and
+    // a touch records the attempt — as the SQL above does.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const ids = Array.from({ length: 30 }, (_, index) => index + 1);
+    const lastAttempt = new Map<number, number>();
+    let clock = 0;
+    const chain: Record<string, unknown> = {};
+    for (const step of ["from", "innerJoin", "leftJoin", "where", "orderBy"]) chain[step] = () => chain;
+    chain.limit = async (n: number) =>
+      [...ids]
+        .sort((a, b) => (lastAttempt.get(a) ?? 0) - (lastAttempt.get(b) ?? 0) || a - b)
+        .slice(0, n)
+        .map((storeId) => ({ storeId, organizationId: 1 }));
+    const db = {
+      select: () => chain,
+      insert: () => ({
+        values: (row: { storeId: number }) => ({
+          onDuplicateKeyUpdate: async (update: { set: Record<string, unknown> }) => {
+            sets.push(update);
+            lastAttempt.set(row.storeId, ++clock);
+          },
+        }),
+      }),
+    };
+    const reached = new Set<number>();
+    const sets: Array<{ set: Record<string, unknown> }> = [];
+    const sync = vi.fn(async ({ storeId }: { storeId: number }) => {
+      reached.add(storeId);
+      if (storeId <= 25) throw new Error("always fails");
+      return {} as never;
+    });
+
+    await runShopifyOrderBackstop({ db: db as never, now: () => NOW, sync: sync as never });
+    await runShopifyOrderBackstop({ db: db as never, now: () => NOW, sync: sync as never });
+
+    expect([...reached].sort((a, b) => a - b)).toEqual(ids);
+    // On the database clock, like the column's own ON UPDATE — never a JS date.
+    expect(new MySqlDialect().sqlToQuery(sets[0]?.set.updatedAt as never).sql).toBe("CURRENT_TIMESTAMP");
+    errors.mockRestore();
     vi.restoreAllMocks();
   });
 
