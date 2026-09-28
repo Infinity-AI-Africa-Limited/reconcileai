@@ -26,9 +26,25 @@ export interface EnqueueOptions {
   attempts?: number;
   /** Base backoff in ms; attempt n waits base * 2^(n-1), capped at 10 min (default 30s). */
   backoffMs?: number;
+  /**
+   * Coalesce enqueues that ask for the same work. While an entry with this key
+   * is still waiting, a further enqueue is absorbed into it. While one is
+   * RUNNING, exactly one follow-up run is kept (carrying the latest data),
+   * because the running pass may have started before whatever prompted the new
+   * request — "refresh now" must not be satisfied by a refresh already under
+   * way. So at most one runs and one waits per key, and never two at once.
+   *
+   * Unlike `uniqueJobNames`, the key is released when the work finishes, so the
+   * same work can be requested again afterwards; a unique job id is retained
+   * with the finished entry and would absorb every later request.
+   */
+  coalesceKey?: string;
 }
 
-export interface QueueCreateOptions<T = unknown> extends EnqueueOptions {
+/** The per-queue retry defaults an enqueue may override. */
+type RetryDefaults = Required<Pick<EnqueueOptions, "attempts" | "backoffMs">>;
+
+export interface QueueCreateOptions<T = unknown> extends Pick<EnqueueOptions, "attempts" | "backoffMs"> {
   /** Refuse the in-process fallback. Required for bank-facing reconciliation. */
   requireDurable?: boolean;
   /**
@@ -47,6 +63,11 @@ export interface QueueCreateOptions<T = unknown> extends EnqueueOptions {
   onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>;
   /** Let a later enqueue replace an exhausted BullMQ entry with the same unique name. */
   replaceFailedOnEnqueue?: boolean;
+  /**
+   * Jobs one BullMQ worker runs at once (default 1). The in-process queue runs
+   * every job as it arrives and ignores this.
+   */
+  concurrency?: number;
 }
 
 export type JobHandler<T> = (job: QueueJob<T>) => Promise<void>;
@@ -115,11 +136,16 @@ export function backoffDelayMs(attempt: number, baseMs: number): number {
 class InProcessQueue<T> implements JobQueue<T> {
   readonly backend = "in-process" as const;
   private pending = 0;
+  /** coalesceKey → whether its entry has started, and the one follow-up kept while it runs. */
+  private readonly coalesced = new Map<
+    string,
+    { started: boolean; followUp: { name: string; data: T; opts?: EnqueueOptions } | null }
+  >();
 
   constructor(
     private readonly queueName: string,
     private readonly handler: JobHandler<T>,
-    private readonly defaults: Required<EnqueueOptions>,
+    private readonly defaults: RetryDefaults,
     private readonly onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>,
   ) {}
 
@@ -138,20 +164,54 @@ class InProcessQueue<T> implements JobQueue<T> {
   async enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
     const attempts = opts?.attempts ?? this.defaults.attempts;
     const backoffMs = opts?.backoffMs ?? this.defaults.backoffMs;
-    this.run({ name, data, attempt: 1 }, attempts, backoffMs);
+    const key = opts?.coalesceKey;
+    if (!key) {
+      this.run({ name, data, attempt: 1 }, attempts, backoffMs);
+      return;
+    }
+
+    // The same rule the durable backend applies (see EnqueueOptions.coalesceKey).
+    const current = this.coalesced.get(key);
+    if (current && !current.started) return;
+    if (current) {
+      current.followUp = { name, data, opts };
+      return;
+    }
+    const entry: { started: boolean; followUp: { name: string; data: T; opts?: EnqueueOptions } | null } = {
+      started: false,
+      followUp: null,
+    };
+    this.coalesced.set(key, entry);
+    this.run({ name, data, attempt: 1 }, attempts, backoffMs, {
+      onStart: () => {
+        entry.started = true;
+      },
+      onSettled: () => {
+        this.coalesced.delete(key);
+        const next = entry.followUp;
+        if (next) void this.enqueue(next.name, next.data, next.opts);
+      },
+    });
   }
 
-  private run(job: QueueJob<T>, maxAttempts: number, backoffMs: number) {
+  private run(
+    job: QueueJob<T>,
+    maxAttempts: number,
+    backoffMs: number,
+    hooks?: { onStart: () => void; onSettled: () => void },
+  ) {
     this.pending += 1;
     // setImmediate keeps enqueue non-blocking; the handler owns its own errors.
     setImmediate(async () => {
+      hooks?.onStart();
       try {
         await this.handler(job);
+        hooks?.onSettled();
       } catch (err) {
         if (job.attempt < maxAttempts) {
           const delay = backoffDelayMs(job.attempt, backoffMs);
           const timer = setTimeout(
-            () => this.run({ ...job, attempt: job.attempt + 1 }, maxAttempts, backoffMs),
+            () => this.run({ ...job, attempt: job.attempt + 1 }, maxAttempts, backoffMs, hooks),
             delay,
           );
           // Never keep the process alive just for retries.
@@ -169,6 +229,9 @@ class InProcessQueue<T> implements JobQueue<T> {
             `[queue:${this.queueName}] job "${job.name}" exhausted ${maxAttempts} attempts:`,
             err instanceof Error ? err.message : err,
           );
+          // After the terminal hook, so a follow-up never starts before this
+          // run's failure has been recorded.
+          hooks?.onSettled();
         }
       } finally {
         this.pending -= 1;
@@ -182,11 +245,12 @@ class InProcessQueue<T> implements JobQueue<T> {
 async function createBullMqQueue<T>(
   queueName: string,
   handler: JobHandler<T>,
-  defaults: Required<EnqueueOptions>,
+  defaults: RetryDefaults,
   redisUrl: string,
   uniqueJobNames: boolean,
   onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>,
   replaceFailedOnEnqueue = false,
+  concurrency = 1,
 ): Promise<JobQueue<T>> {
   const { Queue, Worker } = await import("bullmq");
   const connection = { url: redisUrl } as any;
@@ -210,7 +274,7 @@ async function createBullMqQueue<T>(
         attempt: bullJob.attemptsMade + 1,
       });
     },
-    { connection },
+    { connection, concurrency },
   );
   worker.on("error", (err) => console.error(`[queue:${queueName}] worker error:`, err.message));
   worker.on("failed", async (bullJob, error) => {
@@ -295,6 +359,9 @@ async function createBullMqQueue<T>(
         // Deterministic id only where the caller guarantees names are unique
         // per unit of work — see QueueCreateOptions.uniqueJobNames.
         ...(uniqueJobNames ? { jobId: name } : {}),
+        // BullMQ releases the key when the job completes or fails; while it is
+        // active, keepLastIfActive holds exactly one follow-up (latest data).
+        ...(opts?.coalesceKey ? { deduplication: { id: opts.coalesceKey, keepLastIfActive: true } } : {}),
       });
     },
     // Addressable only when the name IS the job id; without that there is
@@ -347,7 +414,7 @@ export async function createQueue<T>(
   handler: JobHandler<T>,
   opts?: QueueCreateOptions<T>,
 ): Promise<JobQueue<T>> {
-  const defaults: Required<EnqueueOptions> = {
+  const defaults: RetryDefaults = {
     attempts: opts?.attempts ?? 6,
     backoffMs: opts?.backoffMs ?? 30_000,
   };
@@ -363,6 +430,7 @@ export async function createQueue<T>(
         opts?.uniqueJobNames === true,
         opts?.onFinalFailure,
         opts?.replaceFailedOnEnqueue === true,
+        opts?.concurrency ?? 1,
       );
       console.log(`[queue:${queueName}] BullMQ backend active`);
       LIVE_QUEUES.set(queueName, q as JobQueue<unknown>);
