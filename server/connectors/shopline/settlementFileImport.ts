@@ -329,3 +329,39 @@ export function selectUnimportedSettlementEvents<T>(
     return false;
   });
 }
+
+/** True for a row a settlement FILE wrote — `mapSettlementRows` has always stamped `importedFrom`. */
+function isSettlementFileRow(row: SettlementEventFields): boolean {
+  return typeof provenanceOf(row.rawData).importedFrom === "string";
+}
+
+/**
+ * The rows of a SHOPLINE settlement file that are not already recorded in the
+ * store's payments channel. Both sides must be in STORED form (`transactionRef`
+ * as `sanitizeRef` writes it) — comparing a file's `#1001` against the stored
+ * `1001` is how every re-upload used to be inserted again.
+ *
+ * The payments channel holds two kinds of row, and they are told apart on
+ * purpose:
+ *   - rows an earlier FILE imported are deduplicated by settlement EVENT
+ *     (`settlementEventKey`), as a multiset — so a re-upload or an overlapping
+ *     export adds nothing, while a payment and its refund, in one file or two,
+ *     are both kept. Keying these on the order alone drops the refund.
+ *   - rows the SHOPLINE Payments API synced for an order keep that order
+ *     covered, exactly as before: a file row for such an order is skipped,
+ *     because the API already supplies its settlement and a file describing it
+ *     too would count it twice.
+ */
+export function selectNewSettlementFileRows<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): T[] {
+  const coveredByApi = new Set<string>();
+  const importedEvents: string[] = [];
+  for (const row of stored) {
+    if (isSettlementFileRow(row)) importedEvents.push(settlementEventKey(row));
+    else if (row.transactionRef) coveredByApi.add(row.transactionRef);
+  }
+  const uncovered = incoming.filter((row) => !row.transactionRef || !coveredByApi.has(row.transactionRef));
+  return selectUnimportedSettlementEvents(importedEvents, uncovered, settlementEventKey);
+}
