@@ -69,13 +69,17 @@ describe("when the privacy recovery loop ticks", () => {
   it("should run cleanup even when dispatch fails, and log the failure without its text", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const cleanup = vi.fn(async () => 0);
-    const failure = Object.assign(new Error("Failed query: select ... params: owner@example.com"), { name: "DrizzleQueryError" });
+    const failure = Object.assign(new Error("Failed query: select ... params: owner@example.com"), {
+      name: "DrizzleQueryError",
+      cause: Object.assign(new Error("Deadlock found"), { code: "ER_LOCK_DEADLOCK" }),
+    });
 
     await runShopifyPrivacyRecoverySweep({ recover: async () => { throw failure; }, cleanup });
 
     expect(cleanup).toHaveBeenCalledTimes(1);
     const logged = JSON.stringify(error.mock.calls);
-    expect(logged).toMatch(/durable_queue_unavailable/);
+    // The operation's code survives the driver's (Greptile #162).
+    expect(error.mock.calls[0]?.[1]).toMatchObject({ code: "durable_queue_unavailable", errorCode: "ER_LOCK_DEADLOCK" });
     expect(logged).toMatch(/"error":"database"/);
     expect(logged).not.toMatch(/owner@example\.com|Failed query/);
     error.mockRestore();

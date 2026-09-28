@@ -75,7 +75,7 @@ describe("loggableError", () => {
 
       const logged = loggableError(wrapped);
 
-      expect(logged).toEqual({ error: "database", code: "ER_DUP_ENTRY" });
+      expect(logged).toEqual({ error: "database", errorCode: "ER_DUP_ENTRY" });
       expect(JSON.stringify(logged)).not.toMatch(/owner@example\.com|insert into|params/i);
     });
   });
@@ -83,7 +83,7 @@ describe("loggableError", () => {
   describe("when the driver fails without drizzle's wrapper", () => {
     it("should still treat it as a database error", () => {
       const driver = Object.assign(new Error("secret value"), { code: "ECONNRESET", sql: "select 1" });
-      expect(loggableError(driver)).toEqual({ error: "database", code: "ECONNRESET" });
+      expect(loggableError(driver)).toEqual({ error: "database", errorCode: "ECONNRESET" });
     });
   });
 
@@ -97,5 +97,27 @@ describe("loggableError", () => {
     it("should describe a thrown non-error by its type only", () => {
       expect(loggableError("owner@example.com")).toEqual({ error: "string" });
     });
+  });
+});
+
+describe("when loggableError is spread into a log that names its own operation", () => {
+  const driver = Object.assign(new Error("Deadlock found; params: owner@example.com"), {
+    code: "ER_LOCK_DEADLOCK",
+    sqlMessage: "Deadlock found",
+  });
+
+  it("should never replace the operation's code with the driver's", () => {
+    const logged = { code: "durable_queue_unavailable", ...loggableError(driver) };
+    expect(logged).toMatchObject({ code: "durable_queue_unavailable", errorCode: "ER_LOCK_DEADLOCK" });
+  });
+
+  it("should report the driver's code through an application error that carries its own", () => {
+    const wrapped = Object.assign(
+      new Error("Could not secure Shopify access tokens", {
+        cause: new DrizzleQueryError("update `shopify_connector_tokens` set ?", ["owner@example.com"], driver),
+      }),
+      { code: "TOKEN_STORE_FAILED" },
+    );
+    expect(loggableError(wrapped)).toEqual({ error: "database", errorCode: "ER_LOCK_DEADLOCK" });
   });
 });

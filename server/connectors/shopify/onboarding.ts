@@ -74,8 +74,12 @@ export class ShopifyOnboardingError extends Error {
     message: string,
     public readonly code: ShopifyOnboardingErrorCode,
     public readonly storeFailClosed?: StoreFailClosedState,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    // Static text only. A failure underneath travels as the `cause`, where
+    // loggableError can see it is a database error and report its code alone;
+    // copied into this message it would reach the logs as ordinary text.
+    super(message, options);
     this.name = "ShopifyOnboardingError";
   }
 }
@@ -423,11 +427,9 @@ async function reauthorizeExistingStore(
     // Nothing was written, and the fence owns the store's state: leave it be.
     if (isLeaseLost(error) || isRedactionFenced(error)) throw error;
     const failClosedState = await failClosed(db, store, "token_store_failed", params.reauthorization.retiring, params.lease);
-    throw new ShopifyOnboardingError(
-      `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
-      "TOKEN_STORE_FAILED",
-      failClosedState,
-    );
+    throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
+      cause: error,
+    });
   }
 
   const [organization] = await db
@@ -594,11 +596,9 @@ async function createMerchantWorkspace(
     // The store is still `pending_claim` here, never `active`; recording why
     // it has no credentials is for the operator, not for safety.
     const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed", "none", params.lease);
-    throw new ShopifyOnboardingError(
-      `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
-      "TOKEN_STORE_FAILED",
-      failClosedState,
-    );
+    throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
+      cause: error,
+    });
   }
 
   let welcomeEmailSent = false;

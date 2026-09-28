@@ -36,18 +36,26 @@ export function isDuplicateKeyError(error: unknown): boolean {
  * reported by its structured code alone (`ER_DUP_ENTRY`, `ECONNRESET`), which
  * is what diagnosis needs. Any other error keeps a bounded message; this
  * codebase's own errors carry static text by convention.
+ *
+ * The code is reported as `errorCode`, never `code`: logs here use `code` for
+ * the operation that failed (`durable_queue_unavailable`), and spreading this
+ * after it must not replace that with the driver's.
+ *
+ * It is the DEEPEST code on the `cause` chain — the driver's, for a database
+ * error wrapped by drizzle and then by an application error that carries a code
+ * of its own.
  */
-export function loggableError(error: unknown): { error: string; code?: string; message?: string } {
+export function loggableError(error: unknown): { error: string; errorCode?: string; message?: string } {
   if (!(error instanceof Error)) return { error: typeof error };
-  let code: string | undefined;
+  let errorCode: string | undefined;
   let database = false;
   let current: unknown = error;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current && typeof current === "object"; depth += 1) {
     const link = current as { name?: unknown; code?: unknown; sql?: unknown; sqlMessage?: unknown; cause?: unknown };
     if (link.name === "DrizzleQueryError" || "sql" in link || "sqlMessage" in link) database = true;
-    if (code === undefined && typeof link.code === "string") code = link.code;
+    if (typeof link.code === "string") errorCode = link.code;
     current = link.cause;
   }
-  if (database) return { error: "database", ...(code ? { code } : {}) };
-  return { error: error.name, ...(code ? { code } : {}), message: error.message.slice(0, 200) };
+  if (database) return { error: "database", ...(errorCode ? { errorCode } : {}) };
+  return { error: error.name, ...(errorCode ? { errorCode } : {}), message: error.message.slice(0, 200) };
 }
