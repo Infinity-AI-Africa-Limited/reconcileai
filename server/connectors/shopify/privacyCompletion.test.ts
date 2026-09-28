@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PrivacyArtifactIntegrityError,
+  SHOPIFY_PRIVACY_ARTIFACT_DISCARDING,
   ShopifyPrivacyJobNotClaimableError,
   authorizeAndReadPrivacyArtifact,
   canonicalShopifyOrderGid,
@@ -945,7 +946,7 @@ describe("when an export cannot be deleted immediately after the shop fence", ()
 
     const park = fake.writes("update", JOBS).find((op) => op.data?.failureCode === "shop_redaction_in_progress");
     const due = fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data);
-    expect(due?.data).toEqual({ expiresAt: NOW });
+    expect(due?.data).toEqual({ expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING });
     expect(due?.where?.params).toEqual(expect.arrayContaining([901, 42, 7, "writing", "ready", "pending"]));
     expect(due?.txId).toBe(park?.txId);
     // Not deleted yet, and not marked deleted: the sweep will find it due.
@@ -966,7 +967,7 @@ describe("when an export cannot be deleted immediately after the shop fence", ()
       { db: fake.db as never, now: () => NOW, uuid: uuidSequence(), deleteObject },
     );
 
-    expect(fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data)?.data).toEqual({ expiresAt: NOW });
+    expect(fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data)?.data).toEqual({ expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING });
     expect(deleteObject).toHaveBeenCalledWith("org/42/shopify-privacy/901.json");
   });
 });
@@ -1007,8 +1008,9 @@ describe("when an upload lands after its artifact was already cleaned up", () =>
     expect(deleteObject).toHaveBeenCalledWith(OBJECT_KEY);
     const [readyWrite, revive, mark] = fake.writes("update", ARTIFACTS);
     expect(readyWrite?.data).toMatchObject({ status: "ready" });
-    expect(revive?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: NOW });
-    expect(revive?.where?.params).toContain("deleted");
+    expect(revive?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING });
+    expect(revive?.where?.params).toEqual(expect.arrayContaining(["deleted", "writing"]));
+    expect(hasInstant(revive?.where?.params, SHOPIFY_PRIVACY_ARTIFACT_DISCARDING)).toBe(true);
     expect(revive?.where?.params).toContain(OBJECT_KEY);
     expect(mark?.data).toMatchObject({ status: "deleted", deletedAt: NOW });
     expect(mark?.where?.params).toContain("writing");
@@ -1023,7 +1025,7 @@ describe("when an upload lands after its artifact was already cleaned up", () =>
     await expect(run).resolves.toBeUndefined();
 
     // Not lost: the row says `writing` and due now, which is what the sweep reads.
-    expect(fake.writes("update", ARTIFACTS).at(-1)?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: NOW });
+    expect(fake.writes("update", ARTIFACTS).at(-1)?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING });
     expect(JSON.stringify(error.mock.calls)).toMatch(/artifact_discard_deferred/);
     expect(JSON.stringify(error.mock.calls)).not.toMatch(/storage unavailable/);
     error.mockRestore();
@@ -1031,7 +1033,7 @@ describe("when an upload lands after its artifact was already cleaned up", () =>
 
   it("should not delete an object another worker has already finished", async () => {
     const deleteObject = vi.fn(async () => {});
-    const { fake, run } = lateUploadRun([{ status: "ready" }], deleteObject);
+    const { fake, run } = lateUploadRun([{ status: "ready", expiresAt: LATER }], deleteObject);
     await expect(run).resolves.toBeUndefined();
 
     expect(deleteObject).not.toHaveBeenCalled();
@@ -1079,5 +1081,87 @@ describe("when a late upload finishes while cleanup is deleting its object", () 
     const mark = fake.writes("update", ARTIFACTS).at(-1);
     expect(mark?.data).toMatchObject({ status: "deleted" });
     expect(mark?.where?.params).toContain("ready");
+  });
+});
+
+/** Whether rendered WHERE params hold this instant, however drizzle bound it. */
+function hasInstant(params: unknown[] | undefined, instant: Date): boolean {
+  return (params ?? []).some((param) =>
+    param instanceof Date
+      ? param.getTime() === instant.getTime()
+      : typeof param === "string" && new Date(`${param.replace(" ", "T")}Z`).getTime() === instant.getTime(),
+  );
+}
+
+describe("when an export is being discarded while another worker could still resume it", () => {
+  // Greptile #160 (review of 9c33db2): a stale worker revived its row as
+  // `writing`; a live worker uploaded into it and moved it to `ready`; the stale
+  // worker then deleted the object — an export marked ready that cannot be read.
+  const OBJECT_KEY = `org/42/privacy/shopify/901/${UUIDS[2]}.json`;
+  const run = (fake: ReturnType<typeof scriptedDb>, deleteObject = vi.fn(async () => {})) =>
+    handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_org, value) => value === "enc-customer" ? "41" : "501"),
+        putObject: vi.fn(async (key: string) => ({ key, url: "" })),
+        deleteObject,
+      },
+    );
+
+  it("should treat an export past its expiry as expired, and never upload into it", async () => {
+    const discarding = { ...artifactRow(0), expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING };
+    const fake = baseWorkerScript({ select: { [TXNS]: [[]], [ARTIFACTS]: [[discarding]] } });
+    const putObject = vi.fn();
+    await handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      { db: fake.db as never, now: () => NOW, uuid: uuidSequence(), decrypt: vi.fn(async (_o, v) => v === "enc-customer" ? "41" : "501"), putObject },
+    );
+
+    expect(putObject).not.toHaveBeenCalled();
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "manual_review", failureCode: "artifact_expired" });
+  });
+
+  it("should never write `ready` over a row that became due while the upload ran", async () => {
+    const fake = baseWorkerScript({
+      select: { [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)], [{ status: "writing", expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING }]] },
+      update: { [ARTIFACTS]: [0, 1, 1], [JOBS]: [1, 0] },
+    });
+    await run(fake);
+
+    const [readyWrite] = fake.writes("update", ARTIFACTS);
+    expect(readyWrite?.data).toMatchObject({ status: "ready" });
+    expect(readyWrite?.where?.sql).toMatch(/`shopify_privacy_artifacts`\.`expiresAt` > \?/);
+    expect(hasInstant(readyWrite?.where?.params, NOW)).toBe(true);
+  });
+
+  it("should reclaim its object from a `ready` row that is being discarded", async () => {
+    // The fence-park's discard deleted the object; this late upload wrote it
+    // again. Left alone, the discard's mark would record `deleted` over it.
+    const deleteObject = vi.fn(async () => {});
+    const fake = baseWorkerScript({
+      select: { [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)], [{ status: "ready", expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING }]] },
+      update: { [ARTIFACTS]: [0, 1, 1], [JOBS]: [1, 0] },
+    });
+    await run(fake, deleteObject);
+
+    expect(deleteObject).toHaveBeenCalledWith(OBJECT_KEY);
+    const [, convert, mark] = fake.writes("update", ARTIFACTS);
+    expect(convert?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING });
+    expect(mark?.data).toMatchObject({ status: "deleted" });
+  });
+
+  it("should leave a live `ready` export of another worker alone", async () => {
+    const deleteObject = vi.fn(async () => {});
+    const fake = baseWorkerScript({
+      select: { [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)], [{ status: "ready", expiresAt: LATER }]] },
+      update: { [ARTIFACTS]: [0], [JOBS]: [1, 0] },
+    });
+    await run(fake, deleteObject);
+
+    expect(deleteObject).not.toHaveBeenCalled();
+    expect(fake.writes("update", ARTIFACTS)).toHaveLength(1);
   });
 });
