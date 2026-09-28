@@ -25,3 +25,29 @@ export function isDuplicateKeyError(error: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * What a log may say about an error.
+ *
+ * Never the text of a database error: drizzle's wrapper message is
+ * `Failed query: <sql>\nparams: <values>`, and MySQL's own names the offending
+ * value (`Duplicate entry 'owner@example.com' for key …`). Either puts tenant
+ * data — merchant emails, digests, ids — into logs. A database error is
+ * reported by its structured code alone (`ER_DUP_ENTRY`, `ECONNRESET`), which
+ * is what diagnosis needs. Any other error keeps a bounded message; this
+ * codebase's own errors carry static text by convention.
+ */
+export function loggableError(error: unknown): { error: string; code?: string; message?: string } {
+  if (!(error instanceof Error)) return { error: typeof error };
+  let code: string | undefined;
+  let database = false;
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current && typeof current === "object"; depth += 1) {
+    const link = current as { name?: unknown; code?: unknown; sql?: unknown; sqlMessage?: unknown; cause?: unknown };
+    if (link.name === "DrizzleQueryError" || "sql" in link || "sqlMessage" in link) database = true;
+    if (code === undefined && typeof link.code === "string") code = link.code;
+    current = link.cause;
+  }
+  if (database) return { error: "database", ...(code ? { code } : {}) };
+  return { error: error.name, ...(code ? { code } : {}), message: error.message.slice(0, 200) };
+}

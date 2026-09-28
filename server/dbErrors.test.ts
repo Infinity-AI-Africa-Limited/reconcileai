@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isDuplicateKeyError } from "./dbErrors";
+import { DrizzleQueryError } from "drizzle-orm/errors";
+import { isDuplicateKeyError, loggableError } from "./dbErrors";
 
 /** A driver error shaped like mysql2's. */
 function driverError(code: string, errno: number, message: string): Error {
@@ -58,6 +59,43 @@ describe("isDuplicateKeyError", () => {
       const b: { cause?: unknown } = { cause: a };
       a.cause = b;
       expect(isDuplicateKeyError(a)).toBe(false);
+    });
+  });
+});
+
+describe("loggableError", () => {
+  describe("when a query fails through drizzle", () => {
+    it("should report the driver's code and never the query or its parameters", () => {
+      const driver = Object.assign(new Error("Duplicate entry 'owner@example.com' for key 'users.email'"), {
+        code: "ER_DUP_ENTRY",
+        errno: 1062,
+        sqlMessage: "Duplicate entry 'owner@example.com' for key 'users.email'",
+      });
+      const wrapped = new DrizzleQueryError("insert into `users` (`email`) values (?)", ["owner@example.com"], driver);
+
+      const logged = loggableError(wrapped);
+
+      expect(logged).toEqual({ error: "database", code: "ER_DUP_ENTRY" });
+      expect(JSON.stringify(logged)).not.toMatch(/owner@example\.com|insert into|params/i);
+    });
+  });
+
+  describe("when the driver fails without drizzle's wrapper", () => {
+    it("should still treat it as a database error", () => {
+      const driver = Object.assign(new Error("secret value"), { code: "ECONNRESET", sql: "select 1" });
+      expect(loggableError(driver)).toEqual({ error: "database", code: "ECONNRESET" });
+    });
+  });
+
+  describe("when the error is the application's own", () => {
+    it("should keep its name and a bounded message", () => {
+      const logged = loggableError(new TypeError("x".repeat(500)));
+      expect(logged.error).toBe("TypeError");
+      expect(logged.message).toHaveLength(200);
+    });
+
+    it("should describe a thrown non-error by its type only", () => {
+      expect(loggableError("owner@example.com")).toEqual({ error: "string" });
     });
   });
 });

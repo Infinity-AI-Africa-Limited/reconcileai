@@ -10,7 +10,7 @@ import {
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
 import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
-import { isDuplicateKeyError } from "../../dbErrors";
+import { isDuplicateKeyError, loggableError } from "../../dbErrors";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { sha256, type ShopifyTokenResponse } from "./auth";
 import {
@@ -550,7 +550,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     console.error("[shopify-onboarding] tenant baseline failed", {
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 
@@ -567,7 +567,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     console.error("[shopify-onboarding] retail resolution templates not seeded", {
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 
@@ -617,7 +617,7 @@ async function createMerchantWorkspace(
     console.error("[shopify-onboarding] welcome email delivery failed", {
       storeId,
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
       });
   }
 
@@ -749,7 +749,7 @@ async function failClosed(
     organizationId: store.organizationId,
     reason,
     attempts: FAIL_CLOSED_ATTEMPTS,
-    message: lastError instanceof Error ? lastError.message : String(lastError),
+    ...loggableError(lastError),
   });
   return "not_confirmed";
 }

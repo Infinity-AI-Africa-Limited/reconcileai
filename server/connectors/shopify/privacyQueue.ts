@@ -1,4 +1,5 @@
 import { createQueue, type JobQueue } from "../../jobQueue";
+import { loggableError } from "../../dbErrors";
 import {
   cleanupExpiredShopifyPrivacyArtifacts,
   dispatchShopifyPrivacyOutbox,
@@ -75,21 +76,51 @@ export async function recoverShopifyPrivacyOutbox(): Promise<void> {
 
 let recoveryTimer: NodeJS.Timeout | null = null;
 
+/**
+ * One recovery sweep: re-dispatch the outbox, then clean expired artifacts.
+ * Each half contains its own failure so one outage does not stall the other.
+ * Exported for tests; production runs it from the loop below.
+ */
+export async function runShopifyPrivacyRecoverySweep(deps: {
+  recover?: () => Promise<unknown>;
+  cleanup?: () => Promise<unknown>;
+} = {}): Promise<void> {
+  try {
+    await (deps.recover ?? recoverShopifyPrivacyOutbox)();
+  } catch (error) {
+    console.error("[shopify-privacy] durable dispatch unavailable", { code: "durable_queue_unavailable", ...loggableError(error) });
+  }
+  try {
+    await (deps.cleanup ?? cleanupExpiredShopifyPrivacyArtifacts)();
+  } catch (error) {
+    console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed", ...loggableError(error) });
+  }
+}
+
+/**
+ * Wrap a sweep so at most one runs at a time in this process. On a timer, a
+ * sweep slower than its interval would otherwise start another beside it, and
+ * under a slow database they pile up until they exhaust the connection pool —
+ * precisely when the pool is least able to spare them. A tick that finds a
+ * sweep still running is skipped; the next tick tries again.
+ */
+export function singleFlight(task: () => Promise<void>): () => Promise<void> {
+  let running = false;
+  return async () => {
+    if (running) return;
+    running = true;
+    try {
+      await task();
+    } finally {
+      running = false;
+    }
+  };
+}
+
 /** Start one process-local DB recovery scanner; correctness remains in the DB claims. */
 export function startShopifyPrivacyRecoveryLoop(intervalMs = 30_000): void {
   if (recoveryTimer) return;
-  const sweep = async () => {
-    try {
-      await recoverShopifyPrivacyOutbox();
-    } catch {
-      console.error("[shopify-privacy] durable dispatch unavailable", { code: "durable_queue_unavailable" });
-    }
-    try {
-      await cleanupExpiredShopifyPrivacyArtifacts();
-    } catch {
-      console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed" });
-    }
-  };
+  const sweep = singleFlight(() => runShopifyPrivacyRecoverySweep());
   void sweep();
   recoveryTimer = setInterval(() => void sweep(), intervalMs);
   recoveryTimer.unref?.();
