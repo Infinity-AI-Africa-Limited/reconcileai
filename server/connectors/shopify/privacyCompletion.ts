@@ -496,6 +496,8 @@ async function setNonTerminalState(
   job: ClaimedJob,
   status: "manual_review" | "blocked_dependency",
   failureCode: ShopifyPrivacyFailureCode,
+  /** Runs in the same transaction, only while this worker still holds the lease. */
+  alsoInTransaction?: (tx: DbExecutor) => Promise<void>,
 ): Promise<void> {
   await db.transaction(async (tx) => {
     const moved = await tx
@@ -528,7 +530,38 @@ async function setNonTerminalState(
           eq(shopifyPrivacyRequests.topic, "customers/data_request"),
         ),
       );
+    await alsoInTransaction?.(tx);
   });
+}
+
+/**
+ * Park a data request whose tenant shop/redact has fenced, and get rid of any
+ * export it already wrote — durably.
+ *
+ * The export is due for deletion NOW, recorded in the same commit as the park
+ * (its expiry moved to the present). The recovery sweep deletes every undelivered
+ * artifact past its expiry every 30 seconds and retries until it succeeds, so a
+ * failed immediate delete no longer leaves the object stored for up to seven
+ * days. The immediate attempt below just saves waiting for the next sweep. The
+ * sweep's own job transition only touches `awaiting_delivery`, so it leaves this
+ * parked job alone.
+ */
+async function parkForShopRedaction(db: Db, job: ClaimedJob, now: Date, deleteObject: DeleteObject): Promise<void> {
+  await setNonTerminalState(db, job, "blocked_dependency", "shop_redaction_in_progress", async (tx) => {
+    await tx
+      .update(shopifyPrivacyArtifacts)
+      .set({ expiresAt: now })
+      .where(
+        and(
+          eq(shopifyPrivacyArtifacts.requestId, job.requestId),
+          eq(shopifyPrivacyArtifacts.organizationId, job.organizationId),
+          eq(shopifyPrivacyArtifacts.storeId, job.storeId),
+          inArray(shopifyPrivacyArtifacts.status, ["writing", "ready"]),
+          eq(shopifyPrivacyArtifacts.deliveryStatus, "pending"),
+        ),
+      );
+  });
+  await discardUndeliveredArtifact(db, job, deleteObject, now);
 }
 
 async function setFailure(
@@ -811,7 +844,8 @@ export async function handleShopifyPrivacyJob(
     // begins" (redaction.ts). An export is all three. Checked here to avoid the
     // work, and again under lock at the final transition (the authority).
     if (store && shopRedactionFenced(organization, store)) {
-      await setNonTerminalState(db, job, "blocked_dependency", "shop_redaction_in_progress");
+      // An earlier attempt may have written the export before crashing.
+      await parkForShopRedaction(db, job, now, deps.deleteObject ?? storageDelete);
       return;
     }
     if (!store?.claimedByUserId) {
@@ -1025,10 +1059,9 @@ export async function handleShopifyPrivacyJob(
     // Another worker owns the job now; whatever it does, this one must not touch it.
     if (error instanceof LeaseLostError) return;
     if (error instanceof ShopRedactionFencedError) {
-      // Park, then take back the export written before the fence was seen: it
+      // Park, and take back the export written before the fence was seen: it
       // must not outlive the tenant's redaction, nor ever be offered.
-      await setNonTerminalState(db, job, "blocked_dependency", "shop_redaction_in_progress");
-      await discardUndeliveredArtifact(db, job, deps.deleteObject ?? storageDelete, now);
+      await parkForShopRedaction(db, job, now, deps.deleteObject ?? storageDelete);
       return;
     }
     const outcome = await setFailure(db, job, "worker_failed", now);
@@ -1070,8 +1103,11 @@ async function discardUndeliveredArtifact(
         ),
       );
   } catch {
-    // Best effort: expiry cleanup deletes any artifact left `writing`/`ready`.
-    console.error("[shopify-privacy] undelivered export not discarded", { code: "artifact_discard_failed" });
+    // Not lost: parkForShopRedaction already made it due, and the recovery
+    // sweep deletes due artifacts every 30 seconds until it succeeds.
+    console.error("[shopify-privacy] undelivered export not discarded yet; the recovery sweep will retry", {
+      code: "artifact_discard_deferred",
+    });
   }
 }
 

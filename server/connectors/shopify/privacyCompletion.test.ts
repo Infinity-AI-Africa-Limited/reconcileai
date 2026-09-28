@@ -890,3 +890,63 @@ describe("when a shop redaction fences the tenant", () => {
     expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "awaiting_delivery" });
   });
 });
+
+describe("when an export cannot be deleted immediately after the shop fence", () => {
+  // Greptile #160 (review of c8034ad): a failed delete only logged, leaving the
+  // export stored for up to seven days after shop/redact began.
+  const fencedRun = (organizations: unknown[][], deleteObject: () => Promise<void>) => {
+    const fake = baseWorkerScript({
+      select: {
+        organizations,
+        [TXNS]: [[]],
+        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json" }]],
+      },
+    });
+    const run = handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_org, value) => value === "enc-customer" ? "41" : "501"),
+        putObject: vi.fn(async (key: string) => ({ key, url: "" })),
+        deleteObject,
+      },
+    );
+    return { fake, run };
+  };
+
+  it("should make the export due for deletion now, in the same commit as the park, so the sweep retries it", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fake, run } = fencedRun([[{ deletionState: "active" }], [{ deletionState: "redacting" }]], vi.fn(async () => {
+      throw new Error("storage unavailable");
+    }));
+    await expect(run).resolves.toBeUndefined();
+
+    const park = fake.writes("update", JOBS).find((op) => op.data?.failureCode === "shop_redaction_in_progress");
+    const due = fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data);
+    expect(due?.data).toEqual({ expiresAt: NOW });
+    expect(due?.where?.params).toEqual(expect.arrayContaining([901, 42, 7, "writing", "ready", "pending"]));
+    expect(due?.txId).toBe(park?.txId);
+    // Not deleted yet, and not marked deleted: the sweep will find it due.
+    expect(fake.writes("update", ARTIFACTS).some((op) => op.data?.status === "deleted")).toBe(false);
+    error.mockRestore();
+  });
+
+  it("should schedule and attempt the discard when an earlier attempt left an export and the fence is found up front", async () => {
+    const deleteObject = vi.fn(async () => {});
+    const fake = baseWorkerScript({
+      select: {
+        organizations: [[{ deletionState: "redacting" }]],
+        [ARTIFACTS]: [[{ objectKey: "org/42/shopify-privacy/901.json" }]],
+      },
+    });
+    await handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      { db: fake.db as never, now: () => NOW, uuid: uuidSequence(), deleteObject },
+    );
+
+    expect(fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data)?.data).toEqual({ expiresAt: NOW });
+    expect(deleteObject).toHaveBeenCalledWith("org/42/shopify-privacy/901.json");
+  });
+});
