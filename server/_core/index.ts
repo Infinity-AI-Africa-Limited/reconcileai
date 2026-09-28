@@ -758,8 +758,12 @@ async function startServer() {
   app.use(createShoplineRouter());
   // Shopify public-app foundation: route-level OAuth and HMAC-verified webhooks
   // stay outside tRPC because Shopify initiates both without a ReconcileAI session.
+  const { createShopifyAppHomeRouter } = await import("../connectors/shopify/appHomeRoutes");
   const { createShopifyRouter } = await import("../connectors/shopify/routes");
   const { createShopifyWebhookRouter } = await import("../connectors/shopify/webhooks");
+  // Includes a frame policy scoped to /shopify/app; it must run before either
+  // the production static handler or Vite's HTML fallback writes the response.
+  app.use(createShopifyAppHomeRouter());
   app.use(createShopifyRouter());
   app.use(createShopifyWebhookRouter());
 

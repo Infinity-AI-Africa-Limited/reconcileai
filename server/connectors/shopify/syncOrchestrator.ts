@@ -103,7 +103,14 @@ export function partitionShopifyOrders(
   return { inserts, updates, unchanged };
 }
 
-async function resolveAuthorizedActor(
+export class ShopifyActorUnavailableError extends Error {
+  constructor() {
+    super("Shopify store has no authorised sync actor: active tenant administrator unavailable");
+    this.name = "ShopifyActorUnavailableError";
+  }
+}
+
+export async function resolveAuthorizedShopifyActor(
   db: DbExecutor,
   store: { id: number; organizationId: number; claimedByUserId: number | null },
 ): Promise<number> {
@@ -138,7 +145,7 @@ async function resolveAuthorizedActor(
     )
     .orderBy(users.id)
     .limit(1);
-  if (!fallback) throw new Error("Shopify store has no authorised sync actor: active tenant administrator unavailable");
+  if (!fallback) throw new ShopifyActorUnavailableError();
   return fallback.id;
 }
 
@@ -536,7 +543,7 @@ export async function runShopifyOrderSync(
   try {
     // Prove the actor before fetching protected order data. The actor was created
     // and bound to this tenant during OAuth onboarding; no synthetic user 0.
-    const userId = await resolveAuthorizedActor(db, store);
+    const userId = await resolveAuthorizedShopifyActor(db, store);
     const fetched = await (deps.fetchOrders ?? fetchShopifyOrdersWindow)({
       storeId: store.id,
       organizationId: store.organizationId,
