@@ -483,22 +483,12 @@ function maxUpdatedAt(orders: NormalizedShopifyOrder[], fallback: Date): Date {
   }, fallback);
 }
 
-function errorCode(error: unknown): string {
+/** The cursor code for a failed sync. The manual-sync job records it again when it answers a request. */
+export function shopifySyncFailureCode(error: unknown): string {
   if (error instanceof ShopifyOrderApiError) return error.code.toLowerCase();
   if (error instanceof Error && /authorised sync actor/.test(error.message)) return "sync_actor_unavailable";
   if (error instanceof Error && /not an active member/.test(error.message)) return "sync_actor_invalid";
   return "sync_failed";
-}
-
-/**
- * Failures `runShopifyOrderSync` has already recorded on the cursor (with their
- * precise code). A caller that records an outcome of its own asks this rather
- * than inferring it from timestamps, which the cursor holds only to the second.
- */
-const failuresRecordedOnCursor = new WeakSet<object>();
-
-export function isShopifySyncFailureRecorded(error: unknown): boolean {
-  return typeof error === "object" && error !== null && failuresRecordedOnCursor.has(error);
 }
 
 /**
@@ -731,9 +721,8 @@ export async function runShopifyOrderSync(
       ...result,
     };
   } catch (error) {
-    const code = errorCode(error);
-    // With the time: a queued manual sync is judged by whether an outcome was
-    // recorded AFTER it was requested, and a code alone cannot say that.
+    const code = shopifySyncFailureCode(error);
+    // With its time, so the failure can be told apart from an older one.
     const failedAt = new Date();
     await db
       .insert(shopifySyncCursors)
@@ -745,7 +734,6 @@ export async function runShopifyOrderSync(
         lastErrorAt: failedAt,
       })
       .onDuplicateKeyUpdate({ set: { lastErrorCode: code, lastErrorAt: failedAt } });
-    if (typeof error === "object" && error !== null) failuresRecordedOnCursor.add(error);
     throw error;
   }
 }

@@ -6,7 +6,6 @@ vi.hoisted(() => {
 
 import { toShopifyOrderTransaction } from "./ingest";
 import {
-  isShopifySyncFailureRecorded,
   markShopifyWebhookSyncFailed,
   materialShopifyOrderEvidenceChanged,
   partitionShopifyOrders,
@@ -124,9 +123,7 @@ describe("tenant-isolated sync orchestration", () => {
     expect(refusal).toBeInstanceOf(Error);
     expect((refusal as Error).message).toMatch(/not found for tenant/);
     expect(fetchOrders).not.toHaveBeenCalled();
-    // Nothing was written for a store it could not find, so a manual run must
-    // record its own failure rather than assume this one did.
-    expect(isShopifySyncFailureRecorded(refusal)).toBe(false);
+    // Nothing is written for a store it could not find.
     expect(fake.writes("insert", CURSORS)).toEqual([]);
     const lookup = fake.ops.find((op) => op.kind === "select" && op.table === STORES);
     expect(lookup?.where?.params).toEqual(expect.arrayContaining([7, 999, "active"]));
@@ -202,12 +199,10 @@ describe("tenant-isolated sync orchestration", () => {
     ).then(() => null, (e: unknown) => e);
     expect((failed as Error).message).toMatch(/active tenant administrator unavailable/);
     expect(fetchOrders).not.toHaveBeenCalled();
-    // The precise code is recorded, with its time, and the error says so — so a
-    // manual run answering a request keeps this code rather than a generic one.
+    // The precise code is recorded, with its time.
     const failure = fake.writes("insert", CURSORS)[0];
     expect(failure?.data).toMatchObject({ lastErrorCode: "sync_actor_unavailable", lastErrorAt: expect.any(Date) });
     expect(failure?.data?.lastErrorAt).toBeInstanceOf(Date);
-    expect(isShopifySyncFailureRecorded(failed)).toBe(true);
     const actorLookups = fake.ops.filter((op) => op.kind === "select" && op.table === USERS);
     expect(actorLookups).toHaveLength(2);
     expect(actorLookups[0]?.where?.params).toEqual(expect.arrayContaining([9, 42, "admin", true]));

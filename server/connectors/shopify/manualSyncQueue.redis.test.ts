@@ -57,11 +57,13 @@ describe.skipIf(!REDIS_URL)("the Shopify manual-sync queue on BullMQ", () => {
   let queue: JobQueue<ShopifyManualSyncPayload> | null = null;
 
   /** The production queue and enqueue call, under this run's own queue name. */
+  let requestSeq = 0;
   async function enqueueShopifyManualSync(request: { storeId: number; organizationId: number }): Promise<void> {
     const { createShopifyManualSyncQueue, shopifyManualSyncJob } = await import("./syncQueue");
     queue ??= await createShopifyManualSyncQueue(QUEUE_NAME);
     expect(queue.backend).toBe("bullmq");
-    await queue.enqueue(...shopifyManualSyncJob(request));
+    requestSeq += 1;
+    await queue.enqueue(...shopifyManualSyncJob({ ...request, requestSeq }));
   }
 
   afterAll(async () => {
