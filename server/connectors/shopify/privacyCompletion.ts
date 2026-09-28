@@ -6,6 +6,7 @@ import {
   auditLogs,
   exceptions,
   matches,
+  organizations,
   transactions,
   users,
 } from "../../../drizzle/schema";
@@ -45,6 +46,8 @@ export type ShopifyPrivacyQueuePayload = {
 
 export type ShopifyPrivacyFailureCode =
   | "artifact_expired"
+  /** The tenant is fenced for shop/redact: no export may be created or handed out. */
+  | "shop_redaction_in_progress"
   /** Served at least once, never confirmed delivered, then expired: a person decides. */
   | "delivery_unconfirmed"
   | "artifact_integrity_failed"
@@ -106,6 +109,7 @@ export interface ShopifyPrivacyWorkerDeps {
   uuid?: () => string;
   decrypt?: Decrypt;
   putObject?: PutObject;
+  deleteObject?: DeleteObject;
 }
 
 export interface ShopifyPrivacyDispatcherDeps {
@@ -124,6 +128,22 @@ export interface ShopifyPrivacyDispatcherDeps {
  * Thrown inside a transaction when this worker's lease has been taken over, to
  * roll the transaction back. The worker that owns the job now decides its state.
  */
+/**
+ * Thrown inside the final transition when shop/redact fenced the tenant after
+ * the export was written: rolls the transition back so no delivery is offered.
+ */
+class ShopRedactionFencedError extends Error {
+  constructor() {
+    super("Shopify tenant is fenced for shop redaction");
+    this.name = "ShopRedactionFencedError";
+  }
+}
+
+/** Whether shop/redact has fenced this tenant (organisation or store). */
+function shopRedactionFenced(organization: { deletionState: string } | undefined, store: { status: string } | undefined) {
+  return organization?.deletionState !== "active" || store?.status === "redacting";
+}
+
 class LeaseLostError extends Error {
   constructor() {
     super("Shopify privacy job lease was taken over");
@@ -761,6 +781,7 @@ export async function handleShopifyPrivacyJob(
         id: shopifyConnectorStores.id,
         organizationId: shopifyConnectorStores.organizationId,
         claimedByUserId: shopifyConnectorStores.claimedByUserId,
+        status: shopifyConnectorStores.status,
       })
       .from(shopifyConnectorStores)
       .where(
@@ -770,6 +791,18 @@ export async function handleShopifyPrivacyJob(
         ),
       )
       .limit(1);
+    const [organization] = await db
+      .select({ deletionState: organizations.deletionState })
+      .from(organizations)
+      .where(eq(organizations.id, job.organizationId))
+      .limit(1);
+    // "Tenant work must not create, persist, or egress data after redaction
+    // begins" (redaction.ts). An export is all three. Checked here to avoid the
+    // work, and again under lock at the final transition (the authority).
+    if (store && shopRedactionFenced(organization, store)) {
+      await setNonTerminalState(db, job, "blocked_dependency", "shop_redaction_in_progress");
+      return;
+    }
     if (!store?.claimedByUserId) {
       await setNonTerminalState(db, job, "manual_review", "merchant_admin_unavailable");
       return;
@@ -919,6 +952,26 @@ export async function handleShopifyPrivacyJob(
     }
 
     await db.transaction(async (tx) => {
+      // Organisation, then store: shop-redaction admission's lock order. A
+      // shop/redact that committed while the export was being written wins.
+      const [lockedOrganization] = await tx
+        .select({ deletionState: organizations.deletionState })
+        .from(organizations)
+        .where(eq(organizations.id, job.organizationId))
+        .limit(1)
+        .for("update");
+      const [lockedStore] = await tx
+        .select({ status: shopifyConnectorStores.status })
+        .from(shopifyConnectorStores)
+        .where(
+          and(
+            eq(shopifyConnectorStores.id, job.storeId),
+            eq(shopifyConnectorStores.organizationId, job.organizationId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (shopRedactionFenced(lockedOrganization, lockedStore)) throw new ShopRedactionFencedError();
       const moved = await tx
         .update(shopifyPrivacyDataRequestJobs)
         .set({
@@ -960,8 +1013,54 @@ export async function handleShopifyPrivacyJob(
   } catch (error) {
     // Another worker owns the job now; whatever it does, this one must not touch it.
     if (error instanceof LeaseLostError) return;
+    if (error instanceof ShopRedactionFencedError) {
+      // Park, then take back the export written before the fence was seen: it
+      // must not outlive the tenant's redaction, nor ever be offered.
+      await setNonTerminalState(db, job, "blocked_dependency", "shop_redaction_in_progress");
+      await discardUndeliveredArtifact(db, job, deps.deleteObject ?? storageDelete, now);
+      return;
+    }
     const outcome = await setFailure(db, job, "worker_failed", now);
     if (outcome === "retry") throw new Error("Shopify privacy job retry required");
+  }
+}
+
+async function discardUndeliveredArtifact(
+  db: Db,
+  job: Pick<ClaimedJob, "requestId" | "organizationId" | "storeId">,
+  deleteObject: DeleteObject,
+  now: Date,
+): Promise<void> {
+  try {
+    const [artifact] = await db
+      .select({ objectKey: shopifyPrivacyArtifacts.objectKey })
+      .from(shopifyPrivacyArtifacts)
+      .where(
+        and(
+          eq(shopifyPrivacyArtifacts.requestId, job.requestId),
+          eq(shopifyPrivacyArtifacts.organizationId, job.organizationId),
+          eq(shopifyPrivacyArtifacts.storeId, job.storeId),
+          inArray(shopifyPrivacyArtifacts.status, ["writing", "ready"]),
+          eq(shopifyPrivacyArtifacts.deliveryStatus, "pending"),
+        ),
+      )
+      .limit(1);
+    if (!artifact) return;
+    await deleteObject(artifact.objectKey);
+    await db
+      .update(shopifyPrivacyArtifacts)
+      .set({ status: "deleted", deletedAt: now })
+      .where(
+        and(
+          eq(shopifyPrivacyArtifacts.requestId, job.requestId),
+          eq(shopifyPrivacyArtifacts.organizationId, job.organizationId),
+          eq(shopifyPrivacyArtifacts.storeId, job.storeId),
+          eq(shopifyPrivacyArtifacts.deliveryStatus, "pending"),
+        ),
+      );
+  } catch {
+    // Best effort: expiry cleanup deletes any artifact left `writing`/`ready`.
+    console.error("[shopify-privacy] undelivered export not discarded", { code: "artifact_discard_failed" });
   }
 }
 

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { transactions } from "../../../drizzle/schema";
+import { organizations, transactions } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
   shopifyOrderRedactionTombstones,
@@ -40,6 +40,8 @@ export type ShopifyCustomerRedactionFailureCode =
   | "unsupported_transaction_footprint"
   /** Another customer redaction holds the store's write fence; this one waits its turn. */
   | "store_fence_busy"
+  /** The tenant is fenced for shop/redact: nothing new may be written into it. */
+  | "shop_redaction_in_progress"
   | "worker_failed";
 
 export interface ShopifyCustomerRedactionWorkerDeps {
@@ -469,6 +471,15 @@ export async function handleShopifyCustomerRedactionJob(
     }
 
     const outcome = await db.transaction(async (tx) => {
+      // Organisation, then store — the order shop-redaction admission locks in,
+      // so the two serialise and cannot deadlock. A shop/redact that commits
+      // first fences the tenant; this worker then writes nothing into it.
+      const [organization] = await tx
+        .select({ deletionState: organizations.deletionState })
+        .from(organizations)
+        .where(eq(organizations.id, job.organizationId))
+        .limit(1)
+        .for("update");
       // Serialize with sync and reauthorization. The precise request-id fence is
       // rechecked under the row lock immediately before any tombstone/write.
       const [store] = await tx
@@ -488,6 +499,12 @@ export async function handleShopifyCustomerRedactionJob(
         .limit(1)
         .for("update");
       if (!store) return { blocked: "invalid_request_scope" as const, deferred: false };
+      // "Tenant work must not create, persist, or egress data after redaction
+      // begins" (redaction.ts). Tombstones are new tenant rows; the shop's own
+      // redaction will account for this customer's data.
+      if (organization?.deletionState !== "active" || store.status === "redacting") {
+        return { blocked: "shop_redaction_in_progress" as const, deferred: false };
+      }
       const heldByThisRequest =
         store.privacyRedactionState === "customer_redacting" && store.privacyRedactionRequestId === job.requestId;
       if (!heldByThisRequest) {
