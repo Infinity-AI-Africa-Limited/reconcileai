@@ -31,6 +31,7 @@ import {
   ShopifyActorUnavailableError,
   shopifyOrdersChannelCode,
 } from "./syncOrchestrator";
+import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 
 const MAX_DECODED_BYTES = 10 * 1024 * 1024;
 const RECONCILIATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
@@ -109,10 +110,8 @@ export interface ShopifySettlementEvidenceDeps {
   auditCommitted?: AuditCommitted;
 }
 
-/** A deterministic tenant-scoped code; it never identifies a payment provider. */
-export function shopifySettlementEvidenceChannelCode(storeId: number): string {
-  return `shopify_settlement_evidence_${storeId}`;
-}
+// Defined once in channelCodes.ts; re-exported for existing importers.
+export { shopifySettlementEvidenceChannelCode };
 
 function insertId(result: unknown): number {
   return Number((result as [{ insertId?: number }])?.[0]?.insertId ?? 0);

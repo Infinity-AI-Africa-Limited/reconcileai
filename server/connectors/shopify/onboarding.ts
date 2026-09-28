@@ -21,6 +21,7 @@ import {
   type TokenGeneration,
 } from "./tokenStore";
 import { holdsInstallLease, renewInstallLease, type InstallLease } from "./installLease";
+import { shopifyOrdersChannelCode } from "./channelCodes";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -92,9 +93,8 @@ export function deriveShopifyOrganizationCode(shopDomain: string): string {
   return `SHP_${sha256(shopDomain).slice(0, 14).toUpperCase()}`;
 }
 
-export function shopifyOrdersChannelCode(storeId: number): string {
-  return `shopify_orders_${storeId}`;
-}
+// Defined once in channelCodes.ts; re-exported for existing importers.
+export { shopifyOrdersChannelCode };
 
 async function provisionShopifyOrdersChannel(
   db: DbExecutor,

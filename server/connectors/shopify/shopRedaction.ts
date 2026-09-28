@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
-import { and, count, eq, exists, inArray, sql, type SQL } from "drizzle-orm";
+import { and, count, eq, exists, inArray, or, sql, type SQL } from "drizzle-orm";
 import { QueryBuilder, type AnyMySqlColumn, type MySqlTable } from "drizzle-orm/mysql-core";
-import { channels, transactions, uploadBatches } from "../../../drizzle/schema";
+import { anomalyScores, channels, exceptions, matches, transactions, uploadBatches } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
   shopifyConnectorTokens,
@@ -18,6 +18,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { getDb, type DbExecutor } from "../../db";
 import { affectedRows } from "./tokenStore";
+import { shopifyOrdersChannelCode, shopifySettlementEvidenceChannelCode } from "./channelCodes";
 import {
   claimableShopRedactionJob,
   isLiveShopRedactionJobStatus,
@@ -56,6 +57,14 @@ export interface ShopifyShopRedactionManifestSummary {
   orderTransactions: number;
   directShopifyChannels: number;
   directShopifyBatches: number;
+  /** Merchant-provided settlement evidence (App Home import): its own channel, and rows without `shopifyStoreId`. */
+  settlementEvidenceChannels: number;
+  settlementEvidenceTransactions: number;
+  settlementEvidenceBatches: number;
+  /** Reconciliation output derived from the store's order and settlement rows. */
+  reconciliationMatches: number;
+  reconciliationExceptions: number;
+  anomalyScores: number;
 }
 
 export interface ShopifyShopRedactionWorkerDeps {
@@ -144,8 +153,34 @@ async function buildManifest(
     and(eq(table.organizationId, organizationId), eq(table.storeId, storeId));
   const directChannelScope = and(
     eq(channels.organizationId, organizationId),
-    eq(channels.code, `shopify_orders_${storeId}`),
+    eq(channels.code, shopifyOrdersChannelCode(storeId)),
   );
+  const settlementChannelScope = and(
+    eq(channels.organizationId, organizationId),
+    eq(channels.code, shopifySettlementEvidenceChannelCode(storeId)),
+  );
+  // A row belongs to a channel through its channelId; correlated, so it counts
+  // only rows of THIS tenant's channel with that code.
+  const inChannel = (channelId: AnyMySqlColumn, scope: SQL | undefined) =>
+    exists(new QueryBuilder().select({ id: channels.id }).from(channels).where(and(eq(channels.id, channelId), scope)));
+  // Every transaction the store's data produced: synced orders carry the store,
+  // settlement evidence carries its channel instead.
+  const storeTransactionIds = () =>
+    new QueryBuilder()
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.organizationId, organizationId),
+          or(
+            eq(transactions.shopifyStoreId, storeId),
+            inArray(
+              transactions.channelId,
+              new QueryBuilder().select({ id: channels.id }).from(channels).where(settlementChannelScope),
+            ),
+          ),
+        ),
+      );
 
   const [
     connectorStores,
@@ -160,6 +195,11 @@ async function buildManifest(
     suppressionTombstones,
     orderTransactions,
     directShopifyChannels,
+    settlementEvidenceChannels,
+    settlementEvidenceTransactions,
+    reconciliationMatches,
+    reconciliationExceptions,
+    anomalyScoreRows,
   ] = await Promise.all([
     countRows(db, shopifyConnectorStores, storeScope),
     countRows(db, shopifyConnectorTokens, exactStoreScope(shopifyConnectorTokens)),
@@ -196,21 +236,44 @@ async function buildManifest(
       and(eq(transactions.organizationId, organizationId), eq(transactions.shopifyStoreId, storeId)),
     ),
     countRows(db, channels, directChannelScope),
-  ]);
-  const directShopifyBatches = await countRows(
-    db,
-    uploadBatches,
-    and(
-      eq(uploadBatches.organizationId, organizationId),
-      // A batch belongs to this store through its Shopify orders channel.
-      exists(
-        new QueryBuilder()
-          .select({ id: channels.id })
-          .from(channels)
-          .where(and(eq(channels.id, uploadBatches.channelId), directChannelScope)),
+    countRows(db, channels, settlementChannelScope),
+    countRows(
+      db,
+      transactions,
+      and(eq(transactions.organizationId, organizationId), inChannel(transactions.channelId, settlementChannelScope)),
+    ),
+    countRows(
+      db,
+      matches,
+      and(
+        eq(matches.organizationId, organizationId),
+        or(inArray(matches.sourceTransactionId, storeTransactionIds()), inArray(matches.targetTransactionId, storeTransactionIds())),
       ),
     ),
-  );
+    countRows(
+      db,
+      exceptions,
+      and(eq(exceptions.organizationId, organizationId), inArray(exceptions.transactionId, storeTransactionIds())),
+    ),
+    countRows(
+      db,
+      anomalyScores,
+      and(eq(anomalyScores.organizationId, organizationId), inArray(anomalyScores.transactionId, storeTransactionIds())),
+    ),
+  ]);
+  // A batch belongs to this store through one of its channels.
+  const [directShopifyBatches, settlementEvidenceBatches] = await Promise.all([
+    countRows(
+      db,
+      uploadBatches,
+      and(eq(uploadBatches.organizationId, organizationId), inChannel(uploadBatches.channelId, directChannelScope)),
+    ),
+    countRows(
+      db,
+      uploadBatches,
+      and(eq(uploadBatches.organizationId, organizationId), inChannel(uploadBatches.channelId, settlementChannelScope)),
+    ),
+  ]);
 
   return Object.freeze({
     connectorStores,
@@ -226,6 +289,12 @@ async function buildManifest(
     orderTransactions,
     directShopifyChannels,
     directShopifyBatches,
+    settlementEvidenceChannels,
+    settlementEvidenceTransactions,
+    settlementEvidenceBatches,
+    reconciliationMatches,
+    reconciliationExceptions,
+    anomalyScores: anomalyScoreRows,
   });
 }
 
