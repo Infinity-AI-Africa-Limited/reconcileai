@@ -630,6 +630,9 @@ describe("privacy artifact authorization and lifecycle", () => {
     schemaVersion: 1,
     sha256: "a".repeat(64),
     sizeBytes: 123,
+    jobStatus: "awaiting_delivery",
+    organizationDeletionState: "active",
+    storeStatus: "active",
   };
   const actor: PrivacyDownloadActor = { id: 9, organizationId: 42, role: "admin", isActive: true };
 
@@ -641,6 +644,23 @@ describe("privacy artifact authorization and lifecycle", () => {
     expect(mayDownloadShopifyPrivacyArtifact({ ...actor, id: 10 }, artifact, NOW)).toBe(false);
     expect(mayDownloadShopifyPrivacyArtifact(actor, { ...artifact, expiresAt: NOW }, NOW)).toBe(false);
     expect(mayDownloadShopifyPrivacyArtifact(actor, { ...artifact, sha256: null }, NOW)).toBe(false);
+  });
+
+  describe("when the export is not on offer", () => {
+    // Greptile #161: an export `ready` from an attempt that crashed before its
+    // final transition was served, then discarded by the shop fence — bytes in
+    // a merchant's hands that the system no longer knew about.
+    it("should allow the claimant only while the job awaits delivery", () => {
+      expect(mayDownloadShopifyPrivacyArtifact(actor, artifact, NOW)).toBe(true);
+      for (const jobStatus of ["received", "processing", "failed_retryable", "blocked_dependency", "manual_review", "completed"]) {
+        expect(mayDownloadShopifyPrivacyArtifact(actor, { ...artifact, jobStatus }, NOW)).toBe(false);
+      }
+    });
+
+    it("should refuse once shop/redact has fenced the organisation or the store", () => {
+      expect(mayDownloadShopifyPrivacyArtifact(actor, { ...artifact, organizationDeletionState: "redacting" }, NOW)).toBe(false);
+      expect(mayDownloadShopifyPrivacyArtifact(actor, { ...artifact, storeStatus: "redacting" }, NOW)).toBe(false);
+    });
   });
 
   describe("when the claimant downloads an export", () => {
@@ -838,7 +858,7 @@ describe("when a shop redaction fences the tenant", () => {
       select: {
         organizations,
         [TXNS]: [[]],
-        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json" }]],
+        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json", status: "ready" }]],
       },
     });
     const putObject = vi.fn(async (key: string) => ({ key, url: "" }));
@@ -899,7 +919,7 @@ describe("when an export cannot be deleted immediately after the shop fence", ()
       select: {
         organizations,
         [TXNS]: [[]],
-        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json" }]],
+        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json", status: "ready" }]],
       },
     });
     const run = handleShopifyPrivacyJob(
@@ -938,7 +958,7 @@ describe("when an export cannot be deleted immediately after the shop fence", ()
     const fake = baseWorkerScript({
       select: {
         organizations: [[{ deletionState: "redacting" }]],
-        [ARTIFACTS]: [[{ objectKey: "org/42/shopify-privacy/901.json" }]],
+        [ARTIFACTS]: [[{ objectKey: "org/42/shopify-privacy/901.json", status: "ready" }]],
       },
     });
     await handleShopifyPrivacyJob(
@@ -948,5 +968,116 @@ describe("when an export cannot be deleted immediately after the shop fence", ()
 
     expect(fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data)?.data).toEqual({ expiresAt: NOW });
     expect(deleteObject).toHaveBeenCalledWith("org/42/shopify-privacy/901.json");
+  });
+});
+
+describe("when an upload lands after its artifact was already cleaned up", () => {
+  // Greptile #160 (review of 4d5a930): an upload can outlive its lease. Another
+  // worker parks the job for shop/redact, deletes the object and marks the row
+  // `deleted`; the upload then lands and writes the object again. The sweep only
+  // reads `writing`/`ready` rows, so nothing would ever delete it.
+  const OBJECT_KEY = `org/42/privacy/shopify/901/${UUIDS[2]}.json`;
+  const lateUploadRun = (current: unknown[], deleteObject: () => Promise<void>) => {
+    const fake = baseWorkerScript({
+      select: { [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)], current] },
+      // The upload's `writing` -> `ready` write finds the row already moved on;
+      // this worker's lease is gone too, so its failure write matches nothing.
+      update: { [ARTIFACTS]: [0, 1, 1], [JOBS]: [1, 0] },
+    });
+    const putObject = vi.fn(async (key: string) => ({ key, url: "" }));
+    const run = handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_org, value) => value === "enc-customer" ? "41" : "501"),
+        putObject,
+        deleteObject,
+      },
+    );
+    return { fake, run, putObject };
+  };
+
+  it("should make the recreated object the sweep's again before deleting it", async () => {
+    const deleteObject = vi.fn(async () => {});
+    const { fake, run } = lateUploadRun([{ status: "deleted" }], deleteObject);
+    await expect(run).resolves.toBeUndefined();
+
+    expect(deleteObject).toHaveBeenCalledWith(OBJECT_KEY);
+    const [readyWrite, revive, mark] = fake.writes("update", ARTIFACTS);
+    expect(readyWrite?.data).toMatchObject({ status: "ready" });
+    expect(revive?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: NOW });
+    expect(revive?.where?.params).toContain("deleted");
+    expect(revive?.where?.params).toContain(OBJECT_KEY);
+    expect(mark?.data).toMatchObject({ status: "deleted", deletedAt: NOW });
+    expect(mark?.where?.params).toContain("writing");
+    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
+  });
+
+  it("should leave the object due for the sweep when the delete fails", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fake, run } = lateUploadRun([{ status: "deleted" }], vi.fn(async () => {
+      throw new Error("storage unavailable");
+    }));
+    await expect(run).resolves.toBeUndefined();
+
+    // Not lost: the row says `writing` and due now, which is what the sweep reads.
+    expect(fake.writes("update", ARTIFACTS).at(-1)?.data).toEqual({ status: "writing", deletedAt: null, expiresAt: NOW });
+    expect(JSON.stringify(error.mock.calls)).toMatch(/artifact_discard_deferred/);
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/storage unavailable/);
+    error.mockRestore();
+  });
+
+  it("should not delete an object another worker has already finished", async () => {
+    const deleteObject = vi.fn(async () => {});
+    const { fake, run } = lateUploadRun([{ status: "ready" }], deleteObject);
+    await expect(run).resolves.toBeUndefined();
+
+    expect(deleteObject).not.toHaveBeenCalled();
+    expect(fake.writes("update", ARTIFACTS)).toHaveLength(1);
+  });
+});
+
+describe("when a late upload finishes while cleanup is deleting its object", () => {
+  // The reverse order: cleanup deletes the object, then the upload lands and
+  // moves the row from `writing` to `ready`. Marking it `deleted` regardless
+  // would leave the re-written object with no row that owns it.
+  const expired = { requestId: 901, organizationId: 42, storeId: 7, objectKey: "org/42/x.json", deliveryStatus: "pending", downloadedAt: null };
+
+  it("should mark the sweep's row deleted only while it still has the status it deleted under", async () => {
+    const fake = scriptedDb({ select: { [ARTIFACTS]: [[{ ...expired, status: "writing" }]] }, update: { [ARTIFACTS]: [0] } });
+
+    expect(await cleanupExpiredShopifyPrivacyArtifacts({ db: fake.db as never, now: () => NOW, deleteObject: vi.fn(async () => {}) })).toBe(0);
+    const [mark] = fake.writes("update", ARTIFACTS);
+    expect(mark?.where?.params).toContain("writing");
+    // The row moved on, so the job is not judged on it this round.
+    expect(fake.writes("update", JOBS)).toEqual([]);
+    expect(fake.writes("update", REQUESTS)).toEqual([]);
+  });
+
+  it("should condition the fenced discard on the status it deleted under", async () => {
+    const fake = baseWorkerScript({
+      select: {
+        organizations: [[{ deletionState: "active" }], [{ deletionState: "redacting" }]],
+        [TXNS]: [[]],
+        [ARTIFACTS]: [[], [artifactRow(0)], [{ objectKey: "org/42/shopify-privacy/901.json", status: "ready" }]],
+      },
+    });
+    await handleShopifyPrivacyJob(
+      { kind: "customer_request", jobId: 901 },
+      {
+        db: fake.db as never,
+        now: () => NOW,
+        uuid: uuidSequence(),
+        decrypt: vi.fn(async (_org, value) => value === "enc-customer" ? "41" : "501"),
+        putObject: vi.fn(async (key: string) => ({ key, url: "" })),
+        deleteObject: vi.fn(async () => {}),
+      },
+    );
+
+    const mark = fake.writes("update", ARTIFACTS).at(-1);
+    expect(mark?.data).toMatchObject({ status: "deleted" });
+    expect(mark?.where?.params).toContain("ready");
   });
 });

@@ -1,7 +1,12 @@
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, ne } from "drizzle-orm";
 import { z } from "zod";
-import { shopifyConnectorStores, shopifyPrivacyArtifacts } from "../../drizzle/shopify_schema";
+import { organizations } from "../../drizzle/schema";
+import {
+  shopifyConnectorStores,
+  shopifyPrivacyArtifacts,
+  shopifyPrivacyDataRequestJobs,
+} from "../../drizzle/shopify_schema";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { resolveOrgScope } from "../_core/tenancy";
@@ -84,12 +89,27 @@ export const shopifyConnectorRouter = router({
           eq(shopifyConnectorStores.claimedByUserId, ctx.user.id),
         ),
       )
+      .innerJoin(
+        shopifyPrivacyDataRequestJobs,
+        and(
+          eq(shopifyPrivacyDataRequestJobs.requestId, shopifyPrivacyArtifacts.requestId),
+          eq(shopifyPrivacyDataRequestJobs.organizationId, shopifyPrivacyArtifacts.organizationId),
+          eq(shopifyPrivacyDataRequestJobs.storeId, shopifyPrivacyArtifacts.storeId),
+        ),
+      )
+      .innerJoin(organizations, eq(organizations.id, shopifyPrivacyArtifacts.organizationId))
       .where(
         and(
           eq(shopifyPrivacyArtifacts.organizationId, ctx.user.organizationId),
           eq(shopifyPrivacyArtifacts.recipientUserId, ctx.user.id),
           eq(shopifyPrivacyArtifacts.status, "ready"),
           gt(shopifyPrivacyArtifacts.expiresAt, new Date()),
+          // The same rule as the download (mayDownloadShopifyPrivacyArtifact):
+          // offered only once its job says so, and never after shop/redact
+          // has fenced the tenant.
+          eq(shopifyPrivacyDataRequestJobs.status, "awaiting_delivery"),
+          eq(organizations.deletionState, "active"),
+          ne(shopifyConnectorStores.status, "redacting"),
         ),
       )
       .orderBy(desc(shopifyPrivacyArtifacts.generatedAt));
