@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "2e569e5f-fd03-439d-a7ba-57755b1f26a0",
+  "id": "086996a6-8ede-4c27-97f5-164b3b8f6673",
   "prevId": "55146906-44d1-4915-8ad1-d1d9dafac496",
   "tables": {
     "agent_action_drafts": {
@@ -14436,6 +14436,14 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "syncRequestCount": {
+          "name": "syncRequestCount",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         },
         "createdAt": {
           "name": "createdAt",

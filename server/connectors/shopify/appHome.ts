@@ -13,7 +13,7 @@ import { z } from "zod";
 import { shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
-import { ShopifyManualSyncError, shopifyRequestNumber } from "./manualSync";
+import { ShopifyManualSyncError } from "./manualSync";
 import { ShopifySettlementEvidenceError, type ShopifySettlementEvidenceResult } from "./settlementEvidence";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -67,7 +67,6 @@ export function appHomeError(code: TRPCError["code"], message: ShopifyAppHomeErr
 
 /** The store and sync evidence the workspace shows; no id leaves the server. */
 export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
-  const target = { storeId: context.storeId, organizationId: context.organizationId };
   const requests = and(
     eq(shopifySyncRequests.storeId, context.storeId),
     eq(shopifySyncRequests.organizationId, context.organizationId),
@@ -82,6 +81,7 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
         lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
         lastErrorCode: shopifySyncCursors.lastErrorCode,
         lastErrorAt: shopifySyncCursors.lastErrorAt,
+        requestCount: shopifySyncCursors.syncRequestCount,
       })
       .from(shopifySyncCursors)
       .where(
@@ -104,12 +104,7 @@ export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
       .where(and(requests, eq(shopifySyncRequests.status, "queued")))
       .orderBy(desc(shopifySyncRequests.id))
       .limit(1);
-    return {
-      cursor: cursorRow,
-      latestRequest: latestRow,
-      pending: pendingRow,
-      requestCount: await shopifyRequestNumber(tx, target),
-    };
+    return { cursor: cursorRow, latestRequest: latestRow, pending: pendingRow, requestCount: cursorRow?.requestCount ?? 0 };
   });
   return {
     store: { shopDomain: context.shopDomain, displayName: context.displayName, currency: context.currency },

@@ -1,3 +1,5 @@
+import { MySqlDialect } from "drizzle-orm/mysql-core";
+import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { runToNow } = vi.hoisted(() => ({ runToNow: vi.fn(async () => []) }));
@@ -16,6 +18,7 @@ import {
 import { scriptedDb } from "./scriptedDb.testkit";
 
 const STORES = "shopify_connector_stores";
+const CURSORS = "shopify_sync_cursors";
 const REQUESTS = "shopify_sync_requests";
 /** Mid-second, as a real clock almost always is. */
 const CLOCK = new Date("2026-09-28T10:00:00.700Z");
@@ -35,7 +38,7 @@ beforeEach(() => {
 describe("when a manual sync is requested", () => {
   function requestDb(requestId = 55, requestNumber = 3) {
     return scriptedDb({
-      select: { [STORES]: [[{ id: 7 }]], [REQUESTS]: [[{ requests: requestNumber }]] },
+      select: { [STORES]: [[{ id: 7 }]], [CURSORS]: [[{ requests: requestNumber }]] },
       insert: { [REQUESTS]: [requestId] },
     });
   }
@@ -61,26 +64,37 @@ describe("when a manual sync is requested", () => {
     });
   });
 
-  it("should number the request among the store's own, in the transaction that recorded it", async () => {
+  it("should number the request by the store's own counter, in the transaction that records it", async () => {
     const fake = requestDb(55, 3);
     await requestShopifyManualSync(target, { db: fake.db as never, enqueue: vi.fn(async () => {}) });
+
+    const bump = fake.ops.find((op) => op.kind === "insert" && op.table === CURSORS);
+    const readBack = fake.ops.find((op) => op.kind === "select" && op.table === CURSORS);
     const record = fake.ops.find((op) => op.kind === "insert" && op.table === REQUESTS);
-    const numbering = fake.ops.find((op) => op.kind === "select" && op.table === REQUESTS);
-    expect(record?.txId).not.toBeNull();
-    expect(numbering?.txId).toBe(record?.txId);
-    // Counted within this store and tenant, up to this request: the platform-wide id never leaves.
-    expect(numbering?.where?.params).toEqual([7, 42, 55]);
+    // An upsert, which reads the latest committed count and holds the row's
+    // lock to commit: two concurrent requests for one store get two numbers.
+    expect(bump?.upsert).toBe(true);
+    expect(bump?.data).toMatchObject({ storeId: 7, organizationId: 42, resource: "orders", syncRequestCount: 1 });
+    expect(new MySqlDialect().sqlToQuery(bump?.onDuplicate?.syncRequestCount as SQL).sql).toBe(
+      "`shopify_sync_cursors`.`syncRequestCount` + 1",
+    );
+    expect(readBack?.where?.params).toEqual([7, 42, "orders"]);
+    // Numbered, then recorded, in one transaction.
+    expect(bump?.txId).not.toBeNull();
+    expect(new Set([bump?.txId, readBack?.txId, record?.txId]).size).toBe(1);
+    expect(fake.ops.indexOf(bump!)).toBeLessThan(fake.ops.indexOf(record!));
   });
 
   it("should leave no request behind when numbering it fails", async () => {
     const fake = scriptedDb({
-      select: { [STORES]: [[{ id: 7 }]], [REQUESTS]: [new Error("lock wait timeout")] },
+      select: { [STORES]: [[{ id: 7 }]], [CURSORS]: [new Error("lock wait timeout")] },
       insert: { [REQUESTS]: [55] },
     });
     const enqueue = vi.fn(async () => {});
     await expect(requestShopifyManualSync(target, { db: fake.db as never, enqueue })).rejects.toThrow("lock wait timeout");
     expect(enqueue).not.toHaveBeenCalled();
     expect(fake.writes("insert", REQUESTS)).toEqual([]);
+    expect(fake.writes("insert", CURSORS)).toEqual([]);
   });
 
   it("should look the store up by id, tenant and status together", async () => {
@@ -107,7 +121,7 @@ describe("when a manual sync is requested", () => {
 describe("when the queue refuses a manual sync", () => {
   it("should settle its own request as failed — that row alone, and only while still queued", async () => {
     const fake = scriptedDb({
-      select: { [STORES]: [[{ id: 7 }]], [REQUESTS]: [[{ requests: 3 }]] },
+      select: { [STORES]: [[{ id: 7 }]], [CURSORS]: [[{ requests: 3 }]] },
       insert: { [REQUESTS]: [55] },
     });
     const enqueue = vi.fn(async () => {

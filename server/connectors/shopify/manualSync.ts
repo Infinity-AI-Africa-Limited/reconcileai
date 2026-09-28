@@ -29,8 +29,8 @@
  * worse — the columns hold whole seconds, so they cannot order two events in
  * one second.
  */
-import { and, count, desc, eq, lte, or } from "drizzle-orm";
-import { shopifyConnectorStores, shopifySyncRequests } from "../../../drizzle/shopify_schema";
+import { and, desc, eq, lte, or, sql } from "drizzle-orm";
+import { shopifyConnectorStores, shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import { getDb } from "../../db";
 import { runShopifyOrderSyncToNow, shopifySyncFailureCode } from "./syncOrchestrator";
 
@@ -87,16 +87,30 @@ function requestsOf(target: ShopifyManualSyncTarget) {
 }
 
 /**
- * How many requests this store had made up to and including `requestId`. A page
- * waits for its request by this number, which is the store's own — the row ids
- * are a platform-wide count and do not leave the server.
+ * Number a new request among its store's: increment the cursor's counter and
+ * read it back. The upsert reads the latest committed count and holds the row's
+ * lock until the caller's transaction commits, so concurrent requests for one
+ * store are numbered one after the other. A page waits for its request by this
+ * number, which is the store's own — row ids are a platform-wide count and do
+ * not leave the server.
  */
-export async function shopifyRequestNumber(db: Db | Tx, target: ShopifyManualSyncTarget, requestId?: number) {
-  const [row] = await db
-    .select({ requests: count() })
-    .from(shopifySyncRequests)
-    .where(requestId === undefined ? requestsOf(target) : and(requestsOf(target), lte(shopifySyncRequests.id, requestId)));
-  return Number(row?.requests ?? 0);
+async function nextRequestNumber(tx: Tx, target: ShopifyManualSyncTarget): Promise<number> {
+  await tx
+    .insert(shopifySyncCursors)
+    .values({ storeId: target.storeId, organizationId: target.organizationId, resource: "orders", syncRequestCount: 1 })
+    .onDuplicateKeyUpdate({ set: { syncRequestCount: sql`${shopifySyncCursors.syncRequestCount} + 1` } });
+  const [row] = await tx
+    .select({ requests: shopifySyncCursors.syncRequestCount })
+    .from(shopifySyncCursors)
+    .where(
+      and(
+        eq(shopifySyncCursors.storeId, target.storeId),
+        eq(shopifySyncCursors.organizationId, target.organizationId),
+        eq(shopifySyncCursors.resource, "orders"),
+      ),
+    )
+    .limit(1);
+  return row?.requests ?? 0;
 }
 
 function insertedId(result: unknown): number {
@@ -141,10 +155,11 @@ export async function requestShopifyManualSync(
   if (!store) throw new ShopifyManualSyncError("STORE_UNAVAILABLE");
 
   // Recorded BEFORE the enqueue, so the run that settles it cannot start first;
-  // numbered in the same transaction, so a failure there leaves no row behind
-  // that no job will ever settle.
+  // numbered and recorded in one transaction, so a view that counts the number
+  // also holds the row, and a failure leaves no row behind that no job settles.
   const requestedAt = toWholeSecond(now());
   const { requestId, requestNumber } = await db.transaction(async (tx) => {
+    const number = await nextRequestNumber(tx, params);
     const id = insertedId(
       await tx.insert(shopifySyncRequests).values({
         storeId: params.storeId,
@@ -154,7 +169,7 @@ export async function requestShopifyManualSync(
       }),
     );
     if (!id) throw new ShopifyManualSyncError("SERVICE_UNAVAILABLE");
-    return { requestId: id, requestNumber: await shopifyRequestNumber(tx, params, id) };
+    return { requestId: id, requestNumber: number };
   });
 
   try {

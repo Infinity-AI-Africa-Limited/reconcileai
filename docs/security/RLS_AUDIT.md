@@ -117,7 +117,7 @@ unclassified. The ratchet now also asserts that every schema file listed in
 |---|---|---|
 | `shopify_connector_stores` | `tenant_required` | One row per installed Shopify store, owned by the merchant workspace created at install. `statusReason` records why a store left `active` (ownership unverified, refresh rejected, token write failed, uninstalled). |
 | `shopify_connector_tokens` | `tenant_required` | Expiring offline access + refresh tokens, encrypted under the tenant's envelope key. Every write after a refresh is fenced on the row id and `rotationVersion`. |
-| `shopify_sync_cursors` | `tenant_required` | Order-sync watermark and latest outcome per store, written by every sync cycle. |
+| `shopify_sync_cursors` | `tenant_required` | Order-sync watermark and latest outcome per store, written by every sync cycle; also the store's manual-request counter (`syncRequestCount`). |
 | `shopify_sync_requests` | `tenant_required` | One row per manual "refresh now" request (migration `0097`): status, the failure code and times only. Every read and write carries `storeId` and `organizationId`. |
 | `shopify_webhook_events` | `tenant_nullable` | Digest-only delivery ledger. A verified delivery for a shop with no store record is acknowledged and recorded without inventing a tenant. |
 | `shopify_privacy_requests` | `tenant_nullable` | Hashed evidence for Shopify's mandatory compliance topics; same reasoning as `sl_connector_gdpr_requests`. |

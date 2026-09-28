@@ -133,11 +133,11 @@ describe("when the workspace loads its context", () => {
           lastSuccessfulAt: new Date("2026-09-25T07:30:00.000Z"),
           lastErrorCode: null,
           lastErrorAt: null,
+          requestCount: 4,
         }]],
         [REQUESTS]: [
           [{ status: "succeeded", answeredAt: new Date("2026-09-25T07:30:00.000Z") }],
           [],
-          [{ requests: 4 }],
         ],
       },
     });
@@ -163,11 +163,11 @@ describe("when the workspace loads its context", () => {
     expect(JSON.stringify(view)).not.toMatch(/owner@example\.com|must-not-leak|storeId|organizationId|shopifyUserId|"id"/);
     expect(db.ops[0]?.where?.params).toEqual([7, 42, "orders"]);
     const requestLookups = db.ops.filter((op) => op.kind === "select" && op.table === REQUESTS);
-    expect(requestLookups.map((op) => op.where?.params)).toEqual([[7, 42], [7, 42, "queued"], [7, 42]]);
+    expect(requestLookups.map((op) => op.where?.params)).toEqual([[7, 42], [7, 42, "queued"]]);
     // Every read in one transaction, so one snapshot: a run settling between
     // separate reads could make a pending request look finished.
     const reads = db.ops.filter((op) => op.kind === "select");
-    expect(reads).toHaveLength(4);
+    expect(reads).toHaveLength(3);
     expect(new Set(reads.map((op) => op.txId)).size).toBe(1);
     expect(reads[0]?.txId).not.toBeNull();
   });
