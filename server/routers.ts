@@ -13,6 +13,7 @@ import { modulesRouter } from "./routers/modules";
 import { woodcoreConnectorRouter } from "./routers/woodcoreConnector";
 import { shoplineConnectorRouter } from "./routers/shoplineConnector";
 import { shopifyConnectorRouter } from "./routers/shopifyConnector";
+import { shopifyAppHomeRouter } from "./routers/shopifyAppHome";
 import { shoplineReviewRouter } from "./routers/shoplineReview";
 import { lapoRouter } from "./routers/lapo";
 import { ugandaRouter } from "./routers/uganda";
@@ -6461,6 +6462,8 @@ Always be specific, reference actual exception IDs and amounts where available, 
   cbsConnector: woodcoreConnectorRouter,
   shoplineConnector: shoplineConnectorRouter,
   shopifyConnector: shopifyConnectorRouter,
+  // Embedded Shopify Admin workspace; authenticated by App Bridge ID token, not the session.
+  shopifyAppHome: shopifyAppHomeRouter,
   shoplineReview: shoplineReviewRouter,
   bucketIngestion: bucketIngestionRouter,
   emailIngestion: emailIngestionRouter,

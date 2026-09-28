@@ -184,6 +184,25 @@ describe("the roster of scoped procedures", () => {
   });
 });
 
+describe("when a settlement import names only some columns", () => {
+  it("should accept a partial override — the input reaches the scope check, not a schema refusal", async () => {
+    // Under zod 4 an enum-keyed z.record is exhaustive: a partial override was
+    // refused as BAD_REQUEST before any authorisation ran. FORBIDDEN here proves
+    // the input was accepted and the call went on to the tenancy decision.
+    const code = await codeOf(() =>
+      callerAs("admin").shoplineConnector.importSettlementFile({
+        organizationId: OTHER_ORG,
+        fileName: "partial.csv",
+        content: "merchant_ref,net\norder-1,1.00",
+        sourceLabel: "partial mapping",
+        columnOverrides: { orderRef: "merchant_ref", amount: "net" },
+        dryRun: true,
+      }),
+    );
+    expect(code).toBe("FORBIDDEN");
+  });
+});
+
 describe("when a tenant user names another organisation", () => {
   it.each(ALL_ORG_NAMING_CALLS)("should refuse %s with FORBIDDEN", async (_name, run) => {
     for (const role of ["admin", "user", "operations", "compliance", "cfo"]) {
