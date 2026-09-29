@@ -491,7 +491,7 @@ export const shoplineConnectorRouter = router({
           ),
         );
 
-      await deleteToken(db, input.storeId);
+      await deleteToken(db, input.storeId, orgId);
 
       return { success: true };
     }),

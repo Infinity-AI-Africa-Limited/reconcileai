@@ -33,6 +33,7 @@
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
     "server/shoplineSettlementImport.test.ts",
+    "server/shoplineUninstallTenancy.test.ts",
     "server/ssoFlowCookie.test.ts"
   ]
 }

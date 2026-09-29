@@ -495,7 +495,7 @@ async function handleMerchantRedact(
       ),
     );
 
-  await deleteToken(db, slStoreId);
+  await deleteToken(db, slStoreId, organizationId);
 
   // Phase 2: schedule full data purge (webhook events, synced transactions, etc.)
   // within 30 days per GDPR requirement.
