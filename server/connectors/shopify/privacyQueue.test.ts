@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
-  enqueue: vi.fn(async () => {}),
+  enqueue: vi.fn<(name: string, payload: { kind: string; jobId: number }) => Promise<void>>(async () => {}),
   createQueue: vi.fn(),
 }));
 

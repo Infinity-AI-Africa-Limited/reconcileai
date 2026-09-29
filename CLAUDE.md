@@ -1759,7 +1759,7 @@ Before merging any `manus/*` branch, verify:
 | **Demo/POC code isolation** | POC pages (`/salad-africa-poc`, `/lapo-poc`, `/woodcore-poc`) are intentionally public and demo-only — do not add auth gates unless instructed |
 | **LLM calls** | Confirm all `invokeLLM()` calls will work with `DIRECT_LLM_API_KEY` (Anthropic) in production |
 | **Database migrations** | If new tables/columns were added, confirm migration files exist in `drizzle/`. Generate them with `drizzle-kit generate` **against a dev database** — never `pnpm db:push` while `DATABASE_URL` points at production (see §12) |
-| **S3 file keys** | Any new file uploads must use `storagePut()` — never store bytes in DB columns |
+| **S3 file keys** | Any new file upload must go through `server/storage.ts` — never store bytes in DB columns. `storagePut()` returns a presigned download URL at write time; **`storagePutPrivate()` is the right one when no bearer URL should exist**, and is required for anything holding customer data (privacy exports). See §16 |
 | **Secrets** | No hardcoded API keys, tokens, or credentials in any file |
 | **Router size** | If `server/routers.ts` grew, check if it should be split into `server/routers/<feature>.ts` |
 
@@ -1846,7 +1846,22 @@ sandbox.
 - **shadcn/ui for all UI components** — import from `@/components/ui/*`
 - **Optimistic updates** for list mutations — use `onMutate`/`onError`/`onSettled` pattern
 - **UTC timestamps** everywhere — convert to local timezone only at display layer
-- **S3 for all file storage** — never store file bytes in the database
+- **S3 for all file storage** — never store file bytes in the database. Upload
+  through `server/storage.ts`, and pick the helper by whether a download
+  credential should exist at all:
+  - `storagePut()` — uploads **and returns a presigned GET URL** to its caller.
+    For an object the caller is about to hand to whoever asked for it.
+  - `storagePutPrivate()` — uploads and returns the key only, with
+    `Cache-Control: no-store`. **Use this for anything holding customer or
+    tenant data** (privacy/GDPR exports, evidence packs). The flow persists the
+    key and authorises each later read before calling `storageGet()` for a
+    short-lived presign, so no bearer URL exists between writing and a proven
+    read. Reaching for `storagePut()` here mints a credential nothing needs.
+
+  Neither is "the required helper" over the other — the requirement is that
+  bytes go to object storage rather than a DB column. A review finding that
+  reads the rule as `storagePut()`-only is wrong; this was raised on PR #160
+  and withdrawn.
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
 - **Never use `&&` for conditional rendering in JSX** — use a ternary with an

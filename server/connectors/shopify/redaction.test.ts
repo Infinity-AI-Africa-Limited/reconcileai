@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { admitShopifyShopRedaction } from "./redaction";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const ORGANIZATIONS = "organizations";
 const STORES = "shopify_connector_stores";
@@ -23,7 +23,7 @@ function legacyJob(status: string) {
   return { jobId: 903, runId: RUN_ID, privacyRequestId: null, requestHash: LEGACY_HASH, status };
 }
 
-async function admit(script: Parameters<typeof scriptedDb>[0], requestHash = DELIVERY_HASH) {
+async function admit(script: NonNullable<Parameters<typeof scriptedDb>[0]>, requestHash = DELIVERY_HASH) {
   const fake = scriptedDb({
     ...script,
     select: { [ORGANIZATIONS]: [[{ id: STORE.organizationId }]], [STORES]: [[{ id: STORE.id }]], ...script.select },
@@ -60,7 +60,7 @@ describe("when a delivery finds a job admitted before jobs carried their request
       status: "manual_review",
       failureCode: "legacy_request_unresolved",
     });
-    expect(fake.writes("update", JOBS).some((op) => op.data?.privacyRequestId !== undefined)).toBe(false);
+    expect(fake.writes("update", JOBS).some((op) => rowOf(op)?.privacyRequestId !== undefined)).toBe(false);
     expect(fake.writes("insert", OUTBOX)).toEqual([]);
   });
 

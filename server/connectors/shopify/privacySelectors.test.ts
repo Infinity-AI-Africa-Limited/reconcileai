@@ -23,7 +23,7 @@ import {
   protectCustomerPrivacySelectors,
   validateCustomerPrivacySelectors,
 } from "./privacySelectors";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const SHOP = "merchant.myshopify.com";
 const REQUESTS = "shopify_privacy_requests";
@@ -391,7 +391,7 @@ describe("when a request parked for manual review is replayed and now validates"
       selectors: [],
     });
 
-    const promote = fake.writes("update", REQUESTS).find((op) => op.data?.status === "received");
+    const promote = fake.writes("update", REQUESTS).find((op) => rowOf(op)?.status === "received");
     expect(promote?.data).toEqual({ status: "received", admissionErrorCode: null });
     // Only a manual-review row moves.
     expect(promote?.where?.params).toEqual(expect.arrayContaining([901, 42, "manual_review"]));
@@ -420,14 +420,14 @@ describe("when a request parked for manual review is replayed and now validates"
 
     // A job-driven review (expired or unconfirmed export, blocked dependency)
     // carries no admission error; only an admission-parked request moves.
-    const promote = fake.writes("update", REQUESTS).find((op) => op.data?.status === "received");
+    const promote = fake.writes("update", REQUESTS).find((op) => rowOf(op)?.status === "received");
     expect(promote?.where?.sql).toMatch(/`admissionErrorCode` is not null/i);
   });
 
   it("should bring back the job admission parked with it, and queue it again", async () => {
     const fake = await replay();
 
-    const rearm = fake.writes("update", JOBS).find((op) => op.data?.status === "received");
+    const rearm = fake.writes("update", JOBS).find((op) => rowOf(op)?.status === "received");
     expect(rearm?.data).toMatchObject({ status: "received", failureCode: null });
     expect(rearm?.where?.params).toEqual([901, 42, "manual_review", "selectors_unavailable"]);
     expect(fake.writes("update", OUTBOX)[0]?.data).toMatchObject({ status: "pending" });
@@ -458,14 +458,14 @@ describe("when a received customer request has no selectors", () => {
       selectors,
     });
 
-    const repair = fake.writes("update", REQUESTS).find((op) => op.data?.admissionErrorCode === "selectors_unavailable");
+    const repair = fake.writes("update", REQUESTS).find((op) => rowOf(op)?.admissionErrorCode === "selectors_unavailable");
     expect(repair?.data).toEqual({ status: "manual_review", admissionErrorCode: "selectors_unavailable" });
     expect(repair?.where?.sql).toMatch(/not exists \(select 1 from `shopify_privacy_request_selectors`/i);
     expect(repair?.where?.params).toEqual(
       expect.arrayContaining([42, 7, "customers/data_request", "customers/redact", "received"]),
     );
     // The job is parked with its request, so no worker answers it without selectors.
-    const parked = fake.writes("update", JOBS).find((op) => op.data?.status === "manual_review");
+    const parked = fake.writes("update", JOBS).find((op) => rowOf(op)?.status === "manual_review");
     expect(parked?.data).toEqual({ status: "manual_review", failureCode: "selectors_unavailable", lastCheckpoint: "manual_review" });
     expect(parked?.where?.params).toEqual(
       expect.arrayContaining([42, 7, "received", "failed_retryable", "manual_review", "selectors_unavailable"]),

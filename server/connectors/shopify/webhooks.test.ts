@@ -8,7 +8,9 @@ const state = vi.hoisted(() => ({
   db: null as unknown,
   secret: "whsec",
   digestKey: "ab".repeat(32),
-  enqueue: vi.fn(async () => {}),
+  enqueue: vi.fn<(payload: Parameters<typeof import("./syncOrchestrator").enqueueShopifyWebhookSync>[0]) => Promise<void>>(
+    async () => {},
+  ),
 }));
 
 vi.mock("../../db", async (importOriginal) => ({
@@ -30,7 +32,7 @@ vi.mock("../../_core/env", async (importOriginal) => {
   };
 });
 vi.mock("./syncOrchestrator", () => ({
-  enqueueShopifyWebhookSync: (...args: unknown[]) => state.enqueue(...args),
+  enqueueShopifyWebhookSync: (payload: Parameters<typeof state.enqueue>[0]) => state.enqueue(payload),
 }));
 const keyState = vi.hoisted(() => ({ getTenantDek: vi.fn(async () => ({ dek: Buffer.alloc(32), version: 1 })) }));
 vi.mock("../../_core/tenantKeys", () => ({
@@ -46,7 +48,7 @@ vi.mock("../../_core/tenantKeys", () => ({
 import type express from "express";
 import { validateCustomerPrivacySelectors } from "./privacySelectors";
 import { declaredShopDomain, handleShopifyWebhook, isStaleUninstall } from "./webhooks";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const SHOP = "merchant.myshopify.com";
 const STORES = "shopify_connector_stores";
@@ -225,7 +227,7 @@ describe("when a signed shop/redact delivery arrives", () => {
       ...(opts.organizationUpdate ? { update: { [ORGANIZATIONS]: [opts.organizationUpdate] } } : {}),
     });
     state.db = fake.db;
-    const headers = opts.triggeredAt ? { "x-shopify-triggered-at": opts.triggeredAt } : {};
+    const headers: Record<string, string> = opts.triggeredAt ? { "x-shopify-triggered-at": opts.triggeredAt } : {};
     return { fake, run: delivery("shop/redact", { shop_domain: SHOP, shop_id: 17 }, headers).run };
   }
 
@@ -244,7 +246,7 @@ describe("when a signed shop/redact delivery arrives", () => {
     expect(fake.writes("update", ORGANIZATIONS)[0]?.data).toMatchObject({ isActive: false, deletionState: "redacting" });
     expect(fake.writes("update", USERS)[0]?.data).toMatchObject({ isActive: false });
     expect(fake.writes("delete", TOKENS)).toHaveLength(1);
-    const requested = fake.writes("update", STORES).find((op) => op.data?.statusReason === "shop_redact_requested");
+    const requested = fake.writes("update", STORES).find((op) => rowOf(op)?.statusReason === "shop_redact_requested");
     expect(requested?.data).toMatchObject({ status: "redacting" });
     expect(requested?.where?.params).toEqual(expect.arrayContaining([7, 42]));
   });
@@ -276,7 +278,7 @@ describe("when a signed shop/redact delivery arrives", () => {
     const revoke = fake.writes("delete", TOKENS)[0];
     // Scoped by tenant alone: another store of the same organisation loses its token too.
     expect(revoke?.where?.params).toEqual([42]);
-    const siblings = fake.writes("update", STORES).find((op) => op.data?.statusReason === "organization_redacting");
+    const siblings = fake.writes("update", STORES).find((op) => rowOf(op)?.statusReason === "organization_redacting");
     expect(siblings?.data).toMatchObject({ status: "redacting" });
     expect(siblings?.where?.params).toEqual(expect.arrayContaining([42, 7, "redacting"]));
   });
@@ -313,7 +315,7 @@ describe("when a signed shop/redact delivery arrives", () => {
     expect(fake.writes("insert", REDACTION_JOBS)).toEqual([]);
     expect(fake.writes("delete", TOKENS)).toEqual([]);
     // Nothing committed marks the delivery processed; the receipt is left failed for the retry.
-    const settled = fake.writes("update", EVENTS).map((op) => op.data?.status);
+    const settled = fake.writes("update", EVENTS).map((op) => rowOf(op)?.status);
     expect(settled).not.toContain("processed");
     expect(settled).toContain("failed");
   });

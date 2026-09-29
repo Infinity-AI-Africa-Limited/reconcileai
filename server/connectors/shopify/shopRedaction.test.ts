@@ -4,7 +4,7 @@ import {
   SHOPIFY_SHOP_REDACTION_BLOCKER,
   handleShopifyShopRedactionJob,
 } from "./shopRedaction";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const JOBS = "shopify_shop_redaction_jobs";
 const REQUESTS = "shopify_privacy_requests";
@@ -127,8 +127,8 @@ describe("when the report-only shop-redaction worker runs", () => {
 
     expect(firstCheckpoint).toHaveBeenCalledTimes(1);
     expect(secondCheckpoint).not.toHaveBeenCalled();
-    expect(fake.writes("update", JOBS).filter((op) => op.data?.status === "processing")).toHaveLength(2);
-    expect(fake.writes("update", JOBS).filter((op) => op.data?.status === "blocked_dependency")).toHaveLength(1);
+    expect(fake.writes("update", JOBS).filter((op) => rowOf(op)?.status === "processing")).toHaveLength(2);
+    expect(fake.writes("update", JOBS).filter((op) => rowOf(op)?.status === "blocked_dependency")).toHaveLength(1);
   });
 
   it("should keep an early redelivery retryable while another worker holds the lease", async () => {
@@ -181,9 +181,9 @@ describe("when the report-only shop-redaction worker runs", () => {
         anomalyScores: 3,
       },
     });
-    expect(Object.values((finalJob?.data?.manifestSummary ?? {}) as Record<string, unknown>)
+    expect(Object.values((rowOf(finalJob)?.manifestSummary ?? {}) as Record<string, unknown>)
       .every((value) => Number.isSafeInteger(value) && Number(value) >= 0)).toBe(true);
-    expect(JSON.stringify(finalJob?.data?.manifestSummary)).not.toMatch(
+    expect(JSON.stringify(rowOf(finalJob)?.manifestSummary)).not.toMatch(
       /domain|orderId|email|payload|objectKey|hash|webhookId|organizationId|storeId/i,
     );
     expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({
@@ -191,7 +191,7 @@ describe("when the report-only shop-redaction worker runs", () => {
       completionNote: SHOPIFY_SHOP_REDACTION_BLOCKER,
       completedAt: null,
     });
-    expect(fake.committed().some((op) => op.data?.status === "completed")).toBe(false);
+    expect(fake.committed().some((op) => rowOf(op)?.status === "completed")).toBe(false);
     expect(fake.writes("delete", STORES)).toEqual([]);
     expect(fake.writes("delete", TRANSACTIONS)).toEqual([]);
     expect(fake.committed().filter((op) => op.kind !== "select" && ![JOBS, REQUESTS].includes(op.table))).toEqual([]);

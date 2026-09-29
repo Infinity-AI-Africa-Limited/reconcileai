@@ -16,7 +16,10 @@ import {
   type AuthorizedPrivacyArtifact,
   type PrivacyDownloadActor,
 } from "./privacyCompletion";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
+
+/** The uploaded export as text — the upload dependency takes `string | Uint8Array`. */
+const asText = (data: string | Uint8Array) => (typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
 
 const JOBS = "shopify_privacy_data_request_jobs";
 const OUTBOX = "shopify_privacy_queue_outbox";
@@ -110,7 +113,7 @@ describe("Shopify privacy outbox recovery", () => {
     const fake = scriptedDb({
       select: { [OUTBOX]: [[{ id: 77, kind: "customer_request", jobId: 901, attempts: 0 }]] },
     });
-    const enqueue = vi.fn(async () => {});
+    const enqueue = vi.fn<(payload: { kind: string; jobId: number }, attempt: number) => Promise<void>>(async () => {});
 
     const result = await dispatchShopifyPrivacyOutbox({
       db: fake.db as never,
@@ -134,7 +137,7 @@ describe("Shopify privacy outbox recovery", () => {
       // Re-arm sweep (nothing stranded), first claim, its ack, the competing claim.
       update: { [OUTBOX]: [0, 1, 1, 0] },
     });
-    const enqueue = vi.fn(async () => {});
+    const enqueue = vi.fn<(payload: { kind: string; jobId: number }, attempt: number) => Promise<void>>(async () => {});
 
     const result = await dispatchShopifyPrivacyOutbox({
       db: fake.db as never,
@@ -145,7 +148,7 @@ describe("Shopify privacy outbox recovery", () => {
 
     expect(result.dispatched).toBe(1);
     expect(enqueue).toHaveBeenCalledTimes(1);
-    const claim = fake.writes("update", OUTBOX).find((op) => op.data?.status === "dispatching");
+    const claim = fake.writes("update", OUTBOX).find((op) => rowOf(op)?.status === "dispatching");
     expect(claim?.where?.params).toContain("dispatching");
   });
 
@@ -227,7 +230,7 @@ describe("Shopify privacy outbox recovery", () => {
     const fake = scriptedDb({
       select: { [OUTBOX]: [[{ id: 78, kind: "customer_redact", jobId: 902, attempts: 0 }]] },
     });
-    const enqueue = vi.fn(async () => {});
+    const enqueue = vi.fn<(payload: { kind: string; jobId: number }, attempt: number) => Promise<void>>(async () => {});
 
     const result = await dispatchShopifyPrivacyOutbox({
       db: fake.db as never,
@@ -247,7 +250,7 @@ describe("Shopify privacy outbox recovery", () => {
     const fake = scriptedDb({
       select: { [OUTBOX]: [[{ id: 79, kind: "shop_redact", jobId: 903, attempts: 0 }]] },
     });
-    const enqueue = vi.fn(async () => {});
+    const enqueue = vi.fn<(payload: { kind: string; jobId: number }, attempt: number) => Promise<void>>(async () => {});
 
     const result = await dispatchShopifyPrivacyOutbox({
       db: fake.db as never,
@@ -299,7 +302,9 @@ describe("Shopify data-request execution", () => {
         [ARTIFACTS]: [[], [artifactRow(1)]],
       },
     });
-    const putObject = vi.fn(async (key: string, bytes: Buffer) => ({ key, url: "must-not-persist" }));
+    const putObject = vi.fn<(key: string, bytes: string | Uint8Array, contentType?: string) => Promise<{ key: string; url: string }>>(
+      async (key) => ({ key, url: "must-not-persist" }),
+    );
 
     await handleShopifyPrivacyJob(
       { kind: "customer_request", jobId: 901 },
@@ -315,7 +320,7 @@ describe("Shopify data-request execution", () => {
     expect(putObject).toHaveBeenCalledTimes(1);
     const [key, bytes] = putObject.mock.calls[0];
     expect(key).toMatch(/^org\/42\/privacy\/shopify\/901\/[0-9a-f-]+\.json$/);
-    const document = JSON.parse(bytes.toString("utf8"));
+    const document = JSON.parse(asText(bytes));
     expect(document).toEqual({
       schema: "reconcileai.shopify.customer_data_request",
       version: 1,
@@ -339,7 +344,7 @@ describe("Shopify data-request execution", () => {
       }],
     });
     for (const forbidden of ["organizationId", "storeId", "userId", "channelId", "batchId", "matchId", "rawData", "customerId", "selector", "token", "url"]) {
-      expect(bytes.toString("utf8")).not.toContain(forbidden);
+      expect(asText(bytes)).not.toContain(forbidden);
     }
     expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "awaiting_delivery", recordsFound: 1 });
     expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({ status: "awaiting_delivery" });
@@ -356,7 +361,9 @@ describe("Shopify data-request execution", () => {
         [SELECTORS]: [SELECTOR_ROWS], [TXNS]: [[]], [ARTIFACTS]: [[], [artifactRow(0)]],
       },
     });
-    const putObject = vi.fn(async (key: string, bytes: Buffer) => ({ key, url: "unused" }));
+    const putObject = vi.fn<(key: string, bytes: string | Uint8Array, contentType?: string) => Promise<{ key: string; url: string }>>(
+      async (key) => ({ key, url: "unused" }),
+    );
 
     await handleShopifyPrivacyJob(
       { kind: "customer_request", jobId: 901 },
@@ -369,7 +376,7 @@ describe("Shopify data-request execution", () => {
       },
     );
 
-    const document = JSON.parse(putObject.mock.calls[0][1].toString("utf8"));
+    const document = JSON.parse(asText(putObject.mock.calls[0][1]));
     expect(document).toMatchObject({
       version: 1,
       result: "zero_record_attestation",
@@ -378,7 +385,7 @@ describe("Shopify data-request execution", () => {
       selectorDisposition: "deleted_after_authenticated_delivery",
     });
     expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({ status: "awaiting_delivery" });
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "completed")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "completed")).toBe(false);
   });
 
   it("should block selected orders with downstream evidence and create no artifact", async () => {
@@ -436,7 +443,7 @@ describe("Shopify data-request execution", () => {
       status: "manual_review",
       failureCode: "merchant_admin_unavailable",
     });
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "completed")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "completed")).toBe(false);
   });
 
   it("should bound selector failures without leaking decrypted values or becoming completed", async () => {
@@ -553,7 +560,7 @@ describe("when a worker's lease was taken over by another worker", () => {
         workerDeps(fake, vi.fn(async () => { throw new Error("storage down"); })),
       ),
     ).resolves.toBeUndefined();
-    expect(fake.writes("update", REQUESTS).map((op) => op.data?.status)).toEqual([]);
+    expect(fake.writes("update", REQUESTS).map((op) => rowOf(op)?.status)).toEqual([]);
   });
 
   it("should not move the request to manual review when the job did not move", async () => {
@@ -571,7 +578,7 @@ describe("when a worker's lease was taken over by another worker", () => {
     await expect(
       handleShopifyPrivacyJob({ kind: "customer_request", jobId: 901 }, workerDeps(fake)),
     ).resolves.toBeUndefined();
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "awaiting_delivery")).toBe(false);
   });
 });
 
@@ -895,8 +902,8 @@ describe("when a shop redaction fences the tenant", () => {
     await run;
 
     expect(putObject).toHaveBeenCalledTimes(1);
-    expect(fake.writes("update", JOBS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
+    expect(fake.writes("update", JOBS).some((op) => rowOf(op)?.status === "awaiting_delivery")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "awaiting_delivery")).toBe(false);
     expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({ status: "blocked_dependency", failureCode: "shop_redaction_in_progress" });
     expect(deleteObject).toHaveBeenCalledWith("org/42/shopify-privacy/901.json");
     expect(fake.writes("update", ARTIFACTS).at(-1)?.data).toMatchObject({ status: "deleted" });
@@ -944,13 +951,13 @@ describe("when an export cannot be deleted immediately after the shop fence", ()
     }));
     await expect(run).resolves.toBeUndefined();
 
-    const park = fake.writes("update", JOBS).find((op) => op.data?.failureCode === "shop_redaction_in_progress");
+    const park = fake.writes("update", JOBS).find((op) => rowOf(op)?.failureCode === "shop_redaction_in_progress");
     const due = fake.writes("update", ARTIFACTS).find((op) => op.data && "expiresAt" in op.data);
     expect(due?.data).toEqual({ expiresAt: SHOPIFY_PRIVACY_ARTIFACT_DISCARDING });
     expect(due?.where?.params).toEqual(expect.arrayContaining([901, 42, 7, "writing", "ready", "pending"]));
     expect(due?.txId).toBe(park?.txId);
     // Not deleted yet, and not marked deleted: the sweep will find it due.
-    expect(fake.writes("update", ARTIFACTS).some((op) => op.data?.status === "deleted")).toBe(false);
+    expect(fake.writes("update", ARTIFACTS).some((op) => rowOf(op)?.status === "deleted")).toBe(false);
     error.mockRestore();
   });
 
@@ -1014,7 +1021,7 @@ describe("when an upload lands after its artifact was already cleaned up", () =>
     expect(revive?.where?.params).toContain(OBJECT_KEY);
     expect(mark?.data).toMatchObject({ status: "deleted", deletedAt: NOW });
     expect(mark?.where?.params).toContain("writing");
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "awaiting_delivery")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "awaiting_delivery")).toBe(false);
   });
 
   it("should leave the object due for the sweep when the delete fails", async () => {

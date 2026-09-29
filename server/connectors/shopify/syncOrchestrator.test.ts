@@ -17,7 +17,7 @@ import {
   runShopifyOrderSyncToNow,
   type ShopifyOrderSyncReport,
 } from "./syncOrchestrator";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 import type { NormalizedShopifyOrder } from "./orders";
 
 const STORES = "shopify_connector_stores";
@@ -294,7 +294,7 @@ describe("tenant-isolated sync orchestration", () => {
     // The precise code is recorded, with its time.
     const failure = fake.writes("insert", CURSORS)[0];
     expect(failure?.data).toMatchObject({ lastErrorCode: "sync_actor_unavailable", lastErrorAt: expect.any(Date) });
-    expect(failure?.data?.lastErrorAt).toBeInstanceOf(Date);
+    expect(rowOf(failure)?.lastErrorAt).toBeInstanceOf(Date);
     const actorLookups = fake.ops.filter((op) => op.kind === "select" && op.table === USERS);
     expect(actorLookups).toHaveLength(2);
     expect(actorLookups[0]?.where?.params).toEqual(expect.arrayContaining([9, 42, "admin", true]));
@@ -375,9 +375,9 @@ describe("tenant-isolated sync orchestration", () => {
     expect(fake.writes("delete", MATCHES)).toEqual([]);
     expect(fake.writes("update", MATCHES)[0]).toMatchObject({ data: { status: "rejected" } });
     expect(fake.writes("update", MATCHES)[0]?.where?.params).toEqual(expect.arrayContaining([42, 88]));
-    const reopenWrites = fake.writes("update", TRANSACTIONS).filter((op) => op.data?.status === "unmatched");
+    const reopenWrites = fake.writes("update", TRANSACTIONS).filter((op) => rowOf(op)?.status === "unmatched");
     expect(reopenWrites).toHaveLength(2);
-    expect(reopenWrites.every((op) => op.data?.matchId === null)).toBe(true);
+    expect(reopenWrites.every((op) => rowOf(op)?.matchId === null)).toBe(true);
     expect(reopenWrites.some((op) => op.where?.params.includes(777))).toBe(true);
     expect(reopenWrites.some((op) => op.where?.params.includes(501))).toBe(true);
   });
@@ -416,8 +416,8 @@ describe("tenant-isolated sync orchestration", () => {
     expect(report.updated).toBe(1);
     const transactionWrites = fake.writes("update", TRANSACTIONS);
     expect(transactionWrites[0]?.where?.sql).toMatch(/shopifyUpdatedAt.*is null|shopifyUpdatedAt.*</i);
-    expect(transactionWrites.some((op) => op.where?.params.includes(777) && op.data?.status === "unmatched")).toBe(true);
-    expect(transactionWrites.some((op) => op.where?.params.includes(501) && op.data?.status === "unmatched")).toBe(true);
+    expect(transactionWrites.some((op) => op.where?.params.includes(777) && rowOf(op)?.status === "unmatched")).toBe(true);
+    expect(transactionWrites.some((op) => op.where?.params.includes(501) && rowOf(op)?.status === "unmatched")).toBe(true);
   });
 
   it("clears a legacy manually-matched pair only when the counterpart still points back", async () => {
@@ -497,7 +497,7 @@ describe("when a corrected order reopens its reconciliation", () => {
       { db: fake.db as never, suppressionKeys: SUPPRESSION_KEYS, fetchOrders: vi.fn(async () => [order()]) },
     );
 
-    const reopened = fake.writes("update", TRANSACTIONS).filter((op) => op.data?.status === "unmatched");
+    const reopened = fake.writes("update", TRANSACTIONS).filter((op) => rowOf(op)?.status === "unmatched");
     expect(reopened.some((op) => op.where?.params.includes(777))).toBe(false);
     expect(reopened.some((op) => op.where?.params.includes(501))).toBe(true);
     // The still-matched check is scoped to the tenant and to active matches only.
@@ -520,7 +520,7 @@ describe("when a corrected order reopens its reconciliation", () => {
 
     const counterpart = fake
       .writes("update", TRANSACTIONS)
-      .find((op) => op.data?.status === "unmatched" && op.where?.params.includes(777));
+      .find((op) => rowOf(op)?.status === "unmatched" && op.where?.params.includes(777));
     expect(counterpart?.where?.params).toEqual(expect.arrayContaining([42, 777, "matched", "manually_matched", 501]));
     // An open exception record owns an `exception` status; this sync does not resolve it.
     expect(counterpart?.where?.params).not.toContain("exception");
@@ -543,7 +543,7 @@ describe("when a corrected order reopens its reconciliation", () => {
 
     const self = fake
       .writes("update", TRANSACTIONS)
-      .find((op) => op.data?.status === "unmatched" && op.where?.params.includes(501));
+      .find((op) => rowOf(op)?.status === "unmatched" && op.where?.params.includes(501));
     expect(self?.where?.params).toEqual(expect.arrayContaining([501, 42, "matched", "manually_matched"]));
     expect(self?.where?.params).not.toContain("exception");
   });
@@ -563,7 +563,7 @@ describe("when a corrected order was in a match still awaiting review", () => {
   }
 
   const releasedFromReview = (fake: ReturnType<typeof scriptedDb>) =>
-    fake.writes("update", TRANSACTIONS).filter((op) => op.data?.status === "unmatched" && op.where?.params.includes("exception"));
+    fake.writes("update", TRANSACTIONS).filter((op) => rowOf(op)?.status === "unmatched" && op.where?.params.includes("exception"));
   /** Only the corrected order's own row was released; no counterpart write at all. */
   const onlyOwnReleased = (fake: ReturnType<typeof scriptedDb>) => {
     const released = releasedFromReview(fake);
@@ -717,7 +717,7 @@ describe("terminal webhook sync failure evidence", () => {
       status: "failed",
       errorCode: "order_sync_attempts_exhausted",
     });
-    expect(write?.data?.status).not.toBe("processed");
+    expect(rowOf(write)?.status).not.toBe("processed");
     expect(write?.where?.params).toEqual(expect.arrayContaining(["wh-exhausted", 7, 42, "received"]));
   });
 });

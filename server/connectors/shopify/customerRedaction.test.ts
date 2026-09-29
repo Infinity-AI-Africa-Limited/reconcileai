@@ -3,7 +3,7 @@ import type { SQL } from "drizzle-orm";
 import { MySqlDialect } from "drizzle-orm/mysql-core";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 import { computeShopifyOrderSuppressionDigest } from "./privacySuppression";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const JOBS = "shopify_privacy_customer_redaction_jobs";
 const REQUESTS = "shopify_privacy_requests";
@@ -199,7 +199,7 @@ describe("Shopify Scope A customer-redaction execution", () => {
       status: "manual_review",
       failureCode: "suppression_key_unavailable",
     });
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "completed")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "completed")).toBe(false);
   });
 
   it("keeps a tombstone-write outage retryable and rolls back selector destruction", async () => {
@@ -251,7 +251,7 @@ describe("Shopify Scope A customer-redaction execution", () => {
 
     expect(fake.writes("insert", TOMBSTONES)).toEqual([]);
     expect(fake.writes("delete", SELECTORS)).toEqual([]);
-    expect(fake.writes("update", REQUESTS).some((op) => op.data?.status === "completed")).toBe(false);
+    expect(fake.writes("update", REQUESTS).some((op) => rowOf(op)?.status === "completed")).toBe(false);
   });
 
   it("uses only the internal job handle in a customer-redaction queue payload", async () => {
@@ -334,7 +334,7 @@ describe("when another customer redaction holds the store fence", () => {
       lastCheckpoint: "waiting_for_store_fence",
     });
     // The claim's increment is undone: queueing is not a failure.
-    const attempts = new MySqlDialect().sqlToQuery(deferred?.data?.attempts as SQL).sql;
+    const attempts = new MySqlDialect().sqlToQuery(rowOf(deferred)?.attempts as SQL).sql;
     expect(attempts).toMatch(/GREATEST\(`shopify_privacy_customer_redaction_jobs`\.`attempts` - 1, 0\)/);
     expect(fake.writes("insert", OUTBOX).at(-1)?.data).toMatchObject({ kind: "customer_redact", jobId: 901, failureCode: "store_fence_busy" });
     expect(fake.writes("insert", TOMBSTONES)).toEqual([]);
