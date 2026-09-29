@@ -3,8 +3,10 @@
  * procedure accepts, and the operator audit it writes. Kept here so the router
  * module stays wiring (CLAUDE.md §16).
  */
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { logPlatformEvent } from "../../db";
+import { isTransactionTooLargeError } from "../../dbErrors";
 
 const SETTLEMENT_FIELD = z.enum(["orderRef", "gatewayRef", "amount", "currency", "settledAt", "fee", "description"]);
 
@@ -85,4 +87,22 @@ export async function auditCrossTenantSettlementImport(
       { error: auditError instanceof Error ? auditError.name : typeof auditError },
     );
   }
+}
+
+/**
+ * What a failed import tells the merchant, and what it throws. The commit is
+ * one transaction, so any failure wrote nothing — the message says so, in
+ * words a merchant can read, never a database error's query and parameters.
+ *
+ * A file too large for one transaction gets its own answer: "try again" would
+ * fail the same way every time, so it says to split the file instead.
+ */
+export function settlementImportFailure(error: unknown): { error: unknown; batchMessage: string } {
+  if (error instanceof TRPCError) return { error, batchMessage: error.message.slice(0, 2000) };
+  if (isTransactionTooLargeError(error)) {
+    const message =
+      "This file is too large to import in one go. Nothing was written — split it by date range and import each part.";
+    return { error: new TRPCError({ code: "PAYLOAD_TOO_LARGE", message }), batchMessage: message };
+  }
+  return { error, batchMessage: "The import failed and nothing was written. Try again." };
 }

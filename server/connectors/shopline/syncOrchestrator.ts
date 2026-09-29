@@ -20,7 +20,7 @@
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { getDb, sanitizeRef, type DbExecutor } from "../../db";
 import {
-  insertTransactions,
+  insertTransactionsWithExecutor,
   createUploadBatch,
   updateUploadBatch,
   insertExceptionsBatchWithExecutor,
@@ -160,6 +160,42 @@ export async function bestEffortLeg<T>(
 const DEDUPE_LOOKUP_CHUNK = 500;
 
 /**
+ * One writer at a time for a store's ledger — every path that dedupes and then
+ * inserts its rows: API sync cycles and settlement-file imports alike.
+ *
+ * Without it, two writers can both pass their "already recorded?" check before
+ * either inserts, and the same payment is recorded twice: two sync cycles that
+ * overlap (a webhook-triggered run beside a scheduled one, or one per Railway
+ * instance), or a sync beside a file import for the same orders. A row lock in
+ * the SHARED database serialises every process and every instance; it needs no
+ * Redis. Take it as the transaction's FIRST statement, then read existing rows
+ * with a locking read — TiDB answers a plain read from the snapshot taken when
+ * the transaction began, which can predate the other writer's commit. Every
+ * writer takes this lock first, so there is one lock order and no deadlock.
+ *
+ * Returns false when the store is not (or no longer) active.
+ */
+export async function lockShoplineStoreForIngest(
+  tx: DbExecutor,
+  organizationId: number,
+  storeId: number,
+): Promise<boolean> {
+  const [locked] = await tx
+    .select({ id: slConnectorStores.id })
+    .from(slConnectorStores)
+    .where(
+      and(
+        eq(slConnectorStores.id, storeId),
+        eq(slConnectorStores.organizationId, organizationId),
+        eq(slConnectorStores.status, "active"),
+      ),
+    )
+    .limit(1)
+    .for("update");
+  return Boolean(locked);
+}
+
+/**
  * Drop candidate rows whose (channelId, transactionRef) is already in the
  * `transactions` table. This is what makes SHOPLINE ingest idempotent.
  *
@@ -185,10 +221,12 @@ const DEDUPE_LOOKUP_CHUNK = 500;
  * SHOPLINE's semantics on every other channel. Dedupe is therefore scoped to
  * this connector.
  *
- * Residual risk: two cycles running truly concurrently can both pass this check
- * before either inserts. The observed collisions were 15-25s apart and are
- * fully covered. Closing the last gap needs cluster-wide serialisation of sync
- * cycles — the BullMQ/REDIS_URL item in CLAUDE.md §10.
+ * Concurrency: two writers running at the same moment could both pass this
+ * check before either inserted. The sync cycle now runs it as a LOCKING read
+ * (`lock: true`) inside a transaction that first takes the store's row lock
+ * (lockShoplineStoreForIngest), the same lock the settlement-file import takes,
+ * so the check and the insert are one step per store across every instance.
+ * That gap needed no Redis: the lock lives in the shared database.
  *
  * References are compared in the form `insertTransactions` STORES them
  * (`sanitizeRef`). A reference holding a character it strips — `#1001` is
@@ -200,6 +238,7 @@ export async function rejectAlreadyIngested(
   db: DbExecutor,
   rows: InsertTransaction[],
   channelIds: number[],
+  options: { lock?: boolean } = {},
 ): Promise<InsertTransaction[]> {
   const storedRef = (row: InsertTransaction) => sanitizeRef(row.transactionRef);
   const refs = Array.from(
@@ -211,7 +250,7 @@ export async function rejectAlreadyIngested(
   const existing = new Set<string>();
   for (let i = 0; i < refs.length; i += DEDUPE_LOOKUP_CHUNK) {
     const chunk = refs.slice(i, i + DEDUPE_LOOKUP_CHUNK);
-    const found = await db
+    const lookup = db
       .select({ channelId: transactions.channelId, transactionRef: transactions.transactionRef })
       .from(transactions)
       .where(
@@ -220,6 +259,7 @@ export async function rejectAlreadyIngested(
           inArray(transactions.transactionRef, chunk),
         ),
       );
+    const found = options.lock ? await lookup.for("update") : await lookup;
     for (const f of found) existing.add(`${f.channelId}::${f.transactionRef}`);
   }
   // No early return when `existing` is empty: the filter below ALSO collapses
@@ -420,18 +460,23 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     const payoutRows = payouts.data.map((p) => normalisePayout(p, ctx));
 
     const candidateRows = [...orderRows, ...paymentRows, ...payoutRows];
-    const allRows = await rejectAlreadyIngested(db, candidateRows, [
-      ordersChannelId,
-      paymentsChannelId,
-    ]);
+    // The check and the insert as ONE step per store, serialised with every
+    // other writer of this store's ledger (lockShoplineStoreForIngest).
+    const allRows = await db.transaction(async (tx) => {
+      if (!(await lockShoplineStoreForIngest(tx, opts.organizationId, opts.slStoreId))) {
+        throw new Error("SHOPLINE store is no longer active");
+      }
+      const fresh = await rejectAlreadyIngested(tx, candidateRows, [ordersChannelId, paymentsChannelId], {
+        lock: true,
+      });
+      await insertTransactionsWithExecutor(tx, fresh);
+      return fresh;
+    });
     const skipped = candidateRows.length - allRows.length;
     if (skipped > 0) {
       console.info(
         `[SHOPLINE] store=${storeHandle} skipped ${skipped} already-ingested row(s) of ${candidateRows.length}`,
       );
-    }
-    if (allRows.length > 0) {
-      await insertTransactions(allRows);
     }
 
     // Close the batch out. Without this it sat at "processing" forever, so the

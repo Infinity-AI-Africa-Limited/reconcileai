@@ -20,8 +20,11 @@ export type ShoplineSettlementMapping = SettlementMappingOf<ShoplineSettlementFi
 
 /**
  * The fields a merchant maps, in display order. `description` is offered, unlike
- * in the Shopify workspace, because the SHOPLINE import stores it — and offering
- * it is also how a merchant takes away a free-text column that detection mapped.
+ * in the Shopify workspace: its text is never stored, but the refund/reversal
+ * words in it are (settlementImportDescription). They label a row for the
+ * engine; they never change its direction, which is the amount's sign. A row
+ * whose words and sign disagree is counted in the preview instead
+ * (positiveRowsReadingAsReversals).
  */
 export const SHOPLINE_SETTLEMENT_FIELDS: ReadonlyArray<{ field: ShoplineSettlementField; required: boolean }> = [
   { field: "orderRef", required: true },
@@ -41,7 +44,7 @@ export const SHOPLINE_SETTLEMENT_FIELD_LABELS: Record<ShoplineSettlementField, s
   settledAt: "Settlement date",
   currency: "Currency",
   fee: "Fee",
-  description: "Description",
+  description: "Description (only refund / reversal words are kept)",
 };
 
 export const shoplineSettlementMapping = settlementMappingRules(SHOPLINE_SETTLEMENT_FIELDS);
@@ -102,7 +105,28 @@ export type ShoplineSettlementPreview = {
   missingRequired: string[];
   totalRows: number;
   parseErrors: string[];
+  /** Rows described as a refund or reversal whose amount is positive — booked as money in. */
+  positiveRowsReadingAsReversals: number;
 };
+
+/**
+ * What the preview says about rows whose words and sign disagree; null when
+ * there are none. The import books them by their sign, so the merchant is told
+ * before importing rather than finding a refund counted as a payment after.
+ */
+export function positiveReversalRowsNote(count: number): string | null {
+  if (count <= 0) return null;
+  if (count === 1) {
+    return (
+      "1 row is described as a refund or reversal but has a positive amount, so it will be imported as money " +
+      "received. If it is a refund, make its amount negative in the file and check columns again."
+    );
+  }
+  return (
+    `${count} rows are described as a refund or reversal but have a positive amount, so they will be imported ` +
+    "as money received. If they are refunds, make their amounts negative in the file and check columns again."
+  );
+}
 
 export type ShoplineSettlementCommitted = ShoplineSettlementPreview & {
   imported: number;

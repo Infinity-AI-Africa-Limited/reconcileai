@@ -4,6 +4,7 @@ import { usePortalContext } from "@/contexts/PortalContext";
 import {
   canImportShoplineSettlement,
   initialShoplineImportState,
+  positiveReversalRowsNote,
   shoplineImportReducer,
   shoplineMappingEdited,
   shoplineSettlementFileError,
@@ -107,6 +108,9 @@ export function useShoplineSettlementImport(onImported?: (result: ShoplineSettle
     error: state.error,
     columnMapping: state.columnMapping,
     mappingEdited,
+    // Said before the import, not after: once imported, these rows are booked by their sign.
+    positiveReversalNote:
+      state.preview && !state.result ? positiveReversalRowsNote(state.preview.positiveRowsReadingAsReversals) : null,
     canCheck: state.busy === null && shoplineSettlementFileError(state.file) === null,
     canImport,
     chooseFile: (file: File | null) => dispatch({ type: "chooseFile", file }),

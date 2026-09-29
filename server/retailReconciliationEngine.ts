@@ -503,8 +503,12 @@ export function runRetailReconciliation(
   targetTxns: Transaction[],
   config: RetailReconciliationConfig,
 ): RetailReconciliationResult {
-  // Step 1: Run the core 3-pass matching engine
-  const coreResult = runMatchingEngine(sourceTxns, targetTxns, config);
+  // Step 1: Run the core 3-pass matching engine. Every retail leg records money
+  // from the merchant's side (in = credit, out = debit), so a match must agree
+  // on direction — forced here, not left to callers: without it a refund of the
+  // same amount settled an unpaid order, by reference or by amount and date
+  // alone. It cannot be switched off from a caller's config.
+  const coreResult = runMatchingEngine(sourceTxns, targetTxns, { ...config, requireSameDirection: true });
 
   // Pre-index each side ONCE for O(1) same-side duplicate detection, and build
   // id→txn maps so lookups are O(1) instead of Array.find per unmatched id.

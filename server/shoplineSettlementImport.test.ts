@@ -271,3 +271,22 @@ describe("when the merchant confirms a column mapping", () => {
     expect(mapping).toMatchObject({ orderRef: "Order Number", amount: "Amount", fee: "Fee" });
   });
 });
+
+describe("when a settlement file has a free-text description column", () => {
+  it("should store the source and any refund signal, never the text itself", () => {
+    const { rows } = mapSettlementRows(
+      [
+        { "Order ID": "1001", Net: "10.00", Memo: "Paid by Jane Doe, 1 Private Street" },
+        { "Order ID": "1002", Net: "5.00", Memo: "Refund issued to John Roe" },
+      ],
+      { orderRef: "Order ID", amount: "Net", description: "Memo" },
+      ctx,
+    );
+
+    expect(rows.map((row) => row.description)).toEqual([
+      "Settlement import (Stripe payouts)",
+      "Settlement import (Stripe payouts) — refund",
+    ]);
+    expect(JSON.stringify(rows)).not.toMatch(/Jane Doe|Private Street|John Roe/);
+  });
+});

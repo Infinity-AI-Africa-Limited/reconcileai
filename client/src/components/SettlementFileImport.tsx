@@ -134,6 +134,13 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
               </div>
             )}
 
+            {settlement.positiveReversalNote ? (
+              <div className="flex items-start gap-2 text-sm text-amber-700">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <p>{settlement.positiveReversalNote}</p>
+              </div>
+            ) : null}
+
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Column mapping</p>
               <p className="mt-1 text-xs text-muted-foreground">

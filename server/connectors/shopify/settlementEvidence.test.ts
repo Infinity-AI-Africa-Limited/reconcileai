@@ -623,3 +623,14 @@ describe("when a richer export follows one imported without transaction ids", ()
     expect(insertedRows(fake)).toHaveLength(1);
   });
 });
+
+describe("when a merchant's description marks a row as a refund", () => {
+  it("should keep the refund signal while dropping the free text", () => {
+    const [row] = minimizeShopifySettlementEvidenceRows(
+      [{ description: "Refund to Jane Doe, 1 Private Street", rawData: { gatewayEventType: "payment" } } as never],
+      "Courier COD",
+    );
+    expect(row?.description).toBe("Settlement import (Courier COD) — refund");
+    expect(JSON.stringify(row)).not.toMatch(/Jane Doe|Private Street/);
+  });
+});

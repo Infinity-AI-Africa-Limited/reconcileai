@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isDuplicateKeyError } from "./dbErrors";
+import { isDuplicateKeyError, isTransactionTooLargeError } from "./dbErrors";
 
 /** A driver error shaped like mysql2's. */
 function driverError(code: string, errno: number, message: string): Error {
@@ -59,5 +59,16 @@ describe("isDuplicateKeyError", () => {
       a.cause = b;
       expect(isDuplicateKeyError(a)).toBe(false);
     });
+  });
+});
+
+describe("when TiDB refuses a transaction as too large", () => {
+  it("should be recognised through drizzle's wrapper, and nothing else mistaken for it", () => {
+    const tooLarge = Object.assign(new Error("Failed query: …"), {
+      cause: Object.assign(new Error("Transaction is too large"), { errno: 8004 }),
+    });
+    expect(isTransactionTooLargeError(tooLarge)).toBe(true);
+    expect(isTransactionTooLargeError(Object.assign(new Error("dup"), { errno: 1062 }))).toBe(false);
+    expect(isTransactionTooLargeError("8004")).toBe(false);
   });
 });

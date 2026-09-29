@@ -269,7 +269,34 @@ unmapped). The commit (`settlementFileCommit.ts`) is ONE transaction per import
   counted and reported (`unverifiableDuplicates`);
 - an order the SHOPLINE Payments API has already settled keeps the order-level
   protection;
-- it reconciles only the orders the file speaks to.
+- it reconciles only the orders the file speaks to;
+- it never stores a file's free-text description, which can hold a customer's
+  name or address. It stores `Settlement import (<source>)` plus any
+  refund/reversal words from OUR vocabulary (`settlementImportDescription`,
+  `server/reversalSignals.ts`, the list the matching engine reads), so the
+  engine reads the row exactly as it read the original text. The Shopify
+  import uses the same rule;
+- **a row's direction is its amount's sign, never its words.** "Chargeback
+  reversal" and "Refund reversed" are word-marked rows where money comes back
+  in, so re-signing on a word would book real credits as refunds. A row whose
+  words say refund but whose amount is positive is therefore booked as money
+  received. It is not guessed at: the preview counts such rows
+  (`positiveRowsReadingAsReversals`) and tells the merchant before anything is
+  written.
+
+**Retail matching agrees on direction (since 2026-09-29).** Every retail leg
+records money from the merchant's side (in = credit, out = debit), and
+`runRetailReconciliation` forces `requireSameDirection`, so a credit only matches
+a credit. Until then the core engine, which ignores direction, let a refund of
+the same amount settle an unpaid order — by reference, or by amount and date
+alone, even a different order's refund. The flag is opt-in and off for every
+other vertical. Production held no such pair when measured (2026-09-29).
+
+**One writer per store's ledger (since 2026-09-29).** The API sync cycle and the
+file import both take `lockShoplineStoreForIngest` (a row lock in the shared
+database) before their "already recorded?" check, and read under it. Two writers
+can no longer both pass the check and record one payment twice. No Redis is
+needed for this: the lock serialises every process and instance.
 
 > ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
 > file's raw reference with the sanitised stored one (`#1001` is stored as
