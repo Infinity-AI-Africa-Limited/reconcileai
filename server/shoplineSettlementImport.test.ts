@@ -17,6 +17,7 @@ import {
   mapSettlementRows,
   normalizeHeader,
   REQUIRED_FIELDS,
+  resolveImportColumns,
   type ColumnMap,
 } from "./connectors/shopline/settlementFileImport";
 
@@ -229,5 +230,44 @@ describe("parseSettlementFile", () => {
     const { rows } = mapSettlementRows(parsed.rows, mapping, ctx);
     expect(rows[0].transactionRef).toBe("21076388995485181306699745");
     expect(rows[0].amount).toBe("1000001");
+  });
+});
+
+describe("when an order reference is made only of characters storage strips", () => {
+  it("should refuse the row at its own row number, not store it with no reference", () => {
+    const { rows, failures } = mapSettlementRows(
+      [
+        { "Order ID": "1001", Net: "10.00" },
+        { "Order ID": "###", Net: "5.00" },
+      ],
+      { orderRef: "Order ID", amount: "Net" },
+      ctx,
+    );
+    expect(rows.map((row) => row.transactionRef)).toEqual(["1001"]);
+    expect(failures).toEqual([{ rowIndex: 3, reason: "order reference has no usable characters" }]);
+  });
+});
+
+describe("when the merchant confirms a column mapping", () => {
+  const headers = ["Order Number", "Amount", "Fee", "Date"];
+
+  it("should take the confirmed mapping as the whole answer, so a detected column can be unmapped", () => {
+    // Detection would read "Fee" as the fee; the merchant said this file has none.
+    expect(detectColumns(headers).mapping.fee).toBe("Fee");
+    const { mapping } = resolveImportColumns(headers, { columnMapping: { orderRef: "Order Number", amount: "Amount" } });
+    expect(mapping).toEqual({ orderRef: "Order Number", amount: "Amount" });
+  });
+
+  it("should drop a confirmed header that is not in this file", () => {
+    const { mapping, missingRequired } = resolveImportColumns(headers, {
+      columnMapping: { orderRef: "Reference", amount: "Amount" },
+    });
+    expect(mapping).toEqual({ amount: "Amount" });
+    expect(missingRequired).toEqual(["orderRef"]);
+  });
+
+  it("should still detect, with legacy overrides as hints, when nothing was confirmed", () => {
+    const { mapping } = resolveImportColumns(headers, { columnOverrides: { amount: "Amount" } });
+    expect(mapping).toMatchObject({ orderRef: "Order Number", amount: "Amount", fee: "Fee" });
   });
 });

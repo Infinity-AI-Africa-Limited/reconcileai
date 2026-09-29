@@ -21,6 +21,7 @@
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
     "client/src/lib/shopifySettlementMapping.test.ts",
+    "client/src/lib/shoplineSettlementImport.test.ts",
     "server/appOrigin.test.ts",
     "server/connectors/shopify/appHomeRoutes.test.ts",
     "server/connectors/shopify/channelCodes.test.ts",
@@ -35,6 +36,7 @@
     "server/connectors/shopify/syncCursor.db.test.ts",
     "server/connectors/shopify/webhookBody.test.ts",
     "server/connectors/shopline/settlementEvents.test.ts",
+    "server/connectors/shopline/settlementFileCommit.test.ts",
     "server/connectors/shopline/settlementFileDedupe.test.ts",
     "server/dbErrors.test.ts",
     "server/deactivatedAccess.test.ts",
@@ -45,6 +47,8 @@
     "server/sanitizeRef.test.ts",
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
+    "server/shoplineSettlementImport.test.ts",
+    "server/shoplineUninstallTenancy.test.ts",
     "server/ssoFlowCookie.test.ts"
   ]
 }

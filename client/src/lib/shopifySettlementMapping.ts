@@ -1,6 +1,7 @@
 import type { ShopifySettlementField } from "./shopifyAppBridge";
+import { settlementMappingRules, type SettlementMappingOf } from "./settlementMapping";
 
-export type SettlementMapping = Partial<Record<ShopifySettlementField, string>>;
+export type SettlementMapping = SettlementMappingOf<ShopifySettlementField>;
 
 /**
  * The fields a merchant maps in the Shopify workspace, in display order.
@@ -18,49 +19,16 @@ export const SETTLEMENT_MAPPING_FIELDS: ReadonlyArray<{ field: ShopifySettlement
   { field: "fee", required: false },
 ];
 
-const OFFERED = new Set(SETTLEMENT_MAPPING_FIELDS.map(({ field }) => field));
+// The shared rules (settlementMapping.ts), bound to the Shopify fields.
+const rules = settlementMappingRules(SETTLEMENT_MAPPING_FIELDS);
 
 /** The offered fields that have a column — what is submitted as the confirmed mapping. */
-export function confirmedSettlementMapping(mapping: SettlementMapping): SettlementMapping {
-  const confirmed: SettlementMapping = {};
-  for (const { field } of SETTLEMENT_MAPPING_FIELDS) {
-    const header = mapping[field];
-    if (header) confirmed[field] = header;
-  }
-  return confirmed;
-}
+export const confirmedSettlementMapping = rules.confirmed;
 
-/**
- * Put a column on a field, or take the field's column away (`null`).
- *
- * A column feeds one field: assigning it moves it off any field that had it, so
- * the order reference and the amount can never silently read the same column.
- */
-export function assignSettlementColumn(
-  mapping: SettlementMapping,
-  field: ShopifySettlementField,
-  header: string | null,
-): SettlementMapping {
-  if (!OFFERED.has(field)) return confirmedSettlementMapping(mapping);
-  const next: SettlementMapping = {};
-  for (const { field: other } of SETTLEMENT_MAPPING_FIELDS) {
-    const current = mapping[other];
-    if (other !== field && current && current !== header) next[other] = current;
-  }
-  if (header) next[field] = header;
-  return confirmedSettlementMapping(next);
-}
+/** Put a column on a field, or take the field's column away (`null`). */
+export const assignSettlementColumn = rules.assign;
 
-export function missingRequiredSettlementFields(mapping: SettlementMapping): ShopifySettlementField[] {
-  return SETTLEMENT_MAPPING_FIELDS.filter(({ field, required }) => required && !mapping[field]).map(
-    ({ field }) => field,
-  );
-}
+export const missingRequiredSettlementFields = rules.missingRequired;
 
-/**
- * Whether two mappings agree on every offered field. The workspace imports only
- * the mapping the last check confirmed; an edit since then must be checked again.
- */
-export function sameSettlementMapping(a: SettlementMapping, b: SettlementMapping): boolean {
-  return SETTLEMENT_MAPPING_FIELDS.every(({ field }) => (a[field] ?? null) === (b[field] ?? null));
-}
+/** Whether two mappings agree on every offered field. */
+export const sameSettlementMapping = rules.same;
