@@ -251,10 +251,24 @@ Tier 1 as SHOPLINE-Payments-only.
 > a failure that looks like a working feature. `mapSettlementRows` puts the order
 > ref in `transactionRef` and the gateway id in `externalRef`; tests pin this.
 
-Import is `dryRun`-first so the merchant confirms the detected column mapping
-before anything is written, auto-detects across gateway/COD header vocabularies,
-accepts explicit overrides for unknown providers, and dedupes via
-`rejectAlreadyIngested` so re-uploading or overlapping exports never double-count.
+Import is `dryRun`-first so the merchant confirms — and can correct — the
+detected column mapping before anything is written. It auto-detects across
+gateway/COD header vocabularies; the editor sends the mapping the merchant
+checked as `columnMapping`, which is authoritative (a field it omits stays
+unmapped). The commit (`settlementFileCommit.ts`) is ONE transaction per import
+(since 2026-09-29):
+
+- it locks the store row first and reads existing rows with a locking read,
+  refs compared in their stored (sanitised) form;
+- it dedupes by settlement EVENT (`settlementEventKey`, a multiset), not by
+  order, so a refund or a second settlement for an order is kept while a
+  re-upload adds nothing;
+- an order the SHOPLINE API sync has already settled keeps the old order-level
+  protection;
+- it reconciles only the orders the file speaks to.
+
+The earlier `rejectAlreadyIngested` order-level dedupe dropped refunds as
+"duplicates" and re-inserted `#`-prefixed refs; do not reintroduce it here.
 
 **Verified end-to-end against production (2026-08-02):** a DHL COD remittance
 file matched the real dev-store order `21076388995485181306699745`

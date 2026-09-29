@@ -20,16 +20,19 @@
   "files": [
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifySettlementMapping.test.ts",
+    "client/src/lib/shoplineSettlementImport.test.ts",
     "server/appOrigin.test.ts",
     "server/connectors/shopify/appHomeRoutes.test.ts",
     "server/connectors/shopify/embeddedAuth.test.ts",
     "server/connectors/shopify/settlementEvidence.test.ts",
     "server/connectors/shopline/settlementEvents.test.ts",
+    "server/connectors/shopline/settlementFileCommit.test.ts",
     "server/jobQueue.replaceFailed.test.ts",
     "server/reviewerLinkOrigin.test.ts",
     "server/routers/shopifyAppHome.test.ts",
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
+    "server/shoplineSettlementImport.test.ts",
     "server/ssoFlowCookie.test.ts"
   ]
 }

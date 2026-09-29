@@ -5,105 +5,46 @@
  * have an order book with no payment leg. This lets them drop in the gateway's
  * or courier's own CSV/XLSX export to complete the reconciliation.
  *
- * Two-step by design: the file is first sent with `dryRun` so the merchant can
- * SEE which column was read as the order reference before anything is written.
- * Auto-detection is good, not infallible, and silently importing against the
- * wrong column would produce a file that imports cleanly and matches nothing.
+ * Check, correct, import. The file is first sent as a dry run so the merchant
+ * SEES which column was read as each value, and can correct it: map a header
+ * detection did not recognise, or take away a column it read wrongly. Only the
+ * mapping the last check confirmed is imported. Auto-detection is good, not
+ * infallible, and importing against the wrong column produces a file that
+ * imports cleanly and matches nothing.
+ *
+ * This component renders; useShoplineSettlementImport decides.
  */
-import { useState, useRef } from "react";
-import { trpc } from "@/lib/trpc";
-import { usePortalContext } from "@/contexts/PortalContext";
+import { useRef } from "react";
+import { useShoplineSettlementImport } from "@/hooks/useShoplineSettlementImport";
+import {
+  SHOPLINE_SETTLEMENT_FIELDS,
+  SHOPLINE_SETTLEMENT_FIELD_LABELS,
+  type ShoplineSettlementField,
+} from "@/lib/shoplineSettlementImport";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Upload, FileSpreadsheet, CheckCircle2, AlertTriangle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
-const SPREADSHEET_RE = /\.(xlsx|xlsm|xls)$/i;
-const MAX_BYTES = 10 * 1024 * 1024;
-
-/** Field → what to call it for a non-technical merchant. */
-const FIELD_LABELS: Record<string, string> = {
-  orderRef: "Order reference (match key)",
-  gatewayRef: "Gateway transaction ID",
-  amount: "Settled amount",
-  currency: "Currency",
-  settledAt: "Settlement date",
-  fee: "Fee",
-  description: "Description",
-};
-
-type Preview = {
-  committed: boolean;
-  headers: string[];
-  mapping: Record<string, string>;
-  missingRequired: string[];
-  totalRows: number;
-  parseErrors: string[];
-  sampleRows?: Record<string, string>[];
-};
-
-async function readFile(file: File): Promise<{ content: string; encoding: "utf8" | "base64" }> {
-  if (SPREADSHEET_RE.test(file.name)) {
-    const buf = await file.arrayBuffer();
-    let binary = "";
-    const bytes = new Uint8Array(buf);
-    const CHUNK = 0x8000; // chunked: spreading a whole file blows the arg limit
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
-    }
-    return { content: btoa(binary), encoding: "base64" };
-  }
-  return { content: await file.text(), encoding: "utf8" };
-}
+/** Radix Select forbids an empty item value, so "no column" needs a sentinel. */
+const NOT_IN_FILE = "__reconcileai_not_in_file__";
 
 export function SettlementFileImport({ onImported }: { onImported?: () => void }) {
-  const { viewAsOrg } = usePortalContext();
-  const [file, setFile] = useState<File | null>(null);
-  const [sourceLabel, setSourceLabel] = useState("");
-  const [preview, setPreview] = useState<Preview | null>(null);
-  const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const importFile = trpc.shoplineConnector.importSettlementFile.useMutation();
-
-  const run = async (dryRun: boolean) => {
-    if (!file) return;
-    if (file.size > MAX_BYTES) {
-      toast.error(`File is ${(file.size / 1024 / 1024).toFixed(1)}MB — the limit is 10MB. Split it by date range.`);
-      return;
-    }
-    setBusy(true);
-    try {
-      const { content, encoding } = await readFile(file);
-      const res = await importFile.mutateAsync({
-        fileName: file.name,
-        organizationId: viewAsOrg?.id,
-        content,
-        contentEncoding: encoding,
-        sourceLabel: sourceLabel.trim() || file.name,
-        dryRun,
-      });
-      setPreview(res as Preview);
-      if (!dryRun && res.committed) {
-        const r = res as { imported: number; duplicates: number; failed: number; matchedCount: number };
-        toast.success(
-          `Imported ${r.imported} settlement rows — ${r.matchedCount} matched to orders` +
-            (r.duplicates ? `, ${r.duplicates} already present` : "") +
-            (r.failed ? `, ${r.failed} rejected` : ""),
-        );
-        onImported?.();
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Import failed");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const mapped = preview ? Object.entries(preview.mapping) : [];
-  const canCommit = preview && !preview.committed && preview.missingRequired.length === 0;
+  const settlement = useShoplineSettlementImport((result) => {
+    toast.success(
+      `Imported ${result.imported} settlement rows — ${result.matchedCount} matched to orders` +
+        (result.duplicates ? `, ${result.duplicates} already present` : "") +
+        (result.failed ? `, ${result.failed} rejected` : ""),
+    );
+    onImported?.();
+  });
+  const { preview, result } = settlement;
+  const labelOf = (field: string) => SHOPLINE_SETTLEMENT_FIELD_LABELS[field as ShoplineSettlementField] ?? field;
 
   return (
     <Card>
@@ -116,8 +57,8 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
           Upload the payout or settlement export from your payment provider, bank or courier —
-          CSV or Excel. Columns are detected automatically; you confirm the mapping before anything
-          is imported.
+          CSV or Excel. Columns are detected automatically; you confirm or correct the mapping
+          before anything is imported.
         </p>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -127,7 +68,7 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
               ref={inputRef}
               type="file"
               accept=".csv,.txt,.xlsx,.xlsm,.xls"
-              onChange={(e) => { setFile(e.target.files?.[0] ?? null); setPreview(null); }}
+              onChange={(e) => settlement.chooseFile(e.target.files?.[0] ?? null)}
             />
           </div>
           <div>
@@ -135,63 +76,106 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
               Source (e.g. Stripe, Paystack, DHL COD)
             </label>
             <Input
-              value={sourceLabel}
-              onChange={(e) => setSourceLabel(e.target.value)}
+              value={settlement.sourceLabel}
+              onChange={(e) => settlement.setSourceLabel(e.target.value)}
               placeholder="Payment provider name"
             />
           </div>
         </div>
 
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" disabled={!file || busy} onClick={() => run(true)}>
-            {busy && !preview ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
-            Check columns
+          <Button variant="outline" size="sm" disabled={!settlement.canCheck} onClick={settlement.checkColumns}>
+            {settlement.busy === "checking" ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
+            {preview ? "Check columns again" : "Check columns"}
           </Button>
-          <Button size="sm" disabled={!canCommit || busy} onClick={() => run(false)}>
-            {busy && preview ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+          <Button size="sm" disabled={!settlement.canImport} onClick={settlement.importFile}>
+            {settlement.busy === "importing" ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
             Import {preview ? `${preview.totalRows} rows` : ""}
           </Button>
         </div>
 
-        {preview && (
+        {settlement.error ? <p className="text-sm text-destructive">{settlement.error}</p> : null}
+
+        {preview ? (
           <div className="rounded-md border p-3 space-y-3">
-            {preview.missingRequired.length > 0 ? (
+            {result ? (
+              <div className="flex items-start gap-2 text-sm">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                <p>
+                  Imported {result.imported} rows — {result.matchedCount} matched to orders
+                  {result.duplicates > 0 ? `, ${result.duplicates} already recorded` : ""}
+                  {result.failed > 0 ? `, ${result.failed} rejected` : ""}.
+                </p>
+              </div>
+            ) : preview.missingRequired.length > 0 ? (
               <div className="flex items-start gap-2 text-sm">
                 <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-medium">Could not identify {preview.missingRequired.map((f) => FIELD_LABELS[f] ?? f).join(" and ")}.</p>
+                  <p className="font-medium">Choose a column for {preview.missingRequired.map(labelOf).join(" and ")}.</p>
                   <p className="text-muted-foreground">
-                    The order reference is what links a settlement row to an order — without it
-                    nothing can be matched. Columns found:{" "}
-                    <span className="font-mono text-xs">{preview.headers.join(", ")}</span>
+                    The order reference is what links a settlement row to an order — without it nothing can be matched.
                   </p>
                 </div>
               </div>
             ) : (
               <div className="flex items-start gap-2 text-sm">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-                <p>
-                  {preview.committed ? "Imported" : "Ready to import"} — {preview.totalRows} rows detected.
-                </p>
+                <p>Ready to import — {preview.totalRows} rows detected.</p>
               </div>
             )}
 
-            <div className="grid gap-1.5 sm:grid-cols-2">
-              {mapped.map(([field, header]) => (
-                <div key={field} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="text-muted-foreground">{FIELD_LABELS[field] ?? field}</span>
-                  <Badge variant={field === "orderRef" ? "default" : "secondary"} className="font-mono">
-                    {header}
-                  </Badge>
-                </div>
-              ))}
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Column mapping</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Confirm which column holds each value, map one that was not recognised, or choose “Not in this
+                file” for one read wrongly. Required fields must be mapped.
+              </p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {SHOPLINE_SETTLEMENT_FIELDS.map(({ field, required }) => (
+                  <div key={field} className="space-y-1.5 rounded-md bg-muted/40 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label htmlFor={`shopline-map-${field}`} className="text-xs text-muted-foreground">
+                        {labelOf(field)}
+                      </Label>
+                      {required ? <Badge variant="secondary" className="text-[10px]">Required</Badge> : null}
+                    </div>
+                    <Select
+                      value={settlement.columnMapping?.[field] ?? NOT_IN_FILE}
+                      disabled={settlement.busy !== null || result !== null}
+                      onValueChange={(value) => settlement.changeColumn(field, value === NOT_IN_FILE ? null : value)}
+                    >
+                      <SelectTrigger id={`shopline-map-${field}`} className="h-8 font-mono text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NOT_IN_FILE}>{required ? "Choose a column" : "Not in this file"}</SelectItem>
+                        {preview.headers.map((header, index) =>
+                          header ? (
+                            <SelectItem key={`${index}:${header}`} value={header} className="font-mono text-xs">
+                              {header}
+                            </SelectItem>
+                          ) : null,
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+              {preview.headers.length === 0 ? (
+                <p className="mt-2 text-xs text-amber-600">No column headers were found in this file.</p>
+              ) : null}
+              {settlement.mappingEdited ? (
+                <p className="mt-2 text-xs text-amber-600">
+                  You changed the mapping. Check columns again to confirm it before importing.
+                </p>
+              ) : null}
             </div>
 
-            {preview.parseErrors.length > 0 && (
+            {preview.parseErrors.length > 0 ? (
               <p className="text-xs text-amber-600">{preview.parseErrors.slice(0, 3).join(" · ")}</p>
-            )}
+            ) : null}
           </div>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   );

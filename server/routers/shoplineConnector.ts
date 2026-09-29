@@ -39,16 +39,13 @@ import {
 import { getValidToken, saveToken, deleteToken } from "../connectors/shopline/tokenStore";
 import {
   parseSettlementFile,
-  detectColumns,
+  resolveImportColumns,
   mapSettlementRows,
 } from "../connectors/shopline/settlementFileImport";
-import {
-  rejectAlreadyIngested,
-  resolveChannelIds,
-  runReconciliationOnPersistedData,
-} from "../connectors/shopline/syncOrchestrator";
-import { createUploadBatch, updateUploadBatch, insertTransactions } from "../db";
+import { resolveChannelIds } from "../connectors/shopline/syncOrchestrator";
+import { createUploadBatch, updateUploadBatch } from "../db";
 import { ingestWebhook } from "../connectors/shopline/webhookHandler";
+import { commitShoplineSettlementFile } from "../connectors/shopline/settlementFileCommit";
 import { runSettlementSync } from "../connectors/shopline/settlementSync";
 import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
 import { ENV } from "../_core/env";
@@ -824,7 +821,17 @@ export const shoplineConnectorRouter = router({
         sourceLabel: z.string().min(1).max(80).default("Settlement file"),
         // partialRecord: under zod 4 an enum-keyed `record` is exhaustive and
         // refused any override that named fewer than all seven fields.
+        // Legacy HINTS: detection still fills every field they leave out.
         columnOverrides: z
+          .partialRecord(
+            z.enum(["orderRef", "gatewayRef", "amount", "currency", "settledAt", "fee", "description"]),
+            z.string().max(200),
+          )
+          .optional(),
+        // The mapping the merchant CONFIRMED in the editor: the whole answer. A
+        // field it omits stays unmapped, so a wrongly detected optional column
+        // can be taken away, and a header not in this file is dropped.
+        columnMapping: z
           .partialRecord(
             z.enum(["orderRef", "gatewayRef", "amount", "currency", "settledAt", "fee", "description"]),
             z.string().max(200),
@@ -861,7 +868,10 @@ export const shoplineConnectorRouter = router({
         });
       }
 
-      const { mapping, missingRequired } = detectColumns(parsed.headers, input.columnOverrides);
+      const { mapping, missingRequired } = resolveImportColumns(parsed.headers, {
+        columnMapping: input.columnMapping,
+        columnOverrides: input.columnOverrides,
+      });
 
       // Preview, or a file we cannot map — either way, write nothing and tell
       // the caller exactly what was detected so they can correct it.
@@ -895,7 +905,7 @@ export const shoplineConnectorRouter = router({
       if (!batchId) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create upload batch" });
 
       try {
-        const { rows, failures } = mapSettlementRows(parsed.rows, mapping, {
+        const { rows, failures: mappingFailures } = mapSettlementRows(parsed.rows, mapping, {
           organizationId: orgId,
           paymentsChannelId,
           batchId,
@@ -904,33 +914,19 @@ export const shoplineConnectorRouter = router({
           sourceLabel: input.sourceLabel,
         });
 
-        // Same idempotency guard the API path uses: re-uploading a file, or an
-        // overlapping export, must not double-count settlements.
-        const fresh = await rejectAlreadyIngested(db, rows, [paymentsChannelId]);
-        const duplicates = rows.length - fresh.length;
-        if (fresh.length > 0) await insertTransactions(fresh);
-
-        await updateUploadBatch(batchId, {
-          status: "completed",
-          validRows: fresh.length,
-          invalidRows: failures.length,
-          completedAt: new Date(),
-          errorMessage: failures.length > 0 ? failures.slice(0, 10).map((f) => `row ${f.rowIndex}: ${f.reason}`).join("; ") : null,
+        // One transaction, one writer per store: the event-level dedupe, the
+        // insert, the scoped reconciliation and the batch's close commit
+        // together or not at all. See settlementFileCommit.ts.
+        const { imported, duplicates, failures, matchedCount, exceptionCount } = await commitShoplineSettlementFile(db, {
+          organizationId: orgId,
+          storeId: store.id,
+          ordersChannelId,
+          paymentsChannelId,
+          batchId,
+          rows,
+          mappingFailures,
+          currency: store.currency ?? "USD",
         });
-
-        // Now that a payment leg exists, match it against the order book.
-        let matchedCount = 0;
-        let exceptionCount = 0;
-        if (fresh.length > 0) {
-          const dates = fresh.map((r) => (r.transactionDate as Date).getTime());
-          const from = new Date(Math.min(...dates) - 3 * 24 * 60 * 60 * 1000);
-          const to = new Date(Math.max(...dates) + 3 * 24 * 60 * 60 * 1000);
-          const result = await runReconciliationOnPersistedData(
-            db, orgId, ordersChannelId, paymentsChannelId, from, to, store.currency ?? "USD",
-          );
-          matchedCount = result.matchedCount;
-          exceptionCount = result.exceptionCount;
-        }
 
         // Record the operator who wrote into this tenant.
         //
@@ -946,7 +942,7 @@ export const shoplineConnectorRouter = router({
           // The audit must not be able to fail the import.
           //
           // By this line the settlement rows and the reconciliation results are
-          // already committed, and none of it is in a transaction. Letting a
+          // already committed, in a transaction that has closed. Letting a
           // failed audit insert reach the enclosing catch would mark the upload
           // batch `failed` and return an error for work that actually
           // succeeded — the merchant is told nothing imported while their
@@ -966,7 +962,7 @@ export const shoplineConnectorRouter = router({
               newValue: JSON.stringify({
                 fileName: input.fileName,
                 sourceLabel: input.sourceLabel,
-                imported: fresh.length,
+                imported,
                 duplicates,
                 failed: failures.length,
               }),
@@ -975,7 +971,7 @@ export const shoplineConnectorRouter = router({
             console.error(
               "[shopline-settlement] AUDIT WRITE FAILED for a committed cross-tenant import — " +
                 `actor=${ctx.user.id} targetOrg=${orgId} store=${store.storeHandle} ` +
-                `file=${input.fileName} imported=${fresh.length} duplicates=${duplicates} failed=${failures.length}`,
+                `file=${input.fileName} imported=${imported} duplicates=${duplicates} failed=${failures.length}`,
               auditErr,
             );
           }
@@ -988,7 +984,7 @@ export const shoplineConnectorRouter = router({
           mapping,
           missingRequired: [] as string[],
           totalRows: parsed.rows.length,
-          imported: fresh.length,
+          imported,
           duplicates,
           failed: failures.length,
           parseErrors: parsed.parseErrors,
@@ -997,9 +993,13 @@ export const shoplineConnectorRouter = router({
           exceptionCount,
         };
       } catch (err) {
+        // The commit is one transaction, so a failure wrote nothing. The batch
+        // says so in words a merchant can read: a database error's own text is
+        // the failed query and its parameters, never shown to a tenant.
         await updateUploadBatch(batchId, {
           status: "failed",
-          errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 2000),
+          errorMessage:
+            err instanceof TRPCError ? err.message.slice(0, 2000) : "The import failed and nothing was written. Try again.",
           completedAt: new Date(),
         });
         throw err;

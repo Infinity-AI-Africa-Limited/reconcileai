@@ -24,6 +24,7 @@
  * Pure functions here (parse / detect / map) are unit-testable without a DB.
  */
 import type { InsertTransaction } from "../../../drizzle/schema";
+import { sanitizeRef } from "../../db";
 import {
   parseTabularFile,
   normalizeHeader,
@@ -169,6 +170,10 @@ export function mapSettlementRows(
     const rowIndex = i + 2; // 1-based + header
     const orderRef = mapping.orderRef ? String(row[mapping.orderRef] ?? "").trim() : "";
     if (!orderRef) { failures.push({ rowIndex, reason: "missing order reference" }); return; }
+    // Insert stores the SANITISED reference. One made only of characters that
+    // sanitising strips would be stored with no reference at all: nothing could
+    // ever match it, and nothing could tell a re-upload of it from a new row.
+    if (!sanitizeRef(orderRef)) { failures.push({ rowIndex, reason: "order reference has no usable characters" }); return; }
 
     const amount = parseAmount(mapping.amount ? row[mapping.amount] : undefined);
     if (amount === null) { failures.push({ rowIndex, reason: "unparseable amount" }); return; }
@@ -231,6 +236,22 @@ export function resolveConfirmedColumns(headers: string[], confirmed: ColumnMap)
     mapping,
     missingRequired: REQUIRED_FIELDS.filter((f) => !mapping[f]),
   };
+}
+
+/**
+ * The mapping an import runs with.
+ *
+ * A mapping the merchant CONFIRMED (checked in the editor) is the whole answer.
+ * Without one, columns are detected, with any legacy `overrides` as hints —
+ * the behaviour callers had before the editor existed.
+ */
+export function resolveImportColumns(
+  headers: string[],
+  request: { columnMapping?: ColumnMap; columnOverrides?: ColumnMap },
+): { mapping: ColumnMap; missingRequired: SettlementField[] } {
+  return request.columnMapping
+    ? resolveConfirmedColumns(headers, request.columnMapping)
+    : detectColumns(headers, request.columnOverrides);
 }
 
 /** The persisted columns a settlement event is identified by. */
