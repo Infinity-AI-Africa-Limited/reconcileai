@@ -1,12 +1,30 @@
 import { assertEgressAllowed } from "../../_core/egress";
 import { SHOPIFY_API_VERSION } from "../../../drizzle/shopify_schema";
+import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "../../../shared/shopifyOrderSync";
 import { normalizeShopDomain } from "./auth";
 import { getValidShopifyAccessToken } from "./tokenStore";
 
 /** Five minutes re-read on every cycle so records landing on a watermark seam are recovered. */
 export const SHOPIFY_ORDER_WATERMARK_OVERLAP_MS = 5 * 60_000;
-/** The first order sync stays well inside read_orders' recent-order access window. */
-export const SHOPIFY_INITIAL_ORDER_WINDOW_MS = 24 * 60 * 60_000;
+/**
+ * The first order sync reads the whole of read_orders' 60-day access window, so
+ * a merchant's settlement files from before the install still have orders to
+ * match. At one day, nearly every row of a historical file named an order
+ * ReconcileAI had never synced and was flagged as an exception.
+ *
+ * It is not read in one piece: see SHOPIFY_ORDER_WINDOW_MAX_SPAN_MS.
+ */
+export const SHOPIFY_INITIAL_ORDER_WINDOW_MS = SHOPIFY_INITIAL_ORDER_WINDOW_DAYS * 24 * 60 * 60_000;
+/**
+ * The most one sync cycle reads. MAX_ORDER_PAGES × SHOPIFY_ORDER_PAGE_SIZE caps a
+ * window at 100,000 orders, and a window that hits the cap fails closed without
+ * writing a watermark — so a single 60-day window would fail every first sync of
+ * a store averaging over ~1,670 orders a day, forever. In 7-day steps each cycle
+ * commits its watermark and the next starts there, so a large backfill advances
+ * and resumes after a failure; only a store over ~14,000 orders a day in one
+ * week still hits the cap. `runShopifyOrderSyncToNow` walks the steps.
+ */
+export const SHOPIFY_ORDER_WINDOW_MAX_SPAN_MS = 7 * 24 * 60 * 60_000;
 export const SHOPIFY_ORDER_PAGE_SIZE = 100;
 const MAX_ORDER_PAGES = 1_000;
 export const SHOPIFY_ORDER_PAGE_ATTEMPTS = 4;
@@ -425,13 +443,18 @@ export function computeShopifyOrderWindow(params: {
   watermark: Date | null;
   overlapMs?: number;
   initialWindowMs?: number;
+  maxSpanMs?: number;
 }): { from: Date; to: Date } {
   const overlap = params.overlapMs ?? SHOPIFY_ORDER_WATERMARK_OVERLAP_MS;
   const initial = params.initialWindowMs ?? SHOPIFY_INITIAL_ORDER_WINDOW_MS;
-  const to = new Date(params.now);
+  const maxSpan = params.maxSpanMs ?? SHOPIFY_ORDER_WINDOW_MAX_SPAN_MS;
+  const now = new Date(params.now);
   const candidate = params.watermark
     ? new Date(params.watermark.getTime() - overlap)
-    : new Date(to.getTime() - initial);
-  const from = candidate > to ? new Date(to.getTime() - overlap) : candidate;
+    : new Date(now.getTime() - initial);
+  const from = candidate > now ? new Date(now.getTime() - overlap) : candidate;
+  // A window ending before `now` is a step of a longer catch-up, not a failure:
+  // its end becomes the watermark and the next cycle starts from there.
+  const to = new Date(Math.min(now.getTime(), from.getTime() + maxSpan));
   return { from, to };
 }

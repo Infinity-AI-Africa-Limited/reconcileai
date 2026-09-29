@@ -425,7 +425,7 @@ describe("when a signed customer privacy delivery arrives", () => {
       subjectHash: null,
     });
     expect(fake.writes("insert", PRIVACY_SELECTORS)).toEqual([]);
-    expect(JSON.stringify(fake.committed())).not.toContain("501");
+    expect(fake.committedJson()).not.toContain("501");
   });
 });
 

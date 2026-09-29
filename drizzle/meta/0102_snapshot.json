@@ -1,8 +1,8 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "8d122e7b-357d-42ac-a244-dd98877888e8",
-  "prevId": "f62a30b3-e1a0-48db-9988-33d582ecd640",
+  "id": "f62a30b3-e1a0-48db-9988-33d582ecd640",
+  "prevId": "1e6c2821-a762-490e-aabc-8d038ba1a7bb",
   "tables": {
     "agent_action_drafts": {
       "name": "agent_action_drafts",
@@ -14981,7 +14981,7 @@
         },
         "kind": {
           "name": "kind",
-          "type": "enum('customer_request','customer_redact','shop_redact')",
+          "type": "enum('customer_request','customer_redact')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -15356,13 +15356,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "privacyRequestId": {
-          "name": "privacyRequestId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "requestHash": {
           "name": "requestHash",
           "type": "varchar(64)",
@@ -15379,7 +15372,7 @@
         },
         "status": {
           "name": "status",
-          "type": "enum('admitted','processing','blocked_dependency','manual_review','failed_retryable','failed_terminal','completed','redacting','failed')",
+          "type": "enum('admitted','redacting','failed','completed')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
@@ -15393,27 +15386,6 @@
           "autoincrement": false,
           "default": 0
         },
-        "leaseId": {
-          "name": "leaseId",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "leaseExpiresAt": {
-          "name": "leaseExpiresAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "nextAttemptAt": {
-          "name": "nextAttemptAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "lastCheckpoint": {
           "name": "lastCheckpoint",
           "type": "varchar(80)",
@@ -15424,35 +15396,6 @@
         "failureCode": {
           "name": "failureCode",
           "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "manifestVersion": {
-          "name": "manifestVersion",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        },
-        "manifestSummary": {
-          "name": "manifestSummary",
-          "type": "json",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "startedAt": {
-          "name": "startedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "completedAt": {
-          "name": "completedAt",
-          "type": "timestamp",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -15497,27 +15440,11 @@
           ],
           "isUnique": true
         },
-        "uq_shopify_redaction_privacy_request": {
-          "name": "uq_shopify_redaction_privacy_request",
-          "columns": [
-            "privacyRequestId"
-          ],
-          "isUnique": true
-        },
         "idx_shopify_redaction_org_status": {
           "name": "idx_shopify_redaction_org_status",
           "columns": [
             "organizationId",
             "status"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_redaction_claim": {
-          "name": "idx_shopify_redaction_claim",
-          "columns": [
-            "status",
-            "nextAttemptAt",
-            "leaseExpiresAt"
           ],
           "isUnique": false
         }
@@ -15593,6 +15520,21 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "lastErrorAt": {
+          "name": "lastErrorAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "syncRequestCount": {
+          "name": "syncRequestCount",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         },
         "createdAt": {
           "name": "createdAt",
@@ -15753,6 +15695,90 @@
       "compositePrimaryKeys": {
         "shopify_webhook_events_id": {
           "name": "shopify_webhook_events_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "shopify_sync_requests": {
+      "name": "shopify_sync_requests",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "storeId": {
+          "name": "storeId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','succeeded','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "errorCode": {
+          "name": "errorCode",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "requestedAt": {
+          "name": "requestedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "answeredAt": {
+          "name": "answeredAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_shopify_sync_request_store": {
+          "name": "idx_shopify_sync_request_store",
+          "columns": [
+            "storeId",
+            "organizationId",
+            "status"
+          ],
+          "isUnique": false
+        },
+        "idx_shopify_sync_request_org": {
+          "name": "idx_shopify_sync_request_org",
+          "columns": [
+            "organizationId"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_sync_requests_id": {
+          "name": "shopify_sync_requests_id",
           "columns": [
             "id"
           ]

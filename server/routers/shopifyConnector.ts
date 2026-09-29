@@ -12,7 +12,7 @@ import { getDb } from "../db";
 import { loggableError } from "../dbErrors";
 import { resolveOrgScope } from "../_core/tenancy";
 import { canActOnTenant } from "./shared";
-import { runShopifyOrderSync } from "../connectors/shopify/syncOrchestrator";
+import { requestShopifyManualSync, ShopifyManualSyncError } from "../connectors/shopify/manualSync";
 
 /**
  * The merchant-safe view of a store. Tokens live in another table and never
@@ -117,9 +117,10 @@ export const shopifyConnectorRouter = router({
   }),
 
   /**
-   * Starts a merchant-authorised read-only order evidence sync. It does not
-   * mutate Shopify and it intentionally stays admin-gated because it writes
-   * only the caller's tenant reconciliation workspace.
+   * Queues a merchant-authorised read-only order evidence sync and answers at
+   * once; the sync runs on the job queue (connectors/shopify/manualSync.ts). It
+   * does not mutate Shopify and it intentionally stays admin-gated because it
+   * writes only the caller's tenant reconciliation workspace.
    */
   syncOrdersNow: protectedProcedure
     .input(z.object({ storeId: z.number().int().positive(), organizationId: z.number().int().positive().optional() }))
@@ -132,18 +133,24 @@ export const shopifyConnectorRouter = router({
         throw new TRPCError({ code: "FORBIDDEN", message: "Leave this organisation's portal to sync another" });
       }
       try {
-        return await runShopifyOrderSync({
-          storeId: input.storeId,
-          organizationId,
-          trigger: "manual",
-        });
+        const { requestNumber, requestedAt } = await requestShopifyManualSync({ storeId: input.storeId, organizationId });
+        return { status: "queued" as const, requestNumber, requestedAt: requestedAt.toISOString() };
       } catch (error) {
-        console.error("[shopify-sync] manual order sync failed", {
+        // The store is looked up by id, tenant and status together: another
+        // tenant's store, an unknown id and a disconnected store get one answer.
+        if (error instanceof ShopifyManualSyncError && error.code === "STORE_UNAVAILABLE") {
+          throw new TRPCError({ code: "NOT_FOUND", message: "No connected Shopify store with that id in this organisation" });
+        }
+        // `code` is the operation that failed; loggableError adds the driver's
+        // own code as `errorCode` and never a query or its parameters, which
+        // for this procedure would carry a merchant's address.
+        console.error("[shopify-sync] manual order sync could not be queued", {
           organizationId,
           storeId: input.storeId,
+          code: error instanceof ShopifyManualSyncError ? error.code : "unexpected",
           ...loggableError(error),
         });
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Shopify order sync could not complete. Reconnect the store or contact support." });
+        throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "The Shopify order sync could not be started. Try again shortly." });
       }
     }),
 });

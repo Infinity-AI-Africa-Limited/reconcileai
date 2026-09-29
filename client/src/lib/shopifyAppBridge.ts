@@ -11,6 +11,13 @@ export type ShopifyAppBridgeContext = {
   sync: {
     lastSuccessfulAt: string | null;
     lastErrorCode: string | null;
+    lastErrorAt: string | null;
+    /** The newest manual request, settled or not. */
+    latestRequest: { status: "queued" | "succeeded" | "failed"; answeredAt: string | null } | null;
+    /** When the newest request still queued was made, or null when none is. */
+    pendingSince: string | null;
+    /** How many manual requests this store has made. */
+    requestCount: number;
   };
   capabilities: {
     scope: "read_orders";
@@ -21,13 +28,12 @@ export type ShopifyAppBridgeContext = {
   };
 };
 
-export type ShopifySyncReport = {
-  success: boolean;
-  window: { from: string; to: string };
-  fetched: number;
-  inserted: number;
-  updated: number;
-  unchanged: number;
+/** A manual sync is queued, not run, by the request; `context` reports its outcome. */
+export type ShopifySyncRequest = {
+  status: "queued";
+  /** This request's number among the store's requests: the context's requestCount reaches it once it is recorded. */
+  requestNumber: number;
+  requestedAt: string;
 };
 
 export type ShopifySettlementField =
@@ -56,6 +62,8 @@ export type ShopifySettlementEvidenceDryRun = {
   missingRequired: ShopifySettlementField[];
   totalRows: number;
   parseErrors: string[];
+  /** Rows naming no Shopify order ReconcileAI has synced; null when rows could not be read. */
+  unalignedRows: number | null;
 };
 
 export type ShopifySettlementEvidenceCommitted = {
@@ -67,6 +75,8 @@ export type ShopifySettlementEvidenceCommitted = {
   failed: number;
   matchedCount: number;
   exceptionCount: number;
+  /** Of the rows imported, those naming no synced Shopify order. */
+  unalignedRows: number;
 };
 
 export type ShopifySettlementEvidenceResult =
@@ -227,7 +237,10 @@ function loadScript(timeoutMs = APP_BRIDGE_LOAD_TIMEOUT_MS): Promise<void> {
 }
 
 /**
- * Loads the current Shopify App Bridge only in the App Home route. The API key
+ * Loads the current Shopify App Bridge only in the App Home route. In
+ * production the server has already placed it in the HTML as the first script
+ * (server/connectors/shopify/appHomeRoutes.ts), as Shopify requires, so this
+ * returns at once; loading it here is the fallback for dev. The API key
  * is public configuration; credentials and ID tokens never enter this module's
  * storage, URL, logs, or React state. The token is requested afresh per API call.
  */
@@ -257,7 +270,7 @@ export async function loadShopifyAppHomeContext(): Promise<ShopifyAppBridgeConte
   return appHomeCall(() => embeddedClient.shopifyAppHome.context.query());
 }
 
-export async function triggerShopifyOrderSync(): Promise<ShopifySyncReport> {
+export async function triggerShopifyOrderSync(): Promise<ShopifySyncRequest> {
   return appHomeCall(() => embeddedClient.shopifyAppHome.syncNow.mutate());
 }
 

@@ -1,3 +1,5 @@
+import { MySqlDialect } from "drizzle-orm/mysql-core";
+import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
@@ -12,6 +14,8 @@ import {
   materialShopifyOrderEvidenceChanged,
   partitionShopifyOrders,
   runShopifyOrderSync,
+  runShopifyOrderSyncToNow,
+  type ShopifyOrderSyncReport,
 } from "./syncOrchestrator";
 import { scriptedDb } from "./scriptedDb.testkit";
 import type { NormalizedShopifyOrder } from "./orders";
@@ -132,6 +136,8 @@ describe("tenant-isolated sync orchestration", () => {
       ),
     ).rejects.toThrow(/not found for tenant/);
     expect(fetchOrders).not.toHaveBeenCalled();
+    // Nothing is written for a store it could not find.
+    expect(fake.writes("insert", CURSORS)).toEqual([]);
     const lookup = fake.ops.find((op) => op.kind === "select" && op.table === STORES);
     expect(lookup?.where?.params).toEqual(expect.arrayContaining([7, 999, "active"]));
   });
@@ -214,10 +220,36 @@ describe("tenant-isolated sync orchestration", () => {
     await expect(
       runShopifyOrderSync(
         { storeId: 7, organizationId: 42, trigger: "manual" },
-        { db: fake.db as never, suppressionKeys: SUPPRESSION_KEYS, fetchOrders: vi.fn(async () => [order()]), suppressionKeys: [] },
+        { db: fake.db as never, fetchOrders: vi.fn(async () => [order()]), suppressionKeys: [] },
       ),
     ).rejects.toThrow(/suppression_key_unavailable/);
     expect(fake.writes("insert", TRANSACTIONS)).toEqual([]);
+  });
+
+  it("advances a watermark the cursor row holds as NULL — GREATEST alone would keep it NULL", async () => {
+    // A cursor row can exist before the first success: a failed first sync
+    // records its error on one, and a manual request numbers itself on one.
+    // GREATEST(NULL, x) is NULL in MySQL and TiDB, so without COALESCE every
+    // later sync would re-read the oldest window and never reach recent orders.
+    const fake = scriptedDb({
+      select: {
+        [STORES]: [[store], [{ id: store.id }]],
+        [CURSORS]: [[{ watermarkUpdatedAt: null, lastErrorCode: "sync_failed" }]],
+        [USERS]: [[{ id: 9 }]],
+        [CHANNELS]: [[{ id: 70 }]],
+        [TRANSACTIONS]: [[]],
+      },
+    });
+    await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, fetchOrders: vi.fn(async () => []), now: () => new Date("2026-09-20T11:00:00Z") },
+    );
+
+    const success = fake.writes("insert", CURSORS).find((op) => op.onDuplicate && "watermarkUpdatedAt" in op.onDuplicate);
+    const merge = new MySqlDialect().sqlToQuery(success?.onDuplicate?.watermarkUpdatedAt as SQL).sql;
+    expect(merge).toBe(
+      "COALESCE(GREATEST(`shopify_sync_cursors`.`watermarkUpdatedAt`, VALUES(`shopify_sync_cursors`.`watermarkUpdatedAt`)), VALUES(`shopify_sync_cursors`.`watermarkUpdatedAt`))",
+    );
   });
 
   it("falls back to an active administrator of the same tenant when the claimant is absent", async () => {
@@ -259,6 +291,10 @@ describe("tenant-isolated sync orchestration", () => {
       ),
     ).rejects.toThrow(/active tenant administrator unavailable/);
     expect(fetchOrders).not.toHaveBeenCalled();
+    // The precise code is recorded, with its time.
+    const failure = fake.writes("insert", CURSORS)[0];
+    expect(failure?.data).toMatchObject({ lastErrorCode: "sync_actor_unavailable", lastErrorAt: expect.any(Date) });
+    expect(failure?.data?.lastErrorAt).toBeInstanceOf(Date);
     const actorLookups = fake.ops.filter((op) => op.kind === "select" && op.table === USERS);
     expect(actorLookups).toHaveLength(2);
     expect(actorLookups[0]?.where?.params).toEqual(expect.arrayContaining([9, 42, "admin", true]));
@@ -683,5 +719,64 @@ describe("terminal webhook sync failure evidence", () => {
     });
     expect(write?.data?.status).not.toBe("processed");
     expect(write?.where?.params).toEqual(expect.arrayContaining(["wh-exhausted", 7, 42, "received"]));
+  });
+});
+
+describe("when a store is further behind than one sync window", () => {
+  const NOW = new Date("2026-09-20T12:00:00Z");
+  const DAY = 24 * 60 * 60_000;
+  function cycleReport(to: Date): ShopifyOrderSyncReport {
+    return {
+      success: true,
+      organizationId: 42,
+      storeId: 7,
+      window: { from: new Date(to.getTime() - 7 * DAY), to },
+      fetched: 0,
+      inserted: 0,
+      updated: 0,
+      unchanged: 0,
+      batchId: null,
+    };
+  }
+
+  it("should run cycles until a window reaches now, each committing its own step", async () => {
+    const ends = [
+      new Date(NOW.getTime() - 53 * DAY),
+      new Date(NOW.getTime() - 46 * DAY),
+      NOW,
+    ];
+    const runCycle = vi.fn(async () => cycleReport(ends.shift()!));
+
+    const reports = await runShopifyOrderSyncToNow(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { now: () => NOW, runCycle },
+    );
+
+    expect(runCycle).toHaveBeenCalledTimes(3);
+    expect(reports.at(-1)?.window.to).toEqual(NOW);
+  });
+
+  it("should run exactly one cycle for a store that is already current", async () => {
+    const runCycle = vi.fn(async () => cycleReport(NOW));
+    await runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "webhook" }, { now: () => NOW, runCycle });
+    expect(runCycle).toHaveBeenCalledTimes(1);
+  });
+
+  it("should stop rather than spin when a window does not move forward", async () => {
+    const stuck = new Date(NOW.getTime() - 30 * DAY);
+    const runCycle = vi.fn(async () => cycleReport(stuck));
+    await runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "manual" }, { now: () => NOW, runCycle });
+    expect(runCycle).toHaveBeenCalledTimes(2);
+  });
+
+  it("should stop at the first failing cycle, keeping the steps already committed", async () => {
+    const runCycle = vi
+      .fn()
+      .mockResolvedValueOnce(cycleReport(new Date(NOW.getTime() - 53 * DAY)))
+      .mockRejectedValueOnce(new Error("pagination_error"));
+    await expect(
+      runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "manual" }, { now: () => NOW, runCycle }),
+    ).rejects.toThrow("pagination_error");
+    expect(runCycle).toHaveBeenCalledTimes(2);
   });
 });

@@ -24,6 +24,7 @@
  * Pure functions here (parse / detect / map) are unit-testable without a DB.
  */
 import type { InsertTransaction } from "../../../drizzle/schema";
+import { sanitizeRef } from "../../db";
 import {
   parseTabularFile,
   normalizeHeader,
@@ -279,9 +280,15 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  *
  * The key is built only from values that survive storage unchanged, so a stored
  * row and the same row re-imported produce the same key:
- *   - the order and gateway references as the FILE wrote them (`rawData`, kept
- *     verbatim — `transactionRef` itself may be sanitised, or rewritten to a
- *     canonical order id once the order has synced);
+ *   - the ORDER reference as the file wrote it (`rawData`, kept verbatim —
+ *     `transactionRef` itself may be rewritten to a canonical order id once the
+ *     order has synced), compared in its STORED form: `#1001` in one export and
+ *     `1001` in an overlapping one are stored as one order, match as one order,
+ *     and must not count one payment twice;
+ *   - the GATEWAY reference exactly as the file wrote it. It is the provider's
+ *     own id for one payment, so it is NOT normalised: `GW:A` and `GWA` may be
+ *     two payments, and merging them would drop one silently — whereas a
+ *     double count at least surfaces as a duplicate exception;
  *   - direction, amount in cents, currency;
  *   - the settlement date to the second (the column's precision), or nothing
  *     when the file had no date — `transactionDate` then holds the import time
@@ -289,9 +296,9 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  */
 export function settlementEventKey(row: SettlementEventFields): string {
   const provenance = provenanceOf(row.rawData);
-  const orderRef = typeof provenance.originalOrderRef === "string"
-    ? provenance.originalOrderRef
-    : row.transactionRef ?? "";
+  const orderRef = sanitizeRef(
+    typeof provenance.originalOrderRef === "string" ? provenance.originalOrderRef : row.transactionRef,
+  ) ?? "";
   const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : "";
   const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
   return JSON.stringify([
@@ -328,4 +335,40 @@ export function selectUnimportedSettlementEvents<T>(
     stored.set(key, remaining - 1);
     return false;
   });
+}
+
+/** True for a row a settlement FILE wrote — `mapSettlementRows` has always stamped `importedFrom`. */
+function isSettlementFileRow(row: SettlementEventFields): boolean {
+  return typeof provenanceOf(row.rawData).importedFrom === "string";
+}
+
+/**
+ * The rows of a SHOPLINE settlement file that are not already recorded in the
+ * store's payments channel. Both sides must be in STORED form (`transactionRef`
+ * as `sanitizeRef` writes it) — comparing a file's `#1001` against the stored
+ * `1001` is how every re-upload used to be inserted again.
+ *
+ * The payments channel holds two kinds of row, and they are told apart on
+ * purpose:
+ *   - rows an earlier FILE imported are deduplicated by settlement EVENT
+ *     (`settlementEventKey`), as a multiset — so a re-upload or an overlapping
+ *     export adds nothing, while a payment and its refund, in one file or two,
+ *     are both kept. Keying these on the order alone drops the refund.
+ *   - rows the SHOPLINE Payments API synced for an order keep that order
+ *     covered, exactly as before: a file row for such an order is skipped,
+ *     because the API already supplies its settlement and a file describing it
+ *     too would count it twice.
+ */
+export function selectNewSettlementFileRows<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): T[] {
+  const coveredByApi = new Set<string>();
+  const importedEvents: string[] = [];
+  for (const row of stored) {
+    if (isSettlementFileRow(row)) importedEvents.push(settlementEventKey(row));
+    else if (row.transactionRef) coveredByApi.add(row.transactionRef);
+  }
+  const uncovered = incoming.filter((row) => !row.transactionRef || !coveredByApi.has(row.transactionRef));
+  return selectUnimportedSettlementEvents(importedEvents, uncovered, settlementEventKey);
 }

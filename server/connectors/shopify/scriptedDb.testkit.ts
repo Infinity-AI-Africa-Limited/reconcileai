@@ -27,6 +27,8 @@ export interface RecordedOp {
   data: Record<string, unknown> | Record<string, unknown>[] | null;
   /** Set when the INSERT carried ON DUPLICATE KEY UPDATE. */
   upsert: boolean;
+  /** The ON DUPLICATE KEY UPDATE set-clause, as passed. */
+  onDuplicate?: Record<string, unknown>;
   /** The transaction this ran in, or null outside one. */
   txId: number | null;
   /** Set on a locking read (`.for("update")`). */
@@ -53,6 +55,17 @@ export interface ScriptedDb {
   committed(): RecordedOp[];
   /** Committed operations of one kind on one table. */
   writes(kind: Exclude<OpKind, "select">, table: string): RecordedOp[];
+  /**
+   * The committed operations as JSON, for a scan asserting that no raw
+   * identifier was persisted anywhere.
+   *
+   * `JSON.stringify(committed())` cannot do this: an upsert's set-clause holds
+   * drizzle `SQL` values, and those reference their own table, so stringify
+   * throws on the cycle. Here they are rendered to SQL text plus parameters —
+   * which is what such a scan has to read anyway, since an identifier smuggled
+   * into an upsert would sit in those parameters.
+   */
+  committedJson(): string;
 }
 
 export function scriptedDb(script: Script = {}): ScriptedDb {
@@ -122,15 +135,20 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
         return {
           values(values: Record<string, unknown> | Record<string, unknown>[]) {
             let upsert = false;
+            let onDuplicate: Record<string, unknown> | undefined;
             const compute = () => {
-              record({ kind: "insert", table, where: null, data: values, upsert });
+              record({ kind: "insert", table, where: null, data: values, upsert, ...(onDuplicate ? { onDuplicate } : {}) });
               const answer = take("insert", table);
               if (answer instanceof Error) throw answer;
               const insertId = typeof answer === "number" ? answer : nextInsertId++;
               return [{ affectedRows: 1, insertId }, []];
             };
             return {
-              onDuplicateKeyUpdate() { upsert = true; return settle(compute); },
+              onDuplicateKeyUpdate(config?: { set?: Record<string, unknown> }) {
+                upsert = true;
+                onDuplicate = config?.set;
+                return settle(compute);
+              },
               ...settle(compute),
             };
           },
@@ -185,6 +203,20 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
     ops,
     committed,
     writes: (kind, table) => committed().filter((op) => op.kind === kind && op.table === table),
+    committedJson: () => {
+      const seen = new WeakSet<object>();
+      return JSON.stringify(committed(), (_key, value: unknown) => {
+        if (value instanceof SQL) {
+          const query = dialect.sqlToQuery(value);
+          return { sql: query.sql, params: query.params };
+        }
+        if (value && typeof value === "object") {
+          if (seen.has(value)) return "[seen]";
+          seen.add(value);
+        }
+        return value;
+      });
+    },
   };
 }
 

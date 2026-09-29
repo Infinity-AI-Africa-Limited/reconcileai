@@ -1,8 +1,8 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "1e6c2821-a762-490e-aabc-8d038ba1a7bb",
-  "prevId": "949ffa1b-cec2-4f58-a9bc-6c9d1186af43",
+  "id": "949ffa1b-cec2-4f58-a9bc-6c9d1186af43",
+  "prevId": "d339cef5-34eb-406b-9da1-bd3f06af927b",
   "tables": {
     "agent_action_drafts": {
       "name": "agent_action_drafts",
@@ -13939,21 +13939,6 @@
           "autoincrement": false,
           "default": "'pending_claim'"
         },
-        "privacyRedactionState": {
-          "name": "privacyRedactionState",
-          "type": "enum('active','customer_redacting')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'active'"
-        },
-        "privacyRedactionRequestId": {
-          "name": "privacyRedactionRequestId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "statusReason": {
           "name": "statusReason",
           "type": "varchar(64)",
@@ -14285,101 +14270,6 @@
       "uniqueConstraints": {},
       "checkConstraint": {}
     },
-    "shopify_order_redaction_tombstones": {
-      "name": "shopify_order_redaction_tombstones",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "storeId": {
-          "name": "storeId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "keyVersion": {
-          "name": "keyVersion",
-          "type": "varchar(32)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "orderDigest": {
-          "name": "orderDigest",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "sourceRequestId": {
-          "name": "sourceRequestId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        }
-      },
-      "indexes": {
-        "uq_shopify_order_redaction_digest": {
-          "name": "uq_shopify_order_redaction_digest",
-          "columns": [
-            "organizationId",
-            "storeId",
-            "keyVersion",
-            "orderDigest"
-          ],
-          "isUnique": true
-        },
-        "idx_shopify_order_redaction_store_version": {
-          "name": "idx_shopify_order_redaction_store_version",
-          "columns": [
-            "organizationId",
-            "storeId",
-            "keyVersion"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_order_redaction_request": {
-          "name": "idx_shopify_order_redaction_request",
-          "columns": [
-            "organizationId",
-            "sourceRequestId"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "shopify_order_redaction_tombstones_id": {
-          "name": "shopify_order_redaction_tombstones_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
     "shopify_privacy_artifacts": {
       "name": "shopify_privacy_artifacts",
       "columns": {
@@ -14584,215 +14474,6 @@
       "uniqueConstraints": {},
       "checkConstraint": {}
     },
-    "shopify_privacy_customer_redaction_jobs": {
-      "name": "shopify_privacy_customer_redaction_jobs",
-      "columns": {
-        "requestId": {
-          "name": "requestId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "storeId": {
-          "name": "storeId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "enum('received','processing','manual_review','blocked_dependency','failed_retryable','failed_terminal','completed')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'received'"
-        },
-        "attempts": {
-          "name": "attempts",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "leaseId": {
-          "name": "leaseId",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "leaseExpiresAt": {
-          "name": "leaseExpiresAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "nextAttemptAt": {
-          "name": "nextAttemptAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "lastCheckpoint": {
-          "name": "lastCheckpoint",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "failureCode": {
-          "name": "failureCode",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "manifestVersion": {
-          "name": "manifestVersion",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        },
-        "startedAt": {
-          "name": "startedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "completedAt": {
-          "name": "completedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "recordsFound": {
-          "name": "recordsFound",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "tombstonesWritten": {
-          "name": "tombstonesWritten",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "transactionsDeleted": {
-          "name": "transactionsDeleted",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "anomalyScoresDeleted": {
-          "name": "anomalyScoresDeleted",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "orphanBatchesDeleted": {
-          "name": "orphanBatchesDeleted",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "remainingTransactions": {
-          "name": "remainingTransactions",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "selectorDestroyedAt": {
-          "name": "selectorDestroyedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        },
-        "updatedAt": {
-          "name": "updatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "onUpdate": true,
-          "default": "(now())"
-        }
-      },
-      "indexes": {
-        "idx_shopify_privacy_redact_job_org_status": {
-          "name": "idx_shopify_privacy_redact_job_org_status",
-          "columns": [
-            "organizationId",
-            "status"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_privacy_redact_job_store_status": {
-          "name": "idx_shopify_privacy_redact_job_store_status",
-          "columns": [
-            "storeId",
-            "status"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_privacy_redact_job_claim": {
-          "name": "idx_shopify_privacy_redact_job_claim",
-          "columns": [
-            "status",
-            "nextAttemptAt",
-            "leaseExpiresAt"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "shopify_privacy_customer_redaction_jobs_requestId": {
-          "name": "shopify_privacy_customer_redaction_jobs_requestId",
-          "columns": [
-            "requestId"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
     "shopify_privacy_data_request_jobs": {
       "name": "shopify_privacy_data_request_jobs",
       "columns": {
@@ -14981,7 +14662,7 @@
         },
         "kind": {
           "name": "kind",
-          "type": "enum('customer_request','customer_redact')",
+          "type": "enum('customer_request')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -15519,6 +15200,21 @@
           "notNull": false,
           "autoincrement": false
         },
+        "lastErrorAt": {
+          "name": "lastErrorAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "syncRequestCount": {
+          "name": "syncRequestCount",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
         "createdAt": {
           "name": "createdAt",
           "type": "timestamp",
@@ -15678,6 +15374,90 @@
       "compositePrimaryKeys": {
         "shopify_webhook_events_id": {
           "name": "shopify_webhook_events_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "shopify_sync_requests": {
+      "name": "shopify_sync_requests",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "storeId": {
+          "name": "storeId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','succeeded','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "errorCode": {
+          "name": "errorCode",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "requestedAt": {
+          "name": "requestedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "answeredAt": {
+          "name": "answeredAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_shopify_sync_request_store": {
+          "name": "idx_shopify_sync_request_store",
+          "columns": [
+            "storeId",
+            "organizationId",
+            "status"
+          ],
+          "isUnique": false
+        },
+        "idx_shopify_sync_request_org": {
+          "name": "idx_shopify_sync_request_org",
+          "columns": [
+            "organizationId"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_sync_requests_id": {
+          "name": "shopify_sync_requests_id",
           "columns": [
             "id"
           ]

@@ -520,12 +520,51 @@ export const shopifySyncCursors = mysqlTable(
     watermarkUpdatedAt: timestamp("watermarkUpdatedAt"),
     lastSuccessfulAt: timestamp("lastSuccessfulAt"),
     lastErrorCode: varchar("lastErrorCode", { length: 80 }),
+    /** When lastErrorCode was last recorded. */
+    lastErrorAt: timestamp("lastErrorAt"),
+    /**
+     * How many manual sync requests this store has made; it numbers each one.
+     * Incremented by an upsert, which reads the latest committed value and
+     * holds this row's lock until commit on MySQL and TiDB alike, so two
+     * requests for one store always get two numbers. (Counting request rows
+     * could not: a count does not see a concurrent, uncommitted request.)
+     */
+    syncRequestCount: int("syncRequestCount").default(0).notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
   (t) => [
     uniqueIndex("uq_shopify_sync_cursor").on(t.storeId, t.resource),
     index("idx_shopify_sync_org").on(t.organizationId),
+  ],
+);
+
+/**
+ * One row per manual ("refresh now") order sync request. Manual syncs run on
+ * the job queue, so this is how a page learns the outcome, including after a
+ * reload.
+ *
+ * Each writer settles only the rows it can vouch for: a refused enqueue its own
+ * row; a run the rows still `queued` when it STARTED — a request made after that
+ * is left for the follow-up run the queue keeps for it. Counters on the sync
+ * cursor could not do this: answering request N answered every request below
+ * it, whoever had made them and whatever had become of them.
+ */
+export const shopifySyncRequests = mysqlTable(
+  "shopify_sync_requests",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    storeId: int("storeId").notNull(),
+    organizationId: int("organizationId").notNull(),
+    status: mysqlEnum("status", ["queued", "succeeded", "failed"]).default("queued").notNull(),
+    /** Why a failed request failed: the sync's own code, or the queue's refusal. */
+    errorCode: varchar("errorCode", { length: 80 }),
+    requestedAt: timestamp("requestedAt").notNull(),
+    answeredAt: timestamp("answeredAt"),
+  },
+  (t) => [
+    index("idx_shopify_sync_request_store").on(t.storeId, t.organizationId, t.status),
+    index("idx_shopify_sync_request_org").on(t.organizationId),
   ],
 );
 export type ShopifySyncCursor = typeof shopifySyncCursors.$inferSelect;

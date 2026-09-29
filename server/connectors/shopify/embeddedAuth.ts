@@ -71,6 +71,15 @@ function bearerToken(authorization: string | undefined): string {
   return match[1];
 }
 
+/**
+ * Seconds of clock skew allowed on `exp`/`nbf`, matching Shopify's own library
+ * (`JWT_PERMITTED_CLOCK_TOLERANCE` in @shopify/shopify-api). ID tokens live for
+ * one minute and are minted per request, so a server clock even a second
+ * behind Shopify's would otherwise refuse fresh tokens as "not yet valid" —
+ * an intermittent 401 in the merchant's workspace that looks like a bad token.
+ */
+const ID_TOKEN_CLOCK_TOLERANCE_SECONDS = 10;
+
 /** Shopify user ids are numeric; the pattern also admits a GID form, never free text. */
 const SHOPIFY_USER_SUBJECT = /^(?:\d{1,20}|gid:\/\/shopify\/(?:StaffMember|User)\/\d{1,20})$/;
 
@@ -105,6 +114,7 @@ export async function authenticateShopifyEmbeddedRequest(
       algorithms: ["HS256"],
       audience: clientId,
       requiredClaims: ["iss", "dest", "aud", "sub", "exp", "nbf", "iat", "jti", "sid"],
+      clockTolerance: ID_TOKEN_CLOCK_TOLERANCE_SECONDS,
       currentDate: deps.currentDate,
     }));
   } catch (error) {

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SHOPIFY_CONNECTION_MESSAGES, shopifyConnectionVerdict, shopifyInstallErrorMessage } from "@/lib/shopifyConnection";
 import { ShopifyPrivacyDeliveries } from "@/components/ShopifyPrivacyDeliveries";
+import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "@shared/shopifyOrderSync";
 
 export function ShopifyWelcome() {
   const search = useSearch();
@@ -73,7 +74,7 @@ export function ShopifyWelcome() {
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-left text-sm text-amber-950">
           <div className="flex gap-3">
             <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
-          <p><strong>Development release:</strong> use the first read-only order sync below to retrieve the most recent 24-hour order window. ReconcileAI Dev Store does not change Shopify orders, payments, refunds or settings. App Store submission remains subject to separate privacy-completion, developer-store and reviewer-evidence gates.</p>
+          <p><strong>Development release:</strong> use the first read-only order sync below to retrieve the last {SHOPIFY_INITIAL_ORDER_WINDOW_DAYS} days of orders. ReconcileAI does not change Shopify orders, payments, refunds or settings. App Store submission remains subject to separate privacy-completion, developer-store and reviewer-evidence gates.</p>
           </div>
         </div>
         {store?.status === "active" ? (
@@ -88,12 +89,12 @@ export function ShopifyWelcome() {
             </Button>
             {syncOrders.isSuccess ? (
               <p className="rounded-md bg-emerald-50 p-3 text-center text-sm text-emerald-800">
-                Sync complete: {syncOrders.data.inserted} new, {syncOrders.data.updated} updated and {syncOrders.data.unchanged} unchanged order record(s).
+                Sync started. It runs in the background and can take several minutes for a busy store; the Shopify workspace shows when it has finished.
               </p>
             ) : null}
             {syncOrders.isError ? (
               <p className="rounded-md bg-red-50 p-3 text-center text-sm text-red-800">
-                The order sync could not complete. Reconnect the Shopify store or contact support.
+                The order sync could not be started. Try again shortly, or reconnect the Shopify store if this continues.
               </p>
             ) : null}
           </div>

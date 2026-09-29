@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "d339cef5-34eb-406b-9da1-bd3f06af927b",
+  "id": "086996a6-8ede-4c27-97f5-164b3b8f6673",
   "prevId": "bc14728b-4969-4ac4-b882-7825bdffefaa",
   "tables": {
     "agent_action_drafts": {
@@ -6347,28 +6347,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": true
-        },
-        "deletionState": {
-          "name": "deletionState",
-          "type": "enum('active','redacting')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'active'"
-        },
-        "redactingAt": {
-          "name": "redactingAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "redactionRunId": {
-          "name": "redactionRunId",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         },
         "createdAt": {
           "name": "createdAt",
@@ -13933,7 +13911,7 @@
         },
         "status": {
           "name": "status",
-          "type": "enum('pending_claim','active','reauthorization_required','uninstalled','redacting')",
+          "type": "enum('pending_claim','active','reauthorization_required','uninstalled')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
@@ -14270,107 +14248,6 @@
       "uniqueConstraints": {},
       "checkConstraint": {}
     },
-    "shopify_privacy_request_selectors": {
-      "name": "shopify_privacy_request_selectors",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "requestId": {
-          "name": "requestId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "resourceType": {
-          "name": "resourceType",
-          "type": "enum('customer','order')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "position": {
-          "name": "position",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "externalIdEnc": {
-          "name": "externalIdEnc",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "externalIdHmac": {
-          "name": "externalIdHmac",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        }
-      },
-      "indexes": {
-        "uq_shopify_privacy_selector_position": {
-          "name": "uq_shopify_privacy_selector_position",
-          "columns": [
-            "requestId",
-            "resourceType",
-            "position"
-          ],
-          "isUnique": true
-        },
-        "idx_shopify_privacy_selector_org_request": {
-          "name": "idx_shopify_privacy_selector_org_request",
-          "columns": [
-            "organizationId",
-            "requestId"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_privacy_selector_lookup": {
-          "name": "idx_shopify_privacy_selector_lookup",
-          "columns": [
-            "organizationId",
-            "resourceType",
-            "externalIdHmac"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "shopify_privacy_request_selectors_id": {
-          "name": "shopify_privacy_request_selectors_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
     "shopify_privacy_requests": {
       "name": "shopify_privacy_requests",
       "columns": {
@@ -14418,18 +14295,11 @@
         },
         "status": {
           "name": "status",
-          "type": "enum('received','manual_review','completed','blocked_legal_retention','failed')",
+          "type": "enum('received','completed','blocked_legal_retention','failed')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
           "default": "'received'"
-        },
-        "admissionErrorCode": {
-          "name": "admissionErrorCode",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         },
         "recordsAffected": {
           "name": "recordsAffected",
@@ -14492,6 +14362,332 @@
       "compositePrimaryKeys": {
         "shopify_privacy_requests_id": {
           "name": "shopify_privacy_requests_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "shopify_sync_cursors": {
+      "name": "shopify_sync_cursors",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "storeId": {
+          "name": "storeId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "resource": {
+          "name": "resource",
+          "type": "enum('orders')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'orders'"
+        },
+        "cursor": {
+          "name": "cursor",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "watermarkUpdatedAt": {
+          "name": "watermarkUpdatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lastSuccessfulAt": {
+          "name": "lastSuccessfulAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lastErrorCode": {
+          "name": "lastErrorCode",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lastErrorAt": {
+          "name": "lastErrorAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "syncRequestCount": {
+          "name": "syncRequestCount",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(now())"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "onUpdate": true,
+          "default": "(now())"
+        }
+      },
+      "indexes": {
+        "uq_shopify_sync_cursor": {
+          "name": "uq_shopify_sync_cursor",
+          "columns": [
+            "storeId",
+            "resource"
+          ],
+          "isUnique": true
+        },
+        "idx_shopify_sync_org": {
+          "name": "idx_shopify_sync_org",
+          "columns": [
+            "organizationId"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_sync_cursors_id": {
+          "name": "shopify_sync_cursors_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "shopify_sync_requests": {
+      "name": "shopify_sync_requests",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "storeId": {
+          "name": "storeId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','succeeded','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "errorCode": {
+          "name": "errorCode",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "requestedAt": {
+          "name": "requestedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "answeredAt": {
+          "name": "answeredAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_shopify_sync_request_store": {
+          "name": "idx_shopify_sync_request_store",
+          "columns": [
+            "storeId",
+            "organizationId",
+            "status"
+          ],
+          "isUnique": false
+        },
+        "idx_shopify_sync_request_org": {
+          "name": "idx_shopify_sync_request_org",
+          "columns": [
+            "organizationId"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_sync_requests_id": {
+          "name": "shopify_sync_requests_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
+    "shopify_webhook_events": {
+      "name": "shopify_webhook_events",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "storeId": {
+          "name": "storeId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "webhookId": {
+          "name": "webhookId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "topic": {
+          "name": "topic",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "payloadSha256": {
+          "name": "payloadSha256",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "apiVersion": {
+          "name": "apiVersion",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('received','processed','failed','ignored')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'received'"
+        },
+        "errorCode": {
+          "name": "errorCode",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "receivedAt": {
+          "name": "receivedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(now())"
+        },
+        "processedAt": {
+          "name": "processedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "uq_shopify_webhook_id": {
+          "name": "uq_shopify_webhook_id",
+          "columns": [
+            "webhookId"
+          ],
+          "isUnique": true
+        },
+        "idx_shopify_webhook_store_status": {
+          "name": "idx_shopify_webhook_store_status",
+          "columns": [
+            "storeId",
+            "status"
+          ],
+          "isUnique": false
+        },
+        "idx_shopify_webhook_org_received": {
+          "name": "idx_shopify_webhook_org_received",
+          "columns": [
+            "organizationId",
+            "receivedAt"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_webhook_events_id": {
+          "name": "shopify_webhook_events_id",
           "columns": [
             "id"
           ]
@@ -14628,233 +14824,6 @@
       "compositePrimaryKeys": {
         "shopify_shop_redaction_jobs_id": {
           "name": "shopify_shop_redaction_jobs_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
-    "shopify_sync_cursors": {
-      "name": "shopify_sync_cursors",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "storeId": {
-          "name": "storeId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "resource": {
-          "name": "resource",
-          "type": "enum('orders')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'orders'"
-        },
-        "cursor": {
-          "name": "cursor",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "watermarkUpdatedAt": {
-          "name": "watermarkUpdatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "lastSuccessfulAt": {
-          "name": "lastSuccessfulAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "lastErrorCode": {
-          "name": "lastErrorCode",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        },
-        "updatedAt": {
-          "name": "updatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "onUpdate": true,
-          "default": "(now())"
-        }
-      },
-      "indexes": {
-        "uq_shopify_sync_cursor": {
-          "name": "uq_shopify_sync_cursor",
-          "columns": [
-            "storeId",
-            "resource"
-          ],
-          "isUnique": true
-        },
-        "idx_shopify_sync_org": {
-          "name": "idx_shopify_sync_org",
-          "columns": [
-            "organizationId"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "shopify_sync_cursors_id": {
-          "name": "shopify_sync_cursors_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
-    "shopify_webhook_events": {
-      "name": "shopify_webhook_events",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "storeId": {
-          "name": "storeId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "webhookId": {
-          "name": "webhookId",
-          "type": "varchar(128)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "topic": {
-          "name": "topic",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "payloadSha256": {
-          "name": "payloadSha256",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "apiVersion": {
-          "name": "apiVersion",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "enum('received','processed','failed','ignored')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'received'"
-        },
-        "errorCode": {
-          "name": "errorCode",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "receivedAt": {
-          "name": "receivedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        },
-        "processedAt": {
-          "name": "processedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "uq_shopify_webhook_id": {
-          "name": "uq_shopify_webhook_id",
-          "columns": [
-            "webhookId"
-          ],
-          "isUnique": true
-        },
-        "idx_shopify_webhook_store_status": {
-          "name": "idx_shopify_webhook_store_status",
-          "columns": [
-            "storeId",
-            "status"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_webhook_org_received": {
-          "name": "idx_shopify_webhook_org_received",
-          "columns": [
-            "organizationId",
-            "receivedAt"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "shopify_webhook_events_id": {
-          "name": "shopify_webhook_events_id",
           "columns": [
             "id"
           ]

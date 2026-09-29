@@ -13,18 +13,19 @@ import { TRPCError } from "@trpc/server";
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
-const state = vi.hoisted(() => ({ db: null as unknown, runSync: vi.fn() }));
+const state = vi.hoisted(() => ({ db: null as unknown, requestSync: vi.fn() }));
 
 vi.mock("../db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../db")>()),
   getDb: vi.fn(async () => state.db),
 }));
-vi.mock("../connectors/shopify/syncOrchestrator", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../connectors/shopify/syncOrchestrator")>()),
-  runShopifyOrderSync: state.runSync,
+vi.mock("../connectors/shopify/manualSync", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../connectors/shopify/manualSync")>()),
+  requestShopifyManualSync: state.requestSync,
 }));
 
 import { SHOPIFY_STORE_PUBLIC_FIELDS, shopifyConnectorRouter } from "./shopifyConnector";
+import { ShopifyManualSyncError } from "../connectors/shopify/manualSync";
 import { scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
 
 const OWN_ORG = 42;
@@ -204,30 +205,34 @@ describe("when privacy artifact delivery is staged in the authenticated portal",
 });
 
 describe("when someone starts a manual Shopify order sync", () => {
-  const REPORT = { success: true, fetched: 3, inserted: 1, updated: 1, unchanged: 1 };
+  const REQUESTED_AT = new Date("2026-09-28T10:00:00.000Z");
   beforeEach(() => {
-    state.runSync.mockReset();
-    state.runSync.mockResolvedValue(REPORT);
+    state.requestSync.mockReset();
+    state.requestSync.mockResolvedValue({ requestId: 88, requestNumber: 5, requestedAt: REQUESTED_AT });
   });
 
-  it("should sync the store within the administrator's own organisation", async () => {
-    await expect(caller("admin").syncOrdersNow({ storeId: 7 })).resolves.toEqual(REPORT);
-    // The tenant comes from the session, never the input; the orchestrator
-    // then selects the store by (storeId, organizationId).
-    expect(state.runSync).toHaveBeenCalledWith({ storeId: 7, organizationId: OWN_ORG, trigger: "manual" });
+  it("should queue a sync of the store within the administrator's own organisation, and answer at once", async () => {
+    await expect(caller("admin").syncOrdersNow({ storeId: 7 })).resolves.toEqual({
+      status: "queued",
+      requestNumber: 5,
+      requestedAt: REQUESTED_AT.toISOString(),
+    });
+    // The tenant comes from the session, never the input; the request then
+    // selects the store by (storeId, organizationId, active).
+    expect(state.requestSync).toHaveBeenCalledWith({ storeId: 7, organizationId: OWN_ORG });
   });
 
   it.each<Role>(["user", "operations", "compliance", "cfo"])(
     "should refuse %s before anything runs — it writes the tenant's reconciliation workspace",
     async (role) => {
       expect(await codeOf(() => caller(role).syncOrdersNow({ storeId: 7 }))).toBe("FORBIDDEN");
-      expect(state.runSync).not.toHaveBeenCalled();
+      expect(state.requestSync).not.toHaveBeenCalled();
     },
   );
 
   it("should refuse an administrator naming another organisation", async () => {
     expect(await codeOf(() => caller("admin").syncOrdersNow({ storeId: 7, organizationId: OTHER_ORG }))).toBe("FORBIDDEN");
-    expect(state.runSync).not.toHaveBeenCalled();
+    expect(state.requestSync).not.toHaveBeenCalled();
   });
 
   it("should refuse a read-only session, whatever its role", async () => {
@@ -238,33 +243,41 @@ describe("when someone starts a manual Shopify order sync", () => {
       res: {},
     } as never);
     expect(await codeOf(() => readOnly.syncOrdersNow({ storeId: 7 }))).toBe("FORBIDDEN");
-    expect(state.runSync).not.toHaveBeenCalled();
+    expect(state.requestSync).not.toHaveBeenCalled();
   });
 
   it("should let staff outside a portal sync the tenant they name", async () => {
     await caller("super_admin", 1).syncOrdersNow({ storeId: 7, organizationId: OTHER_ORG });
-    expect(state.runSync).toHaveBeenCalledWith({ storeId: 7, organizationId: OTHER_ORG, trigger: "manual" });
+    expect(state.requestSync).toHaveBeenCalledWith({ storeId: 7, organizationId: OTHER_ORG });
   });
 
   it("should confine staff inside a portal to the tenant on screen", async () => {
     expect(
       await codeOf(() => caller("super_admin", OTHER_ORG, OTHER_ORG).syncOrdersNow({ storeId: 7, organizationId: OWN_ORG })),
     ).toBe("FORBIDDEN");
-    expect(state.runSync).not.toHaveBeenCalled();
+    expect(state.requestSync).not.toHaveBeenCalled();
   });
 
-  it("should answer a failed sync with a generic precondition error, not the internal message", async () => {
-    state.runSync.mockRejectedValue(new Error("token decrypt failed for store 7: key tk1:abc"));
+  it("should give one answer for another tenant's store, an unknown id and a disconnected store", async () => {
+    state.requestSync.mockRejectedValue(new ShopifyManualSyncError("STORE_UNAVAILABLE"));
     const error = await caller("admin").syncOrdersNow({ storeId: 7 }).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(TRPCError);
-    expect((error as TRPCError).code).toBe("PRECONDITION_FAILED");
-    expect((error as TRPCError).message).not.toMatch(/decrypt|tk1/);
+    expect((error as TRPCError).code).toBe("NOT_FOUND");
+  });
+
+  it("should answer a sync that could not be queued with a generic error, not the internal message", async () => {
+    state.requestSync.mockRejectedValue(new Error("connect ECONNREFUSED redis.railway.internal:6379"));
+    const error = await caller("admin").syncOrdersNow({ storeId: 7 }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(TRPCError);
+    expect((error as TRPCError).code).toBe("SERVICE_UNAVAILABLE");
+    expect((error as TRPCError).message).not.toMatch(/ECONNREFUSED|redis/);
   });
 
   it("should log a failed sync's database error by its code, never its query or parameters", async () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-    state.runSync.mockRejectedValue(
+    state.requestSync.mockRejectedValue(
       Object.assign(new Error("Failed query: select … params: owner@merchant.com"), {
         name: "DrizzleQueryError",
         cause: Object.assign(new Error("Lock wait timeout exceeded"), { code: "ER_LOCK_WAIT_TIMEOUT" }),

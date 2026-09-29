@@ -60,3 +60,28 @@ export function canImportSettlementEvidence(input: SettlementEvidenceEligibility
       && !input.result,
   );
 }
+
+/**
+ * What the merchant needs to know about rows that name no Shopify order
+ * ReconcileAI has synced, or null when there are none.
+ *
+ * Before import the answer is still actionable — sync first. After it, it is
+ * an explanation: such rows are recorded against the file's own reference and
+ * flagged, and importing them again once the order syncs will not re-link
+ * them (it counts them as duplicates), so the merchant must hear it first.
+ */
+export function unalignedRowsNotice(
+  report: Pick<ShopifySettlementEvidenceDryRun, "committed" | "unalignedRows">
+    | Pick<ShopifySettlementEvidenceCommitted, "committed" | "unalignedRows">,
+): string | null {
+  const count = report.unalignedRows;
+  if (count === null || count === 0) return null;
+  if (!report.committed) {
+    return count === 1
+      ? "1 row names a Shopify order ReconcileAI has not synced. If it is a recent order, refresh order evidence before importing. Otherwise the row will be imported unmatched and flagged as an exception, and importing it again later will not link it to its order."
+      : `${count} rows name Shopify orders ReconcileAI has not synced. If they are recent orders, refresh order evidence before importing. Otherwise the rows will be imported unmatched and flagged as exceptions, and importing them again later will not link them to their orders.`;
+  }
+  return count === 1
+    ? "1 imported row names no Shopify order ReconcileAI has synced, so it was flagged as an exception. Importing the file again will not link it to its order."
+    : `${count} imported rows name no Shopify order ReconcileAI has synced, so they were flagged as exceptions. Importing the file again will not link them to their orders.`;
+}

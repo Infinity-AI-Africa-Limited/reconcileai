@@ -105,7 +105,7 @@ describe("customer privacy request admission", () => {
       expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "order", position: 1 }),
       expect.objectContaining({ requestId: 901, organizationId: 42, resourceType: "order", position: 2 }),
     ]);
-    const persistedStrings = JSON.stringify(fake.committed()).match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g) ?? [];
+    const persistedStrings = fake.committedJson().match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g) ?? [];
     expect(persistedStrings.map((value) => JSON.parse(value))).not.toEqual(
       expect.arrayContaining(["31", "41", "501", "502", "503"]),
     );
@@ -147,7 +147,7 @@ describe("customer privacy request admission", () => {
       status: "processed",
       errorCode: "invalid_privacy_selectors",
     });
-    expect(JSON.stringify(fake.committed())).not.toContain("501");
+    expect(fake.committedJson()).not.toContain("501");
   });
 
   it("atomically admits valid customer redaction work with a store-local write fence", async () => {
