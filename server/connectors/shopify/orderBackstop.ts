@@ -24,7 +24,7 @@ import { shopifyConnectorStores, shopifySyncCursors } from "../../../drizzle/sho
 import { ENV } from "../../_core/env";
 import { getDb, type DbExecutor } from "../../db";
 import { loggableError } from "../../dbErrors";
-import { singleFlight } from "./privacyQueue";
+import { singleFlight } from "../../singleFlight";
 import { runShopifyOrderSync } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -56,8 +56,9 @@ export interface ShopifyOrderBackstopDeps {
 export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {}): Promise<ShopifyOrderBackstopReport> {
   const report: ShopifyOrderBackstopReport = { scanned: 0, synced: 0, failed: 0 };
   let stores: Array<{ storeId: number; organizationId: number }>;
+  let db: Db | null;
   try {
-    const db = deps.db ?? (await getDb());
+    db = deps.db ?? (await getDb());
     if (!db) throw new Error("Database unavailable");
     const now = (deps.now ?? (() => new Date()))();
     const staleBefore = new Date(now.getTime() - (deps.intervalMs ?? SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS));
@@ -101,7 +102,7 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
   for (const store of stores) {
     report.scanned += 1;
     try {
-      await recordShopifyBackstopAttempt(deps.db ?? (await getDb()), store);
+      await recordShopifyBackstopAttempt(db, store);
       await sync({ storeId: store.storeId, organizationId: store.organizationId, trigger: "backstop" });
       report.synced += 1;
     } catch (error) {

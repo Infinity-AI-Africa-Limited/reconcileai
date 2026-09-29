@@ -8,11 +8,28 @@
  * strands work (a dispatch nobody re-sends, or one no worker can take).
  */
 import { and, eq, inArray, isNull, lte, or } from "drizzle-orm";
+import type { MySqlColumn } from "drizzle-orm/mysql-core";
 import {
   shopifyPrivacyCustomerRedactionJobs,
   shopifyPrivacyDataRequestJobs,
   shopifyShopRedactionJobs,
 } from "../../../drizzle/shopify_schema";
+
+/**
+ * A `processing` row is reclaimable once its lease has expired — and a row
+ * carrying NO lease counts as expired.
+ *
+ * `leaseExpiresAt` is nullable, and `NULL <= now` is NULL rather than true, so
+ * a bare `lte` would make such a row unclaimable for ever while
+ * `isLivePrivacyJobStatus` still calls it live — the outbox would re-arm a
+ * dispatch no worker can ever take. Every writer sets the lease in the same
+ * UPDATE as the status, so this state should not arise; it is admitted here so
+ * that if it ever does (a backfill, a manual edit, a writer added later) the
+ * job is recovered rather than stranded in silence.
+ */
+export function leaseExpired(column: MySqlColumn, now: Date) {
+  return or(isNull(column), lte(column, now));
+}
 
 /** Job states that still owe work. Anything else is terminal or awaiting a person. */
 export const LIVE_PRIVACY_JOB_STATUSES = ["received", "failed_retryable", "processing"] as const;
@@ -41,7 +58,7 @@ export function claimableDataRequestJob(now: Date) {
     ),
     and(
       eq(shopifyPrivacyDataRequestJobs.status, "processing"),
-      lte(shopifyPrivacyDataRequestJobs.leaseExpiresAt, now),
+      leaseExpired(shopifyPrivacyDataRequestJobs.leaseExpiresAt, now),
     ),
   );
 }
@@ -61,7 +78,7 @@ export function claimableShopRedactionJob(now: Date) {
     ),
     and(
       eq(shopifyShopRedactionJobs.status, "processing"),
-      lte(shopifyShopRedactionJobs.leaseExpiresAt, now),
+      leaseExpired(shopifyShopRedactionJobs.leaseExpiresAt, now),
     ),
   );
 }
@@ -77,7 +94,7 @@ export function claimableCustomerRedactionJob(now: Date) {
     ),
     and(
       eq(shopifyPrivacyCustomerRedactionJobs.status, "processing"),
-      lte(shopifyPrivacyCustomerRedactionJobs.leaseExpiresAt, now),
+      leaseExpired(shopifyPrivacyCustomerRedactionJobs.leaseExpiresAt, now),
     ),
   );
 }

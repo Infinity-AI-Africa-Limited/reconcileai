@@ -1,18 +1,14 @@
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, gt, ne } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { organizations } from "../../drizzle/schema";
-import {
-  shopifyConnectorStores,
-  shopifyPrivacyArtifacts,
-  shopifyPrivacyDataRequestJobs,
-} from "../../drizzle/shopify_schema";
+import { shopifyConnectorStores } from "../../drizzle/shopify_schema";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { loggableError } from "../dbErrors";
 import { resolveOrgScope } from "../_core/tenancy";
 import { canActOnTenant } from "./shared";
 import { requestShopifyManualSync, ShopifyManualSyncError } from "../connectors/shopify/manualSync";
+import { shopifyPrivacyProcedures } from "./shopifyPrivacy";
 
 /**
  * The merchant-safe view of a store. Tokens live in another table and never
@@ -61,60 +57,7 @@ export const shopifyConnectorRouter = router({
         .orderBy(desc(shopifyConnectorStores.createdAt));
     }),
 
-  /**
-   * Authenticated portal delivery channel for privacy exports. No selector,
-   * object key, digest, internal tenant/store id or presigned URL is projected.
-   * Super admins are intentionally not a substitute for the merchant claimant.
-   */
-  listPrivacyDeliveries: protectedProcedure.query(async ({ ctx }) => {
-    if (ctx.user.role !== "admin" || !ctx.user.isActive || !ctx.user.organizationId) {
-      throw new TRPCError({ code: "FORBIDDEN", message: "Merchant administrator access is required" });
-    }
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    return db
-      .select({
-        artifactId: shopifyPrivacyArtifacts.publicId,
-        kind: shopifyPrivacyArtifacts.artifactKind,
-        recordsFound: shopifyPrivacyArtifacts.recordsFound,
-        generatedAt: shopifyPrivacyArtifacts.generatedAt,
-        expiresAt: shopifyPrivacyArtifacts.expiresAt,
-        deliveryStatus: shopifyPrivacyArtifacts.deliveryStatus,
-      })
-      .from(shopifyPrivacyArtifacts)
-      .innerJoin(
-        shopifyConnectorStores,
-        and(
-          eq(shopifyConnectorStores.id, shopifyPrivacyArtifacts.storeId),
-          eq(shopifyConnectorStores.organizationId, shopifyPrivacyArtifacts.organizationId),
-          eq(shopifyConnectorStores.claimedByUserId, ctx.user.id),
-        ),
-      )
-      .innerJoin(
-        shopifyPrivacyDataRequestJobs,
-        and(
-          eq(shopifyPrivacyDataRequestJobs.requestId, shopifyPrivacyArtifacts.requestId),
-          eq(shopifyPrivacyDataRequestJobs.organizationId, shopifyPrivacyArtifacts.organizationId),
-          eq(shopifyPrivacyDataRequestJobs.storeId, shopifyPrivacyArtifacts.storeId),
-        ),
-      )
-      .innerJoin(organizations, eq(organizations.id, shopifyPrivacyArtifacts.organizationId))
-      .where(
-        and(
-          eq(shopifyPrivacyArtifacts.organizationId, ctx.user.organizationId),
-          eq(shopifyPrivacyArtifacts.recipientUserId, ctx.user.id),
-          eq(shopifyPrivacyArtifacts.status, "ready"),
-          gt(shopifyPrivacyArtifacts.expiresAt, new Date()),
-          // The same rule as the download (mayDownloadShopifyPrivacyArtifact):
-          // offered only once its job says so, and never after shop/redact
-          // has fenced the tenant.
-          eq(shopifyPrivacyDataRequestJobs.status, "awaiting_delivery"),
-          eq(organizations.deletionState, "active"),
-          ne(shopifyConnectorStores.status, "redacting"),
-        ),
-      )
-      .orderBy(desc(shopifyPrivacyArtifacts.generatedAt));
-  }),
+  ...shopifyPrivacyProcedures,
 
   /**
    * Queues a merchant-authorised read-only order evidence sync and answers at

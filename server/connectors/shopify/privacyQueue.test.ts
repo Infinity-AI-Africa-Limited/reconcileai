@@ -9,7 +9,8 @@ vi.mock("../../jobQueue", () => ({
   createQueue: state.createQueue,
 }));
 
-import { enqueueShopifyPrivacyJob, runShopifyPrivacyRecoverySweep, singleFlight } from "./privacyQueue";
+import { singleFlight } from "../../singleFlight";
+import { enqueueShopifyPrivacyJob, runShopifyPrivacyRecoverySweep } from "./privacyQueue";
 
 describe("Shopify privacy durable queue boundary", () => {
   beforeEach(() => {

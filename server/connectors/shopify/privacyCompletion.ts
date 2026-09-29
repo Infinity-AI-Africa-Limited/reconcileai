@@ -29,6 +29,7 @@ import {
   claimableDataRequestJob,
   claimableShopRedactionJob,
   isLivePrivacyJobStatus,
+  leaseExpired,
   ShopifyPrivacyJobNotClaimableError,
 } from "./privacyJobState";
 
@@ -215,7 +216,7 @@ export async function dispatchShopifyPrivacyOutbox(
         due(now),
         and(
           eq(shopifyPrivacyQueueOutbox.status, "dispatching"),
-          lte(shopifyPrivacyQueueOutbox.leaseExpiresAt, now),
+          leaseExpired(shopifyPrivacyQueueOutbox.leaseExpiresAt, now),
         ),
       ),
     )
@@ -242,7 +243,7 @@ export async function dispatchShopifyPrivacyOutbox(
             due(now),
             and(
               eq(shopifyPrivacyQueueOutbox.status, "dispatching"),
-              lte(shopifyPrivacyQueueOutbox.leaseExpiresAt, now),
+              leaseExpired(shopifyPrivacyQueueOutbox.leaseExpiresAt, now),
             ),
           ),
         ),

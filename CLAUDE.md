@@ -1389,7 +1389,31 @@ Most of the original launch-blocking debt is now **resolved**. Current status:
 |---|---|---|
 | Manus OAuth must be replaced | ✅ Done | Email magic-link auth is live (Section 5) |
 | Manus Forge LLM won't work outside Manus | ✅ Done | Production uses `DIRECT_LLM_API_KEY` (Anthropic) |
-| No background job queue | ✅ Code done | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. **Open:** provision Redis on Railway (`REDIS_URL`) to activate durable/multi-instance mode; required before horizontal scaling |
+| No background job queue | 🔴 **Redis not provisioned — now blocking** | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. **Provisioning `REDIS_URL` on Railway is no longer just a scaling item — see the box below** |
+
+> 🔴 **`REDIS_URL` is a HARD prerequisite for the Shopify connector, not a scaling nicety.**
+>
+> Two Shopify paths call `createQueue(..., { requireDurable: true })`, which
+> **throws** `DurableQueueUnavailableError("REDIS_URL is not configured")`
+> (`server/jobQueue.ts`) rather than falling back:
+>
+> - **Order webhooks** — answered `503`, so Shopify retries. Orders still arrive,
+>   because `server/connectors/shopify/orderBackstop.ts` syncs every stale store
+>   on a 15-minute timer. Degraded, not lost.
+> - **Privacy / GDPR webhooks** (`customers/data_request`, `customers/redact`,
+>   `shop/redact`) — **there is no equivalent backstop.** The delivery is
+>   acknowledged `200` because the job and its outbox row commit together, then
+>   `dispatchShopifyPrivacyOutbox` can never enqueue it; the recovery sweep
+>   catches the failure and logs `durable_queue_unavailable` every 30 seconds,
+>   for ever. Shopify sees success while nothing is ever actioned.
+>
+> That is a **mandatory compliance obligation silently unmet** (30 days), and it
+> fails App Store review. The loud-failure design is deliberate — the queue
+> refuses rather than pretending an accepted request reached an operational
+> queue — so the remedy is operational: **provision Redis before any merchant
+> installs the app.** Verify afterwards by confirming the boot log says
+> `BullMQ backend active` for `shopify-privacy`, not by observing that webhooks
+> return 200 — they return 200 either way.
 | No test coverage on reconciliation engine | ✅ Done | Vitest coverage across engines, routers, reports (`*.test.ts` colocated) |
 | No rate limiting on public API | ✅ Done | `server/rateLimiter.ts` guards public API + ingestion |
 | Email delivery | ✅ Done | Resend integration (`server/_core/email.ts`); safe no-op without keys |

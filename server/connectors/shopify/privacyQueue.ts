@@ -1,4 +1,5 @@
 import { createQueue, type JobQueue } from "../../jobQueue";
+import { singleFlight } from "../../singleFlight";
 import { loggableError } from "../../dbErrors";
 import {
   cleanupExpiredShopifyPrivacyArtifacts,
@@ -95,26 +96,6 @@ export async function runShopifyPrivacyRecoverySweep(deps: {
   } catch (error) {
     console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed", ...loggableError(error) });
   }
-}
-
-/**
- * Wrap a sweep so at most one runs at a time in this process. On a timer, a
- * sweep slower than its interval would otherwise start another beside it, and
- * under a slow database they pile up until they exhaust the connection pool —
- * precisely when the pool is least able to spare them. A tick that finds a
- * sweep still running is skipped; the next tick tries again.
- */
-export function singleFlight(task: () => Promise<void>): () => Promise<void> {
-  let running = false;
-  return async () => {
-    if (running) return;
-    running = true;
-    try {
-      await task();
-    } finally {
-      running = false;
-    }
-  };
 }
 
 /** Start one process-local DB recovery scanner; correctness remains in the DB claims. */
