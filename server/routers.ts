@@ -98,6 +98,8 @@ import {
 import { agentActionDrafts, agentMemory, organizations, users } from "../drizzle/schema";
 import { getDb } from "./db";
 import { groupMemoryGrowthByMonth, sixMonthsAgoUtc } from "./agentMemoryStats";
+import { loggableError } from "./dbErrors";
+import { stackFrames, errorSummary } from "./errorText";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -3558,7 +3560,7 @@ export const appRouter = router({
               console.error("[addUser] welcome email not sent — the user exists but has no sign-in link");
             }
           } catch (err) {
-            console.error("[addUser] Failed to send welcome email:", err);
+            console.error("[addUser] Failed to send welcome email:", loggableError(err));
           }
         }
         return { success: true, userId: newUserId, invited };
@@ -3600,7 +3602,7 @@ export const appRouter = router({
           await logAudit(ctx.user.id, "resend_welcome_link", "user", target.id, { email: target.email }, ip, ua, tenantOf.get(target.id));
           return { success: true, magicLink };
         } catch (err: any) {
-          console.error("[resendWelcomeLink] Failed:", err);
+          console.error("[resendWelcomeLink] Failed:", loggableError(err));
           // A TRPCError raised inside this try was raised deliberately and says
           // something the operator can act on ("check APP_URL"). Re-wrapping it
           // in a generic message throws that guidance away — the admin would
@@ -3980,7 +3982,7 @@ export const appRouter = router({
             console.error("[createOrganization] tenant baseline partial failure:", JSON.stringify(baseline.steps));
           }
         } catch (err) {
-          console.error("[createOrganization] tenant baseline failed:", err);
+          console.error("[createOrganization] tenant baseline failed:", loggableError(err));
         }
         // Optional custom channel pack (LAPO). Idempotent; a failure here never
         // aborts org creation — re-run via lapo.provision.
@@ -3991,7 +3993,7 @@ export const appRouter = router({
             const r = await provisionLapoForOrg(newOrgId);
             customChannelResult = { channels: r.channelIds.length, templates: r.templates.inserted };
           } catch (err) {
-            console.error("[createOrganization] LAPO channel pack failed (re-run lapo.provision):", err);
+            console.error("[createOrganization] LAPO channel pack failed (re-run lapo.provision):", loggableError(err));
           }
         } else if (input.customChannel === "uganda") {
           // Uganda market pack: eight rail channels (MTN/Airtel, ABC shared
@@ -4001,7 +4003,7 @@ export const appRouter = router({
             const r = await provisionUgandaForOrg(newOrgId);
             customChannelResult = { channels: r.channelIds.length, templates: r.templates.inserted };
           } catch (err) {
-            console.error("[createOrganization] Uganda channel pack failed (re-run uganda.provision):", err);
+            console.error("[createOrganization] Uganda channel pack failed (re-run uganda.provision):", loggableError(err));
           }
         }
         // Retail / e-commerce vertical (SHOPLINE): seed the retail exception
@@ -4013,7 +4015,7 @@ export const appRouter = router({
             const { seedRetailResolutionTemplates } = await import("./exceptions/retail-commerce");
             await seedRetailResolutionTemplates(newOrgId);
           } catch (err) {
-            console.error("[createOrganization] retail template seed failed:", err);
+            console.error("[createOrganization] retail template seed failed:", loggableError(err));
           }
         }
         await logAudit(ctx.user.id, "create_organization", "organization", newOrgId, {
@@ -4829,7 +4831,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           sig.signatureHash = ei.signatureHashOf(sig);
           await ei.recordLocalSignature(orgId, sig);
         } catch (err) {
-          console.error("[ExceptionIntelligence] signature record failed (non-fatal):", err);
+          console.error("[ExceptionIntelligence] signature record failed (non-fatal):", loggableError(err));
         }
 
         // Named: the memory is filed under orgId, so its record goes there too.
@@ -4915,7 +4917,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
             sharedRecommendations = await ei.getSharedRecommendations(orgId, resolvedCategory);
           }
         } catch (err) {
-          console.error("[ExceptionIntelligence] shared recommendation lookup failed (non-fatal):", err);
+          console.error("[ExceptionIntelligence] shared recommendation lookup failed (non-fatal):", loggableError(err));
         }
 
         return { cases: results, sharedRecommendations };
@@ -5788,7 +5790,7 @@ Always be specific, reference actual exception IDs and amounts where available, 
           // No certificate on a failed or partial run. A document asserting
           // destruction that did not complete is worse than an error, because
           // it is the artefact a regulator or counterparty relies on.
-          const message = err instanceof Error ? err.message : String(err);
+          const message = errorSummary(err);
           await drizzle.update(dataDeletionRequests).set({
             status: "failed",
             notes: [input.notes, `Deletion failed: ${message}`].filter(Boolean).join(" | ").slice(0, 2000),
@@ -7040,7 +7042,7 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
       const recs = await ei.getSharedRecommendations(tenantId, category);
       guidance = learning.formatNetworkGuidance(recs);
     } catch (err) {
-      console.error(`[AI pass] network lookup for "${category}" failed (non-fatal):`, err);
+      console.error(`[AI pass] network lookup for "${category}" failed (non-fatal):`, loggableError(err));
     }
     networkGuidanceByCategory.set(category, guidance);
     return guidance;
@@ -7060,7 +7062,7 @@ async function runDeferredAiAnalysis(jobId: number): Promise<void> {
       // has already been verified before any exception or AI processing.
       await db.updateException(exc.id, tenantId, { aiAnalysis: analysis });
     } catch (err) {
-      console.error(`[AI pass] exception ${exc.id} failed:`, err);
+      console.error(`[AI pass] exception ${exc.id} failed:`, loggableError(err));
     }
   }
 }
@@ -7092,7 +7094,7 @@ async function runReconciliation(
   // swallowed: a failed heartbeat must not fail the reconciliation.
   const heartbeat = setInterval(() => {
     db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
-      console.warn(`[Reconciliation] heartbeat failed for job ${jobId} (non-fatal):`, err),
+      console.warn(`[Reconciliation] heartbeat failed for job ${jobId} (non-fatal):`, loggableError(err)),
     );
   }, RECONCILIATION_HEARTBEAT_MS);
   if (typeof heartbeat.unref === "function") heartbeat.unref();
@@ -7352,25 +7354,25 @@ async function runReconciliation(
 
     // Send email alerts based on user preferences
     checkAndSendAlerts(jobId, userId).catch((err) =>
-      console.error("[EmailReport] Alert check failed:", err)
+      console.error("[EmailReport] Alert check failed:", loggableError(err))
     );
 
     // Deferred AI analysis — fire-and-forget so the job is already "completed".
     // High/critical exceptions get their Claude narrative filled in shortly after,
     // keeping LLM latency entirely out of the reconciliation hot path.
     runDeferredAiAnalysis(jobId).catch((err) =>
-      console.error("[AI pass] deferred analysis failed:", err)
+      console.error("[AI pass] deferred analysis failed:", loggableError(err))
     );
 
   } catch (error) {
-    console.error("[Reconciliation] Job failed:", error);
+    console.error("[Reconciliation] Job failed:", { ...loggableError(error), frames: stackFrames(error) });
     await db.updateReconciliationJob(jobId, {
       status: "failed",
       completedAt: new Date(),
     });
 
-    await trackProgress(jobId, "failed", { message: `Failed: ${String(error)}` });
-    dispatchWebhook("reconciliation.failed", { jobId, error: String(error) });
+    await trackProgress(jobId, "failed", { message: `Failed: ${errorSummary(error)}` });
+    dispatchWebhook("reconciliation.failed", { jobId, error: errorSummary(error) });
   } finally {
     // Every exit path, including the early return when the run was abandoned
     // mid-flight — a heartbeat outliving its run would keep a dead job looking
@@ -7397,7 +7399,7 @@ startDemoTimelineRoll();
 // Runs asynchronously — does not block server startup
 setImmediate(() => {
   prewarmDemoUser().catch((err) =>
-    console.error("[Boot] prewarmDemoUser failed:", err)
+    console.error("[Boot] prewarmDemoUser failed:", loggableError(err))
   );
 });
 

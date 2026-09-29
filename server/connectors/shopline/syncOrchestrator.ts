@@ -55,6 +55,8 @@ import {
   type RetailReconciliationConfig,
 } from "../../retailReconciliationEngine";
 import type { Transaction, InsertTransaction } from "../../../drizzle/schema";
+import { loggableError } from "../../dbErrors";
+import { errorSummary } from "../../errorText";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -125,7 +127,7 @@ async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promis
       )
       .where(eq(slConnectorStores.id, slStoreId));
   } catch (err) {
-    console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, err);
+    console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, loggableError(err));
   }
 }
 
@@ -540,7 +542,7 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       ...(degraded.length > 0 ? { degradedLegs: degraded } : {}),
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorSummary(err);
     // Close out a batch opened by this cycle. Without this, any throw after
     // Step 3 leaves it at "processing" forever — the upload history then shows
     // phantom in-flight syncs that never resolve. Best-effort: a bookkeeping
@@ -555,7 +557,7 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       } catch (cleanupErr) {
         console.error(
           `[SHOPLINE] Failed to close batch ${openBatchId} after sync error:`,
-          cleanupErr,
+          loggableError(cleanupErr),
         );
       }
     }
@@ -922,7 +924,7 @@ export async function runHistoricalBackfill(opts: {
         exceptionCount += report.exceptionCount;
       }
     } catch (err) {
-      errors.push(`${from.toISOString().slice(0, 10)}: ${err instanceof Error ? err.message : String(err)}`);
+      errors.push(`${from.toISOString().slice(0, 10)}: ${errorSummary(err)}`);
     }
   }
 

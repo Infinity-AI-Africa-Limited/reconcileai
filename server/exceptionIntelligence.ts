@@ -34,6 +34,7 @@ import {
   exceptions as exceptionsTable,
   transactions as transactionsTable,
 } from "../drizzle/schema";
+import { loggableError } from "./dbErrors";
 
 /** Minimum distinct contributing organizations before a pattern can be served. */
 export const K_ANON_THRESHOLD = 3;
@@ -378,7 +379,7 @@ export async function captureExceptionOutcome(params: {
     });
     await recordLocalSignature(params.organizationId, sig);
   } catch (err) {
-    console.error("[ExceptionIntelligence] outcome capture failed (non-fatal):", err);
+    console.error("[ExceptionIntelligence] outcome capture failed (non-fatal):", loggableError(err));
   }
 }
 
@@ -438,7 +439,7 @@ export async function retractResolutionLearning(
         }
       }
     } catch (err) {
-      console.error("[ExceptionIntelligence] signature retraction failed (non-fatal):", err);
+      console.error("[ExceptionIntelligence] signature retraction failed (non-fatal):", loggableError(err));
     }
   }
 

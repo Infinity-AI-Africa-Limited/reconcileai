@@ -28,6 +28,7 @@ import { tenantEncryptionKeys } from "../../drizzle/tenant_schema";
 import { getDb } from "../db";
 import { isDuplicateKeyError } from "../dbErrors";
 import { ENV } from "./env";
+import { errorSummary } from "../errorText";
 
 const ALGO = "aes-256-gcm";
 export const TENANT_CIPHERTEXT_PREFIX = "tk1";
@@ -105,7 +106,7 @@ class KmsProvider implements MasterKeyProvider {
         .catch((err: unknown) => {
           this.clientPromise = null;
           throw new Error(
-            `TENANT_KEY_PROVIDER=aws_kms but @aws-sdk/client-kms is not available (pnpm add @aws-sdk/client-kms): ${err instanceof Error ? err.message : String(err)}`,
+            `TENANT_KEY_PROVIDER=aws_kms but @aws-sdk/client-kms is not available (pnpm add @aws-sdk/client-kms): ${errorSummary(err)}`,
           );
         });
     }

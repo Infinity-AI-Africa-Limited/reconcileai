@@ -13,6 +13,8 @@ import { getDb } from "./db";
 import { s3CsvExports } from "../drizzle/schema";
 import { and, eq } from "drizzle-orm";
 import { storagePut, storageDelete } from "./storage";
+import { loggableError } from "./dbErrors";
+import { errorSummary } from "./errorText";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -143,9 +145,9 @@ export async function purgeExpiredCsvExports(): Promise<PurgeResult> {
       );
     } catch (err) {
       result.failed++;
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorSummary(err);
       result.errors.push(`Failed to delete ${record.s3Key}: ${msg}`);
-      console.error(`[S3 Cleanup] Error deleting ${record.s3Key}:`, err);
+      console.error(`[S3 Cleanup] Error deleting ${record.s3Key}:`, loggableError(err));
     }
   }
 

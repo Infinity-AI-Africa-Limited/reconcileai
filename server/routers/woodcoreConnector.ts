@@ -34,6 +34,7 @@ import {
 import { encryptSecretForOrg, maskSecretForOrg } from "../connectors/woodcore/secrets";
 import { runBatchSync } from "../connectors/woodcore/sync";
 import { pushWriteBackNote } from "../connectors/woodcore/writeback";
+import { loggableError } from "../dbErrors";
 
 const entitySchema = z.enum(["savings_transaction", "loan_transaction", "journal_entry"]);
 
@@ -342,7 +343,7 @@ export const woodcoreConnectorRouter = router({
         scope: input?.scope ?? "all",
         windowFrom: input?.windowFrom,
         windowTo: input?.windowTo,
-      }).catch((e) => console.error("[wc-connector] manual sync failed:", e));
+      }).catch((e) => console.error("[wc-connector] manual sync failed:", loggableError(e)));
       return { started: true };
     }),
 
@@ -634,7 +635,7 @@ export const woodcoreConnectorRouter = router({
             newValue: JSON.stringify({ onboardingChannel: input.cbsType, configId: result.configId }),
           });
         } catch (e) {
-          console.error("[wc-onboarding] platform event failed:", e);
+          console.error("[wc-onboarding] platform event failed:", loggableError(e));
         }
         return result;
       } catch (err) {

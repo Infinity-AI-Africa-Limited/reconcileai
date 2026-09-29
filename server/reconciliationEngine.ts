@@ -1,6 +1,7 @@
 import { Transaction, InsertMatch, InsertException } from "../drizzle/schema";
 import { invokeLLM } from "./_core/llm";
 import { REVERSAL_PATTERNS } from "./reversalSignals";
+import { loggableError } from "./dbErrors";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -785,7 +786,7 @@ Provide a brief analysis and recommended action.`,
     const content = response.choices?.[0]?.message?.content;
     return typeof content === "string" ? content : "AI analysis unavailable.";
   } catch (error) {
-    console.error("[AI Analysis] Failed:", error);
+    console.error("[AI Analysis] Failed:", loggableError(error));
     return "AI analysis temporarily unavailable. Please review manually.";
   }
 }

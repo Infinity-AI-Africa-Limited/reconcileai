@@ -21,6 +21,8 @@ import {
   SHOPLINE_WEBHOOK_TOPICS,
 } from "../../../shared/shoplineConstants";
 import { ENV } from "../../_core/env";
+import { loggableError } from "../../dbErrors";
+import { stackFrames, errorSummary } from "../../errorText";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -103,7 +105,7 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
         }
       } catch (err) {
         // Recovery failing must not take the polling pass down with it.
-        console.error("[shoplineSyncCycle] webhook replay failed:", err);
+        console.error("[shoplineSyncCycle] webhook replay failed:", loggableError(err));
       }
     }
 
@@ -142,7 +144,7 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
           matchedCount: 0,
           exceptionCount: 0,
           durationMs: Date.now() - startedAt,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorSummary(err),
         });
       }
     }
@@ -181,10 +183,10 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       })),
     });
   } catch (err) {
-    console.error("[shoplineSyncCycle] fatal error:", err);
+    console.error("[shoplineSyncCycle] fatal error:", { ...loggableError(err), frames: stackFrames(err) });
     res.status(500).json({
-      error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
+      error: errorSummary(err),
+      frames: stackFrames(err),
       context: { url: req.url },
       timestamp: new Date().toISOString(),
     });
@@ -230,7 +232,7 @@ export async function handleShoplineDailyBatch(req: Request, res: Response): Pro
           matchedCount: 0,
           exceptionCount: 0,
           durationMs: Date.now() - startedAt,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorSummary(err),
         });
       }
     }
@@ -266,10 +268,10 @@ export async function handleShoplineDailyBatch(req: Request, res: Response): Pro
       })),
     });
   } catch (err) {
-    console.error("[shoplineDailyBatch] fatal error:", err);
+    console.error("[shoplineDailyBatch] fatal error:", { ...loggableError(err), frames: stackFrames(err) });
     res.status(500).json({
-      error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
+      error: errorSummary(err),
+      frames: stackFrames(err),
       context: { url: req.url },
       timestamp: new Date().toISOString(),
     });
@@ -357,12 +359,12 @@ export async function handleShoplineWebhookReconciler(
             result.registeredCount++;
           } catch (regErr) {
             result.errors.push(
-              `Failed to register ${topic}: ${regErr instanceof Error ? regErr.message : String(regErr)}`,
+              `Failed to register ${topic}: ${errorSummary(regErr)}`,
             );
           }
         }
       } catch (err) {
-        result.errors.push(err instanceof Error ? err.message : String(err));
+        result.errors.push(errorSummary(err));
       }
 
       results.push(result);
@@ -388,10 +390,10 @@ export async function handleShoplineWebhookReconciler(
       results,
     });
   } catch (err) {
-    console.error("[shoplineWebhookReconciler] fatal error:", err);
+    console.error("[shoplineWebhookReconciler] fatal error:", { ...loggableError(err), frames: stackFrames(err) });
     res.status(500).json({
-      error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
+      error: errorSummary(err),
+      frames: stackFrames(err),
       context: { url: req.url },
       timestamp: new Date().toISOString(),
     });

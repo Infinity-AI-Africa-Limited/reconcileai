@@ -20,6 +20,8 @@ import {
 import {
   HANDOVER_MARKDOWN, HANDOVER_TITLE, HANDOVER_UPDATED,
 } from "../content/technicalHandover";
+import { loggableError } from "../dbErrors";
+import { errorSummary } from "../errorText";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
 const MAX_BASE64_LEN = 20 * 1024 * 1024;
@@ -79,7 +81,7 @@ export const pocRouter = router({
           fileName: input.fileName,
         });
       } catch (err: any) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: err?.message || "Could not extract transactions from this file." });
+        throw new TRPCError({ code: "BAD_REQUEST", message: (err instanceof Error && errorSummary(err)) || "Could not extract transactions from this file." });
       }
 
       const { pocUploads } = await import("../../drizzle/poc_schema");
@@ -130,7 +132,7 @@ export const pocRouter = router({
           excludeFeeNoise: input.excludeFeeNoise,
         });
       } catch (err: any) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: err?.message || "Reconciliation failed." });
+        throw new TRPCError({ code: "BAD_REQUEST", message: (err instanceof Error && errorSummary(err)) || "Reconciliation failed." });
       }
     }),
 
@@ -266,7 +268,7 @@ export const pocRouter = router({
         const result = await storagePut(s3Key, fileBuffer, input.mimeType);
         s3Url = result.url;
       } catch (err) {
-        console.warn("[POC saveFile] S3 unavailable, storing metadata only:", (err as Error).message);
+        console.warn("[POC saveFile] S3 unavailable, storing metadata only:", loggableError(err));
       }
 
       // Persist metadata

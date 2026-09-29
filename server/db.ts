@@ -38,6 +38,7 @@ import {
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 import { AUDIT_WRITER_VERSION, auditTimestamp, computeRecordHash } from "./auditChain";
+import { loggableError } from "./dbErrors";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ export async function getDb() {
     try {
       _db = drizzle(process.env.DATABASE_URL, { schema, mode: "default" });
     } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
+      console.warn("[Database] Failed to connect:", loggableError(error));
       _db = null;
     }
   }
@@ -226,7 +227,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     if (!values.lastSignedIn) values.lastSignedIn = new Date();
     if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
     await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
-  } catch (error) { console.error("[Database] Failed to upsert user:", error); throw error; }
+  } catch (error) { console.error("[Database] Failed to upsert user:", loggableError(error)); throw error; }
 }
 
 export async function getUserByOpenId(openId: string) {

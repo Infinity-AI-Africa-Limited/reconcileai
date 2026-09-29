@@ -22,6 +22,7 @@ import {
   settlementImportFailure,
   shoplineSettlementImportInput,
 } from "../connectors/shopline/settlementImportRequest";
+import { errorSummary } from "../errorText";
 
 export const shoplineSettlementImportProcedures = {
   /**
@@ -53,7 +54,7 @@ export const shoplineSettlementImportProcedures = {
 
       const raw = input.contentEncoding === "base64" ? Buffer.from(input.content, "base64") : input.content;
       const parsed = await parseSettlementFile(raw, input.fileName).catch((err: unknown) => {
-        throw new TRPCError({ code: "BAD_REQUEST", message: err instanceof Error ? err.message : "Could not read the file" });
+        throw new TRPCError({ code: "BAD_REQUEST", message: err instanceof Error ? errorSummary(err) : "Could not read the file" });
       });
       const { mapping, missingRequired } = resolveImportColumns(parsed.headers, input);
       const summary = {

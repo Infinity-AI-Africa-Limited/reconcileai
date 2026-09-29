@@ -29,6 +29,7 @@ import { admitWebhook, processAdmittedWebhook } from "./webhookHandler";
 import { processGdprRequest, verifyGdprSignature, type GdprKind } from "./gdpr";
 import { fetchStoreMetadata, registerWebhook as apiRegisterWebhook } from "./apiClient";
 import type { ShoplineApiOptions } from "./apiClient";
+import { loggableError } from "../../dbErrors";
 
 /**
  * Signature verification for SHOPLINE's OAuth GET routes (install + callback).
@@ -212,7 +213,7 @@ export function createShoplineRouter(): Router {
 
       return res.redirect(302, authUrl);
     } catch (err) {
-      console.error("[shopline-install] error:", err);
+      console.error("[shopline-install] error:", loggableError(err));
       return res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -246,7 +247,7 @@ export function createShoplineRouter(): Router {
         const meta = await fetchStoreMetadata(apiOpts);
         storeInfo = { id: meta.id, name: meta.name, domain: meta.domain, currency: meta.currency, iana_timezone: meta.iana_timezone };
       } catch (err) {
-        console.warn("[shopline-callback] Failed to fetch store info:", err);
+        console.warn("[shopline-callback] Failed to fetch store info:", loggableError(err));
       }
 
       // Onboard the merchant (auto-provision org, channels, etc.)
@@ -265,7 +266,7 @@ export function createShoplineRouter(): Router {
 
       // Register webhooks for this store (fire-and-forget)
       registerWebhooksForStore(apiOpts).catch((err: unknown) => {
-        console.error("[shopline-callback] Webhook registration failed:", err);
+        console.error("[shopline-callback] Webhook registration failed:", loggableError(err));
       });
 
       // First install → pull 90 days of history in the background so the
@@ -282,7 +283,7 @@ export function createShoplineRouter(): Router {
             }),
           )
           .catch((err: unknown) => {
-            console.error("[shopline-callback] Historical backfill failed:", err);
+            console.error("[shopline-callback] Historical backfill failed:", loggableError(err));
           });
       }
 
@@ -292,7 +293,7 @@ export function createShoplineRouter(): Router {
 
       return res.redirect(302, dashboardUrl);
     } catch (err) {
-      console.error("[shopline-callback] error:", err);
+      console.error("[shopline-callback] error:", loggableError(err));
       return res.redirect(302, `${appOriginFor(req)}/shopline/error?reason=install_failed`);
     }
   });
@@ -370,14 +371,14 @@ export function createShoplineRouter(): Router {
 
       setImmediate(() => {
         void processAdmittedWebhook(db, admission).catch((err: unknown) => {
-          console.error("[shopline-webhook] processing error for event", admission.eventId, err);
+          console.error("[shopline-webhook] processing error for event", admission.eventId, loggableError(err));
         });
       });
       return;
     } catch (err) {
       // Admission itself failed. This is exactly the case that must NOT be
       // acknowledged: nothing was stored, so a 200 here loses the delivery.
-      console.error("[shopline-webhook] admission failed, asking SHOPLINE to retry:", err);
+      console.error("[shopline-webhook] admission failed, asking SHOPLINE to retry:", loggableError(err));
       if (res.headersSent) return;
       return res.status(503).json({ error: "Temporarily unable to accept webhook" });
     }
@@ -415,7 +416,7 @@ export function createShoplineRouter(): Router {
       // Always 200 once verified — SHOPLINE only needs the ack.
       return res.status(200).json({ ok: true, ...result });
     } catch (err) {
-      console.error(`[shopline-gdpr] ${endpointKind} error:`, err);
+      console.error(`[shopline-gdpr] ${endpointKind} error:`, loggableError(err));
       // Still 200 to avoid retries; the request is logged for manual follow-up.
       return res.status(200).json({ ok: true });
     }
@@ -455,7 +456,7 @@ async function registerWebhooksForStore(
     try {
       await apiRegisterWebhook(opts, topic, callbackUrl);
     } catch (err) {
-      console.error(`[shopline-webhooks] Failed to register ${topic}:`, err);
+      console.error(`[shopline-webhooks] Failed to register ${topic}:`, loggableError(err));
     }
   }
 }

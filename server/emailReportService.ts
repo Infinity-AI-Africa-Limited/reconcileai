@@ -5,6 +5,8 @@
  */
 import { notifyOwner } from "./_core/notification";
 import * as db from "./db";
+import { loggableError } from "./dbErrors";
+import { errorSummary } from "./errorText";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -249,8 +251,8 @@ export async function sendReconciliationReport(
 
     return { success: true };
   } catch (error) {
-    console.error("[EmailReport] Failed to send report:", error);
-    return { success: false, error: String(error) };
+    console.error("[EmailReport] Failed to send report:", loggableError(error));
+    return { success: false, error: errorSummary(error) };
   }
 }
 
@@ -308,6 +310,6 @@ export async function checkAndSendAlerts(
       await notifyOwner({ title, content });
     }
   } catch (error) {
-    console.error("[EmailReport] Alert check failed:", error);
+    console.error("[EmailReport] Alert check failed:", loggableError(error));
   }
 }

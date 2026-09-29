@@ -14,6 +14,7 @@ import { WoodcoreClient } from "./client";
 import { getConfigRow, toConnection } from "./config";
 import { enqueueDeadLetter } from "./dlq";
 import type { WcClientDeps } from "./types";
+import { errorSummary } from "../../errorText";
 
 export interface WriteBackNote {
   /** e.g. "savings" | "loan" | "gl" */
@@ -55,7 +56,7 @@ export async function pushWriteBackNote(
     await client.postWriteBack(body);
     return { ok: true, deadLettered: false };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorSummary(err);
     await enqueueDeadLetter({
       configId: cfg.id,
       organizationId: cfg.organizationId,

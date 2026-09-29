@@ -18,6 +18,8 @@
 
 import { ENV } from "./env";
 import { isEgressAllowed } from "./egress";
+import { loggableError } from "../dbErrors";
+import { errorSummary } from "../errorText";
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
@@ -121,8 +123,8 @@ export async function sendEmail(params: SendEmailParams): Promise<SendEmailResul
     const json = (await response.json().catch(() => ({}))) as { id?: string };
     return { success: true, id: json.id };
   } catch (error) {
-    console.error("[Email] Error calling Resend:", error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
+    console.error("[Email] Error calling Resend:", loggableError(error));
+    return { success: false, error: errorSummary(error) };
   }
 }
 

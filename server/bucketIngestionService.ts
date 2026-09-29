@@ -33,6 +33,8 @@ import {
 import { decryptCredential, encryptCredential } from "./sftpService";
 import { validateParsedRows, storeTransactions, calculateFileHash } from "./apiIngestionService";
 import { parseTabularFile } from "./ingest/fileParser";
+import { loggableError } from "./dbErrors";
+import { errorSummary } from "./errorText";
 
 export { encryptCredential, decryptCredential };
 
@@ -108,7 +110,7 @@ export async function testBucketConnection(src: {
       .filter((k) => k && !k.endsWith("/") && re.test(baseName(k)));
     return { success: true, matchedCount: matched.length, sample: matched.slice(0, 5) };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errorSummary(err) };
   }
 }
 
@@ -149,7 +151,7 @@ export async function listBucketFiles(
     } while (token);
     return { success: true, files };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errorSummary(err) };
   }
 }
 
@@ -226,7 +228,7 @@ export async function downloadAndProcessBucketObject(
     try {
       parsed = await parseTabularFile(bytes, objectKey);
     } catch (parseErr) {
-      const message = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      const message = errorSummary(parseErr);
       await log({ fileSize: bytes.byteLength, fileHash, errorMessage: message });
       return { success: false, error: message };
     }
@@ -276,7 +278,7 @@ export async function downloadAndProcessBucketObject(
     } catch (moveErr) {
       // Non-fatal: the data is already ingested and hash-deduped, so leaving the
       // object in place cannot double-count. Record it and move on.
-      console.warn(`[bucketIngestion] Ingested ${objectKey} but could not archive/delete:`, moveErr);
+      console.warn(`[bucketIngestion] Ingested ${objectKey} but could not archive/delete:`, loggableError(moveErr));
     }
 
     await log({
@@ -295,7 +297,7 @@ export async function downloadAndProcessBucketObject(
 
     return { success: true, uploadBatchId };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorSummary(err);
     await log({ errorMessage: message }).catch(() => {});
     await db.update(bucketIngestionSources).set({
       lastErrorAt: new Date(), lastErrorMessage: message.slice(0, 2000),
@@ -342,7 +344,7 @@ export async function pollBucketSources(): Promise<{ polled: number; ingested: n
       }
     }
   } catch (err) {
-    console.error("[bucketIngestion] poll cycle failed:", err);
+    console.error("[bucketIngestion] poll cycle failed:", loggableError(err));
   }
   return { polled, ingested };
 }

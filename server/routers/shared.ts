@@ -20,6 +20,7 @@ import { getDb, createAuditLog, getChannelByIdForOrg, getReconciliationJob, getR
 import { organizations, users } from "../../drizzle/schema";
 import { ENV } from "../_core/env";
 import { DEFAULT_APP_ORIGIN } from "@shared/appOrigin";
+import { loggableError } from "../dbErrors";
 
 // Prefer the configured APP_URL; fall back to the live production domain. The historical
 // hardcoded "reconcileai.vip" is NOT the live site, so links built from it are broken for
@@ -533,7 +534,7 @@ export async function logAudit(
     });
   } catch (err) {
     // Audit logging should never crash the main operation
-    console.error("[Audit] Failed to log:", err);
+    console.error("[Audit] Failed to log:", loggableError(err));
   }
 }
 

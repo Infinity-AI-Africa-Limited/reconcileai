@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { ENV } from "./env";
+import { errorSummary } from "../errorText";
 
 export type HeartbeatJob = {
   name: string;
@@ -88,7 +89,7 @@ const callForge = async <T>(
   } catch (error) {
     throw new TRPCError({
       code: "INTERNAL_SERVER_ERROR",
-      message: `Heartbeat ${rpc} network error: ${String(error)}`,
+      message: `Heartbeat ${rpc} network error: ${errorSummary(error)}`,
     });
   }
 

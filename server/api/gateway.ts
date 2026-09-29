@@ -27,6 +27,8 @@ import { clientIpOrUnknown } from "../_core/clientIp";
 import { getDb, getUserById } from "../db";
 import { apiIngestionLogs, reconciliationJobs, exceptions as exceptionsTable } from "../../drizzle/schema";
 import { runSandboxReconciliation } from "./sandbox";
+import { loggableError } from "../dbErrors";
+import { stackFrames, errorSummary } from "../errorText";
 
 type ApiAuth = { organizationId: number | null; apiKeyId: number; userId: number };
 
@@ -52,9 +54,9 @@ function sendError(res: Response, status: number, code: string, message: string)
 function handleError(res: Response, err: unknown) {
   if (err instanceof TRPCError) {
     const status = TRPC_HTTP[err.code] ?? 500;
-    return sendError(res, status, err.code, err.message);
+    return sendError(res, status, err.code, errorSummary(err));
   }
-  console.error("[api-gateway] unhandled error:", err);
+  console.error("[api-gateway] unhandled error:", { ...loggableError(err), frames: stackFrames(err) });
   return sendError(res, 500, "INTERNAL", "Internal error");
 }
 
