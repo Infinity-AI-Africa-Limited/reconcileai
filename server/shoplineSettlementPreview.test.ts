@@ -18,6 +18,7 @@ vi.mock("./db", async (importOriginal) => ({
 
 import { getDb } from "./db";
 import { router } from "./_core/trpc";
+import { mapSettlementRows } from "./connectors/shopline/settlementFileImport";
 import { shoplineSettlementImportProcedures } from "./routers/shoplineSettlementImport";
 
 const ORG = 60001;
@@ -58,6 +59,31 @@ describe("when a merchant checks a file whose words and signs disagree", () => {
     // real credit, which is why the count warns rather than re-signs). 1003 is
     // already negative; 1001 carries no reversal word.
     expect(preview.positiveRowsReadingAsReversals).toBe(2);
+  });
+
+  it("should not count a row the import will reject, whatever its words say", async () => {
+    // Greptile #165: a rejected row is never booked, so the preview must not
+    // send the merchant to change its sign.
+    const withRejects = [
+      file,
+      ",6.00,Refund issued", // no order reference
+      "###,6.00,Refund issued", // a reference with no usable characters
+      "1005,six,Refund issued", // an amount that cannot be read
+    ].join("\n");
+    const preview = await check(withRejects, { orderRef: "Order ID", amount: "Net", description: "Memo" });
+
+    expect(preview.positiveRowsReadingAsReversals).toBe(2);
+    // The same three rows are the ones the mapper refuses, so the two agree.
+    const { rows, failures } = mapSettlementRows(
+      withRejects.split("\n").slice(1).map((line) => {
+        const [order, net, memo] = line.split(",");
+        return { "Order ID": order, Net: net, Memo: memo };
+      }),
+      { orderRef: "Order ID", amount: "Net", description: "Memo" },
+      { organizationId: ORG, paymentsChannelId: 1, batchId: 1, userId: 7, defaultCurrency: "USD", sourceLabel: "Stripe" },
+    );
+    expect(failures.map((f) => f.rowIndex)).toEqual([6, 7, 8]);
+    expect(rows).toHaveLength(4);
   });
 
   it("should count nothing when no description column is mapped", async () => {

@@ -154,6 +154,26 @@ export interface SettlementMapContext {
 }
 
 /**
+ * A row's order reference and amount as the import reads them, or why the
+ * import rejects it. The one reader for both the import and the preview's
+ * counts, so the preview never speaks for a row that will not be booked.
+ */
+function readRowKeys(
+  row: Record<string, string>,
+  mapping: ColumnMap,
+): { orderRef: string; amount: number } | { failure: string } {
+  const orderRef = mapping.orderRef ? String(row[mapping.orderRef] ?? "").trim() : "";
+  if (!orderRef) return { failure: "missing order reference" };
+  // Insert stores the SANITISED reference. One made only of characters that
+  // sanitising strips would be stored with no reference at all: nothing could
+  // ever match it, and nothing could tell a re-upload of it from a new row.
+  if (!sanitizeRef(orderRef)) return { failure: "order reference has no usable characters" };
+  const amount = parseAmount(mapping.amount ? row[mapping.amount] : undefined);
+  if (amount === null) return { failure: "unparseable amount" };
+  return { orderRef, amount };
+}
+
+/**
  * Map parsed rows onto canonical payment-leg transactions.
  *
  * `transactionRef` is the ORDER reference so the engine can match; the gateway's
@@ -169,15 +189,9 @@ export function mapSettlementRows(
 
   rows.forEach((row, i) => {
     const rowIndex = i + 2; // 1-based + header
-    const orderRef = mapping.orderRef ? String(row[mapping.orderRef] ?? "").trim() : "";
-    if (!orderRef) { failures.push({ rowIndex, reason: "missing order reference" }); return; }
-    // Insert stores the SANITISED reference. One made only of characters that
-    // sanitising strips would be stored with no reference at all: nothing could
-    // ever match it, and nothing could tell a re-upload of it from a new row.
-    if (!sanitizeRef(orderRef)) { failures.push({ rowIndex, reason: "order reference has no usable characters" }); return; }
-
-    const amount = parseAmount(mapping.amount ? row[mapping.amount] : undefined);
-    if (amount === null) { failures.push({ rowIndex, reason: "unparseable amount" }); return; }
+    const keys = readRowKeys(row, mapping);
+    if ("failure" in keys) { failures.push({ rowIndex, reason: keys.failure }); return; }
+    const { orderRef, amount } = keys;
 
     const settledAt = parseDate(mapping.settledAt ? row[mapping.settledAt] : undefined);
     const gatewayRef = mapping.gatewayRef ? String(row[mapping.gatewayRef] ?? "").trim() : "";
@@ -246,14 +260,17 @@ export function settlementImportDescription(fileText: string | null | undefined,
  * refund would still be booked as money received. So these rows are neither
  * re-signed nor refused. The preview says how many there are, before anything
  * is written, so the merchant checks the sign rather than the platform
- * guessing it.
+ * guessing it. Rows the import will reject are not counted: they are not
+ * booked at all, and the preview must not send the merchant to fix their sign.
  */
 export function countPositiveRowsReadingAsReversals(rows: Record<string, string>[], mapping: ColumnMap): number {
-  if (!mapping.description || !mapping.amount) return 0;
+  const description = mapping.description;
+  if (!description) return 0;
   let count = 0;
   for (const row of rows) {
-    const amount = parseAmount(row[mapping.amount]);
-    if (amount !== null && amount > 0 && reversalSignals(row[mapping.description]).length > 0) count += 1;
+    const keys = readRowKeys(row, mapping);
+    if ("failure" in keys) continue;
+    if (keys.amount > 0 && reversalSignals(row[description]).length > 0) count += 1;
   }
   return count;
 }
