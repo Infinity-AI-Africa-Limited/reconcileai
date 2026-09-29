@@ -378,16 +378,17 @@ export async function pollSftpCredentials() {
       console.log(`[SFTP Polling] Checking credential ${cred.id} (${cred.name})`);
       
       // List files
-      const { success, files, error } = await listSftpFiles(cred.id);
+      // `failure` is already errorSummary text (listSftpFiles), safe to log and store as is.
+      const { success, files, error: failure } = await listSftpFiles(cred.id);
       
       if (!success) {
-        console.error(`[SFTP Polling] Failed to list files for credential ${cred.id}:`, loggableError(error));
+        console.error(`[SFTP Polling] Failed to list files for credential ${cred.id}:`, failure);
         await db
           .update(sftpCredentials)
           .set({
             lastPolledAt: now,
             lastErrorAt: now,
-            lastErrorMessage: error,
+            lastErrorMessage: failure,
           })
           .where(eq(sftpCredentials.id, cred.id));
         continue;

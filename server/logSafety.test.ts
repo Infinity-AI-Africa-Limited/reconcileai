@@ -20,6 +20,10 @@
  *    stored row's message;
  * 3. an error's text read anywhere else: the stored and returned paths.
  *
+ * An error is recognised by its conventional names AND by whatever name each
+ * file binds a caught error to, so `catch (problem)` is scanned like
+ * `catch (err)`.
+ *
  * The Shopify connector and its routers are left to their own ratchet
  * (server/connectors/shopify/logSafety.test.ts, #162), which scans them by the
  * same rules. It ships in PR #160; until that merges they are not clean on
@@ -31,34 +35,59 @@ import { describe, expect, it } from "vitest";
 
 const SERVER = path.resolve(__dirname);
 
-/** How this codebase names a caught error. */
-const ERROR_NAME = String.raw`(?:e|err|error|caught|cause|lastError|\w+Error|\w+Err)`;
+/** How this codebase names a caught error, by convention. */
+const CONVENTIONAL_NAMES = ["e", "err", "error", "caught", "cause", "lastError", String.raw`\w+Error`, String.raw`\w+Err`];
+
+/**
+ * The names a source actually binds to a caught error, whatever they are: a
+ * statement `catch (x)`, `.catch((x) => …)`, and the error of an
+ * `.on("error" | "failed", …)` handler.
+ */
+function caughtNames(source: string): string[] {
+  const binders = [
+    // Not `.catch(fn)`: a function passed by reference is not an error.
+    /(?<!\.)\bcatch\s*\(\s*(\w+)/g,
+    /\.catch\(\s*(?:async\s*)?\(?\s*(\w+)\s*(?::\s*\w+\s*)?\)?\s*=>/g,
+    /\.on\(\s*["'](?:error|failed)["']\s*,\s*(?:async\s*)?\(\s*(?:\w+\s*,\s*)?(\w+)/g,
+  ];
+  const names = new Set<string>();
+  for (const binder of binders) for (const match of source.matchAll(binder)) names.add(match[1]);
+  return [...names];
+}
+
+interface ScanPatterns {
+  /** A log call leaking an error. */
+  log: RegExp[];
+  /** Error text copied into a template literal. */
+  template: RegExp[];
+  /** An error's text read anywhere: `err.message`, `(err as Error).stack`, `String(err)`. */
+  reads: RegExp[];
+}
+
+/** The three scans' patterns, for the error names in play in one source. */
+function patternsFor(source: string): ScanPatterns {
+  const name = `(?:${[...CONVENTIONAL_NAMES, ...caughtNames(source)].join("|")})`;
+  return {
+    log: [
+      /\.(?:message|stack)\b/,
+      new RegExp(String.raw`String\(\s*${name}\s*\)`),
+      new RegExp(String.raw`\$\{\s*${name}\s*\}`),
+      // Handed to console whole: an argument, a shorthand property, or a value.
+      new RegExp(String.raw`[,(]\s*${name}\s*[,)]`),
+      new RegExp(String.raw`[{,]\s*${name}\s*[,}]`),
+      new RegExp(String.raw`:\s*${name}\s*[,}]`),
+    ],
+    template: [/\$\{[^}]*\.(?:message|stack)\b[^}]*\}/, new RegExp(String.raw`\$\{\s*${name}\s*\}`)],
+    reads: [
+      new RegExp(String.raw`\b${name}\??\.(?:message|stack)\b`),
+      new RegExp(String.raw`\(\s*${name}\s+as\s+\w+\s*\)\??\.(?:message|stack)\b`),
+      new RegExp(String.raw`\bString\(\s*${name}\s*\)`),
+    ],
+  };
+}
 
 /** The sanctioned calls: their argument is safe by construction, so they are removed before judging. */
 const SANCTIONED_CALLS = /\b(?:loggableError|errorSummary|stackFrames)\([^()]*\)/g;
-
-const RAW_ERROR_IN_LOG = [
-  /\.(?:message|stack)\b/,
-  new RegExp(String.raw`String\(\s*${ERROR_NAME}\s*\)`),
-  new RegExp(String.raw`\$\{\s*${ERROR_NAME}\s*\}`),
-  // Handed to console whole: an argument, a shorthand property, or a value.
-  new RegExp(String.raw`[,(]\s*${ERROR_NAME}\s*[,)]`),
-  new RegExp(String.raw`[{,]\s*${ERROR_NAME}\s*[,}]`),
-  new RegExp(String.raw`:\s*${ERROR_NAME}\s*[,}]`),
-];
-
-/** Error text copied into a template literal. */
-const TEXT_INTO_TEMPLATE = [
-  /\$\{[^}]*\.(?:message|stack)\b[^}]*\}/,
-  new RegExp(String.raw`\$\{\s*${ERROR_NAME}\s*\}`),
-];
-
-/** An error's text read anywhere: `err.message`, `(err as Error).stack`, `String(err)`. */
-const READS_ERROR_TEXT = [
-  new RegExp(String.raw`\b${ERROR_NAME}\??\.(?:message|stack)\b`),
-  new RegExp(String.raw`\(\s*${ERROR_NAME}\s+as\s+\w+\s*\)\??\.(?:message|stack)\b`),
-  new RegExp(String.raw`\bString\(\s*${ERROR_NAME}\s*\)`),
-];
 
 /**
  * Exact expressions a file may contain although a scan would flag them, each
@@ -118,14 +147,16 @@ function logCalls(source: string): string[] {
   return calls;
 }
 
-function leaksInLog(call: string, file = ""): boolean {
+/** `patterns` come from the whole file the call sits in, so its catch bindings count. */
+function leaksInLog(call: string, file = "", patterns = patternsFor(call)): boolean {
   const rest = withoutSanctioned(call, file);
-  return RAW_ERROR_IN_LOG.some((pattern) => pattern.test(rest));
+  return patterns.log.some((pattern) => pattern.test(rest));
 }
 
 const isComment = (line: string) => /^\s*(\/\/|\/\*|\*)/.test(line);
 
-function flaggedLines(source: string, file: string, patterns: RegExp[]): string[] {
+function flaggedLines(source: string, file: string, pick: (patterns: ScanPatterns) => RegExp[]): string[] {
+  const patterns = pick(patternsFor(source));
   return source
     .split("\n")
     .map((line, index) => ({ line, index }))
@@ -165,6 +196,33 @@ describe("when the ratchet judges a log call", () => {
   });
 });
 
+describe("when an error is caught under a name no convention predicts", () => {
+  // Greptile #166: the scans knew only conventional names, so `catch (problem)`
+  // logging or storing `problem` would have passed.
+  const flaggedLog = (source: string) => logCalls(source).some((call) => leaksInLog(call, "", patternsFor(source)));
+
+  it.each([
+    'try { run(); } catch (problem) {\n  console.error("x", problem);\n}',
+    "try { run(); } catch (problem: unknown) {\n  console.warn(`x ${problem}`);\n}",
+    'run().catch((failure) => console.error("x", failure));',
+    'run().catch(async (failure) => {\n  console.error("x", { failure });\n});',
+    'worker.on("failed", async (job, reason) => console.error("x", reason));',
+  ])("should flag the error logged in %s", (source) => {
+    expect(flaggedLog(source)).toBe(true);
+  });
+
+  it("should flag the same error's text stored under that name", () => {
+    const source = "try { run(); } catch (problem) {\n  row.lastError = problem.message;\n}";
+    expect(flaggedLines(source, "", (p) => p.reads)).toHaveLength(1);
+  });
+
+  it("should not treat a name as an error unless the code binds one to it", () => {
+    expect(flaggedLog('const problem = describeRun();\nconsole.error("x", problem);')).toBe(false);
+    // A handler passed by reference names a function, not an error.
+    expect(flaggedLog('run().catch(reportFailure);\nconsole.error("x", reportFailure);')).toBe(false);
+  });
+});
+
 describe("when the ratchet judges a line outside a log", () => {
   it.each([
     "return { success: false, error: String(error) };",
@@ -175,23 +233,23 @@ describe("when the ratchet judges a line outside a log", () => {
     "throw new Error(`sync failed: ${err.message}`);",
     "errors.push(`${day}: ${err}`);",
   ])("should flag %s", (line) => {
-    expect(flaggedLines(line, "", [...READS_ERROR_TEXT, ...TEXT_INTO_TEMPLATE])).toHaveLength(1);
+    expect(flaggedLines(line, "", (p) => [...p.reads, ...p.template])).toHaveLength(1);
   });
 
   it.each([
     "errorMessage: errorSummary(error),",
     "frames: stackFrames(err),",
-    "throw new Error(\"Could not secure tokens\", { cause: err });",
+    'throw new Error("Could not secure tokens", { cause: err });',
     "// a comment may say err.message",
     "const text = json.message;",
   ])("should allow %s", (line) => {
-    expect(flaggedLines(line, "", [...READS_ERROR_TEXT, ...TEXT_INTO_TEMPLATE])).toHaveLength(0);
+    expect(flaggedLines(line, "", (p) => [...p.reads, ...p.template])).toHaveLength(0);
   });
 
   it("should allow a sanctioned expression only in the file it is sanctioned for", () => {
-    const line = "if (err instanceof RollAborted) return { status: \"refused\", reason: err.message } as const;";
-    expect(flaggedLines(line, "demoTimelineRoll.ts", READS_ERROR_TEXT)).toHaveLength(0);
-    expect(flaggedLines(line, "reviewerAccess.ts", READS_ERROR_TEXT)).toHaveLength(1);
+    const line = 'if (err instanceof RollAborted) return { status: "refused", reason: err.message } as const;';
+    expect(flaggedLines(line, "demoTimelineRoll.ts", (p) => p.reads)).toHaveLength(0);
+    expect(flaggedLines(line, "reviewerAccess.ts", (p) => p.reads)).toHaveLength(1);
   });
 });
 
@@ -218,24 +276,30 @@ describe("when any server module handles an error", () => {
     expect(names.some((rel) => rel.startsWith("connectors/shopify/"))).toBe(false);
     const logs = sources.reduce((sum, { source }) => sum + logCalls(source).length, 0);
     expect(logs).toBeGreaterThan(200);
+    // The derived names are really derived: the server binds errors under
+    // names no convention lists.
+    const unconventional = new Set(sources.flatMap(({ source }) => caughtNames(source)));
+    for (const conventional of ["e", "err", "error"]) unconventional.delete(conventional);
+    expect(unconventional.size).toBeGreaterThan(0);
   });
 
   it("should never log an error's raw text", () => {
-    const offenders = sources.flatMap(({ rel, source }) =>
-      logCalls(source)
-        .filter((call) => leaksInLog(call, rel))
-        .map((call) => `${rel}: ${call.split("\n")[0]}`),
-    );
+    const offenders = sources.flatMap(({ rel, source }) => {
+      const patterns = patternsFor(source);
+      return logCalls(source)
+        .filter((call) => leaksInLog(call, rel, patterns))
+        .map((call) => `${rel}: ${call.split("\n")[0]}`);
+    });
     expect(offenders, "log loggableError(error), never the error or its text").toEqual([]);
   });
 
   it("should never copy an error's text into a new message", () => {
-    const offenders = sources.flatMap(({ rel, source }) => flaggedLines(source, rel, TEXT_INTO_TEMPLATE));
+    const offenders = sources.flatMap(({ rel, source }) => flaggedLines(source, rel, (p) => p.template));
     expect(offenders, "keep static text; pass the failure as { cause }").toEqual([]);
   });
 
   it("should never store or return an error's text", () => {
-    const offenders = sources.flatMap(({ rel, source }) => flaggedLines(source, rel, READS_ERROR_TEXT));
+    const offenders = sources.flatMap(({ rel, source }) => flaggedLines(source, rel, (p) => p.reads));
     expect(offenders, "store or return errorSummary(error)").toEqual([]);
   });
 
