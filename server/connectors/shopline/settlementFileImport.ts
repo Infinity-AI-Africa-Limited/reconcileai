@@ -325,6 +325,89 @@ export function settlementEventKey(row: SettlementEventFields): string {
   ]);
 }
 
+/** An event's identity, split into what every record carries and the gateway id some lack. */
+function settlementEventParts(row: SettlementEventFields): { base: string; gatewayRef: string } {
+  const provenance = provenanceOf(row.rawData);
+  const orderRef = typeof provenance.originalOrderRef === "string"
+    ? provenance.originalOrderRef
+    : row.transactionRef ?? "";
+  const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef.trim() : "";
+  const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
+  const base = JSON.stringify([
+    orderRef,
+    row.debitCredit,
+    amountInCents(row.amount as string | number),
+    String(row.currency ?? "").toUpperCase(),
+    settledAt && !Number.isNaN(settledAt.getTime()) ? Math.round(settledAt.getTime() / 1000) : "",
+  ]);
+  return { base, gatewayRef };
+}
+
+/**
+ * The incoming settlement rows not already recorded among `stored` — counted as
+ * a multiset, and treating a MISSING gateway id as unknown, not as different.
+ *
+ * A merchant may import a plain export first and a richer one covering the same
+ * period later: the same settlement then arrives once without its transaction id
+ * and once with it. Compared by the full event key (which includes the id) the
+ * two never match, and every overlapping settlement is recorded twice. So:
+ *
+ *   1. Exact matches first — same event, same id (or both without one).
+ *   2. Then, for what is left, the same event where ONE side has no id.
+ *
+ * Two DIFFERENT ids never match: they prove two separate settlements. Within the
+ * incoming rows, the k-th occurrence is new only if fewer than k are recorded,
+ * as in selectUnimportedSettlementEvents.
+ */
+export function selectUnrecordedSettlementEvents<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): T[] {
+  const exactKey = (parts: { base: string; gatewayRef: string }) => JSON.stringify([parts.base, parts.gatewayRef]);
+  const unmatched = new Map<string, number>();
+  for (const row of stored) {
+    const key = exactKey(settlementEventParts(row));
+    unmatched.set(key, (unmatched.get(key) ?? 0) + 1);
+  }
+
+  // Pass 1: exact.
+  const recorded = new Set<T>();
+  const leftover: Array<{ row: T; parts: { base: string; gatewayRef: string } }> = [];
+  for (const row of incoming) {
+    const parts = settlementEventParts(row);
+    const key = exactKey(parts);
+    const remaining = unmatched.get(key) ?? 0;
+    if (remaining > 0) {
+      unmatched.set(key, remaining - 1);
+      recorded.add(row);
+    } else {
+      leftover.push({ row, parts });
+    }
+  }
+
+  // Pass 2: the same event where exactly one side has no id.
+  const withoutId = new Map<string, number>();
+  const withId = new Map<string, number>();
+  for (const [key, count] of Array.from(unmatched.entries())) {
+    if (count === 0) continue;
+    const [base, gatewayRef] = JSON.parse(key) as [string, string];
+    const bucket = gatewayRef ? withId : withoutId;
+    bucket.set(base, (bucket.get(base) ?? 0) + count);
+  }
+  for (const { row, parts } of leftover) {
+    // An incoming row with an id may be a stored row that had none; one without
+    // an id may be a stored row that had one.
+    const bucket = parts.gatewayRef ? withoutId : withId;
+    const remaining = bucket.get(parts.base) ?? 0;
+    if (remaining > 0) {
+      bucket.set(parts.base, remaining - 1);
+      recorded.add(row);
+    }
+  }
+
+  return incoming.filter((row) => !recorded.has(row));
+}
+
 /**
  * The incoming events not already recorded, counted as a MULTISET.
  *

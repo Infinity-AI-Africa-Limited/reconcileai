@@ -11,6 +11,7 @@ import { scriptedDb } from "../shopify/scriptedDb.testkit";
 import {
   resolveConfirmedColumns,
   selectUnimportedSettlementEvents,
+  selectUnrecordedSettlementEvents,
   settlementEventKey,
   type SettlementEventFields,
 } from "./settlementFileImport";
@@ -179,5 +180,49 @@ describe("reconciling persisted data for a scope", () => {
     expect(fake.ops.filter((op) => op.table === "exceptions" && op.kind === "select")).toEqual([]);
     const legs = fake.ops.filter((op) => op.kind === "select" && op.table === "transactions");
     expect(legs[0]?.where?.params).not.toContain("ORD-1");
+  });
+});
+
+describe("when the same settlement is recorded once without its transaction id and once with it", () => {
+  // Greptile #164: a plain export imported first and a richer one later — the
+  // full event key includes the id, so the two never matched and every
+  // overlapping settlement was recorded twice.
+  const withoutId = (overrides: Partial<SettlementEventFields> = {}) =>
+    event({ rawData: { originalOrderRef: "#1001" }, ...overrides });
+  const withId = (gatewayRef: string, overrides: Partial<SettlementEventFields> = {}) =>
+    event({ rawData: { originalOrderRef: "#1001", gatewayRef }, ...overrides });
+
+  it("should match a richer re-export to what was first imported without ids, adding only the separate settlement", () => {
+    // One settlement stored without an id; the re-export names it AND a second one.
+    const incoming = [withId("gw-1"), withId("gw-2")];
+    expect(selectUnrecordedSettlementEvents([withoutId()], incoming)).toHaveLength(1);
+  });
+
+  it("should match a plainer re-export to what was first imported with ids", () => {
+    expect(selectUnrecordedSettlementEvents([withId("gw-1")], [withoutId()])).toEqual([]);
+  });
+
+  it("should treat two different ids as two settlements, however alike otherwise", () => {
+    const incoming = [withId("gw-2")];
+    expect(selectUnrecordedSettlementEvents([withId("gw-1")], incoming)).toEqual(incoming);
+  });
+
+  it("should count occurrences across both passes", () => {
+    const incoming = [withId("gw-1"), withId("gw-2"), withId("gw-3")];
+    expect(selectUnrecordedSettlementEvents([withoutId(), withoutId()], incoming)).toHaveLength(1);
+  });
+
+  it("should never match across a different amount, direction or order", () => {
+    expect(selectUnrecordedSettlementEvents([withoutId()], [withId("gw-1", { amount: "12.35" })])).toHaveLength(1);
+    expect(selectUnrecordedSettlementEvents([withoutId()], [withId("gw-1", { debitCredit: "debit" })])).toHaveLength(1);
+    expect(
+      selectUnrecordedSettlementEvents([withoutId()], [event({ rawData: { originalOrderRef: "#1002", gatewayRef: "gw-1" } })]),
+    ).toHaveLength(1);
+  });
+
+  it("should still match exactly, and keep a within-file repeat, as before", () => {
+    expect(selectUnrecordedSettlementEvents([withId("gw-1")], [withId("gw-1")])).toEqual([]);
+    expect(selectUnrecordedSettlementEvents([], [withoutId(), withoutId()])).toHaveLength(2);
+    expect(selectUnrecordedSettlementEvents([withoutId()], [withoutId(), withoutId()])).toHaveLength(1);
   });
 });

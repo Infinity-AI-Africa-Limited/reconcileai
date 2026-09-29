@@ -239,3 +239,23 @@ describe("when a later file repeats a settlement that carries no transaction ID"
     expect(fake.writes("update", BATCHES)[0]?.data?.errorMessage).toBeNull();
   });
 });
+
+describe("when the merchant follows the note and re-exports with transaction IDs", () => {
+  // Greptile #164 (review of 99145f6): the re-export named the settlement first
+  // imported without an ID, and inserted it a second time.
+  it("should match the settlement already stored without an ID and import only the separate one", async () => {
+    const stored = storedFileRow("7001", "50.00", "credit", "2026-09-01", "");
+    stored.rawData.gatewayRef = undefined as unknown as string;
+    const fake = scriptedDb({ select: { ...activeStore(), [TXNS]: [[stored]] } });
+    const { run } = commit(
+      fake,
+      fileRows(
+        { Order: "7001", Amount: "50.00", Date: "2026-09-01", Txn: "ch_1" },
+        { Order: "7001", Amount: "50.00", Date: "2026-09-01", Txn: "ch_2" },
+      ),
+    );
+
+    await expect(run).resolves.toMatchObject({ imported: 1, duplicates: 1, unverifiableDuplicates: 0 });
+    expect(fake.writes("insert", TXNS)[0]?.data).toHaveLength(1);
+  });
+});

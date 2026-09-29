@@ -18,8 +18,8 @@ import {
   mapSettlementRows,
   parseSettlementFile,
   resolveConfirmedColumns,
-  selectUnimportedSettlementEvents,
-  settlementEventKey,
+  selectUnrecordedSettlementEvents,
+  type SettlementEventFields,
   type ColumnMap,
   type ParsedFile,
   type SettlementField,
@@ -267,7 +267,7 @@ function originalOrderRefOf(row: InsertTransaction): string | null {
 /**
  * The rows whose settlement EVENT is not already recorded for this store.
  *
- * Identity is the event, not the order (`settlementEventKey`), so a payment and
+ * Identity is the event, not the order (`selectUnrecordedSettlementEvents`), so a payment and
  * its refund are both kept while a re-upload or an overlapping export adds
  * nothing. Stored rows are found under every reference they may have been
  * written with: the canonical order id, or the file's own reference when the
@@ -289,7 +289,7 @@ async function rejectAlreadyImportedEvidence(
   }
 
   const lookup = [...refs];
-  const storedKeys: string[] = [];
+  const storedEvents: SettlementEventFields[] = [];
   for (let index = 0; index < lookup.length; index += ORDER_REFERENCE_LOOKUP_CHUNK) {
     const chunk = lookup.slice(index, index + ORDER_REFERENCE_LOOKUP_CHUNK);
     const stored = await db
@@ -310,9 +310,11 @@ async function rejectAlreadyImportedEvidence(
         ),
       )
       .for("update");
-    for (const row of stored) storedKeys.push(settlementEventKey(row));
+    storedEvents.push(...stored);
   }
-  return selectUnimportedSettlementEvents(storedKeys, params.rows, settlementEventKey);
+  // A missing transaction id is unknown, not different: a richer re-export of
+  // evidence first imported without ids matches it rather than doubling it.
+  return selectUnrecordedSettlementEvents(storedEvents, params.rows);
 }
 
 async function alignShopifyOrderReferences(

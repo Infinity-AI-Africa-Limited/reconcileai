@@ -292,6 +292,7 @@ function storedEvent(amount: string, debitCredit: "credit" | "debit") {
 
 async function commitFile(options: {
   rows: Array<Record<string, string>>;
+  headers?: string[];
   storedEvidence?: unknown[];
   lock?: unknown[];
   reconcile?: ReturnType<typeof vi.fn>;
@@ -308,7 +309,7 @@ async function commitFile(options: {
   const reconcile = options.reconcile ?? vi.fn(async () => ({ matchedCount: 0, exceptionCount: 0 }));
   const auditCommitted = vi.fn(async () => undefined);
   const result = importShopifySettlementEvidence(context, input, fake.db as never, {
-    parseFile: vi.fn(async () => fileWith(options.rows)),
+    parseFile: vi.fn(async () => fileWith(options.rows, options.headers)),
     reconcile: reconcile as never,
     auditCommitted,
   });
@@ -477,5 +478,21 @@ describe("when the merchant confirms a column mapping", () => {
       mapping: { amount: "settled_amount" },
       missingRequired: ["orderRef"],
     });
+  });
+});
+
+describe("when a richer export follows one imported without transaction ids", () => {
+  it("should match the evidence already stored without an id and import only the separate settlement", async () => {
+    const { fake, result } = await commitFile({
+      headers: ["order_number", "settled_amount", "transaction_id"],
+      rows: [
+        { order_number: "#1001", settled_amount: "12.34", transaction_id: "ch_1" },
+        { order_number: "#1001", settled_amount: "12.34", transaction_id: "ch_2" },
+      ],
+      storedEvidence: [storedEvent("12.34", "credit")],
+    });
+
+    await expect(result).resolves.toMatchObject({ imported: 1, duplicates: 1 });
+    expect(insertedRows(fake)).toHaveLength(1);
   });
 });

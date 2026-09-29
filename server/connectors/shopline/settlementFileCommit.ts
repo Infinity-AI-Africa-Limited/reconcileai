@@ -10,7 +10,8 @@
  *    (the join key). A payment and its refund, or two partial settlements, for
  *    one order collapsed into one, and a refund imported in a later file than
  *    its payment was silently discarded as a "duplicate". File-imported rows
- *    are now compared by settlement EVENT (`settlementEventKey`), as a multiset.
+ *    are now compared by settlement EVENT (`selectUnrecordedSettlementEvents`),
+ *    as a multiset, a missing transaction id counting as unknown, not different.
  * 2. **Concurrent imports could double-insert.** Two overlapping uploads could
  *    both pass the dedupe read before either inserted. The store row is now
  *    locked first, and the existing rows are read under that lock with a
@@ -38,7 +39,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { transactions, uploadBatches, type InsertTransaction } from "../../../drizzle/schema";
 import { getDb, insertTransactionsWithExecutor, sanitizeRef, type DbExecutor } from "../../db";
-import { selectUnimportedSettlementEvents, settlementEventKey } from "./settlementFileImport";
+import { selectUnrecordedSettlementEvents } from "./settlementFileImport";
 import { runReconciliationOnPersistedData } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -89,7 +90,10 @@ export interface ShoplineSettlementCommitDeps {
  * later file, looks identical and cannot be told apart. (Within ONE file both
  * are kept: an export does not repeat a line.) So such rows are skipped, as the
  * far more common case requires — and COUNTED, so the merchant is told, with
- * the remedy, instead of the difference vanishing.
+ * the remedy, instead of the difference vanishing. The remedy is sound: a
+ * re-export WITH ids matches the rows first imported without them (a missing id
+ * is unknown, not different — selectUnrecordedSettlementEvents) and adds only
+ * the settlements that were genuinely separate.
  */
 export function unverifiableDuplicatesNote(count: number): string | null {
   if (count === 0) return null;
@@ -198,13 +202,15 @@ export async function commitShoplineSettlementFile(
     // An order the API sync has settled keeps the order-level protection; every
     // other existing row is a file event, compared by event.
     const settledBySync = new Set<string>();
-    const fileEvents: string[] = [];
+    const fileEvents: typeof existing = [];
     for (const row of existing) {
-      if (isSettlementFileRow(row.rawData)) fileEvents.push(settlementEventKey(row));
+      if (isSettlementFileRow(row.rawData)) fileEvents.push(row);
       else if (row.transactionRef) settledBySync.add(row.transactionRef);
     }
     const candidates = stored.filter((row) => !settledBySync.has(row.transactionRef as string));
-    const fresh = selectUnimportedSettlementEvents(fileEvents, candidates, settlementEventKey);
+    // A missing transaction id is unknown, not different: a richer re-export of
+    // settlements first imported without ids matches them rather than doubling.
+    const fresh = selectUnrecordedSettlementEvents(fileEvents, candidates);
     const kept = new Set(fresh);
     const unverifiableDuplicates = candidates.filter((row) => !kept.has(row) && !gatewayRefOf(row.rawData)).length;
 
