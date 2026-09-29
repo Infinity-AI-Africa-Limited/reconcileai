@@ -28,7 +28,7 @@ import {
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { transactions, channels, exceptions } from "../../../drizzle/schema";
 import { getValidToken } from "./tokenStore";
-import { selectNewSettlementFileRows } from "./settlementFileImport";
+import { classifySettlementFileRows } from "./settlementFileImport";
 import {
   fetchOrders,
   fetchPaymentTransactions,
@@ -248,6 +248,22 @@ export async function rejectAlreadyImportedSettlementRows(
   rows: InsertTransaction[],
   params: { organizationId: number; paymentsChannelId: number },
 ): Promise<InsertTransaction[]> {
+  return (await importableSettlementFileRows(db, rows, params)).fresh;
+}
+
+/**
+ * rejectAlreadyImportedSettlementRows, with the count of skipped rows that could
+ * not be proved duplicates (classifySettlementFileRows). `lock: true` makes the
+ * lookup a LOCKING read: the settlement-file commit runs it inside its
+ * transaction after locking the store, and TiDB answers a plain read from the
+ * snapshot taken when the transaction began — which can predate another
+ * import's commit.
+ */
+export async function importableSettlementFileRows(
+  db: DbExecutor,
+  rows: InsertTransaction[],
+  params: { organizationId: number; paymentsChannelId: number; lock?: boolean },
+): Promise<{ fresh: InsertTransaction[]; unverifiableDuplicates: number }> {
   const storedForm = rows.map((row) => ({
     ...row,
     transactionRef: sanitizeRef(row.transactionRef),
@@ -260,27 +276,26 @@ export async function rejectAlreadyImportedSettlementRows(
   const stored: Array<Pick<InsertTransaction, "transactionRef" | "amount" | "debitCredit" | "currency" | "valueDate" | "rawData">> = [];
   for (let i = 0; i < refs.length; i += DEDUPE_LOOKUP_CHUNK) {
     const chunk = refs.slice(i, i + DEDUPE_LOOKUP_CHUNK);
-    stored.push(
-      ...(await db
-        .select({
-          transactionRef: transactions.transactionRef,
-          amount: transactions.amount,
-          debitCredit: transactions.debitCredit,
-          currency: transactions.currency,
-          valueDate: transactions.valueDate,
-          rawData: transactions.rawData,
-        })
-        .from(transactions)
-        .where(
-          and(
-            eq(transactions.organizationId, params.organizationId),
-            eq(transactions.channelId, params.paymentsChannelId),
-            inArray(transactions.transactionRef, chunk),
-          ),
-        )),
-    );
+    const lookup = db
+      .select({
+        transactionRef: transactions.transactionRef,
+        amount: transactions.amount,
+        debitCredit: transactions.debitCredit,
+        currency: transactions.currency,
+        valueDate: transactions.valueDate,
+        rawData: transactions.rawData,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.organizationId, params.organizationId),
+          eq(transactions.channelId, params.paymentsChannelId),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      );
+    stored.push(...(params.lock ? await lookup.for("update") : await lookup));
   }
-  return selectNewSettlementFileRows(stored, storedForm);
+  return classifySettlementFileRows(stored, storedForm);
 }
 
 async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {

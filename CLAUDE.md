@@ -251,19 +251,32 @@ Tier 1 as SHOPLINE-Payments-only.
 > a failure that looks like a working feature. `mapSettlementRows` puts the order
 > ref in `transactionRef` and the gateway id in `externalRef`; tests pin this.
 
-Import is `dryRun`-first so the merchant confirms the detected column mapping
-before anything is written, auto-detects across gateway/COD header vocabularies,
-accepts explicit overrides for unknown providers, and dedupes via
-`rejectAlreadyImportedSettlementRows`: by settlement EVENT, on references in
-their STORED form, so re-uploading or overlapping exports never double-count
-while a payment and its refund are both kept. Orders the SHOPLINE Payments API
-already settled stay covered and are not counted twice from a file.
+Import is `dryRun`-first so the merchant confirms — and can correct — the
+detected column mapping before anything is written. It auto-detects across
+gateway/COD header vocabularies; the editor sends the mapping the merchant
+checked as `columnMapping`, which is authoritative (a field it omits stays
+unmapped). The commit (`settlementFileCommit.ts`) is ONE transaction per import
+(since 2026-09-29):
 
-> ⚠️ **Until 2026-09-28 that claim was false.** The guard compared the file's
-> raw reference with the sanitised stored one (`#1001` is stored as `1001`), so
-> every re-upload of such a file was inserted again; and it keyed on the order
-> alone, so a refund sharing an order with its payment was dropped. Production
-> may hold duplicates from before the fix — measure before assuming it does not.
+- it locks the store row first, then runs the shared lookup
+  (`importableSettlementFileRows`) as a locking read, refs compared in their
+  STORED (sanitised) form;
+- it dedupes file rows by settlement EVENT (`selectNewSettlementFileRows`, a
+  multiset), not by order, so a refund or a second settlement for an order is
+  kept while a re-upload adds nothing. A missing gateway transaction id counts
+  as unknown, not different, so a richer re-export does not double rows first
+  imported without ids; skipped rows that cannot be proved duplicates are
+  counted and reported (`unverifiableDuplicates`);
+- an order the SHOPLINE Payments API has already settled keeps the order-level
+  protection;
+- it reconciles only the orders the file speaks to.
+
+> ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
+> file's raw reference with the sanitised stored one (`#1001` is stored as
+> `1001`), so every re-upload of such a file was inserted again; and it keyed on
+> the order alone, so a refund sharing an order with its payment was dropped.
+> Production may hold duplicates from before the fix — measure before assuming
+> it does not. Do not reintroduce `rejectAlreadyIngested` on this path.
 
 **Verified end-to-end against production (2026-08-02):** a DHL COD remittance
 file matched the real dev-store order `21076388995485181306699745`

@@ -123,10 +123,13 @@ describe("when the rows come back from the guard", () => {
 
 describe("when the import procedure commits a file", () => {
   it("should use the event-aware guard, not the order-keyed one built for API objects", () => {
-    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
-    const importer = router.slice(router.indexOf("importSettlementFile:"));
-    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
-    expect(commitBlock).toContain("rejectAlreadyImportedSettlementRows(db, rows,");
-    expect(commitBlock).not.toContain("rejectAlreadyIngested(");
+    // The commit moved into one transaction (settlementFileCommit.ts), which runs
+    // the same guard as a locking read under the store lock.
+    const commit = readFileSync("server/connectors/shopline/settlementFileCommit.ts", "utf8");
+    expect(commit).toMatch(/importableSettlementFileRows\(tx, params\.rows, \{[^}]*lock: true/);
+    expect(commit).not.toContain("rejectAlreadyIngested(");
+    const procedure = readFileSync("server/routers/shoplineSettlementImport.ts", "utf8");
+    expect(procedure).toContain("commitShoplineSettlementFile(db,");
+    expect(procedure).not.toContain("rejectAlreadyIngested(");
   });
 });

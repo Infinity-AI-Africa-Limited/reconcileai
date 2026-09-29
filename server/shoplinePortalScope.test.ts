@@ -32,10 +32,11 @@
  * what the handler then reads is that handler's own concern, and asserting on
  * it would make an authorisation test fail for unrelated reasons.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { TRPCError } from "@trpc/server";
 import { appRouter } from "./routers";
+import { auditCrossTenantSettlementImport } from "./connectors/shopline/settlementImportRequest";
 
 type Caller = ReturnType<typeof appRouter.createCaller>;
 
@@ -84,6 +85,16 @@ const SCOPED_CALLS: ReadonlyArray<readonly [string, (c: Caller, orgId: number) =
     "exceptionIntelligence",
     (c, orgId) => c.shoplineConnector.exceptionIntelligence({ category: "retail_chargeback", organizationId: orgId }),
   ],
+  // Admin mutations on a `connectorAdminProcedure` builder, which the old
+  // source-text roster never matched: these three were outside this suite until
+  // the roster was read from the router itself.
+  ["syncNow", (c, orgId) => c.shoplineConnector.syncNow({ storeId: 1, organizationId: orgId })],
+  [
+    "registerWebhooks",
+    (c, orgId) =>
+      c.shoplineConnector.registerWebhooks({ storeId: 1, organizationId: orgId, callbackBaseUrl: "https://example.test" }),
+  ],
+  ["uninstall", (c, orgId) => c.shoplineConnector.uninstall({ storeId: 1, organizationId: orgId })],
 ] as const;
 
 /**
@@ -125,26 +136,24 @@ const ALL_ORG_NAMING_CALLS = [...SCOPED_CALLS, ...OPERATOR_ONLY_CALLS] as const;
  * So the roster is checked against the router rather than trusted: every
  * procedure whose INPUT SCHEMA declares `organizationId` must appear above.
  */
+/**
+ * Read from the ROUTER ITSELF, not from source text: every shoplineConnector
+ * procedure whose parsed input schema has an `organizationId` key.
+ *
+ * It used to scan shoplineConnector.ts with a regex. That went blind twice over
+ * when the settlement import moved into its own module with its schema in a
+ * third file: the procedure was no longer in the file, and its input no longer
+ * spelled `organizationId: z.` where the regex looked. A structural read cannot
+ * be moved out from under.
+ */
 function proceduresAcceptingAnOrgOverride(): string[] {
-  const source = readFileSync("server/routers/shoplineConnector.ts", "utf8");
-  const declarations = [
-    // `\w*` not `\w+`: protectedProcedure has nothing between the prefix and
-    // "Procedure", so a + here silently matches only superAdminProcedure and the
-    // detector reports one procedure instead of seven — a vacuous check that
-    // looks like a passing one.
-    ...source.matchAll(/^[ ]{2,4}([A-Za-z][A-Za-z0-9]*): (?:protected|super|public)\w*Procedure/gm),
-  ];
-  const found = new Set<string>();
-
-  for (const [index, declaration] of declarations.entries()) {
-    const start = declaration.index ?? 0;
-    const end = declarations[index + 1]?.index ?? source.length;
-    // Only the input schema counts. `organizationId` appears throughout the
-    // handler bodies as a column reference, which would match every procedure.
-    const head = source.slice(start, end).split("=> {")[0];
-    if (/organizationId: z\./.test(head)) found.add(declaration[1]);
-  }
-  return [...found];
+  type Procedure = { _def: { inputs?: Array<{ shape?: Record<string, unknown> }> } };
+  const procedures = (appRouter as unknown as { _def: { procedures: Record<string, Procedure> } })._def.procedures;
+  const prefix = "shoplineConnector.";
+  return Object.entries(procedures)
+    .filter(([path]) => path.startsWith(prefix))
+    .filter(([, procedure]) => (procedure._def.inputs ?? []).some((input) => input?.shape?.organizationId !== undefined))
+    .map(([path]) => path.slice(prefix.length));
 }
 
 /** The code and message a call rejected with; both null if it did not reject. */
@@ -181,6 +190,10 @@ describe("the roster of scoped procedures", () => {
 
   it("should find some, so the check above cannot pass vacuously", () => {
     expect(proceduresAcceptingAnOrgOverride().length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("should still find the settlement import in the module it was split into", () => {
+    expect(proceduresAcceptingAnOrgOverride()).toContain("importSettlementFile");
   });
 });
 
@@ -258,21 +271,26 @@ describe("when an operator writes into a tenant from its portal", () => {
     // land in the caller's OWN organisation, so the rows identified their
     // author; a super admin can now create financial transactions in a
     // merchant's ledger and nothing on those rows says who did.
-    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
-    const importer = router.slice(router.indexOf("importSettlementFile:"));
-    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+    const importModule = readFileSync("server/routers/shoplineSettlementImport.ts", "utf8");
+    const commitBlock = importModule.slice(importModule.indexOf("importSettlementFile:"));
+    expect(commitBlock.length, "the importer must be found where it lives").toBeGreaterThan(1000);
 
-    expect(commitBlock).toContain('eventType: "tenant_data_imported"');
+    // The event it writes is the operator audit, in the helper the router calls.
+    expect(readFileSync("server/connectors/shopline/settlementImportRequest.ts", "utf8"))
+      .toContain('eventType: "tenant_data_imported"');
     // On the committing path only — a dry run writes nothing to audit — and
     // only when the operator named a tenant other than their own, so routine
     // merchant self-service does not fill the operator log.
     expect(commitBlock).toContain("input.organizationId !== undefined && orgId !== ctx.user.organizationId");
-    const auditAt = commitBlock.indexOf("tenant_data_imported");
+    const auditAt = commitBlock.indexOf("auditCrossTenantSettlementImport(");
     const dryRunReturn = commitBlock.indexOf("dryRun: true");
+    const commitAt = commitBlock.indexOf("commitShoplineSettlementFile(");
+    expect(auditAt, "the importer must call the audit").toBeGreaterThan(-1);
     expect(auditAt, "the audit must sit on the commit path, after the dry-run return").toBeGreaterThan(dryRunReturn);
+    expect(auditAt, "and after the commit it records").toBeGreaterThan(commitAt);
   });
 
-  it("should not let a failed audit report a committed import as failed", () => {
+  it("should not let a failed audit report a committed import as failed", async () => {
     // By the time the audit runs, the settlement rows and reconciliation
     // results are already committed and none of it is transactional. An audit
     // insert that threw would reach the enclosing catch, mark the upload batch
@@ -281,15 +299,35 @@ describe("when an operator writes into a tenant from its portal", () => {
     //
     // An unattributed write is recoverable from the log line; a ledger that
     // disagrees with its own status is not.
-    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
-    const importer = router.slice(router.indexOf("importSettlementFile:"));
-    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+    //
+    // Proved by behaviour, not by reading the source: an audit write that
+    // throws must resolve, and must say so loudly — without the error's text,
+    // which for a database error is its query and parameters.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failingWrite = vi.fn(async () => {
+      throw new Error("Failed query: insert into platform_audit_logs … params: owner@merchant.com");
+    });
 
-    const auditAt = commitBlock.indexOf("logPlatformEvent({");
-    const guardAt = commitBlock.lastIndexOf("try {", auditAt);
-    const rescueAt = commitBlock.indexOf("AUDIT WRITE FAILED", auditAt);
-    expect(guardAt, "the audit call must be inside its own try").toBeGreaterThan(-1);
-    expect(rescueAt, "and its catch must say so loudly").toBeGreaterThan(auditAt);
+    await expect(
+      auditCrossTenantSettlementImport(
+        {
+          actor: { id: 1, name: "Operator" },
+          organizationId: OTHER_ORG,
+          storeHandle: "merchant-store",
+          fileName: "sept.csv",
+          sourceLabel: "Stripe",
+          imported: 3,
+          duplicates: 0,
+          failed: 0,
+        },
+        { log: failingWrite as never },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(failingWrite).toHaveBeenCalledTimes(1);
+    expect(String(logged.mock.calls[0]?.[0])).toContain("AUDIT WRITE FAILED");
+    expect(JSON.stringify(logged.mock.calls)).not.toMatch(/owner@merchant\.com|Failed query/);
+    logged.mockRestore();
   });
 });
 

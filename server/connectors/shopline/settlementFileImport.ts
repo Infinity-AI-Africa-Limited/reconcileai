@@ -170,6 +170,10 @@ export function mapSettlementRows(
     const rowIndex = i + 2; // 1-based + header
     const orderRef = mapping.orderRef ? String(row[mapping.orderRef] ?? "").trim() : "";
     if (!orderRef) { failures.push({ rowIndex, reason: "missing order reference" }); return; }
+    // Insert stores the SANITISED reference. One made only of characters that
+    // sanitising strips would be stored with no reference at all: nothing could
+    // ever match it, and nothing could tell a re-upload of it from a new row.
+    if (!sanitizeRef(orderRef)) { failures.push({ rowIndex, reason: "order reference has no usable characters" }); return; }
 
     const amount = parseAmount(mapping.amount ? row[mapping.amount] : undefined);
     if (amount === null) { failures.push({ rowIndex, reason: "unparseable amount" }); return; }
@@ -234,6 +238,22 @@ export function resolveConfirmedColumns(headers: string[], confirmed: ColumnMap)
   };
 }
 
+/**
+ * The mapping an import runs with.
+ *
+ * A mapping the merchant CONFIRMED (checked in the editor) is the whole answer.
+ * Without one, columns are detected, with any legacy `overrides` as hints —
+ * the behaviour callers had before the editor existed.
+ */
+export function resolveImportColumns(
+  headers: string[],
+  request: { columnMapping?: ColumnMap; columnOverrides?: ColumnMap },
+): { mapping: ColumnMap; missingRequired: SettlementField[] } {
+  return request.columnMapping
+    ? resolveConfirmedColumns(headers, request.columnMapping)
+    : detectColumns(headers, request.columnOverrides);
+}
+
 /** The persisted columns a settlement event is identified by. */
 export type SettlementEventFields = Pick<
   InsertTransaction,
@@ -295,20 +315,101 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  *     and would make every re-upload look new.
  */
 export function settlementEventKey(row: SettlementEventFields): string {
+  const { orderRef, gatewayRef, rest } = settlementEventParts(row);
+  return JSON.stringify([orderRef, gatewayRef, ...rest]);
+}
+
+/**
+ * The one definition of an event's identity, which settlementEventKey and
+ * selectUnrecordedSettlementEvents both derive from, so the two cannot drift:
+ * the ORDER reference in its stored form, the GATEWAY reference exactly as
+ * written (see settlementEventKey), and the rest.
+ */
+function settlementEventParts(row: SettlementEventFields): {
+  orderRef: string;
+  gatewayRef: string;
+  rest: Array<string | number | null | undefined>;
+  /** Everything but the gateway id: what a record without one can still be matched on. */
+  base: string;
+} {
   const provenance = provenanceOf(row.rawData);
   const orderRef = sanitizeRef(
     typeof provenance.originalOrderRef === "string" ? provenance.originalOrderRef : row.transactionRef,
   ) ?? "";
   const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : "";
   const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
-  return JSON.stringify([
-    orderRef,
-    gatewayRef,
+  const rest = [
     row.debitCredit,
     amountInCents(row.amount as string | number),
     String(row.currency ?? "").toUpperCase(),
     settledAt && !Number.isNaN(settledAt.getTime()) ? Math.round(settledAt.getTime() / 1000) : "",
-  ]);
+  ];
+  return { orderRef, gatewayRef, rest, base: JSON.stringify([orderRef, ...rest]) };
+}
+
+/**
+ * The incoming settlement rows not already recorded among `stored` — counted as
+ * a multiset, and treating a MISSING gateway id as unknown, not as different.
+ *
+ * A merchant may import a plain export first and a richer one covering the same
+ * period later: the same settlement then arrives once without its transaction id
+ * and once with it. Compared by the full event key (which includes the id) the
+ * two never match, and every overlapping settlement is recorded twice. So:
+ *
+ *   1. Exact matches first — same event, same id (or both without one).
+ *   2. Then, for what is left, the same event where ONE side has no id.
+ *
+ * Two DIFFERENT ids never match: they prove two separate settlements. Within the
+ * incoming rows, the k-th occurrence is new only if fewer than k are recorded,
+ * as in selectUnimportedSettlementEvents.
+ */
+export function selectUnrecordedSettlementEvents<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): T[] {
+  const exactKey = (parts: { base: string; gatewayRef: string }) => JSON.stringify([parts.base, parts.gatewayRef]);
+  const unmatched = new Map<string, number>();
+  for (const row of stored) {
+    const key = exactKey(settlementEventParts(row));
+    unmatched.set(key, (unmatched.get(key) ?? 0) + 1);
+  }
+
+  // Pass 1: exact.
+  const recorded = new Set<T>();
+  const leftover: Array<{ row: T; parts: { base: string; gatewayRef: string } }> = [];
+  for (const row of incoming) {
+    const parts = settlementEventParts(row);
+    const key = exactKey(parts);
+    const remaining = unmatched.get(key) ?? 0;
+    if (remaining > 0) {
+      unmatched.set(key, remaining - 1);
+      recorded.add(row);
+    } else {
+      leftover.push({ row, parts });
+    }
+  }
+
+  // Pass 2: the same event where exactly one side has no id.
+  const withoutId = new Map<string, number>();
+  const withId = new Map<string, number>();
+  for (const [key, count] of Array.from(unmatched.entries())) {
+    if (count === 0) continue;
+    const [base, gatewayRef] = JSON.parse(key) as [string, string];
+    const bucket = gatewayRef ? withId : withoutId;
+    bucket.set(base, (bucket.get(base) ?? 0) + count);
+  }
+  for (const { row, parts } of leftover) {
+    // An incoming row with an id may be a stored row that had none; one without
+    // an id may be a stored row that had one.
+    const bucket = parts.gatewayRef ? withoutId : withId;
+    const remaining = bucket.get(parts.base) ?? 0;
+    if (remaining > 0) {
+      bucket.set(parts.base, remaining - 1);
+      recorded.add(row);
+    }
+  }
+
+  return incoming.filter((row) => !recorded.has(row));
 }
 
 /**
@@ -363,12 +464,35 @@ export function selectNewSettlementFileRows<T extends SettlementEventFields>(
   stored: SettlementEventFields[],
   incoming: T[],
 ): T[] {
+  return classifySettlementFileRows(stored, incoming).fresh;
+}
+
+/**
+ * selectNewSettlementFileRows, and how many of the rows it skipped matched an
+ * earlier file's event WITHOUT a gateway transaction id to prove it.
+ *
+ * File rows are compared by event with selectUnrecordedSettlementEvents, so a
+ * missing id is unknown rather than different: a richer re-export of rows first
+ * imported without ids matches them instead of doubling them. What cannot be
+ * proved is counted, not decided silently — two same-amount, same-day
+ * settlements for one order with no id look exactly like an overlapping
+ * export's repeat, and importing them would double-count every overlap.
+ */
+export function classifySettlementFileRows<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): { fresh: T[]; unverifiableDuplicates: number } {
   const coveredByApi = new Set<string>();
-  const importedEvents: string[] = [];
+  const importedEvents: SettlementEventFields[] = [];
   for (const row of stored) {
-    if (isSettlementFileRow(row)) importedEvents.push(settlementEventKey(row));
+    if (isSettlementFileRow(row)) importedEvents.push(row);
     else if (row.transactionRef) coveredByApi.add(row.transactionRef);
   }
   const uncovered = incoming.filter((row) => !row.transactionRef || !coveredByApi.has(row.transactionRef));
-  return selectUnimportedSettlementEvents(importedEvents, uncovered, settlementEventKey);
+  const fresh = selectUnrecordedSettlementEvents(importedEvents, uncovered);
+  const kept = new Set(fresh);
+  const unverifiableDuplicates = uncovered.filter(
+    (row) => !kept.has(row) && !settlementEventParts(row).gatewayRef,
+  ).length;
+  return { fresh, unverifiableDuplicates };
 }

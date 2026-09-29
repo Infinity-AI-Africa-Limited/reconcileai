@@ -8,7 +8,7 @@
  * Public API:
  *   getValidToken(db, slStoreId, orgId, storeHandle) → decrypted access token
  *   saveToken(db, slStoreId, orgId, tokenResponse)
- *   deleteToken(db, slStoreId)
+ *   deleteToken(db, slStoreId, organizationId)
  */
 
 import { and, eq } from "drizzle-orm";
@@ -140,11 +140,21 @@ export async function saveToken(
 /**
  * Delete a token (called on app uninstall).
  */
+/**
+ * Delete a store's credentials — only within the tenant that owns the store.
+ *
+ * It deleted by store id alone. `shoplineConnector.uninstall` is open to any
+ * tenant admin, scoped its status update to the caller's organisation, and then
+ * called this with whatever store id it was given: an admin of one tenant could
+ * delete another tenant's SHOPLINE credentials by naming its (sequential) store
+ * id, and break that merchant's syncs. The tenant is now part of the delete.
+ */
 export async function deleteToken(
   db: Db,
   slStoreId: number,
+  organizationId: number,
 ): Promise<void> {
   await db
     .delete(slConnectorTokens)
-    .where(eq(slConnectorTokens.slStoreId, slStoreId));
+    .where(and(eq(slConnectorTokens.slStoreId, slStoreId), eq(slConnectorTokens.organizationId, organizationId)));
 }
