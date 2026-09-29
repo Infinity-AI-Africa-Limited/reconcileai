@@ -92,3 +92,102 @@ export function canImportShoplineSettlement(input: ShoplineImportEligibility): b
       !shoplineMappingEdited(input),
   );
 }
+
+// ─── The importer's state ────────────────────────────────────────────────────
+
+export type ShoplineSettlementPreview = {
+  committed: boolean;
+  headers: string[];
+  mapping: ShoplineSettlementMapping;
+  missingRequired: string[];
+  totalRows: number;
+  parseErrors: string[];
+};
+
+export type ShoplineSettlementCommitted = ShoplineSettlementPreview & {
+  imported: number;
+  duplicates: number;
+  unverifiableDuplicates?: number;
+  unverifiableDuplicatesNote?: string | null;
+  failed: number;
+  matchedCount: number;
+};
+
+export interface ShoplineImportState<F> {
+  /**
+   * Which file choice this state belongs to. Every request is tagged with the
+   * generation it was sent for, and a reply for an earlier one is dropped: a
+   * check still running when the merchant picks another file must not confirm
+   * its mapping onto the new file.
+   */
+  generation: number;
+  file: F | null;
+  sourceLabel: string;
+  busy: "checking" | "importing" | null;
+  preview: ShoplineSettlementPreview | null;
+  result: ShoplineSettlementCommitted | null;
+  error: string | null;
+  columnMapping: ShoplineSettlementMapping | null;
+  checkedMapping: ShoplineSettlementMapping | null;
+}
+
+export type ShoplineImportAction<F> =
+  | { type: "chooseFile"; file: F | null }
+  | { type: "sourceLabel"; value: string }
+  | { type: "changeColumn"; field: ShoplineSettlementField; header: string | null }
+  | { type: "invalid"; message: string }
+  | { type: "started"; generation: number; mode: "checking" | "importing" }
+  | { type: "checked"; generation: number; preview: ShoplineSettlementPreview }
+  | { type: "imported"; generation: number; result: ShoplineSettlementCommitted }
+  | { type: "failed"; generation: number; message: string };
+
+export function initialShoplineImportState<F>(): ShoplineImportState<F> {
+  return {
+    generation: 0,
+    file: null,
+    sourceLabel: "",
+    busy: null,
+    preview: null,
+    result: null,
+    error: null,
+    columnMapping: null,
+    checkedMapping: null,
+  };
+}
+
+export function shoplineImportReducer<F>(
+  state: ShoplineImportState<F>,
+  action: ShoplineImportAction<F>,
+): ShoplineImportState<F> {
+  switch (action.type) {
+    case "chooseFile":
+      // A new generation: anything still in flight now answers for a file that
+      // is no longer on screen.
+      return { ...initialShoplineImportState<F>(), generation: state.generation + 1, file: action.file, sourceLabel: state.sourceLabel };
+    case "sourceLabel":
+      return { ...state, sourceLabel: action.value, result: null };
+    case "changeColumn":
+      return {
+        ...state,
+        columnMapping: shoplineSettlementMapping.assign(state.columnMapping ?? {}, action.field, action.header),
+        result: null,
+      };
+    case "invalid":
+      return { ...state, error: action.message };
+    default:
+      break;
+  }
+  if (action.generation !== state.generation) return state; // a reply for a file no longer chosen
+  switch (action.type) {
+    case "started":
+      return { ...state, busy: action.mode, error: null };
+    case "checked": {
+      const confirmed = shoplineSettlementMapping.confirmed(action.preview.mapping);
+      return { ...state, busy: null, preview: action.preview, columnMapping: confirmed, checkedMapping: confirmed };
+    }
+    case "imported":
+      return { ...state, busy: null, result: action.result };
+    case "failed":
+      return { ...state, busy: null, error: action.message };
+  }
+}

@@ -213,3 +213,29 @@ describe("when the file covers only some of the store's orders", () => {
     expect(close?.where?.params).toEqual(expect.arrayContaining([300, ORG]));
   });
 });
+
+describe("when a later file repeats a settlement that carries no transaction ID", () => {
+  // Greptile #164: with no gateway ID, a genuinely separate same-amount, same-day
+  // settlement for an order is indistinguishable from an overlapping export's
+  // repeat of one already imported. It is skipped — importing it would
+  // double-count every overlap — but never silently.
+  it("should skip it, count it as unverifiable, and say so on the batch", async () => {
+    const stored = storedFileRow("6001", "50.00", "credit", "2026-09-01", "");
+    stored.rawData.gatewayRef = undefined as unknown as string;
+    const fake = scriptedDb({ select: { ...activeStore(), [TXNS]: [[stored]] } });
+    const { run } = commit(fake, fileRows({ Order: "6001", Amount: "50.00", Date: "2026-09-01", Txn: "" }));
+
+    await expect(run).resolves.toMatchObject({ imported: 0, duplicates: 1, unverifiableDuplicates: 1 });
+    expect(String(fake.writes("update", BATCHES)[0]?.data?.errorMessage)).toMatch(/no transaction ID to tell them apart/);
+  });
+
+  it("should treat a repeat that does carry a transaction ID as a proven duplicate, with nothing to report", async () => {
+    const fake = scriptedDb({
+      select: { ...activeStore(), [TXNS]: [[storedFileRow("6002", "50.00", "credit", "2026-09-01", "ch_7")]] },
+    });
+    const { run } = commit(fake, fileRows({ Order: "6002", Amount: "50.00", Date: "2026-09-01", Txn: "ch_7" }));
+
+    await expect(run).resolves.toMatchObject({ imported: 0, duplicates: 1, unverifiableDuplicates: 0 });
+    expect(fake.writes("update", BATCHES)[0]?.data?.errorMessage).toBeNull();
+  });
+});

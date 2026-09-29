@@ -41,6 +41,8 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
         (result.duplicates ? `, ${result.duplicates} already present` : "") +
         (result.failed ? `, ${result.failed} rejected` : ""),
     );
+    // Skipped rows that could not be proved duplicates are said out loud.
+    if (result.unverifiableDuplicatesNote) toast.warning(result.unverifiableDuplicatesNote);
     onImported?.();
   });
   const { preview, result } = settlement;
@@ -99,13 +101,21 @@ export function SettlementFileImport({ onImported }: { onImported?: () => void }
         {preview ? (
           <div className="rounded-md border p-3 space-y-3">
             {result ? (
-              <div className="flex items-start gap-2 text-sm">
-                <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-                <p>
-                  Imported {result.imported} rows — {result.matchedCount} matched to orders
-                  {result.duplicates > 0 ? `, ${result.duplicates} already recorded` : ""}
-                  {result.failed > 0 ? `, ${result.failed} rejected` : ""}.
-                </p>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <p>
+                    Imported {result.imported} rows — {result.matchedCount} matched to orders
+                    {result.duplicates > 0 ? `, ${result.duplicates} already recorded` : ""}
+                    {result.failed > 0 ? `, ${result.failed} rejected` : ""}.
+                  </p>
+                </div>
+                {result.unverifiableDuplicatesNote ? (
+                  <div className="flex items-start gap-2 text-amber-700">
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <p>{result.unverifiableDuplicatesNote}</p>
+                  </div>
+                ) : null}
               </div>
             ) : preview.missingRequired.length > 0 ? (
               <div className="flex items-start gap-2 text-sm">

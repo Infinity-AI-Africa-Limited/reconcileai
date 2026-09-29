@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   canImportShoplineSettlement,
+  initialShoplineImportState,
+  shoplineImportReducer,
   shoplineMappingEdited,
   shoplineSettlementFileError,
   shoplineSettlementMapping,
@@ -58,5 +60,66 @@ describe("when the merchant chooses a file", () => {
     expect(shoplineSettlementFileError(null)).toMatch(/choose/i);
     expect(shoplineSettlementFileError({ size: SHOPLINE_SETTLEMENT_MAX_BYTES + 1 })).toMatch(/10MB/);
     expect(shoplineSettlementFileError({ size: 1024 })).toBeNull();
+  });
+});
+
+describe("when the merchant replaces the file while a request is still running", () => {
+  // Greptile #164: a check for the first file finished after the second was
+  // chosen and confirmed its mapping onto the second — which could then be
+  // imported against columns nobody checked for it.
+  type FakeFile = { name: string; size: number };
+  const first: FakeFile = { name: "sept-a.csv", size: 10 };
+  const second: FakeFile = { name: "sept-b.csv", size: 10 };
+  const preview = {
+    committed: false,
+    headers: ["Order", "Net"],
+    mapping: { orderRef: "Order", amount: "Net" },
+    missingRequired: [],
+    totalRows: 3,
+    parseErrors: [],
+  };
+
+  const chooseThenReplace = () => {
+    let state = shoplineImportReducer(initialShoplineImportState<FakeFile>(), { type: "chooseFile", file: first });
+    const sentFor = state.generation;
+    state = shoplineImportReducer(state, { type: "started", generation: sentFor, mode: "checking" });
+    state = shoplineImportReducer(state, { type: "chooseFile", file: second });
+    return { state, sentFor };
+  };
+
+  it("should drop the first file's check instead of confirming its mapping for the second", () => {
+    const { state, sentFor } = chooseThenReplace();
+    const after = shoplineImportReducer(state, { type: "checked", generation: sentFor, preview });
+
+    expect(after.file).toBe(second);
+    expect(after.preview).toBeNull();
+    expect(after.checkedMapping).toBeNull();
+    expect(canImportShoplineSettlement({ ...after, busy: after.busy !== null })).toBe(false);
+  });
+
+  it("should drop a late import result or failure for the replaced file", () => {
+    const { state, sentFor } = chooseThenReplace();
+    const committed = { ...preview, committed: true, imported: 3, duplicates: 0, failed: 0, matchedCount: 3 };
+    expect(shoplineImportReducer(state, { type: "imported", generation: sentFor, result: committed }).result).toBeNull();
+    expect(shoplineImportReducer(state, { type: "failed", generation: sentFor, message: "boom" }).error).toBeNull();
+  });
+
+  it("should apply a check for the file still on screen, and confirm its mapping", () => {
+    const { state } = chooseThenReplace();
+    const after = shoplineImportReducer(state, { type: "checked", generation: state.generation, preview });
+
+    expect(after.checkedMapping).toEqual({ orderRef: "Order", amount: "Net" });
+    expect(canImportShoplineSettlement({ ...after, busy: after.busy !== null })).toBe(true);
+  });
+
+  it("should keep the source label across a file change, and clear everything checked", () => {
+    let state = shoplineImportReducer(initialShoplineImportState<FakeFile>(), { type: "sourceLabel", value: "Stripe" });
+    state = shoplineImportReducer(state, { type: "chooseFile", file: first });
+    state = shoplineImportReducer(state, { type: "checked", generation: state.generation, preview });
+    state = shoplineImportReducer(state, { type: "chooseFile", file: second });
+
+    expect(state.sourceLabel).toBe("Stripe");
+    expect(state.columnMapping).toBeNull();
+    expect(state.checkedMapping).toBeNull();
   });
 });

@@ -45,7 +45,7 @@ import {
 import { resolveChannelIds } from "../connectors/shopline/syncOrchestrator";
 import { createUploadBatch, updateUploadBatch } from "../db";
 import { ingestWebhook } from "../connectors/shopline/webhookHandler";
-import { commitShoplineSettlementFile } from "../connectors/shopline/settlementFileCommit";
+import { commitShoplineSettlementFile, unverifiableDuplicatesNote } from "../connectors/shopline/settlementFileCommit";
 import { runSettlementSync } from "../connectors/shopline/settlementSync";
 import { registerWebhook, listWebhooks, fetchStoreMetadata } from "../connectors/shopline/apiClient";
 import { ENV } from "../_core/env";
@@ -917,7 +917,7 @@ export const shoplineConnectorRouter = router({
         // One transaction, one writer per store: the event-level dedupe, the
         // insert, the scoped reconciliation and the batch's close commit
         // together or not at all. See settlementFileCommit.ts.
-        const { imported, duplicates, failures, matchedCount, exceptionCount } = await commitShoplineSettlementFile(db, {
+        const { imported, duplicates, unverifiableDuplicates, failures, matchedCount, exceptionCount } = await commitShoplineSettlementFile(db, {
           organizationId: orgId,
           storeId: store.id,
           ordersChannelId,
@@ -986,6 +986,8 @@ export const shoplineConnectorRouter = router({
           totalRows: parsed.rows.length,
           imported,
           duplicates,
+          unverifiableDuplicates,
+          unverifiableDuplicatesNote: unverifiableDuplicatesNote(unverifiableDuplicates),
           failed: failures.length,
           parseErrors: parsed.parseErrors,
           sampleFailures: failures.slice(0, 5),

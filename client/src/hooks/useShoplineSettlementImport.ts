@@ -1,14 +1,19 @@
-import { useMemo, useState } from "react";
+import { useReducer, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { usePortalContext } from "@/contexts/PortalContext";
 import {
   canImportShoplineSettlement,
+  initialShoplineImportState,
+  shoplineImportReducer,
   shoplineMappingEdited,
   shoplineSettlementFileError,
-  shoplineSettlementMapping,
+  type ShoplineSettlementCommitted,
   type ShoplineSettlementField,
   type ShoplineSettlementMapping,
+  type ShoplineSettlementPreview,
 } from "@/lib/shoplineSettlementImport";
+
+export type { ShoplineSettlementCommitted, ShoplineSettlementPreview };
 
 const SPREADSHEET_RE = /\.(xlsx|xlsm|xls)$/i;
 
@@ -23,22 +28,6 @@ async function encodeSettlementFile(file: File): Promise<{ content: string; enco
   return { content: btoa(binary), encoding: "base64" };
 }
 
-export type ShoplineSettlementPreview = {
-  committed: boolean;
-  headers: string[];
-  mapping: ShoplineSettlementMapping;
-  missingRequired: string[];
-  totalRows: number;
-  parseErrors: string[];
-};
-
-export type ShoplineSettlementCommitted = ShoplineSettlementPreview & {
-  imported: number;
-  duplicates: number;
-  failed: number;
-  matchedCount: number;
-};
-
 /**
  * The SHOPLINE settlement-file import: check the columns, correct the mapping,
  * import exactly what was checked.
@@ -46,104 +35,84 @@ export type ShoplineSettlementCommitted = ShoplineSettlementPreview & {
  * The first check lets the server detect columns. After that, the mapping on
  * screen is sent as CONFIRMED — the whole answer, so a field the merchant took
  * away stays away — and an import sends only the mapping the last check
- * confirmed. An edit since then must be checked again.
+ * confirmed. State changes go through shoplineImportReducer, which drops any
+ * reply that answers for a file the merchant has since replaced.
  */
 export function useShoplineSettlementImport(onImported?: (result: ShoplineSettlementCommitted) => void) {
   const { viewAsOrg } = usePortalContext();
   const importFile = trpc.shoplineConnector.importSettlementFile.useMutation();
-  const [file, setFile] = useState<File | null>(null);
-  const [sourceLabel, setSourceLabel] = useState("");
-  const [busy, setBusy] = useState<"checking" | "importing" | null>(null);
-  const [preview, setPreview] = useState<ShoplineSettlementPreview | null>(null);
-  const [result, setResult] = useState<ShoplineSettlementCommitted | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [columnMapping, setColumnMapping] = useState<ShoplineSettlementMapping | null>(null);
-  const [checkedMapping, setCheckedMapping] = useState<ShoplineSettlementMapping | null>(null);
+  const [state, dispatch] = useReducer(shoplineImportReducer<File>, undefined, initialShoplineImportState<File>);
+  // The generation of the file on screen, readable after an await.
+  const generation = useRef(state.generation);
+  generation.current = state.generation;
 
-  const mappingEdited = useMemo(
-    () => shoplineMappingEdited({ columnMapping, checkedMapping }),
-    [columnMapping, checkedMapping],
-  );
+  const mappingEdited = shoplineMappingEdited(state);
   const canImport = canImportShoplineSettlement({
-    busy: busy !== null,
-    preview: result ? { committed: true, missingRequired: [] } : preview,
-    checkedMapping,
-    columnMapping,
+    busy: state.busy !== null,
+    preview: state.result ? { committed: true, missingRequired: [] } : state.preview,
+    checkedMapping: state.checkedMapping,
+    columnMapping: state.columnMapping,
   });
 
-  const reset = () => {
-    setPreview(null);
-    setResult(null);
-    setError(null);
-    setColumnMapping(null);
-    setCheckedMapping(null);
-  };
-
-  const chooseFile = (next: File | null) => {
-    setFile(next);
-    reset();
-  };
-
-  const changeColumn = (field: ShoplineSettlementField, header: string | null) => {
-    setColumnMapping((current) => shoplineSettlementMapping.assign(current ?? {}, field, header));
-    setResult(null);
-  };
-
   const submit = async (dryRun: boolean) => {
+    const { file } = state;
     const fileError = shoplineSettlementFileError(file);
     if (fileError || !file) {
-      setError(fileError);
+      dispatch({ type: "invalid", message: fileError ?? "Choose a file first." });
       return;
     }
     if (!dryRun && !canImport) return;
 
-    setBusy(dryRun ? "checking" : "importing");
-    setError(null);
+    const sentFor = state.generation;
+    dispatch({ type: "started", generation: sentFor, mode: dryRun ? "checking" : "importing" });
     try {
       const { content, encoding } = await encodeSettlementFile(file);
-      const mappingToSend = dryRun ? columnMapping : checkedMapping;
+      const mappingToSend = dryRun ? state.columnMapping : state.checkedMapping;
       const response = await importFile.mutateAsync({
         fileName: file.name,
         organizationId: viewAsOrg?.id,
         content,
         contentEncoding: encoding,
-        sourceLabel: sourceLabel.trim() || file.name,
+        sourceLabel: state.sourceLabel.trim() || file.name,
         ...(mappingToSend ? { columnMapping: mappingToSend } : {}),
         dryRun,
       });
       if (response.committed) {
-        setResult(response as ShoplineSettlementCommitted);
-        onImported?.(response as ShoplineSettlementCommitted);
+        const result = response as ShoplineSettlementCommitted;
+        dispatch({ type: "imported", generation: sentFor, result });
+        // Tell the page only about an import for the file still on screen.
+        if (sentFor === generation.current) onImported?.(result);
       } else {
-        const confirmed = shoplineSettlementMapping.confirmed(response.mapping as ShoplineSettlementMapping);
-        setPreview(response as ShoplineSettlementPreview);
-        setColumnMapping(confirmed);
-        setCheckedMapping(confirmed);
+        dispatch({
+          type: "checked",
+          generation: sentFor,
+          preview: { ...(response as ShoplineSettlementPreview), mapping: response.mapping as ShoplineSettlementMapping },
+        });
       }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Import failed");
-    } finally {
-      setBusy(null);
+      dispatch({
+        type: "failed",
+        generation: sentFor,
+        message: submitError instanceof Error ? submitError.message : "Import failed",
+      });
     }
   };
 
   return {
-    file,
-    sourceLabel,
-    busy,
-    preview,
-    result,
-    error,
-    columnMapping,
+    file: state.file,
+    sourceLabel: state.sourceLabel,
+    busy: state.busy,
+    preview: state.preview,
+    result: state.result,
+    error: state.error,
+    columnMapping: state.columnMapping,
     mappingEdited,
-    canCheck: busy === null && shoplineSettlementFileError(file) === null,
+    canCheck: state.busy === null && shoplineSettlementFileError(state.file) === null,
     canImport,
-    chooseFile,
-    setSourceLabel: (value: string) => {
-      setSourceLabel(value);
-      setResult(null);
-    },
-    changeColumn,
+    chooseFile: (file: File | null) => dispatch({ type: "chooseFile", file }),
+    setSourceLabel: (value: string) => dispatch({ type: "sourceLabel", value }),
+    changeColumn: (field: ShoplineSettlementField, header: string | null) =>
+      dispatch({ type: "changeColumn", field, header }),
     checkColumns: () => submit(true),
     importFile: () => submit(false),
   };

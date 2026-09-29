@@ -64,6 +64,11 @@ export interface ShoplineSettlementCommitResult {
   imported: number;
   /** Already recorded: the same event from an earlier file, or an order the API sync has settled. */
   duplicates: number;
+  /**
+   * Of `duplicates`, the rows that matched an earlier file's event WITHOUT a
+   * gateway transaction ID to prove it — see unverifiableDuplicatesNote().
+   */
+  unverifiableDuplicates: number;
   failures: Array<{ rowIndex: number; reason: string }>;
   matchedCount: number;
   exceptionCount: number;
@@ -71,6 +76,33 @@ export interface ShoplineSettlementCommitResult {
 
 export interface ShoplineSettlementCommitDeps {
   reconcile?: typeof runReconciliationOnPersistedData;
+}
+
+/**
+ * Why a skipped row without a transaction ID is reported rather than decided.
+ *
+ * With no gateway transaction ID, a settlement is identified only by its order,
+ * direction, amount, currency and date. Two exports that overlap — 1–15 Sept,
+ * then 10–30 Sept — repeat those rows exactly, and that is the case the dedupe
+ * exists for: importing them would double-count every overlap. But a genuinely
+ * separate same-amount, same-day settlement for the same order, arriving in a
+ * later file, looks identical and cannot be told apart. (Within ONE file both
+ * are kept: an export does not repeat a line.) So such rows are skipped, as the
+ * far more common case requires — and COUNTED, so the merchant is told, with
+ * the remedy, instead of the difference vanishing.
+ */
+export function unverifiableDuplicatesNote(count: number): string | null {
+  if (count === 0) return null;
+  return (
+    `${count} row${count === 1 ? "" : "s"} matched settlements already imported and carr${count === 1 ? "ies" : "y"} no ` +
+    "transaction ID to tell them apart, so they were skipped. If they are separate settlements, " +
+    "re-export the file with its transaction ID column and import it again."
+  );
+}
+
+function gatewayRefOf(rawData: unknown): string {
+  const value = (rawData as { gatewayRef?: unknown } | null)?.gatewayRef;
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /** A row imported from a settlement file carries its source label; an API-synced row never does. */
@@ -173,6 +205,8 @@ export async function commitShoplineSettlementFile(
     }
     const candidates = stored.filter((row) => !settledBySync.has(row.transactionRef as string));
     const fresh = selectUnimportedSettlementEvents(fileEvents, candidates, settlementEventKey);
+    const kept = new Set(fresh);
+    const unverifiableDuplicates = candidates.filter((row) => !kept.has(row) && !gatewayRefOf(row.rawData)).length;
 
     await insertTransactionsWithExecutor(tx, fresh);
 
@@ -204,13 +238,19 @@ export async function commitShoplineSettlementFile(
         invalidRows: failures.length,
         completedAt: new Date(),
         errorMessage:
-          failures.length > 0 ? failures.slice(0, 10).map((f) => `row ${f.rowIndex}: ${f.reason}`).join("; ") : null,
+          [
+            failures.length > 0 ? failures.slice(0, 10).map((f) => `row ${f.rowIndex}: ${f.reason}`).join("; ") : null,
+            unverifiableDuplicatesNote(unverifiableDuplicates),
+          ]
+            .filter(Boolean)
+            .join(" ") || null,
       })
       .where(and(eq(uploadBatches.id, params.batchId), eq(uploadBatches.organizationId, params.organizationId)));
 
     return {
       imported: fresh.length,
       duplicates: stored.length - fresh.length,
+      unverifiableDuplicates,
       failures,
       matchedCount,
       exceptionCount,
