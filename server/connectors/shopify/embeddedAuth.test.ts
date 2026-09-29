@@ -86,13 +86,25 @@ describe("Shopify embedded App Home authentication", () => {
     await expectCode(malformed.result, "TOKEN_INVALID");
     expect(malformed.db.ops).toEqual([]);
 
-    const expired = auth(await idToken({ expiration: NOW_SECONDS - 1 }));
+    const expired = auth(await idToken({ expiration: NOW_SECONDS - 11 }));
     await expectCode(expired.result, "TOKEN_EXPIRED");
     expect(expired.db.ops).toEqual([]);
 
     const notActive = auth(await idToken({ notBefore: NOW_SECONDS + 30 }));
     await expectCode(notActive.result, "TOKEN_NOT_ACTIVE");
     expect(notActive.db.ops).toEqual([]);
+  });
+
+  describe("when the server clock is a few seconds off Shopify's", () => {
+    it("should accept a fresh token within Shopify's 10-second tolerance", async () => {
+      await expect(auth(await idToken({ notBefore: NOW_SECONDS + 3 })).result).resolves.toMatchObject({ storeId: 7 });
+      await expect(auth(await idToken({ expiration: NOW_SECONDS - 3 })).result).resolves.toMatchObject({ storeId: 7 });
+    });
+
+    it("should still refuse a token outside that tolerance", async () => {
+      await expectCode(auth(await idToken({ notBefore: NOW_SECONDS + 11 })).result, "TOKEN_NOT_ACTIVE");
+      await expectCode(auth(await idToken({ expiration: NOW_SECONDS - 11 })).result, "TOKEN_EXPIRED");
+    });
   });
 
   it("requires the audience to be exactly the configured client id", async () => {

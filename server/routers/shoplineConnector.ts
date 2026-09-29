@@ -43,7 +43,7 @@ import {
   mapSettlementRows,
 } from "../connectors/shopline/settlementFileImport";
 import {
-  rejectAlreadyIngested,
+  rejectAlreadyImportedSettlementRows,
   resolveChannelIds,
   runReconciliationOnPersistedData,
 } from "../connectors/shopline/syncOrchestrator";
@@ -904,9 +904,13 @@ export const shoplineConnectorRouter = router({
           sourceLabel: input.sourceLabel,
         });
 
-        // Same idempotency guard the API path uses: re-uploading a file, or an
-        // overlapping export, must not double-count settlements.
-        const fresh = await rejectAlreadyIngested(db, rows, [paymentsChannelId]);
+        // Re-uploading a file, or an overlapping export, must not double-count
+        // settlements — and a payment and its refund for one order are two
+        // events, not a duplicate. Compared on the references as STORED.
+        const fresh = await rejectAlreadyImportedSettlementRows(db, rows, {
+          organizationId: orgId,
+          paymentsChannelId,
+        });
         const duplicates = rows.length - fresh.length;
         if (fresh.length > 0) await insertTransactions(fresh);
 

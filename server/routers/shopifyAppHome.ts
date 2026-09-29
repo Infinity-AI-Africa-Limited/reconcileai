@@ -9,14 +9,13 @@ import {
 import {
   appHomeError,
   loadAppHomeView,
+  manualSyncFailure,
   safeSettlementEvidenceResult,
-  safeSyncReport,
   settlementEvidenceFailure,
   settlementEvidenceInput,
-  syncFailure,
 } from "../connectors/shopify/appHome";
+import { requestShopifyManualSync } from "../connectors/shopify/manualSync";
 import { importShopifySettlementEvidence } from "../connectors/shopify/settlementEvidence";
-import { runShopifyOrderSync } from "../connectors/shopify/syncOrchestrator";
 
 /**
  * Shopify App Home: the workspace embedded in Shopify Admin.
@@ -65,17 +64,20 @@ export const shopifyAppHomeRouter = router({
     }
   }),
 
+  /**
+   * Queues a sync and answers at once; the sync itself runs on the job queue
+   * (connectors/shopify/manualSync.ts) and `context` reports its outcome.
+   */
   syncNow: embeddedProcedure.mutation(async ({ ctx }) => {
     try {
-      const report = await runShopifyOrderSync({
+      const { requestNumber, requestedAt } = await requestShopifyManualSync({
         storeId: ctx.shopify.storeId,
         organizationId: ctx.shopify.organizationId,
-        trigger: "manual",
       });
-      return safeSyncReport(report);
+      return { status: "queued" as const, requestNumber, requestedAt: requestedAt.toISOString() };
     } catch (error) {
-      const refusal = syncFailure(error);
-      console.error("[shopify-app-home] manual sync failed", {
+      const refusal = manualSyncFailure(error);
+      console.error("[shopify-app-home] manual sync could not be queued", {
         storeId: ctx.shopify.storeId,
         organizationId: ctx.shopify.organizationId,
         category: refusal.message,

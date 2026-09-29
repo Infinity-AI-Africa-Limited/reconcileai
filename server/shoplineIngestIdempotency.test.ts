@@ -37,8 +37,10 @@ const mockDb = {
 // open a real connection. `rejectAlreadyIngested` takes its Db as an argument,
 // so the fake above is passed in directly and the factory needs no reference to
 // it (referencing it here would break — vi.mock is hoisted above the const).
-vi.mock("../server/db", () => ({
+vi.mock("../server/db", async (importOriginal) => ({
   getDb: vi.fn().mockResolvedValue(null),
+  // The real one: the guard compares references in the form they are stored.
+  sanitizeRef: (await importOriginal<typeof import("./db")>()).sanitizeRef,
   insertTransactions: vi.fn(),
   createUploadBatch: vi.fn(),
   updateUploadBatch: vi.fn(),
@@ -101,6 +103,20 @@ describe("SHOPLINE ingest — rejectAlreadyIngested", () => {
       [ORDERS_CH],
     );
     expect(out.map((r) => (r as { transactionRef: string }).transactionRef)).toEqual(["DUP", "OK"]);
+  });
+
+  describe("when a reference holds a character that storage strips", () => {
+    it("should recognise the stored copy, so a re-presentation is not inserted again", async () => {
+      // "#1001" is stored as "1001"; comparing the raw form never matched it.
+      existingRows = [{ channelId: PAY_CH, transactionRef: "1001" }];
+      const out = await rejectAlreadyIngested(mockDb as never, [row("#1001", PAY_CH)], [PAY_CH]);
+      expect(out).toHaveLength(0);
+    });
+
+    it("should collapse two spellings within one batch that would be stored identically", async () => {
+      const out = await rejectAlreadyIngested(mockDb as never, [row("#1001"), row("1001")], [ORDERS_CH]);
+      expect(out).toHaveLength(1);
+    });
   });
 
   it("passes through rows with no transactionRef rather than dropping them", async () => {

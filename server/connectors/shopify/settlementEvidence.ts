@@ -57,6 +57,14 @@ export interface ShopifySettlementEvidenceDryRun {
   missingRequired: SettlementField[];
   totalRows: number;
   parseErrors: string[];
+  /**
+   * Rows naming no Shopify order ReconcileAI has synced; null when the mapping
+   * is incomplete and rows could not be read. Reported BEFORE the import
+   * because it cannot be undone after: such a row is stored under the file's
+   * own reference and flagged as an exception, and re-importing once the order
+   * has synced counts it as a duplicate rather than re-pointing it.
+   */
+  unalignedRows: number | null;
 }
 
 export interface ShopifySettlementEvidenceCommitted {
@@ -68,6 +76,8 @@ export interface ShopifySettlementEvidenceCommitted {
   failed: number;
   matchedCount: number;
   exceptionCount: number;
+  /** Of the rows imported, those naming no synced Shopify order. */
+  unalignedRows: number;
 }
 
 export type ShopifySettlementEvidenceResult =
@@ -101,6 +111,7 @@ type AuditCommitted = (params: {
   imported: number;
   duplicates: number;
   failed: number;
+  unalignedRows: number;
 }) => Promise<void>;
 
 export interface ShopifySettlementEvidenceDeps {
@@ -315,10 +326,40 @@ async function rejectAlreadyImportedEvidence(
   return selectUnimportedSettlementEvents(storedKeys, params.rows, settlementEventKey);
 }
 
+const SHOPIFY_ORDER_GID_PREFIX = "gid://shopify/Order/";
+
+/**
+ * The other spellings under which an export may name the same Shopify order.
+ *
+ * The order leg stores the GID in `transactionRef` and the order NAME (`#1001`)
+ * in `externalRef`, verbatim. Gateways and couriers rarely write either exactly:
+ * they drop the `#` (`1001`), or carry Shopify's numeric order ID, which is the
+ * GID's tail. A reference that aligns to nothing is not merely unmatched — the
+ * scoped reconciliation reads the order leg BY reference, so it raises an
+ * exception for every such row while the real order sits unmatched beside it.
+ */
+function widenedOrderReferences(fileRef: string): string[] {
+  const bare = fileRef.trim().replace(/^#/, "");
+  if (!bare) return [];
+  const forms = [bare, `#${bare}`];
+  if (/^\d{1,20}$/.test(bare)) forms.push(`${SHOPIFY_ORDER_GID_PREFIX}${bare}`);
+  return forms;
+}
+
+/** The single order a set of hits names, or nothing when it names none or several. */
+function soleOrder(hits: Set<string>): string | undefined {
+  return hits.size === 1 ? [...hits][0] : undefined;
+}
+
+/**
+ * Rewrite each row's order reference to the canonical GID of the synced order
+ * it names, and return the set of those GIDs: a row whose reference is not in
+ * it names no order ReconcileAI holds.
+ */
 async function alignShopifyOrderReferences(
   db: DbExecutor,
   params: { organizationId: number; ordersChannelId: number; rows: InsertTransaction[] },
-): Promise<InsertTransaction[]> {
+): Promise<{ rows: InsertTransaction[]; syncedOrders: Set<string> }> {
   const refs = [
     ...new Set(
       params.rows
@@ -326,10 +367,17 @@ async function alignShopifyOrderReferences(
         .filter((ref): ref is string => Boolean(ref)),
     ),
   ];
-  const canonicalByReference = new Map<string, string>();
+  const lookup = [...new Set(refs.flatMap((ref) => [ref, ...widenedOrderReferences(ref)]))];
+  // Every stored reference (GID or name) → the canonical GIDs it names.
+  const ordersByReference = new Map<string, Set<string>>();
+  const record = (reference: string, canonical: string) => {
+    const hits = ordersByReference.get(reference) ?? new Set<string>();
+    hits.add(canonical);
+    ordersByReference.set(reference, hits);
+  };
 
-  for (let index = 0; index < refs.length; index += ORDER_REFERENCE_LOOKUP_CHUNK) {
-    const chunk = refs.slice(index, index + ORDER_REFERENCE_LOOKUP_CHUNK);
+  for (let index = 0; index < lookup.length; index += ORDER_REFERENCE_LOOKUP_CHUNK) {
+    const chunk = lookup.slice(index, index + ORDER_REFERENCE_LOOKUP_CHUNK);
     const orders = await db
       .select({
         transactionRef: transactions.transactionRef,
@@ -348,16 +396,37 @@ async function alignShopifyOrderReferences(
       );
     for (const order of orders) {
       if (!order.transactionRef) continue;
-      canonicalByReference.set(order.transactionRef, order.transactionRef);
-      if (order.externalRef) canonicalByReference.set(order.externalRef, order.transactionRef);
+      record(order.transactionRef, order.transactionRef);
+      if (order.externalRef) record(order.externalRef, order.transactionRef);
     }
   }
 
-  return params.rows.map((row) => {
+  // An exact hit wins; a widened spelling is used only when the exact one
+  // found nothing. Either way a reference that names MORE than one order is
+  // left as the file wrote it — guessing would pin evidence to the wrong order.
+  const canonicalOf = (ref: string): string | undefined => {
+    const exact = ordersByReference.get(ref);
+    if (exact) return soleOrder(exact);
+    const widened = new Set<string>();
+    for (const form of widenedOrderReferences(ref)) {
+      for (const canonical of ordersByReference.get(form) ?? []) widened.add(canonical);
+    }
+    return soleOrder(widened);
+  };
+
+  const syncedOrders = new Set<string>();
+  const rows = params.rows.map((row) => {
     const original = row.transactionRef;
-    const canonical = original ? canonicalByReference.get(original) : undefined;
-    return canonical ? { ...row, transactionRef: canonical } : row;
+    const canonical = original ? canonicalOf(original) : undefined;
+    if (!canonical) return row;
+    syncedOrders.add(canonical);
+    return { ...row, transactionRef: canonical };
   });
+  return { rows, syncedOrders };
+}
+
+function countUnaligned(rows: InsertTransaction[], syncedOrders: Set<string>): number {
+  return rows.filter((row) => !row.transactionRef || !syncedOrders.has(row.transactionRef)).length;
 }
 
 /**
@@ -408,6 +477,7 @@ async function defaultAuditCommitted(params: Parameters<AuditCommitted>[0]): Pro
       imported: params.imported,
       duplicates: params.duplicates,
       failed: params.failed,
+      unalignedRows: params.unalignedRows,
     },
   });
 }
@@ -416,6 +486,7 @@ function dryRunResult(
   parsed: ParsedFile,
   mapping: ColumnMap,
   missingRequired: SettlementField[],
+  unalignedRows: number | null,
 ): ShopifySettlementEvidenceDryRun {
   return {
     committed: false,
@@ -424,6 +495,7 @@ function dryRunResult(
     missingRequired,
     totalRows: parsed.rows.length,
     parseErrors: safeParseErrors(parsed.parseErrors),
+    unalignedRows,
   };
 }
 
@@ -454,8 +526,26 @@ export async function importShopifySettlementEvidence(
   const { mapping, missingRequired } = input.columnMapping
     ? resolveConfirmedColumns(parsed.headers, input.columnMapping)
     : detectColumns(parsed.headers);
-  if (input.dryRun || missingRequired.length > 0) {
-    return dryRunResult(parsed, mapping, missingRequired);
+  if (missingRequired.length > 0) {
+    return dryRunResult(parsed, mapping, missingRequired, null);
+  }
+  if (input.dryRun) {
+    // Read-only: which rows name an order ReconcileAI has not synced. Nothing
+    // here is written, and no settlement channel or batch is created.
+    const { rows: preview } = mapSettlementRows(parsed.rows, mapping, {
+      organizationId: context.organizationId,
+      paymentsChannelId: 0,
+      batchId: 0,
+      userId: actorId,
+      defaultCurrency: context.currency ?? "USD",
+      sourceLabel: input.sourceLabel,
+    });
+    const { rows: aligned, syncedOrders } = await alignShopifyOrderReferences(db, {
+      organizationId: context.organizationId,
+      ordersChannelId,
+      rows: preview,
+    });
+    return dryRunResult(parsed, mapping, missingRequired, countUnaligned(aligned, syncedOrders));
   }
 
   const settlementChannelId = await resolveSettlementChannel(db, context);
@@ -490,7 +580,7 @@ export async function importShopifySettlementEvidence(
         input.sourceLabel,
         context.shopifyUserId,
       );
-      const alignedRows = await alignShopifyOrderReferences(tx, {
+      const { rows: alignedRows, syncedOrders } = await alignShopifyOrderReferences(tx, {
         organizationId: context.organizationId,
         ordersChannelId,
         rows,
@@ -557,6 +647,7 @@ export async function importShopifySettlementEvidence(
         failed: failures.length,
         matchedCount,
         exceptionCount,
+        unalignedRows: countUnaligned(fresh, syncedOrders),
       };
     });
 

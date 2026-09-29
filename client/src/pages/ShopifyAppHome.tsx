@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, CircleAlert, Clock3, FileSpreadsheet, LoaderCircle, RefreshCw, ShieldCheck, Sparkles, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,13 +9,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   loadShopifyAppHomeContext,
   shopifyAppHomeErrorMessage,
-  triggerShopifyOrderSync,
   type ShopifyAppBridgeContext,
   type ShopifySettlementField,
-  type ShopifySyncReport,
 } from "@/lib/shopifyAppBridge";
 import { SETTLEMENT_MAPPING_FIELDS } from "@/lib/shopifySettlementMapping";
 import { useShopifySettlementEvidence } from "@/hooks/useShopifySettlementEvidence";
+import { useShopifyOrderSync } from "@/hooks/useShopifyOrderSync";
+import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "@shared/shopifyOrderSync";
 
 /** Radix Select forbids an empty item value, so "no column" needs a sentinel. */
 const NOT_IN_FILE = "__reconcileai_not_in_file__";
@@ -36,20 +36,21 @@ function formatTimestamp(value: string | null): string {
   return Number.isNaN(date.getTime()) ? "Not available" : date.toLocaleString();
 }
 
-function syncWindow(report: ShopifySyncReport): string {
-  const from = new Date(report.window.from);
-  const to = new Date(report.window.to);
-  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return "the recent evidence window";
-  return `${from.toLocaleString()} – ${to.toLocaleString()}`;
-}
-
 export default function ShopifyAppHome() {
   const [context, setContext] = useState<ShopifyAppBridgeContext | null>(null);
-  const [syncReport, setSyncReport] = useState<ShopifySyncReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
   const settlement = useShopifySettlementEvidence();
+  // Quiet reload for polling: no full-page spinner, and a failed poll keeps the
+  // last known state (the next poll tries again).
+  const refreshContext = useCallback(async () => {
+    try {
+      setContext(await loadShopifyAppHomeContext());
+    } catch {
+      // Intentionally silent — see above.
+    }
+  }, []);
+  const orderSync = useShopifyOrderSync(context?.sync ?? null, refreshContext);
 
   const load = async () => {
     setLoading(true);
@@ -66,20 +67,6 @@ export default function ShopifyAppHome() {
   useEffect(() => {
     void load();
   }, []);
-
-  const startSync = async () => {
-    setSyncing(true);
-    setError(null);
-    try {
-      const report = await triggerShopifyOrderSync();
-      setSyncReport(report);
-      setContext(await loadShopifyAppHomeContext());
-    } catch (err) {
-      setError(shopifyAppHomeErrorMessage(err));
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   if (loading) {
     return (
@@ -113,7 +100,7 @@ export default function ShopifyAppHome() {
     );
   }
 
-  const hasPriorSyncIssue = Boolean(context.sync.lastErrorCode);
+  const hasPriorSyncIssue = orderSync.progress === "failed";
   return (
     <main className="min-h-screen bg-[#F8F9FA] px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -172,24 +159,32 @@ export default function ShopifyAppHome() {
           <CardHeader>
             <CardTitle className="text-xl text-[#1B365D]">1. Refresh Shopify order evidence</CardTitle>
             <CardDescription>
-              The first controlled sync reads the most recent 24-hour window. Subsequent syncs use a corrective overlap so order updates are rechecked safely.
+              The first controlled sync reads the last {SHOPIFY_INITIAL_ORDER_WINDOW_DAYS} days of orders, the most this read-only permission allows, and can take a few minutes for a busy store. Subsequent syncs use a corrective overlap so order updates are rechecked safely.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Button className="bg-[#F47458] hover:bg-[#dd5e45]" disabled={syncing} onClick={() => void startSync()}>
-              {syncing ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-              {syncing ? "Refreshing order evidence…" : "Sync recent Shopify order evidence"}
+            <Button className="bg-[#F47458] hover:bg-[#dd5e45]" disabled={!orderSync.canRequest} onClick={() => void orderSync.request()}>
+              {orderSync.requesting || orderSync.progress === "pending" ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              {orderSync.progress === "pending" ? "Refreshing in the background…" : "Sync recent Shopify order evidence"}
             </Button>
-            {syncReport ? (
+            {orderSync.error ? (
+              <p className="text-sm text-amber-800">{orderSync.error}</p>
+            ) : null}
+            {orderSync.progress === "pending" ? (
+              <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                Order evidence is refreshing in the background. A store’s first sync reads {SHOPIFY_INITIAL_ORDER_WINDOW_DAYS} days and can take several minutes. You can leave this page; the result will be here when you return.
+              </p>
+            ) : null}
+            {orderSync.progress === "stalled" ? (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+                The requested refresh has not finished. It may still be running for a very large store, or it was interrupted. You can request it again; a refresh already running for this store is not started twice.
+              </p>
+            ) : null}
+            {orderSync.progress === "current" && orderSync.requestedHere ? (
               <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
                 <div className="flex gap-3">
                   <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
-                  <div>
-                    <p className="font-semibold">Order evidence refreshed</p>
-                    <p className="mt-1">
-                      {syncReport.inserted} new, {syncReport.updated} updated and {syncReport.unchanged} unchanged record(s) in {syncWindow(syncReport)}.
-                    </p>
-                  </div>
+                  <p><span className="font-semibold">Order evidence refreshed</span> at {formatTimestamp(context.sync.lastSuccessfulAt)}.</p>
                 </div>
               </div>
             ) : null}
@@ -321,6 +316,9 @@ export default function ShopifyAppHome() {
                 {settlement.preview.parseErrors.length > 0 ? (
                   <p className="text-xs text-amber-700">Some rows have file-structure errors: {settlement.preview.parseErrors.join(" · ")}</p>
                 ) : null}
+                {settlement.previewUnalignedNotice ? (
+                  <p className="text-xs text-amber-700">{settlement.previewUnalignedNotice}</p>
+                ) : null}
               </div>
             ) : null}
 
@@ -332,6 +330,9 @@ export default function ShopifyAppHome() {
                   <p className="mt-1">
                     {settlement.result.imported} imported, {settlement.result.duplicates} duplicate(s), {settlement.result.failed} failed; {settlement.result.matchedCount} matched and {settlement.result.exceptionCount} exception(s) identified.
                   </p>
+                  {settlement.resultUnalignedNotice ? (
+                    <p className="mt-2 text-amber-800">{settlement.resultUnalignedNotice}</p>
+                  ) : null}
                 </div>
               </div>
             ) : null}
