@@ -273,9 +273,24 @@ unmapped). The commit (`settlementFileCommit.ts`) is ONE transaction per import
 - it never stores a file's free-text description, which can hold a customer's
   name or address. It stores `Settlement import (<source>)` plus any
   refund/reversal words from OUR vocabulary (`settlementImportDescription`,
-  `server/reversalSignals.ts`, the list the matching engine reads), so a refund
-  a provider exports as a positive amount is still detected. The Shopify import
-  uses the same rule.
+  `server/reversalSignals.ts`, the list the matching engine reads), so the
+  engine reads the row exactly as it read the original text. The Shopify
+  import uses the same rule;
+- **a row's direction is its amount's sign, never its words.** "Chargeback
+  reversal" and "Refund reversed" are word-marked rows where money comes back
+  in, so re-signing on a word would book real credits as refunds. A row whose
+  words say refund but whose amount is positive is therefore booked as money
+  received. It is not guessed at: the preview counts such rows
+  (`positiveRowsReadingAsReversals`) and tells the merchant before anything is
+  written.
+
+**Retail matching agrees on direction (since 2026-09-29).** Every retail leg
+records money from the merchant's side (in = credit, out = debit), and
+`runRetailReconciliation` forces `requireSameDirection`, so a credit only matches
+a credit. Until then the core engine, which ignores direction, let a refund of
+the same amount settle an unpaid order — by reference, or by amount and date
+alone, even a different order's refund. The flag is opt-in and off for every
+other vertical. Production held no such pair when measured (2026-09-29).
 
 **One writer per store's ledger (since 2026-09-29).** The API sync cycle and the
 file import both take `lockShoplineStoreForIngest` (a row lock in the shared

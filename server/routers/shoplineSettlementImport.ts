@@ -14,7 +14,7 @@ import { slConnectorStores } from "../../drizzle/connector_schema";
 import { protectedProcedure } from "../_core/trpc";
 import { resolveOrgScope } from "../_core/tenancy";
 import { createUploadBatch, getDb, updateUploadBatch } from "../db";
-import { mapSettlementRows, parseSettlementFile, resolveImportColumns } from "../connectors/shopline/settlementFileImport";
+import { countPositiveRowsReadingAsReversals, mapSettlementRows, parseSettlementFile, resolveImportColumns } from "../connectors/shopline/settlementFileImport";
 import { resolveChannelIds } from "../connectors/shopline/syncOrchestrator";
 import { commitShoplineSettlementFile, unverifiableDuplicatesNote } from "../connectors/shopline/settlementFileCommit";
 import {
@@ -56,7 +56,13 @@ export const shoplineSettlementImportProcedures = {
         throw new TRPCError({ code: "BAD_REQUEST", message: err instanceof Error ? err.message : "Could not read the file" });
       });
       const { mapping, missingRequired } = resolveImportColumns(parsed.headers, input);
-      const summary = { headers: parsed.headers, mapping, totalRows: parsed.rows.length, parseErrors: parsed.parseErrors };
+      const summary = {
+        headers: parsed.headers,
+        mapping,
+        totalRows: parsed.rows.length,
+        parseErrors: parsed.parseErrors,
+        positiveRowsReadingAsReversals: countPositiveRowsReadingAsReversals(parsed.rows, mapping),
+      };
 
       // A preview, or a file we cannot map: write nothing, show what was read.
       if (input.dryRun || missingRequired.length > 0) {

@@ -35,6 +35,7 @@
     "server/connectors/shopline/syncIngestLock.test.ts",
     "server/jobQueue.coalesce.test.ts",
     "server/jobQueue.replaceFailed.test.ts",
+    "server/reconciliationEngine.direction.test.ts",
     "server/reversalSignals.test.ts",
     "server/reviewerLinkOrigin.test.ts",
     "server/routers/shopifyAppHome.test.ts",
@@ -42,6 +43,7 @@
     "server/sessionCookie.test.ts",
     "server/shoplineCallbackUrl.test.ts",
     "server/shoplineSettlementImport.test.ts",
+    "server/shoplineSettlementPreview.test.ts",
     "server/shoplineUninstallTenancy.test.ts",
     "server/ssoFlowCookie.test.ts"
   ]

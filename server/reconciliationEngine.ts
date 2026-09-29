@@ -21,6 +21,12 @@ export interface ReconciliationConfig {
   // can't skew the result, and returned in `excluded` flagged with context.
   // Card-settlement fees (interchange/scheme/MDR…) are never treated as noise.
   excludeFeeNoise?: boolean;
+  // When true, a credit may only match a credit and a debit only a debit.
+  // Off by default, leaving every existing reconciliation unchanged. Turn it
+  // on only where both legs record money from the same side's point of view:
+  // retail does (runRetailReconciliation), and there a refund — money out —
+  // matching by amount must never settle an order.
+  requireSameDirection?: boolean;
 }
 
 export interface ExcludedFee {
@@ -278,6 +284,11 @@ function detectReversals(txns: Transaction[]): ReversalPair[] {
 
 // ─── Core Matching Engine (Optimized) ───────────────────────────────
 
+/** A pair the config forbids because the two sides move money in opposite directions. */
+function directionConflicts(src: Transaction, tgt: Transaction, config: ReconciliationConfig): boolean {
+  return config.requireSameDirection === true && src.debitCredit !== tgt.debitCredit;
+}
+
 // ─── Fee/charge "noise" detection (general bank fees only) ───────────
 //
 // Mirrors the POC engine: in a bank-statement reconciliation, fee/charge/levy
@@ -410,6 +421,7 @@ export function runMatchingEngine(
       // leg, not a match — leaving both sides unmatched routes them to
       // categorizeException's fx_rate_variance / currency_mismatch analysis.
       if (src.currency !== tgt.currency) continue;
+      if (directionConflicts(src, tgt, config)) continue;
       const srcAmt = parseFloat(String(src.amount));
       const tgtAmt = parseFloat(String(tgt.amount));
       if (srcAmt === tgtAmt) {
@@ -474,6 +486,7 @@ export function runMatchingEngine(
         // Within-currency only (WS-6): numeric closeness across currencies is
         // meaningless — 500 USD must never tolerance-match 500 NGN.
         if (src.currency !== tgt.currency) continue;
+        if (directionConflicts(src, tgt, config)) continue;
 
         const amtDiffPct = amountDifferencePercent(srcAmt, nums[ai]);
         if (amtDiffPct > config.amountTolerance) continue;
@@ -533,6 +546,7 @@ export function runMatchingEngine(
       if (matchedTargetIds.has(tgt.id)) continue;
       // Within-currency only (WS-6).
       if (src.currency !== tgt.currency) continue;
+      if (directionConflicts(src, tgt, config)) continue;
 
       const srcAmt = parseFloat(String(src.amount));
       const tgtAmt = parseFloat(String(tgt.amount));

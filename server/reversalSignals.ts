@@ -1,13 +1,16 @@
 /**
  * Words that mark a transaction as a reversal — one list, shared.
  *
- * The matching engine reads them in a transaction's description to pair a
- * reversal with its original. Settlement-file imports use the same list to keep
- * that signal while discarding the file's free text: a merchant's description
- * column can hold a customer's name or address, which the platform must not
- * store, yet some providers export a refund as a POSITIVE amount whose only
- * sign of being a refund is the word in that column. Dropping the text outright
- * would book such a refund as a second payment.
+ * The matching engine reads them in a transaction's description: to pair a
+ * reversal with the opposite-direction row it undoes, and to label an
+ * unmatched one a reversal rather than a missing payment. Settlement-file
+ * imports use the same list to keep that reading while discarding the file's
+ * free text: a merchant's description column can hold a customer's name or
+ * address, which the platform must not store.
+ *
+ * The words never set a row's direction. "Chargeback reversal" and "Refund
+ * reversed" are word-marked rows where money comes back IN; only the amount's
+ * sign can say which way money moved.
  */
 const REVERSAL_SIGNALS: ReadonlyArray<{ pattern: RegExp; word: string }> = [
   { pattern: /reversal/i, word: "reversal" },

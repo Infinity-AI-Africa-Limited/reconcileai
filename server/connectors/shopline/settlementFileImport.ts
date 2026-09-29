@@ -220,14 +220,42 @@ export function mapSettlementRows(
  *
  * A description column can hold a customer's name, email or address. The
  * platform does not store it: a customer-redaction request could not find it
- * there, and nothing needs it. Reconciliation needs only whether the row reads
- * as a refund or reversal (reversalSignals), which some providers say in words
- * rather than with a negative amount. Idempotent: applied to its own output it
- * returns it unchanged.
+ * there, and nothing needs it. The engine reads only the reversal words
+ * (reversalSignals): they label an unmatched row a reversal rather than a
+ * missing payment, and let a reversal pair with the opposite-direction row it
+ * undoes. Every word kept matches the pattern the original text matched, so
+ * the engine's reading of the row is unchanged.
+ *
+ * The words do NOT set the row's direction; its amount's sign does (see
+ * countPositiveRowsReadingAsReversals). Idempotent: applied to its own output
+ * it returns it unchanged.
  */
 export function settlementImportDescription(fileText: string | null | undefined, sourceLabel: string): string {
   const signals = reversalSignals(fileText);
   return `Settlement import (${sourceLabel})${signals.length > 0 ? ` — ${signals.join(" ")}` : ""}`;
+}
+
+/**
+ * How many rows describe themselves as a refund or reversal while their amount
+ * says money came IN — the rows whose direction the file itself disputes.
+ *
+ * The import books every row by its amount's sign: the provider's own
+ * statement of direction. The words cannot override it: "Chargeback
+ * reversal" and "Refund reversed" are word-marked rows where money comes back
+ * in, so re-signing on a word would book real credits as refunds. A positive
+ * refund would still be booked as money received. So these rows are neither
+ * re-signed nor refused. The preview says how many there are, before anything
+ * is written, so the merchant checks the sign rather than the platform
+ * guessing it.
+ */
+export function countPositiveRowsReadingAsReversals(rows: Record<string, string>[], mapping: ColumnMap): number {
+  if (!mapping.description || !mapping.amount) return 0;
+  let count = 0;
+  for (const row of rows) {
+    const amount = parseAmount(row[mapping.amount]);
+    if (amount !== null && amount > 0 && reversalSignals(row[mapping.description]).length > 0) count += 1;
+  }
+  return count;
 }
 
 /**
