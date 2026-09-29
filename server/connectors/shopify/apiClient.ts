@@ -5,7 +5,7 @@ import type { ShopifyShopMetadata } from "./onboarding";
 
 interface GraphqlResponse<T> {
   data?: T;
-  errors?: Array<{ message?: string }>;
+  errors?: Array<{ message?: string; extensions?: { code?: string } }>;
 }
 
 function endpointFor(shopDomain: string): string {
@@ -58,7 +58,9 @@ export async function fetchShopifyShopMetadata(params: {
     };
   }>;
   if (body.errors?.length || !body.data?.shop?.id || !body.data.shop.name || !body.data.shop.contactEmail) {
-    throw new Error(`Shopify returned incomplete shop metadata${body.errors?.[0]?.message ? `: ${body.errors[0].message}` : ""}`);
+    // Shopify's error text is not ours to log; its structured code is enough to diagnose.
+    const code = body.errors?.[0]?.extensions?.code;
+    throw new Error(`Shopify returned incomplete shop metadata${code && /^[A-Z_]{1,64}$/.test(code) ? ` (${code})` : ""}`);
   }
   return {
     id: body.data.shop.id,

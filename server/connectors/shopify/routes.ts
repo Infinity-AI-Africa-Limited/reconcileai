@@ -10,7 +10,7 @@ import { getSessionCookieOptions } from "../../_core/cookies";
 import { ENV } from "../../_core/env";
 import { sdk } from "../../_core/sdk";
 import { getDb } from "../../db";
-import { isDuplicateKeyError } from "../../dbErrors";
+import { isDuplicateKeyError, loggableError } from "../../dbErrors";
 import {
   buildShopifyAuthorizationUrl,
   exchangeAuthorizationCode,
@@ -230,7 +230,7 @@ export function createShopifyRouter(): express.Router {
       }
       console.error("[shopify-oauth] install start failed", {
         shopDomain,
-        message: error instanceof Error ? error.message : String(error),
+        ...loggableError(error),
       });
       return callbackError(res, "temporarily_unavailable");
     }
@@ -295,7 +295,7 @@ export function createShopifyRouter(): express.Router {
           // The lease expires on its own; a failed release only delays the next install.
           console.warn("[shopify-oauth] install lease release failed", {
             shopDomain,
-            message: error instanceof Error ? error.message : String(error),
+            ...loggableError(error),
           });
         });
       }
@@ -308,7 +308,7 @@ export function createShopifyRouter(): express.Router {
         shopDomain,
         code: error instanceof ShopifyOnboardingError ? error.code : undefined,
         storeFailClosed: error instanceof ShopifyOnboardingError ? error.storeFailClosed : undefined,
-        message: error instanceof Error ? error.message : String(error),
+        ...loggableError(error),
       });
       return callbackError(res, callbackReasonFor(error));
     }
@@ -368,7 +368,7 @@ async function purgeExpiredStates(db: NonNullable<Awaited<ReturnType<typeof getD
       .where(lt(shopifyOauthStates.expiresAt, new Date(Date.now() - STATE_RETENTION_AFTER_EXPIRY_MS)));
   } catch (error) {
     console.warn("[shopify-oauth] expired state purge failed", {
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 }

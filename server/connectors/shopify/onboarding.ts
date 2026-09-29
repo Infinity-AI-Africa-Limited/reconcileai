@@ -10,7 +10,7 @@ import {
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
 import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
-import { isDuplicateKeyError } from "../../dbErrors";
+import { isDuplicateKeyError, loggableError } from "../../dbErrors";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { sha256, type ShopifyTokenResponse } from "./auth";
 import {
@@ -75,8 +75,12 @@ export class ShopifyOnboardingError extends Error {
     message: string,
     public readonly code: ShopifyOnboardingErrorCode,
     public readonly storeFailClosed?: StoreFailClosedState,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    // Static text only. A failure underneath travels as the `cause`, where
+    // loggableError can see it is a database error and report its code alone;
+    // copied into this message it would reach the logs as ordinary text.
+    super(message, options);
     this.name = "ShopifyOnboardingError";
   }
 }
@@ -423,11 +427,9 @@ async function reauthorizeExistingStore(
     // Nothing was written, and the fence owns the store's state: leave it be.
     if (isLeaseLost(error) || isRedactionFenced(error)) throw error;
     const failClosedState = await failClosed(db, store, "token_store_failed", params.reauthorization.retiring, params.lease);
-    throw new ShopifyOnboardingError(
-      `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
-      "TOKEN_STORE_FAILED",
-      failClosedState,
-    );
+    throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
+      cause: error,
+    });
   }
 
   const [organization] = await db
@@ -550,7 +552,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     console.error("[shopify-onboarding] tenant baseline failed", {
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 
@@ -567,7 +569,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     console.error("[shopify-onboarding] retail resolution templates not seeded", {
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 
@@ -594,11 +596,9 @@ async function createMerchantWorkspace(
     // The store is still `pending_claim` here, never `active`; recording why
     // it has no credentials is for the operator, not for safety.
     const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed", "none", params.lease);
-    throw new ShopifyOnboardingError(
-      `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
-      "TOKEN_STORE_FAILED",
-      failClosedState,
-    );
+    throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
+      cause: error,
+    });
   }
 
   let welcomeEmailSent = false;
@@ -617,7 +617,7 @@ async function createMerchantWorkspace(
     console.error("[shopify-onboarding] welcome email delivery failed", {
       storeId,
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
       });
   }
 
@@ -749,7 +749,7 @@ async function failClosed(
     organizationId: store.organizationId,
     reason,
     attempts: FAIL_CLOSED_ATTEMPTS,
-    message: lastError instanceof Error ? lastError.message : String(lastError),
+    ...loggableError(lastError),
   });
   return "not_confirmed";
 }
