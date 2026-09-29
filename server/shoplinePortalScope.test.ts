@@ -125,8 +125,23 @@ const ALL_ORG_NAMING_CALLS = [...SCOPED_CALLS, ...OPERATOR_ONLY_CALLS] as const;
  * So the roster is checked against the router rather than trusted: every
  * procedure whose INPUT SCHEMA declares `organizationId` must appear above.
  */
+/**
+ * Every file that declares procedures of the shoplineConnector router. The
+ * settlement import lives in its own module and is spread into the router
+ * (CLAUDE.md §16); scanning only the router file would silently stop checking
+ * it — the test below pins that it is still found.
+ */
+const SHOPLINE_CONNECTOR_SOURCES = ["server/routers/shoplineConnector.ts", "server/routers/shoplineSettlementImport.ts"];
+
 function proceduresAcceptingAnOrgOverride(): string[] {
-  const source = readFileSync("server/routers/shoplineConnector.ts", "utf8");
+  const found = new Set<string>();
+  for (const file of SHOPLINE_CONNECTOR_SOURCES) {
+    for (const name of proceduresIn(readFileSync(file, "utf8"))) found.add(name);
+  }
+  return [...found];
+}
+
+function proceduresIn(source: string): string[] {
   const declarations = [
     // `\w*` not `\w+`: protectedProcedure has nothing between the prefix and
     // "Procedure", so a + here silently matches only superAdminProcedure and the
@@ -181,6 +196,10 @@ describe("the roster of scoped procedures", () => {
 
   it("should find some, so the check above cannot pass vacuously", () => {
     expect(proceduresAcceptingAnOrgOverride().length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("should still find the settlement import in the module it was split into", () => {
+    expect(proceduresAcceptingAnOrgOverride()).toContain("importSettlementFile");
   });
 });
 
@@ -258,9 +277,9 @@ describe("when an operator writes into a tenant from its portal", () => {
     // land in the caller's OWN organisation, so the rows identified their
     // author; a super admin can now create financial transactions in a
     // merchant's ledger and nothing on those rows says who did.
-    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
-    const importer = router.slice(router.indexOf("importSettlementFile:"));
-    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+    const importModule = readFileSync("server/routers/shoplineSettlementImport.ts", "utf8");
+    const commitBlock = importModule.slice(importModule.indexOf("importSettlementFile:"));
+    expect(commitBlock.length, "the importer must be found where it lives").toBeGreaterThan(1000);
 
     expect(commitBlock).toContain('eventType: "tenant_data_imported"');
     // On the committing path only — a dry run writes nothing to audit — and
@@ -281,9 +300,9 @@ describe("when an operator writes into a tenant from its portal", () => {
     //
     // An unattributed write is recoverable from the log line; a ledger that
     // disagrees with its own status is not.
-    const router = readFileSync("server/routers/shoplineConnector.ts", "utf8");
-    const importer = router.slice(router.indexOf("importSettlementFile:"));
-    const commitBlock = importer.slice(0, importer.indexOf("listAllStores:"));
+    const importModule = readFileSync("server/routers/shoplineSettlementImport.ts", "utf8");
+    const commitBlock = importModule.slice(importModule.indexOf("importSettlementFile:"));
+    expect(commitBlock.length, "the importer must be found where it lives").toBeGreaterThan(1000);
 
     const auditAt = commitBlock.indexOf("logPlatformEvent({");
     const guardAt = commitBlock.lastIndexOf("try {", auditAt);
