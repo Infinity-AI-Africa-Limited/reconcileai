@@ -20,8 +20,9 @@ export type ShoplineSettlementMapping = SettlementMappingOf<ShoplineSettlementFi
 
 /**
  * The fields a merchant maps, in display order. `description` is offered, unlike
- * in the Shopify workspace, because the SHOPLINE import stores it — and offering
- * it is also how a merchant takes away a free-text column that detection mapped.
+ * in the Shopify workspace: its text is never stored, but the refund/reversal
+ * words in it are (settlementImportDescription), which is how some providers
+ * mark a refund exported as a positive amount.
  */
 export const SHOPLINE_SETTLEMENT_FIELDS: ReadonlyArray<{ field: ShoplineSettlementField; required: boolean }> = [
   { field: "orderRef", required: true },
@@ -41,7 +42,7 @@ export const SHOPLINE_SETTLEMENT_FIELD_LABELS: Record<ShoplineSettlementField, s
   settledAt: "Settlement date",
   currency: "Currency",
   fee: "Fee",
-  description: "Description",
+  description: "Description (only refund / reversal words are kept)",
 };
 
 export const shoplineSettlementMapping = settlementMappingRules(SHOPLINE_SETTLEMENT_FIELDS);

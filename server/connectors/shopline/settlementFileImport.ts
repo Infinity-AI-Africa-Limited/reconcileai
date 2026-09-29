@@ -25,6 +25,7 @@
  */
 import type { InsertTransaction } from "../../../drizzle/schema";
 import { sanitizeRef } from "../../db";
+import { reversalSignals } from "../../reversalSignals";
 import {
   parseTabularFile,
   normalizeHeader,
@@ -191,7 +192,7 @@ export function mapSettlementRows(
       organizationId: ctx.organizationId,
       transactionRef: orderRef,
       externalRef: gatewayRef || null,
-      description: desc || `Settlement import (${ctx.sourceLabel})`,
+      description: settlementImportDescription(desc, ctx.sourceLabel),
       amount: String(Math.abs(amount)),
       currency: currency.toUpperCase().slice(0, 3),
       transactionDate: settledAt ?? new Date(),
@@ -211,6 +212,22 @@ export function mapSettlementRows(
   });
 
   return { rows: out, failures };
+}
+
+/**
+ * What a settlement row keeps of the file's free-text description: the source,
+ * and the reversal words it contained — never the text itself.
+ *
+ * A description column can hold a customer's name, email or address. The
+ * platform does not store it: a customer-redaction request could not find it
+ * there, and nothing needs it. Reconciliation needs only whether the row reads
+ * as a refund or reversal (reversalSignals), which some providers say in words
+ * rather than with a negative amount. Idempotent: applied to its own output it
+ * returns it unchanged.
+ */
+export function settlementImportDescription(fileText: string | null | undefined, sourceLabel: string): string {
+  const signals = reversalSignals(fileText);
+  return `Settlement import (${sourceLabel})${signals.length > 0 ? ` — ${signals.join(" ")}` : ""}`;
 }
 
 /**

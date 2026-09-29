@@ -19,6 +19,7 @@ import { resolveChannelIds } from "../connectors/shopline/syncOrchestrator";
 import { commitShoplineSettlementFile, unverifiableDuplicatesNote } from "../connectors/shopline/settlementFileCommit";
 import {
   auditCrossTenantSettlementImport,
+  settlementImportFailure,
   shoplineSettlementImportInput,
 } from "../connectors/shopline/settlementImportRequest";
 
@@ -132,14 +133,10 @@ export const shoplineSettlementImportProcedures = {
         };
       } catch (err) {
         // One transaction, so a failure wrote nothing; the batch says so in words
-        // a merchant can read — never a database error's query and parameters.
-        await updateUploadBatch(batchId, {
-          status: "failed",
-          errorMessage:
-            err instanceof TRPCError ? err.message.slice(0, 2000) : "The import failed and nothing was written. Try again.",
-          completedAt: new Date(),
-        });
-        throw err;
+        // a merchant can read (settlementImportFailure).
+        const failure = settlementImportFailure(err);
+        await updateUploadBatch(batchId, { status: "failed", errorMessage: failure.batchMessage, completedAt: new Date() });
+        throw failure.error;
       }
     }),
 };

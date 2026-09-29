@@ -1,5 +1,6 @@
 import { Transaction, InsertMatch, InsertException } from "../drizzle/schema";
 import { invokeLLM } from "./_core/llm";
+import { REVERSAL_PATTERNS } from "./reversalSignals";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -212,10 +213,9 @@ function detectDuplicates(txns: Transaction[]): DuplicateGroup[] {
 
 function detectReversals(txns: Transaction[]): ReversalPair[] {
   const pairs: ReversalPair[] = [];
-  const reversalPatterns = [
-    /reversal/i, /reversed/i, /rvsl/i, /refund/i, /chargeback/i,
-    /return/i, /cancel/i, /void/i, /rvs/i, /rev\//i,
-  ];
+  // Shared with settlement imports, which keep these words and nothing else
+  // from a file's free-text description (reversalSignals.ts).
+  const reversalPatterns = REVERSAL_PATTERNS;
 
   // Index by amount + currency for quick lookup — a reversal must offset an
   // original in the SAME currency (WS-6).

@@ -269,7 +269,19 @@ unmapped). The commit (`settlementFileCommit.ts`) is ONE transaction per import
   counted and reported (`unverifiableDuplicates`);
 - an order the SHOPLINE Payments API has already settled keeps the order-level
   protection;
-- it reconciles only the orders the file speaks to.
+- it reconciles only the orders the file speaks to;
+- it never stores a file's free-text description, which can hold a customer's
+  name or address. It stores `Settlement import (<source>)` plus any
+  refund/reversal words from OUR vocabulary (`settlementImportDescription`,
+  `server/reversalSignals.ts`, the list the matching engine reads), so a refund
+  a provider exports as a positive amount is still detected. The Shopify import
+  uses the same rule.
+
+**One writer per store's ledger (since 2026-09-29).** The API sync cycle and the
+file import both take `lockShoplineStoreForIngest` (a row lock in the shared
+database) before their "already recorded?" check, and read under it. Two writers
+can no longer both pass the check and record one payment twice. No Redis is
+needed for this: the lock serialises every process and instance.
 
 > ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
 > file's raw reference with the sanitised stored one (`#1001` is stored as
