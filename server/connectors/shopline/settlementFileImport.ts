@@ -25,6 +25,7 @@
  */
 import type { InsertTransaction } from "../../../drizzle/schema";
 import { sanitizeRef } from "../../db";
+import { reversalSignals } from "../../reversalSignals";
 import {
   parseTabularFile,
   normalizeHeader,
@@ -153,6 +154,26 @@ export interface SettlementMapContext {
 }
 
 /**
+ * A row's order reference and amount as the import reads them, or why the
+ * import rejects it. The one reader for both the import and the preview's
+ * counts, so the preview never speaks for a row that will not be booked.
+ */
+function readRowKeys(
+  row: Record<string, string>,
+  mapping: ColumnMap,
+): { orderRef: string; amount: number } | { failure: string } {
+  const orderRef = mapping.orderRef ? String(row[mapping.orderRef] ?? "").trim() : "";
+  if (!orderRef) return { failure: "missing order reference" };
+  // Insert stores the SANITISED reference. One made only of characters that
+  // sanitising strips would be stored with no reference at all: nothing could
+  // ever match it, and nothing could tell a re-upload of it from a new row.
+  if (!sanitizeRef(orderRef)) return { failure: "order reference has no usable characters" };
+  const amount = parseAmount(mapping.amount ? row[mapping.amount] : undefined);
+  if (amount === null) return { failure: "unparseable amount" };
+  return { orderRef, amount };
+}
+
+/**
  * Map parsed rows onto canonical payment-leg transactions.
  *
  * `transactionRef` is the ORDER reference so the engine can match; the gateway's
@@ -168,15 +189,9 @@ export function mapSettlementRows(
 
   rows.forEach((row, i) => {
     const rowIndex = i + 2; // 1-based + header
-    const orderRef = mapping.orderRef ? String(row[mapping.orderRef] ?? "").trim() : "";
-    if (!orderRef) { failures.push({ rowIndex, reason: "missing order reference" }); return; }
-    // Insert stores the SANITISED reference. One made only of characters that
-    // sanitising strips would be stored with no reference at all: nothing could
-    // ever match it, and nothing could tell a re-upload of it from a new row.
-    if (!sanitizeRef(orderRef)) { failures.push({ rowIndex, reason: "order reference has no usable characters" }); return; }
-
-    const amount = parseAmount(mapping.amount ? row[mapping.amount] : undefined);
-    if (amount === null) { failures.push({ rowIndex, reason: "unparseable amount" }); return; }
+    const keys = readRowKeys(row, mapping);
+    if ("failure" in keys) { failures.push({ rowIndex, reason: keys.failure }); return; }
+    const { orderRef, amount } = keys;
 
     const settledAt = parseDate(mapping.settledAt ? row[mapping.settledAt] : undefined);
     const gatewayRef = mapping.gatewayRef ? String(row[mapping.gatewayRef] ?? "").trim() : "";
@@ -191,7 +206,7 @@ export function mapSettlementRows(
       organizationId: ctx.organizationId,
       transactionRef: orderRef,
       externalRef: gatewayRef || null,
-      description: desc || `Settlement import (${ctx.sourceLabel})`,
+      description: settlementImportDescription(desc, ctx.sourceLabel),
       amount: String(Math.abs(amount)),
       currency: currency.toUpperCase().slice(0, 3),
       transactionDate: settledAt ?? new Date(),
@@ -211,6 +226,53 @@ export function mapSettlementRows(
   });
 
   return { rows: out, failures };
+}
+
+/**
+ * What a settlement row keeps of the file's free-text description: the source,
+ * and the reversal words it contained — never the text itself.
+ *
+ * A description column can hold a customer's name, email or address. The
+ * platform does not store it: a customer-redaction request could not find it
+ * there, and nothing needs it. The engine reads only the reversal words
+ * (reversalSignals): they label an unmatched row a reversal rather than a
+ * missing payment, and let a reversal pair with the opposite-direction row it
+ * undoes. Every word kept matches the pattern the original text matched, so
+ * the engine's reading of the row is unchanged.
+ *
+ * The words do NOT set the row's direction; its amount's sign does (see
+ * countPositiveRowsReadingAsReversals). Idempotent: applied to its own output
+ * it returns it unchanged.
+ */
+export function settlementImportDescription(fileText: string | null | undefined, sourceLabel: string): string {
+  const signals = reversalSignals(fileText);
+  return `Settlement import (${sourceLabel})${signals.length > 0 ? ` — ${signals.join(" ")}` : ""}`;
+}
+
+/**
+ * How many rows describe themselves as a refund or reversal while their amount
+ * says money came IN — the rows whose direction the file itself disputes.
+ *
+ * The import books every row by its amount's sign: the provider's own
+ * statement of direction. The words cannot override it: "Chargeback
+ * reversal" and "Refund reversed" are word-marked rows where money comes back
+ * in, so re-signing on a word would book real credits as refunds. A positive
+ * refund would still be booked as money received. So these rows are neither
+ * re-signed nor refused. The preview says how many there are, before anything
+ * is written, so the merchant checks the sign rather than the platform
+ * guessing it. Rows the import will reject are not counted: they are not
+ * booked at all, and the preview must not send the merchant to fix their sign.
+ */
+export function countPositiveRowsReadingAsReversals(rows: Record<string, string>[], mapping: ColumnMap): number {
+  const description = mapping.description;
+  if (!description) return 0;
+  let count = 0;
+  for (const row of rows) {
+    const keys = readRowKeys(row, mapping);
+    if ("failure" in keys) continue;
+    if (keys.amount > 0 && reversalSignals(row[description]).length > 0) count += 1;
+  }
+  return count;
 }
 
 /**

@@ -36,10 +36,13 @@
  */
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
-import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { uploadBatches, type InsertTransaction } from "../../../drizzle/schema";
 import { getDb, insertTransactionsWithExecutor, type DbExecutor } from "../../db";
-import { importableSettlementFileRows, runReconciliationOnPersistedData } from "./syncOrchestrator";
+import {
+  importableSettlementFileRows,
+  lockShoplineStoreForIngest,
+  runReconciliationOnPersistedData,
+} from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -102,27 +105,6 @@ export function unverifiableDuplicatesNote(count: number): string | null {
   );
 }
 
-/**
- * Serialise imports for one store and refuse one that stopped being active
- * since the request began. Must be the transaction's first statement.
- */
-async function lockStoreForImport(tx: DbExecutor, organizationId: number, storeId: number): Promise<void> {
-  const [locked] = await tx
-    .select({ id: slConnectorStores.id })
-    .from(slConnectorStores)
-    .where(
-      and(
-        eq(slConnectorStores.id, storeId),
-        eq(slConnectorStores.organizationId, organizationId),
-        eq(slConnectorStores.status, "active"),
-      ),
-    )
-    .limit(1)
-    .for("update");
-  if (!locked) {
-    throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No active SHOPLINE store for this organisation" });
-  }
-}
 
 export async function commitShoplineSettlementFile(
   db: Db,
@@ -130,7 +112,10 @@ export async function commitShoplineSettlementFile(
   deps: ShoplineSettlementCommitDeps = {},
 ): Promise<ShoplineSettlementCommitResult> {
   return db.transaction(async (tx) => {
-    await lockStoreForImport(tx, params.organizationId, params.storeId);
+    // The same lock every writer of this store's ledger takes, API sync included.
+    if (!(await lockShoplineStoreForIngest(tx, params.organizationId, params.storeId))) {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No active SHOPLINE store for this organisation" });
+    }
 
     const failures = [...params.mappingFailures];
     // The shared lookup and selection rule (importableSettlementFileRows): refs

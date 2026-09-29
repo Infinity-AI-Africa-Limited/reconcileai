@@ -11,8 +11,26 @@
 
 const ER_DUP_ENTRY = 1062;
 
+/** TiDB's "Transaction is too large" (ErrTxnTooLarge): one transaction exceeded its size limit. */
+const TIDB_TXN_TOO_LARGE = 8004;
+
 /** How far down a `cause` chain to look; guards against a cyclic chain. */
 const MAX_CAUSE_DEPTH = 5;
+
+/**
+ * True when the error, or anything it wraps, is TiDB refusing a transaction as
+ * too large. Retrying the same work fails the same way; it has to be smaller.
+ */
+export function isTransactionTooLargeError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current; depth += 1) {
+    if (typeof current !== "object") return false;
+    const { errno, cause } = current as { errno?: unknown; cause?: unknown };
+    if (errno === TIDB_TXN_TOO_LARGE) return true;
+    current = cause;
+  }
+  return false;
+}
 
 /** True when the error, or anything it wraps, is a unique-key violation. */
 export function isDuplicateKeyError(error: unknown): boolean {

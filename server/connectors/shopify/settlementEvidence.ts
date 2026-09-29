@@ -19,6 +19,7 @@ import {
   parseSettlementFile,
   resolveConfirmedColumns,
   selectUnrecordedSettlementEvents,
+  settlementImportDescription,
   type SettlementEventFields,
   type ColumnMap,
   type ParsedFile,
@@ -445,7 +446,8 @@ export function minimizeShopifySettlementEvidenceRows(
     const provenance = (row.rawData ?? {}) as Record<string, unknown>;
     return {
       ...row,
-      description: `Settlement import (${sourceLabel})`,
+      // The source and any reversal words, never the free text (shared rule).
+      description: settlementImportDescription(row.description, sourceLabel),
       rawData: {
         gatewayEventType: provenance.gatewayEventType === "refund" ? "refund" : "payment",
         originalOrderRef: typeof provenance.originalOrderRef === "string"

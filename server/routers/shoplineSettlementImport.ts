@@ -14,11 +14,12 @@ import { slConnectorStores } from "../../drizzle/connector_schema";
 import { protectedProcedure } from "../_core/trpc";
 import { resolveOrgScope } from "../_core/tenancy";
 import { createUploadBatch, getDb, updateUploadBatch } from "../db";
-import { mapSettlementRows, parseSettlementFile, resolveImportColumns } from "../connectors/shopline/settlementFileImport";
+import { countPositiveRowsReadingAsReversals, mapSettlementRows, parseSettlementFile, resolveImportColumns } from "../connectors/shopline/settlementFileImport";
 import { resolveChannelIds } from "../connectors/shopline/syncOrchestrator";
 import { commitShoplineSettlementFile, unverifiableDuplicatesNote } from "../connectors/shopline/settlementFileCommit";
 import {
   auditCrossTenantSettlementImport,
+  settlementImportFailure,
   shoplineSettlementImportInput,
 } from "../connectors/shopline/settlementImportRequest";
 
@@ -55,7 +56,13 @@ export const shoplineSettlementImportProcedures = {
         throw new TRPCError({ code: "BAD_REQUEST", message: err instanceof Error ? err.message : "Could not read the file" });
       });
       const { mapping, missingRequired } = resolveImportColumns(parsed.headers, input);
-      const summary = { headers: parsed.headers, mapping, totalRows: parsed.rows.length, parseErrors: parsed.parseErrors };
+      const summary = {
+        headers: parsed.headers,
+        mapping,
+        totalRows: parsed.rows.length,
+        parseErrors: parsed.parseErrors,
+        positiveRowsReadingAsReversals: countPositiveRowsReadingAsReversals(parsed.rows, mapping),
+      };
 
       // A preview, or a file we cannot map: write nothing, show what was read.
       if (input.dryRun || missingRequired.length > 0) {
@@ -132,14 +139,10 @@ export const shoplineSettlementImportProcedures = {
         };
       } catch (err) {
         // One transaction, so a failure wrote nothing; the batch says so in words
-        // a merchant can read — never a database error's query and parameters.
-        await updateUploadBatch(batchId, {
-          status: "failed",
-          errorMessage:
-            err instanceof TRPCError ? err.message.slice(0, 2000) : "The import failed and nothing was written. Try again.",
-          completedAt: new Date(),
-        });
-        throw err;
+        // a merchant can read (settlementImportFailure).
+        const failure = settlementImportFailure(err);
+        await updateUploadBatch(batchId, { status: "failed", errorMessage: failure.batchMessage, completedAt: new Date() });
+        throw failure.error;
       }
     }),
 };

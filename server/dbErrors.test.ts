@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DrizzleQueryError } from "drizzle-orm/errors";
-import { isDuplicateKeyError, loggableError } from "./dbErrors";
+import { isDuplicateKeyError, isTransactionTooLargeError, loggableError } from "./dbErrors";
 
 /** A driver error shaped like mysql2's. */
 function driverError(code: string, errno: number, message: string): Error {
@@ -119,5 +119,16 @@ describe("when loggableError is spread into a log that names its own operation",
       { code: "TOKEN_STORE_FAILED" },
     );
     expect(loggableError(wrapped)).toEqual({ error: "database", errorCode: "ER_LOCK_DEADLOCK" });
+  });
+});
+
+describe("when TiDB refuses a transaction as too large", () => {
+  it("should be recognised through drizzle's wrapper, and nothing else mistaken for it", () => {
+    const tooLarge = Object.assign(new Error("Failed query: …"), {
+      cause: Object.assign(new Error("Transaction is too large"), { errno: 8004 }),
+    });
+    expect(isTransactionTooLargeError(tooLarge)).toBe(true);
+    expect(isTransactionTooLargeError(Object.assign(new Error("dup"), { errno: 1062 }))).toBe(false);
+    expect(isTransactionTooLargeError("8004")).toBe(false);
   });
 });

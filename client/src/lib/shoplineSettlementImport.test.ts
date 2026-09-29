@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canImportShoplineSettlement,
   initialShoplineImportState,
+  positiveReversalRowsNote,
   shoplineImportReducer,
   shoplineMappingEdited,
   shoplineSettlementFileError,
@@ -77,6 +78,7 @@ describe("when the merchant replaces the file while a request is still running",
     missingRequired: [],
     totalRows: 3,
     parseErrors: [],
+    positiveRowsReadingAsReversals: 0,
   };
 
   const chooseThenReplace = () => {
@@ -121,5 +123,22 @@ describe("when the merchant replaces the file while a request is still running",
     expect(state.sourceLabel).toBe("Stripe");
     expect(state.columnMapping).toBeNull();
     expect(state.checkedMapping).toBeNull();
+  });
+});
+
+describe("when a checked file has positive rows described as refunds", () => {
+  it("should say nothing when there are none", () => {
+    expect(positiveReversalRowsNote(0)).toBeNull();
+  });
+
+  it("should say what one such row will be imported as, and how to change it", () => {
+    expect(positiveReversalRowsNote(1)).toBe(
+      "1 row is described as a refund or reversal but has a positive amount, so it will be imported as money " +
+        "received. If it is a refund, make its amount negative in the file and check columns again.",
+    );
+  });
+
+  it("should count several", () => {
+    expect(positiveReversalRowsNote(3)).toMatch(/^3 rows are described as a refund or reversal but have a positive amount/);
   });
 });
