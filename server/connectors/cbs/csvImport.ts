@@ -24,6 +24,7 @@ import { applyMapping, type MappingRule } from "../woodcore/mapping";
 import type { CanonicalTransaction, WcEntity } from "../woodcore/types";
 import { getActiveOverrideRules } from "../woodcore/webhooks";
 import { getCbsProfile } from "./registry";
+import { errorSummary } from "../../errorText";
 
 /** Parse CSV text into header-keyed rows. Pure — unit-testable without a DB. */
 export function parseCsvRows(csvContent: string): {
@@ -119,7 +120,7 @@ export async function importCbsCsv(
       batchId,
       { total: rows.length, valid: inserted, invalid: failures.length },
       false,
-      err instanceof Error ? err.message : String(err),
+      errorSummary(err),
     );
     throw err;
   }

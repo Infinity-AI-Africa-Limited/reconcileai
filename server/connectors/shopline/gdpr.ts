@@ -31,6 +31,7 @@ import {
 import { ENV } from "../../_core/env";
 import { verifyWebhookHmac } from "./signature";
 import { handleShoplineUninstall } from "./onboarding";
+import { loggableError } from "../../dbErrors";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -169,7 +170,7 @@ async function recordRequest(
     });
   } catch (err) {
     // Audit insert must never break the 200 ack.
-    console.error("[shopline-gdpr] audit record failed (non-fatal):", err);
+    console.error("[shopline-gdpr] audit record failed (non-fatal):", loggableError(err));
   }
 }
 

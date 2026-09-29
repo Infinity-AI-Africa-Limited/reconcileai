@@ -72,6 +72,7 @@ import { slConnectorStores } from "../drizzle/connector_schema";
 import { createAuditLog, getDb } from "./db";
 import { DEMO_REPORT_MARKER, isSeededReportSummary } from "./demoReportSeed";
 import { buildReportSummary } from "./reportSummary";
+import { loggableError } from "./dbErrors";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -572,7 +573,7 @@ export async function rollAllDemoTimelines(env: NodeJS.ProcessEnv = process.env)
           console.warn(`[demo-timeline] ${code}: NOT ROLLED — ${result.reason}`);
         }
       } catch (err) {
-        console.error(`[demo-timeline] ${code}: failed —`, err instanceof Error ? err.message : err);
+        console.error(`[demo-timeline] ${code}: failed —`, loggableError(err));
       }
     }
   } finally {

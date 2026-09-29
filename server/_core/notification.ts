@@ -1,6 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { ENV } from "./env";
 import { sendEmail, renderBrandedHtml, markdownToBasicHtml } from "./email";
+import { loggableError } from "../dbErrors";
 
 export type NotificationPayload = {
   title: string;
@@ -109,7 +110,7 @@ export async function notifyOwner(
 
       return true;
     } catch (error) {
-      console.warn("[Notification] Error calling notification service:", error);
+      console.warn("[Notification] Error calling notification service:", loggableError(error));
       return false;
     }
   }

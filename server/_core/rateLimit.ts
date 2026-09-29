@@ -13,6 +13,7 @@
 import { eq } from "drizzle-orm";
 import { tenantQuotas, type TenantQuota } from "../../drizzle/tenant_schema";
 import { getDb } from "../db";
+import { loggableError } from "../dbErrors";
 
 export type RateBucket = "api" | "webhook" | "csv_import" | "sync_trigger";
 
@@ -71,7 +72,7 @@ export async function getTenantLimits(organizationId: number): Promise<TenantLim
       if (row) limits = toLimits(row);
     }
   } catch (err) {
-    console.error("[rateLimit] quota lookup failed; using defaults:", err);
+    console.error("[rateLimit] quota lookup failed; using defaults:", loggableError(err));
   }
   quotaCache.set(organizationId, { limits, expiresAt: Date.now() + QUOTA_CACHE_MS });
   return limits;

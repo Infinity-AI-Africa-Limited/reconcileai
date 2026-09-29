@@ -22,6 +22,8 @@ import { asyncHandler } from "./asyncHandler";
 import { clientIpOrUnknown, describeTrustedProxyConfig } from "./clientIp";
 import { ENV } from "./env";
 import { shopifyWebhookRawBody } from "../connectors/shopify/webhookBody";
+import { loggableError } from "../dbErrors";
+import { errorSummary, logProcedureFailure } from "../errorText";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -103,7 +105,7 @@ async function startServer() {
     } catch (err) {
       checks.database = {
         status: "error",
-        message: err instanceof Error ? err.message : String(err),
+        message: errorSummary(err),
       };
     }
 
@@ -130,7 +132,7 @@ async function startServer() {
     } catch (err) {
       checks.storage = {
         status: "error",
-        message: err instanceof Error ? err.message : String(err),
+        message: errorSummary(err),
       };
     }
 
@@ -141,7 +143,7 @@ async function startServer() {
     } catch (err) {
       checks.llm = {
         status: "error",
-        message: err instanceof Error ? err.message : String(err),
+        message: errorSummary(err),
       };
     }
 
@@ -214,7 +216,7 @@ async function startServer() {
     } catch (err) {
       checks.queue = {
         status: "error",
-        message: err instanceof Error ? err.message : String(err),
+        message: errorSummary(err),
       };
     }
 
@@ -290,9 +292,9 @@ async function startServer() {
 
       res.json({ ok: true, total, avgScore, highRisk, pendingInvites });
     } catch (err) {
-      console.error("[weeklyAssessmentDigest] error:", err);
+      console.error("[weeklyAssessmentDigest] error:", loggableError(err));
       res.status(500).json({
-        error: err instanceof Error ? err.message : String(err),
+        error: errorSummary(err),
         timestamp: new Date().toISOString(),
       });
     }
@@ -314,9 +316,9 @@ async function startServer() {
       const result = await sendWeeklyChannelReport(schedule.userId, schedule.reportPeriod);
       res.json({ ok: true, ...result });
     } catch (err) {
-      console.error("[weeklyChannelReport] error:", err);
+      console.error("[weeklyChannelReport] error:", loggableError(err));
       res.status(500).json({
-        error: err instanceof Error ? err.message : String(err),
+        error: errorSummary(err),
         context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
         timestamp: new Date().toISOString(),
       });
@@ -344,9 +346,9 @@ async function startServer() {
 
       res.json({ ok: true, totalBreaches, totalAlerts, usersChecked: users.length });
     } catch (err) {
-      console.error("[channelThresholdCheck] error:", err);
+      console.error("[channelThresholdCheck] error:", loggableError(err));
       res.status(500).json({
-        error: err instanceof Error ? err.message : String(err),
+        error: errorSummary(err),
         context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
         timestamp: new Date().toISOString(),
       });
@@ -367,9 +369,9 @@ async function startServer() {
       console.log(`[s3CsvCleanup] checked=${result.checked} deleted=${result.deleted} failed=${result.failed}`);
       res.json({ ok: true, ...result });
     } catch (err) {
-      console.error("[s3CsvCleanup] error:", err);
+      console.error("[s3CsvCleanup] error:", loggableError(err));
       res.status(500).json({
-        error: err instanceof Error ? err.message : String(err),
+        error: errorSummary(err),
         context: { url: req.url, taskUid: req.headers["x-manus-cron-task-uid"] },
         timestamp: new Date().toISOString(),
       });
@@ -446,7 +448,7 @@ async function startServer() {
       // to pick a redirect.
       return res.redirect(302, "/home");
     } catch (err) {
-      console.error("[magic-login] error:", err);
+      console.error("[magic-login] error:", loggableError(err));
       return res.redirect(302, "/?error=login_failed");
     }
   });
@@ -515,7 +517,7 @@ async function startServer() {
       // would drop a platform one somewhere arbitrary.
       return res.redirect(302, resolved.scope === "platform" ? "/admin/super-admin" : "/home");
     } catch (err) {
-      console.error("[reviewer-access] error:", err);
+      console.error("[reviewer-access] error:", loggableError(err));
       return res.redirect(302, "/login?error=reviewer_link_invalid");
     }
   });
@@ -575,7 +577,7 @@ async function startServer() {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncWoodcoreMirror, syncState } = await import("../woodcoreSync");
     if (syncState.running) return res.status(409).json({ error: "already running", state: syncState });
-    syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", e));
+    syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", loggableError(e)));
     res.status(202).json({ started: true });
   }));
   app.get("/api/woodcore/sync", asyncHandler(async (req, res) => {
@@ -607,7 +609,7 @@ async function startServer() {
       });
       res.status(result.httpStatus).json(result.body);
     } catch (err) {
-      console.error("[cbs-webhook] error:", err);
+      console.error("[cbs-webhook] error:", loggableError(err));
       res.status(500).json({ ok: false, status: "internal_error" });
     }
   };
@@ -623,7 +625,7 @@ async function startServer() {
       const { getApiGateway } = await import("../api/gateway");
       getApiGateway()(req, res, next);
     } catch (err) {
-      console.error("[api-gateway] mount error:", err);
+      console.error("[api-gateway] mount error:", loggableError(err));
       res.status(500).json({ code: "INTERNAL", message: "API unavailable" });
     }
   });
@@ -643,8 +645,8 @@ async function startServer() {
       const result = await runConnectorTick();
       res.json({ ok: true, ...result });
     } catch (err) {
-      console.error("[woodcoreConnectorSync] error:", err);
-      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      console.error("[woodcoreConnectorSync] error:", loggableError(err));
+      res.status(500).json({ error: errorSummary(err) });
     }
   }));
 
@@ -672,7 +674,7 @@ async function startServer() {
       return res.status(200).json({ ok: true });
     } catch (err) {
       // Still 200: an unhandled fault here must not trigger a retry storm.
-      console.error("[emailIngestion] handler threw:", err);
+      console.error("[emailIngestion] handler threw:", loggableError(err));
       return res.status(200).json({ ok: true });
     }
   });
@@ -779,6 +781,10 @@ async function startServer() {
     createExpressMiddleware({
       router: appRouter,
       createContext,
+      // A procedure that failed unexpectedly is logged once, by its code and
+      // where it was thrown, never its text. Until this, such a failure
+      // reached the client (see errorFormatter in trpc.ts) and no log at all.
+      onError: logProcedureFailure,
     })
   );
   // development mode uses Vite, production mode uses static files
@@ -793,7 +799,7 @@ async function startServer() {
   // (fire-and-forget; see server/reconciliationQueue.ts).
   import("../reconciliationQueue")
     .then((q) => q.recoverStuckReconciliationJobs())
-    .catch((e) => console.error("[boot] stuck-job sweep failed:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[boot] stuck-job sweep failed:", loggableError(e)));
 
   // Shopify privacy admission writes a transactional outbox row. Redis is only
   // touched after commit; this recovery loop closes the commit/enqueue crash gap.
@@ -801,7 +807,7 @@ async function startServer() {
   // an accepted request into a false queued/completed state.
   import("../connectors/shopify/privacyQueue")
     .then((q) => q.startShopifyPrivacyRecoveryLoop())
-    .catch((e) => console.error("[boot] Shopify privacy outbox recovery unavailable:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[boot] Shopify privacy outbox recovery unavailable:", loggableError(e)));
 
   // Scheduled Shopify order sync: the backstop behind webhooks, which Shopify
   // does not guarantee. Without REDIS_URL an order webhook cannot be queued and
@@ -809,30 +815,30 @@ async function startServer() {
   // order sync. Starts only when Shopify app credentials are configured.
   import("../connectors/shopify/orderBackstop")
     .then((b) => b.startShopifyOrderBackstopLoop())
-    .catch((e) => console.error("[boot] Shopify order sync backstop unavailable:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[boot] Shopify order sync backstop unavailable:", loggableError(e)));
 
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).
   seedDefaultResolutionTemplates()
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} default resolution template(s)`); })
-    .catch((e) => console.error("[seed] resolution templates failed:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[seed] resolution templates failed:", loggableError(e)));
 
   // Seed Nigerian payment channel exception templates (idempotent; fire-and-forget).
   seedNigerianExceptionDefaults()
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} Nigerian channel exception template(s)`); })
-    .catch((e) => console.error("[seed] Nigerian exception templates failed:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[seed] Nigerian exception templates failed:", loggableError(e)));
 
   // Seed retail / e-commerce (SHOPLINE vertical) exception templates (idempotent).
   import("../seedResolutionTemplates")
     .then((m) => m.seedRetailExceptionDefaults())
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} retail exception template(s)`); })
-    .catch((e) => console.error("[seed] retail exception templates failed:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[seed] retail exception templates failed:", loggableError(e)));
 
   // Seed Uganda market-pack exception templates (BoU framework; idempotent).
   import("../seedResolutionTemplates")
     .then((m) => m.seedUgandaExceptionDefaults())
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} Uganda exception template(s)`); })
-    .catch((e) => console.error("[seed] Uganda exception templates failed:", e instanceof Error ? e.message : e));
+    .catch((e) => console.error("[seed] Uganda exception templates failed:", loggableError(e)));
 
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);

@@ -44,6 +44,7 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "./db";
 import { organizations, reviewerAccessLinks, users } from "../drizzle/schema";
 import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
+import { loggableError } from "./dbErrors";
 
 /** The retail tenant a SHOPLINE reviewer is shown: the canonical dev store. */
 export const SHOPLINE_REVIEW_ORG_CODE = "SL_RECONCILEAI_DEV";
@@ -153,7 +154,7 @@ export async function blockingRealTenants(limit = 10): Promise<Array<{ id: numbe
     // as one that never opened. Throwing here would surface as an errored query
     // whose absent data reads as "no blockers" downstream — an outage opening
     // the gate.
-    console.error("[reviewerAccess] could not read blocking tenants:", err);
+    console.error("[reviewerAccess] could not read blocking tenants:", loggableError(err));
     return [UNREADABLE];
   }
 }

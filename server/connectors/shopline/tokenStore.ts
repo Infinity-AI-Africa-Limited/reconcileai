@@ -13,6 +13,7 @@
 
 import { and, eq } from "drizzle-orm";
 import { getDb } from "../../db";
+import { loggableError } from "../../dbErrors";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { slConnectorTokens } from "../../../drizzle/connector_schema";
 import { refreshAccessToken, tokenNeedsRefresh, calculateTokenExpiry } from "./auth";
@@ -96,7 +97,7 @@ export async function getValidToken(
       return refreshed.accessToken;
     } catch (err) {
       // If refresh fails, return the existing token (may still be valid for up to 1h)
-      console.error(`[SHOPLINE] Token refresh failed for store ${slStoreId}:`, err);
+      console.error(`[SHOPLINE] Token refresh failed for store ${slStoreId}:`, loggableError(err));
       return plainToken;
     }
   }

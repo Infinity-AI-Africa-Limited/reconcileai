@@ -30,6 +30,7 @@
 
 import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { getDb } from "../../db";
+import { errorSummary } from "../../errorText";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { slConnectorWebhookEvents, slConnectorStores } from "../../../drizzle/connector_schema";
 import { verifyWebhookHmac } from "./signature";
@@ -217,7 +218,7 @@ export async function processAdmittedWebhook(
 
     return { status: "processed", eventId: admitted.eventId };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
+    const errorMessage = errorSummary(err);
 
     await db
       .update(slConnectorWebhookEvents)
@@ -659,7 +660,7 @@ export async function replayStalledWebhookEvents(
         .where(heldClaim);
       summary.processed += 1;
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      const errorMessage = errorSummary(err);
       const exhausted = attempts >= WEBHOOK_MAX_ATTEMPTS;
       await db
         .update(slConnectorWebhookEvents)

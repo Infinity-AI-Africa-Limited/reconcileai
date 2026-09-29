@@ -171,9 +171,15 @@ describe("when a route handler's promise rejects", () => {
         throw new Error("boom");
       })(fakeReq("/api/woodcore/sync"), fakeRes().res as never, (() => {}) as never);
     });
+    // What failed and where, never the error itself: Node would print its
+    // message, which for a database error is the query and its parameters.
     expect(errorLog).toHaveBeenCalledWith(
       expect.stringContaining("POST /api/woodcore/sync"),
-      expect.any(Error),
+      expect.objectContaining({
+        error: "Error",
+        message: "boom",
+        frames: expect.arrayContaining([expect.stringMatching(/^at .*asyncHandler\.test\.ts/)]),
+      }),
     );
   });
 });

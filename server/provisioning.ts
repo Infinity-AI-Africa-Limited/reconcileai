@@ -22,6 +22,7 @@ import { eq } from "drizzle-orm";
 import { modulesForSegment, type ModuleType } from "@shared/moduleScope";
 import { getDb } from "./db";
 import { provisionTenantKey } from "./_core/tenantKeys";
+import { errorSummary } from "./errorText";
 
 export interface ProvisionStep {
   step: "encryption_key" | "quotas" | "modules";
@@ -53,7 +54,7 @@ export async function modulesToProvision(
   try {
     return { modules: modulesForSegment(await lookupSegment()) };
   } catch (err) {
-    return { failed: err instanceof Error ? err.message : String(err) };
+    return { failed: errorSummary(err) };
   }
 }
 
@@ -74,7 +75,7 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
     steps.push({ step: "encryption_key", status: "created" });
   } catch (err) {
     if (isDuplicateKeyError(err)) steps.push({ step: "encryption_key", status: "already_present" });
-    else steps.push({ step: "encryption_key", status: "failed", detail: err instanceof Error ? err.message : String(err) });
+    else steps.push({ step: "encryption_key", status: "failed", detail: errorSummary(err) });
   }
 
   // 2) Quota row at platform defaults (super admins tune per tenant later).
@@ -83,7 +84,7 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
     steps.push({ step: "quotas", status: "created" });
   } catch (err) {
     if (isDuplicateKeyError(err)) steps.push({ step: "quotas", status: "already_present" });
-    else steps.push({ step: "quotas", status: "failed", detail: err instanceof Error ? err.message : String(err) });
+    else steps.push({ step: "quotas", status: "failed", detail: errorSummary(err) });
   }
 
   // 3) Reconciliation modules on by default — but only the ones the tenant's
@@ -122,7 +123,7 @@ export async function provisionTenantBaseline(organizationId: number): Promise<P
       await db.insert(moduleConfigurations).values({ organizationId, moduleType, isEnabled: true });
     } catch (err) {
       if (!isDuplicateKeyError(err)) {
-        steps.push({ step: "modules", status: "failed", detail: `${moduleType}: ${err instanceof Error ? err.message : String(err)}` });
+        steps.push({ step: "modules", status: "failed", detail: `${moduleType}: ${errorSummary(err)}` });
       }
     }
   }

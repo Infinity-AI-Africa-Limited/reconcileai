@@ -24,6 +24,7 @@ import { eq } from "drizzle-orm";
 import { organizations } from "../../drizzle/schema";
 import { getDb } from "../db";
 import { currentPortalOrganizationId } from "./requestScope";
+import { loggableError } from "../dbErrors";
 
 export interface TenantActor {
   role?: string | null;
@@ -125,7 +126,7 @@ export async function isOrgLoginAllowed(organizationId: number | null | undefine
     if (!org) return false;
     return org.isActive;
   } catch (err) {
-    console.error("[tenancy] org login check failed (allowing login):", err);
+    console.error("[tenancy] org login check failed (allowing login):", loggableError(err));
     return true;
   }
 }

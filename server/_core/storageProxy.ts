@@ -4,6 +4,7 @@ import { sdk } from "./sdk";
 import { isTenantId } from "@shared/tenantId";
 import { auditOrganizationFor } from "./requestScope";
 import { clientIp } from "./clientIp";
+import { loggableError } from "../dbErrors";
 
 /**
  * Which audit chain a storage access decision is filed in.
@@ -97,7 +98,7 @@ export function registerStorageProxy(app: Express) {
       res.set("Cache-Control", "no-store");
       res.redirect(307, url);
     } catch (err) {
-      console.error("[StorageProxy] failed:", err);
+      console.error("[StorageProxy] failed:", loggableError(err));
       res.status(502).send("Storage proxy error");
     }
   });

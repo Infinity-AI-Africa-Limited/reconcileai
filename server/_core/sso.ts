@@ -33,6 +33,7 @@ import { ENV } from "./env";
 import { appOriginFor, clientIpOrUnknown, requestIsSecure } from "./clientIp";
 import { sdk } from "./sdk";
 import { isOrgLoginAllowed } from "./tenancy";
+import { loggableError } from "../dbErrors";
 
 export type SsoProviderId = "google" | "microsoft";
 
@@ -128,7 +129,7 @@ export async function enabledSsoProviders(): Promise<Array<{ id: SsoProviderId; 
     const enabled = new Set(rows.map((r) => (r.ssoProvider ?? "none").toLowerCase()));
     return configured.filter((p) => enabled.has("both") || enabled.has(p.id));
   } catch (err) {
-    console.error("[sso] provider listing failed:", err);
+    console.error("[sso] provider listing failed:", loggableError(err));
     return [];
   }
 }
@@ -313,7 +314,7 @@ export function registerSsoRoutes(app: Express): void {
         }),
       );
     } catch (err) {
-      console.error("[sso] start failed:", err);
+      console.error("[sso] start failed:", loggableError(err));
       loginError(res, "sso_failed");
     }
   });
@@ -432,7 +433,7 @@ export function registerSsoRoutes(app: Express): void {
       // Same landing as the magic-link flow — see the note there.
       return res.redirect(302, "/home");
     } catch (err) {
-      console.error("[sso] callback failed:", err);
+      console.error("[sso] callback failed:", loggableError(err));
       loginError(res, "sso_failed");
     }
   });

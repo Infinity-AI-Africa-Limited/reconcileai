@@ -29,6 +29,7 @@
  * secret remains a valid second path rather than being ripped out.
  */
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import { errorSummary } from "../errorText";
 
 /** GitHub's OIDC issuer. Fixed; never read from the token. */
 export const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
@@ -96,7 +97,7 @@ export async function verifyGitHubOidcToken(
     });
     claims = payload as Record<string, unknown>;
   } catch (err) {
-    return { ok: false, reason: "invalid", detail: err instanceof Error ? err.message : String(err) };
+    return { ok: false, reason: "invalid", detail: errorSummary(err) };
   }
 
   const repository = typeof claims.repository === "string" ? claims.repository : "";

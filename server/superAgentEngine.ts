@@ -20,6 +20,7 @@ import {
   corporateB2BExceptionsTaxonomyPromptBlock,
   corporateB2BRegulatoryFrame,
 } from "./exceptions/corporate-b2b";
+import { loggableError } from "./dbErrors";
 
 /**
  * Who the tenant is, as far as diagnosis is concerned.
@@ -1645,7 +1646,7 @@ Provide a JSON response with exactly these fields:
       };
     }
   } catch (e) {
-    console.error("[SuperAgent] LLM diagnosis failed:", e);
+    console.error("[SuperAgent] LLM diagnosis failed:", loggableError(e));
   }
   return { headline: ruleResult.headline, rootCause: ruleResult.rootCause, recommendedAction: ruleResult.recommendedAction };
 }
@@ -1736,7 +1737,7 @@ Return JSON: { "subject": "email subject", "body": "full email body" }`,
       };
     }
   } catch (e) {
-    console.error("[SuperAgent] Vendor email generation failed:", e);
+    console.error("[SuperAgent] Vendor email generation failed:", loggableError(e));
   }
 
   // Fallback template

@@ -20,6 +20,7 @@ import { getSessionCookieOptions } from "../_core/cookies";
 import { protectedProcedure, publicProcedure, router } from "../_core/trpc";
 import { createRateLimiter } from "../rateLimiter";
 import { getClientInfo, logAudit, PUBLIC_APP_ORIGIN } from "./shared";
+import { loggableError } from "../dbErrors";
 
 // In-memory throttle for self-service magic-link requests, keyed by normalised
 // email. Prevents inbox flooding / abuse. Adequate for the single-process pilot
@@ -85,7 +86,7 @@ export const authRouter = router({
           const { sendLoginLinkEmail } = await import("../magicLinkService");
           await sendLoginLinkEmail({ email, origin: input.origin ?? PUBLIC_APP_ORIGIN });
         } catch (err) {
-          console.error("[auth.requestMagicLink] Failed to send login link:", err);
+          console.error("[auth.requestMagicLink] Failed to send login link:", loggableError(err));
         }
       }
 

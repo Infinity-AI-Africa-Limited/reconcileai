@@ -13,6 +13,7 @@ import {
   type WcConnectorDeadLetter,
 } from "../../../drizzle/connector_schema";
 import { getDb } from "../../db";
+import { errorSummary } from "../../errorText";
 
 export type DlqSource = "webhook" | "batch_sync" | "mapping" | "api_call" | "write_back";
 
@@ -105,7 +106,7 @@ export async function processDueDeadLetters(
         .where(eq(wcConnectorDeadLetters.id, letter.id));
       out.resolved++;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorSummary(err);
       const isExhausted = attempts >= letter.maxAttempts;
       await db
         .update(wcConnectorDeadLetters)

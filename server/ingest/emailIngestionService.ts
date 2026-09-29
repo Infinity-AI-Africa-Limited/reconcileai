@@ -35,6 +35,8 @@ import { verifySvixSignature, type SvixHeaders } from "./svixSignature";
 import { isSenderAllowed, isIngestibleAttachment, normaliseSender } from "./senderAllowlist";
 import { parseTabularFile } from "./fileParser";
 import { validateParsedRows, storeTransactions, calculateFileHash } from "../apiIngestionService";
+import { loggableError } from "../dbErrors";
+import { errorSummary } from "../errorText";
 
 const RESEND_API = "https://api.resend.com";
 
@@ -124,7 +126,7 @@ export async function handleInboundEmail(
 
   const log = (fields: Partial<typeof emailIngestionLogs.$inferInsert>) =>
     db.insert(emailIngestionLogs).values({ status: "rejected", ...fields } as typeof emailIngestionLogs.$inferInsert)
-      .catch((e) => console.error("[emailIngestion] could not write log:", e));
+      .catch((e) => console.error("[emailIngestion] could not write log:", loggableError(e)));
 
   const d = payload.data ?? {};
   const emailId = d.email_id ?? null;
@@ -208,7 +210,7 @@ export async function handleInboundEmail(
       try {
         bytes = await downloadCapped(m.download_url, source.maxAttachmentBytes);
       } catch (err) {
-        await log({ ...base, status: "failed", attachmentName: filename, errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 2000) });
+        await log({ ...base, status: "failed", attachmentName: filename, errorMessage: (errorSummary(err)).slice(0, 2000) });
         continue;
       }
 
@@ -228,7 +230,7 @@ export async function handleInboundEmail(
       try {
         parsed = await parseTabularFile(bytes, filename);
       } catch (err) {
-        await log({ ...base, status: "failed", attachmentName: filename, fileHash, fileSize: bytes.byteLength, errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 2000) });
+        await log({ ...base, status: "failed", attachmentName: filename, fileHash, fileSize: bytes.byteLength, errorMessage: (errorSummary(err)).slice(0, 2000) });
         continue;
       }
 
@@ -276,7 +278,7 @@ export async function handleInboundEmail(
 
     return { status: 200, handled: true, imported };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorSummary(err);
     await log({ ...base, status: "failed", errorMessage: message.slice(0, 2000) });
     await db.update(emailIngestionSources)
       .set({ lastErrorAt: new Date(), lastErrorMessage: message.slice(0, 2000) })

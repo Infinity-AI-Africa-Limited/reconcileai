@@ -43,6 +43,7 @@ import {
 import { parseWcDate } from "../woodcore/mapping";
 import type { CanonicalTransaction } from "../woodcore/types";
 import { getConfigRowByOrg } from "../woodcore/config";
+import { errorSummary } from "../../errorText";
 
 // ─── Row → canonical mapping (LAPO-aware: split debit/credit ledgers) ───────
 export function normalizeKey(k: string): string {
@@ -342,7 +343,7 @@ export async function ingestLapoFile(
     await finalizeIngestBatch(batchId, { total: rows.length, valid: inserted, invalid: failures.length }, true);
   } catch (err) {
     await finalizeIngestBatch(batchId, { total: rows.length, valid: inserted, invalid: failures.length }, false,
-      err instanceof Error ? err.message : String(err));
+      errorSummary(err));
     throw err;
   }
 

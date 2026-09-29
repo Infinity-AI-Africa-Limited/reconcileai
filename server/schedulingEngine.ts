@@ -6,6 +6,8 @@
 import * as db from "./db";
 import { sendReconciliationReport } from "./emailReportService";
 import { isTenantId } from "@shared/tenantId";
+import { loggableError } from "./dbErrors";
+import { stackFrames, errorSummary } from "./errorText";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -244,7 +246,7 @@ export async function executeScheduledTask(taskId: number): Promise<{
 
     return { success: true, jobId };
   } catch (error) {
-    console.error(`[Scheduler] Task ${taskId} execution failed:`, error);
+    console.error(`[Scheduler] Task ${taskId} execution failed:`, { ...loggableError(error), frames: stackFrames(error) });
 
     // Calculate next run even on failure
     const nextRun = calculateNextRun(task.frequency, task.scheduledTime, {
@@ -267,11 +269,11 @@ export async function executeScheduledTask(taskId: number): Promise<{
       await db.updateScheduleRunHistory(runId, {
         status: "failed",
         completedAt: new Date(),
-        errorMessage: String(error),
+        errorMessage: errorSummary(error),
       });
     }
 
-    return { success: false, error: String(error) };
+    return { success: false, error: errorSummary(error) };
   }
 }
 
@@ -336,11 +338,11 @@ export async function schedulerTick(): Promise<void> {
       return; // success — exit retry loop
     } catch (error) {
       if (isTransientDbError(error) && attempt < MAX_RETRIES) {
-        console.warn(`[Scheduler] Transient DB error on attempt ${attempt + 1}/${MAX_RETRIES + 1} — resetting connection and retrying in ${RETRY_DELAY_MS}ms`, (error as Record<string, unknown>).code ?? (error as Record<string, unknown>).message);
+        console.warn(`[Scheduler] Transient DB error on attempt ${attempt + 1}/${MAX_RETRIES + 1} — resetting connection and retrying in ${RETRY_DELAY_MS}ms`, loggableError(error));
         db.resetDb();
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
       } else {
-        console.error("[Scheduler] Tick failed:", error);
+        console.error("[Scheduler] Tick failed:", { ...loggableError(error), frames: stackFrames(error) });
         return;
       }
     }
@@ -355,7 +357,7 @@ export function startScheduler(intervalMs: number = 60000): void {
   console.log(`[Scheduler] Starting with ${intervalMs}ms interval`);
   schedulerInterval = setInterval(schedulerTick, intervalMs);
   // Run immediately on start
-  schedulerTick().catch((err) => console.error("[Scheduler] Initial tick failed:", err));
+  schedulerTick().catch((err) => console.error("[Scheduler] Initial tick failed:", loggableError(err)));
 }
 
 export function stopScheduler(): void {

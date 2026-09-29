@@ -4,6 +4,7 @@ import { eq, and, desc } from "drizzle-orm";
 import crypto from "crypto";
 import Papa from "papaparse";
 import { parseAmount, parseDate, normalizeHeader } from "./ingest/fileParser";
+import { errorSummary } from "./errorText";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -569,7 +570,7 @@ export async function processApiUpload(
       fileName: request.fileName,
       status: "failed",
       statusCode: 500,
-      errorMessage: error.message,
+      errorMessage: errorSummary(error),
       processingTimeMs: Date.now() - startTime,
       ipAddress,
       userAgent,
@@ -580,7 +581,7 @@ export async function processApiUpload(
       totalRows: 0,
       validRows: 0,
       invalidRows: 0,
-      errors: [error.message],
+      errors: [errorSummary(error)],
       message: "Internal server error during upload processing",
     };
   }

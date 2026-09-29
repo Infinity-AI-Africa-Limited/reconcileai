@@ -28,6 +28,8 @@
  * `REDIS_URL` is provisioned makes it cluster-wide; see CLAUDE.md §10.
  */
 import { runSyncCycle } from "./syncOrchestrator";
+import { loggableError } from "../../dbErrors";
+import { stackFrames } from "../../errorText";
 
 /**
  * Topics that change reconciliation state and therefore justify a sync.
@@ -159,7 +161,7 @@ async function fire(slStoreId: number): Promise<void> {
       );
     }
   } catch (err) {
-    console.error(`[shopline-realtime] sync threw for store=${slStoreId}:`, err);
+    console.error(`[shopline-realtime] sync threw for store=${slStoreId}:`, { ...loggableError(err), frames: stackFrames(err) });
   } finally {
     inFlight.delete(slStoreId);
     // Events that arrived mid-run get exactly one follow-up pass.

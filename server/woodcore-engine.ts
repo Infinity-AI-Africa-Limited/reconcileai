@@ -9,6 +9,7 @@
 
 import { getDb } from "./db";
 import { invokeLLM } from "./_core/llm";
+import { loggableError } from "./dbErrors";
 
 async function getDatabase() {
   const db = await getDb();
@@ -857,7 +858,7 @@ export async function runLayer3(
       );
     }
   } catch (e) {
-    console.error("[Woodcore Layer3] institutional learning lookup failed (non-fatal):", e);
+    console.error("[Woodcore Layer3] institutional learning lookup failed (non-fatal):", loggableError(e));
   }
   const { enrichItemWithInstitutionalMemory } = await import("./institutionalLearning");
 

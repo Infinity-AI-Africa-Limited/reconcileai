@@ -3,9 +3,18 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { auditOrganizationFor, runInRequestScope } from "./requestScope";
+import { errorSummary, isDatabaseError } from "../errorText";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
+  // tRPC answers an error a procedure did not catch with that error's own
+  // message, and a database error's message is its query and parameters. The
+  // client gets its code instead (the stack, sent in development, begins with
+  // the same text). The server logs the failure: onError in index.ts.
+  errorFormatter({ shape, error }) {
+    if (!isDatabaseError(error)) return shape;
+    return { ...shape, message: errorSummary(error), data: { ...shape.data, stack: undefined } };
+  },
 });
 
 export const router = t.router;

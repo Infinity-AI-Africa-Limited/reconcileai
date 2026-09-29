@@ -14,6 +14,7 @@ import type {
   GetUserInfoWithJwtRequest,
   GetUserInfoWithJwtResponse,
 } from "./types/manusTypes";
+import { loggableError } from "../dbErrors";
 // Utility function
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
@@ -238,7 +239,7 @@ class SDKServer {
         name: isNonEmptyString(name) ? name : "",
       };
     } catch (error) {
-      console.warn("[Auth] Session verification failed", String(error));
+      console.warn("[Auth] Session verification failed", loggableError(error));
       return null;
     }
   }
@@ -300,7 +301,7 @@ class SDKServer {
         });
         user = await db.getUserByOpenId(userInfo.openId);
       } catch (error) {
-        console.error("[Auth] Failed to sync user from OAuth:", error);
+        console.error("[Auth] Failed to sync user from OAuth:", loggableError(error));
         throw ForbiddenError("Failed to sync user info");
       }
     }

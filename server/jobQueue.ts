@@ -14,6 +14,8 @@
  * change. If BullMQ/Redis initialisation fails, we fall back in-process and
  * log loudly rather than dropping jobs silently.
  */
+import { loggableError } from "./dbErrors";
+import { stackFrames, errorSummary } from "./errorText";
 
 export interface QueueJob<T> {
   name: string;
@@ -222,12 +224,12 @@ class InProcessQueue<T> implements JobQueue<T> {
           } catch (terminalError) {
             console.error(
               `[queue:${this.queueName}] terminal failure hook failed for "${job.name}":`,
-              terminalError instanceof Error ? terminalError.message : terminalError,
+              loggableError(terminalError),
             );
           }
           console.error(
             `[queue:${this.queueName}] job "${job.name}" exhausted ${maxAttempts} attempts:`,
-            err instanceof Error ? err.message : err,
+            { ...loggableError(err), frames: stackFrames(err) },
           );
           // After the terminal hook, so a follow-up never starts before this
           // run's failure has been recorded.
@@ -276,7 +278,7 @@ async function createBullMqQueue<T>(
     },
     { connection, concurrency },
   );
-  worker.on("error", (err) => console.error(`[queue:${queueName}] worker error:`, err.message));
+  worker.on("error", (err) => console.error(`[queue:${queueName}] worker error:`, loggableError(err)));
   worker.on("failed", async (bullJob, error) => {
     if (!bullJob || bullJob.attemptsMade < (bullJob.opts.attempts ?? defaults.attempts)) return;
     const job: QueueJob<T> = {
@@ -290,7 +292,7 @@ async function createBullMqQueue<T>(
       // Keep the failed BullMQ row as the queue's dead-letter evidence too.
       console.error(
         `[queue:${queueName}] terminal failure hook failed for "${bullJob.name}":`,
-        terminalError instanceof Error ? terminalError.message : terminalError,
+        loggableError(terminalError),
       );
     }
   });
@@ -321,7 +323,7 @@ async function createBullMqQueue<T>(
       } catch (err) {
         // A queue that cannot be counted is a queue whose Redis is unwell —
         // report it rather than presenting a healthy-looking empty snapshot.
-        return { backend: "bullmq", durable: true, error: err instanceof Error ? err.message : String(err) };
+        return { backend: "bullmq", durable: true, error: errorSummary(err) };
       }
     },
     async enqueue(name: string, data: T, opts?: EnqueueOptions) {
@@ -396,7 +398,7 @@ export async function allQueueStats(): Promise<Record<string, QueueStats>> {
       out[name] = {
         backend: q.backend,
         durable: q.backend === "bullmq",
-        error: err instanceof Error ? err.message : String(err),
+        error: errorSummary(err),
       };
     }
   }
@@ -439,12 +441,12 @@ export async function createQueue<T>(
       if (opts?.requireDurable) {
         throw new DurableQueueUnavailableError(
           queueName,
-          err instanceof Error ? err.message : String(err),
+          errorSummary(err),
         );
       }
       console.error(
         `[queue:${queueName}] BullMQ init failed — falling back to in-process queue:`,
-        err instanceof Error ? err.message : err,
+        loggableError(err),
       );
     }
   }

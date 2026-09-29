@@ -16,6 +16,7 @@ import { getDb } from "./db";
 import { organizations, users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { seedDemoData } from "./demoSeedEngine";
+import { loggableError } from "./dbErrors";
 
 export const DEMO_PREWARM_OPEN_ID = "demo_prewarm_shared_user_v1";
 /** Stable code for the organisation every guest-demo account belongs to. */
@@ -242,7 +243,7 @@ export async function prewarmDemoUser(): Promise<void> {
     _prewarmComplete = true;
     console.log("[Prewarm] ✓ Shared demo user pre-warm complete");
   } catch (err) {
-    console.error("[Prewarm] Pre-warm failed:", err);
+    console.error("[Prewarm] Pre-warm failed:", loggableError(err));
   } finally {
     _prewarmInProgress = false;
   }

@@ -35,6 +35,7 @@ import { getDb } from "./db";
 import { reconciliationJobs, matches, exceptions as exceptionsTable, transactions } from "../drizzle/schema";
 import { createQueue, type JobQueue } from "./jobQueue";
 import { ENV } from "./_core/env";
+import { loggableError } from "./dbErrors";
 
 export interface ReconciliationRunPayload {
   jobId: number;
@@ -414,7 +415,7 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
         } catch (err) {
           console.warn(
             `[reconciliationQueue] could not remove queue entry job-${j.id} (row is marked abandoned):`,
-            err instanceof Error ? err.message : err,
+            loggableError(err),
           );
         }
       }
@@ -422,7 +423,7 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
   } catch (err) {
     console.error(
       "[reconciliationQueue] queue unavailable for abandoned-entry cleanup (rows are still marked abandoned):",
-      err instanceof Error ? err.message : err,
+      loggableError(err),
     );
   }
 

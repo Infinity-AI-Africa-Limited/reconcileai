@@ -14,6 +14,7 @@
  */
 import { assertEgressAllowed } from "../../_core/egress";
 import type { FetchLike, OAuthTokenResponse, WcConnection } from "./types";
+import { errorSummary } from "../../errorText";
 
 interface CachedToken {
   accessToken: string;
@@ -156,7 +157,7 @@ export async function getAuthHeaders(
       degraded: false,
     };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorSummary(err);
     // Fallback chain: API key, then basic. Surface degradation to health.
     const viaKey = apiKeyHeaders(conn);
     if (viaKey) {

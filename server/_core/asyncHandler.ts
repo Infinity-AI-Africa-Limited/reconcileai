@@ -18,6 +18,8 @@
  * `asyncHandlerRatchet.test.ts` keeps that true as routes are added.
  */
 import type { NextFunction, Request, Response } from "express";
+import { loggableError } from "../dbErrors";
+import { stackFrames } from "../errorText";
 
 export type AsyncRouteHandler = (req: Request, res: Response, next: NextFunction) => unknown;
 
@@ -48,7 +50,7 @@ export function asyncHandler(fn: AsyncRouteHandler): AsyncRouteHandler {
 }
 
 function handle(err: unknown, req: Request, res: Response): void {
-  console.error(`[asyncHandler] unhandled rejection in ${req.method} ${req.originalUrl || req.path}:`, err);
+  console.error(`[asyncHandler] unhandled rejection in ${req.method} ${req.originalUrl || req.path}:`, { ...loggableError(err), frames: stackFrames(err) });
 
   // Already streaming (the SSE monitor) or already answered: a second set of
   // headers throws ERR_HTTP_HEADERS_SENT, which would be the very thing this
