@@ -1,4 +1,5 @@
 import { createQueue, type JobQueue } from "../../jobQueue";
+import { loggableError } from "../../dbErrors";
 import {
   cleanupExpiredShopifyPrivacyArtifacts,
   dispatchShopifyPrivacyOutbox,
@@ -6,6 +7,7 @@ import {
   type ShopifyPrivacyQueuePayload,
 } from "./privacyCompletion";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
+import { handleShopifyShopRedactionJob } from "./shopRedaction";
 
 /** Queue-name prefix per job kind: a job id is unique only within its own table. */
 export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
@@ -14,6 +16,8 @@ export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]
       return "privacy-request";
     case "customer_redact":
       return "privacy-redact";
+    case "shop_redact":
+      return "privacy-shop-redact";
   }
 }
 
@@ -23,10 +27,15 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
   if (!queuePromise) {
     queuePromise = createQueue<ShopifyPrivacyQueuePayload>(
       "shopify-privacy",
-      async (job) =>
-        job.data.kind === "customer_redact"
-          ? handleShopifyCustomerRedactionJob(job.data.jobId)
-          : handleShopifyPrivacyJob(job.data),
+      async (job) => {
+        if (job.data.kind === "customer_redact") {
+          return handleShopifyCustomerRedactionJob(job.data.jobId);
+        }
+        if (job.data.kind === "shop_redact") {
+          return handleShopifyShopRedactionJob(job.data.jobId);
+        }
+        return handleShopifyPrivacyJob(job.data);
+      },
       {
         attempts: 6,
         backoffMs: 30_000,
@@ -44,14 +53,13 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
 /**
  * Redis receives only `{ kind, jobId }`; authoritative scope stays in MySQL.
  *
- * The queue id is unique per DISPATCH, not per job: a re-dispatch after the
- * queue settled an earlier entry for this job would otherwise be swallowed by
- * that settled entry. A duplicate run is harmless — the database lease lets
- * exactly one worker claim the job.
+ * The queue id is unique per dispatch. A later database re-dispatch must not be
+ * swallowed by a settled BullMQ entry for the same job; the database lease keeps
+ * duplicate worker delivery harmless.
  */
 export async function enqueueShopifyPrivacyJob(
   payload: ShopifyPrivacyQueuePayload,
-  dispatchAttempt: number,
+  dispatchAttempt = 1,
 ): Promise<void> {
   const durable = await queue();
   await durable.enqueue(`${shopifyPrivacyJobPrefix(payload.kind)}-${payload.jobId}-d${dispatchAttempt}`, payload);
@@ -68,21 +76,51 @@ export async function recoverShopifyPrivacyOutbox(): Promise<void> {
 
 let recoveryTimer: NodeJS.Timeout | null = null;
 
+/**
+ * One recovery sweep: re-dispatch the outbox, then clean expired artifacts.
+ * Each half contains its own failure so one outage does not stall the other.
+ * Exported for tests; production runs it from the loop below.
+ */
+export async function runShopifyPrivacyRecoverySweep(deps: {
+  recover?: () => Promise<unknown>;
+  cleanup?: () => Promise<unknown>;
+} = {}): Promise<void> {
+  try {
+    await (deps.recover ?? recoverShopifyPrivacyOutbox)();
+  } catch (error) {
+    console.error("[shopify-privacy] durable dispatch unavailable", { code: "durable_queue_unavailable", ...loggableError(error) });
+  }
+  try {
+    await (deps.cleanup ?? cleanupExpiredShopifyPrivacyArtifacts)();
+  } catch (error) {
+    console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed", ...loggableError(error) });
+  }
+}
+
+/**
+ * Wrap a sweep so at most one runs at a time in this process. On a timer, a
+ * sweep slower than its interval would otherwise start another beside it, and
+ * under a slow database they pile up until they exhaust the connection pool —
+ * precisely when the pool is least able to spare them. A tick that finds a
+ * sweep still running is skipped; the next tick tries again.
+ */
+export function singleFlight(task: () => Promise<void>): () => Promise<void> {
+  let running = false;
+  return async () => {
+    if (running) return;
+    running = true;
+    try {
+      await task();
+    } finally {
+      running = false;
+    }
+  };
+}
+
 /** Start one process-local DB recovery scanner; correctness remains in the DB claims. */
 export function startShopifyPrivacyRecoveryLoop(intervalMs = 30_000): void {
   if (recoveryTimer) return;
-  const sweep = async () => {
-    try {
-      await recoverShopifyPrivacyOutbox();
-    } catch (error) {
-      console.error("[shopify-privacy] durable dispatch unavailable", { code: "durable_queue_unavailable" });
-    }
-    try {
-      await cleanupExpiredShopifyPrivacyArtifacts();
-    } catch {
-      console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed" });
-    }
-  };
+  const sweep = singleFlight(() => runShopifyPrivacyRecoverySweep());
   void sweep();
   recoveryTimer = setInterval(() => void sweep(), intervalMs);
   recoveryTimer.unref?.();

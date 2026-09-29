@@ -261,4 +261,19 @@ describe("when someone starts a manual Shopify order sync", () => {
     expect((error as TRPCError).code).toBe("PRECONDITION_FAILED");
     expect((error as TRPCError).message).not.toMatch(/decrypt|tk1/);
   });
+
+  it("should log a failed sync's database error by its code, never its query or parameters", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    state.runSync.mockRejectedValue(
+      Object.assign(new Error("Failed query: select … params: owner@merchant.com"), {
+        name: "DrizzleQueryError",
+        cause: Object.assign(new Error("Lock wait timeout exceeded"), { code: "ER_LOCK_WAIT_TIMEOUT" }),
+      }),
+    );
+    await caller("admin").syncOrdersNow({ storeId: 7 }).catch(() => undefined);
+
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ storeId: 7, error: "database", errorCode: "ER_LOCK_WAIT_TIMEOUT" });
+    expect(JSON.stringify(logged.mock.calls)).not.toMatch(/owner@merchant\.com|Failed query|Lock wait/);
+    logged.mockRestore();
+  });
 });

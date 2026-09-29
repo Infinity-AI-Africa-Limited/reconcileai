@@ -102,6 +102,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
         const query = {
           from(t: Table) { table = getTableName(t); return query; },
           innerJoin() { return query; },
+          leftJoin() { return query; },
           where(cond: unknown) { where = render(cond); return query; },
           orderBy() { return query; },
           limit() { return query; },

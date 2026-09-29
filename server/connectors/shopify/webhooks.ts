@@ -17,6 +17,7 @@ import {
   type ShopifyCustomerPrivacyTopic,
 } from "./privacySelectors";
 import { admitShopifyShopRedaction } from "./redaction";
+import { loggableError } from "../../dbErrors";
 
 const PRIVACY_TOPICS = new Set(["customers/data_request", "customers/redact", "shop/redact"]);
 export const SHOPIFY_ORDER_TRIGGER_TOPICS = new Set([
@@ -231,7 +232,7 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       } catch (error) {
         console.error("[shopify-webhook] AUDIT WRITE FAILED for an uninstall", {
           storeId: store.id,
-          message: error instanceof Error ? error.message : String(error),
+          ...loggableError(error),
         });
       }
       return res.status(200).json({ received: true, status: "processed" });
@@ -246,9 +247,10 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
           await settle("ignored", "stale_shop_redact");
           return res.status(200).json({ received: true, status: "ignored_stale" });
         }
-        // Shopify's 2xx acknowledgement means this request was durably admitted,
-        // not that the tenant was deleted. Admission creates a short-lived job,
-        // fences new work, revokes credentials, and fails closed on any DB error.
+        // Shopify's 2xx acknowledgement means this request and its report-only
+        // queue intent were durably admitted, not that the tenant was deleted.
+        // Admission fences new work, revokes credentials, and fails closed on
+        // any DB error; automatic destructive completion is not enabled.
         const admission = await db.transaction(async (tx) => {
           await tx
             .insert(shopifyPrivacyRequests)
@@ -354,7 +356,7 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
     console.error("[shopify-webhook] processing failed", {
       topic,
       shopDomain,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
     try {
       await settle("failed", "processing_error");

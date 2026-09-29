@@ -242,6 +242,26 @@ describe("Shopify privacy outbox recovery", () => {
     expect(JSON.stringify(enqueue.mock.calls[0][0])).not.toMatch(/organization|store|shop|domain|selector|hash|url/i);
     expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "dispatched" });
   });
+
+  it("should recover shop-redaction work after a crash using only its internal job id", async () => {
+    const fake = scriptedDb({
+      select: { [OUTBOX]: [[{ id: 79, kind: "shop_redact", jobId: 903, attempts: 0 }]] },
+    });
+    const enqueue = vi.fn(async () => {});
+
+    const result = await dispatchShopifyPrivacyOutbox({
+      db: fake.db as never,
+      now: () => NOW,
+      uuid: uuidSequence(),
+      enqueue,
+    });
+
+    expect(result).toEqual({ scanned: 1, dispatched: 1, failed: 0 });
+    expect(enqueue).toHaveBeenCalledWith({ kind: "shop_redact", jobId: 903 }, 1);
+    expect(Object.keys(enqueue.mock.calls[0][0])).toEqual(["kind", "jobId"]);
+    expect(JSON.stringify(enqueue.mock.calls[0][0])).not.toMatch(/organization|storeId|domain|webhook|hash|payload/i);
+    expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "dispatched" });
+  });
 });
 
 describe("Shopify data-request execution", () => {
@@ -590,8 +610,10 @@ describe("when the queue settled a dispatch but the job still owes work", () => 
     // Every kind, each against its OWN job table: a customer-redaction dispatch
     // whose worker died is re-armed from its own job's state, not the data
     // request table's (where it has no row, so it was never re-armed).
-    expect(rearm?.where?.params).toEqual(expect.arrayContaining(["customer_request", "customer_redact"]));
+    expect(rearm?.where?.params).toEqual(expect.arrayContaining(["customer_request", "customer_redact", "shop_redact"]));
     expect(rearm?.where?.sql).toMatch(/exists \(select 1 from `shopify_privacy_customer_redaction_jobs`/i);
+    // A shop-redaction row names the job's own id, not a request id.
+    expect(rearm?.where?.sql).toMatch(/`shopify_shop_redaction_jobs`\.`id` = `shopify_privacy_queue_outbox`\.`jobId`/i);
   });
 });
 

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import {
   channels,
   exceptions,
@@ -27,6 +27,7 @@ import {
   type NormalizedShopifyOrder,
 } from "./orders";
 import { affectedRows } from "./tokenStore";
+import { shopifyOrdersChannelCode } from "./channelCodes";
 
 const ORDER_RESOURCE = "orders" as const;
 const TRANSACTION_LOOKUP_CHUNK = 500;
@@ -55,9 +56,8 @@ export interface ShopifyOrderSyncDeps {
   suppressionKeys?: ShopifyPrivacySuppressionKey[];
 }
 
-export function shopifyOrdersChannelCode(storeId: number): string {
-  return `shopify_orders_${storeId}`;
-}
+// Defined once in channelCodes.ts; re-exported for existing importers.
+export { shopifyOrdersChannelCode };
 
 interface ExistingOrderRow {
   id: number;
@@ -733,26 +733,7 @@ export async function runShopifyOrderSync(
         }
       }
 
-      const watermark = maxUpdatedAt(fetched, window.to);
-      await tx
-        .insert(shopifySyncCursors)
-        .values({
-          storeId: store.id,
-          organizationId: store.organizationId,
-          resource: ORDER_RESOURCE,
-          cursor: null,
-          watermarkUpdatedAt: watermark,
-          lastSuccessfulAt: new Date(),
-          lastErrorCode: null,
-        })
-        .onDuplicateKeyUpdate({
-          set: {
-            cursor: null,
-            watermarkUpdatedAt: sql`GREATEST(${shopifySyncCursors.watermarkUpdatedAt}, VALUES(${shopifySyncCursors.watermarkUpdatedAt}))`,
-            lastSuccessfulAt: new Date(),
-            lastErrorCode: null,
-          },
-        });
+      await recordSuccessfulOrderSync(tx, store, maxUpdatedAt(fetched, window.to));
 
       if (params.webhookId) {
         await tx
@@ -796,6 +777,49 @@ export async function runShopifyOrderSync(
       .onDuplicateKeyUpdate({ set: { lastErrorCode: code } });
     throw error;
   }
+}
+
+/**
+ * The cursor's watermark after a successful sync: never behind where it was,
+ * and never left NULL.
+ *
+ * GREATEST is NULL when either argument is, and a cursor can exist with no
+ * watermark: a first sync that failed writes one carrying only its error code,
+ * and the scheduled backstop records its turn on the cursor before syncing. A
+ * bare GREATEST would pin such a watermark at NULL for good, so every later sync
+ * would re-read the default first window instead of advancing, and orders
+ * missed for longer than that window would never be recovered.
+ */
+export function advancedOrderWatermark(): SQL {
+  const current = shopifySyncCursors.watermarkUpdatedAt;
+  return sql`COALESCE(GREATEST(${current}, VALUES(${current})), VALUES(${current}))`;
+}
+
+/** Record a successful order sync on the store's cursor, advancing its watermark. */
+export async function recordSuccessfulOrderSync(
+  db: DbExecutor,
+  store: { id: number; organizationId: number },
+  watermark: Date,
+): Promise<void> {
+  await db
+    .insert(shopifySyncCursors)
+    .values({
+      storeId: store.id,
+      organizationId: store.organizationId,
+      resource: ORDER_RESOURCE,
+      cursor: null,
+      watermarkUpdatedAt: watermark,
+      lastSuccessfulAt: new Date(),
+      lastErrorCode: null,
+    })
+    .onDuplicateKeyUpdate({
+      set: {
+        cursor: null,
+        watermarkUpdatedAt: advancedOrderWatermark(),
+        lastSuccessfulAt: new Date(),
+        lastErrorCode: null,
+      },
+    });
 }
 
 type ShopifyWebhookSyncPayload = { storeId: number; organizationId: number; webhookId: string };

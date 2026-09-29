@@ -38,6 +38,8 @@ import { encryptForTenant } from "../../_core/tenantKeys";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { provisionTenantBaseline } from "../../provisioning";
 import { seedRetailResolutionTemplates } from "../../exceptions/retail-commerce";
+import { DrizzleQueryError } from "drizzle-orm/errors";
+import { loggableError } from "../../dbErrors";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 import type { TokenGeneration } from "./tokenStore";
 import { duplicateKeyError, scriptedDb, type RecordedOp } from "./scriptedDb.testkit";
@@ -618,5 +620,46 @@ describe("when Shopify returns no usable contact email", () => {
     );
     expect(code).toBe("MISSING_CONTACT_EMAIL");
     expect(fake.ops).toEqual([]);
+  });
+});
+
+describe("when storing credentials fails with a database error", () => {
+  // Greptile #162: the failure's text was copied into the onboarding error's
+  // message without its cause, so loggableError could not tell it came from the
+  // database, and the callback log printed drizzle's text — the query's parameters included.
+  const tokenWriteFailure = () =>
+    new DrizzleQueryError(
+      "insert into `shopify_connector_tokens` (`accessTokenEnc`) values (?)",
+      ["owner@merchant.com"],
+      Object.assign(new Error("Lock wait timeout exceeded; try restarting transaction"), {
+        code: "ER_LOCK_WAIT_TIMEOUT",
+        errno: 1205,
+        sqlMessage: "Lock wait timeout exceeded; try restarting transaction",
+      }),
+    );
+
+  async function failure(run: () => Promise<unknown>): Promise<ShopifyOnboardingError> {
+    try {
+      await run();
+    } catch (caught) {
+      return caught as ShopifyOnboardingError;
+    }
+    throw new Error("expected the install to fail");
+  }
+
+  it.each([
+    ["a reinstallation", () => held({ select: { [STORES]: [[existingStore]], [USERS]: [[{ id: 9 }]] }, insert: { [TOKENS]: [tokenWriteFailure()] } }), () => onboard()],
+    ["a first install", () => held({ select: { [STORES]: [[]], [USERS]: [[]] }, insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7], [TOKENS]: [tokenWriteFailure()] } }), onboardFirst],
+  ])("should keep the database text out of %s's error and its log", async (_case, script, run) => {
+    state.db = script().db;
+
+    const error = await failure(run);
+
+    expect(error.code).toBe("TOKEN_STORE_FAILED");
+    expect(error.message).toBe("Could not secure Shopify access tokens");
+    expect(error.cause).toBeInstanceOf(DrizzleQueryError);
+    const logged = { code: error.code, ...loggableError(error) };
+    expect(logged).toEqual({ code: "TOKEN_STORE_FAILED", error: "database", errorCode: "ER_LOCK_WAIT_TIMEOUT" });
+    expect(JSON.stringify(logged)).not.toMatch(/owner@merchant\.com|Lock wait|insert into/);
   });
 });

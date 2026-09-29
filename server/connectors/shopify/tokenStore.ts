@@ -12,6 +12,7 @@ import { organizations } from "../../../drizzle/schema";
 import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
 import { decryptForTenant, encryptForTenant } from "../../_core/tenantKeys";
 import { ENV } from "../../_core/env";
+import { loggableError } from "../../dbErrors";
 import {
   refreshExpiringOfflineToken,
   tokenExpiryFromSeconds,
@@ -398,7 +399,7 @@ export async function markReauthorizationRequired(
       console.error("[shopify-token] AUDIT WRITE FAILED for a fail-closed store", {
         storeId: params.storeId,
         reason: params.reason,
-        message: error instanceof Error ? error.message : String(error),
+        ...loggableError(error),
       });
     }
   }

@@ -1,6 +1,7 @@
 import { publicProcedure, router } from "../_core/trpc";
 import { ENV } from "../_core/env";
 import { getDb } from "../db";
+import { loggableError } from "../dbErrors";
 import {
   authenticateShopifyEmbeddedRequest,
   ShopifyEmbeddedAuthError,
@@ -34,7 +35,9 @@ const embeddedProcedure = publicProcedure.use(async ({ ctx, next }) => {
     if (error instanceof ShopifyEmbeddedAuthError && shopifyEmbeddedAuthHttpStatus(error) === 401) {
       throw appHomeError("UNAUTHORIZED", "authentication_required");
     }
-    if (!(error instanceof ShopifyEmbeddedAuthError)) console.error("[shopify-app-home] authentication service failed");
+    if (!(error instanceof ShopifyEmbeddedAuthError)) {
+      console.error("[shopify-app-home] authentication service failed", loggableError(error));
+    }
     throw appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
   }
 });
@@ -60,6 +63,7 @@ export const shopifyAppHomeRouter = router({
       console.error("[shopify-app-home] context lookup failed", {
         storeId: ctx.shopify.storeId,
         organizationId: ctx.shopify.organizationId,
+        ...loggableError(error),
       });
       throw appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
     }
@@ -79,6 +83,7 @@ export const shopifyAppHomeRouter = router({
         storeId: ctx.shopify.storeId,
         organizationId: ctx.shopify.organizationId,
         category: refusal.message,
+        ...loggableError(error),
       });
       throw refusal;
     }
@@ -93,6 +98,7 @@ export const shopifyAppHomeRouter = router({
         console.error("[shopify-app-home] settlement evidence import failed", {
           storeId: ctx.shopify.storeId,
           organizationId: ctx.shopify.organizationId,
+          ...loggableError(error),
         });
       }
       throw refusal;

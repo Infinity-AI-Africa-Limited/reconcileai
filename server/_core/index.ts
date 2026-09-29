@@ -21,6 +21,7 @@ import { applyPortalView } from "./portalView";
 import { asyncHandler } from "./asyncHandler";
 import { clientIpOrUnknown, describeTrustedProxyConfig } from "./clientIp";
 import { ENV } from "./env";
+import { shopifyWebhookRawBody } from "../connectors/shopify/webhookBody";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -60,6 +61,11 @@ async function startServer() {
 
   const app = express();
   const server = createServer(app);
+  // Shopify webhooks are read as bytes under their own limit BEFORE the global
+  // JSON parser below, which would otherwise parse an unauthenticated body up to
+  // 50 MB before the webhook's HMAC could refuse it. Having consumed the body,
+  // this parser makes the global one skip the request.
+  app.use(shopifyWebhookRawBody());
   // Configure body parser with larger size limit for file uploads.
   // `verify` captures the raw body bytes so webhook HMAC signatures can be
   // checked against exactly what was sent (JSON re-serialization is not
@@ -796,6 +802,14 @@ async function startServer() {
   import("../connectors/shopify/privacyQueue")
     .then((q) => q.startShopifyPrivacyRecoveryLoop())
     .catch((e) => console.error("[boot] Shopify privacy outbox recovery unavailable:", e instanceof Error ? e.message : e));
+
+  // Scheduled Shopify order sync: the backstop behind webhooks, which Shopify
+  // does not guarantee. Without REDIS_URL an order webhook cannot be queued and
+  // is answered 503, so until Redis is provisioned this is the only automatic
+  // order sync. Starts only when Shopify app credentials are configured.
+  import("../connectors/shopify/orderBackstop")
+    .then((b) => b.startShopifyOrderBackstopLoop())
+    .catch((e) => console.error("[boot] Shopify order sync backstop unavailable:", e instanceof Error ? e.message : e));
 
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).

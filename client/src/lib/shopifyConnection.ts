@@ -30,9 +30,9 @@ export function shopifyConnectionVerdict(input: {
 
 export const SHOPIFY_CONNECTION_MESSAGES: Record<ShopifyConnectionVerdict, string> = {
   checking: "Checking the secured connection…",
-  connected: "Your Shopify store is connected to this ReconcileAI workspace.",
+  connected: "Your Shopify store is connected to this ReconcileAI Dev Store workspace.",
   not_connected:
-    "This store is not currently connected. Reinstall ReconcileAI from Shopify, or contact support if that does not restore it.",
+    "This store is not currently connected. Reinstall ReconcileAI Dev Store from Shopify, or contact support if that does not restore it.",
   confirming: "The store connection is being confirmed. Refresh this page in a moment if it does not appear.",
 };
 
@@ -43,24 +43,24 @@ export const SHOPIFY_CONNECTION_MESSAGES: Record<ShopifyConnectionVerdict, strin
  */
 const SHOPIFY_INSTALL_ERROR_MESSAGES: Record<ShopifyInstallErrorReason, string> = {
   invalid_shop: "The Shopify store address is not valid. Restart installation from Shopify.",
-  not_configured: "The ReconcileAI Shopify connector is not yet configured for this environment.",
+  not_configured: "The ReconcileAI Dev Store Shopify connector is not yet configured for this environment.",
   invalid_callback: "The response from Shopify was incomplete. Restart installation from Shopify.",
   security_check_failed: "The Shopify security check could not be completed. Restart installation from Shopify.",
   expired_or_replayed: "This installation session expired or was already used. Restart installation from Shopify.",
-  temporarily_unavailable: "ReconcileAI is temporarily unavailable. Please restart installation from Shopify in a few minutes.",
+  temporarily_unavailable: "ReconcileAI Dev Store is temporarily unavailable. Please restart installation from Shopify in a few minutes.",
   installation_in_progress:
     "Another installation for this store is already in progress. Wait a minute, then restart installation from Shopify.",
-  required_permissions_not_granted: "ReconcileAI needs read-only order access to continue. No Shopify data was changed.",
+  required_permissions_not_granted: "ReconcileAI Dev Store needs read-only order access to continue. No Shopify data was changed.",
   ownership_verification_required:
-    "This store is already connected to a ReconcileAI workspace, and its current contact email does not match that workspace's administrator. For your protection the connection was not transferred. Contact ReconcileAI support to verify ownership.",
+    "This store is already connected to a ReconcileAI Dev Store workspace, and its current contact email does not match that workspace's administrator. For your protection the connection was not transferred. Contact ReconcileAI Dev Store support to verify ownership.",
   email_already_registered:
-    "This store's contact email already belongs to another ReconcileAI workspace, so a new workspace could not be created for it. Contact ReconcileAI support to connect this store.",
+    "This store's contact email already belongs to another ReconcileAI Dev Store workspace, so a new workspace could not be created for it. Contact ReconcileAI Dev Store support to connect this store.",
   redaction_in_progress:
-    "This store has an active data-deletion request, so ReconcileAI cannot reconnect it. Contact ReconcileAI support if you believe this is unexpected.",
+    "This store has an active data-deletion request, so ReconcileAI Dev Store cannot reconnect it. Contact ReconcileAI Dev Store support if you believe this is unexpected.",
   missing_contact_email:
     "Shopify did not provide a contact email for this store. Add a store contact email in Shopify settings, then restart installation.",
   store_identity_conflict:
-    "This store's details conflict with an existing connection, so it was not connected. Contact ReconcileAI support.",
+    "This store's details conflict with an existing connection, so it was not connected. Contact ReconcileAI Dev Store support.",
   install_failed: "We could not finish the secure Shopify connection. No changes were made to your store.",
 };
 
