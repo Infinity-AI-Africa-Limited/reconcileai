@@ -10,6 +10,7 @@
 
 import { invokeLLM } from "./_core/llm";
 import type { Transaction } from "../drizzle/schema";
+import { loggableError } from "./dbErrors";
 
 // ─── Statistical Detection ──────────────────────────────────────────
 
@@ -308,7 +309,7 @@ Respond ONLY with valid JSON (no markdown, no code blocks):
         }
       });
     } catch (error) {
-      console.error("LLM anomaly detection error:", error);
+      console.error("LLM anomaly detection error:", loggableError(error));
       // Continue with other batches
     }
   }

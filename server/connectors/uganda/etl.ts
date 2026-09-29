@@ -34,6 +34,7 @@ import {
 } from "../woodcore/ingest";
 import { normalizeKey, normalizeRow, parseLapoDate } from "../lapo/etl";
 import type { CanonicalTransaction } from "../woodcore/types";
+import { errorSummary } from "../../errorText";
 
 /**
  * Day-first date parser (dd/mm/yyyy) — the Ugandan/Nigerian convention.
@@ -295,7 +296,7 @@ export async function ingestUgandaFile(
     await finalizeIngestBatch(batchId, { total: rows.length, valid: inserted, invalid: failures.length }, true);
   } catch (err) {
     await finalizeIngestBatch(batchId, { total: rows.length, valid: inserted, invalid: failures.length }, false,
-      err instanceof Error ? err.message : String(err));
+      errorSummary(err));
     throw err;
   }
 

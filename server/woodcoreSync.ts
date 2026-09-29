@@ -19,6 +19,7 @@
 import mysql from "mysql2/promise";
 import { getWoodcorePool } from "./woodcoreDb";
 import { ENV } from "./_core/env";
+import { errorSummary } from "./errorText";
 
 type TableSpec = { live: string; mirror: string; cols: string[]; batch: number };
 
@@ -103,7 +104,7 @@ async function syncOne(spec: TableSpec): Promise<TableResult> {
     await wc.query(`SELECT ${present.map((c) => `\`${c}\``).join(",")} FROM \`${spec.live}\` LIMIT 1`);
   } catch (e) {
     // Permission-denied (bridge tables) or missing table: skip WITHOUT truncating.
-    return { mirror: spec.mirror, status: "skipped", copied: 0, reason: (e as Error).message };
+    return { mirror: spec.mirror, status: "skipped", copied: 0, reason: errorSummary(e) };
   }
 
   const colSql = present.map((c) => `\`${c}\``).join(",");
@@ -174,13 +175,13 @@ export async function syncWoodcoreMirror(): Promise<SyncState> {
         if (idx >= 0) syncState.tables[idx] = result;
         console.log(`[woodcoreSync] ${result.mirror}: ${result.status} copied=${result.copied}${result.reason ? ` (${result.reason})` : ""}`);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errorSummary(e);
         if (idx >= 0) syncState.tables[idx] = { mirror: spec.mirror, status: "error", copied: syncState.tables[idx]?.copied ?? 0, reason: msg };
         console.error(`[woodcoreSync] ${spec.mirror} failed: ${msg}`);
       }
     }
   } catch (e) {
-    syncState.error = e instanceof Error ? e.message : String(e);
+    syncState.error = errorSummary(e);
     console.error("[woodcoreSync] fatal:", syncState.error);
   } finally {
     syncState.running = false;

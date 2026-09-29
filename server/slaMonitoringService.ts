@@ -30,6 +30,7 @@ import { getDb, getAllUsers } from "./db";
 import { and, eq, or, inArray } from "drizzle-orm";
 import { exceptions, organizations } from "../drizzle/schema";
 import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
+import { loggableError } from "./dbErrors";
 
 // SLA thresholds in hours
 const SLA_WARNING_THRESHOLD = 20; // Yellow alert
@@ -184,7 +185,7 @@ export async function checkSLABreaches(): Promise<void> {
       `(${demoCount} demo organisation(s) excluded), found ${breaches.length} SLA breaches`,
     );
   } catch (error) {
-    console.error('[SLA Monitor] Error checking SLA breaches:', error);
+    console.error('[SLA Monitor] Error checking SLA breaches:', loggableError(error));
   }
 }
 

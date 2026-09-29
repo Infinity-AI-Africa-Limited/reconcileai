@@ -28,6 +28,7 @@ import {
 import { applyMapping } from "./mapping";
 import type { CanonicalTransaction, WcClientDeps, WcEntity } from "./types";
 import { getActiveOverrideRules } from "./webhooks";
+import { errorSummary } from "../../errorText";
 
 export type SyncScope = "savings" | "loans" | "gl" | "all";
 export type SyncTrigger = "scheduled" | "manual" | "webhook_gap" | "backfill";
@@ -227,7 +228,7 @@ export async function runBatchSync(
       } catch (err) {
         // Endpoint-level failure for this entity: DLQ an api_call marker so the
         // retry tick re-pulls this window, and continue with the other entities.
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorSummary(err);
         failed++;
         await finalizeIngestBatch(
           batchId,
@@ -247,7 +248,7 @@ export async function runBatchSync(
       }
     }
   } catch (err) {
-    fatalError = err instanceof Error ? err.message : String(err);
+    fatalError = errorSummary(err);
   } finally {
     runningConfigs.delete(configId);
     releaseSlot();
@@ -344,7 +345,7 @@ export async function runDueScheduledSyncs(
       results.push({
         configId: cfg.id,
         ran: false,
-        reason: err instanceof Error ? err.message : String(err),
+        reason: errorSummary(err),
       });
     }
   }

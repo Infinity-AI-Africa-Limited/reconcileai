@@ -37,6 +37,7 @@ import {
 import { applyMapping, type MappingRule } from "./mapping";
 import { decryptSecretForOrg } from "./secrets";
 import type { WcEntity } from "./types";
+import { errorSummary } from "../../errorText";
 
 export const SIGNATURE_HEADER = "x-woodcore-signature";
 export const EVENT_ID_HEADER = "x-woodcore-event-id";
@@ -157,7 +158,7 @@ export async function handleWoodcoreWebhook(input: {
     });
     eventDbId = Number((res as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorSummary(err);
     if (isDuplicateKeyError(err)) {
       return { httpStatus: 200, body: { ok: true, status: "duplicate" } };
     }
@@ -187,7 +188,7 @@ export async function handleWoodcoreWebhook(input: {
         body: { ok: true, status: result.failed > 0 ? "processed_with_failures" : "processed", eventDbId },
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorSummary(err);
       await db
         .update(wcConnectorWebhookEvents)
         .set({ status: "failed", error: msg.slice(0, 4000) })
@@ -242,7 +243,7 @@ export async function handleWoodcoreWebhook(input: {
       body: { ok: true, status: result.inserted > 0 ? "processed" : "already_ingested", eventDbId },
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorSummary(err);
     await db
       .update(wcConnectorWebhookEvents)
       .set({ status: "failed", error: msg.slice(0, 4000) })

@@ -25,6 +25,7 @@ import { getDb } from "../../db";
 import { getCbsProfile, type CbsType } from "../cbs/registry";
 import { encryptSecretForOrg } from "./secrets";
 import { ensureCbsChannel } from "./ingest";
+import { loggableError } from "../../dbErrors";
 
 /** Channel code this connector stamps on organizations it onboards. */
 export const WOODCORE_ONBOARDING_CHANNEL = "woodcore";
@@ -185,7 +186,7 @@ export async function onboardCbsClient(
       console.error("[wc-onboarding] tenant baseline partial failure:", JSON.stringify(baseline.steps));
     }
   } catch (err) {
-    console.error("[wc-onboarding] tenant baseline failed:", err);
+    console.error("[wc-onboarding] tenant baseline failed:", loggableError(err));
   }
 
   // 6) LAPO channel pack: the eight source channels (with per-source timing
@@ -198,7 +199,7 @@ export async function onboardCbsClient(
       await provisionLapoChannels(organizationId);
       await seedLapoResolutionTemplates(organizationId);
     } catch (err) {
-      console.error("[wc-onboarding] LAPO channel pack failed (re-run lapo.provision):", err);
+      console.error("[wc-onboarding] LAPO channel pack failed (re-run lapo.provision):", loggableError(err));
     }
   }
 
@@ -222,7 +223,7 @@ export async function onboardCbsClient(
         magicLink = r.magicLink;
       }
     } catch (err) {
-      console.error("[wc-onboarding] welcome email failed:", err);
+      console.error("[wc-onboarding] welcome email failed:", loggableError(err));
     }
   }
 

@@ -21,6 +21,7 @@
  */
 
 import { getDb } from "../../db";
+import { errorSummary } from "../../errorText";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { eq, and } from "drizzle-orm";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
@@ -207,7 +208,7 @@ export async function runSettlementSync(
       payoutsIngested: 0,
       exceptionsFound: 0,
       durationMs: Date.now() - startedAt,
-      error: err instanceof Error ? err.message : String(err),
+      error: errorSummary(err),
     };
   }
 }

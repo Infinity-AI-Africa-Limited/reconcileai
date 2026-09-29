@@ -19,6 +19,7 @@ import { getDb } from "../../db";
 import { SHOPLINE_ONBOARDING_CHANNELS } from "../../../shared/shoplineConstants";
 import type { ShoplineTokenResponse } from "./auth";
 import { saveToken } from "./tokenStore";
+import { loggableError } from "../../dbErrors";
 
 export const SHOPLINE_ONBOARDING_CHANNEL = SHOPLINE_ONBOARDING_CHANNELS.APP_STORE;
 
@@ -279,7 +280,7 @@ export async function onboardShoplineMerchant(
       console.error("[sl-onboarding] tenant baseline partial failure:", JSON.stringify(baseline.steps));
     }
   } catch (err) {
-    console.error("[sl-onboarding] tenant baseline failed:", err);
+    console.error("[sl-onboarding] tenant baseline failed:", loggableError(err));
   }
 
   // 6) Seed retail exception resolution templates for this org — fire-and-forget
@@ -287,7 +288,7 @@ export async function onboardShoplineMerchant(
     const { seedRetailExceptionDefaults } = await import("../../seedResolutionTemplates");
     await seedRetailExceptionDefaults();
   } catch (err) {
-    console.error("[sl-onboarding] retail exception seed failed:", err);
+    console.error("[sl-onboarding] retail exception seed failed:", loggableError(err));
   }
 
   return {

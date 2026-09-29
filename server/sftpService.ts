@@ -5,6 +5,8 @@ import { sftpCredentials, sftpIngestionLogs, uploadBatches, transactions } from 
 import { eq, and, lte } from "drizzle-orm";
 import { validateParsedRows, storeTransactions, calculateFileHash } from "./apiIngestionService";
 import { parseTabularFile } from "./ingest/fileParser";
+import { loggableError } from "./dbErrors";
+import { errorSummary } from "./errorText";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -79,7 +81,7 @@ export async function testSftpConnection(config: {
   } catch (error: any) {
     return {
       success: false,
-      error: error.message || "Connection failed",
+      error: errorSummary(error) || "Connection failed",
     };
   }
 }
@@ -137,7 +139,7 @@ export async function listSftpFiles(
   } catch (error: any) {
     return {
       success: false,
-      error: error.message || "Failed to list files",
+      error: errorSummary(error) || "Failed to list files",
     };
   }
 }
@@ -220,7 +222,7 @@ export async function downloadAndProcessSftpFile(
     } catch (parseErr) {
       // A corrupt or password-protected workbook must fail loudly with a usable
       // reason, not fall through as "no valid rows".
-      parseFailure = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      parseFailure = errorSummary(parseErr);
     }
 
     if (parseFailure || valid.length === 0) {
@@ -320,7 +322,7 @@ export async function downloadAndProcessSftpFile(
       fileName,
       filePath: `${cred.remotePath}/${fileName}`,
       status: "failed",
-      errorMessage: error.message,
+      errorMessage: errorSummary(error),
       processingTimeMs: Date.now() - startTime,
     });
     
@@ -330,14 +332,14 @@ export async function downloadAndProcessSftpFile(
       .set({
         lastPolledAt: new Date(),
         lastErrorAt: new Date(),
-        lastErrorMessage: error.message,
+        lastErrorMessage: errorSummary(error),
         totalFilesFailed: cred.totalFilesFailed + 1,
       })
       .where(eq(sftpCredentials.id, credentialId));
     
     return {
       success: false,
-      error: error.message || "Failed to process file",
+      error: errorSummary(error) || "Failed to process file",
     };
   }
 }
@@ -379,7 +381,7 @@ export async function pollSftpCredentials() {
       const { success, files, error } = await listSftpFiles(cred.id);
       
       if (!success) {
-        console.error(`[SFTP Polling] Failed to list files for credential ${cred.id}:`, error);
+        console.error(`[SFTP Polling] Failed to list files for credential ${cred.id}:`, loggableError(error));
         await db
           .update(sftpCredentials)
           .set({
@@ -415,7 +417,7 @@ export async function pollSftpCredentials() {
       }
     }
   } catch (error) {
-    console.error("[SFTP Polling] Polling failed:", error);
+    console.error("[SFTP Polling] Polling failed:", loggableError(error));
   }
 }
 

@@ -9,6 +9,8 @@ import { notifyOwner } from "./_core/notification";
 import { sendEmail, renderBrandedHtml, markdownToBasicHtml } from "./_core/email";
 import { storagePut } from "./storage";
 import { loadExcelJS } from "./exceljsLoader";
+import { loggableError } from "./dbErrors";
+import { errorSummary } from "./errorText";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -187,7 +189,7 @@ export async function buildBoardSummary(
       }),
     );
   } catch (err) {
-    console.error("[CfoReport] severity breakdown unavailable (non-fatal):", err);
+    console.error("[CfoReport] severity breakdown unavailable (non-fatal):", loggableError(err));
   }
 
   const topChannelsByExceptions = [...rows]
@@ -384,7 +386,7 @@ export async function sendWeeklyChannelReport(
       );
       xlsxUrl = url;
     } catch (xlsxErr) {
-      console.error("[CfoReport] Excel generation failed (non-fatal):", xlsxErr);
+      console.error("[CfoReport] Excel generation failed (non-fatal):", loggableError(xlsxErr));
     }
 
     // ── Build markdown notification ─────────────────────────────────────
@@ -460,8 +462,8 @@ export async function sendWeeklyChannelReport(
     await db.updateCfoReportScheduleLastSent(userId);
     return { success: true, channelsReported: rows.length, xlsxUrl };
   } catch (error) {
-    console.error("[CfoReport] Weekly report failed:", error);
-    return { success: false, channelsReported: 0, error: String(error) };
+    console.error("[CfoReport] Weekly report failed:", loggableError(error));
+    return { success: false, channelsReported: 0, error: errorSummary(error) };
   }
 }
 
@@ -538,7 +540,7 @@ export async function checkChannelThresholdBreaches(userId: number): Promise<{
 
     return { breachesFound, alertsSent };
   } catch (error) {
-    console.error("[CfoReport] Threshold check failed:", error);
+    console.error("[CfoReport] Threshold check failed:", loggableError(error));
     return { breachesFound: 0, alertsSent: 0 };
   }
 }

@@ -21,6 +21,8 @@ import { getDb } from "./db";
 import { webhooks, webhookDeliveries } from "../drizzle/schema";
 import { isEgressAllowed } from "./_core/egress";
 import { createQueue, type JobQueue } from "./jobQueue";
+import { loggableError } from "./dbErrors";
+import { errorSummary } from "./errorText";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
 const MAX_ATTEMPTS = 6;
@@ -58,7 +60,7 @@ async function attemptDelivery(job: { data: DeliveryJob; attempt: number }): Pro
     responseStatus = res.status;
     if (!res.ok) error = `HTTP ${res.status}`;
   } catch (err) {
-    error = err instanceof Error ? err.message.slice(0, 500) : "network error";
+    error = err instanceof Error ? errorSummary(err) : "network error";
   }
 
   const delivered = responseStatus !== null && responseStatus >= 200 && responseStatus < 300;
@@ -87,7 +89,7 @@ async function attemptDelivery(job: { data: DeliveryJob; attempt: number }): Pro
           .where(eq(webhooks.id, webhookId));
       }
     } catch (dbErr) {
-      console.error("[webhookDelivery] status update failed (non-fatal):", dbErr);
+      console.error("[webhookDelivery] status update failed (non-fatal):", loggableError(dbErr));
     }
   }
 
@@ -164,7 +166,7 @@ export async function dispatchWebhookEvent(event: string, payload: Record<string
       });
     }
   } catch (err) {
-    console.error("[webhookDelivery] dispatch error (non-fatal):", err);
+    console.error("[webhookDelivery] dispatch error (non-fatal):", loggableError(err));
   }
 }
 

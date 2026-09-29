@@ -14,6 +14,7 @@
 import { assertEgressAllowed } from "../../_core/egress";
 import { getAuthHeaders, invalidateToken, type AuthResult } from "./auth";
 import type { FetchLike, WcClientDeps, WcConnection, WcPagedResponse } from "./types";
+import { errorSummary } from "../../errorText";
 
 export class WoodcoreApiError extends Error {
   constructor(
@@ -111,7 +112,7 @@ export class WoodcoreClient {
           attempt++;
           continue;
         }
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorSummary(err);
         throw new WoodcoreApiError(`WoodCore request failed (network): ${msg}`, null, true);
       }
 
@@ -205,7 +206,7 @@ export class WoodcoreClient {
       return {
         ok: false,
         latencyMs: this.now() - started,
-        error: err instanceof Error ? err.message : String(err),
+        error: errorSummary(err),
       };
     }
   }

@@ -27,6 +27,7 @@ import {
   pocExceptions,
   pocShareTokens,
 } from "../drizzle/poc_schema";
+import { loggableError } from "./dbErrors";
 
 export type FileType = "excel" | "csv";
 export type Side = "ledger" | "statement";
@@ -373,7 +374,7 @@ export async function extractTransactions(params: {
         `(${fileType}, ${matrix.length} lines) — falling back to LLM.`,
       );
     } catch (err) {
-      console.warn("[poc extract] structured parse threw, falling back to LLM:", (err as Error).message);
+      console.warn("[poc extract] structured parse threw, falling back to LLM:", loggableError(err));
     }
   }
 
@@ -398,7 +399,7 @@ export async function extractTransactions(params: {
   } catch (err: any) {
     // Keep the real provider error in the server logs for operators…
     const msg = String(err?.message ?? "");
-    console.error("[poc extract] LLM call failed:", msg);
+    console.error("[poc extract] LLM call failed:", loggableError(err));
     // …but never surface raw provider HTML/JSON (or API-key errors) to the prospect.
     if (/\b401\b|\b403\b|unauthorized|authentication_error|invalid x-api-key|api[- ]?key|not configured/i.test(msg)) {
       throw new Error(
