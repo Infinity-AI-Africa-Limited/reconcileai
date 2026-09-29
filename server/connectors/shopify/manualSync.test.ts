@@ -15,7 +15,7 @@ import {
   ShopifyManualSyncError,
   toWholeSecond,
 } from "./manualSync";
-import { scriptedDb } from "./scriptedDb.testkit";
+import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const STORES = "shopify_connector_stores";
 const CURSORS = "shopify_sync_cursors";
@@ -162,8 +162,7 @@ describe("when the queue runs a manual sync", () => {
 
     expect(runToNow).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, trigger: "manual" });
     const snapshot = fake.ops.findIndex((op) => op.kind === "select" && op.table === REQUESTS);
-    // `data` is a row OR the rows of a bulk insert, so the single-row read narrows first.
-    const midRun = fake.ops.findIndex((op) => !Array.isArray(op.data) && op.data?.note === "request 58 mid-run");
+    const midRun = fake.ops.findIndex((op) => rowOf(op)?.note === "request 58 mid-run");
     expect(snapshot).toBeLessThan(midRun);
     const lookup = fake.ops[snapshot];
     expect(lookup?.where?.params).toEqual([7, 42, "queued"]);

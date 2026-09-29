@@ -35,6 +35,16 @@ export interface RecordedOp {
   locked: boolean;
 }
 
+/**
+ * The single row a write carried, or null when an insert carried several.
+ *
+ * `data` is a row OR the rows of a bulk insert, so reading a field off it does
+ * not type-check without narrowing first. Most assertions are about an update
+ * or a one-row insert and want exactly this.
+ */
+export const rowOf = (op?: RecordedOp): Record<string, unknown> | null =>
+  op && !Array.isArray(op.data) ? op.data : null;
+
 /** A scripted answer: rows for a select, affected rows for a write, or an error to throw. */
 type Answer = unknown[] | number | Error;
 
