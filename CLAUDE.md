@@ -258,17 +258,25 @@ checked as `columnMapping`, which is authoritative (a field it omits stays
 unmapped). The commit (`settlementFileCommit.ts`) is ONE transaction per import
 (since 2026-09-29):
 
-- it locks the store row first and reads existing rows with a locking read,
-  refs compared in their stored (sanitised) form;
-- it dedupes by settlement EVENT (`settlementEventKey`, a multiset), not by
-  order, so a refund or a second settlement for an order is kept while a
-  re-upload adds nothing;
-- an order the SHOPLINE API sync has already settled keeps the old order-level
+- it locks the store row first, then runs the shared lookup
+  (`importableSettlementFileRows`) as a locking read, refs compared in their
+  STORED (sanitised) form;
+- it dedupes file rows by settlement EVENT (`selectNewSettlementFileRows`, a
+  multiset), not by order, so a refund or a second settlement for an order is
+  kept while a re-upload adds nothing. A missing gateway transaction id counts
+  as unknown, not different, so a richer re-export does not double rows first
+  imported without ids; skipped rows that cannot be proved duplicates are
+  counted and reported (`unverifiableDuplicates`);
+- an order the SHOPLINE Payments API has already settled keeps the order-level
   protection;
 - it reconciles only the orders the file speaks to.
 
-The earlier `rejectAlreadyIngested` order-level dedupe dropped refunds as
-"duplicates" and re-inserted `#`-prefixed refs; do not reintroduce it here.
+> ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
+> file's raw reference with the sanitised stored one (`#1001` is stored as
+> `1001`), so every re-upload of such a file was inserted again; and it keyed on
+> the order alone, so a refund sharing an order with its payment was dropped.
+> Production may hold duplicates from before the fix — measure before assuming
+> it does not. Do not reintroduce `rejectAlreadyIngested` on this path.
 
 **Verified end-to-end against production (2026-08-02):** a DHL COD remittance
 file matched the real dev-store order `21076388995485181306699745`

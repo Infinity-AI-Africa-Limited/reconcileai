@@ -366,9 +366,37 @@ describe("the persisted watermark window", () => {
     });
   });
 
-  it("uses only the last 24 hours for a first read_orders sync", () => {
+  it("starts a store's first sync at the beginning of read_orders' 60-day window, one bounded step at a time", () => {
+    // The first cycle covers the oldest 7 days; each commits its watermark and
+    // the next starts there, so a large backfill cannot hit the page cap for
+    // the whole 60 days at once and fail forever.
     expect(
-      computeShopifyOrderWindow({ now: new Date("2026-09-20T12:00:00Z"), watermark: null }).from,
-    ).toEqual(new Date("2026-09-19T12:00:00Z"));
+      computeShopifyOrderWindow({ now: new Date("2026-09-20T12:00:00Z"), watermark: null }),
+    ).toEqual({
+      from: new Date("2026-07-22T12:00:00Z"),
+      to: new Date("2026-07-29T12:00:00Z"),
+    });
+  });
+
+  it("reaches now in one window once the store is within a step of current", () => {
+    expect(
+      computeShopifyOrderWindow({
+        now: new Date("2026-09-20T12:00:00Z"),
+        watermark: new Date("2026-09-15T12:00:00Z"),
+      }),
+    ).toEqual({
+      from: new Date("2026-09-15T11:55:00Z"),
+      to: new Date("2026-09-20T12:00:00Z"),
+    });
+  });
+
+  it("starts from the watermark, not 60 days back, once a store has synced", () => {
+    // An idle store resuming after a month must not re-read the 60-day window.
+    expect(
+      computeShopifyOrderWindow({
+        now: new Date("2026-09-20T12:00:00Z"),
+        watermark: new Date("2026-08-20T12:00:00Z"),
+      }).from,
+    ).toEqual(new Date("2026-08-20T11:55:00Z"));
   });
 });

@@ -27,6 +27,8 @@ export interface RecordedOp {
   data: Record<string, unknown> | null;
   /** Set when the INSERT carried ON DUPLICATE KEY UPDATE. */
   upsert: boolean;
+  /** The ON DUPLICATE KEY UPDATE set-clause, as passed. */
+  onDuplicate?: Record<string, unknown>;
   /** The transaction this ran in, or null outside one. */
   txId: number | null;
   /** Set on a locking read (`.for("update")`). */
@@ -121,15 +123,20 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
         return {
           values(values: Record<string, unknown>) {
             let upsert = false;
+            let onDuplicate: Record<string, unknown> | undefined;
             const compute = () => {
-              record({ kind: "insert", table, where: null, data: values, upsert });
+              record({ kind: "insert", table, where: null, data: values, upsert, ...(onDuplicate ? { onDuplicate } : {}) });
               const answer = take("insert", table);
               if (answer instanceof Error) throw answer;
               const insertId = typeof answer === "number" ? answer : nextInsertId++;
               return [{ affectedRows: 1, insertId }, []];
             };
             return {
-              onDuplicateKeyUpdate() { upsert = true; return settle(compute); },
+              onDuplicateKeyUpdate(config?: { set?: Record<string, unknown> }) {
+                upsert = true;
+                onDuplicate = config?.set;
+                return settle(compute);
+              },
               ...settle(compute),
             };
           },

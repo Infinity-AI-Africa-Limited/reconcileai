@@ -300,47 +300,51 @@ function provenanceOf(rawData: unknown): Record<string, unknown> {
  *
  * The key is built only from values that survive storage unchanged, so a stored
  * row and the same row re-imported produce the same key:
- *   - the order and gateway references as the FILE wrote them (`rawData`, kept
- *     verbatim — `transactionRef` itself may be sanitised, or rewritten to a
- *     canonical order id once the order has synced);
+ *   - the ORDER reference as the file wrote it (`rawData`, kept verbatim —
+ *     `transactionRef` itself may be rewritten to a canonical order id once the
+ *     order has synced), compared in its STORED form: `#1001` in one export and
+ *     `1001` in an overlapping one are stored as one order, match as one order,
+ *     and must not count one payment twice;
+ *   - the GATEWAY reference exactly as the file wrote it. It is the provider's
+ *     own id for one payment, so it is NOT normalised: `GW:A` and `GWA` may be
+ *     two payments, and merging them would drop one silently — whereas a
+ *     double count at least surfaces as a duplicate exception;
  *   - direction, amount in cents, currency;
  *   - the settlement date to the second (the column's precision), or nothing
  *     when the file had no date — `transactionDate` then holds the import time
  *     and would make every re-upload look new.
  */
 export function settlementEventKey(row: SettlementEventFields): string {
-  const provenance = provenanceOf(row.rawData);
-  const orderRef = typeof provenance.originalOrderRef === "string"
-    ? provenance.originalOrderRef
-    : row.transactionRef ?? "";
-  const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : "";
-  const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
-  return JSON.stringify([
-    orderRef,
-    gatewayRef,
-    row.debitCredit,
-    amountInCents(row.amount as string | number),
-    String(row.currency ?? "").toUpperCase(),
-    settledAt && !Number.isNaN(settledAt.getTime()) ? Math.round(settledAt.getTime() / 1000) : "",
-  ]);
+  const { orderRef, gatewayRef, rest } = settlementEventParts(row);
+  return JSON.stringify([orderRef, gatewayRef, ...rest]);
 }
 
-/** An event's identity, split into what every record carries and the gateway id some lack. */
-function settlementEventParts(row: SettlementEventFields): { base: string; gatewayRef: string } {
+/**
+ * The one definition of an event's identity, which settlementEventKey and
+ * selectUnrecordedSettlementEvents both derive from, so the two cannot drift:
+ * the ORDER reference in its stored form, the GATEWAY reference exactly as
+ * written (see settlementEventKey), and the rest.
+ */
+function settlementEventParts(row: SettlementEventFields): {
+  orderRef: string;
+  gatewayRef: string;
+  rest: Array<string | number | null | undefined>;
+  /** Everything but the gateway id: what a record without one can still be matched on. */
+  base: string;
+} {
   const provenance = provenanceOf(row.rawData);
-  const orderRef = typeof provenance.originalOrderRef === "string"
-    ? provenance.originalOrderRef
-    : row.transactionRef ?? "";
-  const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef.trim() : "";
+  const orderRef = sanitizeRef(
+    typeof provenance.originalOrderRef === "string" ? provenance.originalOrderRef : row.transactionRef,
+  ) ?? "";
+  const gatewayRef = typeof provenance.gatewayRef === "string" ? provenance.gatewayRef : "";
   const settledAt = row.valueDate ? new Date(row.valueDate as Date | string) : null;
-  const base = JSON.stringify([
-    orderRef,
+  const rest = [
     row.debitCredit,
     amountInCents(row.amount as string | number),
     String(row.currency ?? "").toUpperCase(),
     settledAt && !Number.isNaN(settledAt.getTime()) ? Math.round(settledAt.getTime() / 1000) : "",
-  ]);
-  return { base, gatewayRef };
+  ];
+  return { orderRef, gatewayRef, rest, base: JSON.stringify([orderRef, ...rest]) };
 }
 
 /**
@@ -432,4 +436,63 @@ export function selectUnimportedSettlementEvents<T>(
     stored.set(key, remaining - 1);
     return false;
   });
+}
+
+/** True for a row a settlement FILE wrote — `mapSettlementRows` has always stamped `importedFrom`. */
+function isSettlementFileRow(row: SettlementEventFields): boolean {
+  return typeof provenanceOf(row.rawData).importedFrom === "string";
+}
+
+/**
+ * The rows of a SHOPLINE settlement file that are not already recorded in the
+ * store's payments channel. Both sides must be in STORED form (`transactionRef`
+ * as `sanitizeRef` writes it) — comparing a file's `#1001` against the stored
+ * `1001` is how every re-upload used to be inserted again.
+ *
+ * The payments channel holds two kinds of row, and they are told apart on
+ * purpose:
+ *   - rows an earlier FILE imported are deduplicated by settlement EVENT
+ *     (`settlementEventKey`), as a multiset — so a re-upload or an overlapping
+ *     export adds nothing, while a payment and its refund, in one file or two,
+ *     are both kept. Keying these on the order alone drops the refund.
+ *   - rows the SHOPLINE Payments API synced for an order keep that order
+ *     covered, exactly as before: a file row for such an order is skipped,
+ *     because the API already supplies its settlement and a file describing it
+ *     too would count it twice.
+ */
+export function selectNewSettlementFileRows<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): T[] {
+  return classifySettlementFileRows(stored, incoming).fresh;
+}
+
+/**
+ * selectNewSettlementFileRows, and how many of the rows it skipped matched an
+ * earlier file's event WITHOUT a gateway transaction id to prove it.
+ *
+ * File rows are compared by event with selectUnrecordedSettlementEvents, so a
+ * missing id is unknown rather than different: a richer re-export of rows first
+ * imported without ids matches them instead of doubling them. What cannot be
+ * proved is counted, not decided silently — two same-amount, same-day
+ * settlements for one order with no id look exactly like an overlapping
+ * export's repeat, and importing them would double-count every overlap.
+ */
+export function classifySettlementFileRows<T extends SettlementEventFields>(
+  stored: SettlementEventFields[],
+  incoming: T[],
+): { fresh: T[]; unverifiableDuplicates: number } {
+  const coveredByApi = new Set<string>();
+  const importedEvents: SettlementEventFields[] = [];
+  for (const row of stored) {
+    if (isSettlementFileRow(row)) importedEvents.push(row);
+    else if (row.transactionRef) coveredByApi.add(row.transactionRef);
+  }
+  const uncovered = incoming.filter((row) => !row.transactionRef || !coveredByApi.has(row.transactionRef));
+  const fresh = selectUnrecordedSettlementEvents(importedEvents, uncovered);
+  const kept = new Set(fresh);
+  const unverifiableDuplicates = uncovered.filter(
+    (row) => !kept.has(row) && !settlementEventParts(row).gatewayRef,
+  ).length;
+  return { fresh, unverifiableDuplicates };
 }

@@ -35,18 +35,16 @@
  * that order and the file's rows for it are skipped, exactly as before.
  */
 import { TRPCError } from "@trpc/server";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
-import { transactions, uploadBatches, type InsertTransaction } from "../../../drizzle/schema";
-import { getDb, insertTransactionsWithExecutor, sanitizeRef, type DbExecutor } from "../../db";
-import { selectUnrecordedSettlementEvents } from "./settlementFileImport";
-import { runReconciliationOnPersistedData } from "./syncOrchestrator";
+import { uploadBatches, type InsertTransaction } from "../../../drizzle/schema";
+import { getDb, insertTransactionsWithExecutor, type DbExecutor } from "../../db";
+import { importableSettlementFileRows, runReconciliationOnPersistedData } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
 /** Each settled row may sit this far from its order and still be matched. */
 const RECONCILIATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
-const REFERENCE_LOOKUP_CHUNK = 500;
 
 export interface ShoplineSettlementCommitParams {
   organizationId: number;
@@ -104,25 +102,6 @@ export function unverifiableDuplicatesNote(count: number): string | null {
   );
 }
 
-function gatewayRefOf(rawData: unknown): string {
-  const value = (rawData as { gatewayRef?: unknown } | null)?.gatewayRef;
-  return typeof value === "string" ? value.trim() : "";
-}
-
-/** A row imported from a settlement file carries its source label; an API-synced row never does. */
-function isSettlementFileRow(rawData: unknown): boolean {
-  let value = rawData;
-  if (typeof value === "string") {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      return false;
-    }
-  }
-  const importedFrom = (value as { importedFrom?: unknown } | null)?.importedFrom;
-  return typeof importedFrom === "string" && importedFrom.length > 0;
-}
-
 /**
  * Serialise imports for one store and refuse one that stopped being active
  * since the request began. Must be the transaction's first statement.
@@ -145,40 +124,6 @@ async function lockStoreForImport(tx: DbExecutor, organizationId: number, storeI
   }
 }
 
-/** Existing payment-leg rows for these references, read under the store lock. */
-async function lockExistingSettlementRows(
-  tx: DbExecutor,
-  organizationId: number,
-  paymentsChannelId: number,
-  refs: string[],
-) {
-  const rows: Array<Pick<InsertTransaction, "transactionRef" | "amount" | "debitCredit" | "currency" | "valueDate" | "rawData">> = [];
-  for (let index = 0; index < refs.length; index += REFERENCE_LOOKUP_CHUNK) {
-    const chunk = refs.slice(index, index + REFERENCE_LOOKUP_CHUNK);
-    rows.push(
-      ...(await tx
-        .select({
-          transactionRef: transactions.transactionRef,
-          amount: transactions.amount,
-          debitCredit: transactions.debitCredit,
-          currency: transactions.currency,
-          valueDate: transactions.valueDate,
-          rawData: transactions.rawData,
-        })
-        .from(transactions)
-        .where(
-          and(
-            eq(transactions.organizationId, organizationId),
-            eq(transactions.channelId, paymentsChannelId),
-            inArray(transactions.transactionRef, chunk),
-          ),
-        )
-        .for("update")),
-    );
-  }
-  return rows;
-}
-
 export async function commitShoplineSettlementFile(
   db: Db,
   params: ShoplineSettlementCommitParams,
@@ -187,32 +132,16 @@ export async function commitShoplineSettlementFile(
   return db.transaction(async (tx) => {
     await lockStoreForImport(tx, params.organizationId, params.storeId);
 
-    // Compare, scope and store references in the form insert will store them.
     const failures = [...params.mappingFailures];
-    const stored: InsertTransaction[] = params.rows.map((row) => {
-      const transactionRef = sanitizeRef(row.transactionRef);
-      // mapSettlementRows refuses these, at their row; one reaching here is a bug.
-      if (!transactionRef) throw new Error("Settlement row reached commit without a usable order reference");
-      return { ...row, transactionRef, externalRef: sanitizeRef(row.externalRef) };
+    // The shared lookup and selection rule (importableSettlementFileRows): refs
+    // compared in their STORED form; an order the API sync settled keeps the
+    // order-level protection; file rows compared by event, a missing transaction
+    // id counting as unknown. Here it is a LOCKING read, under the store lock.
+    const { fresh, unverifiableDuplicates } = await importableSettlementFileRows(tx, params.rows, {
+      organizationId: params.organizationId,
+      paymentsChannelId: params.paymentsChannelId,
+      lock: true,
     });
-
-    const refs = [...new Set(stored.map((row) => row.transactionRef as string))];
-    const existing = await lockExistingSettlementRows(tx, params.organizationId, params.paymentsChannelId, refs);
-
-    // An order the API sync has settled keeps the order-level protection; every
-    // other existing row is a file event, compared by event.
-    const settledBySync = new Set<string>();
-    const fileEvents: typeof existing = [];
-    for (const row of existing) {
-      if (isSettlementFileRow(row.rawData)) fileEvents.push(row);
-      else if (row.transactionRef) settledBySync.add(row.transactionRef);
-    }
-    const candidates = stored.filter((row) => !settledBySync.has(row.transactionRef as string));
-    // A missing transaction id is unknown, not different: a richer re-export of
-    // settlements first imported without ids matches them rather than doubling.
-    const fresh = selectUnrecordedSettlementEvents(fileEvents, candidates);
-    const kept = new Set(fresh);
-    const unverifiableDuplicates = candidates.filter((row) => !kept.has(row) && !gatewayRefOf(row.rawData)).length;
 
     await insertTransactionsWithExecutor(tx, fresh);
 
@@ -255,7 +184,7 @@ export async function commitShoplineSettlementFile(
 
     return {
       imported: fresh.length,
-      duplicates: stored.length - fresh.length,
+      duplicates: params.rows.length - fresh.length,
       unverifiableDuplicates,
       failures,
       matchedCount,

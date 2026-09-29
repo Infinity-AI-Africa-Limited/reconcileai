@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   createQueue: vi.fn(),
   handle: vi.fn(async () => {}),
   markFailed: vi.fn(async () => {}),
+  handleManual: vi.fn(async () => {}),
 }));
 
 vi.mock("../../jobQueue", () => ({
@@ -12,6 +13,9 @@ vi.mock("../../jobQueue", () => ({
 vi.mock("./syncOrchestrator", () => ({
   handleShopifyWebhookSync: (...args: unknown[]) => state.handle(...args),
   markShopifyWebhookSyncFailed: (...args: unknown[]) => state.markFailed(...args),
+}));
+vi.mock("./manualSync", () => ({
+  handleShopifyManualSync: (...args: unknown[]) => state.handleManual(...args),
 }));
 
 const enqueue = vi.fn(async () => {});
@@ -71,5 +75,49 @@ describe("Shopify order sync durable queue", () => {
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue).toHaveBeenNthCalledWith(1, "webhook-wh-redelivered", payload);
     expect(enqueue).toHaveBeenNthCalledWith(2, "webhook-wh-redelivered", payload);
+  });
+});
+
+describe("when a merchant asks for a manual sync", () => {
+  it("should queue it on its own queue, which falls back in-process rather than refusing without Redis", async () => {
+    const { enqueueShopifyManualSync } = await import("./syncQueue");
+    const payload = { storeId: 7, organizationId: 42, requestId: 3 };
+
+    await enqueueShopifyManualSync(payload);
+
+    const [name, handler, options] = state.createQueue.mock.calls[0] as [
+      string,
+      (job: { data: typeof payload }) => Promise<void>,
+      Record<string, unknown>,
+    ];
+    expect(name).toBe("shopify-manual-sync");
+    // Losing a manual sync loses nothing (the watermark has not moved), unlike
+    // a webhook sync owed for an acknowledged delivery.
+    expect(options.requireDurable).toBeUndefined();
+    // One visible failure, not minutes of invisible retries; unique names would
+    // be retained with the finished job and absorb every later request.
+    expect(options).toMatchObject({ attempts: 1 });
+    expect(options.uniqueJobNames).toBeUndefined();
+    expect(options.concurrency).toBeGreaterThan(1);
+    // The handler records a failed run itself, in the same step that answers
+    // the request; a queue-level hook could not know which requests it answered.
+    expect(options.onFinalFailure).toBeUndefined();
+
+    await handler({ data: payload });
+    expect(state.handleManual).toHaveBeenCalledWith(payload);
+  });
+
+  it("should coalesce repeated requests per store, and only per store", async () => {
+    const { enqueueShopifyManualSync } = await import("./syncQueue");
+
+    await enqueueShopifyManualSync({ storeId: 7, organizationId: 42, requestId: 1 });
+    await enqueueShopifyManualSync({ storeId: 8, organizationId: 42, requestId: 1 });
+
+    expect(enqueue).toHaveBeenNthCalledWith(1, "manual-7", { storeId: 7, organizationId: 42, requestId: 1 }, {
+      coalesceKey: "shopify-manual-sync:42:7",
+    });
+    expect(enqueue).toHaveBeenNthCalledWith(2, "manual-8", { storeId: 8, organizationId: 42, requestId: 1 }, {
+      coalesceKey: "shopify-manual-sync:42:8",
+    });
   });
 });

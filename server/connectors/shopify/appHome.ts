@@ -8,15 +8,13 @@
  * internal — ids, batch numbers, row data, operational error text — may reach it.
  */
 import { TRPCError } from "@trpc/server";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { shopifySyncCursors } from "../../../drizzle/shopify_schema";
+import { shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
-import { ShopifyOrderApiError } from "./orders";
+import { ShopifyManualSyncError } from "./manualSync";
 import { ShopifySettlementEvidenceError, type ShopifySettlementEvidenceResult } from "./settlementEvidence";
-import type { ShopifyOrderSyncReport } from "./syncOrchestrator";
-import { ShopifyTokenUnavailableError } from "./tokenStore";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -69,40 +67,64 @@ export function appHomeError(code: TRPCError["code"], message: ShopifyAppHomeErr
 
 /** The store and sync evidence the workspace shows; no id leaves the server. */
 export async function loadAppHomeView(db: Db, context: ShopifyEmbeddedContext) {
-  const [cursor] = await db
-    .select({
-      lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
-      lastErrorCode: shopifySyncCursors.lastErrorCode,
-    })
-    .from(shopifySyncCursors)
-    .where(
-      and(
-        eq(shopifySyncCursors.storeId, context.storeId),
-        eq(shopifySyncCursors.organizationId, context.organizationId),
-        eq(shopifySyncCursors.resource, "orders"),
-      ),
-    )
-    .limit(1);
+  const requests = and(
+    eq(shopifySyncRequests.storeId, context.storeId),
+    eq(shopifySyncRequests.organizationId, context.organizationId),
+  );
+  // One transaction, so one snapshot (REPEATABLE READ, the default on MySQL and
+  // TiDB): read separately, a run settling between the reads could pair a
+  // request still queued in one with no pending request in the next, and the
+  // page would stop waiting with the outcome unseen.
+  const { cursor, latestRequest, pending, requestCount } = await db.transaction(async (tx) => {
+    const [cursorRow] = await tx
+      .select({
+        lastSuccessfulAt: shopifySyncCursors.lastSuccessfulAt,
+        lastErrorCode: shopifySyncCursors.lastErrorCode,
+        lastErrorAt: shopifySyncCursors.lastErrorAt,
+        requestCount: shopifySyncCursors.syncRequestCount,
+      })
+      .from(shopifySyncCursors)
+      .where(
+        and(
+          eq(shopifySyncCursors.storeId, context.storeId),
+          eq(shopifySyncCursors.organizationId, context.organizationId),
+          eq(shopifySyncCursors.resource, "orders"),
+        ),
+      )
+      .limit(1);
+    const [latestRow] = await tx
+      .select({ status: shopifySyncRequests.status, answeredAt: shopifySyncRequests.answeredAt })
+      .from(shopifySyncRequests)
+      .where(requests)
+      .orderBy(desc(shopifySyncRequests.id))
+      .limit(1);
+    const [pendingRow] = await tx
+      .select({ requestedAt: shopifySyncRequests.requestedAt })
+      .from(shopifySyncRequests)
+      .where(and(requests, eq(shopifySyncRequests.status, "queued")))
+      .orderBy(desc(shopifySyncRequests.id))
+      .limit(1);
+    return { cursor: cursorRow, latestRequest: latestRow, pending: pendingRow, requestCount: cursorRow?.requestCount ?? 0 };
+  });
   return {
     store: { shopDomain: context.shopDomain, displayName: context.displayName, currency: context.currency },
     sync: {
       lastSuccessfulAt: cursor?.lastSuccessfulAt?.toISOString() ?? null,
       lastErrorCode: cursor?.lastErrorCode ?? null,
+      lastErrorAt: cursor?.lastErrorAt?.toISOString() ?? null,
+      /** The newest manual request, settled or not. */
+      latestRequest: latestRequest
+        ? { status: latestRequest.status, answeredAt: latestRequest.answeredAt?.toISOString() ?? null }
+        : null,
+      /** When the newest request still queued was made, or null when none is. */
+      pendingSince: pending?.requestedAt.toISOString() ?? null,
+      /** How many requests this store has made: a page waits until this counts its own. */
+      requestCount,
     },
     capabilities: { ...SHOPIFY_APP_HOME_CAPABILITIES },
   };
 }
 
-export function safeSyncReport(report: ShopifyOrderSyncReport) {
-  return {
-    success: report.success,
-    window: { from: report.window.from.toISOString(), to: report.window.to.toISOString() },
-    fetched: report.fetched,
-    inserted: report.inserted,
-    updated: report.updated,
-    unchanged: report.unchanged,
-  };
-}
 
 export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceResult) {
   if (result.committed) {
@@ -115,6 +137,7 @@ export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceRe
       failed: result.failed,
       matchedCount: result.matchedCount,
       exceptionCount: result.exceptionCount,
+      unalignedRows: result.unalignedRows,
     };
   }
   return {
@@ -124,17 +147,16 @@ export function safeSettlementEvidenceResult(result: ShopifySettlementEvidenceRe
     missingRequired: result.missingRequired,
     totalRows: result.totalRows,
     parseErrors: result.parseErrors,
+    unalignedRows: result.unalignedRows,
   };
 }
 
-/** A failed manual sync, as the merchant may see it. */
-export function syncFailure(error: unknown): TRPCError {
-  if (error instanceof ShopifyTokenUnavailableError) {
-    if (error.reason === "refresh_in_progress") return appHomeError("CONFLICT", "sync_in_progress");
-    if (error.reason === "refresh_retry") return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
-    return appHomeError("PRECONDITION_FAILED", "store_action_required");
-  }
-  if (error instanceof ShopifyOrderApiError && error.code !== "HTTP_ERROR") {
+/**
+ * A manual sync that could not be QUEUED, as the merchant may see it. A sync
+ * that fails once running is reported through `context` instead.
+ */
+export function manualSyncFailure(error: unknown): TRPCError {
+  if (error instanceof ShopifyManualSyncError && error.code === "STORE_UNAVAILABLE") {
     return appHomeError("PRECONDITION_FAILED", "store_action_required");
   }
   return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");

@@ -18,7 +18,7 @@
  *   - Manual "Sync Now" from the merchant dashboard
  */
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
-import { getDb, type DbExecutor } from "../../db";
+import { getDb, sanitizeRef, type DbExecutor } from "../../db";
 import {
   insertTransactions,
   createUploadBatch,
@@ -28,6 +28,7 @@ import {
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { transactions, channels, exceptions } from "../../../drizzle/schema";
 import { getValidToken } from "./tokenStore";
+import { classifySettlementFileRows } from "./settlementFileImport";
 import {
   fetchOrders,
   fetchPaymentTransactions,
@@ -188,14 +189,21 @@ const DEDUPE_LOOKUP_CHUNK = 500;
  * before either inserts. The observed collisions were 15-25s apart and are
  * fully covered. Closing the last gap needs cluster-wide serialisation of sync
  * cycles — the BullMQ/REDIS_URL item in CLAUDE.md §10.
+ *
+ * References are compared in the form `insertTransactions` STORES them
+ * (`sanitizeRef`). A reference holding a character it strips — `#1001` is
+ * stored as `1001` — otherwise never equals its own stored copy, so every
+ * re-presentation would be inserted again. SHOPLINE's API ids are unchanged by
+ * sanitisation; this matters for anything else that reaches this guard.
  */
 export async function rejectAlreadyIngested(
   db: DbExecutor,
   rows: InsertTransaction[],
   channelIds: number[],
 ): Promise<InsertTransaction[]> {
+  const storedRef = (row: InsertTransaction) => sanitizeRef(row.transactionRef);
   const refs = Array.from(
-    new Set(rows.map((r) => r.transactionRef).filter((r): r is string => Boolean(r))),
+    new Set(rows.map(storedRef).filter((r): r is string => Boolean(r))),
   );
   if (refs.length === 0) return rows;
 
@@ -219,12 +227,75 @@ export async function rejectAlreadyIngested(
   // what is already persisted.
   const seen = new Set<string>();
   return rows.filter((r) => {
-    if (!r.transactionRef) return true;
-    const key = `${r.channelId}::${r.transactionRef}`;
+    const ref = storedRef(r);
+    if (!ref) return true;
+    const key = `${r.channelId}::${ref}`;
     if (existing.has(key) || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * The rows of a SHOPLINE settlement FILE not already recorded, returned in the
+ * form they will be stored in. Not `rejectAlreadyIngested`: that keys on the
+ * order reference, which is right for API objects (one id, one row) and wrong
+ * for a settlement file, where a payment and its refund share an order and are
+ * still two events. See `selectNewSettlementFileRows` for the rule.
+ */
+export async function rejectAlreadyImportedSettlementRows(
+  db: DbExecutor,
+  rows: InsertTransaction[],
+  params: { organizationId: number; paymentsChannelId: number },
+): Promise<InsertTransaction[]> {
+  return (await importableSettlementFileRows(db, rows, params)).fresh;
+}
+
+/**
+ * rejectAlreadyImportedSettlementRows, with the count of skipped rows that could
+ * not be proved duplicates (classifySettlementFileRows). `lock: true` makes the
+ * lookup a LOCKING read: the settlement-file commit runs it inside its
+ * transaction after locking the store, and TiDB answers a plain read from the
+ * snapshot taken when the transaction began — which can predate another
+ * import's commit.
+ */
+export async function importableSettlementFileRows(
+  db: DbExecutor,
+  rows: InsertTransaction[],
+  params: { organizationId: number; paymentsChannelId: number; lock?: boolean },
+): Promise<{ fresh: InsertTransaction[]; unverifiableDuplicates: number }> {
+  const storedForm = rows.map((row) => ({
+    ...row,
+    transactionRef: sanitizeRef(row.transactionRef),
+    externalRef: sanitizeRef(row.externalRef),
+  }));
+  const refs = Array.from(
+    new Set(storedForm.map((r) => r.transactionRef).filter((r): r is string => Boolean(r))),
+  );
+
+  const stored: Array<Pick<InsertTransaction, "transactionRef" | "amount" | "debitCredit" | "currency" | "valueDate" | "rawData">> = [];
+  for (let i = 0; i < refs.length; i += DEDUPE_LOOKUP_CHUNK) {
+    const chunk = refs.slice(i, i + DEDUPE_LOOKUP_CHUNK);
+    const lookup = db
+      .select({
+        transactionRef: transactions.transactionRef,
+        amount: transactions.amount,
+        debitCredit: transactions.debitCredit,
+        currency: transactions.currency,
+        valueDate: transactions.valueDate,
+        rawData: transactions.rawData,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.organizationId, params.organizationId),
+          eq(transactions.channelId, params.paymentsChannelId),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      );
+    stored.push(...(params.lock ? await lookup.for("update") : await lookup));
+  }
+  return classifySettlementFileRows(stored, storedForm);
 }
 
 async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {

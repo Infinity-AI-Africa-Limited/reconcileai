@@ -102,15 +102,26 @@ function sanitizeText(input: string | null | undefined): string | null {
     .substring(0, 10000); // Max text length
 }
 
+/** A Shopify GID: the one reference shape in which a colon is significant. */
+const SHOPIFY_GID_REF = /^gid:\/\/shopify\/[A-Za-z]+\/\d{1,20}$/;
+
 /**
  * Exported so a caller that looks rows up by reference can ask for the value
  * `insertTransactions` actually stores, rather than the one it was handed.
  */
 export function sanitizeRef(input: string | null | undefined): string | null {
   if (!input) return null;
-  // Shopify canonical order references are GIDs (`gid://shopify/Order/...`), so
-  // colon is a valid reference character alongside the existing safe set.
-  return input.replace(/[^\w\-:\/\.\s]/g, "").trim().substring(0, 255);
+  // A Shopify GID (`gid://shopify/Order/…`) is the canonical order reference,
+  // and the order leg stores it verbatim, so settlement evidence aligned to it
+  // must keep its colon or it can never join. ONLY that exact shape keeps one.
+  // Every other reference, from every other source, keeps the historic
+  // character set: widening it for all of them would store a colon-bearing bank
+  // or gateway reference differently after this change than before it, so the
+  // same reference would stop equalling itself across the deploy boundary —
+  // breaking exact matching and ref-based dedupe for data nobody touched.
+  const trimmed = input.trim();
+  if (SHOPIFY_GID_REF.test(trimmed)) return trimmed;
+  return input.replace(/[^\w\-\/\.\s]/g, "").trim().substring(0, 255);
 }
 
 // ─── Organizations ──────────────────────────────────────────────────

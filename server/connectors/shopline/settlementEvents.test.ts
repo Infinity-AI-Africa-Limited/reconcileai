@@ -74,6 +74,20 @@ describe("settlement event identity", () => {
   });
 });
 
+describe("when two settlements differ only in how their references are spelled", () => {
+  it("should treat #1001 and 1001 as one order, as storage does", () => {
+    expect(settlementEventKey(event({ rawData: { originalOrderRef: "1001", gatewayRef: "gw-1" } }))).toBe(
+      settlementEventKey(event({ rawData: { originalOrderRef: "#1001", gatewayRef: "gw-1" } })),
+    );
+  });
+
+  it("should keep gateway ids exact, so two payments are never merged into one", () => {
+    expect(settlementEventKey(event({ rawData: { originalOrderRef: "#1001", gatewayRef: "GW:A" } }))).not.toBe(
+      settlementEventKey(event({ rawData: { originalOrderRef: "#1001", gatewayRef: "GWA" } })),
+    );
+  });
+});
+
 describe("selecting unimported settlement events", () => {
   const key = (row: string) => row;
 
