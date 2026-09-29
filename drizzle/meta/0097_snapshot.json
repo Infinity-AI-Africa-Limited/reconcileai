@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "086996a6-8ede-4c27-97f5-164b3b8f6673",
+  "id": "bc14728b-4969-4ac4-b882-7825bdffefaa",
   "prevId": "55146906-44d1-4915-8ad1-d1d9dafac496",
   "tables": {
     "agent_action_drafts": {
@@ -6347,6 +6347,28 @@
           "notNull": true,
           "autoincrement": false,
           "default": true
+        },
+        "deletionState": {
+          "name": "deletionState",
+          "type": "enum('active','redacting')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "redactingAt": {
+          "name": "redactingAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "redactionRunId": {
+          "name": "redactionRunId",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "createdAt": {
           "name": "createdAt",
@@ -13911,7 +13933,7 @@
         },
         "status": {
           "name": "status",
-          "type": "enum('pending_claim','active','reauthorization_required','uninstalled')",
+          "type": "enum('pending_claim','active','reauthorization_required','uninstalled','redacting')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
@@ -14370,6 +14392,142 @@
       "uniqueConstraints": {},
       "checkConstraint": {}
     },
+    "shopify_shop_redaction_jobs": {
+      "name": "shopify_shop_redaction_jobs",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "runId": {
+          "name": "runId",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "storeId": {
+          "name": "storeId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "requestHash": {
+          "name": "requestHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "webhookId": {
+          "name": "webhookId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('admitted','redacting','failed','completed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'admitted'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "lastCheckpoint": {
+          "name": "lastCheckpoint",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failureCode": {
+          "name": "failureCode",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(now())"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "onUpdate": true,
+          "default": "(now())"
+        }
+      },
+      "indexes": {
+        "uq_shopify_redaction_request": {
+          "name": "uq_shopify_redaction_request",
+          "columns": [
+            "requestHash"
+          ],
+          "isUnique": true
+        },
+        "uq_shopify_redaction_run": {
+          "name": "uq_shopify_redaction_run",
+          "columns": [
+            "runId"
+          ],
+          "isUnique": true
+        },
+        "uq_shopify_redaction_store": {
+          "name": "uq_shopify_redaction_store",
+          "columns": [
+            "storeId"
+          ],
+          "isUnique": true
+        },
+        "idx_shopify_redaction_org_status": {
+          "name": "idx_shopify_redaction_org_status",
+          "columns": [
+            "organizationId",
+            "status"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "shopify_shop_redaction_jobs_id": {
+          "name": "shopify_shop_redaction_jobs_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
     "shopify_sync_cursors": {
       "name": "shopify_sync_cursors",
       "columns": {
@@ -14430,21 +14588,6 @@
           "notNull": false,
           "autoincrement": false
         },
-        "lastErrorAt": {
-          "name": "lastErrorAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "syncRequestCount": {
-          "name": "syncRequestCount",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
         "createdAt": {
           "name": "createdAt",
           "type": "timestamp",
@@ -14484,90 +14627,6 @@
       "compositePrimaryKeys": {
         "shopify_sync_cursors_id": {
           "name": "shopify_sync_cursors_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
-    "shopify_sync_requests": {
-      "name": "shopify_sync_requests",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "storeId": {
-          "name": "storeId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "enum('queued','succeeded','failed')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'queued'"
-        },
-        "errorCode": {
-          "name": "errorCode",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "requestedAt": {
-          "name": "requestedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "answeredAt": {
-          "name": "answeredAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "idx_shopify_sync_request_store": {
-          "name": "idx_shopify_sync_request_store",
-          "columns": [
-            "storeId",
-            "organizationId",
-            "status"
-          ],
-          "isUnique": false
-        },
-        "idx_shopify_sync_request_org": {
-          "name": "idx_shopify_sync_request_org",
-          "columns": [
-            "organizationId"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "shopify_sync_requests_id": {
-          "name": "shopify_sync_requests_id",
           "columns": [
             "id"
           ]

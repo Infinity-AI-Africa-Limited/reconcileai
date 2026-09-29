@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, eq, ne, or, sql } from "drizzle-orm";
 import { channels, organizations, users } from "../../../drizzle/schema";
 import {
   SHOPIFY_API_VERSION,
@@ -10,7 +10,7 @@ import {
   type ShopifyStatusReason,
 } from "../../../drizzle/shopify_schema";
 import { createAuditLog, getDb, type DbExecutor, type DbTransaction } from "../../db";
-import { isDuplicateKeyError } from "../../dbErrors";
+import { isDuplicateKeyError, loggableError } from "../../dbErrors";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { sha256, type ShopifyTokenResponse } from "./auth";
 import {
@@ -21,6 +21,7 @@ import {
   type TokenGeneration,
 } from "./tokenStore";
 import { holdsInstallLease, renewInstallLease, type InstallLease } from "./installLease";
+import { shopifyOrdersChannelCode } from "./channelCodes";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -54,6 +55,8 @@ export type ShopifyOnboardingErrorCode =
   | "SHOP_IDENTITY_CONFLICT"
   /** The shop's deterministic workspace code is taken, but no store record explains it. */
   | "WORKSPACE_CONFLICT"
+  /** Shopify requested deletion for the existing workspace; reconnection is fenced. */
+  | "REDACTION_IN_PROGRESS"
   /** This callback no longer holds the shop's install lease; a later installation owns the outcome. */
   | "INSTALL_LEASE_LOST";
 
@@ -72,8 +75,12 @@ export class ShopifyOnboardingError extends Error {
     message: string,
     public readonly code: ShopifyOnboardingErrorCode,
     public readonly storeFailClosed?: StoreFailClosedState,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    // Static text only. A failure underneath travels as the `cause`, where
+    // loggableError can see it is a database error and report its code alone;
+    // copied into this message it would reach the logs as ordinary text.
+    super(message, options);
     this.name = "ShopifyOnboardingError";
   }
 }
@@ -90,9 +97,8 @@ export function deriveShopifyOrganizationCode(shopDomain: string): string {
   return `SHP_${sha256(shopDomain).slice(0, 14).toUpperCase()}`;
 }
 
-export function shopifyOrdersChannelCode(storeId: number): string {
-  return `shopify_orders_${storeId}`;
-}
+// Defined once in channelCodes.ts; re-exported for existing importers.
+export { shopifyOrdersChannelCode };
 
 async function provisionShopifyOrdersChannel(
   db: DbExecutor,
@@ -232,6 +238,30 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
     // the lease row, so no takeover can commit before this does, and it leaves
     // a fresh TTL for the exchange that follows immediately.
     if (!(await renewInstallLease(tx, lease))) return null;
+    const [storeState] = await tx
+      .select({
+        status: shopifyConnectorStores.status,
+        privacyRedactionState: shopifyConnectorStores.privacyRedactionState,
+        deletionState: organizations.deletionState,
+      })
+      .from(shopifyConnectorStores)
+      .innerJoin(organizations, eq(organizations.id, shopifyConnectorStores.organizationId))
+      .where(eq(shopifyConnectorStores.shopDomain, shopDomain))
+      .limit(1)
+      .for("update");
+    if (
+      storeState?.status === "redacting" ||
+      storeState?.deletionState === "redacting" ||
+      storeState?.privacyRedactionState === "customer_redacting"
+    ) {
+      // Refuse BEFORE the authorization-code exchange. An exchange retires the
+      // store's prior refresh token, and a redacting tenant must not acquire or
+      // disturb any new credentials while the deletion fence is active.
+      throw new ShopifyOnboardingError(
+        "The Shopify workspace is being redacted and cannot be reauthorized",
+        "REDACTION_IN_PROGRESS",
+      );
+    }
     await tx
       .update(shopifyConnectorStores)
       .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
@@ -301,6 +331,18 @@ async function reauthorizeExistingStore(
   params: Parameters<typeof onboardShopifyMerchant>[0],
   email: string,
 ): Promise<ShopifyOnboardingResult> {
+  const [organizationState] = await db
+    .select({ deletionState: organizations.deletionState })
+    .from(organizations)
+    .where(eq(organizations.id, store.organizationId))
+    .limit(1);
+  if (organizationState?.deletionState === "redacting" || store.status === "redacting") {
+    throw new ShopifyOnboardingError(
+      "The existing Shopify workspace is being redacted and cannot be reauthorized",
+      "REDACTION_IN_PROGRESS",
+    );
+  }
+
   const [admin] = await db
     .select({ id: users.id })
     .from(users)
@@ -330,6 +372,7 @@ async function reauthorizeExistingStore(
     const tokens = await encryptShopifyTokens(store.organizationId, params.tokenResponse);
     ordersChannelId = await db.transaction(async (tx) => {
       await assertLeaseHeld(tx, params.lease);
+      await assertTenantNotFenced(tx, store);
       // Store state, credentials and the record of both commit together. The
       // store becomes `active` only in the same commit that stores the pair it
       // is active ON — never ahead of it, as a separate write could leave it.
@@ -355,6 +398,7 @@ async function reauthorizeExistingStore(
             and(
               eq(shopifyConnectorStores.id, store.id),
               eq(shopifyConnectorStores.organizationId, store.organizationId),
+              ne(shopifyConnectorStores.status, "redacting"),
             ),
           ),
       );
@@ -380,13 +424,12 @@ async function reauthorizeExistingStore(
       return channelId;
     });
   } catch (error) {
-    if (isLeaseLost(error)) throw error;
+    // Nothing was written, and the fence owns the store's state: leave it be.
+    if (isLeaseLost(error) || isRedactionFenced(error)) throw error;
     const failClosedState = await failClosed(db, store, "token_store_failed", params.reauthorization.retiring, params.lease);
-    throw new ShopifyOnboardingError(
-      `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
-      "TOKEN_STORE_FAILED",
-      failClosedState,
-    );
+    throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
+      cause: error,
+    });
   }
 
   const [organization] = await db
@@ -509,7 +552,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     console.error("[shopify-onboarding] tenant baseline failed", {
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 
@@ -526,7 +569,7 @@ async function createMerchantWorkspace(
   } catch (error) {
     console.error("[shopify-onboarding] retail resolution templates not seeded", {
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
     });
   }
 
@@ -535,22 +578,27 @@ async function createMerchantWorkspace(
     const tokens = await encryptShopifyTokens(organizationId, params.tokenResponse);
     await db.transaction(async (tx) => {
       await assertLeaseHeld(tx, params.lease);
+      await assertTenantNotFenced(tx, { id: storeId, organizationId });
       await writeShopifyTokens(tx, { storeId, organizationId, tokens });
       await tx
         .update(shopifyConnectorStores)
         .set({ status: "active", statusReason: null })
-        .where(and(eq(shopifyConnectorStores.id, storeId), eq(shopifyConnectorStores.organizationId, organizationId)));
+        .where(
+          and(
+            eq(shopifyConnectorStores.id, storeId),
+            eq(shopifyConnectorStores.organizationId, organizationId),
+            ne(shopifyConnectorStores.status, "redacting"),
+          ),
+        );
     });
   } catch (error) {
-    if (isLeaseLost(error)) throw error;
+    if (isLeaseLost(error) || isRedactionFenced(error)) throw error;
     // The store is still `pending_claim` here, never `active`; recording why
     // it has no credentials is for the operator, not for safety.
     const failClosedState = await failClosed(db, { id: storeId, organizationId }, "token_store_failed", "none", params.lease);
-    throw new ShopifyOnboardingError(
-      `Could not secure Shopify access tokens: ${error instanceof Error ? error.message : "unknown failure"}`,
-      "TOKEN_STORE_FAILED",
-      failClosedState,
-    );
+    throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
+      cause: error,
+    });
   }
 
   let welcomeEmailSent = false;
@@ -569,7 +617,7 @@ async function createMerchantWorkspace(
     console.error("[shopify-onboarding] welcome email delivery failed", {
       storeId,
       organizationId,
-      message: error instanceof Error ? error.message : String(error),
+      ...loggableError(error),
       });
   }
 
@@ -594,6 +642,54 @@ async function createMerchantWorkspace(
  * grant came after ours and retired our credentials: its outcome is the one
  * that stands, and this callback must write nothing.
  */
+/**
+ * Serialise with shop redaction, and refuse a tenant it has fenced, INSIDE the
+ * transaction that stores credentials and marks a store `active`.
+ *
+ * A check made before that transaction is only advice: a redaction admitted in
+ * between fences the tenant and deletes its credentials, and the write that
+ * follows would then restore both — a sibling store `active` again, holding a
+ * live credential inside a workspace being deleted. Redaction admission writes
+ * the organisation row, so locking it here orders the two: whichever commits
+ * first, the other sees it. A locking read returns the latest committed state,
+ * not a snapshot from before the wait.
+ *
+ * Lock order is organisation, then store — the same as admitShopifyShopRedaction,
+ * so the two cannot deadlock on a reauthorization of the very store being redacted.
+ */
+async function assertTenantNotFenced(
+  tx: DbTransaction,
+  store: { id: number; organizationId: number },
+): Promise<void> {
+  const [organization] = await tx
+    .select({ deletionState: organizations.deletionState })
+    .from(organizations)
+    .where(eq(organizations.id, store.organizationId))
+    .limit(1)
+    .for("update");
+  const [current] = await tx
+    .select({ status: shopifyConnectorStores.status, privacyRedactionState: shopifyConnectorStores.privacyRedactionState })
+    .from(shopifyConnectorStores)
+    .where(and(eq(shopifyConnectorStores.id, store.id), eq(shopifyConnectorStores.organizationId, store.organizationId)))
+    .limit(1)
+    .for("update");
+  if (!organization) throw new Error(`Organisation ${store.organizationId} not found`);
+  // Two fences: the tenant's shop redaction (organisation) and this store's
+  // customer redaction (privacyRedactionState). Either refuses new credentials.
+  const storeFenced = current?.status === "redacting" || (current !== undefined && current.privacyRedactionState !== "active");
+  if (organization.deletionState !== "active" || storeFenced) {
+    throw new ShopifyOnboardingError(
+      "The Shopify workspace is being redacted and cannot be reauthorized",
+      "REDACTION_IN_PROGRESS",
+    );
+  }
+}
+
+/** A redaction fence is not a credential failure: nothing may be written over it. */
+function isRedactionFenced(error: unknown): error is ShopifyOnboardingError {
+  return error instanceof ShopifyOnboardingError && error.code === "REDACTION_IN_PROGRESS";
+}
+
 async function assertLeaseHeld(tx: DbTransaction, lease: InstallLease): Promise<void> {
   if (!(await holdsInstallLease(tx, lease))) {
     throw new ShopifyOnboardingError("Another installation for this shop took over this one", "INSTALL_LEASE_LOST");
@@ -653,7 +749,7 @@ async function failClosed(
     organizationId: store.organizationId,
     reason,
     attempts: FAIL_CLOSED_ATTEMPTS,
-    message: lastError instanceof Error ? lastError.message : String(lastError),
+    ...loggableError(lastError),
   });
   return "not_confirmed";
 }

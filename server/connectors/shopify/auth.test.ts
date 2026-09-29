@@ -5,6 +5,7 @@ import {
   normalizeShopDomain,
   requiredScopesGranted,
   signOAuthState,
+  shopifyWebhookPayloadDigest,
   verifyOAuthState,
   verifyShopifyCallbackHmac,
   verifyShopifyWebhookHmac,
@@ -118,6 +119,16 @@ describe("when a shop domain, callback signature or granted scope is checked", (
     const hmac = crypto.createHmac("sha256", secret).update(raw).digest("base64");
     expect(verifyShopifyWebhookHmac(raw, hmac, secret)).toBe(true);
     expect(verifyShopifyWebhookHmac(Buffer.from('{"shop_id":7}'), hmac, secret)).toBe(false);
+  });
+
+  it("should create a domain-separated keyed digest for durable webhook replay control", () => {
+    const raw = Buffer.from('{"shop_id":7,"customer":{"id":41}}');
+    const key = "ab".repeat(32);
+    const digest = shopifyWebhookPayloadDigest(raw, key);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(digest).not.toBe(crypto.createHash("sha256").update(raw).digest("hex"));
+    expect(digest).not.toBe(shopifyWebhookPayloadDigest(raw, "cd".repeat(32)));
+    expect(() => shopifyWebhookPayloadDigest(raw, "not-a-valid-key")).toThrow(/digest key/i);
   });
 
   it("should require the planned read scope and permit Shopify's write superscope", () => {

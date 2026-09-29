@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import {
   channels,
   exceptions,
@@ -10,11 +10,16 @@ import {
 } from "../../../drizzle/schema";
 import {
   shopifyConnectorStores,
+  shopifyOrderRedactionTombstones,
   shopifySyncCursors,
   shopifyWebhookEvents,
 } from "../../../drizzle/shopify_schema";
 import { getDb, type DbExecutor } from "../../db";
 import { toShopifyOrderTransaction } from "./ingest";
+import {
+  allShopifyOrderSuppressionDigests,
+  type ShopifyPrivacySuppressionKey,
+} from "./privacySuppression";
 import {
   ShopifyOrderApiError,
   computeShopifyOrderWindow,
@@ -22,6 +27,7 @@ import {
   type NormalizedShopifyOrder,
 } from "./orders";
 import { affectedRows } from "./tokenStore";
+import { shopifyOrdersChannelCode } from "./channelCodes";
 
 const ORDER_RESOURCE = "orders" as const;
 const TRANSACTION_LOOKUP_CHUNK = 500;
@@ -47,11 +53,11 @@ export interface ShopifyOrderSyncDeps {
   db?: Db;
   now?: () => Date;
   fetchOrders?: typeof fetchShopifyOrdersWindow;
+  suppressionKeys?: ShopifyPrivacySuppressionKey[];
 }
 
-export function shopifyOrdersChannelCode(storeId: number): string {
-  return `shopify_orders_${storeId}`;
-}
+// Defined once in channelCodes.ts; re-exported for existing importers.
+export { shopifyOrdersChannelCode };
 
 interface ExistingOrderRow {
   id: number;
@@ -101,6 +107,57 @@ export function partitionShopifyOrders(
     }
   }
   return { inserts, updates, unchanged };
+}
+
+export function filterTombstonedShopifyOrders(
+  orders: NormalizedShopifyOrder[],
+  tombstoned: Set<string>,
+): NormalizedShopifyOrder[] {
+  return orders.filter((order) => !tombstoned.has(order.gid));
+}
+
+async function filterSuppressedOrders(
+  db: DbExecutor,
+  store: { id: number; organizationId: number },
+  orders: NormalizedShopifyOrder[],
+  keys?: ShopifyPrivacySuppressionKey[],
+): Promise<NormalizedShopifyOrder[]> {
+  if (orders.length === 0) return [];
+  const candidates = orders.flatMap((order) =>
+    allShopifyOrderSuppressionDigests(store.organizationId, store.id, order.gid, keys).map((digest) => ({
+      gid: order.gid,
+      ...digest,
+    })),
+  );
+  const suppressed = new Set<string>();
+  for (let offset = 0; offset < candidates.length; offset += TRANSACTION_LOOKUP_CHUNK) {
+    const chunk = candidates.slice(offset, offset + TRANSACTION_LOOKUP_CHUNK);
+    const rows = await db
+      .select({
+        keyVersion: shopifyOrderRedactionTombstones.keyVersion,
+        orderDigest: shopifyOrderRedactionTombstones.orderDigest,
+      })
+      .from(shopifyOrderRedactionTombstones)
+      .where(
+        and(
+          eq(shopifyOrderRedactionTombstones.organizationId, store.organizationId),
+          eq(shopifyOrderRedactionTombstones.storeId, store.id),
+          or(
+            ...chunk.map((candidate) =>
+              and(
+                eq(shopifyOrderRedactionTombstones.keyVersion, candidate.keyVersion),
+                eq(shopifyOrderRedactionTombstones.orderDigest, candidate.orderDigest),
+              ),
+            ),
+          ),
+        ),
+      );
+    const hits = new Set(rows.map((row) => `${row.keyVersion}:${row.orderDigest}`));
+    for (const candidate of chunk) {
+      if (hits.has(`${candidate.keyVersion}:${candidate.orderDigest}`)) suppressed.add(candidate.gid);
+    }
+  }
+  return filterTombstonedShopifyOrders(orders, suppressed);
 }
 
 export class ShopifyActorUnavailableError extends Error {
@@ -453,11 +510,14 @@ async function lockStoreForSync(
         eq(shopifyConnectorStores.id, store.id),
         eq(shopifyConnectorStores.organizationId, store.organizationId),
         eq(shopifyConnectorStores.status, "active"),
+        // A customer redaction fences the store's writes; the API read may have
+        // started before it was admitted, so this is re-checked under the lock.
+        eq(shopifyConnectorStores.privacyRedactionState, "active"),
       ),
     )
     .limit(1)
     .for("update");
-  if (!locked) throw new Error("Shopify store not found for tenant or inactive");
+  if (!locked) throw new Error("Shopify store write fence is active or the store is not active");
 }
 
 function transactionFields(order: NormalizedShopifyOrder) {
@@ -553,15 +613,19 @@ export async function runShopifyOrderSync(
     });
 
     const result = await db.transaction(async (tx) => {
-      // First statement: one writer per store from here to commit.
+      // First statement: one writer per store from here to commit. The lock
+      // also refuses a store fenced for redaction since the API read began.
       await lockStoreForSync(tx, store);
+      // Computing every retained-key digest and loading tombstones happens under
+      // the same lock. Missing rotation material throws and aborts fail-closed.
+      const eligible = await filterSuppressedOrders(tx, store, fetched, deps.suppressionKeys);
       const channelId = await resolveOrdersChannel(tx, store);
       const existing = await loadExistingOrders(tx, {
         organizationId: store.organizationId,
         storeId: store.id,
-        gids: fetched.map((order) => order.gid),
+        gids: eligible.map((order) => order.gid),
       });
-      const partition = partitionShopifyOrders(fetched, existing);
+      const partition = partitionShopifyOrders(eligible, existing);
       const changed = partition.inserts.length + partition.updates.length;
       let batchId: number | null = null;
       let inserted = 0;
@@ -576,7 +640,7 @@ export async function runShopifyOrderSync(
           fileName: `shopify_orders_${store.id}_${window.from.toISOString()}`,
           fileHash: `shopify_orders_${store.id}_${window.from.getTime()}_${window.to.getTime()}`,
           detectedFormat: "shopify_graphql_orders",
-          totalRows: fetched.length,
+          totalRows: eligible.length,
           validRows: changed,
           invalidRows: 0,
           status: "completed",
@@ -670,31 +734,11 @@ export async function runShopifyOrderSync(
         }
       }
 
-      const watermark = maxUpdatedAt(fetched, window.to);
-      await tx
-        .insert(shopifySyncCursors)
-        .values({
-          storeId: store.id,
-          organizationId: store.organizationId,
-          resource: ORDER_RESOURCE,
-          cursor: null,
-          watermarkUpdatedAt: watermark,
-          lastSuccessfulAt: new Date(),
-          lastErrorCode: null,
-        })
-        .onDuplicateKeyUpdate({
-          set: {
-            cursor: null,
-            // COALESCE, because GREATEST with a NULL argument is NULL: a cursor row
-            // created before the first success (a failed first sync records its
-            // error on one; a manual request numbers itself on one) would keep a
-            // NULL watermark forever, and every sync would re-read the oldest
-            // window, reporting success without reaching recent orders.
-            watermarkUpdatedAt: sql`GREATEST(COALESCE(${shopifySyncCursors.watermarkUpdatedAt}, VALUES(${shopifySyncCursors.watermarkUpdatedAt})), VALUES(${shopifySyncCursors.watermarkUpdatedAt}))`,
-            lastSuccessfulAt: new Date(),
-            lastErrorCode: null,
-          },
-        });
+      // Both branches fixed the same NULL-watermark bug: main inline here, this
+      // branch by extracting `recordSuccessfulOrderSync` (same COALESCE/GREATEST
+      // guard, asserted by orderBackstop.test.ts). The helper is kept, so the
+      // upsert has one definition rather than two that can drift apart.
+      await recordSuccessfulOrderSync(tx, store, maxUpdatedAt(fetched, window.to));
 
       if (params.webhookId) {
         await tx
@@ -741,6 +785,49 @@ export async function runShopifyOrderSync(
       .onDuplicateKeyUpdate({ set: { lastErrorCode: code, lastErrorAt: failedAt } });
     throw error;
   }
+}
+
+/**
+ * The cursor's watermark after a successful sync: never behind where it was,
+ * and never left NULL.
+ *
+ * GREATEST is NULL when either argument is, and a cursor can exist with no
+ * watermark: a first sync that failed writes one carrying only its error code,
+ * and the scheduled backstop records its turn on the cursor before syncing. A
+ * bare GREATEST would pin such a watermark at NULL for good, so every later sync
+ * would re-read the default first window instead of advancing, and orders
+ * missed for longer than that window would never be recovered.
+ */
+export function advancedOrderWatermark(): SQL {
+  const current = shopifySyncCursors.watermarkUpdatedAt;
+  return sql`COALESCE(GREATEST(${current}, VALUES(${current})), VALUES(${current}))`;
+}
+
+/** Record a successful order sync on the store's cursor, advancing its watermark. */
+export async function recordSuccessfulOrderSync(
+  db: DbExecutor,
+  store: { id: number; organizationId: number },
+  watermark: Date,
+): Promise<void> {
+  await db
+    .insert(shopifySyncCursors)
+    .values({
+      storeId: store.id,
+      organizationId: store.organizationId,
+      resource: ORDER_RESOURCE,
+      cursor: null,
+      watermarkUpdatedAt: watermark,
+      lastSuccessfulAt: new Date(),
+      lastErrorCode: null,
+    })
+    .onDuplicateKeyUpdate({
+      set: {
+        cursor: null,
+        watermarkUpdatedAt: advancedOrderWatermark(),
+        lastSuccessfulAt: new Date(),
+        lastErrorCode: null,
+      },
+    });
 }
 
 /** 60 days in 7-day steps is 9 cycles; the rest is headroom for overlap and clock drift. */

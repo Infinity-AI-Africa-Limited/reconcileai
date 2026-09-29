@@ -68,6 +68,15 @@ export const organizations = mysqlTable("organizations", {
   ssoProvider: varchar("ssoProvider", { length: 20 }).default("none").notNull(),
   settings: json("settings"), // org-level config: matching rules, thresholds, etc.
   isActive: boolean("isActive").default(true).notNull(),
+  /**
+   * A terminal tenant-lifecycle fence for provider-driven deletion. This is
+   * intentionally separate from `isActive`: a disabled account may later be
+   * re-enabled by an administrator, while a redacting tenant must fail closed
+   * until its Shopify deletion run has removed the workspace.
+   */
+  deletionState: mysqlEnum("deletionState", ["active", "redacting"]).default("active").notNull(),
+  redactingAt: timestamp("redactingAt"),
+  redactionRunId: varchar("redactionRunId", { length: 36 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

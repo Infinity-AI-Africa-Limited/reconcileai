@@ -1,12 +1,14 @@
 import { TRPCError } from "@trpc/server";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { shopifyConnectorStores } from "../../drizzle/shopify_schema";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
+import { loggableError } from "../dbErrors";
 import { resolveOrgScope } from "../_core/tenancy";
 import { canActOnTenant } from "./shared";
 import { requestShopifyManualSync, ShopifyManualSyncError } from "../connectors/shopify/manualSync";
+import { shopifyPrivacyProcedures } from "./shopifyPrivacy";
 
 /**
  * The merchant-safe view of a store. Tokens live in another table and never
@@ -55,6 +57,8 @@ export const shopifyConnectorRouter = router({
         .orderBy(desc(shopifyConnectorStores.createdAt));
     }),
 
+  ...shopifyPrivacyProcedures,
+
   /**
    * Queues a merchant-authorised read-only order evidence sync and answers at
    * once; the sync runs on the job queue (connectors/shopify/manualSync.ts). It
@@ -80,10 +84,14 @@ export const shopifyConnectorRouter = router({
         if (error instanceof ShopifyManualSyncError && error.code === "STORE_UNAVAILABLE") {
           throw new TRPCError({ code: "NOT_FOUND", message: "No connected Shopify store with that id in this organisation" });
         }
+        // `code` is the operation that failed; loggableError adds the driver's
+        // own code as `errorCode` and never a query or its parameters, which
+        // for this procedure would carry a merchant's address.
         console.error("[shopify-sync] manual order sync could not be queued", {
           organizationId,
           storeId: input.storeId,
           code: error instanceof ShopifyManualSyncError ? error.code : "unexpected",
+          ...loggableError(error),
         });
         throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "The Shopify order sync could not be started. Try again shortly." });
       }

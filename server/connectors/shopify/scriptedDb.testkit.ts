@@ -24,7 +24,7 @@ export interface RecordedOp {
   /** Rendered WHERE clause, when the operation had one. */
   where: { sql: string; params: unknown[] } | null;
   /** INSERT values or UPDATE set-clause, as passed. */
-  data: Record<string, unknown> | null;
+  data: Record<string, unknown> | Record<string, unknown>[] | null;
   /** Set when the INSERT carried ON DUPLICATE KEY UPDATE. */
   upsert: boolean;
   /** The ON DUPLICATE KEY UPDATE set-clause, as passed. */
@@ -34,6 +34,16 @@ export interface RecordedOp {
   /** Set on a locking read (`.for("update")`). */
   locked: boolean;
 }
+
+/**
+ * The single row a write carried, or null when an insert carried several.
+ *
+ * `data` is a row OR the rows of a bulk insert, so reading a field off it does
+ * not type-check without narrowing first. Most assertions are about an update
+ * or a one-row insert and want exactly this.
+ */
+export const rowOf = (op?: RecordedOp): Record<string, unknown> | null =>
+  op && !Array.isArray(op.data) ? op.data : null;
 
 /** A scripted answer: rows for a select, affected rows for a write, or an error to throw. */
 type Answer = unknown[] | number | Error;
@@ -55,6 +65,17 @@ export interface ScriptedDb {
   committed(): RecordedOp[];
   /** Committed operations of one kind on one table. */
   writes(kind: Exclude<OpKind, "select">, table: string): RecordedOp[];
+  /**
+   * The committed operations as JSON, for a scan asserting that no raw
+   * identifier was persisted anywhere.
+   *
+   * `JSON.stringify(committed())` cannot do this: an upsert's set-clause holds
+   * drizzle `SQL` values, and those reference their own table, so stringify
+   * throws on the cycle. Here they are rendered to SQL text plus parameters —
+   * which is what such a scan has to read anyway, since an identifier smuggled
+   * into an upsert would sit in those parameters.
+   */
+  committedJson(): string;
 }
 
 export function scriptedDb(script: Script = {}): ScriptedDb {
@@ -104,6 +125,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
         const query = {
           from(t: Table) { table = getTableName(t); return query; },
           innerJoin() { return query; },
+          leftJoin() { return query; },
           where(cond: unknown) { where = render(cond); return query; },
           orderBy() { return query; },
           limit() { return query; },
@@ -121,7 +143,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
       insert(t: Table) {
         const table = getTableName(t);
         return {
-          values(values: Record<string, unknown>) {
+          values(values: Record<string, unknown> | Record<string, unknown>[]) {
             let upsert = false;
             let onDuplicate: Record<string, unknown> | undefined;
             const compute = () => {
@@ -191,6 +213,20 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
     ops,
     committed,
     writes: (kind, table) => committed().filter((op) => op.kind === kind && op.table === table),
+    committedJson: () => {
+      const seen = new WeakSet<object>();
+      return JSON.stringify(committed(), (_key, value: unknown) => {
+        if (value instanceof SQL) {
+          const query = dialect.sqlToQuery(value);
+          return { sql: query.sql, params: query.params };
+        }
+        if (value && typeof value === "object") {
+          if (seen.has(value)) return "[seen]";
+          seen.add(value);
+        }
+        return value;
+      });
+    },
   };
 }
 
