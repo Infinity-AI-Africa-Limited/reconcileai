@@ -31,11 +31,12 @@ import { scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
 const OWN_ORG = 42;
 const OTHER_ORG = 60001;
 const STORES = "shopify_connector_stores";
+const ARTIFACTS = "shopify_privacy_artifacts";
 
 type Role = "admin" | "user" | "operations" | "compliance" | "cfo" | "super_admin";
 
-function caller(role: Role | null, organizationId: number | null = OWN_ORG, viewingAs: number | null = null) {
-  const user = role === null ? null : { id: 7, role, organizationId, isReadOnly: false, email: "person@example.com" };
+function caller(role: Role | null, organizationId: number | null = OWN_ORG, viewingAs: number | null = null, isActive = true) {
+  const user = role === null ? null : { id: 7, role, organizationId, isReadOnly: false, isActive, email: "person@example.com" };
   return shopifyConnectorRouter.createCaller({ user, viewingAs, req: { headers: {} }, res: {} } as never);
 }
 
@@ -165,6 +166,44 @@ describe("what a store summary exposes", () => {
   });
 });
 
+describe("when privacy artifact delivery is staged in the authenticated portal", () => {
+  it("should project only non-sensitive notice fields to the exact claimant admin", async () => {
+    const notice = {
+      artifactId: "11111111-1111-4111-8111-111111111111",
+      kind: "order_evidence",
+      recordsFound: 1,
+      generatedAt: new Date("2026-09-25T12:00:00Z"),
+      expiresAt: new Date("2026-10-02T12:00:00Z"),
+      deliveryStatus: "pending",
+    };
+    fake = scriptedDb({ select: { [ARTIFACTS]: [[notice]] } });
+    state.db = fake.db;
+    expect(await caller("admin").listPrivacyDeliveries()).toEqual([notice]);
+    expect(fake.ops[0]?.where?.params).toEqual(expect.arrayContaining([OWN_ORG, 7, "ready"]));
+    // Offered only while its job awaits delivery, and never after the shop fence.
+    expect(fake.ops[0]?.where?.params).toEqual(expect.arrayContaining(["awaiting_delivery", "active", "redacting"]));
+    expect(fake.ops[0]?.where?.sql).toMatch(/`shopify_privacy_data_request_jobs`\.`status` = \?/);
+    expect(fake.ops[0]?.where?.sql).toMatch(/`organizations`\.`deletionState` = \?/);
+    expect(fake.ops[0]?.where?.sql).toMatch(/`shopify_connector_stores`\.`status` <> \?/);
+    for (const forbidden of ["objectKey", "sha256", "organizationId", "storeId", "recipientUserId", "requestId"]) {
+      expect(Object.keys(notice)).not.toContain(forbidden);
+    }
+  });
+
+  it.each<Role>(["user", "operations", "compliance", "cfo", "super_admin"])(
+    "should deny %s before reading artifact metadata",
+    async (role) => {
+      expect(await codeOf(() => caller(role).listPrivacyDeliveries())).toBe("FORBIDDEN");
+      expect(fake.ops).toEqual([]);
+    },
+  );
+
+  it("should deny an inactive admin before reading artifact metadata", async () => {
+    expect(await codeOf(() => caller("admin", OWN_ORG, null, false).listPrivacyDeliveries())).toBe("FORBIDDEN");
+    expect(fake.ops).toEqual([]);
+  });
+});
+
 describe("when someone starts a manual Shopify order sync", () => {
   const REQUESTED_AT = new Date("2026-09-28T10:00:00.000Z");
   beforeEach(() => {
@@ -234,5 +273,20 @@ describe("when someone starts a manual Shopify order sync", () => {
     expect(error).toBeInstanceOf(TRPCError);
     expect((error as TRPCError).code).toBe("SERVICE_UNAVAILABLE");
     expect((error as TRPCError).message).not.toMatch(/ECONNREFUSED|redis/);
+  });
+
+  it("should log a failed sync's database error by its code, never its query or parameters", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    state.requestSync.mockRejectedValue(
+      Object.assign(new Error("Failed query: select … params: owner@merchant.com"), {
+        name: "DrizzleQueryError",
+        cause: Object.assign(new Error("Lock wait timeout exceeded"), { code: "ER_LOCK_WAIT_TIMEOUT" }),
+      }),
+    );
+    await caller("admin").syncOrdersNow({ storeId: 7 }).catch(() => undefined);
+
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ storeId: 7, error: "database", errorCode: "ER_LOCK_WAIT_TIMEOUT" });
+    expect(JSON.stringify(logged.mock.calls)).not.toMatch(/owner@merchant\.com|Failed query|Lock wait/);
+    logged.mockRestore();
   });
 });

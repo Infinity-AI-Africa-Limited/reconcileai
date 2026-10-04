@@ -1389,7 +1389,31 @@ Most of the original launch-blocking debt is now **resolved**. Current status:
 |---|---|---|
 | Manus OAuth must be replaced | ✅ Done | Email magic-link auth is live (Section 5) |
 | Manus Forge LLM won't work outside Manus | ✅ Done | Production uses `DIRECT_LLM_API_KEY` (Anthropic) |
-| No background job queue | ✅ Code done | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. **Open:** provision Redis on Railway (`REDIS_URL`) to activate durable/multi-instance mode; required before horizontal scaling |
+| No background job queue | 🔴 **Redis not provisioned — now blocking** | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. **Provisioning `REDIS_URL` on Railway is no longer just a scaling item — see the box below** |
+
+> 🔴 **`REDIS_URL` is a HARD prerequisite for the Shopify connector, not a scaling nicety.**
+>
+> Two Shopify paths call `createQueue(..., { requireDurable: true })`, which
+> **throws** `DurableQueueUnavailableError("REDIS_URL is not configured")`
+> (`server/jobQueue.ts`) rather than falling back:
+>
+> - **Order webhooks** — answered `503`, so Shopify retries. Orders still arrive,
+>   because `server/connectors/shopify/orderBackstop.ts` syncs every stale store
+>   on a 15-minute timer. Degraded, not lost.
+> - **Privacy / GDPR webhooks** (`customers/data_request`, `customers/redact`,
+>   `shop/redact`) — **there is no equivalent backstop.** The delivery is
+>   acknowledged `200` because the job and its outbox row commit together, then
+>   `dispatchShopifyPrivacyOutbox` can never enqueue it; the recovery sweep
+>   catches the failure and logs `durable_queue_unavailable` every 30 seconds,
+>   for ever. Shopify sees success while nothing is ever actioned.
+>
+> That is a **mandatory compliance obligation silently unmet** (30 days), and it
+> fails App Store review. The loud-failure design is deliberate — the queue
+> refuses rather than pretending an accepted request reached an operational
+> queue — so the remedy is operational: **provision Redis before any merchant
+> installs the app.** Verify afterwards by confirming the boot log says
+> `BullMQ backend active` for `shopify-privacy`, not by observing that webhooks
+> return 200 — they return 200 either way.
 | No test coverage on reconciliation engine | ✅ Done | Vitest coverage across engines, routers, reports (`*.test.ts` colocated) |
 | No rate limiting on public API | ✅ Done | `server/rateLimiter.ts` guards public API + ingestion |
 | Email delivery | ✅ Done | Resend integration (`server/_core/email.ts`); safe no-op without keys |
@@ -1759,7 +1783,7 @@ Before merging any `manus/*` branch, verify:
 | **Demo/POC code isolation** | POC pages (`/salad-africa-poc`, `/lapo-poc`, `/woodcore-poc`) are intentionally public and demo-only — do not add auth gates unless instructed |
 | **LLM calls** | Confirm all `invokeLLM()` calls will work with `DIRECT_LLM_API_KEY` (Anthropic) in production |
 | **Database migrations** | If new tables/columns were added, confirm migration files exist in `drizzle/`. Generate them with `drizzle-kit generate` **against a dev database** — never `pnpm db:push` while `DATABASE_URL` points at production (see §12) |
-| **S3 file keys** | Any new file uploads must use `storagePut()` — never store bytes in DB columns |
+| **S3 file keys** | Any new file upload must go through `server/storage.ts` — never store bytes in DB columns. `storagePut()` returns a presigned download URL at write time; **`storagePutPrivate()` is the right one when no bearer URL should exist**, and is required for anything holding customer data (privacy exports). See §16 |
 | **Secrets** | No hardcoded API keys, tokens, or credentials in any file |
 | **Router size** | If `server/routers.ts` grew, check if it should be split into `server/routers/<feature>.ts` |
 
@@ -1846,7 +1870,22 @@ sandbox.
 - **shadcn/ui for all UI components** — import from `@/components/ui/*`
 - **Optimistic updates** for list mutations — use `onMutate`/`onError`/`onSettled` pattern
 - **UTC timestamps** everywhere — convert to local timezone only at display layer
-- **S3 for all file storage** — never store file bytes in the database
+- **S3 for all file storage** — never store file bytes in the database. Upload
+  through `server/storage.ts`, and pick the helper by whether a download
+  credential should exist at all:
+  - `storagePut()` — uploads **and returns a presigned GET URL** to its caller.
+    For an object the caller is about to hand to whoever asked for it.
+  - `storagePutPrivate()` — uploads and returns the key only, with
+    `Cache-Control: no-store`. **Use this for anything holding customer or
+    tenant data** (privacy/GDPR exports, evidence packs). The flow persists the
+    key and authorises each later read before calling `storageGet()` for a
+    short-lived presign, so no bearer URL exists between writing and a proven
+    read. Reaching for `storagePut()` here mints a credential nothing needs.
+
+  Neither is "the required helper" over the other — the requirement is that
+  bytes go to object storage rather than a DB column. A review finding that
+  reads the rule as `storagePut()`-only is wrong; this was raised on PR #160
+  and withdrawn.
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
 - **Never use `&&` for conditional rendering in JSX** — use a ternary with an

@@ -5,6 +5,7 @@ import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SHOPIFY_CONNECTION_MESSAGES, shopifyConnectionVerdict, shopifyInstallErrorMessage } from "@/lib/shopifyConnection";
+import { ShopifyPrivacyDeliveries } from "@/components/ShopifyPrivacyDeliveries";
 import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "@shared/shopifyOrderSync";
 
 export function ShopifyWelcome() {
@@ -34,13 +35,13 @@ export function ShopifyWelcome() {
         </div>
         <CardTitle className="text-2xl text-[#1B365D]">Shopify connection secured</CardTitle>
         <CardDescription className="text-base leading-relaxed">
-          ReconcileAI has connected to <strong>{shop}</strong> with read-only order access. No orders, payments, refunds or store settings were changed.
+          ReconcileAI Dev Store has connected to <strong>{shop}</strong> with read-only order access. No orders, payments, refunds or store settings were changed.
         </CardDescription>
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-left text-sm text-slate-700">
           <div className="flex gap-3">
             <Mail className="mt-0.5 h-5 w-5 shrink-0 text-[#F47458]" />
             <div>
-              <p className="font-semibold">Confirm your ReconcileAI administrator account</p>
+              <p className="font-semibold">Confirm your ReconcileAI Dev Store administrator account</p>
               <p className="mt-1 text-slate-600">
                 {emailStatus === "sent"
                   ? "A secure, one-time sign-in link was sent to the contact email configured for this Shopify store. Open it to finish activation."
@@ -52,7 +53,7 @@ export function ShopifyWelcome() {
         <div className="rounded-lg bg-blue-50 p-4 text-left text-sm text-blue-900">
           <div className="flex gap-3">
             <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />
-            <p>Initial permission: read-only order and transaction evidence from Shopify’s standard 60-day window. ReconcileAI cannot initiate payments, refunds or store changes.</p>
+            <p>Initial permission: read-only order and transaction evidence from Shopify’s standard 60-day window. ReconcileAI Dev Store cannot initiate payments, refunds or store changes.</p>
           </div>
         </div>
       </Shell>
@@ -98,8 +99,11 @@ export function ShopifyWelcome() {
             ) : null}
           </div>
         ) : null}
+        <div className="text-left">
+          <ShopifyPrivacyDeliveries />
+        </div>
         <Button className="w-full bg-[#1B365D] hover:bg-[#102A43]" onClick={() => navigate("/settlement-monitor")}>
-          Open ReconcileAI workspace <ChevronRight className="ml-2 h-4 w-4" />
+          Open ReconcileAI Dev Store workspace <ChevronRight className="ml-2 h-4 w-4" />
       </Button>
     </Shell>
   );
@@ -116,7 +120,7 @@ export function ShopifyError() {
       </div>
       <CardTitle className="text-2xl text-[#1B365D]">Shopify connection not completed</CardTitle>
       <CardDescription className="text-base leading-relaxed">{message}</CardDescription>
-      <Button variant="outline" className="w-full" onClick={() => navigate("/")}>Return to ReconcileAI</Button>
+      <Button variant="outline" className="w-full" onClick={() => navigate("/")}>Return to ReconcileAI Dev Store</Button>
     </Shell>
   );
 }

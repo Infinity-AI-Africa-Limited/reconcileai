@@ -4,7 +4,7 @@
  */
 import { TRPCError } from "@trpc/server";
 import { describe, expect, it, vi } from "vitest";
-import { scriptedDb } from "../shopify/scriptedDb.testkit";
+import { rowOf, scriptedDb } from "../shopify/scriptedDb.testkit";
 import { commitShoplineSettlementFile } from "./settlementFileCommit";
 import { mapSettlementRows } from "./settlementFileImport";
 
@@ -226,7 +226,7 @@ describe("when a later file repeats a settlement that carries no transaction ID"
     const { run } = commit(fake, fileRows({ Order: "6001", Amount: "50.00", Date: "2026-09-01", Txn: "" }));
 
     await expect(run).resolves.toMatchObject({ imported: 0, duplicates: 1, unverifiableDuplicates: 1 });
-    expect(String(fake.writes("update", BATCHES)[0]?.data?.errorMessage)).toMatch(/no transaction ID to tell them apart/);
+    expect(String(rowOf(fake.writes("update", BATCHES)[0])?.errorMessage)).toMatch(/no transaction ID to tell them apart/);
   });
 
   it("should treat a repeat that does carry a transaction ID as a proven duplicate, with nothing to report", async () => {
@@ -236,7 +236,7 @@ describe("when a later file repeats a settlement that carries no transaction ID"
     const { run } = commit(fake, fileRows({ Order: "6002", Amount: "50.00", Date: "2026-09-01", Txn: "ch_7" }));
 
     await expect(run).resolves.toMatchObject({ imported: 0, duplicates: 1, unverifiableDuplicates: 0 });
-    expect(fake.writes("update", BATCHES)[0]?.data?.errorMessage).toBeNull();
+    expect(rowOf(fake.writes("update", BATCHES)[0])?.errorMessage).toBeNull();
   });
 });
 
