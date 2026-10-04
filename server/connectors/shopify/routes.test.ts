@@ -4,7 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
-const state = vi.hoisted(() => ({ db: null as unknown }));
+const state = vi.hoisted(() => ({
+  db: null as unknown,
+  queueReadiness: { status: "confirmed", durable: true } as {
+    status: "confirmed" | "unavailable";
+    durable: boolean;
+    reason?: "redis_not_configured" | "queue_unavailable";
+  },
+}));
 
 vi.mock("../../db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../db")>()),
@@ -21,6 +28,9 @@ vi.mock("../../_core/cookies", () => ({ getSessionCookieOptions: () => ({}) }));
 vi.mock("./auth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./auth")>()),
   exchangeAuthorizationCode: vi.fn(),
+}));
+vi.mock("./runtimeQueueReadiness", () => ({
+  confirmShopifyRuntimeQueues: () => Promise.resolve(state.queueReadiness),
 }));
 
 import type express from "express";
@@ -83,6 +93,7 @@ const reason = (location: string) => new URL(location, "https://x").searchParams
 
 beforeEach(() => {
   vi.clearAllMocks();
+  state.queueReadiness = { status: "confirmed", durable: true };
 });
 
 describe("when a merchant starts an install (GET /api/shopify/install)", () => {
@@ -115,10 +126,35 @@ describe("when a merchant starts an install (GET /api/shopify/install)", () => {
     }
     expect(getDb).not.toHaveBeenCalled();
   });
+
+  it("should refuse before OAuth when Shopify durable queues are not confirmed", async () => {
+    state.db = scriptedDb().db;
+    state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_unavailable" };
+    const res = fakeRes();
+
+    await handlerFor("/api/shopify/install")({ query: { shop: SHOP }, headers: {} } as unknown as express.Request, res as never);
+
+    expect(reason(res.location)).toBe("temporarily_unavailable");
+    expect(res.cookies.shopify_oauth_flow).toBeUndefined();
+    expect(getDb).not.toHaveBeenCalled();
+  });
 });
 
 describe("when Shopify calls back with an authorization code (GET /api/shopify/callback)", () => {
   const signed = (shopDomain = SHOP) => signOAuthState({ shopDomain, secret: "client-secret", ttlMs: 10 * 60_000 }).state;
+
+  it("should refuse before state consumption or token exchange when durable queues are unavailable", async () => {
+    const fake = scriptedDb();
+    state.db = fake.db;
+    state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_unavailable" };
+    const res = fakeRes();
+
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+
+    expect(reason(res.location)).toBe("temporarily_unavailable");
+    expect(fake.ops).toEqual([]);
+    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+  });
 
   it("should refuse a state issued for another shop before touching the database", async () => {
     const fake = scriptedDb();

@@ -79,7 +79,7 @@ describe("Shopify order sync durable queue", () => {
 });
 
 describe("when a merchant asks for a manual sync", () => {
-  it("should queue it on its own queue, which falls back in-process rather than refusing without Redis", async () => {
+  it("should queue it durably, refusing rather than falling back in-process", async () => {
     const { enqueueShopifyManualSync } = await import("./syncQueue");
     const payload = { storeId: 7, organizationId: 42, requestId: 3 };
 
@@ -91,9 +91,9 @@ describe("when a merchant asks for a manual sync", () => {
       Record<string, unknown>,
     ];
     expect(name).toBe("shopify-manual-sync");
-    // Losing a manual sync loses nothing (the watermark has not moved), unlike
-    // a webhook sync owed for an acknowledged delivery.
-    expect(options.requireDurable).toBeUndefined();
+    // Scope-A merchant evidence must never run on a process-local queue whose
+    // request could be lost on a restart.
+    expect(options.requireDurable).toBe(true);
     // One visible failure, not minutes of invisible retries; unique names would
     // be retained with the finished job and absorb every later request.
     expect(options).toMatchObject({ attempts: 1 });

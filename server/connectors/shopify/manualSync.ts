@@ -258,10 +258,10 @@ export interface ShopifyManualSyncHandlerDeps {
  *
  * No final-failure hook is needed: a run that throws is recorded here — if it
  * cannot read the queued requests, it still settles the one that queued it —
- * and one whose process dies is re-run by the durable queue or, on the
- * in-process fallback, left showing as stalled for the merchant to request
- * again (the next run settles the orphaned row too). Without a database nothing
- * can be recorded; that too shows as stalled.
+ * and one whose process dies is re-run by the durable queue. The admission path
+ * refuses rather than falling back in-process, so a restart cannot silently
+ * lose a merchant's sync request. Without a database nothing can be recorded;
+ * that too shows as stalled.
  */
 export async function handleShopifyManualSync(
   payload: ShopifyManualSyncPayload,

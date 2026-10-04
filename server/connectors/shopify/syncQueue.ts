@@ -1,4 +1,4 @@
-import { createQueue, type EnqueueOptions, type JobQueue } from "../../jobQueue";
+import { createQueue, type EnqueueOptions, type JobQueue, type QueueStats } from "../../jobQueue";
 import { handleShopifyWebhookSync, markShopifyWebhookSyncFailed } from "./syncOrchestrator";
 import { handleShopifyManualSync, type ShopifyManualSyncPayload } from "./manualSync";
 
@@ -31,18 +31,25 @@ function queue(): Promise<JobQueue<ShopifyOrderSyncPayload>> {
   return queuePromise;
 }
 
+/**
+ * Build the production webhook queue and read its BullMQ counts without adding
+ * a job. Used only for runtime readiness: Shopify must not begin an install
+ * before the queue that acknowledges webhook deliveries is durable.
+ */
+export async function verifyShopifyOrderSyncQueue(): Promise<QueueStats> {
+  return (await queue()).stats();
+}
+
 export async function enqueueShopifyOrderSync(payload: ShopifyOrderSyncPayload): Promise<void> {
   const durable = await queue();
   await durable.enqueue(`webhook-${payload.webhookId}`, payload);
 }
 
 /**
- * Manual ("refresh now") syncs. A separate queue from webhook syncs, and
- * deliberately NOT durable-only: a webhook-triggered sync is owed for a delivery
- * Shopify was told succeeded, so losing it loses data, whereas a manual sync
- * lost on restart loses nothing — the watermark has not moved, the page shows
- * the request as stalled, and the merchant asks again. With REDIS_URL set this
- * is BullMQ like everything else.
+ * Manual ("refresh now") syncs. A separate queue from webhook syncs, and it is
+ * durable-only: a failed admission records an explicit failed request rather
+ * than letting merchant evidence run on a process-local queue that a restart
+ * can lose. With REDIS_URL set this is BullMQ like every Shopify queue.
  *
  * One attempt: `runShopifyOrderSync` already retries Shopify's transient
  * failures page by page, and a failure the merchant can see beats one retried
@@ -67,7 +74,7 @@ export function createShopifyManualSyncQueue(
     async (job) => handleShopifyManualSync(job.data),
     // No onFinalFailure: the handler records every outcome it reaches itself
     // (see handleShopifyManualSync).
-    { attempts: 1, backoffMs: 30_000, concurrency: MANUAL_SYNC_CONCURRENCY },
+    { attempts: 1, backoffMs: 30_000, concurrency: MANUAL_SYNC_CONCURRENCY, requireDurable: true },
   );
 }
 

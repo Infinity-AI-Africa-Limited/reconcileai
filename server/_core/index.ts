@@ -164,11 +164,11 @@ async function startServer() {
       const queues = await allQueueStats();
       const names = Object.keys(queues);
 
-      // Queues are built LAZILY, on first use. So a freshly restarted process
-      // has none registered yet, and asking "are all live queues durable?" of an
-      // empty set must not be answered "no" — a Redis-configured instance would
-      // then advertise `durable: false` moments after boot, which is the exact
-      // opposite of the truth on an endpoint an institution reads as evidence.
+      // Most queues are built lazily. Shopify's order and privacy queues are
+      // explicitly constructed at boot when Redis is configured, but this
+      // endpoint still must never infer a live connection from configuration:
+      // a failed module bootstrap or a future lazy queue must not let a wrong
+      // REDIS_URL turn into a durable claim.
       //
       // With nothing registered, durability is a property of CONFIGURATION;
       // once a queue exists, it is a property of what actually got built.
@@ -184,9 +184,9 @@ async function startServer() {
       //                         this. Not evidence of durability.
       //   fallback              in-process; work is lost on restart
       //
-      // The empty window is not brief: queues are built lazily on first use, and
-      // the boot sweep only builds one when there are stuck jobs to recover. A
-      // healthy idle instance can sit here indefinitely.
+      // A configured-unverified result is never evidence of durability. The
+      // Shopify boot probe is designed to remove it in a healthy Shopify runtime;
+      // it remains as an explicit safe state for every other startup condition.
       const configuredDurable = !!process.env.REDIS_URL?.trim();
       const anyBroken = names.some((n) => queues[n].error);
       const confirmedDurable = names.length > 0 && names.every((n) => queues[n].durable);
@@ -792,6 +792,31 @@ async function startServer() {
     await setupVite(app, server);
   } else {
     serveStatic(app);
+  }
+
+  // Shopify durable-queue evidence: create the live order and privacy queues,
+  // then issue their BullMQ count reads before accepting traffic. This adds no
+  // job and no merchant data to Redis. Startup stays live if Redis is unhealthy
+  // so `/api/health` can expose the failure, while the OAuth install route
+  // refuses to start until the same check succeeds.
+  if (process.env.REDIS_URL?.trim()) {
+    try {
+      const { confirmShopifyRuntimeQueues } = await import("../connectors/shopify/runtimeQueueReadiness");
+      const readiness = await confirmShopifyRuntimeQueues();
+      if (readiness.durable) {
+        console.log("[boot] Shopify durable queues confirmed");
+      } else {
+        console.error("[boot] Shopify durable queues unavailable", {
+          code: "shopify_durable_queue_unavailable",
+          reason: readiness.reason,
+        });
+      }
+    } catch (error) {
+      console.error("[boot] Shopify durable queue readiness failed", {
+        code: "shopify_durable_queue_readiness_failed",
+        ...loggableError(error),
+      });
+    }
   }
 
   // Boot sweep: mark reconciliation jobs stuck in pending/running >2h as

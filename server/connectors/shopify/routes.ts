@@ -25,6 +25,7 @@ import {
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
 import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./installLease";
+import { confirmShopifyRuntimeQueues } from "./runtimeQueueReadiness";
 import {
   PrivacyArtifactIntegrityError,
   authorizeAndReadPrivacyArtifact,
@@ -195,7 +196,7 @@ export function createShopifyRouter(): express.Router {
   // No database access and no rate limit, deliberately: the state is signed,
   // not stored, so an unauthenticated hit costs one HMAC and a redirect. A
   // limiter here could only have been keyed on a client-written header.
-  router.get("/api/shopify/install", (req, res) => {
+  router.get("/api/shopify/install", async (req, res) => {
     const shopDomain = normalizeShopDomain(typeof req.query.shop === "string" ? req.query.shop : undefined);
     if (!shopDomain) return callbackError(res, "invalid_shop");
     if (!ENV.shopifyClientId || !ENV.shopifyClientSecret) {
@@ -204,6 +205,14 @@ export function createShopifyRouter(): express.Router {
     }
 
     try {
+      const queueReadiness = await confirmShopifyRuntimeQueues();
+      if (!queueReadiness.durable) {
+        console.error("[shopify-oauth] install refused: Shopify durable queues are unavailable", {
+          code: "shopify_durable_queue_unavailable",
+          reason: queueReadiness.reason,
+        });
+        return callbackError(res, "temporarily_unavailable");
+      }
       const callbackUri = redirectUri(req);
       const { state } = signOAuthState({ shopDomain, secret: ENV.shopifyClientSecret, ttlMs: SHOPIFY_OAUTH_STATE_TTL_MS });
       const baseCookie = getSessionCookieOptions(req);
@@ -261,6 +270,16 @@ export function createShopifyRouter(): express.Router {
     if (!stateExpiresAt) return callbackError(res, "expired_or_replayed");
 
     try {
+      // Redis could fail after install begins. Verify again before a callback
+      // can exchange an authorization code or alter a store's connection state.
+      const queueReadiness = await confirmShopifyRuntimeQueues();
+      if (!queueReadiness.durable) {
+        console.error("[shopify-oauth] callback refused: Shopify durable queues are unavailable", {
+          code: "shopify_durable_queue_unavailable",
+          reason: queueReadiness.reason,
+        });
+        return callbackError(res, "temporarily_unavailable");
+      }
       const db = await getDb();
       if (!db) return callbackError(res, "temporarily_unavailable");
       const origin = appOrigin(req);
