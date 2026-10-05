@@ -1,5 +1,5 @@
 import express from "express";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import {
   shopifyConnectorStores,
   shopifyConnectorTokens,
@@ -209,7 +209,17 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
         await tx
           .update(shopifyConnectorStores)
           .set({ status: "uninstalled", statusReason: "uninstalled", uninstalledAt: new Date(), lastWebhookAt: new Date() })
-          .where(and(eq(shopifyConnectorStores.id, store.id), eq(shopifyConnectorStores.organizationId, store.organizationId)));
+          .where(
+            and(
+              eq(shopifyConnectorStores.id, store.id),
+              eq(shopifyConnectorStores.organizationId, store.organizationId),
+              // A redaction fence outranks every other store state (see
+              // markReauthorizationRequired). A delayed uninstall retry landing
+              // after shop/redact was admitted must not relabel the store; its
+              // credentials are still deleted below.
+              ne(shopifyConnectorStores.status, "redacting"),
+            ),
+          );
         await tx
           .delete(shopifyConnectorTokens)
           .where(and(eq(shopifyConnectorTokens.storeId, store.id), eq(shopifyConnectorTokens.organizationId, store.organizationId)));
