@@ -839,16 +839,24 @@ const MAX_CATCH_UP_CYCLES = 16;
  * so a first sync or a long-idle store walks forward step by step, and a failure
  * part-way resumes from the last committed step rather than from the start. A
  * store already current takes one cycle, as before.
+ *
+ * `budgetMs` bounds the time spent, for a caller sharing its turn with other
+ * stores: no further cycle STARTS once it is spent, and the first always runs,
+ * so a store is never given less than one cycle. What is left resumes from the
+ * committed watermark next time.
  */
 export async function runShopifyOrderSyncToNow(
   params: Parameters<typeof runShopifyOrderSync>[0],
-  deps: ShopifyOrderSyncDeps & { runCycle?: typeof runShopifyOrderSync } = {},
+  deps: ShopifyOrderSyncDeps & { runCycle?: typeof runShopifyOrderSync; budgetMs?: number } = {},
 ): Promise<ShopifyOrderSyncReport[]> {
   const runCycle = deps.runCycle ?? runShopifyOrderSync;
+  const clock = deps.now ?? (() => new Date());
+  const startedAt = clock().getTime();
   const reports: ShopifyOrderSyncReport[] = [];
   let previousEnd = Number.NEGATIVE_INFINITY;
   for (let cycle = 0; cycle < MAX_CATCH_UP_CYCLES; cycle += 1) {
-    const cycleStart = (deps.now ?? (() => new Date()))().getTime();
+    const cycleStart = clock().getTime();
+    if (cycle > 0 && deps.budgetMs !== undefined && cycleStart - startedAt >= deps.budgetMs) break;
     const report = await runCycle(params, deps);
     reports.push(report);
     const end = report.window.to.getTime();

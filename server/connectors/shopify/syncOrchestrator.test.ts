@@ -769,6 +769,39 @@ describe("when a store is further behind than one sync window", () => {
     expect(runCycle).toHaveBeenCalledTimes(2);
   });
 
+  describe("when the caller gives it a time budget", () => {
+    // A clock that moves 20 seconds every time it is read.
+    function steppingClock(stepMs: number) {
+      let t = NOW.getTime();
+      return () => new Date((t += stepMs));
+    }
+    const behind = () => cycleReport(new Date(NOW.getTime() - 50 * DAY));
+
+    it("should start no further cycle once the budget is spent", async () => {
+      const runCycle = vi
+        .fn()
+        .mockResolvedValueOnce(cycleReport(new Date(NOW.getTime() - 53 * DAY)))
+        .mockResolvedValueOnce(cycleReport(new Date(NOW.getTime() - 46 * DAY)))
+        .mockResolvedValue(cycleReport(new Date(NOW.getTime() - 39 * DAY)));
+      // Read at start (t+20s), before cycle 1 (+40s), cycle 2 (+60s: 40s spent, under 45s),
+      // cycle 3 (+80s: 60s spent) — which is not started.
+      await runShopifyOrderSyncToNow(
+        { storeId: 7, organizationId: 42, trigger: "backstop" },
+        { now: steppingClock(20_000), runCycle, budgetMs: 45_000 },
+      );
+      expect(runCycle).toHaveBeenCalledTimes(2);
+    });
+
+    it("should always run the first cycle, even with no budget left", async () => {
+      const runCycle = vi.fn(async () => behind());
+      await runShopifyOrderSyncToNow(
+        { storeId: 7, organizationId: 42, trigger: "backstop" },
+        { now: steppingClock(20_000), runCycle, budgetMs: 0 },
+      );
+      expect(runCycle).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("should stop at the first failing cycle, keeping the steps already committed", async () => {
     const runCycle = vi
       .fn()

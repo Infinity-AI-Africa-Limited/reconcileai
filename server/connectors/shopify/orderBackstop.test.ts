@@ -51,7 +51,11 @@ describe("when the order sync backstop syncs a store", () => {
   it("should catch it up to now, not advance it one 7-day window per tick", async () => {
     const fake = scriptedDb({ select: { [STORES]: [[{ storeId: 7, organizationId: 42 }]] } });
     await runShopifyOrderBackstop({ db: fake.db as never, now: () => NOW });
-    expect(orchestrator.runShopifyOrderSyncToNow).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, trigger: "backstop" });
+    expect(orchestrator.runShopifyOrderSyncToNow).toHaveBeenCalledWith(
+      { storeId: 7, organizationId: 42, trigger: "backstop" },
+      // An equal share of the interval: 15 minutes across 25 stores.
+      { budgetMs: 36_000 },
+    );
     expect(orchestrator.runShopifyOrderSync).not.toHaveBeenCalled();
   });
 });

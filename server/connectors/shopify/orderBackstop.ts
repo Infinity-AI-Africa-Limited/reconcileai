@@ -38,6 +38,18 @@ export const SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS = 15 * 60_000;
  */
 export const SHOPIFY_ORDER_BACKSTOP_BATCH = 25;
 
+/**
+ * Time one store may spend catching up within a tick. Stores are synced one at
+ * a time, so a store with a long backlog — a large shop's 60-day first read,
+ * or one throttled by Shopify — would otherwise hold every store behind it. An
+ * equal share of the interval keeps a full batch to about one interval (each
+ * store may finish the cycle it is in); a store still behind resumes on its
+ * next turn, from its committed watermark.
+ */
+export const SHOPIFY_ORDER_BACKSTOP_STORE_BUDGET_MS = Math.floor(
+  SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS / SHOPIFY_ORDER_BACKSTOP_BATCH,
+);
+
 export interface ShopifyOrderBackstopReport {
   scanned: number;
   synced: number;
@@ -103,7 +115,9 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
   // advance a week per tick — about nine ticks, over two hours at 15 minutes,
   // before its recent orders appear. Without Redis this loop is the only
   // automatic sync, so that delay was the merchant's whole first experience.
-  const sync = deps.sync ?? runShopifyOrderSyncToNow;
+  // Within a time budget, so one store's backlog cannot starve the rest.
+  const sync =
+    deps.sync ?? ((params) => runShopifyOrderSyncToNow(params, { budgetMs: SHOPIFY_ORDER_BACKSTOP_STORE_BUDGET_MS }));
   for (const store of stores) {
     report.scanned += 1;
     try {
