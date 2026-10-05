@@ -388,21 +388,43 @@ async function createBullMqQueue<T>(
  */
 const LIVE_QUEUES = new Map<string, JobQueue<unknown>>();
 
-/** Snapshot of every live queue, keyed by name. Never throws. */
-export async function allQueueStats(): Promise<Record<string, QueueStats>> {
-  const out: Record<string, QueueStats> = {};
-  for (const [name, q] of LIVE_QUEUES) {
-    try {
-      out[name] = await q.stats();
-    } catch (err) {
-      out[name] = {
-        backend: q.backend,
-        durable: q.backend === "bullmq",
-        error: errorSummary(err),
-      };
-    }
+/**
+ * How long one queue's count read may take before it is reported as failing.
+ *
+ * An unreachable Redis does not fail a read, it holds it: BullMQ waits for a
+ * connection its retry strategy never stops attempting, and a queue registers
+ * here at construction, before anything has connected. Unbounded, one such
+ * queue hung every caller of this function, /api/health included, in exactly
+ * the outage it exists to report.
+ */
+export const QUEUE_STATS_TIMEOUT_MS = 3_000;
+
+/**
+ * Snapshot of every live queue, keyed by name. Never throws, and answers within
+ * `timeoutMs`: the reads run in parallel, and one that has not answered by
+ * then is reported with an error, as a read that failed.
+ */
+export async function allQueueStats(timeoutMs = QUEUE_STATS_TIMEOUT_MS): Promise<Record<string, QueueStats>> {
+  const entries = await Promise.all(
+    [...LIVE_QUEUES].map(async ([name, q]) => [name, await boundedStats(q, timeoutMs)] as const),
+  );
+  return Object.fromEntries(entries);
+}
+
+async function boundedStats(q: JobQueue<unknown>, timeoutMs: number): Promise<QueueStats> {
+  const failed = (error: string): QueueStats => ({ backend: q.backend, durable: q.backend === "bullmq", error });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<QueueStats>((resolve) => {
+    timer = setTimeout(() => resolve(failed("count read timed out")), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([q.stats(), deadline]);
+  } catch (err) {
+    return failed(errorSummary(err));
+  } finally {
+    clearTimeout(timer);
   }
-  return out;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────

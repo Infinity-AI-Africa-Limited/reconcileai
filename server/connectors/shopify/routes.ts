@@ -253,11 +253,19 @@ export function createShopifyRouter(): express.Router {
     const state = query.state;
     const code = query.code;
     const cookieState = cookieValue(req, FLOW_COOKIE);
-    res.clearCookie(FLOW_COOKIE, { path: "/api/shopify" });
+    // The flow cookie is spent once this state is DECIDED: rejected here, or
+    // consumed below. A temporary refusal in between (durable queues not ready,
+    // no database) keeps it, so retrying the same callback once the dependency
+    // recovers can still pass this check. Clearing it up front made every such
+    // refusal permanent: the retry failed the cookie check and the merchant had
+    // to start the install again.
+    const spendFlowCookie = () => res.clearCookie(FLOW_COOKIE, { path: "/api/shopify" });
     if (!shopDomain || !state || !code || !sameState(cookieState, state)) {
+      spendFlowCookie();
       return callbackError(res, "security_check_failed");
     }
     if (!verifyShopifyCallbackHmac(query, ENV.shopifyClientSecret)) {
+      spendFlowCookie();
       return callbackError(res, "security_check_failed");
     }
 
@@ -267,7 +275,10 @@ export function createShopifyRouter(): express.Router {
       secret: ENV.shopifyClientSecret,
       ttlMs: SHOPIFY_OAUTH_STATE_TTL_MS,
     });
-    if (!stateExpiresAt) return callbackError(res, "expired_or_replayed");
+    if (!stateExpiresAt) {
+      spendFlowCookie();
+      return callbackError(res, "expired_or_replayed");
+    }
 
     try {
       // Redis could fail after install begins. Verify again before a callback
@@ -283,6 +294,9 @@ export function createShopifyRouter(): express.Router {
       const db = await getDb();
       if (!db) return callbackError(res, "temporarily_unavailable");
       const origin = appOrigin(req);
+
+      // From here the state is consumed, so the cookie is spent whatever follows.
+      spendFlowCookie();
 
       // Consume before the external exchange so a retry cannot reuse the same
       // authorization code. The unique index on stateHash is the arbiter: of

@@ -25,6 +25,7 @@
  * expected to say which is which rather than showing nine identical ticks.
  */
 import type { corporateB2BPilotConfigs, corporateB2BPilotSources } from "../drizzle/schema";
+import type { QueueDurability } from "./queueDurability";
 
 /**
  * Only the columns the rule reads, derived from the schema rather than restated.
@@ -87,11 +88,12 @@ export const PILOT_STATE_SEQUENCE = [
 export type PilotState = (typeof PILOT_STATE_SEQUENCE)[number] | "suspended";
 
 /**
- * Deployment evidence for the durable job queue, mirroring the three states
- * `/api/health` reports. `configured_unverified` is NOT evidence of durability:
- * a wrong or unreachable REDIS_URL looks exactly like it.
+ * Deployment evidence for the durable job queue, in the states `/api/health`
+ * reports (server/queueDurability.ts). Only `confirmed` is evidence of
+ * durability: `configured_unverified` is a wrong or unreachable REDIS_URL's
+ * look-alike, and `unreachable` is Redis not answering.
  */
-export type QueueDurability = "confirmed" | "configured_unverified" | "fallback";
+export type { QueueDurability };
 
 /** Was something actually recorded here, as opposed to typed over? */
 export function hasEvidence(value: string | null | undefined): boolean {
@@ -183,6 +185,8 @@ function queueDurabilityDetail(durability: QueueDurability): string {
   switch (durability) {
     case "confirmed":
       return "The P1–P7 foundation release is merged and proven, and this deployment's reconciliation queue is running on the durable (Redis/BullMQ) backend.";
+    case "unreachable":
+      return "The reconciliation queue is on the durable (Redis/BullMQ) backend, but Redis did not answer a count read, so durability is not currently proven. Restore Redis and re-check before treating this as closed.";
     case "configured_unverified":
       return "REDIS_URL is configured but no queue has connected yet, so durability is unverified — a wrong or unreachable URL looks identical. Run a reconciliation job and re-check before treating this as closed.";
     case "fallback":
