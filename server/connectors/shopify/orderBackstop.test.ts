@@ -31,6 +31,7 @@ import {
   runShopifyOrderBackstop,
   SHOPIFY_ORDER_BACKSTOP_BATCH,
   SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS,
+  SHOPIFY_ORDER_BACKSTOP_TICK_BUDGET_MS,
   startShopifyOrderBackstopLoop,
   stopShopifyOrderBackstopLoop,
 } from "./orderBackstop";
@@ -53,10 +54,30 @@ describe("when the order sync backstop syncs a store", () => {
     await runShopifyOrderBackstop({ db: fake.db as never, now: () => NOW });
     expect(orchestrator.runShopifyOrderSyncToNow).toHaveBeenCalledWith(
       { storeId: 7, organizationId: 42, trigger: "backstop" },
-      // An equal share of the interval: 15 minutes across 25 stores.
-      { budgetMs: 36_000 },
+      // A lone store may use the whole tick, not a 25th of it.
+      { budgetMs: SHOPIFY_ORDER_BACKSTOP_TICK_BUDGET_MS },
     );
     expect(orchestrator.runShopifyOrderSync).not.toHaveBeenCalled();
+  });
+
+  it("should share the tick's time among the stores picked, passing on what a store leaves unused", async () => {
+    const fake = scriptedDb({
+      select: { [STORES]: [[{ storeId: 1, organizationId: 9 }, { storeId: 2, organizationId: 9 }, { storeId: 3, organizationId: 9 }]] },
+    });
+    let clock = NOW.getTime();
+    const spent = [10_000, 40_000, 0];
+    const sync = vi.fn(async () => {
+      clock += spent.shift()!;
+    });
+
+    await runShopifyOrderBackstop({ db: fake.db as never, now: () => new Date(clock), sync, tickBudgetMs: 90_000 });
+
+    // 90s across 3; then the 80s left across 2; then the 40s left for the last.
+    expect(sync.mock.calls.map((call) => (call as unknown[])[1])).toEqual([
+      { budgetMs: 30_000 },
+      { budgetMs: 40_000 },
+      { budgetMs: 40_000 },
+    ]);
   });
 });
 
