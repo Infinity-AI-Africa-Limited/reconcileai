@@ -297,6 +297,28 @@ async function createBullMqQueue<T>(
     }
   });
 
+  let statsInFlight: Promise<QueueStats> | null = null;
+  async function readStats(): Promise<QueueStats> {
+    try {
+      const c = await queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
+      return {
+        backend: "bullmq",
+        durable: true,
+        counts: {
+          waiting: c.waiting ?? 0,
+          active: c.active ?? 0,
+          completed: c.completed ?? 0,
+          failed: c.failed ?? 0,
+          delayed: c.delayed ?? 0,
+        },
+      };
+    } catch (err) {
+      // A queue that cannot be counted is a queue whose Redis is unwell —
+      // report it rather than presenting a healthy-looking empty snapshot.
+      return { backend: "bullmq", durable: true, error: errorSummary(err) };
+    }
+  }
+
   return {
     backend: "bullmq" as const,
     async close(): Promise<void> {
@@ -306,25 +328,16 @@ async function createBullMqQueue<T>(
       await queue.close().catch(() => {});
       LIVE_QUEUES.delete(queueName);
     },
-    async stats(): Promise<QueueStats> {
-      try {
-        const c = await queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
-        return {
-          backend: "bullmq",
-          durable: true,
-          counts: {
-            waiting: c.waiting ?? 0,
-            active: c.active ?? 0,
-            completed: c.completed ?? 0,
-            failed: c.failed ?? 0,
-            delayed: c.delayed ?? 0,
-          },
-        };
-      } catch (err) {
-        // A queue that cannot be counted is a queue whose Redis is unwell —
-        // report it rather than presenting a healthy-looking empty snapshot.
-        return { backend: "bullmq", durable: true, error: errorSummary(err) };
-      }
+    stats(): Promise<QueueStats> {
+      // One count read in flight per queue, shared by every caller. Against an
+      // unreachable Redis a read never settles (BullMQ waits on a connection
+      // its retry strategy never abandons), and callers' deadlines stop their
+      // waiting, not the read. Unshared, every health check and every OAuth
+      // request left two more reads pending for the length of the outage.
+      statsInFlight ??= readStats().finally(() => {
+        statsInFlight = null;
+      });
+      return statsInFlight;
     },
     async enqueue(name: string, data: T, opts?: EnqueueOptions) {
       if (uniqueJobNames && replaceFailedOnEnqueue) {

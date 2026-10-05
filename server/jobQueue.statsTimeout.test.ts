@@ -10,14 +10,24 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const counts = vi.hoisted(() => ({ hang: new Set<string>() }));
+const counts = vi.hoisted(() => ({
+  hang: new Set<string>(),
+  /** Count reads issued to Redis, per queue. */
+  calls: new Map<string, number>(),
+  /** Settle a hung read, as Redis coming back would. */
+  release: new Map<string, () => void>(),
+}));
 
 vi.mock("bullmq", () => ({
   Queue: class {
     constructor(public name: string) {}
     getJobCounts() {
-      if (counts.hang.has(this.name)) return new Promise(() => {});
-      return Promise.resolve({ waiting: 1, active: 0, completed: 0, failed: 0, delayed: 0 });
+      counts.calls.set(this.name, (counts.calls.get(this.name) ?? 0) + 1);
+      const answer = { waiting: 1, active: 0, completed: 0, failed: 0, delayed: 0 };
+      if (counts.hang.has(this.name)) {
+        return new Promise((resolve) => counts.release.set(this.name, () => resolve(answer)));
+      }
+      return Promise.resolve(answer);
     }
     async close() {}
   },
@@ -56,5 +66,32 @@ describe("when one queue's Redis never answers a count read", () => {
       durability: "unreachable",
       status: "error",
     });
+  });
+});
+
+describe("when many callers ask while a read is hung", () => {
+  // Greptile #167: a caller's deadline ends its wait, not the read. Each health
+  // check and each OAuth request used to start fresh reads, which stayed
+  // pending for the whole outage, so they piled up without limit.
+  it("should send Redis one read per queue, shared by every caller, and a fresh one once it settles", async () => {
+    vi.stubEnv("REDIS_URL", "redis://unreachable:6379");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    counts.hang.add("stats-shared");
+    await createQueue("stats-shared", async () => {});
+
+    await Promise.all(Array.from({ length: 25 }, () => allQueueStats(10)));
+    for (let i = 0; i < 5; i += 1) await allQueueStats(10);
+
+    expect(counts.calls.get("stats-shared")).toBe(1);
+
+    // Redis answers: the shared read settles, and the next caller reads afresh.
+    counts.hang.delete("stats-shared");
+    counts.release.get("stats-shared")?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const after = await allQueueStats(50);
+
+    expect(counts.calls.get("stats-shared")).toBe(2);
+    expect(after["stats-shared"]).toMatchObject({ durable: true, counts: { waiting: 1 } });
+    expect(after["stats-shared"].error).toBeUndefined();
   });
 });
