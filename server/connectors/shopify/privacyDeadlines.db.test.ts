@@ -50,6 +50,9 @@ describe.runIf(localDatabase)("when privacy requests are counted in MySQL", () =
       // In flight 4 days: stuck. In flight 1 day: not yet.
       { topic: "customers/redact" as const, status: "received" as const, receivedAt: new Date(NOW.getTime() - 4 * DAY) },
       { topic: "customers/redact" as const, status: "received" as const, receivedAt: new Date(NOW.getTime() - 1 * DAY) },
+      // An export not downloaded after 4 days: stuck. After 1 day: not yet.
+      { topic: "customers/data_request" as const, status: "awaiting_delivery" as const, receivedAt: new Date(NOW.getTime() - 4 * DAY) },
+      { topic: "customers/data_request" as const, status: "awaiting_delivery" as const, receivedAt: new Date(NOW.getTime() - 1 * DAY) },
       // Done: never counted.
       { topic: "customers/data_request" as const, status: "completed" as const, receivedAt: new Date(NOW.getTime() - 40 * DAY) },
     ];
@@ -71,6 +74,7 @@ describe.runIf(localDatabase)("when privacy requests are counted in MySQL", () =
     expect(delta("shop/redact|manual_review", "overdue")).toBe(1);
     expect(delta("customers/redact|received", "requests")).toBe(1);
     expect(delta("customers/redact|received", "overdue")).toBe(0);
+    expect(delta("customers/data_request|awaiting_delivery", "requests")).toBe(1);
     expect(after.get("customers/data_request|completed")).toBeUndefined();
     expect(after.get("shop/redact|manual_review")?.oldestReceivedAt).toBeInstanceOf(Date);
   });

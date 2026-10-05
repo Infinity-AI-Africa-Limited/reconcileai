@@ -13,7 +13,7 @@
  * other request content — as a structured log line on every check, and to the
  * owner by email at most once a day.
  */
-import { and, inArray, lt, or, sql } from "drizzle-orm";
+import { and, count, inArray, lt, min, or, sql } from "drizzle-orm";
 import { shopifyPrivacyRequests } from "../../../drizzle/shopify_schema";
 import { notifyOwner } from "../../_core/notification";
 import { getDb } from "../../db";
@@ -24,22 +24,31 @@ const DAY_MS = 24 * 60 * 60_000;
 
 /** Shopify's limit for completing a compliance request. */
 export const SHOPIFY_PRIVACY_DEADLINE_DAYS = 30;
-/** A request still in flight after this long has stopped moving. */
+/** A request expected to move on that has not done so within this long is reported as stuck. */
 export const SHOPIFY_PRIVACY_STUCK_AFTER_MS = 3 * DAY_MS;
 /** How often the requests are counted, and how often the owner is emailed. */
 export const SHOPIFY_PRIVACY_DEADLINE_CHECK_MS = 60 * 60_000;
 export const SHOPIFY_PRIVACY_DEADLINE_NOTIFY_MS = DAY_MS;
 
-/** Outcomes no job will move on from: a person has to act. */
-const NEEDS_A_PERSON = [
-  "manual_review",
-  "blocked_dependency",
-  "blocked_legal_retention",
-  "failed_terminal",
-  "failed",
-] as const;
-/** Statuses a job is expected to move on from by itself. */
-const IN_FLIGHT = ["received", "processing", "failed_retryable"] as const;
+/**
+ * Every request status, in one of three classes. A test holds this to the
+ * column's enum, so a status added later cannot fall outside the check unseen.
+ */
+export const SHOPIFY_PRIVACY_STATUS_CLASSES = {
+  /** Outcomes no job will move on from: a person has to act. */
+  needsAPerson: ["manual_review", "blocked_dependency", "blocked_legal_retention", "failed_terminal", "failed"],
+  /**
+   * Expected to move on without an operator — a job advances them, or, for
+   * `awaiting_delivery`, the merchant downloads the export. The request is not
+   * complete until then, so one that sits here too long is reported as stuck.
+   */
+  expectedToMove: ["received", "processing", "failed_retryable", "awaiting_delivery"],
+  /** Nothing left to do. */
+  done: ["completed"],
+} as const;
+
+const NEEDS_A_PERSON = SHOPIFY_PRIVACY_STATUS_CLASSES.needsAPerson;
+const EXPECTED_TO_MOVE = SHOPIFY_PRIVACY_STATUS_CLASSES.expectedToMove;
 
 export interface ShopifyPrivacyAttentionGroup {
   topic: string;
@@ -61,9 +70,10 @@ export async function findShopifyPrivacyRequestsNeedingAttention(
     .select({
       topic: shopifyPrivacyRequests.topic,
       status: shopifyPrivacyRequests.status,
-      requests: sql<number>`COUNT(*)`.mapWith(Number),
-      oldestReceivedAt: sql<Date>`MIN(${receivedAt})`.mapWith(receivedAt),
-      // Encoded by the column, so the comparison is in the column's UTC terms.
+      requests: count(),
+      oldestReceivedAt: min(receivedAt),
+      // Drizzle has no CASE builder. Both operands are bound — the column, and
+      // the cutoff encoded by the column, so it compares in the column's UTC terms.
       overdue: sql<number>`SUM(CASE WHEN ${receivedAt} < ${sql.param(dueBefore, receivedAt)} THEN 1 ELSE 0 END)`.mapWith(
         Number,
       ),
@@ -72,11 +82,14 @@ export async function findShopifyPrivacyRequestsNeedingAttention(
     .where(
       or(
         inArray(shopifyPrivacyRequests.status, [...NEEDS_A_PERSON]),
-        and(inArray(shopifyPrivacyRequests.status, [...IN_FLIGHT]), lt(receivedAt, stuckBefore)),
+        and(inArray(shopifyPrivacyRequests.status, [...EXPECTED_TO_MOVE]), lt(receivedAt, stuckBefore)),
       ),
     )
     .groupBy(shopifyPrivacyRequests.topic, shopifyPrivacyRequests.status);
-  return rows.map((row) => ({ ...row, overdue: row.overdue || 0 }));
+  // A group exists only for rows that matched, so its MIN is never NULL.
+  return rows.flatMap((row) =>
+    row.oldestReceivedAt ? [{ ...row, oldestReceivedAt: row.oldestReceivedAt, overdue: row.overdue || 0 }] : [],
+  );
 }
 
 function day(date: Date): string {
@@ -155,14 +168,16 @@ let lastNotifiedAt = 0;
  * The throttled form the privacy sweep calls every 30 seconds: counts at most
  * hourly, emails at most daily (per process; with several instances, one email
  * per instance per day). An email that could not be sent is retried at the
- * next hourly check rather than a day later.
+ * next hourly check rather than a day later, and a count that failed is retried
+ * at the next sweep rather than an hour later. The sweep is single-flight, so
+ * no two checks overlap.
  */
 export async function runShopifyPrivacyDeadlineCheck(deps: ShopifyPrivacyDeadlineDeps = {}): Promise<void> {
   const now = (deps.now ?? (() => new Date()))().getTime();
   if (now - lastCheckAt < SHOPIFY_PRIVACY_DEADLINE_CHECK_MS) return;
-  lastCheckAt = now;
   const email = now - lastNotifiedAt >= SHOPIFY_PRIVACY_DEADLINE_NOTIFY_MS;
   const result = await checkShopifyPrivacyDeadlines({ email }, deps);
+  lastCheckAt = now;
   if (result.notified) lastNotifiedAt = now;
 }
 

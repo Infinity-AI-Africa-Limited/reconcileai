@@ -4,6 +4,7 @@ import { shopifyPrivacyRequests } from "../../../drizzle/shopify_schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkShopifyPrivacyDeadlines,
+  SHOPIFY_PRIVACY_STATUS_CLASSES,
   describeShopifyPrivacyAttention,
   resetShopifyPrivacyDeadlineThrottle,
   runShopifyPrivacyDeadlineCheck,
@@ -35,15 +36,15 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("when the privacy requests are counted", () => {
-  it("should ask for those needing a person, and those in flight for over three days, with Shopify's 30-day cutoff", async () => {
+  it("should ask for those needing a person, and those stuck for over three days, with Shopify's 30-day cutoff", async () => {
     const fake = scriptedDb({ select: { [REQUESTS]: [[]] } });
     await checkShopifyPrivacyDeadlines({ email: false }, { db: fake.db as never, now: () => NOW });
 
     const where = fake.ops.find((op) => op.kind === "select" && op.table === REQUESTS)?.where;
     expect(where?.params).toEqual([
       "manual_review", "blocked_dependency", "blocked_legal_retention", "failed_terminal", "failed",
-      "received", "processing", "failed_retryable",
-      // In flight since before this, encoded by the column (UTC), not by the process's timezone.
+      "received", "processing", "failed_retryable", "awaiting_delivery",
+      // Received before this, encoded by the column (UTC), not by the process's timezone.
       "2026-10-02 12:00:00.000",
     ]);
   });
@@ -53,6 +54,20 @@ describe("when the privacy requests are counted", () => {
     const cutoff = new Date(NOW.getTime() - 30 * DAY);
     const rendered = new MySqlDialect().sqlToQuery(sql`${sql.param(cutoff, shopifyPrivacyRequests.receivedAt)}` as SQL);
     expect(rendered.params).toEqual(["2026-09-05 12:00:00.000"]);
+  });
+});
+
+describe("when a privacy request's status is classified", () => {
+  it("should place every status the column allows in exactly one class", () => {
+    const classified = Object.values(SHOPIFY_PRIVACY_STATUS_CLASSES).flat();
+    // A status in no class would never be reported, however long it sat there.
+    expect([...classified].sort()).toEqual([...shopifyPrivacyRequests.status.enumValues].sort());
+    expect(new Set(classified).size).toBe(classified.length);
+  });
+
+  it("should count an export the merchant has not downloaded as not yet complete", () => {
+    // The request completes only on download; until then Shopify's clock runs.
+    expect(SHOPIFY_PRIVACY_STATUS_CLASSES.expectedToMove).toContain("awaiting_delivery");
   });
 });
 
@@ -125,5 +140,19 @@ describe("when the deadline check runs", () => {
     clock += SHOPIFY_PRIVACY_DEADLINE_CHECK_MS;
     await runShopifyPrivacyDeadlineCheck(deps); // …and is retried at the next hourly check
     expect(notify).toHaveBeenCalledTimes(3);
+  });
+
+  it("should count again at the next sweep when a count fails, not an hour later", async () => {
+    const fake = due([group()]);
+    const notify = vi.fn(async () => true);
+    let clock = NOW.getTime();
+    await expect(runShopifyPrivacyDeadlineCheck({ db: null, now: () => new Date(clock), notify })).rejects.toThrow(
+      "Database unavailable",
+    );
+
+    clock += 30_000; // the privacy sweep's next pass
+    await runShopifyPrivacyDeadlineCheck({ db: fake.db as never, now: () => new Date(clock), notify });
+    expect(fake.ops.filter((op) => op.table === REQUESTS)).toHaveLength(1);
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 });
