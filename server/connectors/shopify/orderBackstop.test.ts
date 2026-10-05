@@ -18,6 +18,15 @@ vi.mock("../../_core/env", async (importOriginal) => {
   };
 });
 
+const orchestrator = vi.hoisted(() => ({
+  runShopifyOrderSync: vi.fn(async () => undefined),
+  runShopifyOrderSyncToNow: vi.fn(async () => []),
+}));
+vi.mock("./syncOrchestrator", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./syncOrchestrator")>()),
+  ...orchestrator,
+}));
+
 import {
   runShopifyOrderBackstop,
   SHOPIFY_ORDER_BACKSTOP_BATCH,
@@ -36,6 +45,15 @@ afterEach(() => {
   vi.useRealTimers();
   env.shopifyClientId = "client-id";
   env.shopifyClientSecret = "client-secret";
+});
+
+describe("when the order sync backstop syncs a store", () => {
+  it("should catch it up to now, not advance it one 7-day window per tick", async () => {
+    const fake = scriptedDb({ select: { [STORES]: [[{ storeId: 7, organizationId: 42 }]] } });
+    await runShopifyOrderBackstop({ db: fake.db as never, now: () => NOW });
+    expect(orchestrator.runShopifyOrderSyncToNow).toHaveBeenCalledWith({ storeId: 7, organizationId: 42, trigger: "backstop" });
+    expect(orchestrator.runShopifyOrderSync).not.toHaveBeenCalled();
+  });
 });
 
 describe("when the order sync backstop ticks", () => {

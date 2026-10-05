@@ -25,7 +25,7 @@ import { ENV } from "../../_core/env";
 import { getDb, type DbExecutor } from "../../db";
 import { loggableError } from "../../dbErrors";
 import { singleFlight } from "../../singleFlight";
-import { runShopifyOrderSync } from "./syncOrchestrator";
+import { runShopifyOrderSyncToNow } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -47,7 +47,7 @@ export interface ShopifyOrderBackstopReport {
 export interface ShopifyOrderBackstopDeps {
   db?: Db;
   now?: () => Date;
-  sync?: typeof runShopifyOrderSync;
+  sync?: (params: { storeId: number; organizationId: number; trigger: "backstop" }) => Promise<unknown>;
   batchSize?: number;
   intervalMs?: number;
 }
@@ -98,7 +98,12 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
     return report;
   }
 
-  const sync = deps.sync ?? runShopifyOrderSync;
+  // To NOW, not one cycle: a cycle reads at most one 7-day window, so a newly
+  // installed store (60 days to read) or one behind after an outage would
+  // advance a week per tick — about nine ticks, over two hours at 15 minutes,
+  // before its recent orders appear. Without Redis this loop is the only
+  // automatic sync, so that delay was the merchant's whole first experience.
+  const sync = deps.sync ?? runShopifyOrderSyncToNow;
   for (const store of stores) {
     report.scanned += 1;
     try {
