@@ -9,6 +9,7 @@ import {
 } from "./privacyCompletion";
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 import { handleShopifyShopRedactionJob } from "./shopRedaction";
+import { runShopifyPrivacyDeadlineCheck } from "./privacyDeadlines";
 
 /** Queue-name prefix per job kind: a job id is unique only within its own table. */
 export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
@@ -87,13 +88,15 @@ export async function recoverShopifyPrivacyOutbox(): Promise<void> {
 let recoveryTimer: NodeJS.Timeout | null = null;
 
 /**
- * One recovery sweep: re-dispatch the outbox, then clean expired artifacts.
- * Each half contains its own failure so one outage does not stall the other.
- * Exported for tests; production runs it from the loop below.
+ * One recovery sweep: re-dispatch the outbox, clean expired artifacts, and
+ * report requests nearing Shopify's deadline (throttled to hourly; see
+ * privacyDeadlines.ts). Each step contains its own failure so one outage does
+ * not stall the others. Exported for tests; production runs it from the loop below.
  */
 export async function runShopifyPrivacyRecoverySweep(deps: {
   recover?: () => Promise<unknown>;
   cleanup?: () => Promise<unknown>;
+  deadlines?: () => Promise<unknown>;
 } = {}): Promise<void> {
   try {
     await (deps.recover ?? recoverShopifyPrivacyOutbox)();
@@ -104,6 +107,11 @@ export async function runShopifyPrivacyRecoverySweep(deps: {
     await (deps.cleanup ?? cleanupExpiredShopifyPrivacyArtifacts)();
   } catch (error) {
     console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed", ...loggableError(error) });
+  }
+  try {
+    await (deps.deadlines ?? runShopifyPrivacyDeadlineCheck)();
+  } catch (error) {
+    console.error("[shopify-privacy] deadline check unavailable", { code: "privacy_deadline_check_failed", ...loggableError(error) });
   }
 }
 

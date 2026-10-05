@@ -75,14 +75,27 @@ describe("when the privacy recovery loop ticks", () => {
       cause: Object.assign(new Error("Deadlock found"), { code: "ER_LOCK_DEADLOCK" }),
     });
 
-    await runShopifyPrivacyRecoverySweep({ recover: async () => { throw failure; }, cleanup });
+    const deadlines = vi.fn(async () => undefined);
+    await runShopifyPrivacyRecoverySweep({ recover: async () => { throw failure; }, cleanup, deadlines });
 
     expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(deadlines).toHaveBeenCalledTimes(1);
     const logged = JSON.stringify(error.mock.calls);
     // The operation's code survives the driver's (Greptile #162).
     expect(error.mock.calls[0]?.[1]).toMatchObject({ code: "durable_queue_unavailable", errorCode: "ER_LOCK_DEADLOCK" });
     expect(logged).toMatch(/"error":"database"/);
     expect(logged).not.toMatch(/owner@example\.com|Failed query/);
+    error.mockRestore();
+  });
+
+  it("should still dispatch and clean up when the deadline check fails", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const recover = vi.fn(async () => undefined);
+    const cleanup = vi.fn(async () => 0);
+    await runShopifyPrivacyRecoverySweep({ recover, cleanup, deadlines: async () => { throw new Error("db down"); } });
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]?.[1]).toMatchObject({ code: "privacy_deadline_check_failed" });
     error.mockRestore();
   });
 });
