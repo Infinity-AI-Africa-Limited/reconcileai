@@ -4,7 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
-const state = vi.hoisted(() => ({ db: null as unknown }));
+const state = vi.hoisted(() => ({
+  db: null as unknown,
+  queueReadiness: { status: "confirmed", durable: true } as {
+    status: "confirmed" | "unavailable";
+    durable: boolean;
+    reason?: "redis_not_configured" | "queue_unavailable" | "queue_timeout";
+  },
+}));
 
 vi.mock("../../db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../db")>()),
@@ -21,6 +28,9 @@ vi.mock("../../_core/cookies", () => ({ getSessionCookieOptions: () => ({}) }));
 vi.mock("./auth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./auth")>()),
   exchangeAuthorizationCode: vi.fn(),
+}));
+vi.mock("./runtimeQueueReadiness", () => ({
+  confirmShopifyRuntimeQueues: () => Promise.resolve(state.queueReadiness),
 }));
 
 import type express from "express";
@@ -47,6 +57,8 @@ function fakeRes() {
   const res = {
     location: "",
     cookies: {} as Record<string, string>,
+    /** Cookies the handler cleared, so a test can tell a spent flow cookie from a kept one. */
+    cleared: [] as string[],
     statusCode: 0,
     redirect(code: number, url: string) {
       this.statusCode = code;
@@ -57,7 +69,8 @@ function fakeRes() {
       this.cookies[name] = value;
       return this;
     },
-    clearCookie() {
+    clearCookie(name: string) {
+      this.cleared.push(name);
       return this;
     },
     status(code: number) {
@@ -83,6 +96,7 @@ const reason = (location: string) => new URL(location, "https://x").searchParams
 
 beforeEach(() => {
   vi.clearAllMocks();
+  state.queueReadiness = { status: "confirmed", durable: true };
 });
 
 describe("when a merchant starts an install (GET /api/shopify/install)", () => {
@@ -115,10 +129,82 @@ describe("when a merchant starts an install (GET /api/shopify/install)", () => {
     }
     expect(getDb).not.toHaveBeenCalled();
   });
+
+  it("should refuse before OAuth when Shopify durable queues are not confirmed", async () => {
+    state.db = scriptedDb().db;
+    state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_unavailable" };
+    const res = fakeRes();
+
+    await handlerFor("/api/shopify/install")({ query: { shop: SHOP }, headers: {} } as unknown as express.Request, res as never);
+
+    expect(reason(res.location)).toBe("temporarily_unavailable");
+    expect(res.cookies.shopify_oauth_flow).toBeUndefined();
+    expect(getDb).not.toHaveBeenCalled();
+  });
 });
 
 describe("when Shopify calls back with an authorization code (GET /api/shopify/callback)", () => {
   const signed = (shopDomain = SHOP) => signOAuthState({ shopDomain, secret: "client-secret", ttlMs: 10 * 60_000 }).state;
+
+  it("should refuse before state consumption or token exchange when durable queues are unavailable", async () => {
+    const fake = scriptedDb();
+    state.db = fake.db;
+    state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_unavailable" };
+    const res = fakeRes();
+
+    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+
+    expect(reason(res.location)).toBe("temporarily_unavailable");
+    expect(fake.ops).toEqual([]);
+    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+  });
+
+  describe("when the refusal is temporary", () => {
+    // Greptile #167: the flow cookie was cleared before any check, so a callback
+    // refused only because Redis or the database was briefly down could never be
+    // retried: the retry failed the cookie check and the install had to restart.
+
+    it("should keep the flow cookie, and let the same callback through once the queues recover", async () => {
+      const fake = scriptedDb();
+      state.db = fake.db;
+      state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_timeout" };
+      const request = callbackRequest(signed());
+      const refused = fakeRes();
+
+      await handlerFor("/api/shopify/callback")(request, refused as never);
+
+      expect(reason(refused.location)).toBe("temporarily_unavailable");
+      expect(refused.cleared).not.toContain("shopify_oauth_flow");
+
+      // The browser still holds the cookie, so the merchant's retry carries it.
+      state.queueReadiness = { status: "confirmed", durable: true };
+      const retried = fakeRes();
+      await handlerFor("/api/shopify/callback")(request, retried as never);
+
+      expect(reason(retried.location)).not.toBe("security_check_failed");
+      expect(fake.writes("insert", STATES)).toHaveLength(1);
+      expect(retried.cleared).toContain("shopify_oauth_flow");
+    });
+
+    it("should keep the flow cookie when the database is unavailable", async () => {
+      state.db = null;
+      const res = fakeRes();
+
+      await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+
+      expect(reason(res.location)).toBe("temporarily_unavailable");
+      expect(res.cleared).not.toContain("shopify_oauth_flow");
+    });
+
+    it("should still spend the cookie on a callback that fails its security check", async () => {
+      const res = fakeRes();
+
+      await handlerFor("/api/shopify/callback")(callbackRequest(signed(), "some-other-state"), res as never);
+
+      expect(reason(res.location)).toBe("security_check_failed");
+      expect(res.cleared).toContain("shopify_oauth_flow");
+    });
+  });
 
   it("should refuse a state issued for another shop before touching the database", async () => {
     const fake = scriptedDb();

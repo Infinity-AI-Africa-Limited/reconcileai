@@ -164,50 +164,20 @@ async function startServer() {
       const queues = await allQueueStats();
       const names = Object.keys(queues);
 
-      // Queues are built LAZILY, on first use. So a freshly restarted process
-      // has none registered yet, and asking "are all live queues durable?" of an
-      // empty set must not be answered "no" — a Redis-configured instance would
-      // then advertise `durable: false` moments after boot, which is the exact
-      // opposite of the truth on an endpoint an institution reads as evidence.
-      //
-      // With nothing registered, durability is a property of CONFIGURATION;
-      // once a queue exists, it is a property of what actually got built.
-      // Three states, not two — which is the point. Both booleans are wrong
-      // before a queue exists: claiming durable asserts a Redis connection
-      // nobody has made, and claiming non-durable contradicts the configuration.
-      // So `durable` means CONFIRMED durable and nothing else, and `durability`
-      // carries the distinction the boolean cannot.
-      //
-      //   confirmed             a queue was built and is on BullMQ
-      //   configured_unverified REDIS_URL is set, but nothing has connected yet,
-      //                         so a wrong or unreachable URL still looks like
-      //                         this. Not evidence of durability.
-      //   fallback              in-process; work is lost on restart
-      //
-      // The empty window is not brief: queues are built lazily on first use, and
-      // the boot sweep only builds one when there are stuck jobs to recover. A
-      // healthy idle instance can sit here indefinitely.
-      const configuredDurable = !!process.env.REDIS_URL?.trim();
-      const anyBroken = names.some((n) => queues[n].error);
-      const confirmedDurable = names.length > 0 && names.every((n) => queues[n].durable);
-
-      const durability =
-        names.length === 0
-          ? configuredDurable
-            ? "configured_unverified"
-            : "fallback"
-          : confirmedDurable
-            ? "confirmed"
-            : "fallback";
+      // The rule lives in one place (server/queueDurability.ts), shared with the
+      // corporate-B2B pilot gate. `durable` means CONFIRMED: every queue on
+      // BullMQ AND answering a count read. A queue built on BullMQ whose Redis
+      // stopped answering is "unreachable", never "confirmed"; REDIS_URL set
+      // with nothing built yet is "configured_unverified", never evidence.
+      const { classifyQueueDurability } = await import("../queueDurability");
+      const report = classifyQueueDurability(queues, process.env.REDIS_URL);
 
       checks.queue = {
-        status: anyBroken ? "error" : confirmedDurable ? "ok" : "degraded",
-        durable: confirmedDurable,
-        durability,
+        ...report,
         ...(names.length === 0
           ? {
               note:
-                durability === "configured_unverified"
+                report.durability === "configured_unverified"
                   ? "REDIS_URL is set, but no queue has been built yet, so Redis connectivity is unverified — configured, not confirmed."
                   : "REDIS_URL is not set — the in-process fallback will be used.",
             }
@@ -793,6 +763,26 @@ async function startServer() {
   } else {
     serveStatic(app);
   }
+
+  // Shopify durable-queue evidence: build the live order and privacy queues and
+  // read their BullMQ counts, so /api/health has evidence on a Redis-configured
+  // instance. It adds no job and no merchant data to Redis.
+  //
+  // NOT awaited, deliberately. An unreachable Redis does not fail a count read,
+  // it holds it (BullMQ waits for a connection that its retry strategy never
+  // gives up on), so awaiting it here would keep the server from ever
+  // listening: /api/healthz could not answer, and the deploy's health check
+  // would fail.
+  // Nothing needs the result before traffic; the OAuth routes check readiness
+  // themselves, bounded, on every request.
+  import("../connectors/shopify/runtimeQueueReadiness")
+    .then((readiness) => readiness.startShopifyQueueEvidence())
+    .catch((error) =>
+      console.error("[boot] Shopify durable queue readiness failed", {
+        code: "shopify_durable_queue_readiness_failed",
+        ...loggableError(error),
+      }),
+    );
 
   // Boot sweep: mark reconciliation jobs stuck in pending/running >2h as
   // failed — crash orphans from the pre-queue era or in-process restarts

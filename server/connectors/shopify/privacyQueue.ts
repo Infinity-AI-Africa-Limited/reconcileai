@@ -1,4 +1,4 @@
-import { createQueue, type JobQueue } from "../../jobQueue";
+import { createQueue, type JobQueue, type QueueStats } from "../../jobQueue";
 import { singleFlight } from "../../singleFlight";
 import { loggableError } from "../../dbErrors";
 import {
@@ -49,6 +49,15 @@ function queue(): Promise<JobQueue<ShopifyPrivacyQueuePayload>> {
     });
   }
   return queuePromise;
+}
+
+/**
+ * Build the production privacy queue and read its BullMQ counts without adding
+ * a request. This is non-merchant runtime evidence only; privacy work still
+ * enters through the transactional outbox after its database commit.
+ */
+export async function verifyShopifyPrivacyQueue(): Promise<QueueStats> {
+  return (await queue()).stats();
 }
 
 /**

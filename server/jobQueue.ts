@@ -297,6 +297,28 @@ async function createBullMqQueue<T>(
     }
   });
 
+  let statsInFlight: Promise<QueueStats> | null = null;
+  async function readStats(): Promise<QueueStats> {
+    try {
+      const c = await queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
+      return {
+        backend: "bullmq",
+        durable: true,
+        counts: {
+          waiting: c.waiting ?? 0,
+          active: c.active ?? 0,
+          completed: c.completed ?? 0,
+          failed: c.failed ?? 0,
+          delayed: c.delayed ?? 0,
+        },
+      };
+    } catch (err) {
+      // A queue that cannot be counted is a queue whose Redis is unwell —
+      // report it rather than presenting a healthy-looking empty snapshot.
+      return { backend: "bullmq", durable: true, error: errorSummary(err) };
+    }
+  }
+
   return {
     backend: "bullmq" as const,
     async close(): Promise<void> {
@@ -306,25 +328,16 @@ async function createBullMqQueue<T>(
       await queue.close().catch(() => {});
       LIVE_QUEUES.delete(queueName);
     },
-    async stats(): Promise<QueueStats> {
-      try {
-        const c = await queue.getJobCounts("waiting", "active", "completed", "failed", "delayed");
-        return {
-          backend: "bullmq",
-          durable: true,
-          counts: {
-            waiting: c.waiting ?? 0,
-            active: c.active ?? 0,
-            completed: c.completed ?? 0,
-            failed: c.failed ?? 0,
-            delayed: c.delayed ?? 0,
-          },
-        };
-      } catch (err) {
-        // A queue that cannot be counted is a queue whose Redis is unwell —
-        // report it rather than presenting a healthy-looking empty snapshot.
-        return { backend: "bullmq", durable: true, error: errorSummary(err) };
-      }
+    stats(): Promise<QueueStats> {
+      // One count read in flight per queue, shared by every caller. Against an
+      // unreachable Redis a read never settles (BullMQ waits on a connection
+      // its retry strategy never abandons), and callers' deadlines stop their
+      // waiting, not the read. Unshared, every health check and every OAuth
+      // request left two more reads pending for the length of the outage.
+      statsInFlight ??= readStats().finally(() => {
+        statsInFlight = null;
+      });
+      return statsInFlight;
     },
     async enqueue(name: string, data: T, opts?: EnqueueOptions) {
       if (uniqueJobNames && replaceFailedOnEnqueue) {
@@ -388,21 +401,43 @@ async function createBullMqQueue<T>(
  */
 const LIVE_QUEUES = new Map<string, JobQueue<unknown>>();
 
-/** Snapshot of every live queue, keyed by name. Never throws. */
-export async function allQueueStats(): Promise<Record<string, QueueStats>> {
-  const out: Record<string, QueueStats> = {};
-  for (const [name, q] of LIVE_QUEUES) {
-    try {
-      out[name] = await q.stats();
-    } catch (err) {
-      out[name] = {
-        backend: q.backend,
-        durable: q.backend === "bullmq",
-        error: errorSummary(err),
-      };
-    }
+/**
+ * How long one queue's count read may take before it is reported as failing.
+ *
+ * An unreachable Redis does not fail a read, it holds it: BullMQ waits for a
+ * connection its retry strategy never stops attempting, and a queue registers
+ * here at construction, before anything has connected. Unbounded, one such
+ * queue hung every caller of this function, /api/health included, in exactly
+ * the outage it exists to report.
+ */
+export const QUEUE_STATS_TIMEOUT_MS = 3_000;
+
+/**
+ * Snapshot of every live queue, keyed by name. Never throws, and answers within
+ * `timeoutMs`: the reads run in parallel, and one that has not answered by
+ * then is reported with an error, as a read that failed.
+ */
+export async function allQueueStats(timeoutMs = QUEUE_STATS_TIMEOUT_MS): Promise<Record<string, QueueStats>> {
+  const entries = await Promise.all(
+    [...LIVE_QUEUES].map(async ([name, q]) => [name, await boundedStats(q, timeoutMs)] as const),
+  );
+  return Object.fromEntries(entries);
+}
+
+async function boundedStats(q: JobQueue<unknown>, timeoutMs: number): Promise<QueueStats> {
+  const failed = (error: string): QueueStats => ({ backend: q.backend, durable: q.backend === "bullmq", error });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<QueueStats>((resolve) => {
+    timer = setTimeout(() => resolve(failed("count read timed out")), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([q.stats(), deadline]);
+  } catch (err) {
+    return failed(errorSummary(err));
+  } finally {
+    clearTimeout(timer);
   }
-  return out;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────

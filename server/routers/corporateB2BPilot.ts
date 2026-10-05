@@ -36,23 +36,19 @@ const SOURCE_STATUSES = ["draft", "tested", "approved", "active", "suspended"] a
 const PILOT_STATES = ["preparation", "data_validation", "dry_run", "parallel_run", "limited_control", "suspended"] as const;
 
 /**
- * Which job-queue backend this deployment is actually running, in the same
- * three states `/api/health` reports.
+ * Which job-queue backend this deployment is actually running, by the same rule
+ * `/api/health` reports (server/queueDurability.ts, one copy for both).
  *
- * `configured_unverified` is deliberately NOT treated as durable: a wrong or
- * unreachable REDIS_URL is indistinguishable from a correct one until a queue
- * has been built and connected. B6 asks for deployment evidence, and a set
- * environment variable is configuration, not evidence.
+ * Only `confirmed` is durable: every queue on BullMQ AND answering a count
+ * read. `configured_unverified` (a set REDIS_URL, nothing connected) and
+ * `unreachable` (built on BullMQ, Redis not answering) are not. B6 asks for
+ * deployment evidence, and configuration is not evidence.
  */
 async function queueDurability(): Promise<QueueDurability> {
   try {
     const { allQueueStats } = await import("../jobQueue");
-    const queues = await allQueueStats();
-    const names = Object.keys(queues);
-    if (names.length === 0) {
-      return process.env.REDIS_URL?.trim() ? "configured_unverified" : "fallback";
-    }
-    return names.every((name) => queues[name].durable) ? "confirmed" : "fallback";
+    const { classifyQueueDurability } = await import("../queueDurability");
+    return classifyQueueDurability(await allQueueStats(), process.env.REDIS_URL).durability;
   } catch {
     // An unreadable queue is not evidence of a durable one.
     return "fallback";

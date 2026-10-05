@@ -132,6 +132,14 @@ describe("B6 — durable-queue deployment evidence", () => {
     expect(result.blockedBy).toContain("B6");
     expect(result.gates.find((gate) => gate.id === "B6")?.detail).toMatch(/unverified/i);
   });
+
+  it("should stay open when the queue is on Redis but Redis is not answering", () => {
+    // #167: built on BullMQ is not evidence while its count reads fail. This
+    // read as "confirmed" until the pilot gate and /api/health shared one rule.
+    const result = readiness({ queueDurability: "unreachable" });
+    expect(result.blockedBy).toContain("B6");
+    expect(result.gates.find((gate) => gate.id === "B6")?.detail).toMatch(/did not answer/i);
+  });
 });
 
 describe("what a green gate actually proves", () => {
