@@ -16,7 +16,7 @@ vi.hoisted(() => {
 
 import type { InsertTransaction, Transaction } from "../../../drizzle/schema";
 import { mapSettlementRows } from "../shopline/settlementFileImport";
-import { runReconciliationOnPersistedData } from "../shopline/syncOrchestrator";
+import { runReconciliationOnPersistedData, type ReconciliationScope } from "../shopline/syncOrchestrator";
 import { toShopifyOrderTransaction, toShopifyRefundTransaction } from "./ingest";
 import type { NormalizedShopifyOrder, NormalizedShopifyRefund } from "./orders";
 import { scriptedDb } from "./scriptedDb.testkit";
@@ -110,7 +110,7 @@ function settlementFile(lines: Array<[string, string]>): Transaction[] {
   return rows.map((row, index) => stored(100 + index, row));
 }
 
-async function reconcile(ledger: Transaction[], settlement: Transaction[]) {
+async function reconcile(ledger: Transaction[], settlement: Transaction[], flag?: ReconciliationScope["flag"]) {
   const fake = scriptedDb({ select: { [TRANSACTIONS]: [ledger, settlement], [EXCEPTIONS]: [[]] } });
   const result = await runReconciliationOnPersistedData(
     fake.db as never,
@@ -120,7 +120,7 @@ async function reconcile(ledger: Transaction[], settlement: Transaction[]) {
     new Date("2026-09-17T00:00:00Z"),
     new Date("2026-09-25T00:00:00Z"),
     "USD",
-    { orderRefs: [GID] },
+    { orderRefs: [GID], ...(flag ? { flag } : {}) },
   );
   // Each match marks its source row matched to its target; read those pairs back.
   const pairs = fake
@@ -188,5 +188,33 @@ describe("when an order is refunded in full", () => {
     expect(result).toEqual({ matchedCount: 2, exceptionCount: 0 });
     // Line 1 of the file (id 100) is the refund, line 2 (id 101) the payment.
     expect(pairs).toEqual(expect.arrayContaining([[1, 101], [10, 100]]));
+  });
+});
+
+describe("when a refund's settlement line may simply not have arrived yet", () => {
+  // Payment settled 09-20; the refund was made 09-21 and its line is not in this file.
+  const ledger = () => shopifyLedger(order("100.00", [refund(9, "30.00")]));
+  const file = () => settlementFile([["100.00", "2026-09-20"]]);
+
+  it("should still match the payment, and not flag a refund inside the grace period", async () => {
+    const { result, pairs, exceptions } = await reconcile(ledger(), file(), {
+      orderSideBefore: new Date("2026-09-13T00:00:00Z"),
+    });
+    expect(pairs).toEqual([[1, 100]]);
+    expect(result.exceptionCount).toBe(0);
+    expect(exceptions).toEqual([]);
+  });
+
+  it("should flag a refund older than the grace period that the file still lacks", async () => {
+    const { exceptions } = await reconcile(ledger(), file(), { orderSideBefore: new Date("2026-09-25T00:00:00Z") });
+    expect(exceptions).toEqual([expect.objectContaining({ transactionId: 10, subCategory: "retail_refund_not_settled" })]);
+  });
+
+  it("should flag nothing at all in a pass that only matches", async () => {
+    const { result, pairs, exceptions } = await reconcile(ledger(), settlementFile([["-30.00", "2026-09-22"]]), "none");
+    // The refund matches its line; the order's payment line is elsewhere, and is not flagged here.
+    expect(pairs).toEqual([[10, 100]]);
+    expect(result.exceptionCount).toBe(0);
+    expect(exceptions).toEqual([]);
   });
 });

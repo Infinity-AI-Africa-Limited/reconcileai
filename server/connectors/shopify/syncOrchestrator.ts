@@ -958,7 +958,6 @@ export async function runShopifyOrderSync(
           store,
           ordersChannelId: channelId,
           orderGids: [...writtenOrders],
-          now,
         });
       }
 
@@ -1018,7 +1017,7 @@ export async function runShopifyOrderSync(
   }
 }
 
-/** The import's own margin past the latest date it reconciles to. */
+/** The import's own margin past the latest evidence it reconciles to. */
 const EVIDENCE_DATE_MARGIN_MS = 3 * 24 * 60 * 60_000;
 
 /**
@@ -1029,8 +1028,11 @@ const EVIDENCE_DATE_MARGIN_MS = 3 * 24 * 60 * 60_000;
  * BEFORE its Shopify row — a gateway's refund line imported before the refund
  * synced, an order that synced late, a match reopened by a correction — would
  * otherwise stay unmatched for good: importing the file again adds nothing, so
- * reconciles nothing. Only orders with evidence still unmatched are in scope,
- * so an order whose file has not been imported is never flagged for its absence.
+ * reconciles nothing. Only orders with evidence still unmatched are in scope.
+ *
+ * It only MATCHES. Judging what a settlement file lacks is the import's job,
+ * against the file's own period; here there is no file, and a refund whose line
+ * has simply not arrived yet would be flagged — and stay flagged after it did.
  *
  * Runs inside the sync's transaction, under its store lock, which the import
  * also takes: the two never reconcile one store's ledger at once.
@@ -1041,7 +1043,6 @@ async function reconcileWithWaitingEvidence(
     store: { id: number; organizationId: number; currency: string | null };
     ordersChannelId: number;
     orderGids: string[];
-    now: Date;
   },
 ): Promise<number> {
   const { store } = params;
@@ -1058,7 +1059,9 @@ async function reconcileWithWaitingEvidence(
   if (!evidenceChannel) return 0;
 
   const waiting = new Set<string>();
-  let latest = params.now.getTime();
+  // Up to the latest evidence waiting, never to the sync's own clock: a refund
+  // made after the evidence's period is not something it could show.
+  let latest = 0;
   for (let i = 0; i < params.orderGids.length; i += TRANSACTION_LOOKUP_CHUNK) {
     const chunk = params.orderGids.slice(i, i + TRANSACTION_LOOKUP_CHUNK);
     const rows = await tx
@@ -1086,11 +1089,11 @@ async function reconcileWithWaitingEvidence(
     params.ordersChannelId,
     evidenceChannel.id,
     // Any earlier date: the scope is these orders, and their evidence may
-    // follow them by weeks. Up to the latest evidence waiting for them.
+    // follow them by weeks.
     new Date(0),
     new Date(latest + EVIDENCE_DATE_MARGIN_MS),
     store.currency ?? "USD",
-    { orderRefs: [...waiting] },
+    { orderRefs: [...waiting], flag: "none" },
   );
   return result.matchedCount;
 }

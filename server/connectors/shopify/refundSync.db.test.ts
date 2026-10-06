@@ -208,6 +208,35 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
       expect(await statusOf(LATE)).toHaveLength(4);
     });
 
+    it("should match the waiting payment but not flag a refund whose line has not arrived", async () => {
+      const PARTIAL = "gid://shopify/Order/5550004";
+      const [channel] = await db
+        .select({ id: channels.id })
+        .from(channels)
+        .where(and(eq(channels.organizationId, organizationId), eq(channels.code, shopifySettlementEvidenceChannelCode(storeId))));
+      await db.insert(transactions).values({
+        batchId: 1,
+        channelId: channel.id,
+        userId: 1,
+        organizationId,
+        transactionRef: PARTIAL,
+        amount: "100.00",
+        currency: "USD",
+        transactionDate: new Date("2026-09-22"),
+        debitCredit: "credit",
+        status: "unmatched",
+      });
+
+      const report = await sync(order("2026-09-25T10:00:00.000Z", [refund(51, "20.00")], PARTIAL));
+
+      expect(report.evidenceMatched).toBe(1);
+      expect(await statusOf(PARTIAL)).toEqual([
+        ["20.00", "unmatched"],
+        ["100.00", "matched"],
+        ["100.00", "matched"],
+      ]);
+    });
+
     it("should leave an order with no evidence yet untouched, and flag nothing", async () => {
       const report = await sync(order("2026-09-21T11:00:00.000Z", [refund(41, "5.00")], QUIET));
 

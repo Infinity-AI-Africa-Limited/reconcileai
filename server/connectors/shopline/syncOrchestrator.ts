@@ -696,6 +696,16 @@ export async function resolveChannelIds(
 export interface ReconciliationScope {
   /** Order references as stored in `transactionRef` on both legs. */
   orderRefs: string[];
+  /**
+   * Which unmatched rows may be raised as exceptions. Matching is never limited.
+   *  - absent: every one, as always;
+   *  - "none": none — a pass that only matches;
+   *  - `{ orderSideBefore }`: every unmatched settlement-side row, but an
+   *    order-side row only if dated before this. A later one may yet settle in
+   *    a file not imported: a refund made late in a file's period often settles
+   *    in the next, and flagged now it would stay open after it matched.
+   */
+  flag?: "none" | { orderSideBefore: Date };
 }
 
 /** Exception states that still await a person — raising another is a duplicate. */
@@ -823,6 +833,15 @@ export async function runReconciliationOnPersistedData(
   // in `subCategory` so the exception intelligence flywheel learns on it (both
   // the intra-org agentMemory recall and the cross-org shared pool key on it).
   let raised = result.retailExceptions;
+  if (scope?.flag === "none") {
+    raised = [];
+  } else if (scope?.flag) {
+    const cutoff = scope.flag.orderSideBefore.getTime();
+    const tooRecent = new Set(
+      sourceRows.filter((row) => new Date(row.transactionDate).getTime() >= cutoff).map((row) => row.id),
+    );
+    raised = raised.filter((ex) => !tooRecent.has(ex.transactionId));
+  }
   if (scope && raised.length > 0) {
     const unresolved = await unresolvedExceptionKeys(
       db,

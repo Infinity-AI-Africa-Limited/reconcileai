@@ -36,6 +36,13 @@ import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 
 const MAX_DECODED_BYTES = 10 * 1024 * 1024;
 const RECONCILIATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+/**
+ * How long a Shopify order or refund may take to appear in settlement before a
+ * file that names its order but lacks its line flags it. A refund made in the
+ * last days of a file's period routinely settles in the next file; flagged by
+ * this one, it would stay open after the next file matched it.
+ */
+export const SHOPIFY_SETTLEMENT_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const ORDER_REFERENCE_LOOKUP_CHUNK = 500;
 
 export interface ShopifySettlementEvidenceInput {
@@ -624,8 +631,10 @@ export async function importShopifySettlementEvidence(
           to,
           context.currency ?? "USD",
           // Only the orders this file speaks to. Orders whose evidence is in a
-          // file not yet imported must not be flagged for its absence.
+          // file not yet imported must not be flagged for its absence — nor
+          // their recent rows, which may settle in the next file.
           {
+            flag: { orderSideBefore: new Date(Math.max(...times) - SHOPIFY_SETTLEMENT_GRACE_MS) },
             orderRefs: fresh
               .map((row) => row.transactionRef)
               .filter((ref): ref is string => Boolean(ref)),

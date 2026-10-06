@@ -14,6 +14,7 @@ import {
   minimizeShopifySettlementEvidenceRows,
   ShopifySettlementEvidenceError,
   shopifySettlementEvidenceChannelCode,
+  SHOPIFY_SETTLEMENT_GRACE_MS,
 } from "./settlementEvidence";
 import { scriptedDb } from "./scriptedDb.testkit";
 
@@ -193,7 +194,7 @@ describe("Shopify merchant settlement evidence", () => {
       expect.any(Date),
       expect.any(Date),
       "USD",
-      { orderRefs: ["gid://shopify/Order/1001"] },
+      expect.objectContaining({ orderRefs: ["gid://shopify/Order/1001"] }),
     );
     expect(auditCommitted).toHaveBeenCalledWith({
       actorId: 9,
@@ -402,7 +403,7 @@ describe("when an export names the order differently from how Shopify stores it"
     const orderLookup = fake.ops.find((op) => op.kind === "select" && op.table === TRANSACTIONS);
     expect(orderLookup?.where?.params).toEqual(expect.arrayContaining(["1001", "#1001"]));
     expect(insertedRows(fake).map((row) => row.transactionRef)).toEqual([ORDER_GID]);
-    expect(reconcile.mock.calls[0]?.[7]).toEqual({ orderRefs: [ORDER_GID] });
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({ orderRefs: [ORDER_GID] });
   });
 
   it("should align Shopify's numeric order ID to the order's GID", async () => {
@@ -552,6 +553,12 @@ describe("when a file covers only some of the store's orders", () => {
     expect(reconcile.mock.calls[0]?.[4]).toEqual(new Date(0));
     // A refund made after the file's period is not missing from it.
     expect(reconcile.mock.calls[0]?.[5]).toEqual(new Date(new Date("2026-09-20").getTime() + 3 * 24 * 60 * 60 * 1000));
+    // Nor is one made in its last week, which may settle in the next file:
+    // matched if its line is here, but not flagged if it is not.
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({
+      flag: { orderSideBefore: new Date(new Date("2026-09-20").getTime() - SHOPIFY_SETTLEMENT_GRACE_MS) },
+    });
+    expect(SHOPIFY_SETTLEMENT_GRACE_MS).toBe(7 * 24 * 60 * 60 * 1000);
   });
 
   it("should reconcile only the orders the imported rows name", async () => {
@@ -561,7 +568,7 @@ describe("when a file covers only some of the store's orders", () => {
     await result;
 
     expect(reconcile).toHaveBeenCalledTimes(1);
-    expect(reconcile.mock.calls[0]?.[7]).toEqual({ orderRefs: [ORDER_GID] });
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({ orderRefs: [ORDER_GID] });
   });
 });
 
