@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SHOPIFY_API_VERSION, SHOPIFY_ORDER_LED_SCOPES } from "../../../drizzle/shopify_schema";
-import { SHOPIFY_APP_HOME_PATH, SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_WEBHOOK_PATH } from "./paths";
+import { SHOPIFY_APP_HOME_PATH, SHOPIFY_WEBHOOK_PATH } from "./paths";
 import { SHOPIFY_ORDER_TRIGGER_TOPICS, SHOPIFY_PRIVACY_TOPICS, SHOPIFY_UNINSTALL_TOPIC } from "./webhooks";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -152,10 +152,9 @@ function expectedConfig(): TomlTable {
     embedded: true,
     access_scopes: {
       scopes: SHOPIFY_ORDER_LED_SCOPES.join(","),
-      // The server performs the authorization-code exchange itself.
-      use_legacy_install_flow: true,
+      // App Home exchanges a verified App Bridge ID token server-side.
+      use_legacy_install_flow: false,
     },
-    auth: { redirect_urls: [`${ORIGIN}${SHOPIFY_OAUTH_CALLBACK_PATH}`] },
     webhooks: {
       api_version: SHOPIFY_API_VERSION,
       subscriptions: [

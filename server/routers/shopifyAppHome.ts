@@ -11,10 +11,12 @@ import {
   appHomeError,
   loadAppHomeView,
   manualSyncFailure,
+  managedInstallFailure,
   safeSettlementEvidenceResult,
   settlementEvidenceFailure,
   settlementEvidenceInput,
 } from "../connectors/shopify/appHome";
+import { completeShopifyManagedInstall } from "../connectors/shopify/managedInstall";
 import { requestShopifyManualSync } from "../connectors/shopify/manualSync";
 import { importShopifySettlementEvidence } from "../connectors/shopify/settlementEvidence";
 
@@ -53,6 +55,30 @@ export const shopifyAppHomeRouter = router({
     const apiKey = ENV.shopifyClientId.trim();
     if (!apiKey) throw appHomeError("SERVICE_UNAVAILABLE", "configuration_unavailable");
     return { apiKey };
+  }),
+
+  /**
+   * Shopify-managed installation happens from App Home, not a callback URL.
+   * A fresh App Bridge token is verified and exchanged only when this shop has
+   * no active ReconcileAI connection; repeated opens do not rotate credentials.
+   */
+  initialize: publicProcedure.mutation(async ({ ctx }) => {
+    const origin = ENV.appUrl.trim().replace(/\/+$/, "");
+    if (ENV.isProduction && !origin) throw appHomeError("SERVICE_UNAVAILABLE", "configuration_unavailable");
+    try {
+      return await completeShopifyManagedInstall({
+        authorization: ctx.req.headers?.authorization,
+        origin: origin || "http://localhost:3000",
+      });
+    } catch (error) {
+      const refusal = managedInstallFailure(error);
+      if (refusal.message === "service_unavailable") {
+        console.error("[shopify-app-home] managed installation unavailable", {
+          category: refusal.message,
+        });
+      }
+      throw refusal;
+    }
   }),
 
   context: embeddedProcedure.query(async ({ ctx }) => {

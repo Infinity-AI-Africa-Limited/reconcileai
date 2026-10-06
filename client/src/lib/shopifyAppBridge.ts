@@ -101,7 +101,7 @@ const APP_BRIDGE_POLL_MS = 50;
 let bridgeReady: Promise<ShopifyAppBridgeApi> | null = null;
 
 export class ShopifyAppHomeClientError extends Error {
-  constructor(public readonly code: "CONFIGURATION_UNAVAILABLE" | "APP_BRIDGE_UNAVAILABLE" | "AUTHENTICATION_REQUIRED" | "STORE_ACTION_REQUIRED" | "ORDER_SYNC_REQUIRED" | "ACTIVE_ADMIN_REQUIRED" | "INVALID_REQUEST" | "SYNC_IN_PROGRESS" | "SERVICE_UNAVAILABLE") {
+  constructor(public readonly code: "CONFIGURATION_UNAVAILABLE" | "APP_BRIDGE_UNAVAILABLE" | "AUTHENTICATION_REQUIRED" | "INSTALLATION_IN_PROGRESS" | "REQUIRED_PERMISSIONS_NOT_GRANTED" | "STORE_ACTION_REQUIRED" | "ORDER_SYNC_REQUIRED" | "ACTIVE_ADMIN_REQUIRED" | "INVALID_REQUEST" | "SYNC_IN_PROGRESS" | "SERVICE_UNAVAILABLE") {
     super(code);
     this.name = "ShopifyAppHomeClientError";
   }
@@ -109,6 +109,8 @@ export class ShopifyAppHomeClientError extends Error {
 
 const MESSAGE_CODES: Record<string, ShopifyAppHomeClientError["code"]> = {
   authentication_required: "AUTHENTICATION_REQUIRED",
+  installation_in_progress: "INSTALLATION_IN_PROGRESS",
+  required_permissions_not_granted: "REQUIRED_PERMISSIONS_NOT_GRANTED",
   sync_in_progress: "SYNC_IN_PROGRESS",
   order_sync_required: "ORDER_SYNC_REQUIRED",
   active_admin_required: "ACTIVE_ADMIN_REQUIRED",
@@ -270,6 +272,15 @@ export async function loadShopifyAppHomeContext(): Promise<ShopifyAppBridgeConte
   return appHomeCall(() => embeddedClient.shopifyAppHome.context.query());
 }
 
+/**
+ * Ensure this verified Shopify App Bridge session has a stored offline token
+ * before App Home reads its connection. The server treats an active store as a
+ * no-op, so loading or refreshing this page never rotates worker credentials.
+ */
+export async function initializeShopifyManagedInstall(): Promise<void> {
+  await appHomeCall(() => embeddedClient.shopifyAppHome.initialize.mutate());
+}
+
 export async function triggerShopifyOrderSync(): Promise<ShopifySyncRequest> {
   return appHomeCall(() => embeddedClient.shopifyAppHome.syncNow.mutate());
 }
@@ -291,6 +302,10 @@ export function shopifyAppHomeErrorMessage(error: unknown): string {
       return "Shopify App Bridge could not load. Disable any ad blocker, refresh this App Home, and try again.";
     case "AUTHENTICATION_REQUIRED":
       return "Your Shopify session could not be verified. Refresh this App Home from Shopify Admin and try again.";
+    case "INSTALLATION_IN_PROGRESS":
+      return "Another secure connection attempt is already in progress for this store. Wait a moment, then refresh this App Home.";
+    case "REQUIRED_PERMISSIONS_NOT_GRANTED":
+      return "ReconcileAI Dev Store needs read-only order access to continue. Reopen the app from Shopify Admin and approve the requested permission.";
     case "STORE_ACTION_REQUIRED":
       return "This store needs to be reconnected before ReconcileAI can read order evidence.";
     case "ORDER_SYNC_REQUIRED":

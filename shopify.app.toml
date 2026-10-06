@@ -11,15 +11,10 @@ embedded = true
 
 [access_scopes]
 scopes = "read_orders"
-# ReconcileAI currently performs the authorization-code exchange server-side at
-# /api/shopify/callback, so this must remain true until the connector is
-# deliberately migrated to Shopify managed installation and token exchange.
-use_legacy_install_flow = true
-
-[auth]
-redirect_urls = [
-  "https://www.reconcileaiafrica.com/api/shopify/callback",
-]
+# Shopify-managed installation grants this one read-only scope. App Home verifies
+# its fresh App Bridge ID token and performs the server-side offline-token
+# exchange; no browser OAuth callback or redirect URL is used.
+use_legacy_install_flow = false
 
 [webhooks]
 # Match the Admin API version stored for every Shopify connection in ReconcileAI.

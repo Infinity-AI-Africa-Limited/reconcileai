@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TRPCClientError } from "@trpc/client";
 import {
   appHomeErrorCode,
+  initializeShopifyManagedInstall,
   loadShopifyAppBridgeScriptForTest,
   loadShopifyAppHomeContext,
   resetShopifyAppBridgeForTest,
@@ -136,6 +137,8 @@ describe("when an App Home call fails", () => {
     expect(appHomeErrorCode(serverError("authentication_required", "UNAUTHORIZED"))).toBe("AUTHENTICATION_REQUIRED");
     expect(appHomeErrorCode(serverError("active_admin_required", "FORBIDDEN"))).toBe("ACTIVE_ADMIN_REQUIRED");
     expect(appHomeErrorCode(serverError("sync_in_progress", "CONFLICT"))).toBe("SYNC_IN_PROGRESS");
+    expect(appHomeErrorCode(serverError("installation_in_progress", "CONFLICT"))).toBe("INSTALLATION_IN_PROGRESS");
+    expect(appHomeErrorCode(serverError("required_permissions_not_granted", "PRECONDITION_FAILED"))).toBe("REQUIRED_PERMISSIONS_NOT_GRANTED");
   });
 
   it("should treat an input the schema refused as an invalid request", () => {
@@ -174,5 +177,22 @@ describe("when the workspace calls its API", () => {
     expect(url).toMatch(/^\/api\/trpc\/shopifyAppHome\.context/);
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer id-token-1");
     expect(url).not.toMatch(/organizationId|storeId/);
+  });
+
+  it("should initialize Shopify-managed installation with a fresh App Bridge token before loading a new workspace", async () => {
+    vi.useRealTimers();
+    resetShopifyAppBridgeForTest();
+    page.window.shopify = { idToken: vi.fn(async () => "id-token-2") };
+    const fetchStub = vi.fn(async () => new Response(JSON.stringify({ result: { data: { json: { status: "connected" } } } }), {
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchStub);
+
+    await expect(initializeShopifyManagedInstall()).resolves.toBeUndefined();
+
+    const [url, init] = fetchStub.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/^\/api\/trpc\/shopifyAppHome\.initialize/);
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer id-token-2");
+    expect(url).not.toMatch(/organizationId|storeId|id-token/);
   });
 });

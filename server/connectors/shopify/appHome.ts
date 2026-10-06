@@ -12,7 +12,8 @@ import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
-import type { ShopifyEmbeddedContext } from "./embeddedAuth";
+import { ShopifyEmbeddedAuthError, type ShopifyEmbeddedContext } from "./embeddedAuth";
+import { ShopifyManagedInstallError } from "./managedInstall";
 import { ShopifyManualSyncError } from "./manualSync";
 import { ShopifySettlementEvidenceError, type ShopifySettlementEvidenceResult } from "./settlementEvidence";
 
@@ -54,6 +55,8 @@ export const SHOPIFY_APP_HOME_CAPABILITIES = Object.freeze({
 export type ShopifyAppHomeErrorMessage =
   | "configuration_unavailable"
   | "authentication_required"
+  | "installation_in_progress"
+  | "required_permissions_not_granted"
   | "service_unavailable"
   | "sync_in_progress"
   | "store_action_required"
@@ -63,6 +66,31 @@ export type ShopifyAppHomeErrorMessage =
 
 export function appHomeError(code: TRPCError["code"], message: ShopifyAppHomeErrorMessage): TRPCError {
   return new TRPCError({ code, message });
+}
+
+/** A managed-install refusal rendered as a stable App Home error, never provider text. */
+export function managedInstallFailure(error: unknown): TRPCError {
+  if (error instanceof ShopifyEmbeddedAuthError) {
+    return error.code === "CONFIG_UNAVAILABLE"
+      ? appHomeError("SERVICE_UNAVAILABLE", "configuration_unavailable")
+      : appHomeError("UNAUTHORIZED", "authentication_required");
+  }
+  if (error instanceof ShopifyManagedInstallError) {
+    switch (error.code) {
+      case "INSTALLATION_IN_PROGRESS":
+        return appHomeError("CONFLICT", "installation_in_progress");
+      case "REQUIRED_PERMISSIONS_NOT_GRANTED":
+        return appHomeError("PRECONDITION_FAILED", "required_permissions_not_granted");
+      case "ID_TOKEN_REJECTED":
+        return appHomeError("UNAUTHORIZED", "authentication_required");
+      case "DURABLE_QUEUE_UNAVAILABLE":
+      case "TOKEN_EXCHANGE_RETRY":
+      case "TOKEN_EXCHANGE_FAILED":
+      case "SHOP_METADATA_UNAVAILABLE":
+        return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
+    }
+  }
+  return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
 }
 
 /** The store and sync evidence the workspace shows; no id leaves the server. */

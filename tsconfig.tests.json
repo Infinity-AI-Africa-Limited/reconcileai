@@ -34,6 +34,7 @@
     "server/connectors/shopify/logSafety.test.ts",
     "server/connectors/shopify/manualSync.test.ts",
     "server/connectors/shopify/manualSyncQueue.redis.test.ts",
+    "server/connectors/shopify/managedInstall.test.ts",
     "server/connectors/shopify/onboarding.test.ts",
     "server/connectors/shopify/orderBackstop.test.ts",
     "server/connectors/shopify/privacyCompletion.test.ts",

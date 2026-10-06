@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  initializeShopifyManagedInstall,
   loadShopifyAppHomeContext,
   shopifyAppHomeErrorMessage,
   type ShopifyAppBridgeContext,
@@ -56,6 +57,7 @@ export default function ShopifyAppHome() {
     setLoading(true);
     setError(null);
     try {
+      await initializeShopifyManagedInstall();
       setContext(await loadShopifyAppHomeContext());
     } catch (err) {
       setError(shopifyAppHomeErrorMessage(err));

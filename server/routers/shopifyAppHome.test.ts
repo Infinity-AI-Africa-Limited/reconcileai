@@ -15,6 +15,7 @@ vi.hoisted(() => {
 const state = vi.hoisted(() => ({
   db: null as unknown,
   authenticate: vi.fn(),
+  initialize: vi.fn(),
   requestSync: vi.fn(),
   importEvidence: vi.fn(),
 }));
@@ -27,6 +28,14 @@ vi.mock("../connectors/shopify/embeddedAuth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../connectors/shopify/embeddedAuth")>()),
   authenticateShopifyEmbeddedRequest: state.authenticate,
 }));
+vi.mock("../connectors/shopify/managedInstall", () => ({
+  completeShopifyManagedInstall: state.initialize,
+  ShopifyManagedInstallError: class ShopifyManagedInstallError extends Error {
+    constructor(public readonly code: string) {
+      super(code);
+    }
+  },
+}));
 vi.mock("../connectors/shopify/manualSync", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../connectors/shopify/manualSync")>()),
   requestShopifyManualSync: state.requestSync,
@@ -38,6 +47,7 @@ vi.mock("../connectors/shopify/settlementEvidence", async (importOriginal) => ({
 
 import { ENV } from "../_core/env";
 import { ShopifyEmbeddedAuthError, type ShopifyEmbeddedContext } from "../connectors/shopify/embeddedAuth";
+import { ShopifyManagedInstallError } from "../connectors/shopify/managedInstall";
 import { scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
 import { ShopifyManualSyncError } from "../connectors/shopify/manualSync";
 import { ShopifySettlementEvidenceError } from "../connectors/shopify/settlementEvidence";
@@ -87,6 +97,7 @@ let clientId: string;
 beforeEach(() => {
   clientId = ENV.shopifyClientId;
   state.authenticate.mockReset().mockResolvedValue(context);
+  state.initialize.mockReset().mockResolvedValue({ status: "already_connected" });
   state.requestSync.mockReset();
   state.importEvidence.mockReset();
   state.db = scriptedDb().db;
@@ -107,6 +118,24 @@ describe("when App Bridge asks for its configuration", () => {
       code: "SERVICE_UNAVAILABLE",
       message: "configuration_unavailable",
     });
+  });
+});
+
+describe("when App Home ensures Shopify-managed installation", () => {
+  it("should pass only the fresh App Bridge authorization and configured origin to the onboarding boundary", async () => {
+    await expect(caller().initialize()).resolves.toEqual({ status: "already_connected" });
+    expect(state.initialize).toHaveBeenCalledWith({ authorization: TOKEN, origin: ENV.appUrl.replace(/\/+$/, "") || "http://localhost:3000" });
+  });
+
+  it.each([
+    [new ShopifyManagedInstallError("INSTALLATION_IN_PROGRESS"), "CONFLICT", "installation_in_progress"],
+    [new ShopifyManagedInstallError("REQUIRED_PERMISSIONS_NOT_GRANTED"), "PRECONDITION_FAILED", "required_permissions_not_granted"],
+    [new ShopifyManagedInstallError("ID_TOKEN_REJECTED"), "UNAUTHORIZED", "authentication_required"],
+    [new ShopifyManagedInstallError("DURABLE_QUEUE_UNAVAILABLE"), "SERVICE_UNAVAILABLE", "service_unavailable"],
+    [new ShopifyEmbeddedAuthError("TOKEN_EXPIRED"), "UNAUTHORIZED", "authentication_required"],
+  ] as const)("should map %s to a stable App Home error", async (error, code, message) => {
+    state.initialize.mockRejectedValue(error);
+    expect(await refusal(() => caller().initialize())).toEqual({ code, message });
   });
 });
 
