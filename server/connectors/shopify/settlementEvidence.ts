@@ -1,10 +1,14 @@
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, lt, ne, notExists, or, sql } from "drizzle-orm";
+import { alias, QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   channels,
+  exceptions,
   transactions,
   uploadBatches,
   type InsertTransaction,
+  type Transaction,
 } from "../../../drizzle/schema";
+import { classifyRetailException } from "../../retailReconciliationEngine";
 import { shopifyConnectorStores } from "../../../drizzle/shopify_schema";
 import {
   createAuditLog,
@@ -25,7 +29,12 @@ import {
   type ParsedFile,
   type SettlementField,
 } from "../shopline/settlementFileImport";
-import { runReconciliationOnPersistedData } from "../shopline/syncOrchestrator";
+import {
+  inlineRetailConfig,
+  raiseRetailExceptions,
+  runReconciliationOnPersistedData,
+  withShopifyRefundEvent,
+} from "../shopline/syncOrchestrator";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
 import {
   resolveAuthorizedShopifyActor,
@@ -127,7 +136,82 @@ export interface ShopifySettlementEvidenceDeps {
   parseFile?: ParseFile;
   reconcile?: Reconcile;
   auditCommitted?: AuditCommitted;
+  flagOverdueRefunds?: typeof flagOverdueShopifyRefunds;
 }
+
+/**
+ * Flag the store's Shopify refunds that settlement has now had its grace period
+ * to show and still does not, and return how many were flagged.
+ *
+ * The import holds back a refund made within the grace period of a file's last
+ * settlement, since it may settle in the next file. Something must come back to
+ * it, and a later file need not name its order. So every import with fresh rows
+ * sweeps the store: a refund dated before `dueBefore` (that file's last
+ * settlement less the grace), still unmatched, is flagged — when its ORDER has
+ * settlement evidence on file, which says that order's money flows through
+ * files this merchant imports. A refund of an order paid elsewhere is not.
+ *
+ * Each refund is flagged once: never again after any exception of this kind
+ * was raised on it, so a person's resolution or dismissal stands.
+ */
+export async function flagOverdueShopifyRefunds(
+  db: DbExecutor,
+  params: {
+    organizationId: number;
+    storeId: number;
+    ordersChannelId: number;
+    settlementChannelId: number;
+    dueBefore: Date;
+    currency: string;
+  },
+): Promise<number> {
+  const evidence = alias(transactions, "evidence");
+  const overdue = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.organizationId, params.organizationId),
+        eq(transactions.channelId, params.ordersChannelId),
+        eq(transactions.shopifyStoreId, params.storeId),
+        ne(transactions.shopifyRefundId, ""),
+        eq(transactions.status, "unmatched"),
+        lt(transactions.transactionDate, params.dueBefore),
+        exists(
+          new QueryBuilder()
+            .select({ id: evidence.id })
+            .from(evidence)
+            .where(
+              and(
+                eq(evidence.organizationId, params.organizationId),
+                eq(evidence.channelId, params.settlementChannelId),
+                eq(evidence.transactionRef, transactions.transactionRef),
+              ),
+            ),
+        ),
+        notExists(
+          new QueryBuilder()
+            .select({ id: exceptions.id })
+            .from(exceptions)
+            .where(
+              and(
+                eq(exceptions.organizationId, params.organizationId),
+                eq(exceptions.transactionId, transactions.id),
+                eq(exceptions.subCategory, REFUND_NOT_SETTLED),
+              ),
+            ),
+        ),
+      ),
+    );
+  const config = inlineRetailConfig(params.currency);
+  const raised = overdue
+    .map((row) => ({ transactionId: row.id, ...classifyRetailException(withShopifyRefundEvent(row) as Transaction, [], config) }))
+    .filter((classification) => classification.category === REFUND_NOT_SETTLED);
+  await raiseRetailExceptions(db, params.organizationId, params.currency, raised);
+  return raised.length;
+}
+
+const REFUND_NOT_SETTLED = "retail_refund_not_settled";
 
 // Defined once in channelCodes.ts; re-exported for existing importers.
 export { shopifySettlementEvidenceChannelCode };
@@ -642,6 +726,17 @@ export async function importShopifySettlementEvidence(
         );
         matchedCount = result.matchedCount;
         exceptionCount = result.exceptionCount;
+        // Settlement now runs to this file's last date: refunds it has had
+        // the grace period to show and still does not are due, whichever file
+        // named their order.
+        exceptionCount += await (deps.flagOverdueRefunds ?? flagOverdueShopifyRefunds)(tx, {
+          organizationId: context.organizationId,
+          storeId: context.storeId,
+          ordersChannelId,
+          settlementChannelId,
+          dueBefore: new Date(Math.max(...times) - SHOPIFY_SETTLEMENT_GRACE_MS),
+          currency: context.currency ?? "USD",
+        });
       }
 
       await tx

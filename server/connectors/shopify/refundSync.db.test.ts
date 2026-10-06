@@ -17,6 +17,7 @@ import { shopifyConnectorStores, shopifySyncCursors } from "../../../drizzle/sho
 import { classifyDatabaseTarget } from "../../dbTarget";
 import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 import type { NormalizedShopifyOrder, NormalizedShopifyRefund } from "./orders";
+import { importShopifySettlementEvidence } from "./settlementEvidence";
 import { runShopifyOrderSync } from "./syncOrchestrator";
 
 const url = process.env.DATABASE_URL;
@@ -250,6 +251,67 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
         .from(exceptions)
         .where(eq(exceptions.organizationId, organizationId));
       expect(flagged).toEqual([]);
+    });
+  });
+  describe("when a refund's settlement never arrives", () => {
+    const OVERDUE = "gid://shopify/Order/5550005";
+    // The import, as App Home calls it, with the file already parsed.
+    const importFile = (lines: Array<{ order: string; amount: string; date: string }>) =>
+      importShopifySettlementEvidence(
+        {
+          storeId,
+          organizationId,
+          shopDomain: `refund-sync-${organizationId}.myshopify.com`,
+          displayName: "Refund sync test",
+          currency: "USD",
+          shopifyUserId: "staff-1",
+        },
+        { fileName: "settlement.csv", content: "x", contentEncoding: "utf8", sourceLabel: "Gateway", dryRun: false },
+        db as never,
+        {
+          parseFile: async () => ({
+            headers: ["order_number", "settled_amount", "settlement_date"],
+            rows: lines.map((line) => ({ order_number: line.order, settled_amount: line.amount, settlement_date: line.date })),
+            parseErrors: [],
+          }),
+          auditCommitted: async () => undefined,
+        },
+      );
+    const refundFlags = async (gid = OVERDUE, refundId = "gid://shopify/Refund/61") => {
+      const [refundRow] = await db
+        .select({ id: transactions.id })
+        .from(transactions)
+        .where(and(eq(transactions.transactionRef, gid), eq(transactions.shopifyRefundId, refundId)));
+      return db
+        .select({ subCategory: exceptions.subCategory })
+        .from(exceptions)
+        .where(and(eq(exceptions.organizationId, organizationId), eq(exceptions.transactionId, refundRow.id)));
+    };
+
+    it("should hold the alert while the refund may still settle in the next file", async () => {
+      await sync(order("2026-09-21T10:00:00.000Z", [refund(61, "10.00")], OVERDUE));
+      // The order's payment settles; the refund made the day before does not appear.
+      await importFile([{ order: "#5550005", amount: "100.00", date: "2026-09-22" }]);
+
+      expect(await refundFlags()).toEqual([]);
+    });
+
+    it("should flag it once a later file covers past its grace period, though that file names another order", async () => {
+      await importFile([{ order: "#5550002", amount: "7.00", date: "2026-10-05" }]);
+
+      expect(await refundFlags()).toEqual([{ subCategory: "retail_refund_not_settled" }]);
+      // So is the earlier order whose payment was evidenced but whose refund line never came…
+      expect(await refundFlags("gid://shopify/Order/5550004", "gid://shopify/Refund/51")).toEqual([
+        { subCategory: "retail_refund_not_settled" },
+      ]);
+      // …but not a refund of an order with no evidence on file: it may be paid elsewhere.
+      expect(await refundFlags("gid://shopify/Order/5550003", "gid://shopify/Refund/41")).toEqual([]);
+    });
+
+    it("should not flag it again", async () => {
+      await importFile([{ order: "#5550002", amount: "8.00", date: "2026-10-12" }]);
+
+      expect(await refundFlags()).toHaveLength(1);
     });
   });
 });
