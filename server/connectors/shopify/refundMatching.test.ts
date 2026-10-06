@@ -210,6 +210,13 @@ describe("when a refund's settlement line may simply not have arrived yet", () =
     expect(exceptions).toEqual([expect.objectContaining({ transactionId: 10, subCategory: "retail_refund_not_settled" })]);
   });
 
+  it("should neither match nor flag a refund Shopify corrected to zero", async () => {
+    const corrected = shopifyLedger(order("100.00", [refund(9, "0.00")]));
+    const { pairs, exceptions } = await reconcile(corrected, file(), { orderSideBefore: new Date("2026-09-25T00:00:00Z") });
+    expect(pairs).toEqual([[1, 100]]);
+    expect(exceptions).toEqual([]);
+  });
+
   it("should flag nothing at all in a pass that only matches", async () => {
     const { result, pairs, exceptions } = await reconcile(ledger(), settlementFile([["-30.00", "2026-09-22"]]), "none");
     // The refund matches its line; the order's payment line is elsewhere, and is not flagged here.

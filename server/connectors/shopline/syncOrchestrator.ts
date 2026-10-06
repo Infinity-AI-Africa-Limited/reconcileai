@@ -771,6 +771,16 @@ export async function raiseRetailExceptions(
  * row holds nothing beyond its projection), so the event is derived here from
  * the row's own refund id, in memory only.
  */
+/**
+ * A Shopify refund row whose refund, Shopify now says, returned no money. It is
+ * kept — its match history and audit trail point at it — but it is no longer
+ * part of the ledger: matching it to anything, or flagging it as missing from
+ * settlement, would both be wrong.
+ */
+export function refundReturnedNoMoney(row: { shopifyRefundId: string; amount: string | number }): boolean {
+  return row.shopifyRefundId !== "" && Number(row.amount) === 0;
+}
+
 export function withShopifyRefundEvent<T extends { shopifyRefundId: string; rawData: unknown }>(row: T): T {
   if (!row.shopifyRefundId) return row;
   return { ...row, rawData: { gatewayEventType: "refund", refundId: row.shopifyRefundId } };
@@ -840,12 +850,12 @@ export async function runReconciliationOnPersistedData(
   if (orderRefs && orderRefs.length === 0) return { matchedCount: 0, exceptionCount: 0 };
 
   // Fetch persisted transactions for the window
-  const sourceRows = await selectUnmatchedLeg(db, {
-    organizationId, channelId: ordersChannelId, from, to, orderRefs,
-  });
-  const targetRows = await selectUnmatchedLeg(db, {
-    organizationId, channelId: paymentsChannelId, from, to, orderRefs,
-  });
+  const sourceRows = (
+    await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs })
+  ).filter((row) => !refundReturnedNoMoney(row));
+  const targetRows = (
+    await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs })
+  ).filter((row) => !refundReturnedNoMoney(row));
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
     return { matchedCount: 0, exceptionCount: 0 };

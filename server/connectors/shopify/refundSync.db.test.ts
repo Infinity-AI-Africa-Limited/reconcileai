@@ -313,5 +313,17 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
 
       expect(await refundFlags()).toHaveLength(1);
     });
+
+    it("should not flag a refund Shopify has since corrected to zero", async () => {
+      const ZERO = "gid://shopify/Order/5550006";
+      await sync(order("2026-09-21T10:00:00.000Z", [refund(71, "10.00")], ZERO));
+      await importFile([{ order: "#5550006", amount: "100.00", date: "2026-09-22" }]);
+      // Shopify now says the refund returned nothing.
+      await sync(order("2026-09-23T10:00:00.000Z", [refund(71, "0.00")], ZERO));
+
+      await importFile([{ order: "#5550002", amount: "9.00", date: "2026-10-20" }]);
+
+      expect(await refundFlags(ZERO, "gid://shopify/Refund/71")).toEqual([]);
+    });
   });
 });

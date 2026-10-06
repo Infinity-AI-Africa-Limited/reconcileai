@@ -1,4 +1,4 @@
-import { and, eq, exists, inArray, lt, ne, notExists, or, sql } from "drizzle-orm";
+import { and, eq, exists, gt, inArray, lt, ne, notExists, or, sql } from "drizzle-orm";
 import { alias, QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   channels,
@@ -137,6 +137,23 @@ export interface ShopifySettlementEvidenceDeps {
   reconcile?: Reconcile;
   auditCommitted?: AuditCommitted;
   flagOverdueRefunds?: typeof flagOverdueShopifyRefunds;
+  now?: () => Date;
+}
+
+/**
+ * How far settlement evidence now runs: the file's latest settlement DATE, never
+ * past the moment of import. Only rows the file actually dated count — a row
+ * with no date is stamped with the import time, which says nothing about the
+ * period the file covers — and a date in the future is a mistake in the file,
+ * not coverage. Null when the file dated nothing: it then supports no claim that
+ * anything is missing from settlement.
+ */
+export function settlementCoveredUntil(rows: InsertTransaction[], now: Date): Date | null {
+  const dated = rows
+    .map((row) => (row.valueDate ? new Date(row.valueDate).getTime() : NaN))
+    .filter((time) => Number.isFinite(time));
+  if (dated.length === 0) return null;
+  return new Date(Math.min(Math.max(...dated), now.getTime()));
 }
 
 /**
@@ -175,6 +192,8 @@ export async function flagOverdueShopifyRefunds(
         eq(transactions.channelId, params.ordersChannelId),
         eq(transactions.shopifyStoreId, params.storeId),
         ne(transactions.shopifyRefundId, ""),
+        // A refund Shopify now says returned no money is not missing anywhere.
+        gt(transactions.amount, "0"),
         eq(transactions.status, "unmatched"),
         lt(transactions.transactionDate, params.dueBefore),
         exists(
@@ -697,6 +716,7 @@ export async function importShopifySettlementEvidence(
       let exceptionCount = 0;
       if (fresh.length > 0) {
         const times = fresh.map((row: InsertTransaction) => new Date(row.transactionDate).getTime());
+        const coveredUntil = settlementCoveredUntil(fresh, (deps.now ?? (() => new Date()))());
         // No lower bound: the scope below is already the orders this file
         // names, and their Shopify rows are dated by the ORDER and the REFUND,
         // which a settlement routinely follows by more than days — a COD
@@ -718,7 +738,8 @@ export async function importShopifySettlementEvidence(
           // file not yet imported must not be flagged for its absence — nor
           // their recent rows, which may settle in the next file.
           {
-            flag: { orderSideBefore: new Date(Math.max(...times) - SHOPIFY_SETTLEMENT_GRACE_MS) },
+            // A file that dated nothing supports no claim that a row is missing.
+            flag: { orderSideBefore: new Date(coveredUntil ? coveredUntil.getTime() - SHOPIFY_SETTLEMENT_GRACE_MS : 0) },
             orderRefs: fresh
               .map((row) => row.transactionRef)
               .filter((ref): ref is string => Boolean(ref)),
@@ -729,14 +750,16 @@ export async function importShopifySettlementEvidence(
         // Settlement now runs to this file's last date: refunds it has had
         // the grace period to show and still does not are due, whichever file
         // named their order.
-        exceptionCount += await (deps.flagOverdueRefunds ?? flagOverdueShopifyRefunds)(tx, {
-          organizationId: context.organizationId,
-          storeId: context.storeId,
-          ordersChannelId,
-          settlementChannelId,
-          dueBefore: new Date(Math.max(...times) - SHOPIFY_SETTLEMENT_GRACE_MS),
-          currency: context.currency ?? "USD",
-        });
+        if (coveredUntil) {
+          exceptionCount += await (deps.flagOverdueRefunds ?? flagOverdueShopifyRefunds)(tx, {
+            organizationId: context.organizationId,
+            storeId: context.storeId,
+            ordersChannelId,
+            settlementChannelId,
+            dueBefore: new Date(coveredUntil.getTime() - SHOPIFY_SETTLEMENT_GRACE_MS),
+            currency: context.currency ?? "USD",
+          });
+        }
       }
 
       await tx
