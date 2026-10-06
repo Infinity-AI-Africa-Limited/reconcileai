@@ -33,6 +33,7 @@ import {
   loadPrivacyArtifactForDownload,
 } from "./privacyCompletion";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
+import { SHOPIFY_OAUTH_CALLBACK_PATH } from "./paths";
 
 const FLOW_COOKIE = "shopify_oauth_flow";
 
@@ -80,7 +81,7 @@ function appOrigin(req: Request): string {
 }
 
 function redirectUri(req: Request): string {
-  return `${appOrigin(req)}/api/shopify/callback`;
+  return `${appOrigin(req)}${SHOPIFY_OAUTH_CALLBACK_PATH}`;
 }
 
 /** cookie-parser is not installed; parse one named cookie without decoding other values. */
@@ -245,7 +246,7 @@ export function createShopifyRouter(): express.Router {
     }
   });
 
-  router.get("/api/shopify/callback", async (req, res) => {
+  router.get(SHOPIFY_OAUTH_CALLBACK_PATH, async (req, res) => {
     const query = parseUniqueQuery(req.query as Record<string, unknown>);
     if (!query || !ENV.shopifyClientId || !ENV.shopifyClientSecret) return callbackError(res, "invalid_callback");
 

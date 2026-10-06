@@ -1,0 +1,49 @@
+# ReconcileAI Dev Store — Scope A, read-only order-evidence workspace.
+#
+# This is the app-specific Shopify configuration. It intentionally excludes all
+# Shopify Payments, write, customer-account, billing, POS, proxy and storefront
+# capabilities. Deploy it only through the reviewed Shopify CLI release path.
+
+name = "ReconcileAI Dev Store"
+client_id = "fd5ae266d3239ea3662f735db980b688"
+application_url = "https://www.reconcileaiafrica.com/shopify/app"
+embedded = true
+
+[access_scopes]
+scopes = "read_orders"
+# ReconcileAI currently performs the authorization-code exchange server-side at
+# /api/shopify/callback, so this must remain true until the connector is
+# deliberately migrated to Shopify managed installation and token exchange.
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = [
+  "https://www.reconcileaiafrica.com/api/shopify/callback",
+]
+
+[webhooks]
+# Match the Admin API version stored for every Shopify connection in ReconcileAI.
+api_version = "2026-07"
+
+[[webhooks.subscriptions]]
+topics = [
+  "orders/create",
+  "orders/paid",
+  "orders/cancelled",
+  "orders/edited",
+  "orders/updated",
+  "app/uninstalled",
+]
+uri = "https://www.reconcileaiafrica.com/api/webhooks/shopify"
+
+[[webhooks.subscriptions]]
+compliance_topics = [
+  "customers/data_request",
+  "customers/redact",
+  "shop/redact",
+]
+uri = "https://www.reconcileaiafrica.com/api/webhooks/shopify"
+
+[build]
+# A local CLI tunnel must never overwrite production app or callback URLs.
+automatically_update_urls_on_dev = false
