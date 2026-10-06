@@ -154,7 +154,7 @@ describe("Shopify managed installation", () => {
     expect(state.onboard).not.toHaveBeenCalled();
   });
 
-  it("should refuse before database access or exchange when durable queues are unavailable", async () => {
+  it("should refuse before taking the lease or exchanging when durable queues are unavailable", async () => {
     state.queues.mockResolvedValue({
       status: "unavailable",
       durable: false,
@@ -169,6 +169,30 @@ describe("Shopify managed installation", () => {
         })
       )
     ).toBe("DURABLE_QUEUE_UNAVAILABLE");
+    expect(state.acquire).not.toHaveBeenCalled();
+    expect(state.exchange).not.toHaveBeenCalled();
+  });
+
+  it("should still report an active store as connected when durable queues are unavailable", async () => {
+    // The queues are asked only when an installation has to run. App Home awaits
+    // this call before its own database-backed context read, so refusing here
+    // would hide an already-connected merchant's sync status — which needs no
+    // queue — behind "this workspace is not ready".
+    state.db = scriptedDb({ select: { [STORES]: [[{ id: 7 }]] } }).db;
+    state.queues.mockResolvedValue({
+      status: "unavailable",
+      durable: false,
+      reason: "queue_unavailable",
+    });
+
+    await expect(
+      completeShopifyManagedInstall({
+        authorization: "Bearer id-token",
+        origin: "https://www.reconcileaiafrica.com",
+      })
+    ).resolves.toEqual({ status: "already_connected" });
+
+    expect(state.queues).not.toHaveBeenCalled();
     expect(state.acquire).not.toHaveBeenCalled();
     expect(state.exchange).not.toHaveBeenCalled();
   });

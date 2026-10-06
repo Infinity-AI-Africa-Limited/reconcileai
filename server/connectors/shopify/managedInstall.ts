@@ -59,14 +59,19 @@ export async function completeShopifyManagedInstall(params: {
   origin: string;
 }): Promise<ShopifyManagedInstallResult> {
   const identity = await verifyShopifyIdToken(params.authorization);
-  const queueReadiness = await confirmShopifyRuntimeQueues();
-  if (!queueReadiness.durable)
-    throw new ShopifyManagedInstallError("DURABLE_QUEUE_UNAVAILABLE");
 
   const db = await getDb();
   if (!db) throw new ShopifyManagedInstallError("TOKEN_EXCHANGE_RETRY");
   if (await hasActiveStore(db, identity.shopDomain))
     return { status: "already_connected" };
+
+  // Only now, with an installation actually about to run. Asked any earlier it
+  // would refuse an ALREADY-CONNECTED store whenever Redis is unavailable, and
+  // App Home awaits this before its own database-backed context read — so the
+  // merchant would lose sight of a sync status that needs no queue at all.
+  const queueReadiness = await confirmShopifyRuntimeQueues();
+  if (!queueReadiness.durable)
+    throw new ShopifyManagedInstallError("DURABLE_QUEUE_UNAVAILABLE");
 
   const leaseId = await acquireInstallLease(db, identity.shopDomain);
   if (!leaseId)

@@ -1,6 +1,7 @@
 import { createTRPCClient, httpLink, TRPCClientError } from "@trpc/client";
 import superjson from "superjson";
 import type { AppRouter } from "../../../server/routers";
+import { shopifyInstallErrorMessage } from "./shopifyConnection";
 
 export type ShopifyAppBridgeContext = {
   store: {
@@ -101,7 +102,7 @@ const APP_BRIDGE_POLL_MS = 50;
 let bridgeReady: Promise<ShopifyAppBridgeApi> | null = null;
 
 export class ShopifyAppHomeClientError extends Error {
-  constructor(public readonly code: "CONFIGURATION_UNAVAILABLE" | "APP_BRIDGE_UNAVAILABLE" | "AUTHENTICATION_REQUIRED" | "INSTALLATION_IN_PROGRESS" | "REQUIRED_PERMISSIONS_NOT_GRANTED" | "STORE_ACTION_REQUIRED" | "ORDER_SYNC_REQUIRED" | "ACTIVE_ADMIN_REQUIRED" | "INVALID_REQUEST" | "SYNC_IN_PROGRESS" | "SERVICE_UNAVAILABLE") {
+  constructor(public readonly code: "CONFIGURATION_UNAVAILABLE" | "APP_BRIDGE_UNAVAILABLE" | "AUTHENTICATION_REQUIRED" | "INSTALLATION_IN_PROGRESS" | "REQUIRED_PERMISSIONS_NOT_GRANTED" | "STORE_ACTION_REQUIRED" | "ORDER_SYNC_REQUIRED" | "ACTIVE_ADMIN_REQUIRED" | "INVALID_REQUEST" | "SYNC_IN_PROGRESS" | "SERVICE_UNAVAILABLE" | "OWNERSHIP_VERIFICATION_REQUIRED" | "EMAIL_ALREADY_REGISTERED" | "REDACTION_IN_PROGRESS" | "MISSING_CONTACT_EMAIL" | "STORE_IDENTITY_CONFLICT") {
     super(code);
     this.name = "ShopifyAppHomeClientError";
   }
@@ -118,6 +119,11 @@ const MESSAGE_CODES: Record<string, ShopifyAppHomeClientError["code"]> = {
   store_action_required: "STORE_ACTION_REQUIRED",
   configuration_unavailable: "CONFIGURATION_UNAVAILABLE",
   service_unavailable: "SERVICE_UNAVAILABLE",
+  ownership_verification_required: "OWNERSHIP_VERIFICATION_REQUIRED",
+  email_already_registered: "EMAIL_ALREADY_REGISTERED",
+  redaction_in_progress: "REDACTION_IN_PROGRESS",
+  missing_contact_email: "MISSING_CONTACT_EMAIL",
+  store_identity_conflict: "STORE_IDENTITY_CONFLICT",
 };
 
 /**
@@ -318,6 +324,16 @@ export function shopifyAppHomeErrorMessage(error: unknown): string {
       return "A reconciliation sync is already running for this store. Wait a moment, then refresh this page.";
     case "SERVICE_UNAVAILABLE":
       return "ReconcileAI is temporarily unavailable. Please try again shortly.";
+    case "OWNERSHIP_VERIFICATION_REQUIRED":
+      return shopifyInstallErrorMessage("ownership_verification_required");
+    case "EMAIL_ALREADY_REGISTERED":
+      return shopifyInstallErrorMessage("email_already_registered");
+    case "REDACTION_IN_PROGRESS":
+      return shopifyInstallErrorMessage("redaction_in_progress");
+    case "MISSING_CONTACT_EMAIL":
+      return shopifyInstallErrorMessage("missing_contact_email");
+    case "STORE_IDENTITY_CONFLICT":
+      return shopifyInstallErrorMessage("store_identity_conflict");
   }
 }
 
