@@ -22,6 +22,12 @@ export interface ShopifyEmbeddedContext {
   shopifyUserId: string;
 }
 
+/** Verified App Bridge identity, available before a ReconcileAI store row exists. */
+export interface VerifiedShopifyIdToken {
+  shopDomain: string;
+  shopifyUserId: string;
+}
+
 export type ShopifyEmbeddedAuthErrorCode =
   | "CONFIG_UNAVAILABLE"
   | "AUTHORIZATION_REQUIRED"
@@ -52,13 +58,16 @@ export function shopifyEmbeddedAuthHttpStatus(error: ShopifyEmbeddedAuthError): 
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
-export interface ShopifyEmbeddedAuthDeps {
+export interface ShopifyIdTokenVerificationDeps {
   /** Test seam; production always reads the deployment's SHOPIFY_CLIENT_ID. */
   clientId?: string;
   /** Test seam; production always reads the deployment's SHOPIFY_CLIENT_SECRET. */
   clientSecret?: string;
-  getDatabase?: () => Promise<Db | null>;
   currentDate?: Date;
+}
+
+export interface ShopifyEmbeddedAuthDeps extends ShopifyIdTokenVerificationDeps {
+  getDatabase?: () => Promise<Db | null>;
 }
 
 function configuredValue(override: string | undefined, configured: string): string {
@@ -95,14 +104,14 @@ function httpsUrl(value: unknown): URL | null {
 }
 
 /**
- * Authenticate one Shopify App Bridge ID token and bind it to the active store
- * selected by its signed `dest`/`iss` claims. This performs no provider call and
- * keeps neither the bearer token nor its decoded claims after returning.
+ * Verify one App Bridge ID token and return only its authority-bearing identity.
+ * This performs no provider call. Managed installation uses it before any store
+ * exists; App Home then binds the same verified shop to an active store below.
  */
-export async function authenticateShopifyEmbeddedRequest(
+export async function verifyShopifyIdToken(
   authorization: Request["headers"]["authorization"],
-  deps: ShopifyEmbeddedAuthDeps = {},
-): Promise<ShopifyEmbeddedContext> {
+  deps: ShopifyIdTokenVerificationDeps = {},
+): Promise<VerifiedShopifyIdToken> {
   const clientId = configuredValue(deps.clientId, ENV.shopifyClientId);
   const clientSecret = configuredValue(deps.clientSecret, ENV.shopifyClientSecret);
   if (!clientId || !clientSecret) throw new ShopifyEmbeddedAuthError("CONFIG_UNAVAILABLE");
@@ -152,6 +161,20 @@ export async function authenticateShopifyEmbeddedRequest(
     throw new ShopifyEmbeddedAuthError("SHOP_MISMATCH");
   }
 
+  return { shopDomain: destinationShop, shopifyUserId };
+}
+
+/**
+ * Authenticate one Shopify App Bridge ID token and bind it to the active store
+ * selected by its signed `dest`/`iss` claims. This performs no provider call and
+ * keeps neither the bearer token nor its decoded claims after returning.
+ */
+export async function authenticateShopifyEmbeddedRequest(
+  authorization: Request["headers"]["authorization"],
+  deps: ShopifyEmbeddedAuthDeps = {},
+): Promise<ShopifyEmbeddedContext> {
+  const verified = await verifyShopifyIdToken(authorization, deps);
+
   let db: Db | null;
   try {
     db = await (deps.getDatabase ?? getDb)();
@@ -172,7 +195,7 @@ export async function authenticateShopifyEmbeddedRequest(
       .from(shopifyConnectorStores)
       .where(
         and(
-          eq(shopifyConnectorStores.shopDomain, destinationShop),
+          eq(shopifyConnectorStores.shopDomain, verified.shopDomain),
           eq(shopifyConnectorStores.status, "active"),
         ),
       )
@@ -184,7 +207,7 @@ export async function authenticateShopifyEmbeddedRequest(
       shopDomain: store.shopDomain,
       displayName: store.displayName,
       currency: store.currency,
-      shopifyUserId,
+      shopifyUserId: verified.shopifyUserId,
     };
   } catch (error) {
     if (error instanceof ShopifyEmbeddedAuthError) throw error;

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { ReauthorizationTicket } from "./onboarding";
 
 export const SHOPIFY_DOMAIN_SUFFIX = ".myshopify.com";
 
@@ -220,7 +221,14 @@ async function shopifyFetch(url: string, init: RequestInit): Promise<Response> {
 }
 
 async function parseTokenResponse(response: Response): Promise<ShopifyTokenResponse> {
-  const body = (await response.json()) as Partial<ShopifyTokenResponse>;
+  let body: Partial<ShopifyTokenResponse>;
+  try {
+    body = (await response.json()) as Partial<ShopifyTokenResponse>;
+  } catch {
+    // Never the parser's own message: Node quotes the start of the input in it,
+    // and the input is a token response, so a truncated body carries a token.
+    throw new Error("Shopify returned an unreadable token response");
+  }
   if (
     typeof body.access_token !== "string" ||
     typeof body.refresh_token !== "string" ||
@@ -232,13 +240,20 @@ async function parseTokenResponse(response: Response): Promise<ShopifyTokenRespo
   return body as ShopifyTokenResponse;
 }
 
+/** Resolve the only endpoint that may receive ReconcileAI's Shopify credentials. */
+function shopifyTokenEndpoint(shopDomain: string): string {
+  const normalized = normalizeShopDomain(shopDomain);
+  if (!normalized) throw new Error("Invalid Shopify shop domain");
+  return `https://${normalized}/admin/oauth/access_token`;
+}
+
 export async function exchangeAuthorizationCode(params: {
   shopDomain: string;
   clientId: string;
   clientSecret: string;
   code: string;
 }): Promise<ShopifyTokenResponse> {
-  const response = await shopifyFetch(`https://${params.shopDomain}/admin/oauth/access_token`, {
+  const response = await shopifyFetch(shopifyTokenEndpoint(params.shopDomain), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
     body: new URLSearchParams({
@@ -250,6 +265,76 @@ export async function exchangeAuthorizationCode(params: {
   });
   if (!response.ok) throw new Error(`Shopify authorization-code exchange failed (${response.status})`);
   return parseTokenResponse(response);
+}
+
+export type TokenExchangeResult =
+  | { kind: "exchanged"; token: ShopifyTokenResponse }
+  /** The ID token was expired or invalid: have App Bridge issue a fresh one and try again. */
+  | { kind: "id_token_rejected" }
+  /** Shopify was unreachable, rate limiting or failing: try again later. */
+  | { kind: "retry" }
+  /** Shopify refused a request of ours (configuration, or a bug): retrying will not help. */
+  | { kind: "failed" };
+
+/**
+ * Exchange a verified, fresh App Bridge ID token for Shopify's expiring offline
+ * access-token pair. The caller owns ID-token verification, browser input,
+ * onboarding, persistence and authorization policy.
+ *
+ * ── This exchange retires the store's stored credentials ──────────────────
+ *
+ * Every grant of a new offline pair retires the other refresh tokens the app
+ * holds for the store (shopify.dev, "How refresh token rotation works"; the
+ * authorization-code path in onboarding.ts is built on the same fact). Called
+ * for a store that is already connected, it kills the stored refresh token,
+ * and the connection fails within the hour unless the new pair is stored under
+ * the same fences as the callback's. So it demands `reauthorization`: the
+ * ticket only `suspendForReauthorization` issues. Holding one proves the
+ * caller took the store out of service first, under its install lease, AND
+ * passed the redaction fence that keeps a tenant being deleted from acquiring
+ * new credentials. Pass the same ticket on to `onboardShopifyMerchant`.
+ *
+ * Failures come back by kind, never as Shopify's text. An expired ID token is
+ * the usual case (they live about a minute), and it calls for a fresh token,
+ * not an error page.
+ */
+export async function exchangeShopifyIdTokenForOfflineAccess(params: {
+  shopDomain: string;
+  clientId: string;
+  clientSecret: string;
+  idToken: string;
+  /** Not read here: having one is the point. See above. */
+  reauthorization: ReauthorizationTicket;
+}): Promise<TokenExchangeResult> {
+  if (!params.clientId.trim() || !params.clientSecret.trim() || !params.idToken.trim()) {
+    throw new Error("Shopify token exchange is not configured");
+  }
+  let response: Response;
+  try {
+    response = await shopifyFetch(shopifyTokenEndpoint(params.shopDomain), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: new URLSearchParams({
+        client_id: params.clientId,
+        client_secret: params.clientSecret,
+        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+        subject_token: params.idToken,
+        subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+        requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
+        expiring: "1",
+      }),
+    });
+  } catch (error) {
+    if (error instanceof ShopifyTransportError) return { kind: "retry" };
+    throw error;
+  }
+
+  if (response.status === 429 || response.status >= 500) return { kind: "retry" };
+  if ((response.status === 400 || response.status === 401) && (await presentedTokenRejected(response))) {
+    return { kind: "id_token_rejected" };
+  }
+  if (!response.ok) return { kind: "failed" };
+  return { kind: "exchanged", token: await parseTokenResponse(response) };
 }
 
 export type RefreshResult =
@@ -266,7 +351,7 @@ export async function refreshExpiringOfflineToken(params: {
 }): Promise<RefreshResult> {
   let response: Response;
   try {
-    response = await shopifyFetch(`https://${params.shopDomain}/admin/oauth/access_token`, {
+    response = await shopifyFetch(shopifyTokenEndpoint(params.shopDomain), {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
       body: new URLSearchParams({
@@ -282,14 +367,15 @@ export async function refreshExpiringOfflineToken(params: {
   }
 
   if (response.status === 401) return { kind: "reauthorize" };
-  if (response.status === 400 && (await refreshTokenRejected(response))) return { kind: "reauthorize" };
+  if (response.status === 400 && (await presentedTokenRejected(response))) return { kind: "reauthorize" };
   if (response.status === 429 || response.status >= 500) return { kind: "retry" };
   if (!response.ok) return { kind: "failed" };
   return { kind: "refreshed", token: await parseTokenResponse(response) };
 }
 
 /**
- * OAuth errors that say the presented refresh token itself is no longer good.
+ * OAuth errors that say the token we presented, whether a refresh token or an
+ * App Bridge ID token, is itself no longer good.
  * Shopify answers an expired, revoked or rotated-away refresh token with HTTP
  * 400 — its own library tests model it as `{ error: "invalid_subject_token" }`
  * — and RFC 6749 §5.2 names the generic case `invalid_grant`. Treated as a
@@ -299,12 +385,13 @@ export async function refreshExpiringOfflineToken(params: {
  * Any OTHER 400 (a malformed request is ours to fix) stays `failed`: taking
  * every store out of service over a bug of ours would be the worse error.
  */
-const REJECTED_REFRESH_TOKEN_ERRORS = new Set(["invalid_subject_token", "invalid_grant"]);
+const REJECTED_PRESENTED_TOKEN_ERRORS = new Set(["invalid_subject_token", "invalid_grant"]);
 
-async function refreshTokenRejected(response: Response): Promise<boolean> {
+/** Whether Shopify rejected the token we presented: a refresh token, or an App Bridge ID token. */
+async function presentedTokenRejected(response: Response): Promise<boolean> {
   try {
     const body = (await response.json()) as { error?: unknown };
-    return typeof body?.error === "string" && REJECTED_REFRESH_TOKEN_ERRORS.has(body.error);
+    return typeof body?.error === "string" && REJECTED_PRESENTED_TOKEN_ERRORS.has(body.error);
   } catch {
     return false;
   }

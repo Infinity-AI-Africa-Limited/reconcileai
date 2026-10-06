@@ -1,6 +1,6 @@
 import { SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
-import { authenticateShopifyEmbeddedRequest, ShopifyEmbeddedAuthError } from "./embeddedAuth";
+import { authenticateShopifyEmbeddedRequest, ShopifyEmbeddedAuthError, verifyShopifyIdToken } from "./embeddedAuth";
 import { scriptedDb } from "./scriptedDb.testkit";
 
 const CLIENT_ID = "shopify-client-id";
@@ -58,6 +58,16 @@ async function expectCode(promise: Promise<unknown>, code: ShopifyEmbeddedAuthEr
 }
 
 describe("Shopify embedded App Home authentication", () => {
+  it("exposes a verified shop identity for managed installation before a store row exists", async () => {
+    await expect(
+      verifyShopifyIdToken(`Bearer ${await idToken()}`, {
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        currentDate: NOW,
+      }),
+    ).resolves.toEqual({ shopDomain: SHOP, shopifyUserId: "gid://shopify/User/123" });
+  });
+
   it("accepts a valid HS256 ID token and returns only the active store's minimal context", async () => {
     const { result, db } = auth(await idToken());
 
