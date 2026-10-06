@@ -24,6 +24,7 @@ import {
 } from "./auth";
 import { fetchShopifyShopMetadata } from "./apiClient";
 import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
+import { onboardingFailureReason } from "./onboardingFailure";
 import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./installLease";
 import { confirmShopifyRuntimeQueues } from "./runtimeQueueReadiness";
 import {
@@ -40,27 +41,14 @@ const FLOW_COOKIE = "shopify_oauth_flow";
 /** Consumed states are kept this long past expiry for diagnosis, then purged. */
 const STATE_RETENTION_AFTER_EXPIRY_MS = 60 * 60_000;
 
-/** The error-page reason for a failed callback. Pure, so every mapping is testable. */
-export function callbackReasonFor(error: unknown): ShopifyInstallErrorReason {
-  if (!(error instanceof ShopifyOnboardingError)) return "install_failed";
-  switch (error.code) {
-    case "OWNERSHIP_UNVERIFIED":
-      return "ownership_verification_required";
-    case "EMAIL_CONFLICT":
-      return "email_already_registered";
-    case "REDACTION_IN_PROGRESS":
-      return "redaction_in_progress";
-    case "MISSING_CONTACT_EMAIL":
-      return "missing_contact_email";
-    case "SHOP_IDENTITY_CONFLICT":
-    case "WORKSPACE_CONFLICT":
-      return "store_identity_conflict";
-    case "INSTALL_LEASE_LOST":
-      return "installation_in_progress";
-    default:
-      return "install_failed";
-  }
-}
+/**
+ * The error-page reason for a failed callback.
+ *
+ * Kept as this module's name for the classification, which now lives in
+ * `onboardingFailure.ts` because App Home must answer the same question and
+ * must not answer it differently.
+ */
+export const callbackReasonFor: (error: unknown) => ShopifyInstallErrorReason = onboardingFailureReason;
 
 class ShopifyNotConfiguredError extends Error {}
 

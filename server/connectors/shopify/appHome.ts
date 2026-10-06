@@ -12,8 +12,11 @@ import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { shopifySyncCursors, shopifySyncRequests } from "../../../drizzle/shopify_schema";
 import type { getDb } from "../../db";
-import type { ShopifyEmbeddedContext } from "./embeddedAuth";
+import { ShopifyEmbeddedAuthError, type ShopifyEmbeddedContext } from "./embeddedAuth";
+import { ShopifyManagedInstallError } from "./managedInstall";
 import { ShopifyManualSyncError } from "./manualSync";
+import { ShopifyOnboardingError } from "./onboarding";
+import { onboardingFailureReason } from "./onboardingFailure";
 import { ShopifySettlementEvidenceError, type ShopifySettlementEvidenceResult } from "./settlementEvidence";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -54,15 +57,77 @@ export const SHOPIFY_APP_HOME_CAPABILITIES = Object.freeze({
 export type ShopifyAppHomeErrorMessage =
   | "configuration_unavailable"
   | "authentication_required"
+  | "installation_in_progress"
+  | "required_permissions_not_granted"
   | "service_unavailable"
   | "sync_in_progress"
   | "store_action_required"
   | "order_sync_required"
   | "active_admin_required"
-  | "invalid_request";
+  | "invalid_request"
+  // Onboarding refusals that no retry can clear. They are spelled exactly as
+  // the legacy install reasons (`shared/shopifyInstall.ts`) so the client
+  // renders them from the copy that already exists for the install error page,
+  // rather than carrying a second wording of the same refusal.
+  | "ownership_verification_required"
+  | "email_already_registered"
+  | "redaction_in_progress"
+  | "missing_contact_email"
+  | "store_identity_conflict";
 
 export function appHomeError(code: TRPCError["code"], message: ShopifyAppHomeErrorMessage): TRPCError {
   return new TRPCError({ code, message });
+}
+
+/** A managed-install refusal rendered as a stable App Home error, never provider text. */
+export function managedInstallFailure(error: unknown): TRPCError {
+  if (error instanceof ShopifyEmbeddedAuthError) {
+    return error.code === "CONFIG_UNAVAILABLE"
+      ? appHomeError("SERVICE_UNAVAILABLE", "configuration_unavailable")
+      : appHomeError("UNAUTHORIZED", "authentication_required");
+  }
+  if (error instanceof ShopifyManagedInstallError) {
+    switch (error.code) {
+      case "INSTALLATION_IN_PROGRESS":
+        return appHomeError("CONFLICT", "installation_in_progress");
+      case "REQUIRED_PERMISSIONS_NOT_GRANTED":
+        return appHomeError("PRECONDITION_FAILED", "required_permissions_not_granted");
+      case "ID_TOKEN_REJECTED":
+        return appHomeError("UNAUTHORIZED", "authentication_required");
+      case "DURABLE_QUEUE_UNAVAILABLE":
+      case "TOKEN_EXCHANGE_RETRY":
+      case "TOKEN_EXCHANGE_FAILED":
+      case "SHOP_METADATA_UNAVAILABLE":
+        return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
+    }
+  }
+  /**
+   * An onboarding refusal is usually NOT transient, and saying
+   * "service_unavailable" to one is actively harmful: the merchant retries, and
+   * every retry re-runs the token exchange, which retires the offline token
+   * pair Shopify issued for the previous attempt — while the shop still has no
+   * contact email, or its email still belongs to another workspace, so the
+   * attempt can never succeed. Classified by the same function the legacy
+   * install page uses (onboardingFailure.ts).
+   */
+  if (error instanceof ShopifyOnboardingError) {
+    const reason = onboardingFailureReason(error);
+    switch (reason) {
+      case "missing_contact_email":
+      case "ownership_verification_required":
+        return appHomeError("PRECONDITION_FAILED", reason);
+      case "email_already_registered":
+      case "redaction_in_progress":
+      case "store_identity_conflict":
+        return appHomeError("CONFLICT", reason);
+      case "installation_in_progress":
+        return appHomeError("CONFLICT", "installation_in_progress");
+      default:
+        // install_failed — transient (DB_UNAVAILABLE, TOKEN_STORE_FAILED).
+        return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
+    }
+  }
+  return appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
 }
 
 /** The store and sync evidence the workspace shows; no id leaves the server. */

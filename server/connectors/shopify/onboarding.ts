@@ -292,6 +292,35 @@ export interface ReauthorizationTicket {
 }
 
 /**
+ * Retire exactly the credential generation a managed-install token exchange
+ * replaced when it cannot continue to onboarding. Shopify has already returned
+ * a fresh pair at this point, so an existing store's old refresh token is dead;
+ * a first installation has nothing to remove.
+ *
+ * The same installation lease fences this cleanup. A stale failure can never
+ * delete the pair a newer managed install has persisted after taking the lease.
+ */
+export async function failClosedAfterTokenExchange(
+  lease: InstallLease,
+  reauthorization: ReauthorizationTicket,
+): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    throw new ShopifyOnboardingError("Could not retire the replaced Shopify credential", "TOKEN_STORE_FAILED", "not_confirmed");
+  }
+  const [store] = await db
+    .select({ id: shopifyConnectorStores.id, organizationId: shopifyConnectorStores.organizationId })
+    .from(shopifyConnectorStores)
+    .where(eq(shopifyConnectorStores.shopDomain, lease.shopDomain))
+    .limit(1);
+  if (!store) return;
+  const state = await failClosed(db, store, "token_store_failed", reauthorization.retiring, lease);
+  if (state === "not_confirmed") {
+    throw new ShopifyOnboardingError("Could not retire the replaced Shopify credential", "TOKEN_STORE_FAILED", state);
+  }
+}
+
+/**
  * The store record this shop already has, by its Shopify id OR its permanent
  * domain. Both are unique, and they must agree: a domain that now names a
  * different shop id (or two records, one per key) cannot be resolved by picking
