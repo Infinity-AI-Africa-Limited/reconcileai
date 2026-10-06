@@ -217,6 +217,8 @@ describe("when a verified App Bridge ID token is exchanged for offline access", 
     clientId: "client-id",
     clientSecret: "client-secret",
     idToken: "signed-id-token",
+    // What suspendForReauthorization issues for a shop with no stored pair.
+    reauthorization: { retiring: "none" as const },
   };
   const token = {
     access_token: "access-token",
@@ -225,15 +227,20 @@ describe("when a verified App Bridge ID token is exchanged for offline access", 
     expires_in: 3600,
     refresh_token_expires_in: 7_776_000,
   };
+  const answer = (status: number, body: unknown) =>
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
 
   afterEach(() => vi.restoreAllMocks());
 
   it("uses Shopify's offline token-exchange grant and requests an expiring pair", async () => {
-    const fetchImpl = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(token), { status: 200, headers: { "Content-Type": "application/json" } }),
-    );
+    const fetchImpl = answer(200, token);
 
-    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).resolves.toEqual(token);
+    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).resolves.toEqual({ kind: "exchanged", token });
 
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0]!;
@@ -265,28 +272,76 @@ describe("when a verified App Bridge ID token is exchanged for offline access", 
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("does not expose the ID token or Shopify error body on a refused exchange", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: "invalid_grant", error_description: params.idToken }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+  it("should not compile without proof the store was taken out of service first", () => {
+    // The exchange retires the store's stored refresh token, so only a caller
+    // holding suspendForReauthorization's ticket may make it. Making the ticket
+    // optional turns this line into an unused directive and fails check:tests.
+    const { reauthorization: _ticket, ...unsuspended } = params;
+    // @ts-expect-error reauthorization is required: see exchangeShopifyIdTokenForOfflineAccess.
+    const call = () => exchangeShopifyIdTokenForOfflineAccess(unsuspended);
+    expect(typeof call).toBe("function");
+  });
 
-    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).rejects.toThrow("Shopify token exchange failed (400)");
-    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).rejects.not.toThrow(params.idToken);
+  describe("when Shopify refuses or cannot answer", () => {
+    // An expired ID token is the usual failure (they live about a minute): it
+    // calls for a fresh token from App Bridge, not an error page. Each answer
+    // comes back by kind, never as Shopify's text.
+    it.each([
+      [400, { error: "invalid_subject_token", error_description: params.idToken }, "id_token_rejected"],
+      [401, { error: "invalid_subject_token" }, "id_token_rejected"],
+      [400, { error: "invalid_grant" }, "id_token_rejected"],
+      [400, { error: "invalid_request", error_description: params.idToken }, "failed"],
+      [401, { error: "invalid_client" }, "failed"],
+      [403, "<html>forbidden</html>", "failed"],
+      [429, { error: "rate_limited" }, "retry"],
+      [503, "<html>unavailable</html>", "retry"],
+    ])("should answer %i %j as %s, carrying none of the response", async (status, body, kind) => {
+      answer(status, body);
+      const result = await exchangeShopifyIdTokenForOfflineAccess(params);
+      expect(result).toEqual({ kind });
+      expect(JSON.stringify(result)).not.toContain(params.idToken);
+    });
+
+    it("should answer retry when Shopify cannot be reached", async () => {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+      await expect(exchangeShopifyIdTokenForOfflineAccess(params)).resolves.toEqual({ kind: "retry" });
+    });
   });
 
   it("rejects a success response that lacks the refreshable token pair", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ access_token: "access-token", scope: "read_orders" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    answer(200, { access_token: "access-token", scope: "read_orders" });
 
     await expect(exchangeShopifyIdTokenForOfflineAccess(params)).rejects.toThrow(
       "Shopify returned an incomplete expiring-token response",
     );
+  });
+});
+
+describe("when a token response cannot be read", () => {
+  // Node's JSON errors quote the start of the input, and a truncated success
+  // body begins with the token. The message must be ours, for every token path.
+  const truncated = '{"access_token":"shpat_live_secret_value","refresh_token":"shprt_';
+  const reply = () =>
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(truncated, { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+  afterEach(() => vi.restoreAllMocks());
+
+  it("should say so without quoting a token, on the exchange and on refresh", async () => {
+    const shop = { shopDomain: "merchant.myshopify.com", clientId: "client-id", clientSecret: "client-secret" };
+    const failures: unknown[] = [];
+    reply();
+    await exchangeShopifyIdTokenForOfflineAccess({ ...shop, idToken: "id", reauthorization: { retiring: "none" } }).catch((e) =>
+      failures.push(e),
+    );
+    vi.restoreAllMocks();
+    reply();
+    await refreshExpiringOfflineToken({ ...shop, refreshToken: "refresh" }).catch((e) => failures.push(e));
+
+    expect(failures).toHaveLength(2);
+    for (const failure of failures) {
+      expect((failure as Error).message).toBe("Shopify returned an unreadable token response");
+      expect(String((failure as Error).stack)).not.toContain("shpat_");
+    }
   });
 });
