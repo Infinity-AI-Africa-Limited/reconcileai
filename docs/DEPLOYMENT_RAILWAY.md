@@ -2,8 +2,14 @@
 
 **Status (2026-10-06):** production already runs on Railway at
 `https://www.reconcileaiafrica.com`, auto-deploying from `main`. This runbook is the
-reference for that service, and for standing up a second one (staging, a disaster-
-recovery copy) from scratch. `reconcileai.vip` is historical; do not configure it.
+reference for that service. `reconcileai.vip` is historical; do not configure it.
+
+> ⚠️ **This runbook describes the production service only.** Do not copy its values into a
+> second Railway service (staging, a disaster-recovery copy). A second service needs its own
+> database, storage bucket, Redis, `APP_URL` and domain, and **no** SHOPLINE or Shopify
+> credentials unless it has its own registered app: the App Store callbacks and webhooks
+> point at the production domain, so a copy would share production data while connector
+> traffic keeps reaching production.
 
 **Stack:** Node 22 · Express + tRPC · Vite/React · Drizzle ORM · MySQL (TiDB Cloud).
 **Build:** `pnpm build` → `dist/index.js` (server) + `dist/public/` (static client).
@@ -76,7 +82,8 @@ REDIS_URL=${{Redis.REDIS_URL}}
 > sync, manual sync and privacy (GDPR) webhooks create their queues with
 > `requireDurable: true` (`server/connectors/shopify/syncQueue.ts`, `privacyQueue.ts`) and
 > refuse to run without Redis. Order webhooks degrade to the 15-minute backstop; privacy
-> requests are acknowledged to Shopify and then **never actioned**. Verify with the boot
+> requests are acknowledged to Shopify and parked in a retryable outbox, so they are
+> **not actioned until Redis is provisioned** — the 30-day obligation keeps running meanwhile. Verify with the boot
 > log line `BullMQ backend active` for `shopify-privacy`, not by webhooks returning 200.
 > See CLAUDE.md §10.
 
@@ -89,6 +96,10 @@ GITHUB_OIDC_AUDIENCE=https://www.reconcileaiafrica.com   # must match OIDC_AUDIE
 GITHUB_OIDC_REPOSITORIES=Infinity-AI-Africa-Limited/reconcileai
 GITHUB_OIDC_REFS=refs/heads/main
 CRON_SECRET=                     # dedicated value; unset falls back to JWT_SECRET
+# CRON_SECRET must ALSO exist as a GitHub Actions secret of the same name, with the same
+# value. Both scheduler workflows send it alongside the OIDC token, and exit before
+# syncing if they have neither. On rotation, change Railway and GitHub together, then
+# delete the legacy SHOPLINE_SYNC_SECRET / WOODCORE_SYNC_SECRET (CLAUDE.md §18).
 
 # SHOPLINE App Store (CLAUDE.md §2B.9). Missing secret = every install, webhook and
 # GDPR delivery fails signature checks.
@@ -223,7 +234,9 @@ use its JSON `checks` to fix the offending one. (Railway healthchecks `/api/heal
 - **LLM:** trigger an exception classification or the Super Agent; confirm a Claude response.
 - **Storage:** generate/share a report; confirm upload + download via R2.
 - **Queue:** the boot log shows `[queue:…] BullMQ backend active` for every queue, including
-  `shopify-privacy`. An in-process fallback line there means `REDIS_URL` is missing.
+  `shopify-privacy`. If that line is absent for a Shopify queue, `REDIS_URL` is missing: the
+  durable queues print no fallback line, they refuse instead, and the first sign is
+  `[shopify-privacy] durable dispatch unavailable` (code `durable_queue_unavailable`).
 
 ---
 
