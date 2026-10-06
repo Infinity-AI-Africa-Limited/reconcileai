@@ -25,7 +25,7 @@ import { ENV } from "../../_core/env";
 import { getDb, type DbExecutor } from "../../db";
 import { loggableError } from "../../dbErrors";
 import { singleFlight } from "../../singleFlight";
-import { runShopifyOrderSync } from "./syncOrchestrator";
+import { runShopifyOrderSyncToNow } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -38,6 +38,19 @@ export const SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS = 15 * 60_000;
  */
 export const SHOPIFY_ORDER_BACKSTOP_BATCH = 25;
 
+/**
+ * Time one tick may spend catching stores up, shared among the stores it
+ * picked. Stores are synced one at a time, so a store with a long backlog — a
+ * large shop's 60-day first read, or one Shopify is throttling — would
+ * otherwise hold every store behind it. Each store is given the time left
+ * divided by the stores left: a lone store may use the whole tick, a full batch
+ * gets an equal share each, and time a store leaves unused passes to the next.
+ * Two-thirds of the interval, leaving headroom for the cycle each store may
+ * finish past its share. A store still behind resumes on its next turn, from
+ * its committed watermark.
+ */
+export const SHOPIFY_ORDER_BACKSTOP_TICK_BUDGET_MS = (SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS * 2) / 3;
+
 export interface ShopifyOrderBackstopReport {
   scanned: number;
   synced: number;
@@ -47,9 +60,13 @@ export interface ShopifyOrderBackstopReport {
 export interface ShopifyOrderBackstopDeps {
   db?: Db;
   now?: () => Date;
-  sync?: typeof runShopifyOrderSync;
+  sync?: (
+    params: { storeId: number; organizationId: number; trigger: "backstop" },
+    options: { budgetMs: number },
+  ) => Promise<unknown>;
   batchSize?: number;
   intervalMs?: number;
+  tickBudgetMs?: number;
 }
 
 /** One tick. Never throws: a failure is logged by its code and the next tick tries again. */
@@ -98,12 +115,22 @@ export async function runShopifyOrderBackstop(deps: ShopifyOrderBackstopDeps = {
     return report;
   }
 
-  const sync = deps.sync ?? runShopifyOrderSync;
-  for (const store of stores) {
+  // To NOW, not one cycle: a cycle reads at most one 7-day window, so a newly
+  // installed store (60 days to read) or one behind after an outage would
+  // advance a week per tick — about nine ticks, over two hours at 15 minutes,
+  // before its recent orders appear. Without Redis this loop is the only
+  // automatic sync, so that delay was the merchant's whole first experience.
+  // Within a share of the tick's time, so one store's backlog cannot starve the rest.
+  const sync = deps.sync ?? runShopifyOrderSyncToNow;
+  const clock = deps.now ?? (() => new Date());
+  const tickEndsAt = clock().getTime() + (deps.tickBudgetMs ?? SHOPIFY_ORDER_BACKSTOP_TICK_BUDGET_MS);
+  for (const [index, store] of stores.entries()) {
     report.scanned += 1;
     try {
       await recordShopifyBackstopAttempt(db, store);
-      await sync({ storeId: store.storeId, organizationId: store.organizationId, trigger: "backstop" });
+      // The time left, shared among the stores left.
+      const budgetMs = Math.max(0, Math.floor((tickEndsAt - clock().getTime()) / (stores.length - index)));
+      await sync({ storeId: store.storeId, organizationId: store.organizationId, trigger: "backstop" }, { budgetMs });
       report.synced += 1;
     } catch (error) {
       // One store's failure never stops the rest; the sync has already recorded

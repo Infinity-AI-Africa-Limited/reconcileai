@@ -32,6 +32,28 @@ export function secureEqualHex(left: string, right: string): boolean {
 }
 
 /**
+ * The message Shopify signs for an Admin request (OAuth callback, install
+ * link): every parameter but `hmac` and `signature`, sorted by key, URL-ENCODED
+ * as `URLSearchParams` encodes it with spaces as `%20`.
+ *
+ * This is `stringifyQueryForAdmin` in Shopify's own library
+ * (@shopify/shopify-api, lib/utils/hmac-validator.ts and processed-query.ts),
+ * whose tests sign `code=some%20code%20goes%20here&shop=…`. Express hands us
+ * DECODED values, so joining them raw only agrees when no value needs
+ * encoding. The callback's `host` is standard base64 — it ends in `=` padding
+ * for most shop names and may hold `/` or `+` — so a raw join rejected genuine
+ * installs.
+ */
+export function shopifyAdminHmacMessage(params: Record<string, string>): string {
+  const query = new URLSearchParams();
+  Object.keys(params)
+    .filter((key) => key !== "hmac" && key !== "signature")
+    .sort((left, right) => left.localeCompare(right))
+    .forEach((key) => query.append(key, params[key]));
+  return query.toString().replace(/\+/g, "%20");
+}
+
+/**
  * Validates Shopify's OAuth callback HMAC. Duplicate keys are rejected before
  * this function is called, because Object.fromEntries would otherwise let a
  * callback smuggle an alternate `shop`, `state` or `hmac` value into validation.
@@ -42,16 +64,7 @@ export function verifyShopifyCallbackHmac(
 ): boolean {
   const provided = params.hmac;
   if (!provided || !clientSecret) return false;
-  // Code-unit order, as Shopify's own reference implementation sorts
-  // (`Object.entries(params).sort()`). `localeCompare` is locale collation —
-  // it orders case and punctuation differently — so a key set where the two
-  // disagree would fail verification on a genuine callback.
-  const message = Object.entries(params)
-    .filter(([key]) => key !== "hmac")
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, value]) => `${key}=${value}`)
-    .join("&");
-  const expected = crypto.createHmac("sha256", clientSecret).update(message).digest("hex");
+  const expected = crypto.createHmac("sha256", clientSecret).update(shopifyAdminHmacMessage(params)).digest("hex");
   return secureEqualHex(expected, provided);
 }
 
@@ -269,7 +282,30 @@ export async function refreshExpiringOfflineToken(params: {
   }
 
   if (response.status === 401) return { kind: "reauthorize" };
+  if (response.status === 400 && (await refreshTokenRejected(response))) return { kind: "reauthorize" };
   if (response.status === 429 || response.status >= 500) return { kind: "retry" };
   if (!response.ok) return { kind: "failed" };
   return { kind: "refreshed", token: await parseTokenResponse(response) };
+}
+
+/**
+ * OAuth errors that say the presented refresh token itself is no longer good.
+ * Shopify answers an expired, revoked or rotated-away refresh token with HTTP
+ * 400 — its own library tests model it as `{ error: "invalid_subject_token" }`
+ * — and RFC 6749 §5.2 names the generic case `invalid_grant`. Treated as a
+ * transient failure, such a store read `active` while every sync failed, and
+ * the merchant was never asked to reconnect.
+ *
+ * Any OTHER 400 (a malformed request is ours to fix) stays `failed`: taking
+ * every store out of service over a bug of ours would be the worse error.
+ */
+const REJECTED_REFRESH_TOKEN_ERRORS = new Set(["invalid_subject_token", "invalid_grant"]);
+
+async function refreshTokenRejected(response: Response): Promise<boolean> {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    return typeof body?.error === "string" && REJECTED_REFRESH_TOKEN_ERRORS.has(body.error);
+  } catch {
+    return false;
+  }
 }

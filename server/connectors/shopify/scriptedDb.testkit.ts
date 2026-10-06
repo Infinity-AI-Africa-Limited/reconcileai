@@ -128,6 +128,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
           leftJoin() { return query; },
           where(cond: unknown) { where = render(cond); return query; },
           orderBy() { return query; },
+          groupBy() { return query; },
           limit() { return query; },
           for() { locked = true; return query; },
           ...settle(() => {

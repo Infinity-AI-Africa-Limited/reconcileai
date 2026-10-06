@@ -136,6 +136,17 @@ describe("when an app/uninstalled delivery arrives", () => {
     expect(fake.writes("update", STORES)[0]?.data).toMatchObject({ status: "uninstalled", statusReason: "uninstalled" });
   });
 
+  it("should never relabel a store fenced for redaction, though it still deletes the credentials", async () => {
+    // Shopify retries a failed uninstall for 48 hours; shop/redact follows 48
+    // hours after the uninstall. A retry can land after redaction was admitted.
+    const { fake, run } = uninstall("2026-09-21T08:00:00Z");
+    expect((await run()).statusCode).toBe(200);
+    const relabel = fake.writes("update", STORES)[0];
+    expect(relabel?.where?.sql).toContain("`status` <> ?");
+    expect(relabel?.where?.params).toContain("redacting");
+    expect(fake.writes("delete", TOKENS)).toHaveLength(1);
+  });
+
   it("should ignore a retry triggered before the merchant reinstalled, keeping the new credentials", async () => {
     const { fake, run } = uninstall("2026-09-19T08:00:00Z");
     const res = await run();
