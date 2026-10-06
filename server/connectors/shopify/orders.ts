@@ -33,9 +33,17 @@ const SHOPIFY_ORDER_RETRY_MAX_MS = 30_000;
 const SHOPIFY_ORDER_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * Shopify Admin 2026-07 exposes the current total as currentTotalPriceSet.
- * Alias it to the product name and select only shopMoney's MoneyV2 fields; no
- * presentment/customer/order-detail object crosses the connector boundary.
+ * The order's amount is its total BEFORE refunds (`totalPriceSet`): what the
+ * customer was charged, and so what the gateway settles as the payment. Each
+ * refund is recorded as its own money-out row (see SHOPIFY_ORDER_REFUNDS_QUERY),
+ * matching the gateway's own refund line. `currentTotalPriceSet` — the total
+ * net of refunds — was used before, and a partially refunded order then never
+ * matched its own gross payment.
+ *
+ * `totalRefundedSet` says which orders have refunds to read; only those are
+ * asked for them, so this page's cost stays near what it was. Only shopMoney's
+ * MoneyV2 fields are selected; no presentment/customer/order-detail object
+ * crosses the connector boundary.
  */
 export const SHOPIFY_ORDERS_QUERY = `query ReconcileAIOrders($first: Int!, $after: String, $query: String!) {
   orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
@@ -46,7 +54,13 @@ export const SHOPIFY_ORDERS_QUERY = `query ReconcileAIOrders($first: Int!, $afte
       updatedAt
       processedAt
       currencyCode
-      currentTotalPrice: currentTotalPriceSet {
+      totalPrice: totalPriceSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      totalRefunded: totalRefundedSet {
         shopMoney {
           amount
           currencyCode
@@ -62,9 +76,34 @@ export const SHOPIFY_ORDERS_QUERY = `query ReconcileAIOrders($first: Int!, $afte
   }
 }`;
 
+/**
+ * The refunds of orders that have any: id, time and amount only — no line
+ * items, note or staff member. `refunds` is a plain list, not a paginated
+ * connection, so completeness is checked by the caller: a list as long as
+ * `first` may have been cut short (see fetchShopifyOrderRefunds).
+ */
+export const SHOPIFY_ORDER_REFUNDS_QUERY = `query ReconcileAIOrderRefunds($ids: [ID!]!, $first: Int!) {
+  nodes(ids: $ids) {
+    ... on Order {
+      id
+      refunds(first: $first) {
+        id
+        createdAt
+        totalRefunded: totalRefundedSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+      }
+    }
+  }
+}`;
+
 /** There is deliberately no generic arbitrary-query entry point in this client. */
 export const SHOPIFY_READ_ONLY_QUERY_ALLOWLIST = Object.freeze({
   orders: SHOPIFY_ORDERS_QUERY,
+  orderRefunds: SHOPIFY_ORDER_REFUNDS_QUERY,
 });
 
 const DENIED_ORDER_FIELDS = [
@@ -90,9 +129,24 @@ export function assertMinimalReadOnlyOrderQuery(query: string): void {
       throw new Error(`Shopify order operation requests denied field ${field}`);
     }
   }
-  if (query !== SHOPIFY_READ_ONLY_QUERY_ALLOWLIST.orders) {
+  if (!(Object.values(SHOPIFY_READ_ONLY_QUERY_ALLOWLIST) as string[]).includes(query)) {
     throw new Error("Shopify order operation is not allowlisted");
   }
+}
+
+interface ShopifyMoney {
+  amount: string;
+  currencyCode: string;
+}
+
+export interface NormalizedShopifyRefund {
+  /** `gid://shopify/Refund/<id>`. */
+  gid: string;
+  /** Shopify may omit it; the ledger row then falls back to the order's update time. */
+  createdAt: string | null;
+  /** Money returned by this refund: non-negative, in shop currency. */
+  amount: string;
+  currencyCode: string;
 }
 
 export interface NormalizedShopifyOrder {
@@ -103,10 +157,17 @@ export interface NormalizedShopifyOrder {
   /** Shopify returns null until an order has been processed; keep that absence explicit. */
   processedAt: string | null;
   currencyCode: string;
-  currentTotalPrice: { amount: string; currencyCode: string };
+  /** The order total before refunds — what the customer was charged. */
+  totalPrice: ShopifyMoney;
+  /** Money refunded so far, across all refunds. */
+  totalRefunded: ShopifyMoney;
+  /** Every refund; empty unless money was refunded. Zero-amount refunds included. */
+  refunds: NormalizedShopifyRefund[];
   displayFinancialStatus: string | null;
   cancelledAt: string | null;
 }
+
+type ShopifyMoneyBagNode = { shopMoney?: { amount?: unknown; currencyCode?: unknown } | null } | null;
 
 interface ShopifyOrderNode {
   id?: unknown;
@@ -115,9 +176,20 @@ interface ShopifyOrderNode {
   updatedAt?: unknown;
   processedAt?: unknown;
   currencyCode?: unknown;
-  currentTotalPrice?: { shopMoney?: { amount?: unknown; currencyCode?: unknown } | null } | null;
+  totalPrice?: ShopifyMoneyBagNode;
+  totalRefunded?: ShopifyMoneyBagNode;
   displayFinancialStatus?: unknown;
   cancelledAt?: unknown;
+}
+
+interface ShopifyRefundNode {
+  id?: unknown;
+  createdAt?: unknown;
+  totalRefunded?: ShopifyMoneyBagNode;
+}
+
+interface OrderRefundsGraphqlData {
+  nodes?: Array<{ id?: unknown; refunds?: ShopifyRefundNode[] | null } | null>;
 }
 
 interface OrdersGraphqlData {
@@ -161,7 +233,8 @@ export class ShopifyOrderApiError extends Error {
       | "GRAPHQL_ERROR"
       | "USER_ERROR"
       | "PAGINATION_ERROR"
-      | "THROTTLED",
+      | "THROTTLED"
+      | "REFUNDS_TRUNCATED",
   ) {
     super(message);
     this.name = "ShopifyOrderApiError";
@@ -192,13 +265,22 @@ function text(value: unknown, field: string): string {
   return value;
 }
 
-export function normalizeShopifyOrder(node: ShopifyOrderNode): NormalizedShopifyOrder {
-  const amount = text(node.currentTotalPrice?.shopMoney?.amount, "currentTotalPrice.amount");
-  if (!/^-?\d+(?:\.\d+)?$/.test(amount)) {
-    throw new ShopifyOrderApiError("Shopify order currentTotalPrice.amount is invalid", "INVALID_RESPONSE");
+function money(node: ShopifyMoneyBagNode | undefined, field: string, options: { nonNegative?: boolean } = {}): ShopifyMoney {
+  const amount = text(node?.shopMoney?.amount, `${field}.amount`);
+  const pattern = options.nonNegative ? /^\d+(?:\.\d+)?$/ : /^-?\d+(?:\.\d+)?$/;
+  if (!pattern.test(amount)) {
+    throw new ShopifyOrderApiError(`Shopify order ${field}.amount is invalid`, "INVALID_RESPONSE");
   }
+  return { amount, currencyCode: text(node?.shopMoney?.currencyCode, `${field}.currencyCode`) };
+}
+
+/** True when a decimal amount is above zero. */
+export function isPositiveAmount(amount: string): boolean {
+  return Number(amount) > 0;
+}
+
+export function normalizeShopifyOrder(node: ShopifyOrderNode): NormalizedShopifyOrder {
   const currencyCode = text(node.currencyCode, "currencyCode");
-  const moneyCurrency = text(node.currentTotalPrice?.shopMoney?.currencyCode, "currentTotalPrice.currencyCode");
   return {
     gid: text(node.id, "id"),
     name: text(node.name, "name"),
@@ -206,7 +288,10 @@ export function normalizeShopifyOrder(node: ShopifyOrderNode): NormalizedShopify
     updatedAt: iso(node.updatedAt, "updatedAt"),
     processedAt: nullableIso(node.processedAt, "processedAt"),
     currencyCode,
-    currentTotalPrice: { amount, currencyCode: moneyCurrency },
+    totalPrice: money(node.totalPrice, "totalPrice"),
+    totalRefunded: money(node.totalRefunded, "totalRefunded", { nonNegative: true }),
+    // Read separately, and only for orders that have refunded money.
+    refunds: [],
     displayFinancialStatus:
       node.displayFinancialStatus === null || node.displayFinancialStatus === undefined
         ? null
@@ -215,6 +300,23 @@ export function normalizeShopifyOrder(node: ShopifyOrderNode): NormalizedShopify
       node.cancelledAt === null || node.cancelledAt === undefined
         ? null
         : iso(node.cancelledAt, "cancelledAt"),
+  };
+}
+
+const SHOPIFY_REFUND_GID = /^gid:\/\/shopify\/Refund\/[1-9]\d{0,19}$/;
+
+export function normalizeShopifyRefund(node: ShopifyRefundNode): NormalizedShopifyRefund {
+  const gid = text(node.id, "refund.id");
+  // Stored in a 64-character key column; the pattern also bounds its length.
+  if (!SHOPIFY_REFUND_GID.test(gid)) {
+    throw new ShopifyOrderApiError("Shopify order refund.id is invalid", "INVALID_RESPONSE");
+  }
+  const refunded = money(node.totalRefunded, "refund.totalRefunded", { nonNegative: true });
+  return {
+    gid,
+    createdAt: nullableIso(node.createdAt, "refund.createdAt"),
+    amount: refunded.amount,
+    currencyCode: refunded.currencyCode,
   };
 }
 
@@ -298,12 +400,12 @@ function backoffMs(attempt: number): number {
  * cost throttle — which Shopify answers with HTTP 200, so an HTTP-only retry
  * would never see it and a busy store's whole window would fail.
  */
-async function fetchOrderPage(
+async function fetchOrderPage<T = OrdersGraphqlData>(
   endpoint: string,
   init: RequestInit,
   fetchImpl: typeof fetch,
   deps: Pick<ShopifyOrderFetchDeps, "sleep" | "now">,
-): Promise<GraphqlResponse<OrdersGraphqlData>> {
+): Promise<GraphqlResponse<T>> {
   const sleep = deps.sleep ?? defaultSleep;
   const now = deps.now ?? Date.now;
 
@@ -332,9 +434,9 @@ async function fetchOrderPage(
       continue;
     }
 
-    let body: GraphqlResponse<OrdersGraphqlData>;
+    let body: GraphqlResponse<T>;
     try {
-      body = (await response.json()) as GraphqlResponse<OrdersGraphqlData>;
+      body = (await response.json()) as GraphqlResponse<T>;
     } catch {
       throw new ShopifyOrderApiError("Shopify order query returned invalid JSON", "INVALID_RESPONSE");
     }
@@ -377,7 +479,7 @@ export async function fetchShopifyOrdersWindow(
   let after: string | null = null;
 
   for (let pageNumber = 1; pageNumber <= MAX_ORDER_PAGES; pageNumber += 1) {
-    const body = await fetchOrderPage(endpoint, {
+    const body: GraphqlResponse<OrdersGraphqlData> = await fetchOrderPage<OrdersGraphqlData>(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -433,9 +535,106 @@ export async function fetchShopifyOrdersWindow(
     if (pause) await (deps.sleep ?? defaultSleep)(pause);
   }
 
-  return [...byGid.values()].sort(
+  const orders = [...byGid.values()].sort(
     (left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.gid.localeCompare(right.gid),
   );
+  const refunded = orders.filter((order) => isPositiveAmount(order.totalRefunded.amount));
+  if (refunded.length === 0) return orders;
+
+  const refundsByOrder = await fetchShopifyOrderRefunds(
+    refunded.map((order) => order.gid),
+    { endpoint, accessToken, fetchImpl },
+    deps,
+  );
+  // Every refund, including any that returned no money: the sync records only
+  // those that did, but must see the rest to restate a row it stored earlier.
+  return orders.map((order) => ({ ...order, refunds: refundsByOrder.get(order.gid) ?? [] }));
+}
+
+/**
+ * Orders per refunds request, and refunds read per order on the first pass.
+ * Shopify prices a query by what it may return, against a 1,000-point ceiling
+ * per query: 10 orders × 10 refunds stays well under it, as does the
+ * single-order second pass. An order with SHOPIFY_REFUNDS_PER_ORDER_MAX refunds
+ * or more fails the cycle closed (`refunds_truncated`) — far beyond any real
+ * order, and visible on the store's sync status if it ever happens.
+ */
+export const SHOPIFY_REFUND_ORDERS_PER_REQUEST = 10;
+export const SHOPIFY_REFUNDS_PER_ORDER = 10;
+/** The second, single-order pass for an order whose list filled the first. */
+export const SHOPIFY_REFUNDS_PER_ORDER_MAX = 100;
+
+async function fetchRefundsOf(
+  ids: string[],
+  first: number,
+  client: { endpoint: string; accessToken: string; fetchImpl: typeof fetch },
+  deps: ShopifyOrderFetchDeps,
+): Promise<Map<string, NormalizedShopifyRefund[]>> {
+  const body = await fetchOrderPage<OrderRefundsGraphqlData>(client.endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Shopify-Access-Token": client.accessToken,
+    },
+    body: JSON.stringify({ query: SHOPIFY_ORDER_REFUNDS_QUERY, variables: { ids, first } }),
+  }, client.fetchImpl, deps);
+  if (body.errors?.length) {
+    throw new ShopifyOrderApiError("Shopify refund query returned GraphQL errors", "GRAPHQL_ERROR");
+  }
+  const nodes = body.data?.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new ShopifyOrderApiError("Shopify refund query response is incomplete", "INVALID_RESPONSE");
+  }
+  const byOrder = new Map<string, NormalizedShopifyRefund[]>();
+  for (const node of nodes) {
+    // An order read moments ago that is now missing (deleted in between) or
+    // malformed: fail the cycle rather than record it without its refunds. The
+    // next cycle reads the store afresh.
+    if (!node || typeof node.id !== "string" || !ids.includes(node.id) || !Array.isArray(node.refunds)) {
+      throw new ShopifyOrderApiError("Shopify refund query returned an unexpected order", "INVALID_RESPONSE");
+    }
+    byOrder.set(node.id, node.refunds.map(normalizeShopifyRefund));
+  }
+  if (byOrder.size !== ids.length) {
+    throw new ShopifyOrderApiError("Shopify refund query did not return every order", "INVALID_RESPONSE");
+  }
+  // Pace the next request by the bucket Shopify just reported, as order pages are.
+  const pause = shopifyThrottleWaitMs(body.extensions?.cost);
+  if (pause) await (deps.sleep ?? defaultSleep)(pause);
+  return byOrder;
+}
+
+/**
+ * Every refund of the given orders. `refunds` is a plain list with no
+ * pagination, so a list as long as the limit asked for may have been cut
+ * short: such an order is read again on its own with a far larger limit, and
+ * if that list fills too the cycle fails rather than record an incomplete set
+ * — a missing refund would leave the ledger overstated with nothing to show it.
+ */
+export async function fetchShopifyOrderRefunds(
+  orderGids: string[],
+  client: { endpoint: string; accessToken: string; fetchImpl: typeof fetch },
+  deps: ShopifyOrderFetchDeps = {},
+): Promise<Map<string, NormalizedShopifyRefund[]>> {
+  assertMinimalReadOnlyOrderQuery(SHOPIFY_ORDER_REFUNDS_QUERY);
+  const result = new Map<string, NormalizedShopifyRefund[]>();
+  for (let index = 0; index < orderGids.length; index += SHOPIFY_REFUND_ORDERS_PER_REQUEST) {
+    const ids = orderGids.slice(index, index + SHOPIFY_REFUND_ORDERS_PER_REQUEST);
+    const batch = await fetchRefundsOf(ids, SHOPIFY_REFUNDS_PER_ORDER, client, deps);
+    for (const [gid, refunds] of batch) {
+      if (refunds.length < SHOPIFY_REFUNDS_PER_ORDER) {
+        result.set(gid, refunds);
+        continue;
+      }
+      const full = (await fetchRefundsOf([gid], SHOPIFY_REFUNDS_PER_ORDER_MAX, client, deps)).get(gid) ?? [];
+      if (full.length >= SHOPIFY_REFUNDS_PER_ORDER_MAX) {
+        throw new ShopifyOrderApiError("Shopify order has more refunds than can be read", "REFUNDS_TRUNCATED");
+      }
+      result.set(gid, full);
+    }
+  }
+  return result;
 }
 
 export function computeShopifyOrderWindow(params: {

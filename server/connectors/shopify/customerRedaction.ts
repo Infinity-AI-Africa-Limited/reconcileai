@@ -17,6 +17,7 @@ import {
   type ShopifyPrivacySuppressionKey,
 } from "./privacySuppression";
 import { canonicalShopifyOrderGid } from "./privacyCompletion";
+import { shopifyOrderDescription, shopifyRefundDescription } from "./ingest";
 import {
   claimableCustomerRedactionJob,
   isLivePrivacyJobStatus,
@@ -64,6 +65,8 @@ interface ClaimedRedactionJob {
 interface SelectedOrderRow {
   id: number;
   transactionRef: string | null;
+  /** Empty on the order's own row; the refund's GID on a refund row. */
+  shopifyRefundId: string;
   externalRef: string | null;
   description: string | null;
   counterparty: string | null;
@@ -315,6 +318,7 @@ async function loadSelectedOrders(
         .select({
           id: transactions.id,
           transactionRef: transactions.transactionRef,
+          shopifyRefundId: transactions.shopifyRefundId,
           externalRef: transactions.externalRef,
           description: transactions.description,
           counterparty: transactions.counterparty,
@@ -351,18 +355,24 @@ async function loadSelectedOrders(
  * while reconciliation, audit, or report writers may be active.
  */
 function isFieldMinimizedScopeAOrder(row: SelectedOrderRow): boolean {
+  // Two projections write rows under an order's GID (ingest.ts): the order's
+  // own row, and one per refund. Each is checked against its own exact shape;
+  // a row matching neither was not written by them.
+  const refund = row.shopifyRefundId !== "";
+  if (refund && !/^gid:\/\/shopify\/Refund\/[1-9]\d*$/.test(row.shopifyRefundId)) return false;
   if (
     typeof row.transactionRef !== "string" ||
     !/^gid:\/\/shopify\/Order\/[1-9]\d*$/.test(row.transactionRef) ||
     typeof row.externalRef !== "string" ||
     !/^#[A-Za-z0-9][A-Za-z0-9-]*$/.test(row.externalRef) ||
-    row.description !== `Shopify Order ${row.externalRef}` ||
+    row.description !== (refund ? shopifyRefundDescription(row.externalRef) : shopifyOrderDescription(row.externalRef)) ||
     row.counterparty !== "Shopify" ||
     row.originalTransactionRef !== null ||
-    row.isReversal !== false ||
-    // The order projection always writes a credit in an ISO currency code. A
-    // row that differs was not written by it, whatever else it looks like.
-    row.debitCredit !== "credit" ||
+    row.isReversal !== refund ||
+    // The order projection always writes a credit, a refund a debit, in an ISO
+    // currency code. A row that differs was not written by them, whatever else
+    // it looks like.
+    row.debitCredit !== (refund ? "debit" : "credit") ||
     typeof row.currency !== "string" ||
     !/^[A-Z]{3}$/.test(row.currency) ||
     typeof row.shopifyOrderCurrency !== "string" ||

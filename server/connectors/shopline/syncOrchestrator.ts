@@ -702,6 +702,18 @@ export interface ReconciliationScope {
 const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
 const SCOPE_LOOKUP_CHUNK = 500;
 
+/**
+ * A Shopify refund row is a refund event to the retail engine — classified as a
+ * refund not reflected in settlement when unmatched, never as a missing
+ * payment. Its stored rawData stays NULL (the privacy pipeline proves a Shopify
+ * row holds nothing beyond its projection), so the event is derived here from
+ * the row's own refund id, in memory only.
+ */
+export function withShopifyRefundEvent<T extends { shopifyRefundId: string; rawData: unknown }>(row: T): T {
+  if (!row.shopifyRefundId) return row;
+  return { ...row, rawData: { gatewayEventType: "refund", refundId: row.shopifyRefundId } };
+}
+
 async function selectUnmatchedLeg(
   db: DbExecutor,
   params: { organizationId: number; channelId: number; from: Date; to: Date; orderRefs?: string[] },
@@ -787,8 +799,8 @@ export async function runReconciliationOnPersistedData(
   };
 
   const result = runRetailReconciliation(
-    sourceRows as Transaction[],
-    targetRows as Transaction[],
+    sourceRows.map(withShopifyRefundEvent) as Transaction[],
+    targetRows.map(withShopifyRefundEvent) as Transaction[],
     config,
   );
 
