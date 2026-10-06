@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildShopifyAuthorizationUrl,
+  exchangeShopifyIdTokenForOfflineAccess,
   normalizeShopDomain,
   refreshExpiringOfflineToken,
   requiredScopesGranted,
@@ -207,5 +208,85 @@ describe("when Shopify answers a refresh-token request", () => {
     expect(await refreshExpiringOfflineToken(params)).toEqual({ kind: "retry" });
     answer(503, {});
     expect(await refreshExpiringOfflineToken(params)).toEqual({ kind: "retry" });
+  });
+});
+
+describe("when a verified App Bridge ID token is exchanged for offline access", () => {
+  const params = {
+    shopDomain: "merchant.myshopify.com",
+    clientId: "client-id",
+    clientSecret: "client-secret",
+    idToken: "signed-id-token",
+  };
+  const token = {
+    access_token: "access-token",
+    refresh_token: "refresh-token",
+    scope: "read_orders",
+    expires_in: 3600,
+    refresh_token_expires_in: 7_776_000,
+  };
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("uses Shopify's offline token-exchange grant and requests an expiring pair", async () => {
+    const fetchImpl = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(token), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+
+    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).resolves.toEqual(token);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe("https://merchant.myshopify.com/admin/oauth/access_token");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      signal: expect.any(AbortSignal),
+    });
+    expect(Object.fromEntries(new URLSearchParams(String(init?.body)))).toEqual({
+      client_id: "client-id",
+      client_secret: "client-secret",
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      subject_token: "signed-id-token",
+      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+      requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
+      expiring: "1",
+    });
+  });
+
+  it("fails closed without sending configuration blanks or an invalid shop to Shopify", async () => {
+    const fetchImpl = vi.spyOn(globalThis, "fetch");
+    await expect(exchangeShopifyIdTokenForOfflineAccess({ ...params, clientSecret: "" })).rejects.toThrow(
+      "Shopify token exchange is not configured",
+    );
+    await expect(exchangeShopifyIdTokenForOfflineAccess({ ...params, shopDomain: "attacker.example" })).rejects.toThrow(
+      "Invalid Shopify shop domain",
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not expose the ID token or Shopify error body on a refused exchange", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "invalid_grant", error_description: params.idToken }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).rejects.toThrow("Shopify token exchange failed (400)");
+    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).rejects.not.toThrow(params.idToken);
+  });
+
+  it("rejects a success response that lacks the refreshable token pair", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ access_token: "access-token", scope: "read_orders" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(exchangeShopifyIdTokenForOfflineAccess(params)).rejects.toThrow(
+      "Shopify returned an incomplete expiring-token response",
+    );
   });
 });

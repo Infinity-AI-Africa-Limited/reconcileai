@@ -232,13 +232,20 @@ async function parseTokenResponse(response: Response): Promise<ShopifyTokenRespo
   return body as ShopifyTokenResponse;
 }
 
+/** Resolve the only endpoint that may receive ReconcileAI's Shopify credentials. */
+function shopifyTokenEndpoint(shopDomain: string): string {
+  const normalized = normalizeShopDomain(shopDomain);
+  if (!normalized) throw new Error("Invalid Shopify shop domain");
+  return `https://${normalized}/admin/oauth/access_token`;
+}
+
 export async function exchangeAuthorizationCode(params: {
   shopDomain: string;
   clientId: string;
   clientSecret: string;
   code: string;
 }): Promise<ShopifyTokenResponse> {
-  const response = await shopifyFetch(`https://${params.shopDomain}/admin/oauth/access_token`, {
+  const response = await shopifyFetch(shopifyTokenEndpoint(params.shopDomain), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
     body: new URLSearchParams({
@@ -249,6 +256,37 @@ export async function exchangeAuthorizationCode(params: {
     }),
   });
   if (!response.ok) throw new Error(`Shopify authorization-code exchange failed (${response.status})`);
+  return parseTokenResponse(response);
+}
+
+/**
+ * Exchange a verified, fresh App Bridge ID token for Shopify's expiring offline
+ * access-token pair. The caller owns ID-token verification, browser input,
+ * onboarding, persistence and authorization policy.
+ */
+export async function exchangeShopifyIdTokenForOfflineAccess(params: {
+  shopDomain: string;
+  clientId: string;
+  clientSecret: string;
+  idToken: string;
+}): Promise<ShopifyTokenResponse> {
+  if (!params.clientId.trim() || !params.clientSecret.trim() || !params.idToken.trim()) {
+    throw new Error("Shopify token exchange is not configured");
+  }
+  const response = await shopifyFetch(shopifyTokenEndpoint(params.shopDomain), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      subject_token: params.idToken,
+      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+      requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
+      expiring: "1",
+    }),
+  });
+  if (!response.ok) throw new Error(`Shopify token exchange failed (${response.status})`);
   return parseTokenResponse(response);
 }
 
@@ -266,7 +304,7 @@ export async function refreshExpiringOfflineToken(params: {
 }): Promise<RefreshResult> {
   let response: Response;
   try {
-    response = await shopifyFetch(`https://${params.shopDomain}/admin/oauth/access_token`, {
+    response = await shopifyFetch(shopifyTokenEndpoint(params.shopDomain), {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
       body: new URLSearchParams({
