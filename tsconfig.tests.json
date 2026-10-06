@@ -25,6 +25,7 @@
     "client/src/lib/shoplineSettlementImport.test.ts",
     "server/_core/tenantHardening.test.ts",
     "server/appOrigin.test.ts",
+    "server/connectors/shopify/appConfig.test.ts",
     "server/connectors/shopify/appHomeRoutes.test.ts",
     "server/connectors/shopify/auth.test.ts",
     "server/connectors/shopify/channelCodes.test.ts",
