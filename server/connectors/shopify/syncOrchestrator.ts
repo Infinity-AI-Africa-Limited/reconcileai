@@ -26,6 +26,7 @@ import {
   type ShopifyPrivacySuppressionKey,
 } from "./privacySuppression";
 import {
+  SHOPIFY_INITIAL_ORDER_WINDOW_MS,
   ShopifyOrderApiError,
   computeShopifyOrderWindow,
   fetchShopifyOrdersWindow,
@@ -744,7 +745,9 @@ export async function runShopifyOrderSync(
       ),
     )
     .limit(1);
-  const window = computeShopifyOrderWindow({ now, watermark: cursor?.watermarkUpdatedAt ?? null });
+  // The replay this cycle read, if one is owed; only it may be moved on commit.
+  const replayRead = cursor?.replayWatermarkUpdatedAt ?? null;
+  const window = computeShopifyOrderWindow({ now, watermark: orderSyncStartingPoint(cursor ?? null, now) });
 
   try {
     // Prove the actor before fetching protected order data. The actor was created
@@ -965,7 +968,12 @@ export async function runShopifyOrderSync(
       // branch by extracting `recordSuccessfulOrderSync` (same COALESCE/GREATEST
       // guard, asserted by orderBackstop.test.ts). The helper is kept, so the
       // upsert has one definition rather than two that can drift apart.
-      await recordSuccessfulOrderSync(tx, store, maxUpdatedAt(fetched, window.to));
+      await recordSuccessfulOrderSync(
+        tx,
+        store,
+        maxUpdatedAt(fetched, window.to),
+        replayRead ? { read: replayRead, caughtUp: window.to.getTime() >= now.getTime() } : undefined,
+      );
 
       if (params.webhookId) {
         await tx
@@ -1114,11 +1122,35 @@ export function advancedOrderWatermark(): SQL {
   return sql`COALESCE(GREATEST(${current}, VALUES(${current})), VALUES(${current}))`;
 }
 
-/** Record a successful order sync on the store's cursor, advancing its watermark. */
+/**
+ * Where a cycle reads from: while a replay is owed, the replay's progress;
+ * otherwise the watermark. NULL means the initial window, which is also as far
+ * back as a replay reads: read_orders allows nothing older.
+ */
+export function orderSyncStartingPoint(
+  cursor: { watermarkUpdatedAt: Date | null; replayWatermarkUpdatedAt: Date | null } | null,
+  now: Date,
+): Date | null {
+  const replay = cursor?.replayWatermarkUpdatedAt ?? null;
+  if (!replay) return cursor?.watermarkUpdatedAt ?? null;
+  return replay.getTime() > now.getTime() - SHOPIFY_INITIAL_ORDER_WINDOW_MS ? replay : null;
+}
+
+/**
+ * Record a successful order sync on the store's cursor, advancing its watermark.
+ *
+ * A cycle that read a replay (`replay.read`) also moves the replay: to where it
+ * reached, or clears it once caught up. Only from the value it read, though. A
+ * cycle racing it from the same value, or one that read the replay before a new
+ * one was requested, finds a different value and leaves it, so a replay ends
+ * only by catching up. A cycle that read no replay never touches it: the
+ * watermark it advances is not where a replay reads from.
+ */
 export async function recordSuccessfulOrderSync(
   db: DbExecutor,
   store: { id: number; organizationId: number },
   watermark: Date,
+  replay?: { read: Date; caughtUp: boolean },
 ): Promise<void> {
   await db
     .insert(shopifySyncCursors)
@@ -1139,6 +1171,18 @@ export async function recordSuccessfulOrderSync(
         lastErrorCode: null,
       },
     });
+  if (!replay) return;
+  await db
+    .update(shopifySyncCursors)
+    .set({ replayWatermarkUpdatedAt: replay.caughtUp ? null : watermark })
+    .where(
+      and(
+        eq(shopifySyncCursors.storeId, store.id),
+        eq(shopifySyncCursors.organizationId, store.organizationId),
+        eq(shopifySyncCursors.resource, ORDER_RESOURCE),
+        eq(shopifySyncCursors.replayWatermarkUpdatedAt, replay.read),
+      ),
+    );
 }
 
 /** 60 days in 7-day steps is 9 cycles; the rest is headroom for overlap and clock drift. */

@@ -20,7 +20,7 @@ import { classifyDatabaseTarget } from "../../dbTarget";
 import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 import type { NormalizedShopifyOrder, NormalizedShopifyRefund } from "./orders";
 import { importShopifySettlementEvidence } from "./settlementEvidence";
-import { runShopifyOrderSync } from "./syncOrchestrator";
+import { recordSuccessfulOrderSync, runShopifyOrderSync, runShopifyOrderSyncToNow } from "./syncOrchestrator";
 
 const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
@@ -329,30 +329,68 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
     });
   });
 
-  describe("when migration 0105 resets the order watermarks", () => {
-    it("should make the store's next sync read its whole initial window again", async () => {
-      // The store has synced, so its watermark sits at its last order update.
-      const [before] = await db
-        .select({ watermark: shopifySyncCursors.watermarkUpdatedAt })
+  describe("when migration 0105 asks every store to replay its orders", () => {
+    const DAY = 24 * 60 * 60_000;
+    const cursorOf = async () => {
+      const [row] = await db
+        .select({
+          watermark: shopifySyncCursors.watermarkUpdatedAt,
+          replay: shopifySyncCursors.replayWatermarkUpdatedAt,
+        })
         .from(shopifySyncCursors)
-        .where(eq(shopifySyncCursors.storeId, storeId));
+        .where(and(eq(shopifySyncCursors.storeId, storeId), eq(shopifySyncCursors.organizationId, organizationId)));
+      return row;
+    };
+
+    it("should read the whole initial window again, even after a sync that began before it committed", async () => {
+      // The store has synced, so its watermark sits at its last order update.
+      const before = await cursorOf();
       expect(before?.watermark).toBeInstanceOf(Date);
 
-      // The migration itself, as the runner would apply it.
-      const migration = fs
-        .readFileSync(path.join(__dirname, "../../../drizzle/0105_shopify_order_watermark_reset.sql"), "utf8")
-        .split("\n")
-        .filter((line) => !line.startsWith("--"))
-        .join("\n");
-      await db.execute(sql.raw(migration));
+      // The migration itself, statement by statement as the runner applies it,
+      // with its UPDATE confined to this test's store: other test files share
+      // this database while this one runs.
+      const statements = fs
+        .readFileSync(path.join(__dirname, "../../../drizzle/0105_shopify_order_replay.sql"), "utf8")
+        .split("--> statement-breakpoint")
+        .map((statement) =>
+          statement
+            .split("\n")
+            .filter((line) => !line.startsWith("--"))
+            .join("\n")
+            .trim(),
+        )
+        .filter(Boolean);
+      const update = statements.at(-1)!;
+      expect(update).toMatch(/^UPDATE `shopify_sync_cursors` SET .* WHERE `resource` = 'orders';$/);
+      for (const statement of statements.slice(0, -1)) await db.execute(sql.raw(statement));
+      await db.execute(
+        sql.raw(
+          update.replace(
+            /;$/,
+            ` AND \`storeId\` = ${Number(storeId)} AND \`organizationId\` = ${Number(organizationId)};`,
+          ),
+        ),
+      );
+
+      const owed = await cursorOf();
+      expect(owed?.replay).toBeInstanceOf(Date);
+      // The watermark is left alone; the replay is recorded beside it.
+      expect(owed?.watermark).toEqual(before?.watermark);
+
+      // A sync of the previous release that read the old watermark commits now,
+      // advancing it to its own recent window. The replay must survive it.
+      const now = new Date(owed!.replay!.getTime() + 60 * DAY + 2 * 60 * 60_000);
+      await recordSuccessfulOrderSync(db as never, { id: storeId, organizationId }, now);
+      expect((await cursorOf())?.replay).toEqual(owed?.replay);
 
       const windows: Array<{ from: Date; to: Date }> = [];
-      await runShopifyOrderSync(
+      await runShopifyOrderSyncToNow(
         { storeId, organizationId, trigger: "manual" },
         {
           db: db as never,
           suppressionKeys: keys,
-          now: () => new Date("2026-09-22T00:00:00Z"),
+          now: () => now,
           fetchOrders: async (window) => {
             windows.push({ from: window.from, to: window.to });
             return [];
@@ -360,9 +398,13 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
         },
       );
 
-      // From the start of the 60-day window, in its first 7-day step.
-      expect(windows[0]?.from).toEqual(new Date("2026-07-24T00:00:00Z"));
-      expect(windows[0]?.to).toEqual(new Date("2026-07-31T00:00:00Z"));
+      // From the start of the 60-day window, in 7-day steps, up to now.
+      expect(windows[0]?.from).toEqual(new Date(now.getTime() - 60 * DAY));
+      expect(windows[0]?.to).toEqual(new Date(now.getTime() - 53 * DAY));
+      expect(windows.at(-1)?.to).toEqual(now);
+      expect(windows).toHaveLength(9);
+      // Caught up: the replay is over and the next sync reads from the watermark.
+      expect(await cursorOf()).toEqual({ watermark: now, replay: null });
     });
   });
 });

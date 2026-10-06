@@ -12,6 +12,7 @@ import {
   filterTombstonedShopifyOrders,
   markShopifyWebhookSyncFailed,
   materialShopifyOrderEvidenceChanged,
+  orderSyncStartingPoint,
   partitionShopifyOrders,
   planShopifyRefundRows,
   runShopifyOrderSync,
@@ -1014,5 +1015,32 @@ describe("when the sync writes an order's refunds", () => {
     expect(restate?.where?.sql).toMatch(/`shopifyUpdatedAt` <= \?/);
     // Reopening reads the refund's active matches.
     expect(fake.ops.some((op) => op.kind === "select" && op.table === MATCHES)).toBe(true);
+  });
+});
+
+describe("when a replay of the store's orders is owed", () => {
+  const now = new Date("2026-10-06T00:00:00Z");
+  const watermark = new Date("2026-10-05T23:00:00Z");
+
+  it("should read from the replay's progress, not the watermark", () => {
+    const progress = new Date("2026-08-20T00:00:00Z");
+    expect(orderSyncStartingPoint({ watermarkUpdatedAt: watermark, replayWatermarkUpdatedAt: progress }, now)).toEqual(
+      progress,
+    );
+  });
+
+  it("should start a replay no further back than the initial window", () => {
+    // Requested long ago: read_orders allows only the last 60 days.
+    const requested = new Date("2026-06-01T00:00:00Z");
+    expect(
+      orderSyncStartingPoint({ watermarkUpdatedAt: watermark, replayWatermarkUpdatedAt: requested }, now),
+    ).toBeNull();
+  });
+
+  it("should read from the watermark when no replay is owed", () => {
+    expect(orderSyncStartingPoint({ watermarkUpdatedAt: watermark, replayWatermarkUpdatedAt: null }, now)).toEqual(
+      watermark,
+    );
+    expect(orderSyncStartingPoint(null, now)).toBeNull();
   });
 });

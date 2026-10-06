@@ -1,8 +1,8 @@
 {
-  "id": "95eb0f61-4771-4831-859a-773472233c0f",
-  "prevId": "5ccbbd69-731e-4c10-827e-c7413229700f",
   "version": "5",
   "dialect": "mysql",
+  "id": "96686332-a501-4de4-9d82-95a820b000cb",
+  "prevId": "5ccbbd69-731e-4c10-827e-c7413229700f",
   "tables": {
     "agent_action_drafts": {
       "name": "agent_action_drafts",
@@ -164,8 +164,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -1383,8 +1383,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -1525,8 +1525,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -1926,8 +1926,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -2332,8 +2332,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -2544,8 +2544,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -2674,8 +2674,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -2781,8 +2781,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -2919,8 +2919,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -3307,8 +3307,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -3427,8 +3427,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -3613,8 +3613,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -3749,8 +3749,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -4029,8 +4029,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -4241,8 +4241,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -4440,8 +4440,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -4778,8 +4778,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -4942,8 +4942,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -5005,8 +5005,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         },
         "createdAt": {
           "name": "createdAt",
@@ -5129,8 +5129,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -5256,8 +5256,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -6113,8 +6113,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -6212,8 +6212,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -6384,8 +6384,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {},
@@ -7007,8 +7007,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -7260,8 +7260,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -7795,8 +7795,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -7981,8 +7981,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -8214,8 +8214,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -8528,8 +8528,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -9272,8 +9272,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -9403,8 +9403,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         },
         "lastSignedIn": {
           "name": "lastSignedIn",
@@ -9673,8 +9673,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -11163,8 +11163,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -12449,8 +12449,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -12606,8 +12606,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -13075,8 +13075,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -13225,8 +13225,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -13834,8 +13834,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -14012,8 +14012,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -14140,8 +14140,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -14551,8 +14551,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -14759,8 +14759,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -14943,8 +14943,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -15067,8 +15067,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -15480,8 +15480,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -15589,6 +15589,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "replayWatermarkUpdatedAt": {
+          "name": "replayWatermarkUpdatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "lastSuccessfulAt": {
           "name": "lastSuccessfulAt",
           "type": "timestamp",
@@ -15632,8 +15639,8 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "(now())",
-          "onUpdate": true
+          "onUpdate": true,
+          "default": "(now())"
         }
       },
       "indexes": {
@@ -15872,9 +15879,9 @@
   },
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   },
   "internal": {
     "tables": {},
