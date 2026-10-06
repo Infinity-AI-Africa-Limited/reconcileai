@@ -84,7 +84,7 @@ REDIS_URL=${{Redis.REDIS_URL}}
 > refuse to run without Redis. Order webhooks degrade to the 15-minute backstop; privacy
 > requests are acknowledged to Shopify and parked in a retryable outbox, so they are
 > **not actioned until Redis is provisioned** — the 30-day obligation keeps running meanwhile. Verify with the boot
-> log line `BullMQ backend active` for `shopify-privacy`, not by webhooks returning 200.
+> log line `[boot] Shopify durable queues confirmed` (see §6), not by webhooks returning 200.
 > See CLAUDE.md §10.
 
 ### 2b. Required for a connector that is live
@@ -233,10 +233,14 @@ use its JSON `checks` to fix the offending one. (Railway healthchecks `/api/heal
   14-day GL window surfaces the ₦4.64M imbalance on 2026-05-22.
 - **LLM:** trigger an exception classification or the Super Agent; confirm a Claude response.
 - **Storage:** generate/share a report; confirm upload + download via R2.
-- **Queue:** the boot log shows `[queue:…] BullMQ backend active` for every queue, including
-  `shopify-privacy`. If that line is absent for a Shopify queue, `REDIS_URL` is missing: the
-  durable queues print no fallback line, they refuse instead, and the first sign is
-  `[shopify-privacy] durable dispatch unavailable` (code `durable_queue_unavailable`).
+- **Queue:** the boot log must show `[boot] Shopify durable queues confirmed`, and
+  `GET /api/health` must report `checks.queue.durable: true`. Both come from an actual count
+  read against Redis. Do **not** rely on `[queue:…] BullMQ backend active`: it prints when the
+  queue object is built, before Redis has answered, so it appears even when Redis is
+  unreachable. Failure looks like `[boot] Shopify durable queues unavailable` with reason
+  `queue_timeout` (Redis set but unreachable) or `queue_unavailable`. With `REDIS_URL`
+  unset the boot probe prints nothing at all, so a missing "confirmed" line is itself the
+  signal.
 
 ---
 
