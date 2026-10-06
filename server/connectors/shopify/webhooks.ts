@@ -18,8 +18,16 @@ import {
 } from "./privacySelectors";
 import { admitShopifyShopRedaction } from "./redaction";
 import { loggableError } from "../../dbErrors";
+import { SHOPIFY_WEBHOOK_PATH } from "./paths";
 
-const PRIVACY_TOPICS = new Set(["customers/data_request", "customers/redact", "shop/redact"]);
+/**
+ * The non-order topics this endpoint handles: Shopify's three mandatory privacy
+ * topics, and uninstall. Exported, with SHOPIFY_ORDER_TRIGGER_TOPICS, so
+ * shopify.app.toml is checked against what the handler actually serves
+ * (appConfig.test.ts).
+ */
+export const SHOPIFY_PRIVACY_TOPICS = new Set(["customers/data_request", "customers/redact", "shop/redact"]);
+export const SHOPIFY_UNINSTALL_TOPIC = "app/uninstalled";
 export const SHOPIFY_ORDER_TRIGGER_TOPICS = new Set([
   "orders/create",
   "orders/paid",
@@ -200,7 +208,7 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       return res.status(200).json({ received: true, status: "unknown_store" });
     }
 
-    if (topic === "app/uninstalled") {
+    if (topic === SHOPIFY_UNINSTALL_TOPIC) {
       if (isStaleUninstall(headerValue(req, "x-shopify-triggered-at"), store.claimedAt)) {
         await settle("ignored", "stale_uninstall");
         return res.status(200).json({ received: true, status: "ignored_stale" });
@@ -248,7 +256,7 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
       return res.status(200).json({ received: true, status: "processed" });
     }
 
-    if (PRIVACY_TOPICS.has(topic)) {
+    if (SHOPIFY_PRIVACY_TOPICS.has(topic)) {
       if (topic === "shop/redact") {
         // Shopify retries a failed delivery for 48 hours. One triggered before
         // the merchant reinstalled is about the previous installation; admitting
@@ -379,6 +387,6 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
 
 export function createShopifyWebhookRouter(): express.Router {
   const router = express.Router();
-  router.post("/api/webhooks/shopify", handleShopifyWebhook);
+  router.post(SHOPIFY_WEBHOOK_PATH, handleShopifyWebhook);
   return router;
 }

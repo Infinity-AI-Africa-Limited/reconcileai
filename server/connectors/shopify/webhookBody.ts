@@ -13,8 +13,9 @@
  * Mount with `app.use(shopifyWebhookRawBody())` ahead of `express.json`.
  */
 import express from "express";
+import { SHOPIFY_WEBHOOK_PATH } from "./paths";
 
-export const SHOPIFY_WEBHOOK_PATH = "/api/webhooks/shopify";
+export { SHOPIFY_WEBHOOK_PATH };
 
 /**
  * Comfortably above a real delivery: an order payload carries each line item,
