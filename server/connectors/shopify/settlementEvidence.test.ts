@@ -537,6 +537,23 @@ describe("when two imports for the same store run at once", () => {
 });
 
 describe("when a file covers only some of the store's orders", () => {
+  it("should reconcile the file's orders at any earlier date, and nothing after its period", async () => {
+    const { result, reconcile } = await commitFile({
+      headers: ["order_number", "settled_amount", "settlement_date"],
+      rows: [
+        { order_number: "#1001", settled_amount: "12.34", settlement_date: "2026-09-10" },
+        { order_number: "#1001", settled_amount: "-2.34", settlement_date: "2026-09-20" },
+      ],
+    });
+    await result;
+
+    // A settlement follows its order or refund by more than days — a COD
+    // remittance by weeks — so the file's orders are read at any earlier date.
+    expect(reconcile.mock.calls[0]?.[4]).toEqual(new Date(0));
+    // A refund made after the file's period is not missing from it.
+    expect(reconcile.mock.calls[0]?.[5]).toEqual(new Date(new Date("2026-09-20").getTime() + 3 * 24 * 60 * 60 * 1000));
+  });
+
   it("should reconcile only the orders the imported rows name", async () => {
     const { result, reconcile } = await commitFile({
       rows: [{ order_number: "#1001", settled_amount: "12.34" }],

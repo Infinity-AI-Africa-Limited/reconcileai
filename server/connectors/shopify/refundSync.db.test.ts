@@ -12,9 +12,10 @@ import { and, asc, eq } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { channels, transactions, uploadBatches, users } from "../../../drizzle/schema";
+import { channels, exceptions, transactions, uploadBatches, users } from "../../../drizzle/schema";
 import { shopifyConnectorStores, shopifySyncCursors } from "../../../drizzle/shopify_schema";
 import { classifyDatabaseTarget } from "../../dbTarget";
+import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 import type { NormalizedShopifyOrder, NormalizedShopifyRefund } from "./orders";
 import { runShopifyOrderSync } from "./syncOrchestrator";
 
@@ -28,9 +29,9 @@ const refund = (id: number, amount: string): NormalizedShopifyRefund => ({
   amount,
   currencyCode: "USD",
 });
-const order = (updatedAt: string, refunds: NormalizedShopifyRefund[]): NormalizedShopifyOrder => ({
-  gid: GID,
-  name: "#5001",
+const order = (updatedAt: string, refunds: NormalizedShopifyRefund[], gid = GID): NormalizedShopifyOrder => ({
+  gid,
+  name: `#${gid.split("/").pop()}`,
   createdAt: "2026-09-20T10:00:00.000Z",
   updatedAt,
   processedAt: "2026-09-20T10:01:00.000Z",
@@ -96,6 +97,7 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
 
   afterAll(async () => {
     if (!db) return;
+    await db.delete(exceptions).where(eq(exceptions.organizationId, organizationId));
     await db.delete(transactions).where(eq(transactions.organizationId, organizationId));
     await db.delete(uploadBatches).where(eq(uploadBatches.organizationId, organizationId));
     await db.delete(channels).where(eq(channels.organizationId, organizationId));
@@ -157,5 +159,68 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
 
     expect(report).toMatchObject({ updated: 1, refundsInserted: 0, refundsUpdated: 0 });
     expect((await ledger())[0]).toMatchObject({ shopifyRefundId: "", amount: "100.00" });
+  });
+  describe("when the gateway's lines were imported before Shopify synced the order", () => {
+    const LATE = "gid://shopify/Order/5550002";
+    const QUIET = "gid://shopify/Order/5550003";
+    const statusOf = async (gid: string) =>
+      (
+        await db
+          .select({ channelId: transactions.channelId, amount: transactions.amount, status: transactions.status })
+          .from(transactions)
+          .where(and(eq(transactions.organizationId, organizationId), eq(transactions.transactionRef, gid)))
+          .orderBy(asc(transactions.channelId), asc(transactions.amount))
+      ).map((row) => [row.amount, row.status]);
+
+    it("should match the order and its refund to the evidence waiting for them", async () => {
+      // The evidence import's channel and rows, as it writes them, before the sync.
+      const [channel] = await db.insert(channels).values({
+        organizationId,
+        name: "Settlement Evidence — test",
+        code: shopifySettlementEvidenceChannelCode(storeId),
+        channelType: "ecommerce_gateway",
+        country: "GLB",
+        defaultCurrency: "USD",
+        isActive: true,
+      });
+      const evidenceChannelId = (channel as { insertId: number }).insertId;
+      const line = (amount: string, debitCredit: "credit" | "debit", settledOn: string) => ({
+        batchId: 1,
+        channelId: evidenceChannelId,
+        userId: 1,
+        organizationId,
+        transactionRef: LATE,
+        amount,
+        currency: "USD",
+        // Settled a week after the refund: outside any three-day window.
+        transactionDate: new Date(settledOn),
+        debitCredit,
+        isReversal: debitCredit === "debit",
+        status: "unmatched" as const,
+      });
+      await db.insert(transactions).values([line("100.00", "credit", "2026-09-27"), line("15.00", "debit", "2026-09-28")]);
+
+      const report = await sync(order("2026-09-21T10:00:00.000Z", [refund(31, "15.00")], LATE));
+
+      expect(report.evidenceMatched).toBe(2);
+      // Evidence rows first (higher channel id is the evidence channel).
+      expect((await statusOf(LATE)).every(([, status]) => status === "matched")).toBe(true);
+      expect(await statusOf(LATE)).toHaveLength(4);
+    });
+
+    it("should leave an order with no evidence yet untouched, and flag nothing", async () => {
+      const report = await sync(order("2026-09-21T11:00:00.000Z", [refund(41, "5.00")], QUIET));
+
+      expect(report).toMatchObject({ inserted: 1, refundsInserted: 1, evidenceMatched: 0 });
+      expect(await statusOf(QUIET)).toEqual([
+        ["5.00", "unmatched"],
+        ["100.00", "unmatched"],
+      ]);
+      const flagged = await db
+        .select({ id: exceptions.id })
+        .from(exceptions)
+        .where(eq(exceptions.organizationId, organizationId));
+      expect(flagged).toEqual([]);
+    });
   });
 });

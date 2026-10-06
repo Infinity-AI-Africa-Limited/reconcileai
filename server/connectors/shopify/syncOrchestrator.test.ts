@@ -747,6 +747,7 @@ describe("when a store is further behind than one sync window", () => {
       unchanged: 0,
       refundsInserted: 0,
       refundsUpdated: 0,
+      evidenceMatched: 0,
       batchId: null,
     };
   }

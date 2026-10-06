@@ -34,7 +34,8 @@ import {
   type NormalizedShopifyRefund,
 } from "./orders";
 import { affectedRows } from "./tokenStore";
-import { shopifyOrdersChannelCode } from "./channelCodes";
+import { shopifyOrdersChannelCode, shopifySettlementEvidenceChannelCode } from "./channelCodes";
+import { runReconciliationOnPersistedData } from "../shopline/syncOrchestrator";
 
 const ORDER_RESOURCE = "orders" as const;
 const TRANSACTION_LOOKUP_CHUNK = 500;
@@ -53,6 +54,8 @@ export interface ShopifyOrderSyncReport {
   /** Refund rows written this cycle: each refund that returned money is its own row. */
   refundsInserted: number;
   refundsUpdated: number;
+  /** Pairs matched against settlement evidence imported before these rows were written. */
+  evidenceMatched: number;
   batchId: number | null;
   errorCode?: string;
 }
@@ -787,6 +790,10 @@ export async function runShopifyOrderSync(
       let unchanged = partition.unchanged;
       let refundsInserted = 0;
       let refundsUpdated = 0;
+      let evidenceMatched = 0;
+      // Orders whose ledger rows this cycle wrote, to reconcile against
+      // evidence that arrived before them.
+      const writtenOrders = new Set<string>();
 
       if (changed > 0) {
         const batch = await tx.insert(uploadBatches).values({
@@ -835,7 +842,9 @@ export async function runShopifyOrderSync(
         // A row this cycle inserted carries this cycle's batch. Anything else
         // was written by another sync first: it is not an insert of ours. It is
         // an update if our evidence is newer, and otherwise unchanged.
-        inserted = racedRows.filter((row) => row.batchId === batchId).length;
+        const ours = racedRows.filter((row) => row.batchId === batchId);
+        inserted = ours.length;
+        for (const row of ours) if (row.transactionRef) writtenOrders.add(row.transactionRef);
         const raced = partitionShopifyOrders(
           partition.inserts,
           racedRows.filter((row) => row.batchId !== batchId),
@@ -868,6 +877,7 @@ export async function runShopifyOrderSync(
             continue;
           }
           updated += 1;
+          writtenOrders.add(update.order.gid);
           if (current && materialShopifyOrderEvidenceChanged(current, update.order)) {
             await reopenAffectedReconciliation(tx, {
               organizationId: store.organizationId,
@@ -896,6 +906,7 @@ export async function runShopifyOrderSync(
             )
             .onDuplicateKeyUpdate({ set: { transactionRef: sql`${transactions.transactionRef}` } });
           refundsInserted = refundPlan.inserts.length;
+          for (const { order } of refundPlan.inserts) writtenOrders.add(order.gid);
         }
         for (const update of refundPlan.updates) {
           const write = await tx
@@ -916,6 +927,7 @@ export async function runShopifyOrderSync(
             );
           if (affectedRows(write) === 0) continue;
           refundsUpdated += 1;
+          writtenOrders.add(update.order.gid);
           if (materialShopifyRefundEvidenceChanged(update.current, update.order, update.refund)) {
             await reopenAffectedReconciliation(tx, {
               organizationId: store.organizationId,
@@ -939,6 +951,15 @@ export async function runShopifyOrderSync(
             .set({ validRows: written })
             .where(and(eq(uploadBatches.id, batchId), eq(uploadBatches.organizationId, store.organizationId)));
         }
+      }
+
+      if (writtenOrders.size > 0) {
+        evidenceMatched = await reconcileWithWaitingEvidence(tx, {
+          store,
+          ordersChannelId: channelId,
+          orderGids: [...writtenOrders],
+          now,
+        });
       }
 
       // Both branches fixed the same NULL-watermark bug: main inline here, this
@@ -966,6 +987,7 @@ export async function runShopifyOrderSync(
         unchanged,
         refundsInserted,
         refundsUpdated,
+        evidenceMatched,
         batchId,
       };
     });
@@ -994,6 +1016,83 @@ export async function runShopifyOrderSync(
       .onDuplicateKeyUpdate({ set: { lastErrorCode: code, lastErrorAt: failedAt } });
     throw error;
   }
+}
+
+/** The import's own margin past the latest date it reconciles to. */
+const EVIDENCE_DATE_MARGIN_MS = 3 * 24 * 60 * 60_000;
+
+/**
+ * Reconcile the orders this cycle wrote against settlement evidence already
+ * imported for them, and return the pairs matched.
+ *
+ * The evidence import reconciles only what it imports. Evidence that arrived
+ * BEFORE its Shopify row — a gateway's refund line imported before the refund
+ * synced, an order that synced late, a match reopened by a correction — would
+ * otherwise stay unmatched for good: importing the file again adds nothing, so
+ * reconciles nothing. Only orders with evidence still unmatched are in scope,
+ * so an order whose file has not been imported is never flagged for its absence.
+ *
+ * Runs inside the sync's transaction, under its store lock, which the import
+ * also takes: the two never reconcile one store's ledger at once.
+ */
+async function reconcileWithWaitingEvidence(
+  tx: DbExecutor,
+  params: {
+    store: { id: number; organizationId: number; currency: string | null };
+    ordersChannelId: number;
+    orderGids: string[];
+    now: Date;
+  },
+): Promise<number> {
+  const { store } = params;
+  const [evidenceChannel] = await tx
+    .select({ id: channels.id })
+    .from(channels)
+    .where(
+      and(
+        eq(channels.organizationId, store.organizationId),
+        eq(channels.code, shopifySettlementEvidenceChannelCode(store.id)),
+      ),
+    )
+    .limit(1);
+  if (!evidenceChannel) return 0;
+
+  const waiting = new Set<string>();
+  let latest = params.now.getTime();
+  for (let i = 0; i < params.orderGids.length; i += TRANSACTION_LOOKUP_CHUNK) {
+    const chunk = params.orderGids.slice(i, i + TRANSACTION_LOOKUP_CHUNK);
+    const rows = await tx
+      .select({ transactionRef: transactions.transactionRef, transactionDate: transactions.transactionDate })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.organizationId, store.organizationId),
+          eq(transactions.channelId, evidenceChannel.id),
+          eq(transactions.status, "unmatched"),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      );
+    for (const row of rows) {
+      if (!row.transactionRef) continue;
+      waiting.add(row.transactionRef);
+      if (row.transactionDate) latest = Math.max(latest, new Date(row.transactionDate).getTime());
+    }
+  }
+  if (waiting.size === 0) return 0;
+
+  const result = await runReconciliationOnPersistedData(
+    tx,
+    store.organizationId,
+    params.ordersChannelId,
+    evidenceChannel.id,
+    // Any earlier date: the scope is these orders, and their evidence may
+    // follow them by weeks. Up to the latest evidence waiting for them.
+    new Date(0),
+    new Date(latest + EVIDENCE_DATE_MARGIN_MS),
+    store.currency ?? "USD",
+    { orderRefs: [...waiting] },
+  );
+  return result.matchedCount;
 }
 
 /**

@@ -606,7 +606,14 @@ export async function importShopifySettlementEvidence(
       let exceptionCount = 0;
       if (fresh.length > 0) {
         const times = fresh.map((row: InsertTransaction) => new Date(row.transactionDate).getTime());
-        const from = new Date(Math.min(...times) - RECONCILIATION_WINDOW_MS);
+        // No lower bound: the scope below is already the orders this file
+        // names, and their Shopify rows are dated by the ORDER and the REFUND,
+        // which a settlement routinely follows by more than days — a COD
+        // remittance by weeks. Bounded below by the file's first date, those
+        // rows were left out and both sides flagged unmatched. The upper bound
+        // stays: a refund made after the period this file covers is not
+        // missing from it.
+        const from = new Date(0);
         const to = new Date(Math.max(...times) + RECONCILIATION_WINDOW_MS);
         const result = await (deps.reconcile ?? runReconciliationOnPersistedData)(
           tx,
