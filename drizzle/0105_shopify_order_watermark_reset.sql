@@ -1,0 +1,28 @@
+-- One-time restatement of every Shopify store's orders (owner decision, 2026-10-06).
+--
+-- WHY. Until #169 an order was stored at its total NET of refunds and its
+-- refunds were not recorded, so a partially refunded order never matched its own
+-- gross payment. #169 stores the total BEFORE refunds and each refund as its own
+-- row, but only for orders it reads again. A sync reads from the store's
+-- watermark (its last order update seen), so an order refunded before the deploy
+-- and not touched since would keep its net total, and no refund rows, for good.
+--
+-- WHAT. Clearing the orders watermark makes each store's next sync read its full
+-- initial window again (SHOPIFY_INITIAL_ORDER_WINDOW_DAYS, 60 days: everything
+-- read_orders allows), in 7-day steps. For each order read:
+--   - a row stored net of refunds is restated at its total before them (same
+--     Shopify version, different evidence: restatesSameSnapshot), and any match
+--     it was in is reopened;
+--   - its refunds are written as their own rows;
+--   - the sync then re-matches both against settlement evidence already waiting
+--     for them (reconcileWithWaitingEvidence), raising no new exceptions;
+--   - an order whose customer was redacted stays out: its tombstone still
+--     filters it before anything is written.
+-- Orders already stored correctly are read and left unchanged.
+--
+-- SAFETY. Data only, no schema change. The sync's watermark guard
+-- (advancedOrderWatermark) treats NULL as "never synced", so the next success
+-- sets it again. Stores that are uninstalled, fenced for redaction or awaiting
+-- reauthorization are untouched by the sync whatever their cursor says. Running
+-- this twice would only cause a second re-read; the migration runner runs it once.
+UPDATE `shopify_sync_cursors` SET `watermarkUpdatedAt` = NULL WHERE `resource` = 'orders';

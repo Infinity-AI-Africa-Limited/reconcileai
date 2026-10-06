@@ -8,7 +8,9 @@
  * of either, that the order lookup ignores its refund rows, and that the sync
  * converges — a replay writes nothing, a later version adds only what is new.
  */
-import { and, asc, eq } from "drizzle-orm";
+import fs from "node:fs";
+import path from "node:path";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -324,6 +326,43 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
       await importFile([{ order: "#5550002", amount: "9.00", date: "2026-10-20" }]);
 
       expect(await refundFlags(ZERO, "gid://shopify/Refund/71")).toEqual([]);
+    });
+  });
+
+  describe("when migration 0105 resets the order watermarks", () => {
+    it("should make the store's next sync read its whole initial window again", async () => {
+      // The store has synced, so its watermark sits at its last order update.
+      const [before] = await db
+        .select({ watermark: shopifySyncCursors.watermarkUpdatedAt })
+        .from(shopifySyncCursors)
+        .where(eq(shopifySyncCursors.storeId, storeId));
+      expect(before?.watermark).toBeInstanceOf(Date);
+
+      // The migration itself, as the runner would apply it.
+      const migration = fs
+        .readFileSync(path.join(__dirname, "../../../drizzle/0105_shopify_order_watermark_reset.sql"), "utf8")
+        .split("\n")
+        .filter((line) => !line.startsWith("--"))
+        .join("\n");
+      await db.execute(sql.raw(migration));
+
+      const windows: Array<{ from: Date; to: Date }> = [];
+      await runShopifyOrderSync(
+        { storeId, organizationId, trigger: "manual" },
+        {
+          db: db as never,
+          suppressionKeys: keys,
+          now: () => new Date("2026-09-22T00:00:00Z"),
+          fetchOrders: async (window) => {
+            windows.push({ from: window.from, to: window.to });
+            return [];
+          },
+        },
+      );
+
+      // From the start of the 60-day window, in its first 7-day step.
+      expect(windows[0]?.from).toEqual(new Date("2026-07-24T00:00:00Z"));
+      expect(windows[0]?.to).toEqual(new Date("2026-07-31T00:00:00Z"));
     });
   });
 });
