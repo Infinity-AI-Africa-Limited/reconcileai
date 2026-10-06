@@ -6,19 +6,20 @@ vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
 
-import { toShopifyOrderTransaction } from "./ingest";
+import { toShopifyOrderTransaction, toShopifyRefundTransaction } from "./ingest";
 import { computeShopifyOrderSuppressionDigest } from "./privacySuppression";
 import {
   filterTombstonedShopifyOrders,
   markShopifyWebhookSyncFailed,
   materialShopifyOrderEvidenceChanged,
   partitionShopifyOrders,
+  planShopifyRefundRows,
   runShopifyOrderSync,
   runShopifyOrderSyncToNow,
   type ShopifyOrderSyncReport,
 } from "./syncOrchestrator";
 import { rowOf, scriptedDb } from "./scriptedDb.testkit";
-import type { NormalizedShopifyOrder } from "./orders";
+import type { NormalizedShopifyOrder, NormalizedShopifyRefund } from "./orders";
 
 const STORES = "shopify_connector_stores";
 const CURSORS = "shopify_sync_cursors";
@@ -38,7 +39,9 @@ const order = (over: Partial<NormalizedShopifyOrder> = {}): NormalizedShopifyOrd
   updatedAt: "2026-09-20T10:05:00.000Z",
   processedAt: "2026-09-20T10:01:00.000Z",
   currencyCode: "USD",
-  currentTotalPrice: { amount: "19.95", currencyCode: "USD" },
+  totalPrice: { amount: "19.95", currencyCode: "USD" },
+  totalRefunded: { amount: "0.00", currencyCode: "USD" },
+  refunds: [],
   displayFinancialStatus: "PAID",
   cancelledAt: null,
   ...over,
@@ -106,7 +109,7 @@ describe("Shopify order idempotency", () => {
     ).toEqual([order({ gid: "gid://shopify/Order/1002" })]);
   });
 
-  it("distinguishes material reconciliation evidence from descriptive-only changes", () => {
+  it("should treat as material only what matching reads: total, currency and dates", () => {
     const existing = {
       id: 501,
       transactionRef: order().gid,
@@ -120,8 +123,15 @@ describe("Shopify order idempotency", () => {
       shopifyCancelledAt: null,
     };
     expect(materialShopifyOrderEvidenceChanged(existing, order({ name: "#1001-edited" }))).toBe(false);
-    expect(materialShopifyOrderEvidenceChanged(existing, order({ currentTotalPrice: { amount: "20.95", currencyCode: "USD" } }))).toBe(true);
-    expect(materialShopifyOrderEvidenceChanged(existing, order({ displayFinancialStatus: "REFUNDED" }))).toBe(true);
+    expect(materialShopifyOrderEvidenceChanged(existing, order({ totalPrice: { amount: "20.95", currencyCode: "USD" } }))).toBe(true);
+    expect(materialShopifyOrderEvidenceChanged(existing, order({ processedAt: "2026-09-21T00:00:00.000Z" }))).toBe(true);
+    expect(materialShopifyOrderEvidenceChanged(existing, order({ currencyCode: "EUR" }))).toBe(true);
+    // A refund changes these, and is its own row: the order still matches its payment.
+    expect(materialShopifyOrderEvidenceChanged(existing, order({ displayFinancialStatus: "PARTIALLY_REFUNDED" }))).toBe(false);
+    expect(materialShopifyOrderEvidenceChanged(existing, order({ cancelledAt: "2026-09-22T00:00:00.000Z" }))).toBe(false);
+    expect(
+      materialShopifyOrderEvidenceChanged(existing, order({ totalRefunded: { amount: "5.00", currencyCode: "USD" } })),
+    ).toBe(false);
   });
 });
 
@@ -735,6 +745,9 @@ describe("when a store is further behind than one sync window", () => {
       inserted: 0,
       updated: 0,
       unchanged: 0,
+      refundsInserted: 0,
+      refundsUpdated: 0,
+      evidenceMatched: 0,
       batchId: null,
     };
   }
@@ -811,5 +824,195 @@ describe("when a store is further behind than one sync window", () => {
       runShopifyOrderSyncToNow({ storeId: 7, organizationId: 42, trigger: "manual" }, { now: () => NOW, runCycle }),
     ).rejects.toThrow("pagination_error");
     expect(runCycle).toHaveBeenCalledTimes(2);
+  });
+});
+
+const refundOf = (over: Partial<NormalizedShopifyRefund> = {}): NormalizedShopifyRefund => ({
+  gid: "gid://shopify/Refund/9",
+  createdAt: "2026-09-21T09:00:00.000Z",
+  amount: "5.00",
+  currencyCode: "USD",
+  ...over,
+});
+const REFUNDED_AT = "2026-09-21T09:00:05.000Z";
+const refundedOrder = (over: Partial<NormalizedShopifyOrder> = {}) =>
+  order({ updatedAt: REFUNDED_AT, totalRefunded: { amount: "5.00", currencyCode: "USD" }, refunds: [refundOf()], ...over });
+const INGEST = { organizationId: 42, storeId: 7, channelId: 70, batchId: 80, userId: 9 };
+const storedRefund = (over: Record<string, unknown> = {}) => ({
+  id: 601,
+  transactionRef: order().gid,
+  shopifyRefundId: refundOf().gid,
+  shopifyUpdatedAt: new Date(REFUNDED_AT),
+  amount: "5.00",
+  currency: "USD",
+  transactionDate: new Date(refundOf().createdAt!),
+  matchId: null,
+  ...over,
+});
+
+describe("when an order has been refunded", () => {
+  it("should record the refund as money out, under its order's reference, with nothing raw", () => {
+    expect(toShopifyRefundTransaction(refundedOrder(), refundOf(), INGEST)).toEqual({
+      batchId: 80,
+      channelId: 70,
+      userId: 9,
+      organizationId: 42,
+      shopifyStoreId: 7,
+      shopifyRefundId: "gid://shopify/Refund/9",
+      transactionRef: "gid://shopify/Order/1001",
+      externalRef: "#1001",
+      description: "Shopify Order #1001 refund",
+      amount: "5.00",
+      currency: "USD",
+      transactionDate: new Date("2026-09-21T09:00:00.000Z"),
+      valueDate: new Date("2026-09-21T09:00:00.000Z"),
+      shopifyOrderCurrency: "USD",
+      shopifyUpdatedAt: new Date(REFUNDED_AT),
+      shopifyFinancialStatus: "PAID",
+      shopifyCancelledAt: null,
+      debitCredit: "debit",
+      counterparty: "Shopify",
+      isReversal: true,
+      status: "unmatched",
+      rawData: null,
+    });
+  });
+
+  it("should date a refund Shopify gives no time for by its order's last update", () => {
+    const row = toShopifyRefundTransaction(refundedOrder(), refundOf({ createdAt: null }), INGEST);
+    expect(row.transactionDate).toEqual(new Date(REFUNDED_AT));
+  });
+
+  it("should keep the order's own row at its total before refunds", () => {
+    const row = toShopifyOrderTransaction(refundedOrder({ totalPrice: { amount: "100.00", currencyCode: "USD" } }), INGEST);
+    expect(row).toMatchObject({ amount: "100.00", debitCredit: "credit", isReversal: false, shopifyRefundId: "" });
+  });
+});
+
+describe("when refunds are planned against what is stored", () => {
+  it("should insert a new refund that returned money, and not one that returned none", () => {
+    const plan = planShopifyRefundRows(
+      [refundedOrder({ refunds: [refundOf(), refundOf({ gid: "gid://shopify/Refund/10", amount: "0.00" })] })],
+      [],
+    );
+    expect(plan.inserts.map(({ refund }) => refund.gid)).toEqual(["gid://shopify/Refund/9"]);
+    expect(plan.updates).toEqual([]);
+  });
+
+  it("should restate a stored refund from a newer version of its order", () => {
+    const plan = planShopifyRefundRows([refundedOrder()], [storedRefund({ shopifyUpdatedAt: new Date("2026-09-21T09:00:00Z") })]);
+    expect(plan.updates.map((update) => update.transactionId)).toEqual([601]);
+  });
+
+  it("should restate a stored refund the same version now reads differently — including to zero", () => {
+    const plan = planShopifyRefundRows([refundedOrder({ refunds: [refundOf({ amount: "0.00" })] })], [storedRefund()]);
+    expect(plan.updates.map((update) => [update.transactionId, update.refund.amount])).toEqual([[601, "0.00"]]);
+  });
+
+  it("should leave a stored refund alone when nothing changed, or its order's version is older", () => {
+    expect(planShopifyRefundRows([refundedOrder()], [storedRefund()])).toMatchObject({ inserts: [], updates: [], unchanged: 1 });
+    const older = planShopifyRefundRows(
+      [refundedOrder({ updatedAt: "2026-09-21T08:00:00.000Z", refunds: [refundOf({ amount: "9.99" })] })],
+      [storedRefund()],
+    );
+    expect(older).toMatchObject({ inserts: [], updates: [], unchanged: 1 });
+  });
+});
+
+describe("when an order stored net of its refunds is read again at the same version", () => {
+  it("should restate it at its total before refunds", () => {
+    const current = order();
+    const result = partitionShopifyOrders(
+      [current],
+      [
+        {
+          id: 501,
+          transactionRef: current.gid,
+          shopifyUpdatedAt: new Date(current.updatedAt),
+          amount: "14.95", // written as the total net of a 5.00 refund
+          currency: "USD",
+          transactionDate: new Date(current.createdAt),
+          valueDate: new Date(current.processedAt!),
+          shopifyOrderCurrency: "USD",
+        },
+      ],
+    );
+    expect(result.updates.map((update) => update.transactionId)).toEqual([501]);
+  });
+});
+
+describe("when the sync writes an order's refunds", () => {
+  it("should insert each refund that returned money as its own row, and look orders up by their own row only", async () => {
+    const refunded = refundedOrder({ refunds: [refundOf(), refundOf({ gid: "gid://shopify/Refund/10", amount: "0.00" })] });
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        // The order's own row (none yet), its stored refunds (none), then the reload of inserted orders.
+        [TRANSACTIONS]: [[], [], [{ id: 1, transactionRef: refunded.gid, shopifyUpdatedAt: new Date(REFUNDED_AT), batchId: 80 }]],
+      },
+      insert: { [BATCHES]: [80] },
+    });
+    const report = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "manual" },
+      { db: fake.db as never, suppressionKeys: SUPPRESSION_KEYS, fetchOrders: vi.fn(async () => [refunded]) },
+    );
+
+    expect(report).toMatchObject({ inserted: 1, refundsInserted: 1, refundsUpdated: 0, batchId: 80 });
+    const [orderInsert, refundInsert] = fake.writes("insert", TRANSACTIONS);
+    expect(orderInsert?.data).toEqual([expect.objectContaining({ amount: "19.95", debitCredit: "credit", shopifyRefundId: "" })]);
+    expect(refundInsert?.data).toEqual([
+      expect.objectContaining({
+        transactionRef: refunded.gid,
+        shopifyRefundId: "gid://shopify/Refund/9",
+        amount: "5.00",
+        debitCredit: "debit",
+        isReversal: true,
+        batchId: 80,
+        rawData: null,
+      }),
+    ]);
+    const [orderLookup, refundLookup] = fake.ops.filter((op) => op.kind === "select" && op.table === TRANSACTIONS);
+    expect(orderLookup?.where?.sql).toMatch(/`shopifyRefundId` = \?/);
+    expect(orderLookup?.where?.params).toContain("");
+    expect(refundLookup?.where?.sql).toMatch(/`shopifyRefundId` <> \?/);
+    expect(refundLookup?.locked).toBe(true);
+  });
+
+  it("should restate a changed refund under its version guard, and reopen its match", async () => {
+    const refunded = refundedOrder();
+    const fake = scriptedDb({
+      select: {
+        ...baseSelects(),
+        [TRANSACTIONS]: [
+          [
+            {
+              id: 501,
+              transactionRef: refunded.gid,
+              shopifyUpdatedAt: new Date(REFUNDED_AT),
+              amount: "19.95",
+              currency: "USD",
+              transactionDate: new Date(refunded.createdAt),
+              valueDate: new Date(refunded.processedAt!),
+              shopifyOrderCurrency: "USD",
+            },
+          ],
+          [storedRefund({ shopifyUpdatedAt: new Date("2026-09-21T09:00:00Z"), amount: "4.00", status: "matched" })],
+        ],
+        [MATCHES]: [[]],
+      },
+      insert: { [BATCHES]: [80] },
+    });
+    const report = await runShopifyOrderSync(
+      { storeId: 7, organizationId: 42, trigger: "webhook" },
+      { db: fake.db as never, suppressionKeys: SUPPRESSION_KEYS, fetchOrders: vi.fn(async () => [refunded]) },
+    );
+
+    expect(report).toMatchObject({ inserted: 0, updated: 0, unchanged: 1, refundsInserted: 0, refundsUpdated: 1 });
+    const [restate] = fake.writes("update", TRANSACTIONS);
+    expect(restate?.data).toMatchObject({ amount: "5.00", batchId: 80 });
+    expect(restate?.where?.params).toEqual(expect.arrayContaining([601, 42, 7, refunded.gid, "gid://shopify/Refund/9"]));
+    expect(restate?.where?.sql).toMatch(/`shopifyUpdatedAt` <= \?/);
+    // Reopening reads the refund's active matches.
+    expect(fake.ops.some((op) => op.kind === "select" && op.table === MATCHES)).toBe(true);
   });
 });

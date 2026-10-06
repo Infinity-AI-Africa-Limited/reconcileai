@@ -210,10 +210,11 @@ export const transactions = mysqlTable("transactions", {
   userId: int("userId").notNull(),
   organizationId: int("organizationId"),
   /**
-   * Internal Shopify store owner for a field-minimised order row. NULL for every
-   * other ingestion path. Together with organizationId + transactionRef this is
-   * the connector-specific idempotency key; nullable legacy/non-Shopify rows are
-   * deliberately unaffected by the unique index below.
+   * Internal Shopify store owner for a field-minimised order or refund row. NULL
+   * for every other ingestion path. Together with organizationId, transactionRef
+   * and shopifyRefundId this is the connector-specific idempotency key;
+   * nullable legacy/non-Shopify rows are deliberately unaffected by the unique
+   * index below.
    */
   shopifyStoreId: int("shopifyStoreId"),
   transactionRef: varchar("transactionRef", { length: 255 }),
@@ -228,6 +229,15 @@ export const transactions = mysqlTable("transactions", {
   shopifyUpdatedAt: timestamp("shopifyUpdatedAt"),
   shopifyFinancialStatus: varchar("shopifyFinancialStatus", { length: 64 }),
   shopifyCancelledAt: timestamp("shopifyCancelledAt"),
+  /**
+   * The Shopify refund this row records (`gid://shopify/Refund/…`), or empty on
+   * the order's own row. A refund is recorded as its own money-out row under its
+   * ORDER's reference, so it matches the gateway's refund line by reference the
+   * way the order matches its payment; this column is what keeps the two rows
+   * distinct in the unique key below. Empty, never NULL: MySQL treats NULLs as
+   * distinct in a unique index, so a NULL here would let an order be stored twice.
+   */
+  shopifyRefundId: varchar("shopifyRefundId", { length: 64 }).default("").notNull(),
   debitCredit: mysqlEnum("debitCredit", ["debit", "credit"]).notNull(),
   counterparty: varchar("counterparty", { length: 255 }),
   // Reversal tracking
@@ -248,10 +258,11 @@ export const transactions = mysqlTable("transactions", {
   index("idx_txn_ext_ref").on(table.externalRef),
   index("idx_txn_status").on(table.status),
   index("idx_txn_match").on(table.matchId),
-  uniqueIndex("uq_txn_shopify_order").on(
+  uniqueIndex("uq_txn_shopify_record").on(
     table.organizationId,
     table.shopifyStoreId,
     table.transactionRef,
+    table.shopifyRefundId,
   ),
   // Composite index for reconciliation queries
   index("idx_txn_channel_date_status").on(table.channelId, table.transactionDate, table.status),

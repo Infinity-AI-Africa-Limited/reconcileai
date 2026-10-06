@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   SHOPIFY_ORDERS_QUERY,
+  SHOPIFY_ORDER_REFUNDS_QUERY,
   SHOPIFY_READ_ONLY_QUERY_ALLOWLIST,
   ShopifyOrderApiError,
   assertMinimalReadOnlyOrderQuery,
   computeShopifyOrderWindow,
   fetchShopifyOrdersWindow,
   normalizeShopifyOrder,
+  SHOPIFY_REFUNDS_PER_ORDER,
+  SHOPIFY_REFUNDS_PER_ORDER_MAX,
+  SHOPIFY_REFUND_ORDERS_PER_REQUEST,
 } from "./orders";
 
 const rawOrder = (over: Record<string, unknown> = {}) => ({
@@ -16,7 +20,8 @@ const rawOrder = (over: Record<string, unknown> = {}) => ({
   updatedAt: "2026-09-20T10:05:00Z",
   processedAt: "2026-09-20T10:01:00Z",
   currencyCode: "USD",
-  currentTotalPrice: { shopMoney: { amount: "19.95", currencyCode: "USD" } },
+  totalPrice: { shopMoney: { amount: "19.95", currencyCode: "USD" } },
+  totalRefunded: { shopMoney: { amount: "0.00", currencyCode: "USD" } },
   displayFinancialStatus: "PAID",
   cancelledAt: null,
   ...over,
@@ -43,8 +48,9 @@ function errorResponse(status: number, retryAfter?: string, providerText = "sens
 
 describe("the fixed Shopify order operation", () => {
   it("is the sole allowlisted read-only operation and requests no denied buyer/detail fields", () => {
-    expect(Object.keys(SHOPIFY_READ_ONLY_QUERY_ALLOWLIST)).toEqual(["orders"]);
+    expect(Object.keys(SHOPIFY_READ_ONLY_QUERY_ALLOWLIST)).toEqual(["orders", "orderRefunds"]);
     expect(() => assertMinimalReadOnlyOrderQuery(SHOPIFY_ORDERS_QUERY)).not.toThrow();
+    expect(() => assertMinimalReadOnlyOrderQuery(SHOPIFY_ORDER_REFUNDS_QUERY)).not.toThrow();
     expect(SHOPIFY_ORDERS_QUERY).toMatch(/^query /);
     expect(SHOPIFY_ORDERS_QUERY).not.toMatch(/\bmutation\b/i);
     for (const denied of [
@@ -60,6 +66,7 @@ describe("the fixed Shopify order operation", () => {
       "cartToken",
     ]) {
       expect(SHOPIFY_ORDERS_QUERY).not.toMatch(new RegExp(`\\b${denied}\\b`));
+      expect(SHOPIFY_ORDER_REFUNDS_QUERY).not.toMatch(new RegExp(`\\b${denied}\\b`));
     }
   });
 
@@ -79,7 +86,9 @@ describe("Shopify order normalization", () => {
       updatedAt: "2026-09-20T10:05:00.000Z",
       processedAt: "2026-09-20T10:01:00.000Z",
       currencyCode: "USD",
-      currentTotalPrice: { amount: "19.95", currencyCode: "USD" },
+      totalPrice: { amount: "19.95", currencyCode: "USD" },
+      totalRefunded: { amount: "0.00", currencyCode: "USD" },
+      refunds: [],
       displayFinancialStatus: "PAID",
       cancelledAt: null,
     });
@@ -88,7 +97,10 @@ describe("Shopify order normalization", () => {
   it("refuses malformed money or timestamps rather than persisting defaults", () => {
     expect(() => normalizeShopifyOrder(rawOrder({ updatedAt: "not-a-date" }))).toThrow(ShopifyOrderApiError);
     expect(() =>
-      normalizeShopifyOrder(rawOrder({ currentTotalPrice: { shopMoney: { amount: "NaN", currencyCode: "USD" } } })),
+      normalizeShopifyOrder(rawOrder({ totalPrice: { shopMoney: { amount: "NaN", currencyCode: "USD" } } })),
+    ).toThrow(ShopifyOrderApiError);
+    expect(() =>
+      normalizeShopifyOrder(rawOrder({ totalRefunded: { shopMoney: { amount: "-1.00", currencyCode: "USD" } } })),
     ).toThrow(ShopifyOrderApiError);
   });
 
@@ -398,5 +410,155 @@ describe("the persisted watermark window", () => {
         watermark: new Date("2026-08-20T12:00:00Z"),
       }).from,
     ).toEqual(new Date("2026-08-20T11:55:00Z"));
+  });
+});
+
+describe("when orders have been refunded", () => {
+  const WINDOW = {
+    storeId: 7,
+    organizationId: 42,
+    shopDomain: "merchant.myshopify.com",
+    from: new Date("2026-09-20T10:00:00Z"),
+    to: new Date("2026-09-20T11:00:00Z"),
+  };
+  const refunded = (id: number, amount = "5.00") =>
+    rawOrder({
+      id: `gid://shopify/Order/${id}`,
+      name: `#${id}`,
+      totalRefunded: { shopMoney: { amount, currencyCode: "USD" } },
+    });
+  const ordersPage = (nodes: unknown[]) =>
+    jsonResponse({ data: { orders: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } });
+  const refund = (id: number, amount = "5.00", createdAt: string | null = "2026-09-21T09:00:00Z") => ({
+    id: `gid://shopify/Refund/${id}`,
+    createdAt,
+    totalRefunded: { shopMoney: { amount, currencyCode: "USD" } },
+  });
+  const refundsPage = (nodes: unknown[]) => jsonResponse({ data: { nodes } });
+  const requestOf = (fetchImpl: ReturnType<typeof vi.fn>, call: number) =>
+    JSON.parse(fetchImpl.mock.calls[call][1].body as string) as { query: string; variables: { ids: string[]; first: number } };
+  const fetchWith = (fetchImpl: ReturnType<typeof vi.fn>) =>
+    fetchShopifyOrdersWindow(WINDOW, { getAccessToken: vi.fn(async () => "token"), fetchImpl, sleep: vi.fn(async () => {}) });
+
+  it("should take the order total before refunds as the order's amount", () => {
+    const order = normalizeShopifyOrder(
+      rawOrder({
+        totalPrice: { shopMoney: { amount: "100.00", currencyCode: "USD" } },
+        totalRefunded: { shopMoney: { amount: "30.00", currencyCode: "USD" } },
+      }),
+    );
+    expect(order.totalPrice).toEqual({ amount: "100.00", currencyCode: "USD" });
+    expect(order.totalRefunded).toEqual({ amount: "30.00", currencyCode: "USD" });
+  });
+
+  it("should not ask for refunds when no order has refunded money", async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(ordersPage([rawOrder()]));
+    const [order] = await fetchWith(fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(order.refunds).toEqual([]);
+  });
+
+  it("should ask only for the refunded orders' refunds, and attach them", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(ordersPage([rawOrder({ id: "gid://shopify/Order/1" }), refunded(2, "12.50")]))
+      .mockResolvedValueOnce(refundsPage([{ id: "gid://shopify/Order/2", refunds: [refund(9, "12.50")] }]));
+
+    const orders = await fetchWith(fetchImpl);
+
+    expect(requestOf(fetchImpl, 1).query).toBe(SHOPIFY_ORDER_REFUNDS_QUERY);
+    expect(requestOf(fetchImpl, 1).variables).toEqual({ ids: ["gid://shopify/Order/2"], first: SHOPIFY_REFUNDS_PER_ORDER });
+    expect(orders.find((order) => order.gid === "gid://shopify/Order/2")?.refunds).toEqual([
+      { gid: "gid://shopify/Refund/9", createdAt: "2026-09-21T09:00:00.000Z", amount: "12.50", currencyCode: "USD" },
+    ]);
+    expect(orders.find((order) => order.gid === "gid://shopify/Order/1")?.refunds).toEqual([]);
+  });
+
+  it("should keep a refund that returned no money, so a row stored earlier can be restated", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(ordersPage([refunded(2)]))
+      .mockResolvedValueOnce(refundsPage([{ id: "gid://shopify/Order/2", refunds: [refund(9), refund(10, "0.00", null)] }]));
+    const [order] = await fetchWith(fetchImpl);
+    expect(order.refunds.map((r) => [r.gid, r.amount, r.createdAt])).toEqual([
+      ["gid://shopify/Refund/9", "5.00", "2026-09-21T09:00:00.000Z"],
+      ["gid://shopify/Refund/10", "0.00", null],
+    ]);
+  });
+
+  it("should ask in batches of orders", async () => {
+    const count = SHOPIFY_REFUND_ORDERS_PER_REQUEST + 2;
+    const ids = Array.from({ length: count }, (_, index) => index + 1);
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      const { variables } = JSON.parse(init.body as string) as { variables: { ids?: string[] } };
+      // Answer whichever orders this request asks for.
+      return variables.ids
+        ? refundsPage(variables.ids.map((gid) => ({ id: gid, refunds: [refund(Number(gid.split("/").pop()))] })))
+        : ordersPage(ids.map((id) => refunded(id)));
+    });
+
+    const orders = await fetchWith(fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(requestOf(fetchImpl, 1).variables.ids).toHaveLength(SHOPIFY_REFUND_ORDERS_PER_REQUEST);
+    expect(requestOf(fetchImpl, 2).variables.ids).toHaveLength(2);
+    expect(orders.every((order) => order.refunds.length === 1)).toBe(true);
+  });
+
+  it("should read an order alone, with a larger limit, when its list may have been cut short", async () => {
+    const full = Array.from({ length: SHOPIFY_REFUNDS_PER_ORDER }, (_, index) => refund(index + 1, "1.00"));
+    const complete = [...full, refund(999, "1.00")];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(ordersPage([refunded(2)]))
+      .mockResolvedValueOnce(refundsPage([{ id: "gid://shopify/Order/2", refunds: full }]))
+      .mockResolvedValueOnce(refundsPage([{ id: "gid://shopify/Order/2", refunds: complete }]));
+
+    const [order] = await fetchWith(fetchImpl);
+
+    expect(requestOf(fetchImpl, 2).variables).toEqual({ ids: ["gid://shopify/Order/2"], first: SHOPIFY_REFUNDS_PER_ORDER_MAX });
+    expect(order.refunds).toHaveLength(SHOPIFY_REFUNDS_PER_ORDER + 1);
+  });
+
+  it("should fail the cycle rather than record an incomplete set of refunds", async () => {
+    const full = (n: number) => Array.from({ length: n }, (_, index) => refund(index + 1, "1.00"));
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(ordersPage([refunded(2)]))
+      .mockResolvedValueOnce(refundsPage([{ id: "gid://shopify/Order/2", refunds: full(SHOPIFY_REFUNDS_PER_ORDER) }]))
+      .mockResolvedValueOnce(refundsPage([{ id: "gid://shopify/Order/2", refunds: full(SHOPIFY_REFUNDS_PER_ORDER_MAX) }]));
+
+    await expect(fetchWith(fetchImpl)).rejects.toMatchObject({ code: "REFUNDS_TRUNCATED" });
+  });
+
+  it("should pace the next refunds request when the bucket runs low", async () => {
+    const sleep = vi.fn(async () => {});
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(ordersPage([refunded(2)]))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: { nodes: [{ id: "gid://shopify/Order/2", refunds: [refund(9)] }] },
+          extensions: {
+            cost: { requestedQueryCost: 100, throttleStatus: { maximumAvailable: 1000, currentlyAvailable: 10, restoreRate: 50 } },
+          },
+        }),
+      );
+
+    await fetchShopifyOrdersWindow(WINDOW, { getAccessToken: vi.fn(async () => "token"), fetchImpl, sleep });
+
+    // 90 points short at 50 a second.
+    expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_800]);
+  });
+
+  it.each([
+    ["is missing", [null]],
+    ["is another order", [{ id: "gid://shopify/Order/3", refunds: [] }]],
+    ["has no refund list", [{ id: "gid://shopify/Order/2", refunds: null }]],
+    ["names a refund that is not one", [{ id: "gid://shopify/Order/2", refunds: [{ ...refund(9), id: "gid://shopify/Order/9" }] }]],
+    ["has a negative refund", [{ id: "gid://shopify/Order/2", refunds: [refund(9, "-5.00")] }]],
+  ])("should fail closed when the refunded order %s", async (_label, nodes) => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(ordersPage([refunded(2)])).mockResolvedValueOnce(refundsPage(nodes));
+    await expect(fetchWith(fetchImpl)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 });

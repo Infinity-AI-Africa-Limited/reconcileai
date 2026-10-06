@@ -696,11 +696,95 @@ export async function resolveChannelIds(
 export interface ReconciliationScope {
   /** Order references as stored in `transactionRef` on both legs. */
   orderRefs: string[];
+  /**
+   * Which unmatched rows may be raised as exceptions. Matching is never limited.
+   *  - absent: every one, as always;
+   *  - "none": none — a pass that only matches;
+   *  - `{ orderSideBefore }`: every unmatched settlement-side row, but an
+   *    order-side row only if dated before this. A later one may yet settle in
+   *    a file not imported: a refund made late in a file's period often settles
+   *    in the next, and flagged now it would stay open after it matched.
+   */
+  flag?: "none" | { orderSideBefore: Date };
 }
 
 /** Exception states that still await a person — raising another is a duplicate. */
 const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
 const SCOPE_LOOKUP_CHUNK = 500;
+
+/** The retail engine's settings for inline reconciliation and its classifications. */
+export function inlineRetailConfig(currency: string): RetailReconciliationConfig {
+  return {
+    amountTolerance: 0.005, // 0.5% tolerance
+    dateWindowDays: 3,
+    settlementCurrency: currency,
+    chargebackDetection: true,
+    fxMarkupTolerance: 0.03,
+  };
+}
+
+/**
+ * Record retail classifications as open exceptions — the one shape every inline
+ * reconciliation path files them in.
+ *
+ * `category` is the coarse core enum (for list filters/reports); the PRECISE
+ * retail category goes in `subCategory`, which the exception intelligence
+ * flywheel learns on. The exceptions table requires a jobId, and inline
+ * reconciliation has no job, so it is a synthetic 0; with no parent job to
+ * derive the tenant from, `organizationId` is what attributes the record.
+ */
+export async function raiseRetailExceptions(
+  db: DbExecutor,
+  organizationId: number,
+  currency: string,
+  raised: Array<{
+    transactionId: number;
+    category: string;
+    severity: "critical" | "high" | "medium" | "low";
+    description: string;
+    suggestedResolution: string;
+  }>,
+): Promise<void> {
+  if (raised.length === 0) return;
+  const { mapRetailToCoreCategory } = await import("./retailIntelligence");
+  await insertExceptionsBatchWithExecutor(
+    db,
+    raised.map((ex) => ({
+      jobId: 0,
+      organizationId,
+      transactionId: ex.transactionId,
+      category: mapRetailToCoreCategory(ex.category),
+      subCategory: ex.category,
+      severity: ex.severity,
+      description: `[${ex.category}] ${ex.description}`,
+      suggestedResolution: ex.suggestedResolution,
+      status: "open" as const,
+      currency,
+    })),
+  );
+}
+
+/**
+ * A Shopify refund row is a refund event to the retail engine — classified as a
+ * refund not reflected in settlement when unmatched, never as a missing
+ * payment. Its stored rawData stays NULL (the privacy pipeline proves a Shopify
+ * row holds nothing beyond its projection), so the event is derived here from
+ * the row's own refund id, in memory only.
+ */
+/**
+ * A Shopify refund row whose refund, Shopify now says, returned no money. It is
+ * kept — its match history and audit trail point at it — but it is no longer
+ * part of the ledger: matching it to anything, or flagging it as missing from
+ * settlement, would both be wrong.
+ */
+export function refundReturnedNoMoney(row: { shopifyRefundId: string; amount: string | number }): boolean {
+  return row.shopifyRefundId !== "" && Number(row.amount) === 0;
+}
+
+export function withShopifyRefundEvent<T extends { shopifyRefundId: string; rawData: unknown }>(row: T): T {
+  if (!row.shopifyRefundId) return row;
+  return { ...row, rawData: { gatewayEventType: "refund", refundId: row.shopifyRefundId } };
+}
 
 async function selectUnmatchedLeg(
   db: DbExecutor,
@@ -766,29 +850,23 @@ export async function runReconciliationOnPersistedData(
   if (orderRefs && orderRefs.length === 0) return { matchedCount: 0, exceptionCount: 0 };
 
   // Fetch persisted transactions for the window
-  const sourceRows = await selectUnmatchedLeg(db, {
-    organizationId, channelId: ordersChannelId, from, to, orderRefs,
-  });
-  const targetRows = await selectUnmatchedLeg(db, {
-    organizationId, channelId: paymentsChannelId, from, to, orderRefs,
-  });
+  const sourceRows = (
+    await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs })
+  ).filter((row) => !refundReturnedNoMoney(row));
+  const targetRows = (
+    await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs })
+  ).filter((row) => !refundReturnedNoMoney(row));
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
     return { matchedCount: 0, exceptionCount: 0 };
   }
 
   // Run the retail reconciliation engine
-  const config: RetailReconciliationConfig = {
-    amountTolerance: 0.005, // 0.5% tolerance
-    dateWindowDays: 3,
-    settlementCurrency: currency,
-    chargebackDetection: true,
-    fxMarkupTolerance: 0.03,
-  };
+  const config = inlineRetailConfig(currency);
 
   const result = runRetailReconciliation(
-    sourceRows as Transaction[],
-    targetRows as Transaction[],
+    sourceRows.map(withShopifyRefundEvent) as Transaction[],
+    targetRows.map(withShopifyRefundEvent) as Transaction[],
     config,
   );
 
@@ -811,6 +889,15 @@ export async function runReconciliationOnPersistedData(
   // in `subCategory` so the exception intelligence flywheel learns on it (both
   // the intra-org agentMemory recall and the cross-org shared pool key on it).
   let raised = result.retailExceptions;
+  if (scope?.flag === "none") {
+    raised = [];
+  } else if (scope?.flag) {
+    const cutoff = scope.flag.orderSideBefore.getTime();
+    const tooRecent = new Set(
+      sourceRows.filter((row) => new Date(row.transactionDate).getTime() >= cutoff).map((row) => row.id),
+    );
+    raised = raised.filter((ex) => !tooRecent.has(ex.transactionId));
+  }
   if (scope && raised.length > 0) {
     const unresolved = await unresolvedExceptionKeys(
       db,
@@ -820,26 +907,7 @@ export async function runReconciliationOnPersistedData(
     raised = raised.filter((ex) => !unresolved.has(`${ex.transactionId}::${ex.category}`));
   }
 
-  if (raised.length > 0) {
-    const { mapRetailToCoreCategory } = await import("./retailIntelligence");
-
-    const exceptionRows = raised.map((ex) => ({
-      jobId: 0, // synthetic — no reconciliation job for inline sync
-      // With jobId 0 there is no parent to derive the tenant from, so these
-      // rows were previously unattributable to any organization. This is the
-      // path the new column matters most for.
-      organizationId,
-      transactionId: ex.transactionId,
-      category: mapRetailToCoreCategory(ex.category),
-      subCategory: ex.category, // precise retail_* key — feeds the flywheel
-      severity: ex.severity,
-      description: `[${ex.category}] ${ex.description}`,
-      suggestedResolution: ex.suggestedResolution,
-      status: "open" as const,
-      currency,
-    }));
-    await insertExceptionsBatchWithExecutor(db, exceptionRows);
-  }
+  await raiseRetailExceptions(db, organizationId, currency, raised);
 
   return {
     matchedCount: result.matches.length,

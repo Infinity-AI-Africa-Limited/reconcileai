@@ -251,6 +251,7 @@ export function normaliseToTransactions(
         userId: SYNTHETIC_USER,
         organizationId: null,
         shopifyStoreId: null,
+        shopifyRefundId: "",
         transactionRef: o.id,
         externalRef: o.name, // human-readable order number (e.g. "#1001")
         description: `Order ${o.name} via ${gateway}`,
@@ -285,6 +286,7 @@ export function normaliseToTransactions(
       userId: SYNTHETIC_USER,
       organizationId: null,
       shopifyStoreId: null,
+      shopifyRefundId: "",
       transactionRef: t.seller_order_id ?? t.trade_order_id,
       externalRef: t.trade_order_id,
       description: `${t.payment_method} capture via ${t.sub_payment_method ?? t.payment_method}`,

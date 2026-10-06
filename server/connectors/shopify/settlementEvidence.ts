@@ -1,10 +1,14 @@
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, exists, gt, inArray, lt, ne, notExists, or, sql } from "drizzle-orm";
+import { alias, QueryBuilder } from "drizzle-orm/mysql-core";
 import {
   channels,
+  exceptions,
   transactions,
   uploadBatches,
   type InsertTransaction,
+  type Transaction,
 } from "../../../drizzle/schema";
+import { classifyRetailException } from "../../retailReconciliationEngine";
 import { shopifyConnectorStores } from "../../../drizzle/shopify_schema";
 import {
   createAuditLog,
@@ -25,7 +29,12 @@ import {
   type ParsedFile,
   type SettlementField,
 } from "../shopline/settlementFileImport";
-import { runReconciliationOnPersistedData } from "../shopline/syncOrchestrator";
+import {
+  inlineRetailConfig,
+  raiseRetailExceptions,
+  runReconciliationOnPersistedData,
+  withShopifyRefundEvent,
+} from "../shopline/syncOrchestrator";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
 import {
   resolveAuthorizedShopifyActor,
@@ -36,6 +45,13 @@ import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 
 const MAX_DECODED_BYTES = 10 * 1024 * 1024;
 const RECONCILIATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+/**
+ * How long a Shopify order or refund may take to appear in settlement before a
+ * file that names its order but lacks its line flags it. A refund made in the
+ * last days of a file's period routinely settles in the next file; flagged by
+ * this one, it would stay open after the next file matched it.
+ */
+export const SHOPIFY_SETTLEMENT_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const ORDER_REFERENCE_LOOKUP_CHUNK = 500;
 
 export interface ShopifySettlementEvidenceInput {
@@ -120,7 +136,101 @@ export interface ShopifySettlementEvidenceDeps {
   parseFile?: ParseFile;
   reconcile?: Reconcile;
   auditCommitted?: AuditCommitted;
+  flagOverdueRefunds?: typeof flagOverdueShopifyRefunds;
+  now?: () => Date;
 }
+
+/**
+ * How far settlement evidence now runs: the file's latest settlement DATE, never
+ * past the moment of import. Only rows the file actually dated count — a row
+ * with no date is stamped with the import time, which says nothing about the
+ * period the file covers — and a date in the future is a mistake in the file,
+ * not coverage. Null when the file dated nothing: it then supports no claim that
+ * anything is missing from settlement.
+ */
+export function settlementCoveredUntil(rows: InsertTransaction[], now: Date): Date | null {
+  const dated = rows
+    .map((row) => (row.valueDate ? new Date(row.valueDate).getTime() : NaN))
+    .filter((time) => Number.isFinite(time));
+  if (dated.length === 0) return null;
+  return new Date(Math.min(Math.max(...dated), now.getTime()));
+}
+
+/**
+ * Flag the store's Shopify refunds that settlement has now had its grace period
+ * to show and still does not, and return how many were flagged.
+ *
+ * The import holds back a refund made within the grace period of a file's last
+ * settlement, since it may settle in the next file. Something must come back to
+ * it, and a later file need not name its order. So every import with fresh rows
+ * sweeps the store: a refund dated before `dueBefore` (that file's last
+ * settlement less the grace), still unmatched, is flagged — when its ORDER has
+ * settlement evidence on file, which says that order's money flows through
+ * files this merchant imports. A refund of an order paid elsewhere is not.
+ *
+ * Each refund is flagged once: never again after any exception of this kind
+ * was raised on it, so a person's resolution or dismissal stands.
+ */
+export async function flagOverdueShopifyRefunds(
+  db: DbExecutor,
+  params: {
+    organizationId: number;
+    storeId: number;
+    ordersChannelId: number;
+    settlementChannelId: number;
+    dueBefore: Date;
+    currency: string;
+  },
+): Promise<number> {
+  const evidence = alias(transactions, "evidence");
+  const overdue = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.organizationId, params.organizationId),
+        eq(transactions.channelId, params.ordersChannelId),
+        eq(transactions.shopifyStoreId, params.storeId),
+        ne(transactions.shopifyRefundId, ""),
+        // A refund Shopify now says returned no money is not missing anywhere.
+        gt(transactions.amount, "0"),
+        eq(transactions.status, "unmatched"),
+        lt(transactions.transactionDate, params.dueBefore),
+        exists(
+          new QueryBuilder()
+            .select({ id: evidence.id })
+            .from(evidence)
+            .where(
+              and(
+                eq(evidence.organizationId, params.organizationId),
+                eq(evidence.channelId, params.settlementChannelId),
+                eq(evidence.transactionRef, transactions.transactionRef),
+              ),
+            ),
+        ),
+        notExists(
+          new QueryBuilder()
+            .select({ id: exceptions.id })
+            .from(exceptions)
+            .where(
+              and(
+                eq(exceptions.organizationId, params.organizationId),
+                eq(exceptions.transactionId, transactions.id),
+                eq(exceptions.subCategory, REFUND_NOT_SETTLED),
+              ),
+            ),
+        ),
+      ),
+    );
+  const config = inlineRetailConfig(params.currency);
+  const raised = overdue
+    .map((row) => ({ transactionId: row.id, ...classifyRetailException(withShopifyRefundEvent(row) as Transaction, [], config) }))
+    .filter((classification) => classification.category === REFUND_NOT_SETTLED);
+  await raiseRetailExceptions(db, params.organizationId, params.currency, raised);
+  return raised.length;
+}
+
+const REFUND_NOT_SETTLED = "retail_refund_not_settled";
 
 // Defined once in channelCodes.ts; re-exported for existing importers.
 export { shopifySettlementEvidenceChannelCode };
@@ -606,7 +716,15 @@ export async function importShopifySettlementEvidence(
       let exceptionCount = 0;
       if (fresh.length > 0) {
         const times = fresh.map((row: InsertTransaction) => new Date(row.transactionDate).getTime());
-        const from = new Date(Math.min(...times) - RECONCILIATION_WINDOW_MS);
+        const coveredUntil = settlementCoveredUntil(fresh, (deps.now ?? (() => new Date()))());
+        // No lower bound: the scope below is already the orders this file
+        // names, and their Shopify rows are dated by the ORDER and the REFUND,
+        // which a settlement routinely follows by more than days — a COD
+        // remittance by weeks. Bounded below by the file's first date, those
+        // rows were left out and both sides flagged unmatched. The upper bound
+        // stays: a refund made after the period this file covers is not
+        // missing from it.
+        const from = new Date(0);
         const to = new Date(Math.max(...times) + RECONCILIATION_WINDOW_MS);
         const result = await (deps.reconcile ?? runReconciliationOnPersistedData)(
           tx,
@@ -617,8 +735,11 @@ export async function importShopifySettlementEvidence(
           to,
           context.currency ?? "USD",
           // Only the orders this file speaks to. Orders whose evidence is in a
-          // file not yet imported must not be flagged for its absence.
+          // file not yet imported must not be flagged for its absence — nor
+          // their recent rows, which may settle in the next file.
           {
+            // A file that dated nothing supports no claim that a row is missing.
+            flag: { orderSideBefore: new Date(coveredUntil ? coveredUntil.getTime() - SHOPIFY_SETTLEMENT_GRACE_MS : 0) },
             orderRefs: fresh
               .map((row) => row.transactionRef)
               .filter((ref): ref is string => Boolean(ref)),
@@ -626,6 +747,19 @@ export async function importShopifySettlementEvidence(
         );
         matchedCount = result.matchedCount;
         exceptionCount = result.exceptionCount;
+        // Settlement now runs to this file's last date: refunds it has had
+        // the grace period to show and still does not are due, whichever file
+        // named their order.
+        if (coveredUntil) {
+          exceptionCount += await (deps.flagOverdueRefunds ?? flagOverdueShopifyRefunds)(tx, {
+            organizationId: context.organizationId,
+            storeId: context.storeId,
+            ordersChannelId,
+            settlementChannelId,
+            dueBefore: new Date(coveredUntil.getTime() - SHOPIFY_SETTLEMENT_GRACE_MS),
+            currency: context.currency ?? "USD",
+          });
+        }
       }
 
       await tx
