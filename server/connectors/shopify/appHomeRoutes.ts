@@ -3,6 +3,7 @@ import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { ENV } from "../../_core/env";
 import { normalizeShopDomain } from "./auth";
+import { SHOPIFY_APP_HOME_PATH } from "./paths";
 
 /**
  * The App Home DOCUMENT: its embed policy, and — in production — App Bridge
@@ -95,12 +96,12 @@ function readBuiltShell(): string | null {
  */
 export function createShopifyAppHomeRouter(deps: ShopifyAppHomeRouterDeps = {}): express.Router {
   const router = express.Router();
-  router.use("/shopify/app", shopifyAppFrameHeaders);
+  router.use(SHOPIFY_APP_HOME_PATH, shopifyAppFrameHeaders);
 
   const serveShell = deps.serveShell ?? ENV.isProduction;
   const readShell = deps.readShell ?? readBuiltShell;
   const apiKey = deps.apiKey ?? (() => ENV.shopifyClientId.trim());
-  router.get(["/shopify/app", "/shopify/app/"], (_req, res, next) => {
+  router.get([SHOPIFY_APP_HOME_PATH, `${SHOPIFY_APP_HOME_PATH}/`], (_req, res, next) => {
     if (!serveShell) return next();
     const key = apiKey();
     const shell = key ? readShell() : null;

@@ -204,6 +204,38 @@ describe("when a handler is defined somewhere other than the route call", () => 
     expect(scanFile(path.resolve("/virtual/a.ts"), sample).map(e => e.route)).toEqual(["POST /a", "POST /b"]);
   });
 
+  it("should read a route path held in a constant, and still see the route when its receiver cannot be traced", () => {
+    // #170 moved the Shopify paths into constants shared with shopify.app.toml.
+    // The scan read only literal paths: it labelled such a route middleware,
+    // and on a receiver it could not trace it saw no route at all.
+    const exposures = scanVirtual({
+      "a.ts": `import { HOOK, HOME } from "./paths";
+        const LOCAL = "/local";
+        declare const router: any;
+        router.post(HOOK, ${unguarded});
+        router.get([HOME, \`\${HOME}/\`], ${unguarded});
+        router.put(LOCAL, ${unguarded});`,
+      "paths.ts": `export const HOOK = "/hook";\nexport const HOME = "/home";`,
+    });
+    expect(exposures.map(e => e.route)).toEqual(["POST /hook", "GET /home,/home/", "PUT /local"]);
+  });
+
+  it("should not mistake an HTTP client call with a constant path for a route", () => {
+    // _core/sdk.ts: \`this.client.post(EXCHANGE_TOKEN_PATH, { … })\` is a request
+    // to another service, with a body, not a handler. Reading constant paths
+    // first flagged three of these.
+    const exposures = scanVirtual({
+      "a.ts": `const PATH = "/remote/Exchange";
+        declare const client: any;
+        declare const payload: { code: string };
+        export async function exchange(code: string) {
+          await client.post(PATH, { code });
+          await client.post(PATH, payload);
+        }`,
+    });
+    expect(exposures).toEqual([]);
+  });
+
   it("should follow a factory to the handler it returns", () => {
     const sample = `${HEADER}
       const make = (kind: string) => ${unguarded};

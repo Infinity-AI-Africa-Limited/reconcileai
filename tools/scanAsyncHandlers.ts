@@ -94,15 +94,6 @@ function isPathLike(e: ts.Expression): boolean {
   return ts.isStringLiteralLike(e) || ts.isTemplateExpression(e) || ts.isRegularExpressionLiteral(e);
 }
 
-/** `"/x"` → `/x`; `["/a", "/b"]` → `/a,/b`; anything else is middleware. */
-function pathLabel(first: ts.Expression | undefined): string {
-  if (first && ts.isStringLiteralLike(first)) return first.text;
-  if (first && ts.isArrayLiteralExpression(first) && first.elements.length > 0 && first.elements.every(ts.isStringLiteralLike)) {
-    return first.elements.map(el => (el as ts.StringLiteralLike).text).join(",");
-  }
-  return "<middleware>";
-}
-
 function unwrap(e: ts.Expression): ts.Expression {
   while (
     ts.isParenthesizedExpression(e) ||
@@ -273,11 +264,49 @@ export function createScanner(opts: ScanOptions = {}) {
   }
 
   /** What a route argument — or a factory's return value — actually is. */
+  /**
+   * The text of a route path: a literal, a template, an array of paths, or a
+   * `const` holding one, declared here or imported. A named path constant is
+   * the safer way to write a route (one value shared with whatever else needs
+   * it), so the scan must read it: not label it middleware, and not drop the
+   * route when the receiver cannot be traced and the path is the only sign
+   * that this is a route.
+   */
+  function pathText(expr: ts.Expression | undefined, ctx: Ctx, depth = 0): string | undefined {
+    if (!expr || depth > MAX_DEPTH) return undefined;
+    const e = unwrap(expr);
+    if (ts.isStringLiteralLike(e)) return e.text;
+    if (ts.isTemplateExpression(e)) {
+      let text = e.head.text;
+      for (const span of e.templateSpans) {
+        const part = pathText(span.expression, ctx, depth + 1);
+        if (part === undefined) return undefined;
+        text += part + span.literal.text;
+      }
+      return text;
+    }
+    if (ts.isArrayLiteralExpression(e) && e.elements.length > 0) {
+      const parts = e.elements.map(el => pathText(el, ctx, depth + 1));
+      return parts.every((p): p is string => p !== undefined) ? parts.join(",") : undefined;
+    }
+    if (!ts.isIdentifier(e)) return undefined;
+    const binding = findBinding(e.text, e);
+    if (!binding) return undefined;
+    const constInitializer = (d: ts.Node) =>
+      ts.isVariableDeclaration(d) && (d.parent.flags & ts.NodeFlags.Const) !== 0 ? d.initializer : undefined;
+    const local = constInitializer(binding);
+    if (local) return pathText(local, ctx, depth + 1);
+    const imported = followImport(binding, ctx);
+    const initializer = imported ? constInitializer(imported.decl) : undefined;
+    return imported && initializer ? pathText(initializer, imported.ctx, depth + 1) : undefined;
+  }
+
   function resolve(expr: ts.Expression, ctx: Ctx, depth: number): Target[] {
     const e = unwrap(expr);
     const opaque = (): Target[] => [{ kind: "opaque", text: e.getText(ctx.sf).replace(/\s+/g, " ").slice(0, 80), node: e, ctx }];
     if (depth > MAX_DEPTH) return opaque();
     if (isPathLike(e)) return [];
+    if (ts.isIdentifier(e) && pathText(e, ctx, depth) !== undefined) return [];
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return [{ kind: "fn", fn: e, ctx }];
     if (ts.isIdentifier(e)) return resolveIdentifier(e, ctx, depth);
     // Express flattens arrays of handlers, spread or not, at any depth.
@@ -451,7 +480,19 @@ export function createScanner(opts: ScanOptions = {}) {
     if (!ts.isPropertyAccessExpression(node.expression) || !ROUTE_METHODS.has(node.expression.name.text)) return false;
     if (isExpressReceiver(node.expression.expression, ctx)) return true;
     const first = node.arguments[0];
-    return !!first && ts.isStringLiteralLike(first) && first.text.startsWith("/") && node.arguments.length >= 2;
+    if (!first || node.arguments.length < 2) return false;
+    if (ts.isStringLiteralLike(first)) return first.text.startsWith("/");
+    // A path held in a constant. An HTTP client's `.post(PATH, body)` has that
+    // shape too, so here a route must also show a handler: a function, an
+    // asyncHandler(...) call, or a name that resolves to a function.
+    const text = pathText(first, ctx);
+    return text !== undefined && text.startsWith("/") && node.arguments.slice(1).some(arg => handlerShaped(arg, ctx));
+  }
+
+  function handlerShaped(arg: ts.Expression, ctx: Ctx): boolean {
+    const e = unwrap(arg);
+    if (ts.isArrowFunction(e) || ts.isFunctionExpression(e) || isAsyncHandlerCall(e)) return true;
+    return ts.isIdentifier(e) && resolve(e, ctx, 0).some(t => t.kind === "fn");
   }
 
   function scanFile(file: string, source?: string): Exposure[] {
@@ -460,7 +501,7 @@ export function createScanner(opts: ScanOptions = {}) {
     const out: Exposure[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node) && isRouteCall(node, ctx)) {
-        const route = `${node.expression.name.text.toUpperCase()} ${pathLabel(node.arguments[0])}`;
+        const route = `${node.expression.name.text.toUpperCase()} ${pathText(node.arguments[0], ctx) ?? "<middleware>"}`;
         // Every argument goes through resolve(): paths resolve to nothing, and
         // arrays / spreads / asyncHandler(...) are taken apart there.
         for (const t of node.arguments.flatMap(arg => resolve(arg, ctx, 0))) {
