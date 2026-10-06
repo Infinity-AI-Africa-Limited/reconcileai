@@ -84,6 +84,64 @@ describe.runIf(localDatabase)("when the order-sync cursor is written in MySQL", 
     expect((await watermarkOf(target.id))?.getTime()).toBe(latest.getTime());
   });
 
+  describe("when a replay of the store's orders is owed", () => {
+    const replayOf = async (storeId: number) => {
+      const [row] = await db
+        .select({ replay: shopifySyncCursors.replayWatermarkUpdatedAt })
+        .from(shopifySyncCursors)
+        .where(and(eq(shopifySyncCursors.storeId, storeId), eq(shopifySyncCursors.resource, "orders")));
+      return row?.replay ?? null;
+    };
+    const owe = async (target: { id: number; organizationId: number }, replay: Date) => {
+      await recordSuccessfulOrderSync(db as never, target, new Date("2026-09-28T12:00:00.000Z"));
+      await db
+        .update(shopifySyncCursors)
+        .set({ replayWatermarkUpdatedAt: replay })
+        .where(eq(shopifySyncCursors.storeId, target.id));
+    };
+    const requested = new Date("2026-07-30T12:00:00.000Z");
+
+    it("should keep it owed through a commit from a cycle that never read it", async () => {
+      // A sync of the previous release, or one that began before the request.
+      const target = store(4);
+      await owe(target, requested);
+
+      await recordSuccessfulOrderSync(db as never, target, new Date("2026-09-28T13:00:00.000Z"));
+
+      expect((await replayOf(target.id))?.getTime()).toBe(requested.getTime());
+      expect((await watermarkOf(target.id))?.getTime()).toBe(new Date("2026-09-28T13:00:00.000Z").getTime());
+    });
+
+    it("should move it from the value the cycle read, and not from any other", async () => {
+      const target = store(5);
+      await owe(target, requested);
+      const step = new Date("2026-08-06T12:00:00.000Z");
+
+      await recordSuccessfulOrderSync(db as never, target, step, { read: requested, caughtUp: false });
+      expect((await replayOf(target.id))?.getTime()).toBe(step.getTime());
+
+      // A second cycle that read the same value commits after the first.
+      await recordSuccessfulOrderSync(db as never, target, new Date("2026-08-06T13:00:00.000Z"), {
+        read: requested,
+        caughtUp: true,
+      });
+      expect((await replayOf(target.id))?.getTime()).toBe(step.getTime());
+      // The watermark it does not read from is never moved back.
+      expect((await watermarkOf(target.id))?.getTime()).toBe(new Date("2026-09-28T12:00:00.000Z").getTime());
+    });
+
+    it("should end it once a cycle that read it has caught up", async () => {
+      const target = store(6);
+      await owe(target, requested);
+      const now = new Date("2026-09-28T14:00:00.000Z");
+
+      await recordSuccessfulOrderSync(db as never, target, now, { read: requested, caughtUp: true });
+
+      expect(await replayOf(target.id)).toBeNull();
+      expect((await watermarkOf(target.id))?.getTime()).toBe(now.getTime());
+    });
+  });
+
   it("should be proving something: a bare GREATEST over a NULL is NULL in this engine", async () => {
     const [rows] = await pool.query("SELECT GREATEST(NULL, NOW()) AS greatest");
     expect((rows as Array<{ greatest: unknown }>)[0]?.greatest).toBeNull();

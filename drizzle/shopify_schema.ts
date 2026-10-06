@@ -518,6 +518,13 @@ export const shopifySyncCursors = mysqlTable(
     resource: mysqlEnum("resource", ["orders"]).default("orders").notNull(),
     cursor: varchar("cursor", { length: 512 }),
     watermarkUpdatedAt: timestamp("watermarkUpdatedAt"),
+    /**
+     * Set while a replay of the store's orders is owed: the sync reads from
+     * here, not from watermarkUpdatedAt, until it has caught up, then clears
+     * it. Kept apart from the watermark so that a sync already running when the
+     * replay was requested cannot cancel it by advancing the watermark.
+     */
+    replayWatermarkUpdatedAt: timestamp("replayWatermarkUpdatedAt"),
     lastSuccessfulAt: timestamp("lastSuccessfulAt"),
     lastErrorCode: varchar("lastErrorCode", { length: 80 }),
     /** When lastErrorCode was last recorded. */
