@@ -14,6 +14,8 @@ import {
   minimizeShopifySettlementEvidenceRows,
   ShopifySettlementEvidenceError,
   shopifySettlementEvidenceChannelCode,
+  SHOPIFY_SETTLEMENT_GRACE_MS,
+  settlementCoveredUntil,
 } from "./settlementEvidence";
 import { scriptedDb } from "./scriptedDb.testkit";
 
@@ -193,7 +195,7 @@ describe("Shopify merchant settlement evidence", () => {
       expect.any(Date),
       expect.any(Date),
       "USD",
-      { orderRefs: ["gid://shopify/Order/1001"] },
+      expect.objectContaining({ orderRefs: ["gid://shopify/Order/1001"] }),
     );
     expect(auditCommitted).toHaveBeenCalledWith({
       actorId: 9,
@@ -301,6 +303,7 @@ async function commitFile(options: {
   storedEvidence?: unknown[];
   lock?: unknown[];
   reconcile?: ReturnType<typeof vi.fn>;
+  now?: Date;
 }) {
   const fake = scriptedDb({
     select: {
@@ -313,12 +316,15 @@ async function commitFile(options: {
   });
   const reconcile = options.reconcile ?? vi.fn(async () => ({ matchedCount: 0, exceptionCount: 0 }));
   const auditCommitted = vi.fn(async () => undefined);
+  const flagOverdueRefunds = vi.fn(async () => 0);
   const result = importShopifySettlementEvidence(context, input, fake.db as never, {
     parseFile: vi.fn(async () => fileWith(options.rows, options.headers)),
     reconcile: reconcile as never,
     auditCommitted,
+    flagOverdueRefunds: flagOverdueRefunds as never,
+    now: () => options.now ?? new Date("2026-10-06T00:00:00Z"),
   });
-  return { fake, result, reconcile, auditCommitted };
+  return { fake, result, reconcile, auditCommitted, flagOverdueRefunds };
 }
 
 function insertedRows(fake: ReturnType<typeof scriptedDb>): Array<Record<string, unknown>> {
@@ -402,7 +408,7 @@ describe("when an export names the order differently from how Shopify stores it"
     const orderLookup = fake.ops.find((op) => op.kind === "select" && op.table === TRANSACTIONS);
     expect(orderLookup?.where?.params).toEqual(expect.arrayContaining(["1001", "#1001"]));
     expect(insertedRows(fake).map((row) => row.transactionRef)).toEqual([ORDER_GID]);
-    expect(reconcile.mock.calls[0]?.[7]).toEqual({ orderRefs: [ORDER_GID] });
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({ orderRefs: [ORDER_GID] });
   });
 
   it("should align Shopify's numeric order ID to the order's GID", async () => {
@@ -537,6 +543,65 @@ describe("when two imports for the same store run at once", () => {
 });
 
 describe("when a file covers only some of the store's orders", () => {
+  it("should reconcile the file's orders at any earlier date, and nothing after its period", async () => {
+    const { result, reconcile } = await commitFile({
+      headers: ["order_number", "settled_amount", "settlement_date"],
+      rows: [
+        { order_number: "#1001", settled_amount: "12.34", settlement_date: "2026-09-10" },
+        { order_number: "#1001", settled_amount: "-2.34", settlement_date: "2026-09-20" },
+      ],
+    });
+    await result;
+
+    // A settlement follows its order or refund by more than days — a COD
+    // remittance by weeks — so the file's orders are read at any earlier date.
+    expect(reconcile.mock.calls[0]?.[4]).toEqual(new Date(0));
+    // A refund made after the file's period is not missing from it.
+    expect(reconcile.mock.calls[0]?.[5]).toEqual(new Date(new Date("2026-09-20").getTime() + 3 * 24 * 60 * 60 * 1000));
+    // Nor is one made in its last week, which may settle in the next file:
+    // matched if its line is here, but not flagged if it is not.
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({
+      flag: { orderSideBefore: new Date(new Date("2026-09-20").getTime() - SHOPIFY_SETTLEMENT_GRACE_MS) },
+    });
+    expect(SHOPIFY_SETTLEMENT_GRACE_MS).toBe(7 * 24 * 60 * 60 * 1000);
+  });
+
+  it("should sweep for overdue refunds from the file's last settlement date", async () => {
+    const { result, flagOverdueRefunds } = await commitFile({
+      headers: ["order_number", "settled_amount", "settlement_date"],
+      rows: [{ order_number: "#1001", settled_amount: "12.34", settlement_date: "2026-09-20" }],
+    });
+    await result;
+    expect(flagOverdueRefunds).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ dueBefore: new Date(new Date("2026-09-20").getTime() - SHOPIFY_SETTLEMENT_GRACE_MS) }),
+    );
+  });
+
+  it("should not let a date in the future move the cutoff past the moment of import", async () => {
+    const now = new Date("2026-10-06T00:00:00Z");
+    const { result, reconcile, flagOverdueRefunds } = await commitFile({
+      headers: ["order_number", "settled_amount", "settlement_date"],
+      rows: [{ order_number: "#1001", settled_amount: "12.34", settlement_date: "2027-10-06" }],
+      now,
+    });
+    await result;
+    const cutoff = new Date(now.getTime() - SHOPIFY_SETTLEMENT_GRACE_MS);
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({ flag: { orderSideBefore: cutoff } });
+    expect(flagOverdueRefunds).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ dueBefore: cutoff }));
+  });
+
+  it("should claim nothing is missing when the file dates nothing", async () => {
+    const { result, reconcile, flagOverdueRefunds } = await commitFile({
+      rows: [{ order_number: "#1001", settled_amount: "12.34" }],
+    });
+    await result;
+    // Still matched; but no order-side row is flagged, and there is no sweep.
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({ flag: { orderSideBefore: new Date(0) } });
+    expect(flagOverdueRefunds).not.toHaveBeenCalled();
+  });
+
   it("should reconcile only the orders the imported rows name", async () => {
     const { result, reconcile } = await commitFile({
       rows: [{ order_number: "#1001", settled_amount: "12.34" }],
@@ -544,7 +609,7 @@ describe("when a file covers only some of the store's orders", () => {
     await result;
 
     expect(reconcile).toHaveBeenCalledTimes(1);
-    expect(reconcile.mock.calls[0]?.[7]).toEqual({ orderRefs: [ORDER_GID] });
+    expect(reconcile.mock.calls[0]?.[7]).toMatchObject({ orderRefs: [ORDER_GID] });
   });
 });
 
@@ -632,5 +697,23 @@ describe("when a merchant's description marks a row as a refund", () => {
     );
     expect(row?.description).toBe("Settlement import (Courier COD) — refund");
     expect(JSON.stringify(row)).not.toMatch(/Jane Doe|Private Street/);
+  });
+});
+
+describe("when how far settlement runs is read from a file", () => {
+  const NOW = new Date("2026-10-06T12:00:00Z");
+  const row = (valueDate: Date | null) => ({ valueDate }) as never;
+
+  it("should take the latest date the file gave", () => {
+    expect(settlementCoveredUntil([row(new Date("2026-09-01")), row(new Date("2026-09-20"))], NOW)).toEqual(new Date("2026-09-20"));
+  });
+
+  it("should never run past the moment of import", () => {
+    expect(settlementCoveredUntil([row(new Date("2027-01-01"))], NOW)).toEqual(NOW);
+  });
+
+  it("should ignore rows the file did not date, and say nothing when none were", () => {
+    expect(settlementCoveredUntil([row(null), row(new Date("2026-09-03"))], NOW)).toEqual(new Date("2026-09-03"));
+    expect(settlementCoveredUntil([row(null)], NOW)).toBeNull();
   });
 });

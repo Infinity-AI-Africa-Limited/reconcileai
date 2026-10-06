@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import {
   channels,
   exceptions,
@@ -15,7 +15,12 @@ import {
   shopifyWebhookEvents,
 } from "../../../drizzle/shopify_schema";
 import { getDb, type DbExecutor } from "../../db";
-import { toShopifyOrderTransaction } from "./ingest";
+import {
+  shopifyOrderDescription,
+  shopifyRefundTransactionFields,
+  toShopifyOrderTransaction,
+  toShopifyRefundTransaction,
+} from "./ingest";
 import {
   allShopifyOrderSuppressionDigests,
   type ShopifyPrivacySuppressionKey,
@@ -24,10 +29,13 @@ import {
   ShopifyOrderApiError,
   computeShopifyOrderWindow,
   fetchShopifyOrdersWindow,
+  isPositiveAmount,
   type NormalizedShopifyOrder,
+  type NormalizedShopifyRefund,
 } from "./orders";
 import { affectedRows } from "./tokenStore";
-import { shopifyOrdersChannelCode } from "./channelCodes";
+import { shopifyOrdersChannelCode, shopifySettlementEvidenceChannelCode } from "./channelCodes";
+import { runReconciliationOnPersistedData } from "../shopline/syncOrchestrator";
 
 const ORDER_RESOURCE = "orders" as const;
 const TRANSACTION_LOOKUP_CHUNK = 500;
@@ -43,6 +51,11 @@ export interface ShopifyOrderSyncReport {
   inserted: number;
   updated: number;
   unchanged: number;
+  /** Refund rows written this cycle: each refund that returned money is its own row. */
+  refundsInserted: number;
+  refundsUpdated: number;
+  /** Pairs matched against settlement evidence imported before these rows were written. */
+  evidenceMatched: number;
   batchId: number | null;
   errorCode?: string;
 }
@@ -102,11 +115,28 @@ export function partitionShopifyOrders(
       inserts.push(order);
     } else if (!row.shopifyUpdatedAt || new Date(order.updatedAt) > row.shopifyUpdatedAt) {
       updates.push({ transactionId: row.id, order });
+    } else if (restatesSameSnapshot(row, order)) {
+      updates.push({ transactionId: row.id, order });
     } else {
       unchanged += 1;
     }
   }
   return { inserts, updates, unchanged };
+}
+
+/**
+ * The same Shopify version of an order, stored with different evidence: the
+ * projection changed under it — as when the amount moved from the total net of
+ * refunds to the total before them. Rewriting it is safe: an older version is
+ * still never written over a newer one. Rows read without their evidence (a
+ * replay check) are never restated.
+ */
+function restatesSameSnapshot(row: ExistingOrderRow, order: NormalizedShopifyOrder): boolean {
+  return (
+    row.amount != null &&
+    row.shopifyUpdatedAt?.getTime() === new Date(order.updatedAt).getTime() &&
+    materialShopifyOrderEvidenceChanged(row, order)
+  );
 }
 
 export function filterTombstonedShopifyOrders(
@@ -280,6 +310,8 @@ async function loadExistingOrders(
             eq(transactions.organizationId, params.organizationId),
             eq(transactions.shopifyStoreId, params.storeId),
             inArray(transactions.transactionRef, chunk),
+            // The order's own row; its refunds share its reference.
+            eq(transactions.shopifyRefundId, ""),
           ),
         )
         .for("update")),
@@ -288,23 +320,136 @@ async function loadExistingOrders(
   return out;
 }
 
+interface ExistingRefundRow {
+  id: number;
+  transactionRef: string | null;
+  shopifyRefundId: string;
+  shopifyUpdatedAt: Date | null;
+  amount: string | null;
+  currency: string | null;
+  transactionDate: Date | null;
+  matchId: number | null;
+}
+
+async function loadExistingRefunds(
+  db: DbExecutor,
+  params: { organizationId: number; storeId: number; gids: string[] },
+): Promise<ExistingRefundRow[]> {
+  const out: ExistingRefundRow[] = [];
+  for (let i = 0; i < params.gids.length; i += TRANSACTION_LOOKUP_CHUNK) {
+    const chunk = params.gids.slice(i, i + TRANSACTION_LOOKUP_CHUNK);
+    if (chunk.length === 0) continue;
+    out.push(
+      ...(await db
+        .select({
+          id: transactions.id,
+          transactionRef: transactions.transactionRef,
+          shopifyRefundId: transactions.shopifyRefundId,
+          shopifyUpdatedAt: transactions.shopifyUpdatedAt,
+          amount: transactions.amount,
+          currency: transactions.currency,
+          transactionDate: transactions.transactionDate,
+          matchId: transactions.matchId,
+        })
+        .from(transactions)
+        .where(
+          and(
+            eq(transactions.organizationId, params.organizationId),
+            eq(transactions.shopifyStoreId, params.storeId),
+            inArray(transactions.transactionRef, chunk),
+            ne(transactions.shopifyRefundId, ""),
+          ),
+        )
+        .for("update")),
+    );
+  }
+  return out;
+}
+
+/** Fields that can change whether, or to what, a refund row reconciles. */
+export function materialShopifyRefundEvidenceChanged(
+  existing: Pick<ExistingRefundRow, "amount" | "currency" | "transactionDate">,
+  order: NormalizedShopifyOrder,
+  refund: NormalizedShopifyRefund,
+): boolean {
+  const fields = shopifyRefundTransactionFields(order, refund);
+  return (
+    Number(existing.amount) !== Number(fields.amount) ||
+    existing.currency !== fields.currency ||
+    existing.transactionDate?.getTime() !== fields.transactionDate.getTime()
+  );
+}
+
+/**
+ * Which refunds to insert, which stored refund rows to restate, and how many
+ * are unchanged. Pure. A refund is keyed by its order and its own id. One that
+ * returned no money (a restock-only refund) is not recorded — but a stored row
+ * whose refund now reads zero IS restated, so the ledger follows Shopify. A
+ * stored row is never written over by an older version of its order.
+ */
+export function planShopifyRefundRows(
+  orders: NormalizedShopifyOrder[],
+  existing: ExistingRefundRow[],
+): {
+  inserts: Array<{ order: NormalizedShopifyOrder; refund: NormalizedShopifyRefund }>;
+  updates: Array<{ transactionId: number; order: NormalizedShopifyOrder; refund: NormalizedShopifyRefund; current: ExistingRefundRow }>;
+  unchanged: number;
+} {
+  const key = (orderGid: string, refundGid: string) => `${orderGid}|${refundGid}`;
+  const stored = new Map(
+    existing
+      .filter((row): row is ExistingRefundRow & { transactionRef: string } => Boolean(row.transactionRef))
+      .map((row) => [key(row.transactionRef, row.shopifyRefundId), row]),
+  );
+  const inserts: Array<{ order: NormalizedShopifyOrder; refund: NormalizedShopifyRefund }> = [];
+  const updates: Array<{ transactionId: number; order: NormalizedShopifyOrder; refund: NormalizedShopifyRefund; current: ExistingRefundRow }> = [];
+  let unchanged = 0;
+  for (const order of orders) {
+    const version = new Date(order.updatedAt).getTime();
+    for (const refund of order.refunds) {
+      const row = stored.get(key(order.gid, refund.gid));
+      if (!row) {
+        if (isPositiveAmount(refund.amount)) inserts.push({ order, refund });
+        continue;
+      }
+      const storedVersion = row.shopifyUpdatedAt?.getTime() ?? null;
+      if (
+        storedVersion === null ||
+        version > storedVersion ||
+        (version === storedVersion && materialShopifyRefundEvidenceChanged(row, order, refund))
+      ) {
+        updates.push({ transactionId: row.id, order, refund, current: row });
+      } else {
+        unchanged += 1;
+      }
+    }
+  }
+  return { inserts, updates, unchanged };
+}
+
 function sameInstant(left: Date | null | undefined, right: string | null): boolean {
   return (left?.getTime() ?? null) === (right === null ? null : new Date(right).getTime());
 }
 
-/** Fields that can change whether, or to what, this order reconciles. */
+/**
+ * Fields that can change whether, or to what, this order reconciles.
+ *
+ * Not the financial status or the cancellation time: they are kept on the row,
+ * but nothing that matches reads them, and a refund — which is what changes
+ * them — is now its own row. Treated as material, every refund reopened the
+ * order's match to its payment, which the refund does not affect, and nothing
+ * re-matched it until another settlement file named the order.
+ */
 export function materialShopifyOrderEvidenceChanged(
   existing: ExistingOrderRow,
   order: NormalizedShopifyOrder,
 ): boolean {
   return (
-    String(existing.amount) !== order.currentTotalPrice.amount ||
-    existing.currency !== order.currentTotalPrice.currencyCode ||
+    Number(existing.amount) !== Number(order.totalPrice.amount) ||
+    existing.currency !== order.totalPrice.currencyCode ||
     !sameInstant(existing.transactionDate, order.createdAt) ||
     !sameInstant(existing.valueDate, order.processedAt) ||
-    existing.shopifyOrderCurrency !== order.currencyCode ||
-    (existing.shopifyFinancialStatus ?? null) !== order.displayFinancialStatus ||
-    !sameInstant(existing.shopifyCancelledAt, order.cancelledAt)
+    existing.shopifyOrderCurrency !== order.currencyCode
   );
 }
 
@@ -523,9 +668,9 @@ async function lockStoreForSync(
 function transactionFields(order: NormalizedShopifyOrder) {
   return {
     externalRef: order.name,
-    description: `Shopify Order ${order.name}`,
-    amount: order.currentTotalPrice.amount,
-    currency: order.currentTotalPrice.currencyCode,
+    description: shopifyOrderDescription(order.name),
+    amount: order.totalPrice.amount,
+    currency: order.totalPrice.currencyCode,
     transactionDate: new Date(order.createdAt),
     valueDate: order.processedAt ? new Date(order.processedAt) : null,
     shopifyOrderCurrency: order.currencyCode,
@@ -626,11 +771,29 @@ export async function runShopifyOrderSync(
         gids: eligible.map((order) => order.gid),
       });
       const partition = partitionShopifyOrders(eligible, existing);
-      const changed = partition.inserts.length + partition.updates.length;
+      const refundPlan = planShopifyRefundRows(
+        eligible,
+        await loadExistingRefunds(tx, {
+          organizationId: store.organizationId,
+          storeId: store.id,
+          gids: eligible.filter((order) => order.refunds.length > 0).map((order) => order.gid),
+        }),
+      );
+      const changed =
+        partition.inserts.length +
+        partition.updates.length +
+        refundPlan.inserts.length +
+        refundPlan.updates.length;
       let batchId: number | null = null;
       let inserted = 0;
       let updated = 0;
       let unchanged = partition.unchanged;
+      let refundsInserted = 0;
+      let refundsUpdated = 0;
+      let evidenceMatched = 0;
+      // Orders whose ledger rows this cycle wrote, to reconcile against
+      // evidence that arrived before them.
+      const writtenOrders = new Set<string>();
 
       if (changed > 0) {
         const batch = await tx.insert(uploadBatches).values({
@@ -679,7 +842,9 @@ export async function runShopifyOrderSync(
         // A row this cycle inserted carries this cycle's batch. Anything else
         // was written by another sync first: it is not an insert of ours. It is
         // an update if our evidence is newer, and otherwise unchanged.
-        inserted = racedRows.filter((row) => row.batchId === batchId).length;
+        const ours = racedRows.filter((row) => row.batchId === batchId);
+        inserted = ours.length;
+        for (const row of ours) if (row.transactionRef) writtenOrders.add(row.transactionRef);
         const raced = partitionShopifyOrders(
           partition.inserts,
           racedRows.filter((row) => row.batchId !== batchId),
@@ -698,9 +863,12 @@ export async function runShopifyOrderSync(
                 eq(transactions.organizationId, store.organizationId),
                 eq(transactions.shopifyStoreId, store.id),
                 eq(transactions.transactionRef, update.order.gid),
+                eq(transactions.shopifyRefundId, ""),
+                // Never an older version over a newer one. The same version is
+                // written only when the plan found its evidence restated.
                 or(
                   isNull(transactions.shopifyUpdatedAt),
-                  lt(transactions.shopifyUpdatedAt, new Date(update.order.updatedAt)),
+                  lte(transactions.shopifyUpdatedAt, new Date(update.order.updatedAt)),
                 ),
               ),
             );
@@ -709,6 +877,7 @@ export async function runShopifyOrderSync(
             continue;
           }
           updated += 1;
+          writtenOrders.add(update.order.gid);
           if (current && materialShopifyOrderEvidenceChanged(current, update.order)) {
             await reopenAffectedReconciliation(tx, {
               organizationId: store.organizationId,
@@ -718,9 +887,59 @@ export async function runShopifyOrderSync(
           }
         }
 
+        // Refunds after their orders. The store lock serialises every writer
+        // of this store's ledger, so the plan's inserts are this cycle's; the
+        // unique key (order, refund id) stays the backstop.
+        if (refundPlan.inserts.length > 0) {
+          await tx
+            .insert(transactions)
+            .values(
+              refundPlan.inserts.map(({ order, refund }) =>
+                toShopifyRefundTransaction(order, refund, {
+                  organizationId: store.organizationId,
+                  storeId: store.id,
+                  channelId,
+                  batchId: batchId!,
+                  userId,
+                }),
+              ),
+            )
+            .onDuplicateKeyUpdate({ set: { transactionRef: sql`${transactions.transactionRef}` } });
+          refundsInserted = refundPlan.inserts.length;
+          for (const { order } of refundPlan.inserts) writtenOrders.add(order.gid);
+        }
+        for (const update of refundPlan.updates) {
+          const write = await tx
+            .update(transactions)
+            .set({ ...shopifyRefundTransactionFields(update.order, update.refund), batchId, channelId, userId })
+            .where(
+              and(
+                eq(transactions.id, update.transactionId),
+                eq(transactions.organizationId, store.organizationId),
+                eq(transactions.shopifyStoreId, store.id),
+                eq(transactions.transactionRef, update.order.gid),
+                eq(transactions.shopifyRefundId, update.refund.gid),
+                or(
+                  isNull(transactions.shopifyUpdatedAt),
+                  lte(transactions.shopifyUpdatedAt, new Date(update.order.updatedAt)),
+                ),
+              ),
+            );
+          if (affectedRows(write) === 0) continue;
+          refundsUpdated += 1;
+          writtenOrders.add(update.order.gid);
+          if (materialShopifyRefundEvidenceChanged(update.current, update.order, update.refund)) {
+            await reopenAffectedReconciliation(tx, {
+              organizationId: store.organizationId,
+              transactionId: update.transactionId,
+              legacyMatchId: update.current.matchId,
+            });
+          }
+        }
+
         // The batch was sized from the plan; record what was actually written.
         // If another sync wrote everything first, this batch holds nothing.
-        const written = inserted + updated;
+        const written = inserted + updated + refundsInserted + refundsUpdated;
         if (written === 0) {
           await tx
             .delete(uploadBatches)
@@ -732,6 +951,14 @@ export async function runShopifyOrderSync(
             .set({ validRows: written })
             .where(and(eq(uploadBatches.id, batchId), eq(uploadBatches.organizationId, store.organizationId)));
         }
+      }
+
+      if (writtenOrders.size > 0) {
+        evidenceMatched = await reconcileWithWaitingEvidence(tx, {
+          store,
+          ordersChannelId: channelId,
+          orderGids: [...writtenOrders],
+        });
       }
 
       // Both branches fixed the same NULL-watermark bug: main inline here, this
@@ -757,6 +984,9 @@ export async function runShopifyOrderSync(
         inserted,
         updated,
         unchanged,
+        refundsInserted,
+        refundsUpdated,
+        evidenceMatched,
         batchId,
       };
     });
@@ -785,6 +1015,87 @@ export async function runShopifyOrderSync(
       .onDuplicateKeyUpdate({ set: { lastErrorCode: code, lastErrorAt: failedAt } });
     throw error;
   }
+}
+
+/** The import's own margin past the latest evidence it reconciles to. */
+const EVIDENCE_DATE_MARGIN_MS = 3 * 24 * 60 * 60_000;
+
+/**
+ * Reconcile the orders this cycle wrote against settlement evidence already
+ * imported for them, and return the pairs matched.
+ *
+ * The evidence import reconciles only what it imports. Evidence that arrived
+ * BEFORE its Shopify row — a gateway's refund line imported before the refund
+ * synced, an order that synced late, a match reopened by a correction — would
+ * otherwise stay unmatched for good: importing the file again adds nothing, so
+ * reconciles nothing. Only orders with evidence still unmatched are in scope.
+ *
+ * It only MATCHES. Judging what a settlement file lacks is the import's job,
+ * against the file's own period; here there is no file, and a refund whose line
+ * has simply not arrived yet would be flagged — and stay flagged after it did.
+ *
+ * Runs inside the sync's transaction, under its store lock, which the import
+ * also takes: the two never reconcile one store's ledger at once.
+ */
+async function reconcileWithWaitingEvidence(
+  tx: DbExecutor,
+  params: {
+    store: { id: number; organizationId: number; currency: string | null };
+    ordersChannelId: number;
+    orderGids: string[];
+  },
+): Promise<number> {
+  const { store } = params;
+  const [evidenceChannel] = await tx
+    .select({ id: channels.id })
+    .from(channels)
+    .where(
+      and(
+        eq(channels.organizationId, store.organizationId),
+        eq(channels.code, shopifySettlementEvidenceChannelCode(store.id)),
+      ),
+    )
+    .limit(1);
+  if (!evidenceChannel) return 0;
+
+  const waiting = new Set<string>();
+  // Up to the latest evidence waiting, never to the sync's own clock: a refund
+  // made after the evidence's period is not something it could show.
+  let latest = 0;
+  for (let i = 0; i < params.orderGids.length; i += TRANSACTION_LOOKUP_CHUNK) {
+    const chunk = params.orderGids.slice(i, i + TRANSACTION_LOOKUP_CHUNK);
+    const rows = await tx
+      .select({ transactionRef: transactions.transactionRef, transactionDate: transactions.transactionDate })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.organizationId, store.organizationId),
+          eq(transactions.channelId, evidenceChannel.id),
+          eq(transactions.status, "unmatched"),
+          inArray(transactions.transactionRef, chunk),
+        ),
+      );
+    for (const row of rows) {
+      if (!row.transactionRef) continue;
+      waiting.add(row.transactionRef);
+      if (row.transactionDate) latest = Math.max(latest, new Date(row.transactionDate).getTime());
+    }
+  }
+  if (waiting.size === 0) return 0;
+
+  const result = await runReconciliationOnPersistedData(
+    tx,
+    store.organizationId,
+    params.ordersChannelId,
+    evidenceChannel.id,
+    // Any earlier date: the scope is these orders, and their evidence may
+    // follow them by weeks.
+    new Date(0),
+    new Date(latest + EVIDENCE_DATE_MARGIN_MS),
+    store.currency ?? "USD",
+    { orderRefs: [...waiting], flag: "none" },
+  );
+  return result.matchedCount;
 }
 
 /**

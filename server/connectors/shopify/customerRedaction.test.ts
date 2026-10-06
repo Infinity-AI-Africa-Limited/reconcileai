@@ -35,6 +35,7 @@ const SELECTOR_ROWS = [
 const SCOPE_A_ROW = {
   id: 3001,
   transactionRef: "gid://shopify/Order/501",
+  shopifyRefundId: "",
   externalRef: "#1001",
   description: "Shopify Order #1001",
   counterparty: "Shopify",
@@ -46,6 +47,15 @@ const SCOPE_A_ROW = {
   shopifyUpdatedAt: NOW,
   shopifyFinancialStatus: "PAID",
   rawData: null,
+};
+/** The refund projection (ingest.ts): its order's reference, money out, its own id. */
+const SCOPE_A_REFUND_ROW = {
+  ...SCOPE_A_ROW,
+  id: 3002,
+  shopifyRefundId: "gid://shopify/Refund/77",
+  description: "Shopify Order #1001 refund",
+  isReversal: true,
+  debitCredit: "debit",
 };
 
 function baseScript(overrides: Parameters<typeof scriptedDb>[0] = {}) {
@@ -124,6 +134,54 @@ describe("Shopify Scope A customer-redaction execution", () => {
       transactionsDeleted: 0,
       anomalyScoresDeleted: 0,
       remainingTransactions: 1,
+    });
+  });
+
+  describe("when the order has refund rows", () => {
+    it("should complete when each refund row is exactly the refund projection", async () => {
+      const fake = baseScript({ select: { [TXNS]: [[SCOPE_A_ROW, SCOPE_A_REFUND_ROW]] } });
+
+      await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+      expect(fake.writes("insert", TOMBSTONES)).toHaveLength(1);
+      expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+        status: "completed",
+        recordsFound: 2,
+        remainingTransactions: 2,
+      });
+    });
+
+    it.each([
+      ["carries provider data", { rawData: { note: "must-not-be-retained" } }],
+      ["is booked as money in", { debitCredit: "credit" }],
+      ["is not marked a reversal", { isReversal: false }],
+      ["carries the order's description", { description: "Shopify Order #1001" }],
+      ["carries free text", { description: "Refund to alice@example.com" }],
+      ["names no Shopify refund", { shopifyRefundId: "gid://shopify/Order/501" }],
+      ["carries an unprojected reference", { originalTransactionRef: "customer@example.com" }],
+    ])("should fail closed when a refund row %s", async (_label, deviation) => {
+      const fake = baseScript({ select: { [TXNS]: [[SCOPE_A_ROW, { ...SCOPE_A_REFUND_ROW, ...deviation }]] } });
+
+      await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+      expect(fake.writes("insert", TOMBSTONES)).toEqual([]);
+      expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+        status: "blocked_dependency",
+        failureCode: "unsupported_transaction_footprint",
+      });
+    });
+
+    it("should fail closed when an order's own row is shaped as a refund", async () => {
+      const fake = baseScript({
+        select: { [TXNS]: [[{ ...SCOPE_A_REFUND_ROW, shopifyRefundId: "" }]] },
+      });
+
+      await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+      expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+        status: "blocked_dependency",
+        failureCode: "unsupported_transaction_footprint",
+      });
     });
   });
 
