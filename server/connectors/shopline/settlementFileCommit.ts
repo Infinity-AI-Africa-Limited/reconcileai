@@ -46,7 +46,7 @@ import {
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
-/** Each settled row may sit this far from its order and still be matched. */
+/** How far past the file's last settlement its orders' rows are still read. */
 const RECONCILIATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 export interface ShoplineSettlementCommitParams {
@@ -139,7 +139,14 @@ export async function commitShoplineSettlementFile(
         params.organizationId,
         params.ordersChannelId,
         params.paymentsChannelId,
-        new Date(Math.min(...times) - RECONCILIATION_WINDOW_MS),
+        // No lower bound. The scope below is already the orders this file
+        // names, and an order row is dated by its ORDER, which settlement
+        // follows by days — a COD courier remittance by weeks. Bounded below by
+        // the file's first date less three days, those orders were left out:
+        // the remittance line and its order were both flagged unmatched though
+        // reference and amount agreed. The upper bound stays: nothing after the
+        // file's period is expected in it.
+        new Date(0),
         new Date(Math.max(...times) + RECONCILIATION_WINDOW_MS),
         params.currency,
         // Only the orders this file speaks to: an order whose evidence is in a

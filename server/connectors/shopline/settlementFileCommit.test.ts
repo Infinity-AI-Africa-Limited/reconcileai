@@ -202,6 +202,24 @@ describe("when the file covers only some of the store's orders", () => {
     expect(args[0]).not.toBe(fake.db);
   });
 
+  it("should read the file's orders at any earlier date, and nothing past its period", async () => {
+    const fake = scriptedDb({ select: { ...activeStore(), [TXNS]: [[]] } });
+    const { run, reconcile } = commit(
+      fake,
+      fileRows(
+        { Order: "#4001", Amount: "12.00", Date: "2026-09-05", Txn: "a" },
+        { Order: "4002", Amount: "8.00", Date: "2026-09-26", Txn: "b" },
+      ),
+    );
+    await run;
+
+    const args = reconcile.mock.calls[0] as unknown[];
+    // A COD remittance follows its order by weeks: no lower bound.
+    expect(args[4]).toEqual(new Date(0));
+    // The file's last settlement plus the three-day margin.
+    expect(args[5]).toEqual(new Date(new Date("2026-09-26").getTime() + 3 * 24 * 60 * 60 * 1000));
+  });
+
   it("should close the batch with its counts in the same transaction", async () => {
     const fake = scriptedDb({ select: { ...activeStore(), [TXNS]: [[]] } });
     const { run } = commit(fake, fileRows({ Order: "5001", Amount: "3.00", Date: "2026-09-01", Txn: "c" }));
