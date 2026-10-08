@@ -16,6 +16,13 @@ scopes = "read_orders"
 # exchange; no browser OAuth callback or redirect URL is used.
 use_legacy_install_flow = false
 
+[auth]
+# Shopify CLI requires an authorization-code redirect allow-list for public-app
+# configuration, even when Scope A uses managed installation. This is the
+# existing, source-tested callback; App Home does not navigate to it during a
+# managed installation.
+redirect_urls = ["https://www.reconcileaiafrica.com/api/shopify/callback"]
+
 [webhooks]
 # Match the Admin API version stored for every Shopify connection in ReconcileAI.
 api_version = "2026-07"
