@@ -69,6 +69,7 @@
     "server/errorTextPaths.test.ts",
     "server/exactDecimal.test.ts",
     "server/jobQueue.coalesce.test.ts",
+    "server/jobQueue.operationTimeout.test.ts",
     "server/jobQueue.replaceFailed.test.ts",
     "server/jobQueue.statsTimeout.test.ts",
     "server/logSafety.test.ts",
@@ -76,6 +77,7 @@
     "server/portalOrgScope.test.ts",
     "server/queueHealthReporting.test.ts",
     "server/reconciliationEngine.direction.test.ts",
+    "server/reconciliationQueue.sweepTimeout.test.ts",
     "server/reversalSignals.test.ts",
     "server/reviewerLinkOrigin.test.ts",
     "server/rlsAudit.test.ts",
@@ -88,6 +90,7 @@
     "server/shoplineSettlementImport.test.ts",
     "server/shoplineSettlementPreview.test.ts",
     "server/shoplineUninstallTenancy.test.ts",
-    "server/ssoFlowCookie.test.ts"
+    "server/ssoFlowCookie.test.ts",
+    "server/webhookDelivery.dispatch.test.ts"
   ]
 }

@@ -33,7 +33,7 @@
 import { and, eq, inArray, isNotNull, isNull, lt, notInArray, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { reconciliationJobs, matches, exceptions as exceptionsTable, transactions } from "../drizzle/schema";
-import { createQueue, type JobQueue } from "./jobQueue";
+import { createQueue, QueueOperationTimeoutError, type JobQueue } from "./jobQueue";
 import { ENV } from "./_core/env";
 import { loggableError } from "./dbErrors";
 
@@ -417,6 +417,10 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
             `[reconciliationQueue] could not remove queue entry job-${j.id} (row is marked abandoned):`,
             loggableError(err),
           );
+          // Redis did not answer, so each remaining removal would wait out the
+          // same deadline. The rows are already marked abandoned, which is the
+          // guard that matters; the entries are only capacity.
+          if (err instanceof QueueOperationTimeoutError) break;
         }
       }
     }

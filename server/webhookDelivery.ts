@@ -20,7 +20,7 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { webhooks, webhookDeliveries } from "../drizzle/schema";
 import { isEgressAllowed } from "./_core/egress";
-import { createQueue, type JobQueue } from "./jobQueue";
+import { createQueue, QueueOperationTimeoutError, type JobQueue } from "./jobQueue";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
 
@@ -138,6 +138,9 @@ export async function dispatchWebhookEvent(event: string, payload: Record<string
     )}`.slice(0, 500);
 
     const queue = await getQueue();
+    // Set once an enqueue times out: every later one in this fan-out would wait
+    // out the same deadline, so the rest are recorded as not queued at once.
+    let unreachable: QueueOperationTimeoutError | null = null;
     for (const webhook of subscribed) {
       // Data residency: user-configured webhooks can carry reconciliation
       // payload references. In on-premise mode, only allowlisted hosts.
@@ -157,16 +160,51 @@ export async function dispatchWebhookEvent(event: string, payload: Record<string
         payloadSummary,
       }).$returningId();
 
-      await queue.enqueue(event, {
-        deliveryId: row.id,
-        webhookId: webhook.id,
-        url: webhook.url,
-        secret: webhook.secret,
-        body,
-      });
+      try {
+        if (unreachable) throw unreachable;
+        await queue.enqueue(event, {
+          deliveryId: row.id,
+          webhookId: webhook.id,
+          url: webhook.url,
+          secret: webhook.secret,
+          body,
+        });
+      } catch (err) {
+        // Per subscriber: one failed enqueue must not abandon the others.
+        if (err instanceof QueueOperationTimeoutError) unreachable = err;
+        await markNotQueued(row.id, err);
+      }
     }
   } catch (err) {
     console.error("[webhookDelivery] dispatch error (non-fatal):", loggableError(err));
+  }
+}
+
+/**
+ * Settle a delivery row whose enqueue failed, so it reads `failed` with a
+ * reason rather than sitting `pending` for ever with nothing to send it.
+ *
+ * Only while still `pending` with no attempt made: an enqueue that timed out
+ * may still land once Redis answers, and a delivery that then runs records its
+ * own outcome, which must stand.
+ */
+async function markNotQueued(deliveryId: number, err: unknown): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    await db
+      .update(webhookDeliveries)
+      // errorSummary caps a message at 200 characters, so this fits lastError (500).
+      .set({ status: "failed", lastError: `Not queued: ${errorSummary(err)}` })
+      .where(
+        and(
+          eq(webhookDeliveries.id, deliveryId),
+          eq(webhookDeliveries.status, "pending"),
+          eq(webhookDeliveries.attempts, 0),
+        ),
+      );
+  } catch (dbErr) {
+    console.error("[webhookDelivery] could not record an unqueued delivery (non-fatal):", loggableError(dbErr));
   }
 }
 

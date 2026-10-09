@@ -16,6 +16,7 @@ import {
   type AuthorizedPrivacyArtifact,
   type PrivacyDownloadActor,
 } from "./privacyCompletion";
+import { QueueOperationTimeoutError } from "../../jobQueue";
 import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 /** The uploaded export as text — the upload dependency takes `string | Uint8Array`. */
@@ -1170,5 +1171,57 @@ describe("when an export is being discarded while another worker could still res
 
     expect(deleteObject).not.toHaveBeenCalled();
     expect(fake.writes("update", ARTIFACTS)).toHaveLength(1);
+  });
+});
+
+describe("when Redis does not answer a privacy dispatch", () => {
+  const candidates = [
+    { id: 77, kind: "customer_request", jobId: 901, attempts: 0 },
+    { id: 78, kind: "customer_request", jobId: 902, attempts: 0 },
+  ];
+  const claims = (fake: ReturnType<typeof scriptedDb>) =>
+    fake.writes("update", OUTBOX).filter(op => rowOf(op)?.status === "dispatching");
+
+  it("should stop the batch, leaving the rest unclaimed and due for the next sweep", async () => {
+    // Each further candidate would wait out the same deadline, and the sweep's
+    // artifact cleanup and 30-day deadline check run behind this dispatch.
+    const fake = scriptedDb({ select: { [OUTBOX]: [candidates] } });
+    const enqueue = vi.fn(async () => {
+      throw new QueueOperationTimeoutError("shopify-privacy", "enqueue", 3_000);
+    });
+
+    const result = await dispatchShopifyPrivacyOutbox({
+      db: fake.db as never,
+      now: () => NOW,
+      uuid: uuidSequence(),
+      enqueue,
+    });
+
+    expect(result).toEqual({ scanned: 2, dispatched: 0, failed: 1 });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(claims(fake).map(op => op.where?.params)).toEqual([expect.arrayContaining([77])]);
+    expect(fake.writes("update", OUTBOX).some(op => op.where?.params.includes(78))).toBe(false);
+    // The one that was claimed is retryable, not stranded in `dispatching`.
+    expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({ status: "failed_retryable" });
+  });
+
+  it("should keep going past a failure that is not a timeout", async () => {
+    // A refusal Redis DID answer is about that one entry; the next may succeed.
+    const fake = scriptedDb({ select: { [OUTBOX]: [candidates] } });
+    const enqueue = vi
+      .fn<(payload: { kind: string; jobId: number }, attempt: number) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("ERR one entry refused"))
+      .mockResolvedValueOnce(undefined);
+
+    const result = await dispatchShopifyPrivacyOutbox({
+      db: fake.db as never,
+      now: () => NOW,
+      uuid: uuidSequence(),
+      enqueue,
+    });
+
+    expect(result).toEqual({ scanned: 2, dispatched: 1, failed: 1 });
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(claims(fake)).toHaveLength(2);
   });
 });
