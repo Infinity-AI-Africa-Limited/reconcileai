@@ -1435,14 +1435,26 @@ Most of the original launch-blocking debt is now **resolved**. Current status:
 > **Never** infer it from webhooks returning 200: they return 200 either way.
 >
 > An unreachable Redis **hangs** rather than failing, because BullMQ's default
-> retry never gives up. Only the health and readiness count reads carry
-> deadlines (`allQueueStats` via `boundedStats`, and
-> `confirmShopifyRuntimeQueues`), so `/api/health` reports `unreachable`
-> instead of hanging. **Other queue calls are NOT bounded.** `enqueue()` awaits
-> `queue.getJob()` and `isFailed()` with no deadline, and the connection is
-> `{ url }` only, which keeps ioredis's default offline queue, so they can hang
-> while Redis is unreachable. Never assume a queue call cannot hang, never add an unbounded
-> await on one in a request path, and never await a Redis probe before
+> retry never gives up and the connection (`{ url }` only) keeps ioredis's
+> default offline queue. So every queue call the server makes that can reach
+> Redis carries a deadline (`raceDeadline` in `server/jobQueue.ts`):
+>
+> - the health and readiness count reads (`allQueueStats` via `boundedStats`,
+>   and `confirmShopifyRuntimeQueues`), so `/api/health` reports `unreachable`
+>   instead of hanging;
+> - since #181, BullMQ `enqueue()` (the whole operation, including the re-arm
+>   path's four round trips) and `remove()`. They reject with
+>   `QueueOperationTimeoutError` after `QUEUE_OPERATION_TIMEOUT_MS` (3s, under
+>   Shopify's 5-second webhook budget).
+>
+> **A deadline ends the wait, not the command.** An enqueue refused on time can
+> still land once Redis answers. That is logged ("completed after its
+> deadline"), and a rejection means "not known to be queued", never "will not
+> run". So job names must make a repeat harmless (`uniqueJobNames`,
+> `coalesceKey`) or handlers must claim their work conditionally.
+>
+> Never add a queue call outside these bounds, never treat a refused enqueue
+> as proof the work will not run, and never await a Redis probe before
 > `server.listen`.
 
 ---

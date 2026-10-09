@@ -22,6 +22,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { decryptForTenantQuiet } from "../../_core/tenantKeys";
 import { createAuditLog, getDb, type DbExecutor } from "../../db";
+import { QueueOperationTimeoutError } from "../../jobQueue";
 import { storageDelete, storagePutPrivate, storageReadPrivate } from "../../storage";
 import { affectedRows } from "./tokenStore";
 import {
@@ -271,7 +272,7 @@ export async function dispatchShopifyPrivacyOutbox(
           ),
         );
       dispatched += 1;
-    } catch {
+    } catch (error) {
       // Shopify has already received a 2xx only after the outbox committed. A
       // durable-queue outage must therefore remain recoverable: terminalising
       // this row would strand an acknowledged request when Redis returns. The
@@ -380,6 +381,11 @@ export async function dispatchShopifyPrivacyOutbox(
         }
       });
       failed += 1;
+      // Redis did not answer at all, so every candidate behind this one would
+      // wait out the same deadline. They are not claimed yet, so they stay due
+      // for the next sweep, and the sweep's artifact cleanup and deadline check
+      // are not held behind a batch of timeouts.
+      if (error instanceof QueueOperationTimeoutError) break;
     }
   }
   return { scanned: candidates.length, dispatched, failed };

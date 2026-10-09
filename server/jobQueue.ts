@@ -70,6 +70,12 @@ export interface QueueCreateOptions<T = unknown> extends Pick<EnqueueOptions, "a
    * every job as it arrives and ignores this.
    */
   concurrency?: number;
+  /**
+   * How long a BullMQ `enqueue` or `remove` may wait for Redis before it is
+   * refused with QueueOperationTimeoutError (default QUEUE_OPERATION_TIMEOUT_MS).
+   * Exists so tests can shorten it; production queues keep the default.
+   */
+  operationTimeoutMs?: number;
 }
 
 export type JobHandler<T> = (job: QueueJob<T>) => Promise<void>;
@@ -94,6 +100,16 @@ export interface QueueStats {
 }
 
 export interface JobQueue<T> {
+  /**
+   * Add work. On BullMQ this answers within `operationTimeoutMs`, rejecting
+   * with QueueOperationTimeoutError if Redis has not answered by then.
+   *
+   * A rejection means "not known to be queued", NOT "not queued": the deadline
+   * ends the wait, not the Redis command, which may still land once Redis
+   * answers. So job names must make a repeat harmless (`uniqueJobNames`,
+   * `coalesceKey`) or handlers must claim their work conditionally, and a
+   * caller must never treat a rejection as proof the work will not run.
+   */
   enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void>;
   /** Operational snapshot for health output. */
   stats(): Promise<QueueStats>;
@@ -124,6 +140,61 @@ export class DurableQueueUnavailableError extends Error {
   constructor(queueName: string, reason: string) {
     super(`[queue:${queueName}] durable BullMQ processing is required but unavailable: ${reason}`);
     this.name = "DurableQueueUnavailableError";
+  }
+}
+
+/**
+ * A BullMQ enqueue or remove that Redis has not answered in time.
+ *
+ * Without a deadline these never settle against an unreachable Redis: BullMQ
+ * waits for a connection its retry strategy never abandons, and the connection
+ * keeps ioredis's offline queue. A webhook that awaited one never answered, and
+ * a recovery sweep that awaited one stopped, with every step behind it, for the
+ * length of the outage.
+ */
+export class QueueOperationTimeoutError extends Error {
+  constructor(
+    readonly queueName: string,
+    readonly operation: "enqueue" | "remove",
+    readonly timeoutMs: number,
+  ) {
+    super(`[queue:${queueName}] ${operation} did not complete within ${timeoutMs}ms; Redis may be unreachable`);
+    this.name = "QueueOperationTimeoutError";
+  }
+}
+
+/**
+ * How long a BullMQ enqueue or remove may wait for Redis. A healthy Redis
+ * answers in milliseconds; this is the point at which "slow" has become
+ * "unreachable". It stays under Shopify's 5-second webhook budget, so a
+ * delivery is refused with a 503 Shopify retries, rather than abandoned.
+ */
+export const QUEUE_OPERATION_TIMEOUT_MS = 3_000;
+
+/**
+ * Settle with `work`, or with `onTimeout()` once `ms` have passed, whichever
+ * comes first. `onTimeout` returns a fallback value or throws.
+ *
+ * The deadline ends the WAIT, not the work: an unreachable Redis does not
+ * cancel a command, so `work` may still complete later. Every caller of this
+ * must be correct when that happens.
+ */
+async function raceDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      try {
+        resolve(onTimeout());
+      } catch (error) {
+        reject(error);
+      }
+    }, ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -253,6 +324,7 @@ async function createBullMqQueue<T>(
   onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>,
   replaceFailedOnEnqueue = false,
   concurrency = 1,
+  operationTimeoutMs = QUEUE_OPERATION_TIMEOUT_MS,
 ): Promise<JobQueue<T>> {
   const { Queue, Worker } = await import("bullmq");
   const connection = { url: redisUrl } as any;
@@ -319,6 +391,68 @@ async function createBullMqQueue<T>(
     }
   }
 
+  /**
+   * `work`, refused with QueueOperationTimeoutError once the deadline passes.
+   * A command that completes after that is logged: its caller was told it
+   * failed, so a job that then runs anyway must be explainable from the logs.
+   */
+  function bounded(operation: "enqueue" | "remove", name: string, work: Promise<void>): Promise<void> {
+    let timedOut = false;
+    void work.then(
+      () => {
+        if (timedOut) {
+          console.warn(`[queue:${queueName}] ${operation} of "${name}" completed after its deadline; its caller was told it failed`);
+        }
+      },
+      () => {},
+    );
+    return raceDeadline(work, operationTimeoutMs, () => {
+      timedOut = true;
+      throw new QueueOperationTimeoutError(queueName, operation, operationTimeoutMs);
+    });
+  }
+
+  async function enqueueNow(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
+    if (uniqueJobNames && replaceFailedOnEnqueue) {
+      const existing = await queue.getJob(name);
+      if (existing && (await existing.isFailed())) {
+        // A failed unique entry is dead work, not an idempotency success. Keep
+        // it until redelivery arrives (for inspection), then re-arm it so the
+        // same provider delivery receives a fresh bounded attempt cycle.
+        //
+        // Re-arm with retry(), never remove()+add(): retry moves the entry
+        // out of the failed set in ONE Redis script, and only while it is
+        // still there. With remove()+add(), two concurrent redeliveries could
+        // each hold the failed entry; the slower one's remove() then either
+        // deleted the fresh entry the faster one had just queued, or threw
+        // because the entry was already gone — failing a delivery whose work
+        // was in fact queued.
+        try {
+          await existing.updateData(data);
+          await existing.retry("failed", { resetAttemptsMade: true, resetAttemptsStarted: true });
+          return;
+        } catch (error) {
+          // Losing that race is success: a concurrent redelivery re-armed the
+          // same unit of work. Only an entry that is STILL failed is an error.
+          const current = await queue.getJob(name);
+          if (current && !(await current.isFailed())) return;
+          if (current) throw error;
+          // Gone entirely (retention trimmed it): queue it afresh below.
+        }
+      }
+    }
+    await queue.add(name, data, {
+      attempts: opts?.attempts ?? defaults.attempts,
+      backoff: { type: "exponential", delay: opts?.backoffMs ?? defaults.backoffMs },
+      // Deterministic id only where the caller guarantees names are unique
+      // per unit of work — see QueueCreateOptions.uniqueJobNames.
+      ...(uniqueJobNames ? { jobId: name } : {}),
+      // BullMQ releases the key when the job completes or fails; while it is
+      // active, keepLastIfActive holds exactly one follow-up (latest data).
+      ...(opts?.coalesceKey ? { deduplication: { id: opts.coalesceKey, keepLastIfActive: true } } : {}),
+    });
+  }
+
   return {
     backend: "bullmq" as const,
     async close(): Promise<void> {
@@ -339,54 +473,23 @@ async function createBullMqQueue<T>(
       });
       return statsInFlight;
     },
-    async enqueue(name: string, data: T, opts?: EnqueueOptions) {
-      if (uniqueJobNames && replaceFailedOnEnqueue) {
-        const existing = await queue.getJob(name);
-        if (existing && (await existing.isFailed())) {
-          // A failed unique entry is dead work, not an idempotency success. Keep
-          // it until redelivery arrives (for inspection), then re-arm it so the
-          // same provider delivery receives a fresh bounded attempt cycle.
-          //
-          // Re-arm with retry(), never remove()+add(): retry moves the entry
-          // out of the failed set in ONE Redis script, and only while it is
-          // still there. With remove()+add(), two concurrent redeliveries could
-          // each hold the failed entry; the slower one's remove() then either
-          // deleted the fresh entry the faster one had just queued, or threw
-          // because the entry was already gone — failing a delivery whose work
-          // was in fact queued.
-          try {
-            await existing.updateData(data);
-            await existing.retry("failed", { resetAttemptsMade: true, resetAttemptsStarted: true });
-            return;
-          } catch (error) {
-            // Losing that race is success: a concurrent redelivery re-armed the
-            // same unit of work. Only an entry that is STILL failed is an error.
-            const current = await queue.getJob(name);
-            if (current && !(await current.isFailed())) return;
-            if (current) throw error;
-            // Gone entirely (retention trimmed it): queue it afresh below.
-          }
-        }
-      }
-      await queue.add(name, data, {
-        attempts: opts?.attempts ?? defaults.attempts,
-        backoff: { type: "exponential", delay: opts?.backoffMs ?? defaults.backoffMs },
-        // Deterministic id only where the caller guarantees names are unique
-        // per unit of work — see QueueCreateOptions.uniqueJobNames.
-        ...(uniqueJobNames ? { jobId: name } : {}),
-        // BullMQ releases the key when the job completes or fails; while it is
-        // active, keepLastIfActive holds exactly one follow-up (latest data).
-        ...(opts?.coalesceKey ? { deduplication: { id: opts.coalesceKey, keepLastIfActive: true } } : {}),
-      });
+    enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
+      // The WHOLE operation is bounded, not each round trip: the re-arm path
+      // makes up to four, and the caller's budget is for the enqueue.
+      return bounded("enqueue", name, enqueueNow(name, data, opts));
     },
     // Addressable only when the name IS the job id; without that there is
     // nothing to look up, so the capability is simply absent.
     ...(uniqueJobNames
       ? {
-          async remove(name: string) {
+          remove(name: string): Promise<void> {
             // Throws if the entry is currently active. Callers treat removal as
             // best-effort, so surface it rather than swallowing it here.
-            await queue.remove(name);
+            return bounded(
+              "remove",
+              name,
+              queue.remove(name).then(() => {}),
+            );
           },
         }
       : {}),
@@ -426,17 +529,10 @@ export async function allQueueStats(timeoutMs = QUEUE_STATS_TIMEOUT_MS): Promise
 
 async function boundedStats(q: JobQueue<unknown>, timeoutMs: number): Promise<QueueStats> {
   const failed = (error: string): QueueStats => ({ backend: q.backend, durable: q.backend === "bullmq", error });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<QueueStats>((resolve) => {
-    timer = setTimeout(() => resolve(failed("count read timed out")), timeoutMs);
-    timer.unref?.();
-  });
   try {
-    return await Promise.race([q.stats(), deadline]);
+    return await raceDeadline(q.stats(), timeoutMs, () => failed("count read timed out"));
   } catch (err) {
     return failed(errorSummary(err));
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -468,6 +564,7 @@ export async function createQueue<T>(
         opts?.onFinalFailure,
         opts?.replaceFailedOnEnqueue === true,
         opts?.concurrency ?? 1,
+        opts?.operationTimeoutMs ?? QUEUE_OPERATION_TIMEOUT_MS,
       );
       console.log(`[queue:${queueName}] BullMQ backend active`);
       LIVE_QUEUES.set(queueName, q as JobQueue<unknown>);
