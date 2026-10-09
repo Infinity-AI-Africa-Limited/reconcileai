@@ -254,7 +254,7 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
       storeState?.deletionState === "redacting" ||
       storeState?.privacyRedactionState === "customer_redacting"
     ) {
-      // Refuse BEFORE the authorization-code exchange. An exchange retires the
+      // Refuse BEFORE the token exchange (managedInstall.ts). An exchange retires the
       // store's prior refresh token, and a redacting tenant must not acquire or
       // disturb any new credentials while the deletion fence is active.
       throw new ShopifyOnboardingError(

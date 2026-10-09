@@ -40,7 +40,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Shopify durable runtime queue readiness", () => {
+describe("when Shopify durable queue readiness is checked", () => {
   it("does not claim durability or construct queues when Redis is absent", async () => {
     delete process.env.REDIS_URL;
 

@@ -19,6 +19,8 @@ export const SHOPIFY_INSTALL_ERROR_REASONS = [
   "missing_contact_email",
   "store_identity_conflict",
   "install_failed",
+  // The retired authorization-code path: installation is Shopify-managed.
+  "managed_install_only",
 ] as const;
 
 export type ShopifyInstallErrorReason = (typeof SHOPIFY_INSTALL_ERROR_REASONS)[number];

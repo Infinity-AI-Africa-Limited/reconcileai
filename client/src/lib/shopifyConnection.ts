@@ -62,6 +62,8 @@ const SHOPIFY_INSTALL_ERROR_MESSAGES: Record<ShopifyInstallErrorReason, string> 
   store_identity_conflict:
     "This store's details conflict with an existing connection, so it was not connected. Contact ReconcileAI Dev Store support.",
   install_failed: "We could not finish the secure Shopify connection. No changes were made to your store.",
+  managed_install_only:
+    "ReconcileAI Dev Store is now installed and reconnected from inside Shopify. In your Shopify admin, open Apps and choose ReconcileAI Dev Store. No changes were made to your store.",
 };
 
 function isInstallErrorReason(value: string): value is ShopifyInstallErrorReason {

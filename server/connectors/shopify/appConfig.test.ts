@@ -183,7 +183,7 @@ function readConfig(source: string): TomlTable {
   return doc;
 }
 
-describe("shopify.app.toml", () => {
+describe("when shopify.app.toml is read against the code", () => {
   it("should declare exactly the configuration the code serves, each setting in its section", () => {
     expect(readConfig(config)).toEqual(expectedConfig());
   });
@@ -247,7 +247,7 @@ describe("when a setting is misplaced or added", () => {
   });
 });
 
-describe("the reader", () => {
+describe("when the strict TOML reader is given input", () => {
   it("should refuse TOML it does not understand rather than misread it", () => {
     expect(() => readToml("count = 1")).toThrow(/unsupported value/);
     expect(() => readToml('a.b = "x"')).toThrow(/unsupported syntax/);

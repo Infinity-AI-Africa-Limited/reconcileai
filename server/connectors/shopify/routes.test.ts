@@ -1,47 +1,32 @@
+/**
+ * The retired authorization-code install path.
+ *
+ * Installation and reconnection are Shopify-managed (managedInstall.ts). The
+ * two old routes stay mounted only to refuse: the install route starts no
+ * authorization-code grant, and the callback redeems no code, even one that
+ * arrives complete and correctly signed. Both answer before the database or
+ * the network is touched.
+ */
 import crypto from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
 });
-const state = vi.hoisted(() => ({
-  db: null as unknown,
-  queueReadiness: { status: "confirmed", durable: true } as {
-    status: "confirmed" | "unavailable";
-    durable: boolean;
-    reason?: "redis_not_configured" | "queue_unavailable" | "queue_timeout";
-  },
-}));
 
 vi.mock("../../db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../db")>()),
-  getDb: vi.fn(async () => state.db),
-}));
-vi.mock("../../_core/env", async (importOriginal) => {
-  const mod = await importOriginal<typeof import("../../_core/env")>();
-  return {
-    ...mod,
-    ENV: { ...mod.ENV, shopifyClientId: "client-id", shopifyClientSecret: "client-secret", appUrl: "https://app.example", isProduction: false },
-  };
-});
-vi.mock("../../_core/cookies", () => ({ getSessionCookieOptions: () => ({}) }));
-vi.mock("./auth", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./auth")>()),
-  exchangeAuthorizationCode: vi.fn(),
-}));
-vi.mock("./runtimeQueueReadiness", () => ({
-  confirmShopifyRuntimeQueues: () => Promise.resolve(state.queueReadiness),
+  getDb: vi.fn(async () => {
+    throw new Error("the retired install path must not touch the database");
+  }),
 }));
 
 import type express from "express";
 import { getDb } from "../../db";
-import { exchangeAuthorizationCode, signOAuthState } from "./auth";
-import { callbackReasonFor, createShopifyRouter } from "./routes";
-import { ShopifyOnboardingError, type ShopifyOnboardingErrorCode } from "./onboarding";
-import { duplicateKeyError, scriptedDb } from "./scriptedDb.testkit";
+import { SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_RETIRED_INSTALL_PATH } from "./paths";
+import { createShopifyRouter } from "./routes";
 
 const SHOP = "merchant.myshopify.com";
-const STATES = "shopify_oauth_states";
 
 type Handler = (req: express.Request, res: express.Response) => unknown;
 type Layer = { route?: { path: string; stack: Array<{ handle: Handler }> } };
@@ -54,12 +39,11 @@ function handlerFor(path: string): Handler {
 }
 
 function fakeRes() {
-  const res = {
+  return {
     location: "",
-    cookies: {} as Record<string, string>,
-    /** Cookies the handler cleared, so a test can tell a spent flow cookie from a kept one. */
-    cleared: [] as string[],
     statusCode: 0,
+    cookies: {} as Record<string, string>,
+    cleared: [] as string[],
     redirect(code: number, url: string) {
       this.statusCode = code;
       this.location = url;
@@ -73,272 +57,74 @@ function fakeRes() {
       this.cleared.push(name);
       return this;
     },
-    status(code: number) {
-      this.statusCode = code;
-      return this;
-    },
-    send() {
-      return this;
-    },
   };
-  return res;
 }
 
-/** A callback Shopify would send: HMAC over the params in code-unit order. */
-function callbackRequest(oauthState: string, cookieState = oauthState, shop = SHOP) {
-  const params: Record<string, string> = { code: "auth-code", shop, state: oauthState, timestamp: "1790000000" };
+/** What Shopify would deliver to the callback after a grant: a code, signed. */
+function signedGrant(): express.Request {
+  const params: Record<string, string> = { code: "auth-code", shop: SHOP, state: "some-state", timestamp: "1790000000" };
   const message = Object.entries(params).sort().map(([k, v]) => `${k}=${v}`).join("&");
   params.hmac = crypto.createHmac("sha256", "client-secret").update(message).digest("hex");
-  return { query: params, headers: { cookie: `shopify_oauth_flow=${cookieState}` }, get: () => "app.example", protocol: "https" } as unknown as express.Request;
+  return { query: params, headers: { cookie: "shopify_oauth_flow=some-state" } } as unknown as express.Request;
 }
 
 const reason = (location: string) => new URL(location, "https://x").searchParams.get("reason");
 
+let network: MockInstance<typeof fetch>;
 beforeEach(() => {
   vi.clearAllMocks();
-  state.queueReadiness = { status: "confirmed", durable: true };
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("the retired install path must not call out"));
 });
+afterEach(() => vi.restoreAllMocks());
 
-describe("when a merchant starts an install (GET /api/shopify/install)", () => {
-  it("should redirect to the shop's authorize page with a signed state, writing nothing", async () => {
-    const fake = scriptedDb();
-    state.db = fake.db;
+describe("when a merchant follows an old install link", () => {
+  it("should start no authorization-code grant, and say where installation happens now", async () => {
     const res = fakeRes();
-    await handlerFor("/api/shopify/install")({ query: { shop: SHOP }, headers: {} } as unknown as express.Request, res as never);
 
-    const url = new URL(res.location);
-    expect(url.origin).toBe(`https://${SHOP}`);
-    expect(url.searchParams.get("redirect_uri")).toBe("https://app.example/api/shopify/callback");
-    expect(url.searchParams.get("state")).toBe(res.cookies.shopify_oauth_flow);
-    expect(fake.ops).toEqual([]);
+    await handlerFor(SHOPIFY_RETIRED_INSTALL_PATH)({ query: { shop: SHOP }, headers: {} } as unknown as express.Request, res as never);
+
+    expect(res.statusCode).toBe(302);
+    expect(res.location).toBe("/shopify/error?reason=managed_install_only");
+    expect(res.cookies).toEqual({});
     expect(getDb).not.toHaveBeenCalled();
+    expect(network).not.toHaveBeenCalled();
   });
 
-  it("should not consult X-Forwarded-For — there is no per-client state left to key", async () => {
-    // Any number of distinct spoofed addresses is served identically and costs
-    // no database write; the header is simply never read.
-    state.db = scriptedDb().db;
-    for (const ip of ["1.1.1.1", "2.2.2.2", "3.3.3.3"]) {
+  it("should answer the same whatever the shop parameter holds", async () => {
+    for (const query of [{}, { shop: "attacker.example" }, { shop: ["a", "b"] }]) {
       const res = fakeRes();
-      await handlerFor("/api/shopify/install")(
-        { query: { shop: SHOP }, headers: { "x-forwarded-for": ip } } as unknown as express.Request,
-        res as never,
-      );
-      expect(res.statusCode).toBe(302);
-      expect(res.location).toContain(SHOP);
+      await handlerFor(SHOPIFY_RETIRED_INSTALL_PATH)({ query, headers: {} } as unknown as express.Request, res as never);
+      expect(reason(res.location)).toBe("managed_install_only");
     }
-    expect(getDb).not.toHaveBeenCalled();
-  });
-
-  it("should refuse before OAuth when Shopify durable queues are not confirmed", async () => {
-    state.db = scriptedDb().db;
-    state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_unavailable" };
-    const res = fakeRes();
-
-    await handlerFor("/api/shopify/install")({ query: { shop: SHOP }, headers: {} } as unknown as express.Request, res as never);
-
-    expect(reason(res.location)).toBe("temporarily_unavailable");
-    expect(res.cookies.shopify_oauth_flow).toBeUndefined();
-    expect(getDb).not.toHaveBeenCalled();
   });
 });
 
-describe("when Shopify calls back with an authorization code (GET /api/shopify/callback)", () => {
-  const signed = (shopDomain = SHOP) => signOAuthState({ shopDomain, secret: "client-secret", ttlMs: 10 * 60_000 }).state;
-
-  it("should refuse before state consumption or token exchange when durable queues are unavailable", async () => {
-    const fake = scriptedDb();
-    state.db = fake.db;
-    state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_unavailable" };
+describe("when Shopify delivers an authorization code to the callback", () => {
+  it("should redeem nothing, even a complete and correctly signed grant", async () => {
     const res = fakeRes();
 
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
+    await handlerFor(SHOPIFY_OAUTH_CALLBACK_PATH)(signedGrant(), res as never);
 
-    expect(reason(res.location)).toBe("temporarily_unavailable");
-    expect(fake.ops).toEqual([]);
-    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+    expect(reason(res.location)).toBe("managed_install_only");
+    // No exchange, no lease, no onboarding: nothing reaches Shopify or the database.
+    expect(network).not.toHaveBeenCalled();
+    expect(getDb).not.toHaveBeenCalled();
   });
 
-  describe("when the refusal is temporary", () => {
-    // Greptile #167: the flow cookie was cleared before any check, so a callback
-    // refused only because Redis or the database was briefly down could never be
-    // retried: the retry failed the cookie check and the install had to restart.
-
-    it("should keep the flow cookie, and let the same callback through once the queues recover", async () => {
-      const fake = scriptedDb();
-      state.db = fake.db;
-      state.queueReadiness = { status: "unavailable", durable: false, reason: "queue_timeout" };
-      const request = callbackRequest(signed());
-      const refused = fakeRes();
-
-      await handlerFor("/api/shopify/callback")(request, refused as never);
-
-      expect(reason(refused.location)).toBe("temporarily_unavailable");
-      expect(refused.cleared).not.toContain("shopify_oauth_flow");
-
-      // The browser still holds the cookie, so the merchant's retry carries it.
-      state.queueReadiness = { status: "confirmed", durable: true };
-      const retried = fakeRes();
-      await handlerFor("/api/shopify/callback")(request, retried as never);
-
-      expect(reason(retried.location)).not.toBe("security_check_failed");
-      expect(fake.writes("insert", STATES)).toHaveLength(1);
-      expect(retried.cleared).toContain("shopify_oauth_flow");
-    });
-
-    it("should keep the flow cookie when the database is unavailable", async () => {
-      state.db = null;
-      const res = fakeRes();
-
-      await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
-
-      expect(reason(res.location)).toBe("temporarily_unavailable");
-      expect(res.cleared).not.toContain("shopify_oauth_flow");
-    });
-
-    it("should still spend the cookie on a callback that fails its security check", async () => {
-      const res = fakeRes();
-
-      await handlerFor("/api/shopify/callback")(callbackRequest(signed(), "some-other-state"), res as never);
-
-      expect(reason(res.location)).toBe("security_check_failed");
-      expect(res.cleared).toContain("shopify_oauth_flow");
-    });
-  });
-
-  it("should refuse a state issued for another shop before touching the database", async () => {
-    const fake = scriptedDb();
-    state.db = fake.db;
+  it("should clear a flow cookie a browser still holds from the old path", async () => {
     const res = fakeRes();
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed("other.myshopify.com")), res as never);
-    expect(reason(res.location)).toBe("expired_or_replayed");
-    expect(fake.ops).toEqual([]);
-    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
-  });
 
-  it("should refuse a replayed state without exchanging the code a second time", async () => {
-    const fake = scriptedDb({ insert: { [STATES]: [duplicateKeyError()] } });
-    state.db = fake.db;
-    const res = fakeRes();
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
-    expect(reason(res.location)).toBe("expired_or_replayed");
-    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
-  });
+    await handlerFor(SHOPIFY_OAUTH_CALLBACK_PATH)(signedGrant(), res as never);
 
-  it("should record the state as consumed before exchanging the code", async () => {
-    const fake = scriptedDb();
-    state.db = fake.db;
-    vi.mocked(exchangeAuthorizationCode).mockRejectedValueOnce(new Error("stop here"));
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), fakeRes() as never);
-    const consumed = fake.writes("insert", STATES)[0];
-    expect(consumed?.data).toMatchObject({ shopDomain: SHOP, consumedAt: expect.any(Date) });
-    expect(exchangeAuthorizationCode).toHaveBeenCalledTimes(1);
-  });
-
-  it("should take a live store out of service before exchanging the code that retires its credentials", async () => {
-    // Greptile #134 re-review: a fail-close attempted AFTER a failure can itself
-    // fail, leaving `active` on retired credentials. Suspending first means the
-    // store is already out of service whatever happens after the exchange.
-    const fake = scriptedDb();
-    state.db = fake.db;
-    let suspendedBeforeExchange = false;
-    vi.mocked(exchangeAuthorizationCode).mockImplementationOnce(async () => {
-      suspendedBeforeExchange = fake.writes("update", "shopify_connector_stores").some(
-        (op) => op.data?.status === "reauthorization_required" && op.data?.statusReason === "reauthorization_pending",
-      );
-      throw new Error("stop here");
-    });
-
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), fakeRes() as never);
-
-    expect(suspendedBeforeExchange).toBe(true);
-    const suspend = fake.writes("update", "shopify_connector_stores")[0];
-    expect(suspend?.where?.params).toEqual(expect.arrayContaining([SHOP, "active"]));
-  });
-
-  it("should not exchange the code at all when the suspension cannot be written", async () => {
-    // Nothing is retired until the exchange, so stopping here leaves a live
-    // store truthfully active.
-    state.db = scriptedDb({ update: { shopify_connector_stores: [new Error("ECONNRESET")] } }).db;
-    const res = fakeRes();
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
-    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
-    expect(reason(res.location)).toBe("install_failed");
-  });
-
-  it("should refuse an overlapping callback for the same shop before it exchanges its code", async () => {
-    // Greptile #134, fifth pass: overlapping exchanges each retire the other's
-    // credentials at a moment no fence can observe. The second callback is
-    // refused while the first holds the shop's lease, so its grant never
-    // happens and retires nothing.
-    const fake = scriptedDb({
-      insert: { shopify_install_leases: [duplicateKeyError()] },
-      update: { shopify_install_leases: [0] },
-    });
-    state.db = fake.db;
-    const res = fakeRes();
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
-
-    expect(reason(res.location)).toBe("installation_in_progress");
-    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
-    expect(fake.writes("update", "shopify_connector_stores")).toEqual([]); // nothing suspended either
-  });
-
-  it("should stop before the exchange when its lease was taken over while it stalled", async () => {
-    // Greptile #134, sixth pass. The lease is renewed immediately before the
-    // exchange; a callback that lost it must not exchange, or its grant would
-    // retire the credentials of the installation that took over.
-    const fake = scriptedDb({ update: { shopify_install_leases: [0] } });
-    state.db = fake.db;
-    const res = fakeRes();
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), res as never);
-
-    expect(reason(res.location)).toBe("installation_in_progress");
-    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
-    // …and it has not suspended the installation that took over, either.
-    expect(fake.writes("update", "shopify_connector_stores")).toEqual([]);
-  });
-
-  it("should release its lease once the install ends, even when it fails", async () => {
-    const fake = scriptedDb();
-    state.db = fake.db;
-    vi.mocked(exchangeAuthorizationCode).mockRejectedValueOnce(new Error("Shopify unreachable"));
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed()), fakeRes() as never);
-
-    const taken = fake.writes("insert", "shopify_install_leases")[0]?.data?.leaseId;
-    expect(taken).toBeTruthy();
-    expect(fake.writes("delete", "shopify_install_leases")[0]?.where?.params).toEqual([SHOP, taken]);
-  });
-
-  it("should refuse a state that does not match the browser's flow cookie", async () => {
-    state.db = scriptedDb().db;
-    const res = fakeRes();
-    await handlerFor("/api/shopify/callback")(callbackRequest(signed(), signed()), res as never);
-    expect(reason(res.location)).toBe("security_check_failed");
+    expect(res.cleared).toEqual(["shopify_oauth_flow"]);
   });
 });
 
-/**
- * Every onboarding refusal maps to a reason the error page can explain. A
- * refusal that collapses to "install_failed" tells a merchant whose store was
- * protected from a cross-tenant attachment only that something broke.
- */
-describe("when a failed callback is turned into a reason the merchant sees", () => {
-  it.each<[ShopifyOnboardingErrorCode, string]>([
-    ["OWNERSHIP_UNVERIFIED", "ownership_verification_required"],
-    ["EMAIL_CONFLICT", "email_already_registered"],
-    ["MISSING_CONTACT_EMAIL", "missing_contact_email"],
-    ["SHOP_IDENTITY_CONFLICT", "store_identity_conflict"],
-    ["WORKSPACE_CONFLICT", "store_identity_conflict"],
-    ["INSTALL_LEASE_LOST", "installation_in_progress"],
-    ["TOKEN_STORE_FAILED", "install_failed"],
-    ["DB_UNAVAILABLE", "install_failed"],
-  ])("should map %s to %s", (code, expected) => {
-    expect(callbackReasonFor(new ShopifyOnboardingError("x", code))).toBe(expected);
-  });
-
-  it("should report anything else as a generic install failure", () => {
-    expect(callbackReasonFor(new Error("fetch failed"))).toBe("install_failed");
-    expect(callbackReasonFor("thrown string")).toBe("install_failed");
+describe("when the configured Shopify routes are mounted", () => {
+  it("should still answer at exactly the paths Shopify was given", () => {
+    // The callback stays listed as the redirect allow-list the CLI requires.
+    expect(() => handlerFor(SHOPIFY_OAUTH_CALLBACK_PATH)).not.toThrow();
+    expect(() => handlerFor(SHOPIFY_RETIRED_INSTALL_PATH)).not.toThrow();
   });
 });

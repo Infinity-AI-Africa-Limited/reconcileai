@@ -43,6 +43,7 @@
     "server/connectors/shopify/privacySelectors.test.ts",
     "server/connectors/shopify/privacySuppression.test.ts",
     "server/connectors/shopify/redaction.test.ts",
+    "server/connectors/shopify/routes.test.ts",
     "server/connectors/shopify/runtimeQueueReadiness.test.ts",
     "server/connectors/shopify/scriptedDb.testkit.test.ts",
     "server/connectors/shopify/settlementEvidence.test.ts",
