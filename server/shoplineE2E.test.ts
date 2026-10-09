@@ -8,7 +8,8 @@
  *   2. SHOPLINE fires `orders/paid` webhook to /api/webhooks/shopline
  *   3. webhookHandler.ingestWebhook() verifies HMAC, persists event, calls
  *      processWebhookEvent() which calls scheduleReconciliation()
- *   4. realtimeSync debounces 20s then calls runSyncCycle()
+ *   4. realtimeSync coalesces the store's events on a queue for 20s, then
+ *      calls runSyncCycle()
  *   5. runSyncCycle() fetches orders/payments/payouts, normalises, persists,
  *      runs retail reconciliation, updates lastSyncAt
  *   6. Settlement Monitor queries shoplineConnector.syncStatus → shows
@@ -23,8 +24,9 @@
  *   C. Invalid HMAC: webhook rejected before any DB write
  *   D. Refund path: refunds/create triggers reconciliation (exception expected)
  *   E. Subscription gate: expired subscription blocks sync
- *   F. Debounce coalescing: 10 rapid webhooks → exactly 1 sync call
+ *   F. Coalescing: 10 rapid webhooks → exactly 1 sync call
  *   G. In-flight guard: webhook during active sync queues one rerun, not N
+ *   J. A steady stream is serviced once per window, never starved
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
@@ -207,10 +209,8 @@ import {
 import {
   scheduleReconciliation,
   isReconciliationTrigger,
-  realtimeStatus,
-  __resetRealtimeState,
-  DEBOUNCE_MS,
-  MAX_WAIT_MS,
+  __resetRealtimeQueue,
+  COALESCE_WINDOW_MS,
   RECONCILIATION_TRIGGER_TOPICS,
 } from "./connectors/shopline/realtimeSync";
 
@@ -251,14 +251,14 @@ function makeOrderPaidPayload(orderId = "SL_ORDER_001") {
 
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
-beforeEach(() => {
+beforeEach(async () => {
+  await __resetRealtimeQueue();
   vi.useFakeTimers();
   runSyncCycleMock.mockClear();
   storedWebhookIds = new Set();
   insertedTransactions = [];
   insertedExceptions = [];
   subscriptionBlocked = false;
-  __resetRealtimeState();
 
   // Default: store lookup returns mockStore; webhook duplicate check returns []
   mockDb.limit.mockImplementation(async () => {
@@ -267,9 +267,9 @@ beforeEach(() => {
   mockDb.values.mockResolvedValue([{ insertId: 1001 }]);
 });
 
-afterEach(() => {
-  __resetRealtimeState();
+afterEach(async () => {
   vi.useRealTimers();
+  await __resetRealtimeQueue();
 });
 
 // ─── A0. Durable admission ────────────────────────────────────────────────────
@@ -478,16 +478,19 @@ describe("A. Happy path — paid order → webhook → sync → Settlement Monit
     const webhook = makeSignedWebhook("orders/paid", makeOrderPaidPayload());
     await ingestWebhook(mockDb as never, webhook);
 
-    // The debounce timer is armed — store is in pending state
-    const status = realtimeStatus();
-    expect(status.pending).toContain(mockStore.id);
+    // Queued, not run: the store's window is open.
+    expect(runSyncCycleMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
+    expect(runSyncCycleMock).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: mockStore.organizationId, slStoreId: mockStore.id }),
+    );
   });
 
-  it("runSyncCycle is called exactly once after the debounce window", async () => {
+  it("runSyncCycle is called exactly once after the coalescing window", async () => {
     scheduleReconciliation(7, 42, "orders/paid");
 
     expect(runSyncCycleMock).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
 
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
     expect(runSyncCycleMock).toHaveBeenCalledWith(
@@ -547,16 +550,17 @@ describe("B. Duplicate webhook — idempotency", () => {
     mockDb.limit.mockImplementationOnce(async () => [mockStore])
       .mockImplementationOnce(async () => []);
     await ingestWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload(), webhookId));
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
+    const syncsAfterFirst = runSyncCycleMock.mock.calls.length;
 
-    const pendingAfterFirst = realtimeStatus().pending.length;
-
-    // Second delivery (duplicate)
+    // Second delivery (duplicate), after the first window has closed, so a
+    // re-schedule could not be hidden by coalescing.
     mockDb.limit.mockImplementationOnce(async () => [mockStore])
       .mockImplementationOnce(async () => [{ id: 1001 }]);
     await ingestWebhook(mockDb as never, makeSignedWebhook("orders/paid", makeOrderPaidPayload(), webhookId));
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
 
-    // Pending count should not increase (duplicate does not arm a new timer)
-    expect(realtimeStatus().pending.length).toBe(pendingAfterFirst);
+    expect(runSyncCycleMock).toHaveBeenCalledTimes(syncsAfterFirst);
   });
 });
 
@@ -611,8 +615,7 @@ describe("C. Invalid HMAC — webhook rejected before any DB write", () => {
       rawBody,
     });
 
-    expect(realtimeStatus().pending).toEqual([]);
-    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS * 2);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS * 3);
     expect(runSyncCycleMock).not.toHaveBeenCalled();
   });
 });
@@ -625,14 +628,11 @@ describe("D. Refund path — refunds/create triggers reconciliation", () => {
     expect(isReconciliationTrigger("refunds/update")).toBe(true);
   });
 
-  it("scheduleReconciliation is armed for refunds/create", async () => {
+  it("a refund webhook triggers one sync when its window closes, not before", async () => {
     scheduleReconciliation(7, 42, "refunds/create");
-    expect(realtimeStatus().pending).toContain(42);
-  });
-
-  it("refund webhook triggers sync after debounce", async () => {
-    scheduleReconciliation(7, 42, "refunds/create");
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS - 1_000);
+    expect(runSyncCycleMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_100);
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
   });
 });
@@ -660,13 +660,13 @@ describe("E. Subscription gate — expired subscription blocks sync", () => {
 
 // ─── F. Debounce Coalescing ───────────────────────────────────────────────────
 
-describe("F. Debounce coalescing — burst of webhooks → exactly 1 sync", () => {
+describe("F. Coalescing — burst of webhooks → exactly 1 sync", () => {
   it("10 rapid orders/paid webhooks produce exactly 1 runSyncCycle call", async () => {
     for (let i = 0; i < 10; i++) {
       scheduleReconciliation(7, 42, "orders/paid");
     }
     expect(runSyncCycleMock).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
   });
 
@@ -675,14 +675,14 @@ describe("F. Debounce coalescing — burst of webhooks → exactly 1 sync", () =
     for (let i = 0; i < 50; i++) {
       scheduleReconciliation(7, 42, topics[i % 3]);
     }
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
   });
 
   it("two different stores each get their own sync (no cross-store coalescing)", async () => {
     scheduleReconciliation(7, 42, "orders/paid");
     scheduleReconciliation(8, 99, "orders/paid");
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
     expect(runSyncCycleMock).toHaveBeenCalledTimes(2);
     const calls = runSyncCycleMock.mock.calls.map((c) => c[0].slStoreId);
     expect(calls).toContain(42);
@@ -696,7 +696,7 @@ describe("G. In-flight guard — webhook during active sync queues one rerun", (
   it("events during an active sync trigger exactly one follow-up sync", async () => {
     // Start a sync
     scheduleReconciliation(7, 42, "orders/paid");
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
 
     // While sync is "running" (mock resolves immediately, but we test the state)
@@ -706,7 +706,7 @@ describe("G. In-flight guard — webhook during active sync queues one rerun", (
     }
 
     // After the first sync completes, one rerun should be scheduled
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
     // Total: at most 2 calls (initial + one rerun)
     expect(runSyncCycleMock.mock.calls.length).toBeLessThanOrEqual(2);
   });
@@ -741,11 +741,10 @@ describe("H. Topic filter — only reconciliation-relevant topics trigger sync",
     expect(isReconciliationTrigger("orders/delete")).toBe(false);
   });
 
-  it("non-trigger topics do not arm the debounce timer", () => {
+  it("non-trigger topics queue no sync", async () => {
     scheduleReconciliation(7, 42, "orders/create");
     scheduleReconciliation(7, 42, "customers/redact");
-    expect(realtimeStatus().pending).toEqual([]);
-    vi.advanceTimersByTime(MAX_WAIT_MS * 2);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS * 3);
     expect(runSyncCycleMock).not.toHaveBeenCalled();
   });
 });
@@ -769,23 +768,34 @@ describe("I. Store not found — webhook for unknown store is handled gracefully
     const webhook = makeSignedWebhook("orders/paid", makeOrderPaidPayload());
     await ingestWebhook(mockDb as never, webhook);
 
-    expect(realtimeStatus().pending).toEqual([]);
-    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS * 2);
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS * 3);
     expect(runSyncCycleMock).not.toHaveBeenCalled();
   });
 });
 
-// ─── J. MAX_WAIT_MS Cap ───────────────────────────────────────────────────────
+// ─── J. Steady stream ─────────────────────────────────────────────────────────
 
-describe("J. MAX_WAIT_MS cap — steady stream of events doesn't starve the sync", () => {
-  it("fires the sync after MAX_WAIT_MS even if events keep arriving", async () => {
-    // Send an event every 5 seconds for 70 seconds (> MAX_WAIT_MS = 60s)
+describe("J. A steady stream is serviced once per window, never starved", () => {
+  it("syncs once per window while events keep arriving, never closer together", async () => {
+    // An event every 5 seconds for 80 seconds. The window opens at the first
+    // event and does not move, so the stream cannot hold the sync back — and
+    // the store is never synced more often than once per window.
+    const ranAt: number[] = [];
+    runSyncCycleMock.mockImplementation(async () => {
+      ranAt.push(Date.now());
+      return { error: undefined, ordersIngested: 0, paymentsIngested: 0, matchedCount: 0, exceptionCount: 0 };
+    });
+    const started = Date.now();
     const interval = 5000;
-    for (let t = 0; t < MAX_WAIT_MS + DEBOUNCE_MS; t += interval) {
+    for (let t = 0; t < 80_000; t += interval) {
       scheduleReconciliation(7, 42, "orders/paid");
       await vi.advanceTimersByTimeAsync(interval);
     }
-    // The sync should have fired by MAX_WAIT_MS + DEBOUNCE_MS
-    expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
+
+    expect(ranAt.length).toBeGreaterThanOrEqual(3);
+    expect(ranAt[0] - started).toBeLessThanOrEqual(COALESCE_WINDOW_MS + interval);
+    for (let i = 1; i < ranAt.length; i++) {
+      expect(ranAt[i] - ranAt[i - 1]).toBeGreaterThanOrEqual(COALESCE_WINDOW_MS);
+    }
   });
 });

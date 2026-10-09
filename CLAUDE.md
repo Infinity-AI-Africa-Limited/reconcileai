@@ -545,23 +545,36 @@ limit is a leaky bucket (burst 40, drain 4 req/s). A store importing 200
 orders emits 200+ webhooks in seconds — reconciling per event would guarantee
 a 429. So:
 
-- `DEBOUNCE_MS` (20s) — quiet period; each further event resets it.
-- `MAX_WAIT_MS` (60s) — hard cap, so a continuous stream can't starve the sync.
-- In-flight guard — never two concurrent cycles for one store; events arriving
-  mid-run earn exactly one follow-up pass.
+- `COALESCE_WINDOW_MS` (20s): the first event opens a store's window, and every
+  further event inside it is absorbed. The window does NOT move, so a continuous
+  stream cannot starve the sync. Under sustained load a store syncs about once
+  per window plus its run time.
+- Never two concurrent cycles for one store. Events arriving mid-run earn exactly
+  one follow-up, which opens a fresh window when the run ends.
 - Trigger topics exclude `orders/create` (still unpaid — nothing to match;
   `orders/paid` follows), `orders/delete`, GDPR and `appsubscription/*`.
 
 Scheduling happens **before** the per-topic handlers and is non-blocking; the
 HTTP layer has already acked 200, so SHOPLINE's 5-second budget is untouched.
 
-> ⚠️ The scheduler is **per-process**. With multiple Railway instances each
-> keeps its own timers, so a store may sync once per instance in a window —
-> wasteful, not incorrect (ingest dedupes; `runSyncCycle` is idempotent over
-> its window). `REDIS_URL` is provisioned now (confirmed 2026-10-06), but this trigger
-> has **not** moved: it still runs on per-process timers (`setTimeout` in
-> `realtimeSync.ts`). Moving it onto a BullMQ queue is what would make it
-> cluster-wide. See §10.
+> ✅ **Cluster-wide since 2026-10-09.** The window is one delayed BullMQ job per
+> store on the `shopline-realtime-sync` queue, deduplicated in Redis by a
+> tenant-qualified key (`shopline-realtime:<org>:<store>`) with
+> `keepLastIfActive`. So every instance's webhooks feed the same job, and only
+> one instance runs it. (Until then each process kept its own `setTimeout`
+> timers, and with several instances a store could sync once per instance per
+> window.)
+>
+> - **Without `REDIS_URL`** the in-process queue applies the same rule within
+>   the one process, which is then the whole deployment.
+> - **A request the queue refuses** (Redis down, or the enqueue deadline in §10)
+>   is logged and never reaches the webhook path. The 15-minute poll below picks
+>   the store up.
+>
+> The semantics changed deliberately with the move. The old quiet period reset
+> on every event, capped at 60s. It could not be made atomic across instances,
+> whereas a fixed window from the first event is exactly what BullMQ
+> deduplication guarantees.
 
 The scheduled handlers remain as the **safety net** for missed or dropped
 deliveries (SHOPLINE explicitly does not guarantee webhook delivery):

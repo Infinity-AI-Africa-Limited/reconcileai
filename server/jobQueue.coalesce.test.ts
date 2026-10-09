@@ -162,3 +162,63 @@ describe.skipIf(!REDIS_URL)("coalesceKey on the bullmq backend, before a run has
     expect(runs.map((r) => r.label)).toEqual(["blocker", "first"]);
   });
 });
+
+describe("delayMs on the in-process backend", () => {
+  // Fake timers, not real ones: the property is about WHEN work runs, and a
+  // margin on a loaded runner is how a timing test becomes a flake.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function timedQueue(label: string) {
+    vi.stubEnv("REDIS_URL", "");
+    const ranAt: Array<{ label: string; at: number }> = [];
+    const queue = await createQueue<Payload>(
+      `${RUN}-${label}`,
+      async (job) => {
+        ranAt.push({ label: job.data.label, at: Date.now() });
+      },
+      { attempts: 1, backoffMs: 10 },
+    );
+    open.push(queue);
+    vi.useFakeTimers();
+    return { queue, ranAt, start: Date.now() };
+  }
+
+  it("should open a coalesced window at the first request and not move it for later ones", async () => {
+    const { queue, ranAt, start } = await timedQueue("delay-window");
+
+    await queue.enqueue("sync", { key: "store-1", label: "first" }, { coalesceKey: "store-1", delayMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(600);
+    await queue.enqueue("sync", { key: "store-1", label: "second" }, { coalesceKey: "store-1", delayMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(399);
+    expect(ranAt).toEqual([]);
+
+    // Closes 1s after the FIRST request, not 1s after the second.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(ranAt).toHaveLength(1);
+    expect(ranAt[0].label).toBe("first");
+    expect(ranAt[0].at - start).toBeLessThan(1_100);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ranAt).toHaveLength(1);
+  });
+
+  it("should delay work that is not coalesced as well", async () => {
+    const { queue, ranAt } = await timedQueue("delay-plain");
+
+    await queue.enqueue("sync", { key: "a", label: "plain" }, { delayMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ranAt).toEqual([]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(ranAt.map((r) => r.label)).toEqual(["plain"]);
+  });
+
+  it("should start at once when no delay is asked for", async () => {
+    const { queue, ranAt } = await timedQueue("delay-none");
+
+    await queue.enqueue("sync", { key: "b", label: "now" });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ranAt.map((r) => r.label)).toEqual(["now"]);
+  });
+});

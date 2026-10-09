@@ -252,7 +252,7 @@ export async function ingestWebhook(
  * Topics aligned with the verified SHOPLINE webhook catalogue (spec §A7).
  *
  * Reconciliation is REAL-TIME: any topic that changes reconciliation state
- * schedules a debounced sync for the store (see realtimeSync.ts), so a
+ * requests a coalesced sync for the store (see realtimeSync.ts), so a
  * merchant sees results within seconds of a payment rather than waiting for
  * the 15-minute poll. Bursts are coalesced into a single run per store to stay
  * inside SHOPLINE's per-store rate limit. The scheduling call is deliberately
@@ -265,7 +265,7 @@ async function processWebhookEvent(
   topic: string,
   payload: unknown,
 ): Promise<void> {
-  // Arm the debounced sync first: even if a per-topic handler below throws,
+  // Request the coalesced sync first: even if a per-topic handler below throws,
   // the reconciliation still happens (the event was real and state changed).
   scheduleReconciliation(organizationId, slStoreId, topic);
 
@@ -348,7 +348,7 @@ async function handleOrderPaid(
   slStoreId: number,
   payload: unknown,
 ): Promise<void> {
-  // Reconciliation is scheduled centrally in processWebhookEvent (debounced).
+  // Reconciliation is scheduled centrally in processWebhookEvent (coalesced).
   const order = payload as { id?: string; name?: string; current_total_price_set?: unknown };
   console.info(
     `[SHOPLINE] Order paid: org=${organizationId} store=${slStoreId} orderId=${order?.id} name=${order?.name}`,
@@ -445,7 +445,7 @@ async function handleTransactionCreated(
   console.info(
     `[SHOPLINE] Transaction created: org=${organizationId} store=${slStoreId} txId=${tx?.id} orderId=${tx?.order_id} kind=${tx?.kind} status=${tx?.status}`,
   );
-  // Reconciliation is scheduled centrally in processWebhookEvent (debounced).
+  // Reconciliation is scheduled centrally in processWebhookEvent (coalesced).
 }
 
 // ─── GDPR handlers (mandatory for App Store review) ─────────────────────────
