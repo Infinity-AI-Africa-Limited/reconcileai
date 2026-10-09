@@ -16,7 +16,8 @@
     "noEmit": true,
     "incremental": false
   },
-  "include": [],  "files": [
+  "include": [],
+  "files": [
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
     "client/src/lib/shopifyPrivacyDeliveries.test.ts",
@@ -58,6 +59,7 @@
     "server/connectors/shopline/settlementFileDedupe.test.ts",
     "server/connectors/shopline/settlementImportRequest.test.ts",
     "server/connectors/shopline/syncIngestLock.test.ts",
+    "server/controlCompleteness.test.ts",
     "server/corporateB2BPilot.test.ts",
     "server/dbErrors.test.ts",
     "server/deactivatedAccess.test.ts",
