@@ -27,6 +27,7 @@ vi.hoisted(() => {
 import { runInRequestScope } from "./_core/requestScope";
 import { resolveOrgScope } from "./_core/tenancy";
 import { controlFitRouter } from "./routers/controlFit";
+import { controlEvidenceRouter } from "./routers/controlEvidence";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { lapoRouter } from "./routers/lapo";
 import { ugandaRouter } from "./routers/uganda";
@@ -148,6 +149,52 @@ const OVERRIDE_CALLS: ReadonlyArray<readonly [string, (ctx: Ctx, organizationId:
         successMeasure: "Fewer unresolved breaks",
         status: "draft",
       }),
+  ],
+  ["controlEvidence.get", (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).get({ organizationId })],
+  [
+    "controlEvidence.createSourceContract",
+    (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).createSourceContract({
+      organizationId,
+      sourceKey: "settlement-source",
+      version: 1,
+      role: "settlement",
+      displayName: "Settlement report",
+      systemName: "Approved system",
+      controlPurpose: "Daily settlement completeness control",
+      accountableOwner: "Settlement owner",
+      escalationOwner: "Finance controller",
+      deliveryRoute: "manual_export",
+      timeZone: "Africa/Lagos",
+      cutoffMinutes: 1020,
+      schemaVersion: "v1",
+      controlTotalRequired: true,
+      expectedCurrency: "NGN",
+      status: "approved",
+      approvalReference: "CAB-1",
+      effectiveAt: "2026-10-09T08:00:00.000Z",
+    }),
+  ],
+  [
+    "controlEvidence.recordBatchManifest",
+    (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).recordBatchManifest({
+      organizationId,
+      sourceContractId: 1,
+      controlPeriod: "2026-10-09",
+      deliveryIdentity: "delivery-1",
+      uploadBatchId: null,
+      receivedAt: "2026-10-09T16:00:00.000Z",
+      mappingVersion: "v1",
+      reconciliationPolicyVersion: "v1",
+      schemaState: "accepted",
+      duplicateDelivery: "none",
+      invalidRowCount: 0,
+      expectedRecordCount: 1,
+      expectedMonetaryTotal: "1.00",
+      expectedCurrency: "NGN",
+      receivedRecordCount: 1,
+      receivedMonetaryTotal: "1.00",
+      receivedCurrency: "NGN",
+    }),
   ],
   ["corporateB2BPilot.readiness", (ctx, organizationId) => corporateB2BPilotRouter.createCaller(withReqRes(ctx)).readiness({ organizationId })],
   [

@@ -105,6 +105,88 @@ export const controlFitBriefs = mysqlTable("control_fit_briefs", {
 
 export type ControlFitBrief = typeof controlFitBriefs.$inferSelect;
 
+// ─── Governed-control source contracts and batch manifests ────────────
+//
+// A source contract records the approved definition of a control input. A batch
+// manifest records the delivered population against that immutable contract
+// version. Neither stores source-file contents or credentials: those remain in
+// the customer-approved ingestion route and the existing upload/connector
+// records. New control evidence is tenant-required by design.
+export const controlSourceContracts = mysqlTable("control_source_contracts", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  sourceKey: varchar("sourceKey", { length: 100 }).notNull(),
+  version: int("version").notNull(),
+  role: mysqlEnum("role", ["settlement", "internal_register", "bank_or_gl"]).notNull(),
+  displayName: varchar("displayName", { length: 255 }).notNull(),
+  systemName: varchar("systemName", { length: 255 }).notNull(),
+  controlPurpose: text("controlPurpose").notNull(),
+  accountableOwner: varchar("accountableOwner", { length: 255 }).notNull(),
+  escalationOwner: varchar("escalationOwner", { length: 255 }).notNull(),
+  deliveryRoute: varchar("deliveryRoute", { length: 64 }).notNull(),
+  timeZone: varchar("timeZone", { length: 64 }).notNull(),
+  /** Minutes after local midnight; interpreted with timeZone by the future scheduler. */
+  cutoffMinutes: int("cutoffMinutes").notNull(),
+  schemaVersion: varchar("schemaVersion", { length: 128 }).notNull(),
+  controlTotalRequired: boolean("controlTotalRequired").default(true).notNull(),
+  expectedCurrency: varchar("expectedCurrency", { length: 3 }),
+  status: mysqlEnum("status", ["draft", "approved", "tested", "active", "retired"]).default("draft").notNull(),
+  approvalReference: varchar("approvalReference", { length: 255 }),
+  effectiveAt: timestamp("effectiveAt").notNull(),
+  createdByUserId: int("createdByUserId").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_control_source_contract_org_key_version").on(table.organizationId, table.sourceKey, table.version),
+  index("idx_control_source_contract_org_status").on(table.organizationId, table.status),
+  // The default read order of controlEvidence.get, and the keyset it pages by.
+  // Without it every page filesorts the tenant's whole contract partition.
+  index("idx_control_source_contract_org_effective").on(table.organizationId, table.effectiveAt, table.id),
+]);
+
+export type ControlSourceContract = typeof controlSourceContracts.$inferSelect;
+export type InsertControlSourceContract = typeof controlSourceContracts.$inferInsert;
+
+export const controlBatchManifests = mysqlTable("control_batch_manifests", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  sourceContractId: int("sourceContractId").notNull(),
+  /** Immutable source-contract version captured at delivery admission. */
+  sourceContractVersion: int("sourceContractVersion").notNull(),
+  /** Customer-defined business period, never inferred from server time. */
+  controlPeriod: varchar("controlPeriod", { length: 64 }).notNull(),
+  /** Idempotency identity supplied by the approved source route. */
+  deliveryIdentity: varchar("deliveryIdentity", { length: 255 }).notNull(),
+  /** Existing upload row where the approved route creates one; otherwise null. */
+  uploadBatchId: int("uploadBatchId"),
+  receivedAt: timestamp("receivedAt").notNull(),
+  mappingVersion: varchar("mappingVersion", { length: 128 }).notNull(),
+  reconciliationPolicyVersion: varchar("reconciliationPolicyVersion", { length: 128 }).notNull(),
+  schemaState: mysqlEnum("schemaState", ["accepted", "rejected", "unknown"]).notNull(),
+  duplicateDelivery: mysqlEnum("duplicateDelivery", ["none", "deduplicated", "rejected"]).notNull(),
+  invalidRowCount: int("invalidRowCount").default(0).notNull(),
+  expectedRecordCount: int("expectedRecordCount"),
+  /** Exact decimal strings preserve provider totals without JavaScript number rounding. */
+  expectedMonetaryTotal: varchar("expectedMonetaryTotal", { length: 40 }),
+  expectedCurrency: varchar("expectedCurrency", { length: 3 }),
+  receivedRecordCount: int("receivedRecordCount").notNull(),
+  receivedMonetaryTotal: varchar("receivedMonetaryTotal", { length: 40 }).notNull(),
+  receivedCurrency: varchar("receivedCurrency", { length: 3 }).notNull(),
+  recordedByUserId: int("recordedByUserId").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_control_batch_manifest_contract_period_delivery").on(table.sourceContractId, table.controlPeriod, table.deliveryIdentity),
+  index("idx_control_batch_manifest_org_period").on(table.organizationId, table.controlPeriod),
+  index("idx_control_batch_manifest_contract").on(table.sourceContractId),
+  // The default read order of controlEvidence.get, and the keyset it pages by.
+  // Manifests accrue one row per source per period, so this partition is the
+  // one that grows without bound; paging it by filesort would not hold up.
+  index("idx_control_batch_manifest_org_received").on(table.organizationId, table.receivedAt, table.id),
+]);
+
+export type ControlBatchManifest = typeof controlBatchManifests.$inferSelect;
+export type InsertControlBatchManifest = typeof controlBatchManifests.$inferInsert;
+
 // ─── Users ───────────────────────────────────────────────────────────
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),

@@ -6,7 +6,7 @@
 > columns. This document is the human-readable half; the test is the enforced half.
 > **Both must be updated together when a table is added.**
 
-*Audited: 25 September 2026 · 113 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
+*Audited: 9 October 2026 · 115 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
 
 ## 1. Isolation model
 
@@ -21,17 +21,17 @@ enforced at three layers:
 
 ## 2. Classification summary (see the test for the per-table list)
 
-Measured by `server/rlsAudit.test.ts` on 2026-09-25 (113 tables).
+Measured by `server/rlsAudit.test.ts` on 2026-10-09 (115 tables).
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 30 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 33 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 45 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
 | `derived` | 4 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
 | `mirror_single_tenant` | 13 | `wc_*` Fineract mirror (Woodcore POC) | **Known caveat** — see finding F2. |
 | `global` | 9 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
-| `token` | 5 | random-secret keyed | Entropy-gated, not org-gated. |
+| `token` | 4 | random-secret keyed | Entropy-gated, not org-gated. |
 
 ## 3. Findings & remediation plan
 
@@ -104,7 +104,14 @@ justification comment in the classification map and a row in §2/§3 here.
 | `corporate_b2b_pilot_configs` | `tenant_required` | One auditable policy/evidence register per Corporate B2B customer. It records only the customer’s declared no-write scope, source-contract readiness, recovery posture and approval references; it never stores payment authority. |
 | `corporate_b2b_pilot_sources` | `tenant_required` | Metadata-only evidence-source registry. Provider credentials and source-file contents stay in the approved customer-owned ingestion route, never in this table. |
 
-## 7. Shopify public-app connector tables (September 2026, PR #134)
+## 7. Governed-control evidence tables (October 2026)
+
+| Table | Class | Notes |
+|---|---|---|
+| `control_source_contracts` | `tenant_required` | Versioned customer control-input contract: source role, delivery route, local cut-off, schema version, control-total requirement, owner and approval reference. It contains no source credential or source-file payload. |
+| `control_batch_manifests` | `tenant_required` | Per-delivery control evidence bound to one source-contract version: expected and received count/value evidence, mapping/policy versions, schema state and duplicate-delivery result. Monetary totals are stored as exact decimal strings; the record is not a transaction ledger. |
+
+## 8. Shopify public-app connector tables (September 2026, PR #134)
 
 Defined in `drizzle/shopify_schema.ts`, initially in migration `0095` and extended
 for data-request completion in migration `0099`. These tables reached a

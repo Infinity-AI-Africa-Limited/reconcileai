@@ -1,0 +1,2 @@
+CREATE INDEX `idx_control_batch_manifest_org_received` ON `control_batch_manifests` (`organizationId`,`receivedAt`,`id`);--> statement-breakpoint
+CREATE INDEX `idx_control_source_contract_org_effective` ON `control_source_contracts` (`organizationId`,`effectiveAt`,`id`);

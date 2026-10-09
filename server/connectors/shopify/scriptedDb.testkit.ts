@@ -33,6 +33,16 @@ export interface RecordedOp {
   txId: number | null;
   /** Set on a locking read (`.for("update")`). */
   locked: boolean;
+  /**
+   * The row ceiling a select asked for, when it asked for one.
+   *
+   * The fake answers from a scripted array and cannot apply a limit, so a test
+   * that only reads the rows back proves nothing about the limit the real query
+   * would send. A keyset pager that fetches one row beyond its page purely to
+   * answer "is there more?" is exactly that case: drop the extra row and the
+   * fake behaves identically while production always reports no further pages.
+   */
+  limit?: number;
 }
 
 /**
@@ -122,6 +132,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
         let table = "";
         let where: RecordedOp["where"] = null;
         let locked = false;
+        let limit: number | undefined;
         const query = {
           from(t: Table) { table = getTableName(t); return query; },
           innerJoin() { return query; },
@@ -129,10 +140,10 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
           where(cond: unknown) { where = render(cond); return query; },
           orderBy() { return query; },
           groupBy() { return query; },
-          limit() { return query; },
+          limit(rows?: number) { limit = rows; return query; },
           for() { locked = true; return query; },
           ...settle(() => {
-            record({ kind: "select", table, where, data: null, upsert: false, locked });
+            record({ kind: "select", table, where, data: null, upsert: false, locked, ...(limit === undefined ? {} : { limit }) });
             const answer = take("select", table);
             if (answer instanceof Error) throw answer;
             return Array.isArray(answer) ? answer : (script.standing?.[table] ?? []);
