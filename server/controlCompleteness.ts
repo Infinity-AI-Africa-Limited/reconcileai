@@ -11,7 +11,14 @@
  * decision. Callers must persist the source contract, batch manifest, mapping
  * version, policy version, and resulting assessment separately. Until that
  * integration exists, no route may claim this module proves a customer run.
+ *
+ * It fails CLOSED on anything it cannot vouch for. Manifests will be loaded
+ * from storage, so the declared types are not trusted at runtime: a missing
+ * field, a number where a string belongs, or a state it does not recognise
+ * blocks the source. It never throws, and it never lets the input pass.
  */
+
+import { exactDecimalsEqual, parseExactDecimal } from "../shared/money";
 
 export type ControlSourceRole =
   | "settlement"
@@ -24,7 +31,10 @@ export type DuplicateDeliveryState = "none" | "deduplicated" | "rejected";
 export interface SourceControlTotal {
   /** Number of records in the agreed source population. */
   recordCount: number;
-  /** Canonical decimal string, for example `125000.00`; never use a JS float. */
+  /**
+   * Canonical decimal string, for example `125000.00`; never a JS float. Any
+   * number of decimal places, compared exactly (shared/money.ts).
+   */
   monetaryTotal: string;
   /** ISO 4217 currency code for the contractual monetary total. */
   currency: string;
@@ -42,8 +52,10 @@ export interface ReceivedSourceManifest extends SourceControlTotal {
 }
 
 export interface RequiredSourceManifest {
+  /** Unique within one control definition. */
   sourceKey: string;
   role: ControlSourceRole;
+  /** Only an explicit `false` makes a source optional; anything else is required. */
   required: boolean;
   /** The approved source-delivery cut-off for the control period. */
   cutoffAt: Date;
@@ -62,8 +74,10 @@ export type SourceReadiness =
 /** Stable machine reasons: safe to store, translate, trend, and use in policy tests. */
 export type SourceReadinessReason =
   | "source_not_received"
+  | "invalid_evaluation_time"
   | "invalid_cutoff"
   | "invalid_received_at"
+  | "received_after_evaluation_time"
   | "received_after_cutoff"
   | "missing_batch_identity"
   | "missing_source_contract_version"
@@ -71,6 +85,7 @@ export type SourceReadinessReason =
   | "schema_not_accepted"
   | "invalid_rows_present"
   | "duplicate_delivery_rejected"
+  | "unknown_duplicate_delivery_state"
   | "control_total_not_required"
   | "missing_expected_control_total"
   | "invalid_expected_control_total"
@@ -79,13 +94,53 @@ export type SourceReadinessReason =
   | "currency_mismatch"
   | "monetary_total_mismatch";
 
+/**
+ * What each reason does to a source. `blocks`: the evidence or its definition
+ * is unusable, whatever else is true. `population_shortfall`: the evidence is
+ * sound but does not (yet) add up to the agreed population.
+ *
+ * A source with ANY blocking reason is `blocked`, even when it is also late or
+ * short — a shortfall must never be the headline for evidence that cannot be
+ * trusted. Typed as a full Record, so a reason added without a class here is a
+ * compile error rather than a silent default.
+ */
+export const SOURCE_REASON_EFFECT: Readonly<
+  Record<SourceReadinessReason, "blocks" | "population_shortfall">
+> = {
+  // Awaiting or incomplete, decided by the clock against the cut-off.
+  source_not_received: "population_shortfall",
+  received_after_cutoff: "population_shortfall",
+  record_count_mismatch: "population_shortfall",
+  currency_mismatch: "population_shortfall",
+  monetary_total_mismatch: "population_shortfall",
+  invalid_evaluation_time: "blocks",
+  invalid_cutoff: "blocks",
+  invalid_received_at: "blocks",
+  // Evidence dated after the moment it is judged at is a clock or replay
+  // error, never a delivery that may still count.
+  received_after_evaluation_time: "blocks",
+  missing_batch_identity: "blocks",
+  missing_source_contract_version: "blocks",
+  missing_mapping_version: "blocks",
+  schema_not_accepted: "blocks",
+  invalid_rows_present: "blocks",
+  duplicate_delivery_rejected: "blocks",
+  unknown_duplicate_delivery_state: "blocks",
+  control_total_not_required: "blocks",
+  missing_expected_control_total: "blocks",
+  invalid_expected_control_total: "blocks",
+  invalid_control_total: "blocks",
+};
+
+export type SourceReadinessWarning = "duplicate_delivery_deduplicated";
+
 export interface SourceReadinessAssessment {
   sourceKey: string;
   role: ControlSourceRole;
   required: boolean;
   status: SourceReadiness;
   reasons: SourceReadinessReason[];
-  warnings: Array<"duplicate_delivery_deduplicated">;
+  warnings: SourceReadinessWarning[];
 }
 
 export type ControlRunReadiness =
@@ -96,7 +151,8 @@ export type ControlRunReadiness =
 
 export type ControlRunReadinessReason =
   | "no_required_sources"
-  | "invalid_evaluation_time";
+  | "invalid_evaluation_time"
+  | "duplicate_source_key";
 
 export interface ControlRunAssessment {
   status: ControlRunReadiness;
@@ -110,9 +166,10 @@ export interface ControlRunAssessment {
 
 /**
  * Evaluate every required source before matching. Precedence is intentional:
- * invalid/unsafe inputs block a run; a late source makes it incomplete; a source
- * not yet due is awaiting. An optional source is assessed for visibility but
- * never prevents the defined two-source control from proceeding.
+ * invalid/unsafe inputs block a run; a late or short source makes it
+ * incomplete; a source not yet due is awaiting. An optional source is assessed
+ * for visibility but never prevents the defined two-source control from
+ * proceeding.
  */
 export function assessControlRunReadiness(
   manifests: RequiredSourceManifest[],
@@ -123,28 +180,29 @@ export function assessControlRunReadiness(
   );
   const required = sourceAssessments.filter(assessment => assessment.required);
 
-  const noRequiredSources = required.length === 0;
-  const invalidEvaluationTime =
-    !(now instanceof Date) || Number.isNaN(now.getTime());
+  const reasons: ControlRunReadinessReason[] = [];
+  if (required.length === 0) reasons.push("no_required_sources");
+  if (!isValidDate(now)) reasons.push("invalid_evaluation_time");
+  // Two entries under one key leave a persisted assessment ambiguous about
+  // which delivery it describes, so the definition itself is unusable.
+  const keys = manifests.map(manifest => manifest.sourceKey);
+  if (new Set(keys).size !== keys.length) reasons.push("duplicate_source_key");
+
   const status: ControlRunReadiness =
-    noRequiredSources || invalidEvaluationTime
+    reasons.length > 0 ||
+    required.some(assessment => assessment.status === "blocked")
       ? "blocked"
-      : required.some(assessment => assessment.status === "blocked")
-        ? "blocked"
-        : required.some(assessment => assessment.status === "incomplete")
-          ? "incomplete"
-          : required.some(assessment => assessment.status === "awaiting_source")
-            ? "awaiting_sources"
-            : "ready_to_reconcile";
+      : required.some(assessment => assessment.status === "incomplete")
+        ? "incomplete"
+        : required.some(assessment => assessment.status === "awaiting_source")
+          ? "awaiting_sources"
+          : "ready_to_reconcile";
 
   return {
     status,
     canReconcile: status === "ready_to_reconcile",
     mayPublishMatchRate: status === "ready_to_reconcile",
-    reasons: [
-      ...(noRequiredSources ? ["no_required_sources" as const] : []),
-      ...(invalidEvaluationTime ? ["invalid_evaluation_time" as const] : []),
-    ],
+    reasons,
     sourceAssessments,
   };
 }
@@ -154,135 +212,130 @@ export function assessSourceReadiness(
   now: Date
 ): SourceReadinessAssessment {
   const reasons: SourceReadinessReason[] = [];
-  const warnings: Array<"duplicate_delivery_deduplicated"> = [];
+  const warnings: SourceReadinessWarning[] = [];
 
-  if (
-    !(manifest.cutoffAt instanceof Date) ||
-    Number.isNaN(manifest.cutoffAt.getTime())
-  ) {
-    return assessment(manifest, "blocked", ["invalid_cutoff"], warnings);
+  // The clock and the contract come first: neither depends on a delivery, so a
+  // batch that has not arrived must not hide that the definition is unusable.
+  const nowIsValid = isValidDate(now);
+  const cutoffIsValid = isValidDate(manifest.cutoffAt);
+  if (!nowIsValid) reasons.push("invalid_evaluation_time");
+  if (!cutoffIsValid) reasons.push("invalid_cutoff");
+
+  const expected =
+    manifest.controlTotalRequired === true ? manifest.expected : undefined;
+  if (manifest.controlTotalRequired !== true) {
+    reasons.push("control_total_not_required");
+  } else if (!manifest.expected) {
+    reasons.push("missing_expected_control_total");
+  } else if (!isValidControlTotal(manifest.expected)) {
+    reasons.push("invalid_expected_control_total");
   }
 
   const received = manifest.received;
   if (!received) {
-    return assessment(
-      manifest,
-      now.getTime() > manifest.cutoffAt.getTime()
-        ? "incomplete"
-        : "awaiting_source",
-      ["source_not_received"],
-      warnings
-    );
-  }
-
-  if (
-    !(received.receivedAt instanceof Date) ||
-    Number.isNaN(received.receivedAt.getTime())
-  ) {
-    reasons.push("invalid_received_at");
-  } else if (received.receivedAt.getTime() > manifest.cutoffAt.getTime()) {
-    reasons.push("received_after_cutoff");
-  }
-  if (!hasMeaningfulValue(received.batchId))
-    reasons.push("missing_batch_identity");
-  if (!hasMeaningfulValue(received.sourceContractVersion))
-    reasons.push("missing_source_contract_version");
-  if (!hasMeaningfulValue(received.mappingVersion))
-    reasons.push("missing_mapping_version");
-  if (received.schemaState !== "accepted") reasons.push("schema_not_accepted");
-  if (
-    !isNonNegativeInteger(received.invalidRowCount) ||
-    received.invalidRowCount > 0
-  )
-    reasons.push("invalid_rows_present");
-  if (received.duplicateDelivery === "rejected")
-    reasons.push("duplicate_delivery_rejected");
-  if (received.duplicateDelivery === "deduplicated")
-    warnings.push("duplicate_delivery_deduplicated");
-
-  if (!isValidControlTotal(received)) reasons.push("invalid_control_total");
-
-  if (!manifest.controlTotalRequired) {
-    reasons.push("control_total_not_required");
+    reasons.push("source_not_received");
   } else {
-    if (!manifest.expected) {
-      reasons.push("missing_expected_control_total");
-    } else if (!isValidControlTotal(manifest.expected)) {
-      reasons.push("invalid_expected_control_total");
-    } else if (isValidControlTotal(received)) {
-      if (received.recordCount !== manifest.expected.recordCount)
-        reasons.push("record_count_mismatch");
+    if (!isValidDate(received.receivedAt)) {
+      reasons.push("invalid_received_at");
+    } else {
+      if (nowIsValid && received.receivedAt.getTime() > now.getTime())
+        reasons.push("received_after_evaluation_time");
       if (
-        received.currency.toUpperCase() !==
-        manifest.expected.currency.toUpperCase()
-      ) {
+        cutoffIsValid &&
+        received.receivedAt.getTime() > manifest.cutoffAt.getTime()
+      )
+        reasons.push("received_after_cutoff");
+    }
+    if (!hasMeaningfulValue(received.batchId))
+      reasons.push("missing_batch_identity");
+    if (!hasMeaningfulValue(received.sourceContractVersion))
+      reasons.push("missing_source_contract_version");
+    if (!hasMeaningfulValue(received.mappingVersion))
+      reasons.push("missing_mapping_version");
+    if (received.schemaState !== "accepted")
+      reasons.push("schema_not_accepted");
+    if (
+      !isNonNegativeInteger(received.invalidRowCount) ||
+      received.invalidRowCount > 0
+    )
+      reasons.push("invalid_rows_present");
+    // An allow-list: only the two states known to be safe pass.
+    if (received.duplicateDelivery === "deduplicated")
+      warnings.push("duplicate_delivery_deduplicated");
+    else if (received.duplicateDelivery === "rejected")
+      reasons.push("duplicate_delivery_rejected");
+    else if (received.duplicateDelivery !== "none")
+      reasons.push("unknown_duplicate_delivery_state");
+
+    const receivedTotalIsValid = isValidControlTotal(received);
+    if (!receivedTotalIsValid) reasons.push("invalid_control_total");
+
+    if (expected && receivedTotalIsValid && isValidControlTotal(expected)) {
+      if (received.recordCount !== expected.recordCount)
+        reasons.push("record_count_mismatch");
+      if (received.currency.toUpperCase() !== expected.currency.toUpperCase()) {
         reasons.push("currency_mismatch");
-      } else if (
-        toMinorUnits(received.monetaryTotal) !==
-        toMinorUnits(manifest.expected.monetaryTotal)
-      ) {
+      } else if (!sameMonetaryTotal(received, expected)) {
         reasons.push("monetary_total_mismatch");
       }
     }
   }
 
-  if (reasons.length > 0) {
-    const hasPopulationMismatch = reasons.some(reason =>
-      [
-        "received_after_cutoff",
-        "record_count_mismatch",
-        "currency_mismatch",
-        "monetary_total_mismatch",
-      ].includes(reason)
-    );
-    return assessment(
-      manifest,
-      hasPopulationMismatch ? "incomplete" : "blocked",
-      reasons,
-      warnings
-    );
-  }
-
-  return assessment(manifest, "ready", reasons, warnings);
-}
-
-function assessment(
-  manifest: RequiredSourceManifest,
-  status: SourceReadiness,
-  reasons: SourceReadinessReason[],
-  warnings: Array<"duplicate_delivery_deduplicated">
-): SourceReadinessAssessment {
   return {
     sourceKey: manifest.sourceKey,
     role: manifest.role,
-    required: manifest.required,
-    status,
+    required: manifest.required !== false,
+    status: sourceStatus(
+      reasons,
+      nowIsValid &&
+        cutoffIsValid &&
+        now.getTime() <= manifest.cutoffAt.getTime()
+    ),
     reasons,
     warnings,
   };
 }
 
-function hasMeaningfulValue(value: string): boolean {
-  return value.trim().length > 0;
+/** Blocked first, always; then not-yet-due; then any shortfall. */
+function sourceStatus(
+  reasons: SourceReadinessReason[],
+  stillDue: boolean
+): SourceReadiness {
+  if (reasons.some(reason => SOURCE_REASON_EFFECT[reason] === "blocks"))
+    return "blocked";
+  if (reasons.length === 0) return "ready";
+  const onlyAwaitingDelivery =
+    reasons.length === 1 && reasons[0] === "source_not_received";
+  return onlyAwaitingDelivery && stillDue ? "awaiting_source" : "incomplete";
 }
 
-function isNonNegativeInteger(value: number): boolean {
-  return Number.isSafeInteger(value) && value >= 0;
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && !Number.isNaN(value.getTime());
+}
+
+function hasMeaningfulValue(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isValidControlTotal(total: SourceControlTotal): boolean {
   return (
     isNonNegativeInteger(total.recordCount) &&
+    typeof total.currency === "string" &&
     /^[A-Za-z]{3}$/.test(total.currency) &&
-    toMinorUnits(total.monetaryTotal) !== null
+    parseExactDecimal(total.monetaryTotal) !== null
   );
 }
 
-/** Parse decimal money exactly; use BigInt so control totals cannot drift on JS floats. */
-function toMinorUnits(value: string): bigint | null {
-  const match = /^([+-]?)(\d+)(?:\.(\d{1,2}))?$/.exec(value.trim());
-  if (!match) return null;
-  const [, sign, whole, fraction = ""] = match;
-  const units = BigInt(whole) * 100n + BigInt((fraction + "00").slice(0, 2));
-  return sign === "-" ? -units : units;
+/** Both totals are already known to parse (isValidControlTotal). */
+function sameMonetaryTotal(
+  received: SourceControlTotal,
+  expected: SourceControlTotal
+): boolean {
+  const left = parseExactDecimal(received.monetaryTotal);
+  const right = parseExactDecimal(expected.monetaryTotal);
+  return left !== null && right !== null && exactDecimalsEqual(left, right);
 }
