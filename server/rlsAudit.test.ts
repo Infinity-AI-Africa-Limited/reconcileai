@@ -228,9 +228,6 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // Transient redaction jobs carry organizationId NOT NULL while the provider
   // request is being processed; completed jobs are removed or de-identified.
   shopify_shop_redaction_jobs: "tenant_required",
-  // Hash-only single-use OAuth states, keyed by a random secret held in the
-  // browser's flow cookie; created before any tenant exists.
-  shopify_oauth_states: "token",
   // A pre-tenant platform lock — one installation in flight per shop domain.
   // Holds a lease id and expiry only; no tenant data, and it exists before any tenant does.
   shopify_install_leases: "global",

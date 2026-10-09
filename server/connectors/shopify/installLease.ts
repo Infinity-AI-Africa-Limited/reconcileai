@@ -9,10 +9,10 @@ type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
 /**
  * Take the shop's install lease (see shopifyInstallLeases). Returns the lease id,
- * or null while another callback holds a live one.
+ * or null while another installation holds a live one.
  *
  * An expired lease is taken over by one conditional UPDATE — the new expiry is
- * in the future, so of two callbacks racing for the same expired lease exactly
+ * in the future, so of two installations racing for the same expired lease exactly
  * one matches `expiresAt < now`.
  */
 export async function acquireInstallLease(db: Db, shopDomain: string, now: Date = new Date()): Promise<string | null> {
@@ -33,21 +33,21 @@ export async function acquireInstallLease(db: Db, shopDomain: string, now: Date 
   return taken === 1 ? leaseId : null;
 }
 
-/** A lease one callback holds on one shop. */
+/** A lease one installation holds on one shop. */
 export interface InstallLease {
   shopDomain: string;
   leaseId: string;
 }
 
 /**
- * Extend a lease this callback still holds. False means it expired and was
+ * Extend a lease this installation still holds. False means it expired and was
  * taken over. Run inside a transaction, the UPDATE also row-locks the lease, so
  * no takeover can commit before that transaction does (see
  * suspendForReauthorization, the one caller).
  *
  * Renewing right before the exchange is what bounds the exchange inside the
  * lease: the exchange times out at 30s, far inside the TTL, so the grant
- * happens while this callback still holds the shop. (mysql2 reports MATCHED
+ * happens while this installation still holds the shop. (mysql2 reports MATCHED
  * rows, so a same-second renewal that changes nothing still counts.)
  */
 export async function renewInstallLease(db: DbExecutor, lease: InstallLease, now: Date = new Date()): Promise<boolean> {
@@ -61,7 +61,7 @@ export async function renewInstallLease(db: DbExecutor, lease: InstallLease, now
 }
 
 /**
- * Inside a transaction: does this callback still hold the shop's lease?
+ * Inside a transaction: does this installation still hold the shop's lease?
  *
  * The locking read is the point: a takeover is an UPDATE of this row, so it
  * cannot commit until the caller's transaction does — the answer stays true
@@ -79,7 +79,7 @@ export async function holdsInstallLease(tx: DbExecutor, lease: InstallLease): Pr
   return Boolean(row);
 }
 
-/** Release a lease this callback holds. A lease since taken over by another is left alone. */
+/** Release a lease this installation holds. A lease since taken over by another is left alone. */
 export async function releaseInstallLease(db: Db, shopDomain: string, leaseId: string): Promise<void> {
   await db
     .delete(shopifyInstallLeases)

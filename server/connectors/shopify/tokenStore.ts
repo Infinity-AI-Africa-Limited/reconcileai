@@ -88,7 +88,7 @@ export async function encryptShopifyTokens(
  * Replace a store's tokens with a fresh AUTHORIZATION (install or reinstall).
  *
  * The version bump is load-bearing: Shopify retires every other refresh token
- * for the store the moment an authorization-code grant succeeds, so any refresh
+ * for the store the moment a new grant succeeds, so any refresh
  * already in flight is working from a dead pair. Bumping the version makes that
  * refresh's fenced write miss, and its result is discarded rather than stored
  * over the new grant.

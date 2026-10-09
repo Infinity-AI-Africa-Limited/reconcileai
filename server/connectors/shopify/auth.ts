@@ -13,7 +13,7 @@ export interface ShopifyTokenResponse {
 
 /**
  * Normalize and validate Shopify's canonical permanent shop hostname.
- * A public app must never let a callback-controlled hostname choose where server
+ * A public app must never let a request-controlled hostname choose where server
  * credentials are posted, so custom domains, ports, paths and lookalikes reject.
  */
 export function normalizeShopDomain(input: string | undefined | null): string | null {
@@ -33,15 +33,15 @@ export function secureEqualHex(left: string, right: string): boolean {
 }
 
 /**
- * The message Shopify signs for an Admin request (OAuth callback, install
- * link): every parameter but `hmac` and `signature`, sorted by key, URL-ENCODED
- * as `URLSearchParams` encodes it with spaces as `%20`.
+ * The message Shopify signs for an Admin request's query: every parameter but
+ * `hmac` and `signature`, sorted by key, URL-ENCODED as `URLSearchParams`
+ * encodes it with spaces as `%20`.
  *
  * This is `stringifyQueryForAdmin` in Shopify's own library
  * (@shopify/shopify-api, lib/utils/hmac-validator.ts and processed-query.ts),
  * whose tests sign `code=some%20code%20goes%20here&shop=…`. Express hands us
  * DECODED values, so joining them raw only agrees when no value needs
- * encoding. The callback's `host` is standard base64 — it ends in `=` padding
+ * encoding. Shopify's `host` parameter is standard base64 — it ends in `=` padding
  * for most shop names and may hold `/` or `+` — so a raw join rejected genuine
  * installs.
  */
@@ -55,9 +55,9 @@ export function shopifyAdminHmacMessage(params: Record<string, string>): string 
 }
 
 /**
- * Validates Shopify's OAuth callback HMAC. Duplicate keys are rejected before
- * this function is called, because Object.fromEntries would otherwise let a
- * callback smuggle an alternate `shop`, `state` or `hmac` value into validation.
+ * Validates the HMAC Shopify puts on an Admin request's query. Duplicate keys
+ * are rejected before this function is called, because Object.fromEntries would
+ * otherwise let a request smuggle an alternate `shop`, `state` or `hmac` value into validation.
  */
 export function verifyShopifyCallbackHmac(
   params: Record<string, string>,
@@ -106,7 +106,7 @@ export function shopifyWebhookPayloadDigest(rawBody: Buffer, digestKey: string):
 }
 
 /**
- * Parse a callback query without accepting duplicate values. OAuth parameters
+ * Parse a Shopify-signed query without accepting duplicate values. OAuth parameters
  * are singleton values; accepting the last repeated key is ambiguous and can
  * invalidate an otherwise sound HMAC/state check.
  */
@@ -199,7 +199,7 @@ export type TokenExchangeResult =
  * onboarding in onboarding.ts is built on the same fact). Called
  * for a store that is already connected, it kills the stored refresh token,
  * and the connection fails within the hour unless the new pair is stored under
- * the same fences as the callback's. So it demands `reauthorization`: the
+ * onboarding's fences. So it demands `reauthorization`: the
  * ticket only `suspendForReauthorization` issues. Holding one proves the
  * caller took the store out of service first, under its install lease, AND
  * passed the redaction fence that keeps a tenant being deleted from acquiring
