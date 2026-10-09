@@ -11,22 +11,25 @@
  *  - Concurrent cycles for the same store would race on persistence and
  *    duplicate work.
  *
- * So events are COALESCED per store: the first relevant event opens a short
- * quiet period; further events inside it reset the timer (up to a hard cap so
- * a continuous stream still gets serviced). When the timer fires, exactly one
- * sync runs for that store. A store under sustained load therefore syncs about
- * once per `MAX_WAIT_MS`, not once per event.
+ * So requests are COALESCED per store, on a queue rather than in this
+ * process's memory. The first relevant event opens a window of
+ * `COALESCE_WINDOW_MS`; every further event for that store inside it is
+ * absorbed, and the window does not move, so a continuous stream cannot starve
+ * the sync. When it closes, exactly one sync runs. Events that arrive WHILE it
+ * runs earn exactly one follow-up, which opens a fresh window when the run ends.
+ *
+ * On BullMQ this holds across every instance: the window is one delayed job
+ * per store, deduplicated in Redis by a tenant-qualified key, so each instance's
+ * webhooks feed the same job and only one instance runs it. (Until 2026-10-09
+ * each process kept its own timers, so with several instances a store could
+ * sync once per instance per window.) Without REDIS_URL the in-process queue
+ * applies the same rule within the one process, which is the whole deployment.
  *
  * The webhook HTTP handler already acks 200 before any of this happens
- * (`ingestWebhook` is fire-and-forget), so SHOPLINE's 5-second budget is never
- * at risk from reconciliation work.
- *
- * Scope note: this scheduler is per-process. With multiple Railway instances
- * each holds its own timers, so a store could sync once per instance in a
- * window — wasteful but not incorrect (ingest dedupes, and `runSyncCycle` is
- * idempotent over its window). Moving the trigger onto the BullMQ queue once
- * `REDIS_URL` is provisioned makes it cluster-wide; see CLAUDE.md §10.
+ * (`ingestWebhook` is fire-and-forget), and scheduling never throws: a request
+ * that cannot be queued is logged, and the 15-minute poll picks the store up.
  */
+import { createQueue, type EnqueueOptions, type JobQueue, type QueueJob } from "../../jobQueue";
 import { runSyncCycle } from "./syncOrchestrator";
 import { loggableError } from "../../dbErrors";
 import { stackFrames } from "../../errorText";
@@ -55,94 +58,36 @@ export function isReconciliationTrigger(topic: string): boolean {
   return RECONCILIATION_TRIGGER_TOPICS.includes(topic);
 }
 
-/** Quiet period: wait this long after the last event before syncing. */
-export const DEBOUNCE_MS = 20_000;
-/** Hard cap: never delay a sync longer than this after the FIRST event. */
-export const MAX_WAIT_MS = 60_000;
-
-interface PendingEntry {
-  organizationId: number;
-  timer: NodeJS.Timeout;
-  /** When the first event in this batch arrived (drives MAX_WAIT_MS). */
-  firstQueuedAt: number;
-  /** Distinct topics seen in this batch — logged for traceability. */
-  topics: Set<string>;
-}
-
-const pending = new Map<number, PendingEntry>();
-const inFlight = new Set<number>();
-/** Stores that received an event while a sync was running — rerun once it ends. */
-const rerunRequested = new Map<number, number>();
-
-/** Test seam: clear all scheduler state. */
-export function __resetRealtimeState(): void {
-  for (const entry of Array.from(pending.values())) clearTimeout(entry.timer);
-  pending.clear();
-  inFlight.clear();
-  rerunRequested.clear();
-}
-
-/** Introspection for tests/health: stores currently queued or running. */
-export function realtimeStatus(): { pending: number[]; inFlight: number[] } {
-  return { pending: Array.from(pending.keys()), inFlight: Array.from(inFlight) };
-}
-
 /**
- * Request a reconciliation for a store in response to a webhook.
- *
- * Non-blocking and never throws: the caller is on the webhook path, which has
- * already acked. Returns immediately after (re)arming the debounce timer.
+ * How long a store's window stays open after the event that opened it. A
+ * store under sustained load syncs about once per window plus its run time,
+ * one store at a time, which keeps it inside SHOPLINE's per-store rate limit.
  */
-export function scheduleReconciliation(
-  organizationId: number,
-  slStoreId: number,
-  topic: string,
-): void {
-  if (!isReconciliationTrigger(topic)) return;
+export const COALESCE_WINDOW_MS = 20_000;
 
-  // A sync is already running for this store — note that more work arrived so
-  // we run exactly one more pass when it finishes, rather than piling on.
-  if (inFlight.has(slStoreId)) {
-    rerunRequested.set(slStoreId, organizationId);
-    return;
-  }
+export const SHOPLINE_REALTIME_QUEUE = "shopline-realtime-sync";
 
-  const existing = pending.get(slStoreId);
-  const now = Date.now();
+/** Stores synced at once by one instance's worker; one store never runs twice at once. */
+const REALTIME_SYNC_CONCURRENCY = 4;
 
-  if (existing) {
-    existing.topics.add(topic);
-    // Respect the hard cap: if we've already waited MAX_WAIT_MS since the
-    // first event, let the pending timer stand rather than pushing it out
-    // again — otherwise a steady stream of events would starve the sync.
-    if (now - existing.firstQueuedAt >= MAX_WAIT_MS) return;
-    clearTimeout(existing.timer);
-    existing.timer = setTimeout(() => void fire(slStoreId), DEBOUNCE_MS);
-    // Timers must not hold the process open during shutdown.
-    existing.timer.unref?.();
-    return;
-  }
-
-  const timer = setTimeout(() => void fire(slStoreId), DEBOUNCE_MS);
-  timer.unref?.();
-  pending.set(slStoreId, {
-    organizationId,
-    timer,
-    firstQueuedAt: now,
-    topics: new Set([topic]),
-  });
+export interface ShoplineRealtimeSyncPayload {
+  organizationId: number;
+  slStoreId: number;
+  /** The topic of the event that opened (or, for a follow-up, last fed) the window. */
+  topic: string;
+  /** ISO time of that event, so the log can say how long the sync waited. */
+  requestedAt: string;
 }
 
-/** Run the coalesced sync for a store. Never throws. */
-async function fire(slStoreId: number): Promise<void> {
-  const entry = pending.get(slStoreId);
-  if (!entry) return;
-  pending.delete(slStoreId);
+/** One window per store, qualified by tenant as every queue key here is. */
+export function realtimeCoalesceKey(payload: Pick<ShoplineRealtimeSyncPayload, "organizationId" | "slStoreId">): string {
+  return `shopline-realtime:${payload.organizationId}:${payload.slStoreId}`;
+}
 
-  const { organizationId, topics, firstQueuedAt } = entry;
-  inFlight.add(slStoreId);
-  const waitedMs = Date.now() - firstQueuedAt;
-
+/** Run the coalesced sync for a store. Never throws: the 15-minute poll is the retry. */
+export async function runRealtimeSync(job: QueueJob<ShoplineRealtimeSyncPayload>): Promise<void> {
+  const { organizationId, slStoreId, topic, requestedAt } = job.data;
+  const waitedMs = Date.now() - Date.parse(requestedAt);
   try {
     const report = await runSyncCycle({
       organizationId,
@@ -150,25 +95,111 @@ async function fire(slStoreId: number): Promise<void> {
       triggeredBy: 0, // system
     });
     if (report.error) {
-      console.warn(
-        `[shopline-realtime] sync failed store=${slStoreId} topics=[${Array.from(topics).join(",")}] error=${report.error}`,
-      );
+      console.warn(`[shopline-realtime] sync failed store=${slStoreId} topic=${topic} error=${report.error}`);
     } else {
       console.info(
         `[shopline-realtime] synced store=${slStoreId} after ${waitedMs}ms ` +
-          `topics=[${Array.from(topics).join(",")}] orders=${report.ordersIngested} ` +
+          `topic=${topic} orders=${report.ordersIngested} ` +
           `payments=${report.paymentsIngested} matched=${report.matchedCount} exceptions=${report.exceptionCount}`,
       );
     }
   } catch (err) {
-    console.error(`[shopline-realtime] sync threw for store=${slStoreId}:`, { ...loggableError(err), frames: stackFrames(err) });
-  } finally {
-    inFlight.delete(slStoreId);
-    // Events that arrived mid-run get exactly one follow-up pass.
-    const orgForRerun = rerunRequested.get(slStoreId);
-    if (orgForRerun !== undefined) {
-      rerunRequested.delete(slStoreId);
-      scheduleReconciliation(orgForRerun, slStoreId, "orders/updated");
-    }
+    console.error(`[shopline-realtime] sync threw for store=${slStoreId}:`, {
+      ...loggableError(err),
+      frames: stackFrames(err),
+    });
   }
+}
+
+/**
+ * The realtime queue, under `name`. Production uses the one module-level queue
+ * below; the real-Redis test builds its own under a name no running app uses,
+ * so it can never consume a live store's sync.
+ */
+export function createShoplineRealtimeQueue(
+  name: string = SHOPLINE_REALTIME_QUEUE,
+): Promise<JobQueue<ShoplineRealtimeSyncPayload>> {
+  return createQueue<ShoplineRealtimeSyncPayload>(name, runRealtimeSync, {
+    // One attempt: a failed cycle is logged, and the 15-minute poll retries it
+    // with fresh data rather than replaying a stale trigger.
+    attempts: 1,
+    backoffMs: COALESCE_WINDOW_MS,
+    concurrency: REALTIME_SYNC_CONCURRENCY,
+  });
+}
+
+/** How one request is enqueued: one delayed window per store, coalesced per tenant and store. */
+export function shoplineRealtimeJob(
+  payload: ShoplineRealtimeSyncPayload,
+): [name: string, payload: ShoplineRealtimeSyncPayload, options: EnqueueOptions] {
+  return [
+    `store-${payload.slStoreId}`,
+    payload,
+    { coalesceKey: realtimeCoalesceKey(payload), delayMs: COALESCE_WINDOW_MS },
+  ];
+}
+
+let queuePromise: Promise<JobQueue<ShoplineRealtimeSyncPayload>> | null = null;
+
+function realtimeQueue(): Promise<JobQueue<ShoplineRealtimeSyncPayload>> {
+  if (!queuePromise) {
+    queuePromise = createShoplineRealtimeQueue().catch(error => {
+      // Never cache a rejection: the next request should try again.
+      queuePromise = null;
+      throw error;
+    });
+  }
+  return queuePromise;
+}
+
+/**
+ * Start this instance's worker at boot, so delayed requests saved in Redis
+ * before a restart resume without waiting for the next webhook. The 15-minute
+ * poll calls runSyncCycle directly and never drains this queue, so without
+ * this they sat idle.
+ *
+ * Fire-and-forget, and it awaits no Redis connection: BullMQ connects in the
+ * background, and nothing may hold up `server.listen` on Redis (CLAUDE.md §10).
+ */
+export function startShoplineRealtimeWorker(): void {
+  realtimeQueue().catch(err =>
+    console.error("[shopline-realtime] worker could not start; saved requests wait for the next webhook", {
+      ...loggableError(err),
+    })
+  );
+}
+
+/**
+ * Test seam: drop the queue so the next request builds a fresh one. A test
+ * that leaves work behind would otherwise share it with the next.
+ */
+export async function __resetRealtimeQueue(): Promise<void> {
+  const pending = queuePromise;
+  queuePromise = null;
+  if (pending) await (await pending.catch(() => null))?.close();
+}
+
+/** Queue one coalesced request. Never throws; a refusal is logged, not raised. */
+async function requestRealtimeSync(payload: ShoplineRealtimeSyncPayload): Promise<void> {
+  try {
+    const queue = await realtimeQueue();
+    await queue.enqueue(...shoplineRealtimeJob(payload));
+  } catch (err) {
+    console.warn("[shopline-realtime] could not schedule a sync; the 15-minute poll will pick the store up", {
+      organizationId: payload.organizationId,
+      slStoreId: payload.slStoreId,
+      ...loggableError(err),
+    });
+  }
+}
+
+/**
+ * Request a reconciliation for a store in response to a webhook.
+ *
+ * Non-blocking and never throws: the caller is on the webhook path, which has
+ * already acked. Returns at once; the request is queued in the background.
+ */
+export function scheduleReconciliation(organizationId: number, slStoreId: number, topic: string): void {
+  if (!isReconciliationTrigger(topic)) return;
+  void requestRealtimeSync({ organizationId, slStoreId, topic, requestedAt: new Date().toISOString() });
 }

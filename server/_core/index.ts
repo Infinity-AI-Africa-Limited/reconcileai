@@ -807,6 +807,13 @@ async function startServer() {
     .then((b) => b.startShopifyOrderBackstopLoop())
     .catch((e) => console.error("[boot] Shopify order sync backstop unavailable:", loggableError(e)));
 
+  // SHOPLINE realtime syncs are delayed jobs that outlive a restart. Start this
+  // instance's worker now, so saved ones resume without waiting for the next
+  // webhook. Fire-and-forget: BullMQ connects in the background.
+  import("../connectors/shopline/realtimeSync")
+    .then((r) => r.startShoplineRealtimeWorker())
+    .catch((e) => console.error("[boot] SHOPLINE realtime worker unavailable:", loggableError(e)));
+
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).
   seedDefaultResolutionTemplates()

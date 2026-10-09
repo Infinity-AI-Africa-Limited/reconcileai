@@ -41,6 +41,15 @@ export interface EnqueueOptions {
    * with the finished entry and would absorb every later request.
    */
   coalesceKey?: string;
+  /**
+   * Run no sooner than this many milliseconds after the enqueue.
+   *
+   * With `coalesceKey` this makes a fixed window that opens at the FIRST
+   * request: later requests are absorbed into the waiting entry and do not push
+   * it back, so a steady stream of requests cannot starve the work. A follow-up
+   * kept while the work runs waits the same delay after it finishes.
+   */
+  delayMs?: number;
 }
 
 /** The per-queue retry defaults an enqueue may override. */
@@ -237,9 +246,10 @@ class InProcessQueue<T> implements JobQueue<T> {
   async enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
     const attempts = opts?.attempts ?? this.defaults.attempts;
     const backoffMs = opts?.backoffMs ?? this.defaults.backoffMs;
+    const delayMs = opts?.delayMs ?? 0;
     const key = opts?.coalesceKey;
     if (!key) {
-      this.run({ name, data, attempt: 1 }, attempts, backoffMs);
+      this.after(delayMs, () => this.run({ name, data, attempt: 1 }, attempts, backoffMs));
       return;
     }
 
@@ -255,16 +265,31 @@ class InProcessQueue<T> implements JobQueue<T> {
       followUp: null,
     };
     this.coalesced.set(key, entry);
-    this.run({ name, data, attempt: 1 }, attempts, backoffMs, {
-      onStart: () => {
-        entry.started = true;
-      },
-      onSettled: () => {
-        this.coalesced.delete(key);
-        const next = entry.followUp;
-        if (next) void this.enqueue(next.name, next.data, next.opts);
-      },
-    });
+    // While the delay runs the entry is not started, so further requests are
+    // absorbed into it: the window opens at the first request and never moves.
+    this.after(delayMs, () =>
+      this.run({ name, data, attempt: 1 }, attempts, backoffMs, {
+        onStart: () => {
+          entry.started = true;
+        },
+        onSettled: () => {
+          this.coalesced.delete(key);
+          const next = entry.followUp;
+          if (next) void this.enqueue(next.name, next.data, next.opts);
+        },
+      }),
+    );
+  }
+
+  /** Start work now, or after `delayMs` (EnqueueOptions.delayMs). */
+  private after(delayMs: number, start: () => void): void {
+    if (delayMs <= 0) {
+      start();
+      return;
+    }
+    const timer = setTimeout(start, delayMs);
+    // A delayed start must not hold the process open, any more than a retry.
+    timer.unref?.();
   }
 
   private run(
@@ -444,6 +469,10 @@ async function createBullMqQueue<T>(
     await queue.add(name, data, {
       attempts: opts?.attempts ?? defaults.attempts,
       backoff: { type: "exponential", delay: opts?.backoffMs ?? defaults.backoffMs },
+      // A delayed job with a coalesceKey makes a window from the first request:
+      // BullMQ deduplicates every later add into it, from any instance, and
+      // a follow-up kept while it runs is re-created with this same delay.
+      ...(opts?.delayMs && opts.delayMs > 0 ? { delay: opts.delayMs } : {}),
       // Deterministic id only where the caller guarantees names are unique
       // per unit of work — see QueueCreateOptions.uniqueJobNames.
       ...(uniqueJobNames ? { jobId: name } : {}),
