@@ -558,8 +558,10 @@ HTTP layer has already acked 200, so SHOPLINE's 5-second budget is untouched.
 > ⚠️ The scheduler is **per-process**. With multiple Railway instances each
 > keeps its own timers, so a store may sync once per instance in a window —
 > wasteful, not incorrect (ingest dedupes; `runSyncCycle` is idempotent over
-> its window). Moving the trigger onto the BullMQ queue once `REDIS_URL` is
-> provisioned makes it cluster-wide. See §10.
+> its window). `REDIS_URL` is provisioned now (confirmed 2026-10-06), but this trigger
+> has **not** moved: it still runs on per-process timers (`setTimeout` in
+> `realtimeSync.ts`). Moving it onto a BullMQ queue is what would make it
+> cluster-wide. See §10.
 
 The scheduled handlers remain as the **safety net** for missed or dropped
 deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
@@ -1389,9 +1391,19 @@ Most of the original launch-blocking debt is now **resolved**. Current status:
 |---|---|---|
 | Manus OAuth must be replaced | ✅ Done | Email magic-link auth is live (Section 5) |
 | Manus Forge LLM won't work outside Manus | ✅ Done | Production uses `DIRECT_LLM_API_KEY` (Anthropic) |
-| No background job queue | 🔴 **Redis not provisioned — now blocking** | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. **Provisioning `REDIS_URL` on Railway is no longer just a scaling item — see the box below** |
+| No background job queue | ✅ Done — Redis provisioned (confirmed 2026-10-06) | `server/jobQueue.ts` — BullMQ when `REDIS_URL` is set, in-process fallback otherwise. Production runs on BullMQ: `/api/health` reports `queue.durability: "confirmed"`, with `shopify-order-sync` and `shopify-privacy` both on `bullmq` (re-verified 2026-10-09). **It must stay provisioned — see the box below the table** |
+| No test coverage on reconciliation engine | ✅ Done | Vitest coverage across engines, routers, reports (`*.test.ts` colocated) |
+| No rate limiting on public API | ✅ Done | `server/rateLimiter.ts` guards public API + ingestion |
+| Email delivery | ✅ Done | Resend integration (`server/_core/email.ts`); safe no-op without keys |
+| S3 file keys not access-controlled | 🟡 Improved | New objects use org-scoped keys (`orgScopedKey`, `org/<organizationId>/…` in `server/storage.ts`); audit legacy read paths |
+| `server/routers.ts` is very large (~6,900 lines) | 🟡 In progress | Domain routers extracted to `server/routers/` (uganda, lapo, cbnCompliance, mobileMoney, poc, erpExport, regulatorPortal, woodcoreConnector, shoplineConnector). Core router still large — keep extracting per the 150-line rule and `docs/ROUTERS_SPLIT_PLAN.md` |
+| Direct MySQL access to Woodcore DB (dynamic IPs) | 🔴 Open | Migrate to Fineract REST API for production |
+| CI/CD | ✅ Done | `.github/workflows/ci.yml` (+ `woodcore-sync.yml`); RLS tenant-scoping ratchet enforced in CI |
+| Migration numbering collision (local `0070` vs production `0070`) | 🔴 Watch | Migrations are append-only; a local untracked `0070_*` differs from production's `0070_useful_franklin_richards.sql`. Reconcile before committing new migrations (never renumber an applied one) |
 
-> 🔴 **`REDIS_URL` is a HARD prerequisite for the Shopify connector, not a scaling nicety.**
+> ✅ **Redis is provisioned (confirmed live 2026-10-06), and it must STAY provisioned.**
+> Before that this box was a 🔴 blocker. The reasoning below is why unsetting
+> `REDIS_URL` would be a compliance incident, not a performance change.
 >
 > Two Shopify paths call `createQueue(..., { requireDurable: true })`, which
 > **throws** `DurableQueueUnavailableError("REDIS_URL is not configured")`
@@ -1407,21 +1419,26 @@ Most of the original launch-blocking debt is now **resolved**. Current status:
 >   catches the failure and logs `durable_queue_unavailable` every 30 seconds,
 >   for ever. Shopify sees success while nothing is ever actioned.
 >
-> That is a **mandatory compliance obligation silently unmet** (30 days), and it
-> fails App Store review. The loud-failure design is deliberate — the queue
+> That would be a **mandatory compliance obligation silently unmet** (30 days),
+> and it fails App Store review. The loud failure is deliberate: the queue
 > refuses rather than pretending an accepted request reached an operational
-> queue — so the remedy is operational: **provision Redis before any merchant
-> installs the app.** Verify afterwards by confirming the boot log says
-> `BullMQ backend active` for `shopify-privacy`, not by observing that webhooks
-> return 200 — they return 200 either way.
-| No test coverage on reconciliation engine | ✅ Done | Vitest coverage across engines, routers, reports (`*.test.ts` colocated) |
-| No rate limiting on public API | ✅ Done | `server/rateLimiter.ts` guards public API + ingestion |
-| Email delivery | ✅ Done | Resend integration (`server/_core/email.ts`); safe no-op without keys |
-| S3 file keys not access-controlled | 🟡 Improved | New objects use org-scoped keys (`orgScopedKey`, `org/<organizationId>/…` in `server/storage.ts`); audit legacy read paths |
-| `server/routers.ts` is very large (~6,900 lines) | 🟡 In progress | Domain routers extracted to `server/routers/` (uganda, lapo, cbnCompliance, mobileMoney, poc, erpExport, regulatorPortal, woodcoreConnector, shoplineConnector). Core router still large — keep extracting per the 150-line rule and `docs/ROUTERS_SPLIT_PLAN.md` |
-| Direct MySQL access to Woodcore DB (dynamic IPs) | 🔴 Open | Migrate to Fineract REST API for production |
-| CI/CD | ✅ Done | `.github/workflows/ci.yml` (+ `woodcore-sync.yml`); RLS tenant-scoping ratchet enforced in CI |
-| Migration numbering collision (local `0070` vs production `0070`) | 🔴 Watch | Migrations are append-only; a local untracked `0070_*` differs from production's `0070_useful_franklin_richards.sql`. Reconcile before committing new migrations (never renumber an applied one) |
+> queue.
+>
+> **How to verify, at any time:** `GET /api/health` → `checks.queue.durability`
+> must read `confirmed`. `server/queueDurability.ts` names four states:
+> - `confirmed` — every queue is on BullMQ AND answered a count read;
+> - `unreachable`;
+> - `configured_unverified`;
+> - `fallback`.
+>
+> The boot log `BullMQ backend active` for `shopify-privacy` also shows it.
+> **Never** infer it from webhooks returning 200: they return 200 either way.
+>
+> An unreachable Redis **hangs** rather than failing, because BullMQ's default
+> retry never gives up. So every queue read is bounded by a deadline and
+> `/api/health` reports `unreachable` instead of hanging. Never add an
+> unbounded await on a queue read, and never await a Redis probe before
+> `server.listen`.
 
 ---
 
@@ -1447,8 +1464,9 @@ DIRECT_LLM_MODEL=claude-sonnet-5
 DIRECT_LLM_PROVIDER=anthropic                   # optional; auto-detected when omitted
 
 # Job queue (durable reconciliation runs + webhooks)
-# Unset → in-process fallback (fine for single-instance). Set → BullMQ (durable, multi-instance).
-REDIS_URL=redis://...                            # provision on Railway before horizontal scaling
+# Unset → in-process fallback, EXCEPT the `requireDurable` Shopify queues, which refuse (§10).
+# Set → BullMQ (durable, multi-instance).
+REDIS_URL=redis://...                            # provisioned on Railway (confirmed 2026-10-06); keep it set
 
 # Auth (magic-link) — email/magic-link is implemented
 JWT_SECRET=<generate 64-char random string>
@@ -1702,11 +1720,13 @@ pnpm db:migrate
 ### Background Jobs
 The durable job queue is **built** (`server/jobQueue.ts`): reconciliation runs and webhook
 delivery are queued with retry-safe artifact reset and a boot sweep for orphaned runs.
-- **`REDIS_URL` unset** → in-process retry queue (fine for a single Railway instance / on-prem).
+- **`REDIS_URL` unset** → in-process retry queue (fine for a single instance and on-prem), except
+  the `requireDurable` Shopify queues, which refuse to run (§10).
 - **`REDIS_URL` set** → BullMQ (durable, survives restarts, safe across multiple instances).
 
-The BullMQ path activates the moment `REDIS_URL` is provisioned — no code change. **Provision
-Redis on Railway before running more than one instance (horizontal scaling).**
+The BullMQ path activates the moment `REDIS_URL` is provisioned, with no code change.
+**Production has it (confirmed 2026-10-06; `/api/health` → `durability: "confirmed"`).** Keep
+it: the Shopify connector requires it (§10), and so does running more than one instance.
 
 ---
 
@@ -1716,7 +1736,7 @@ These were the PRD features missing from the original prototype. Most are now sh
 
 1. **Real authentication** — ✅ email/magic link live. Google OAuth2 / Microsoft Entra pending (per-org opt-in, Section 5).
 2. **Fineract REST API connector** — 🔴 still pending; Woodcore still uses direct DB access.
-3. **Background job queue** — ✅ built (`server/jobQueue.ts`); provision `REDIS_URL` to activate BullMQ.
+3. **Background job queue** — ✅ built and live on BullMQ in production (`server/jobQueue.ts`; Redis confirmed live 2026-10-06).
 4. **Email delivery** — ✅ Resend integration live (magic links, alerts, CFO reports).
 5. **Billing** — 🟡 SHOPLINE Tier 1 is App-Store-managed (no Stripe needed there); general subscription billing still pending.
 6. **Full test suite** — ✅ broad Vitest coverage across engines, routers, and reports.
