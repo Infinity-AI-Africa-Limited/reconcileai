@@ -13,8 +13,18 @@ embedded = true
 scopes = "read_orders"
 # Shopify-managed installation grants this one read-only scope. App Home verifies
 # its fresh App Bridge ID token and performs the server-side offline-token
-# exchange; no browser OAuth callback or redirect URL is used.
+# exchange; a managed installation never passes through a browser OAuth callback.
 use_legacy_install_flow = false
+
+[auth]
+# Shopify CLI requires this allow-list for a public app, even under managed
+# installation. It is NOT inert: Shopify sends an authorization-code grant only
+# to a URL listed here, and this route is still served (routes.ts), so the
+# authorization-code path (/api/shopify/install → this callback) keeps working
+# for reinstall and reauthorization, under the same install lease, suspension
+# and redaction fence as a managed installation. One exact URL, bound to the
+# served path by appConfig.test.ts; list nothing else.
+redirect_urls = ["https://www.reconcileaiafrica.com/api/shopify/callback"]
 
 [webhooks]
 # Match the Admin API version stored for every Shopify connection in ReconcileAI.
