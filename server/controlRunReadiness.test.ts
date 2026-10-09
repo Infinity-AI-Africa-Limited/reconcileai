@@ -191,6 +191,56 @@ describe("when a source contract took effect after the day being assessed", () =
     expect(result.sourceContractCount).toBe(1);
   });
 
+  it("should ignore an excluded source's own manifest rather than let it block the day", () => {
+    // The query over-fetches around the day boundary on purpose, and recording
+    // a manifest does not check that its contract was in effect for the period
+    // — so an October-9 source can hold an October-8 manifest. Counting that
+    // manifest raised mixed_reconciliation_policy_version and blocked a day
+    // that was otherwise ready: the same false, unclearable block by a second
+    // route.
+    const established = contract({
+      id: 41,
+      sourceKey: "switch-settlement",
+      effectiveAt: new Date("2026-10-01T08:00:00.000Z"),
+    });
+    const notYetInEffect = contract({
+      id: 42,
+      sourceKey: "new-register",
+      role: "internal_register",
+      effectiveAt: new Date("2026-10-09T08:00:00.000Z"),
+    });
+
+    const result = assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: [established, notYetInEffect],
+      batchManifests: [
+        manifest({
+          id: 71,
+          sourceContractId: 41,
+          controlPeriod: EIGHTH,
+          receivedAt: new Date("2026-10-08T16:45:00.000Z"),
+        }),
+        manifest({
+          id: 72,
+          sourceContractId: 42,
+          controlPeriod: EIGHTH,
+          deliveryIdentity: "new-register-2026-10-08-v1",
+          receivedAt: new Date("2026-10-08T16:50:00.000Z"),
+          reconciliationPolicyVersion: "register-ledger-v9",
+        }),
+      ],
+    });
+
+    expect(result.persistenceReasons).not.toContain(
+      "mixed_reconciliation_policy_version"
+    );
+    expect(result.persistenceReasons).toEqual([]);
+    // The count reports the evidence this day is judged on, not what was read.
+    expect(result.batchManifestCount).toBe(1);
+    expect(result.status).toBe("ready_to_reconcile");
+  });
+
   it("should keep a contract whose cut-off cannot be resolved, so the misconfiguration is still reported", () => {
     // Fails open: dropping it would turn a misconfigured source into a
     // silently absent one, which is the opposite of what a control wants.

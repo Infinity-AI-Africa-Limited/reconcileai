@@ -215,7 +215,7 @@ export function assessPersistedControlEvidence(params: {
   const supplied = Array.isArray(params.sourceContracts)
     ? params.sourceContracts
     : [];
-  const manifests = Array.isArray(params.batchManifests)
+  const periodManifests = Array.isArray(params.batchManifests)
     ? params.batchManifests.filter(
         manifest => manifest?.controlPeriod === params.controlPeriod
       )
@@ -245,6 +245,25 @@ export function assessPersistedControlEvidence(params: {
   const contracts = dated
     .filter(({ contract, cutoffAt }) => isInEffectBy(contract, cutoffAt))
     .map(({ contract }) => contract);
+  /**
+   * Evidence belonging to the sources this day actually requires.
+   *
+   * The query deliberately over-fetches around the day boundary, and
+   * `recordControlBatchManifest` lets a contract carry a manifest for a period
+   * it was not yet in effect for — so without this, an EXCLUDED source's
+   * manifest still reached `policyVersions` and `batchManifestCount`. One
+   * October-9 source with its own policy version could raise
+   * `mixed_reconciliation_policy_version` and block an October-8 day that was
+   * otherwise ready: the same false, unclearable block as the bug above, by a
+   * second route.
+   */
+  const eligibleContractIds = new Set(
+    contracts.map(contract => contract?.id).filter(id => id !== undefined)
+  );
+  const manifests = periodManifests.filter(manifest =>
+    eligibleContractIds.has(manifest?.sourceContractId)
+  );
+
   const cutoffByContract = new Map(
     dated.map(({ contract, cutoffAt }) => [contract, cutoffAt])
   );
