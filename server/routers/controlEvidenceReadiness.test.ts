@@ -52,7 +52,7 @@ beforeEach(() => {
   });
 });
 
-describe("controlEvidence.assessReadiness", () => {
+describe("when a tenant asks whether their control day is ready", () => {
   it("should evaluate only the caller's tenant and remain a query boundary", async () => {
     const result = await caller().assessReadiness({
       controlPeriod: "2026-10-09",
@@ -70,7 +70,10 @@ describe("controlEvidence.assessReadiness", () => {
     expect(state.assess).toHaveBeenCalledTimes(1);
   });
 
-  it("should reject another tenant before it asks the readiness service for evidence", async () => {
+});
+
+describe("when the caller names another organisation", () => {
+  it("should reject it before asking the readiness service for evidence", async () => {
     const refusal = await failureOf(() =>
       caller().assessReadiness({
         organizationId: 60001,
@@ -82,7 +85,10 @@ describe("controlEvidence.assessReadiness", () => {
     expect(state.assess).not.toHaveBeenCalled();
   });
 
-  it("should reject a non-calendar control period before it queries stored evidence", async () => {
+});
+
+describe("when the control period is not a real calendar day", () => {
+  it("should reject it before querying stored evidence", async () => {
     const refusal = await failureOf(() =>
       caller().assessReadiness({ controlPeriod: "2026-02-30" })
     );

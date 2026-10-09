@@ -137,6 +137,17 @@ export async function assessPersistedControlRun(params: {
     });
   }
 
+  // Bounded by the business day under assessment, NOT by the clock. Keyed on
+  // `evaluatedAt`, a source that took effect on the 9th was required for the
+  // 8th as soon as the 8th was assessed on the 10th — and since no manifest for
+  // the 8th can ever exist for a source that did not exist then, an otherwise
+  // complete past day was blocked permanently. `evaluatedAt` remains the clock
+  // for judging receipts and deadlines, which is what it is for.
+  //
+  // This predicate is a deliberate SUPERSET: cut-offs are per contract, in each
+  // contract's own approved zone, so the exact test belongs where that zone is
+  // known (assessPersistedControlEvidence). Here it only keeps the fetch
+  // bounded without excluding any row that could still be eligible.
   const contracts = (await db
     .select(SOURCE_CONTRACT_FIELDS)
     .from(controlSourceContracts)
@@ -144,7 +155,10 @@ export async function assessPersistedControlRun(params: {
       and(
         eq(controlSourceContracts.organizationId, params.organizationId),
         inArray(controlSourceContracts.status, [...ELIGIBLE_CONTRACT_STATUSES]),
-        lte(controlSourceContracts.effectiveAt, evaluatedAt)
+        lte(
+          controlSourceContracts.effectiveAt,
+          contractEligibilityHorizon(params.controlPeriod) ?? evaluatedAt
+        )
       )
     )) as PersistedSourceContract[];
 
@@ -198,7 +212,7 @@ export function assessPersistedControlEvidence(params: {
     persistenceReasons.push("invalid_control_period");
   }
 
-  const contracts = Array.isArray(params.sourceContracts)
+  const supplied = Array.isArray(params.sourceContracts)
     ? params.sourceContracts
     : [];
   const manifests = Array.isArray(params.batchManifests)
@@ -206,6 +220,34 @@ export function assessPersistedControlEvidence(params: {
         manifest => manifest?.controlPeriod === params.controlPeriod
       )
     : [];
+
+  /**
+   * Each contract with the cut-off instant it defines for THIS business day,
+   * resolved in its own approved zone.
+   *
+   * A contract is required for the day only if it was already in effect at that
+   * day's cut-off — the deadline the control is judged against. A source that
+   * took effect after the cut-off had nothing to deliver, so requiring it would
+   * manufacture a shortfall no one can ever clear.
+   *
+   * A contract whose cut-off cannot be resolved at all is NOT filtered out: it
+   * is kept so `invalid_source_cutoff` still fires. Dropping it would turn a
+   * misconfigured source into a silently absent one.
+   */
+  const dated = supplied.map(contract => ({
+    contract,
+    cutoffAt: cutoffAtFor(
+      params.controlPeriod,
+      contract?.timeZone,
+      contract?.cutoffMinutes
+    ),
+  }));
+  const contracts = dated
+    .filter(({ contract, cutoffAt }) => isInEffectBy(contract, cutoffAt))
+    .map(({ contract }) => contract);
+  const cutoffByContract = new Map(
+    dated.map(({ contract, cutoffAt }) => [contract, cutoffAt])
+  );
 
   if (contracts.length === 0) {
     persistenceReasons.push("no_eligible_source_contracts");
@@ -237,11 +279,7 @@ export function assessPersistedControlEvidence(params: {
     const manifest =
       sourceManifests.length === 1 ? sourceManifests[0] : undefined;
 
-    const cutoffAt = cutoffAtFor(
-      params.controlPeriod,
-      contract?.timeZone,
-      contract?.cutoffMinutes
-    );
+    const cutoffAt = cutoffByContract.get(contract) ?? null;
     if (!cutoffAt) addReason(persistenceReasons, "invalid_source_cutoff");
 
     if (manifest) {
@@ -351,6 +389,43 @@ function addReason(
   reason: PersistedControlReadinessReason
 ): void {
   if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+/**
+ * Was this contract already in effect at the business day's cut-off?
+ *
+ * Fails OPEN — keeps the contract — when either side is unusable: an
+ * unresolvable cut-off is reported as `invalid_source_cutoff` elsewhere, and a
+ * missing or malformed `effectiveAt` must not let a source quietly drop out of
+ * a control it may well belong to. Both of those end in a blocked assessment a
+ * human can see, which is the safe direction for a control.
+ */
+function isInEffectBy(
+  contract: PersistedSourceContract | undefined,
+  cutoffAt: Date | null
+): boolean {
+  if (!cutoffAt) return true;
+  const effectiveAt = contract?.effectiveAt;
+  if (!(effectiveAt instanceof Date) || Number.isNaN(effectiveAt.getTime())) {
+    return true;
+  }
+  return effectiveAt.getTime() <= cutoffAt.getTime();
+}
+
+/**
+ * The latest instant any contract's cut-off for this business day could fall
+ * on, used only to bound the query.
+ *
+ * The day ends last in the most western zone in use (UTC−12), and a cut-off may
+ * sit as late as 23:59 local, so nothing eligible can have an `effectiveAt`
+ * beyond the day after in UTC plus 12 hours. Two further hours of margin cost
+ * nothing — over-fetching is filtered exactly by `isInEffectBy`, while
+ * under-fetching would silently drop a required source.
+ */
+function contractEligibilityHorizon(controlPeriod: string): Date | null {
+  if (!isIsoCalendarDate(controlPeriod)) return null;
+  const [year, month, day] = controlPeriod.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + 1) + 14 * 60 * 60 * 1_000);
 }
 
 /** `YYYY-MM-DD`, including real calendar days only. */

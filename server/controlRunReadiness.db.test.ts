@@ -68,8 +68,8 @@ beforeEach(() => {
   state.db = null;
 });
 
-describe("assessPersistedControlRun", () => {
-  it("should query contracts and manifests within one organisation and control period", async () => {
+describe("when stored evidence is read for one tenant and control period", () => {
+  it("should scope both queries to that organisation and period", async () => {
     const fake = readinessDb();
 
     const result = await assessPersistedControlRun({
@@ -97,7 +97,36 @@ describe("assessPersistedControlRun", () => {
     );
   });
 
-  it("should fail closed without an eligible tenant source contract and avoid a manifest lookup", async () => {
+});
+
+describe("when the business day assessed is not the day it is assessed on", () => {
+  it("should bound the contract query by that business day, not by the clock", async () => {
+    // Bounded by `evaluatedAt`, a contract that began AFTER the day under
+    // assessment was still fetched and then required — and a day whose sources
+    // did not yet exist can never be completed. The bound is the end of the
+    // day anywhere on earth; the exact per-zone test happens in memory, where
+    // each contract's own time zone is known.
+    const fake = readinessDb();
+
+    await assessPersistedControlRun({
+      organizationId,
+      controlPeriod: "2026-10-08",
+      evaluatedAt: new Date("2026-10-10T09:00:00.000Z"),
+    });
+
+    const contractQuery = fake.ops.find(
+      op => op.kind === "select" && op.table === CONTRACTS
+    );
+    // The rendered parameter, read as the driver sends it. Re-parsing it with
+    // `new Date()` would reinterpret it in the machine's own zone and make this
+    // assertion pass or fail depending on where it runs; drizzle renders in
+    // UTC, so the string itself is the stable thing to compare.
+    expect(contractQuery?.where?.params.at(-1)).toBe("2026-10-09 14:00:00.000");
+  });
+});
+
+describe("when the tenant has no eligible source contract", () => {
+  it("should fail closed and not look for manifests at all", async () => {
     const fake = readinessDb({ contracts: [] });
 
     const result = await assessPersistedControlRun({
@@ -119,7 +148,10 @@ describe("assessPersistedControlRun", () => {
     ).toBe(false);
   });
 
-  it("should return a safe infrastructure error when evidence storage is unavailable", async () => {
+});
+
+describe("when evidence storage is unavailable", () => {
+  it("should answer a safe infrastructure error rather than an empty assessment", async () => {
     await expect(
       assessPersistedControlRun({ organizationId, controlPeriod: period })
     ).rejects.toMatchObject({

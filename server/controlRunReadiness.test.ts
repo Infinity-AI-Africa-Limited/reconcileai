@@ -67,6 +67,247 @@ function assess(
   });
 }
 
+/** Assess a different business day, or at a different clock, than the default. */
+function assessOn(options: {
+  controlPeriod: string;
+  evaluatedAt: Date;
+  sourceContracts: PersistedSourceContract[];
+  batchManifests?: PersistedBatchManifest[];
+}) {
+  return assessPersistedControlEvidence({
+    organizationId,
+    controlPeriod: options.controlPeriod,
+    evaluatedAt: options.evaluatedAt,
+    sourceContracts: options.sourceContracts,
+    batchManifests: options.batchManifests ?? [],
+  });
+}
+
+describe("when a source contract took effect after the day being assessed", () => {
+  // Lagos is UTC+1 year round, so a 18:00 local cut-off on the 8th is
+  // 2026-10-08T17:00:00Z. The day is assessed on the 10th.
+  const EIGHTH = "2026-10-08";
+  const ON_THE_TENTH = new Date("2026-10-10T09:00:00.000Z");
+  const cutoffOnTheEighth = new Date("2026-10-08T17:00:00.000Z");
+
+  it("should not require a source that did not exist at that day's cut-off", () => {
+    // Keyed on the clock instead of the day, this source counted as required
+    // for the 8th — and no manifest for the 8th can ever exist for a source
+    // that began on the 9th, so the day was blocked for good.
+    const established = contract({
+      id: 41,
+      sourceKey: "switch-settlement",
+      effectiveAt: new Date("2026-10-01T08:00:00.000Z"),
+    });
+    const brandNew = contract({
+      id: 42,
+      sourceKey: "new-register",
+      role: "internal_register",
+      effectiveAt: new Date("2026-10-09T08:00:00.000Z"),
+    });
+
+    const result = assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: [established, brandNew],
+      batchManifests: [
+        manifest({
+          controlPeriod: EIGHTH,
+          receivedAt: new Date("2026-10-08T16:45:00.000Z"),
+        }),
+      ],
+    });
+
+    expect(result.sourceContractCount).toBe(1);
+    expect(result.sourceAssessments.map(source => source.sourceKey)).toEqual([
+      "switch-settlement",
+    ]);
+    expect(result.persistenceReasons).toEqual([]);
+    expect(result.status).toBe("ready_to_reconcile");
+  });
+
+  it("should still require a source that took effect during that day, before its cut-off", () => {
+    const sameDay = contract({
+      effectiveAt: new Date("2026-10-08T06:00:00.000Z"),
+    });
+
+    const result = assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: [sameDay],
+    });
+
+    expect(result.sourceContractCount).toBe(1);
+    expect(result.status).toBe("blocked");
+    expect(result.persistenceReasons).not.toContain(
+      "no_eligible_source_contracts"
+    );
+  });
+
+  it("should treat the day's cut-off as the boundary, to the minute", () => {
+    const atTheCutoff = contract({ effectiveAt: cutoffOnTheEighth });
+    const justAfter = contract({
+      effectiveAt: new Date(cutoffOnTheEighth.getTime() + 60_000),
+    });
+
+    expect(
+      assessOn({
+        controlPeriod: EIGHTH,
+        evaluatedAt: ON_THE_TENTH,
+        sourceContracts: [atTheCutoff],
+      }).sourceContractCount
+    ).toBe(1);
+    expect(
+      assessOn({
+        controlPeriod: EIGHTH,
+        evaluatedAt: ON_THE_TENTH,
+        sourceContracts: [justAfter],
+      }).sourceContractCount
+    ).toBe(0);
+  });
+
+  it("should not read a superseding version as ambiguous while it is not yet in effect", () => {
+    // v2 begins on the 9th. For the 8th there is exactly one contract for this
+    // source key, so the day is not ambiguous — it was, when eligibility was
+    // judged by the clock.
+    const v1 = contract({
+      id: 41,
+      version: 1,
+      effectiveAt: new Date("2026-10-01T08:00:00.000Z"),
+    });
+    const v2 = contract({
+      id: 42,
+      version: 2,
+      effectiveAt: new Date("2026-10-09T08:00:00.000Z"),
+    });
+
+    const result = assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: [v1, v2],
+    });
+
+    expect(result.persistenceReasons).not.toContain("ambiguous_source_contract");
+    expect(result.sourceContractCount).toBe(1);
+  });
+
+  it("should keep a contract whose cut-off cannot be resolved, so the misconfiguration is still reported", () => {
+    // Fails open: dropping it would turn a misconfigured source into a
+    // silently absent one, which is the opposite of what a control wants.
+    const unresolvable = contract({
+      timeZone: "not/a-zone",
+      effectiveAt: new Date("2030-01-01T00:00:00.000Z"),
+    });
+
+    const result = assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: [unresolvable],
+    });
+
+    expect(result.sourceContractCount).toBe(1);
+    expect(result.persistenceReasons).toContain("invalid_source_cutoff");
+    expect(result.status).toBe("blocked");
+  });
+});
+
+describe("when a source cut-off falls in a daylight-saving transition", () => {
+  // America/New_York, verified against Intl: the 2026 transitions are
+  // 2026-03-08T07:00Z (−5 → −4) and 2026-11-01T06:00Z (−4 → −5).
+  const NEW_YORK = "America/New_York";
+  const newYorkContract = (overrides: Partial<PersistedSourceContract> = {}) =>
+    contract({
+      timeZone: NEW_YORK,
+      effectiveAt: new Date("2026-01-01T00:00:00.000Z"),
+      ...overrides,
+    });
+
+  it("should block a local cut-off that the spring change skips over", () => {
+    // 02:30 never happens on 2026-03-08: the clocks jump 02:00 to 03:00. There
+    // is no instant to judge a deadline against, so guessing one is not an
+    // option a control may take.
+    const result = assessOn({
+      controlPeriod: "2026-03-08",
+      evaluatedAt: new Date("2026-03-08T12:00:00.000Z"),
+      sourceContracts: [newYorkContract({ cutoffMinutes: 150 })],
+    });
+
+    expect(result.persistenceReasons).toContain("invalid_source_cutoff");
+    expect(result.status).toBe("blocked");
+    expect(result.canReconcile).toBe(false);
+  });
+
+  it("should block a local cut-off that the autumn change repeats", () => {
+    // 01:30 happens twice on 2026-11-01, at 05:30Z and again at 06:30Z. An
+    // ambiguous deadline would make "late" depend on which one was meant.
+    const result = assessOn({
+      controlPeriod: "2026-11-01",
+      evaluatedAt: new Date("2026-11-01T12:00:00.000Z"),
+      sourceContracts: [newYorkContract({ cutoffMinutes: 90 })],
+    });
+
+    expect(result.persistenceReasons).toContain("invalid_source_cutoff");
+    expect(result.status).toBe("blocked");
+    expect(result.canReconcile).toBe(false);
+  });
+
+  it("should resolve a normal cut-off beside the change to the right UTC instant", () => {
+    // 04:00 on 2026-03-08 is unambiguous and, after the change, EDT: 08:00Z.
+    // Receipts a minute either side pin the conversion to the minute.
+    const onTime = assessOn({
+      controlPeriod: "2026-03-08",
+      evaluatedAt: new Date("2026-03-08T12:00:00.000Z"),
+      sourceContracts: [newYorkContract({ cutoffMinutes: 240 })],
+      batchManifests: [
+        manifest({
+          controlPeriod: "2026-03-08",
+          receivedAt: new Date("2026-03-08T07:59:00.000Z"),
+        }),
+      ],
+    });
+    const late = assessOn({
+      controlPeriod: "2026-03-08",
+      evaluatedAt: new Date("2026-03-08T12:00:00.000Z"),
+      sourceContracts: [newYorkContract({ cutoffMinutes: 240 })],
+      batchManifests: [
+        manifest({
+          controlPeriod: "2026-03-08",
+          receivedAt: new Date("2026-03-08T08:01:00.000Z"),
+        }),
+      ],
+    });
+
+    expect(onTime.persistenceReasons).toEqual([]);
+    expect(onTime.sourceAssessments[0]?.reasons).not.toContain(
+      "received_after_cutoff"
+    );
+    expect(onTime.status).toBe("ready_to_reconcile");
+    expect(late.sourceAssessments[0]?.reasons).toContain(
+      "received_after_cutoff"
+    );
+  });
+
+  it("should still resolve a cut-off in a zone that never changes its clocks", () => {
+    // The guard must not reject the ordinary case it was written around.
+    const result = assessOn({
+      controlPeriod: "2026-03-08",
+      evaluatedAt: new Date("2026-03-08T18:05:00.000Z"),
+      sourceContracts: [
+        contract({ effectiveAt: new Date("2026-01-01T00:00:00.000Z") }),
+      ],
+      batchManifests: [
+        manifest({
+          controlPeriod: "2026-03-08",
+          receivedAt: new Date("2026-03-08T16:45:00.000Z"),
+        }),
+      ],
+    });
+
+    expect(result.persistenceReasons).toEqual([]);
+    expect(result.status).toBe("ready_to_reconcile");
+  });
+});
+
 describe("when persisted control evidence is complete", () => {
   it("should translate approved source and batch evidence into a ready-to-reconcile preflight", () => {
     const result = assess();
