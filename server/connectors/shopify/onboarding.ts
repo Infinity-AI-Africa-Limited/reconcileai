@@ -57,7 +57,7 @@ export type ShopifyOnboardingErrorCode =
   | "WORKSPACE_CONFLICT"
   /** Shopify requested deletion for the existing workspace; reconnection is fenced. */
   | "REDACTION_IN_PROGRESS"
-  /** This callback no longer holds the shop's install lease; a later installation owns the outcome. */
+  /** This installation no longer holds the shop's install lease; a later installation owns the outcome. */
   | "INSTALL_LEASE_LOST";
 
 /**
@@ -156,23 +156,24 @@ function emailEquals(email: string) {
  *
  * ── The fact every branch below is built on ──────────────────────────────
  *
- * By the time this runs the callback has already exchanged the authorization
- * code, and Shopify retires every OTHER refresh token for the app on the store
- * at that moment (shopify.dev, "How refresh token rotation works"). So for a
+ * By the time this runs the installation has already exchanged its ID token
+ * for a new offline pair, and Shopify retires every OTHER refresh token for
+ * the app on the store at that moment (shopify.dev, "How refresh token
+ * rotation works"). So for a
  * store we already hold credentials for, the stored refresh token is dead
  * whatever happens next. Any branch that does not store the new pair must take
  * the store out of service — leaving it `active` would report a connection that
  * stops working within the hour — but only the generation THIS grant retired
- * (ReauthorizationTicket): an overlapping callback may have stored a newer one.
+ * (ReauthorizationTicket): an overlapping installation may have stored a newer one.
  */
 export async function onboardShopifyMerchant(params: {
   shopDomain: string;
   metadata: ShopifyShopMetadata;
   tokenResponse: ShopifyTokenResponse;
   origin: string;
-  /** From suspendForReauthorization, taken before the code was exchanged. Required: see its type. */
+  /** From suspendForReauthorization, taken before the token exchange. Required: see its type. */
   reauthorization: ReauthorizationTicket;
-  /** The shop's install lease this callback holds; every write below is conditioned on still holding it. */
+  /** The shop's install lease this installation holds; every write below is conditioned on still holding it. */
   lease: InstallLease;
 }): Promise<ShopifyOnboardingResult> {
   const db = await getDb();
@@ -189,9 +190,9 @@ export async function onboardShopifyMerchant(params: {
     return await createMerchantWorkspace(db, params, email);
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;
-    // Two first-time callbacks for one shop both passed the lookup above; the
+    // Two first-time installations for one shop both passed the lookup above; the
     // unique workspace code / store identity let exactly one create the tenant.
-    // That tenant is now committed, so this callback is a reauthorization of it
+    // That tenant is now committed, so this installation is a reauthorization of it
     // and goes through the same ownership check — not a failed install, which
     // is what the merchant was shown while the other tab had succeeded.
     const winner = await findExistingStore(db, params.shopDomain, params.metadata.id);
@@ -206,8 +207,8 @@ export async function onboardShopifyMerchant(params: {
 }
 
 /**
- * Take the shop's live connection out of service BEFORE its authorization code
- * is exchanged. Call it after the callback is verified and before the exchange.
+ * Take the shop's live connection out of service BEFORE the token exchange.
+ * Call it after the installation's ID token is verified and before the exchange.
  *
  * The exchange is what retires the stored refresh token. Taking the store out
  * of service afterwards (failClosed) depends on a write succeeding after
@@ -224,7 +225,7 @@ export async function onboardShopifyMerchant(params: {
  * connection to protect. Matched by domain because the shop id is not known
  * until after the exchange (it comes from the metadata call).
  *
- * Returns null — having changed nothing — when this callback no longer holds
+ * Returns null — having changed nothing — when this installation no longer holds
  * the shop's install lease; the caller must stop before exchanging.
  */
 export async function suspendForReauthorization(lease: InstallLease): Promise<ReauthorizationTicket | null> {
@@ -232,7 +233,7 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
   if (!db) throw new ShopifyOnboardingError("Database unavailable", "DB_UNAVAILABLE");
   const { shopDomain } = lease;
   return db.transaction(async (tx) => {
-    // Lease FIRST, in the same transaction, and renewed: a callback that
+    // Lease FIRST, in the same transaction, and renewed: an installation that
     // stalled past its TTL and lost the shop must not suspend the installation
     // that took over (Greptile #134, seventh pass). The renewing UPDATE locks
     // the lease row, so no takeover can commit before this does, and it leaves
@@ -267,7 +268,7 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
       .set({ status: "reauthorization_required", statusReason: "reauthorization_pending" })
       .where(and(eq(shopifyConnectorStores.shopDomain, shopDomain), eq(shopifyConnectorStores.status, "active")));
     // Read AFTER suspending and BEFORE the exchange. Every pair stored by now
-    // was issued before this callback's grant, so the grant retires it; a pair
+    // was issued before this installation's grant, so the grant retires it; a pair
     // stored after this read may come from a newer grant, not ours to retire.
     const [held] = await tx
       .select({ id: shopifyConnectorTokens.id, rotationVersion: shopifyConnectorTokens.rotationVersion })
@@ -280,9 +281,9 @@ export async function suspendForReauthorization(lease: InstallLease): Promise<Re
 }
 
 /**
- * What one callback's authorization-code grant is about to retire.
+ * What one installation's grant is about to retire.
  *
- * Two callbacks for the same shop can overlap. If B stores a fresh pair and A
+ * Two installations for the same shop can overlap. If B stores a fresh pair and A
  * fails afterwards, A's fail-close must not delete B's credentials — B's grant
  * may well be the newer one. Fencing A's failure on the generation A retired
  * makes it act only while that generation is still what the store holds.
@@ -662,14 +663,14 @@ async function createMerchantWorkspace(
 }
 
 /**
- * Throw unless this callback still holds the shop's install lease. Called first
+ * Throw unless this installation still holds the shop's install lease. Called first
  * inside every transaction that stores credentials or activates a store, so a
  * takeover cannot commit in between (holdsInstallLease locks the lease row).
  *
- * Losing it means the lease expired mid-install and another callback took the
- * shop. That callback renewed the lease immediately before ITS exchange, so its
+ * Losing it means the lease expired mid-install and another installation took the
+ * shop. That installation renewed the lease immediately before ITS exchange, so its
  * grant came after ours and retired our credentials: its outcome is the one
- * that stands, and this callback must write nothing.
+ * that stands, and this installation must write nothing.
  */
 /**
  * Serialise with shop redaction, and refuse a tenant it has fenced, INSIDE the
@@ -762,7 +763,7 @@ async function failClosed(
         organizationId: store.organizationId,
         reason,
         fence,
-        // A callback that lost the shop's lease leaves the store to the one that took it.
+        // An installation that lost the shop's lease leaves the store to the one that took it.
         guard: (tx) => holdsInstallLease(tx, lease),
       });
       return marked ? "confirmed" : "superseded";

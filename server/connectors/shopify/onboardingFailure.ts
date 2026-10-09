@@ -1,10 +1,8 @@
 /**
- * What an onboarding refusal means to the merchant — ONE classification, for
- * both installation surfaces.
+ * What an onboarding refusal means to the merchant, classified in ONE place.
  *
- * The legacy callback renders it on the install error page and App Home renders
- * it in the embedded workspace, but the question is the same, so the answer must
- * not be given twice. App Home previously had no answer at all: every
+ * App Home renders it in the embedded workspace (appHome.ts). It previously
+ * had no answer at all: every
  * `ShopifyOnboardingError` fell through to a generic "temporarily unavailable",
  * which told a merchant whose shop has no contact email, or whose contact email
  * belongs to another workspace, to retry — and each retry re-ran the token

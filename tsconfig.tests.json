@@ -18,6 +18,7 @@
   },
   "include": [],  "files": [
     "client/src/lib/shopifyAppBridge.test.ts",
+    "client/src/lib/shopifyConnection.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
     "client/src/lib/shopifyPrivacyDeliveries.test.ts",
     "client/src/lib/shopifySettlementMapping.test.ts",
@@ -67,6 +68,7 @@
     "server/jobQueue.replaceFailed.test.ts",
     "server/jobQueue.statsTimeout.test.ts",
     "server/logSafety.test.ts",
+    "server/migrationIntegrity.test.ts",
     "server/queueHealthReporting.test.ts",
     "server/reconciliationEngine.direction.test.ts",
     "server/reversalSignals.test.ts",
