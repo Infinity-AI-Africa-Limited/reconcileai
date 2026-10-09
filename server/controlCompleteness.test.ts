@@ -547,3 +547,241 @@ describe("when the control definition itself is unusable", () => {
     expect(assessment.reasons).toEqual(["invalid_evaluation_time"]);
   });
 });
+
+describe("when a source cannot be identified or placed", () => {
+  it.each<[string, unknown]>([
+    ["missing", undefined],
+    ["blank", "   "],
+    ["empty", ""],
+    ["not text", 42],
+  ])(
+    "should block a source whose key is %s, and not name it",
+    (_label, key) => {
+      const unnamed = {
+        ...source(),
+        sourceKey: key,
+      } as unknown as RequiredSourceManifest;
+
+      const result = assessControlRunReadiness([unnamed], NOW);
+
+      expect(result.status).toBe("blocked");
+      expect(result.mayPublishMatchRate).toBe(false);
+      expect(result.sourceAssessments[0]).toMatchObject({
+        sourceKey: null,
+        status: "blocked",
+        reasons: ["missing_source_key"],
+      });
+    }
+  );
+
+  it("should block a source whose role this policy does not know", () => {
+    const misplaced = {
+      ...source(),
+      role: "ledger",
+    } as unknown as RequiredSourceManifest;
+
+    const result = assessControlRunReadiness([misplaced], NOW);
+
+    expect(result.status).toBe("blocked");
+    expect(result.sourceAssessments[0]).toMatchObject({
+      role: null,
+      reasons: ["invalid_source_role"],
+    });
+  });
+
+  it("should not count two unnamed sources as a duplicate key", () => {
+    // Each is already blocked for having no key; reporting a collision
+    // between two absent names would describe a problem that is not there.
+    const unnamed = {
+      ...source(),
+      sourceKey: "",
+    } as unknown as RequiredSourceManifest;
+
+    const result = assessControlRunReadiness([unnamed, unnamed], NOW);
+
+    expect(result.status).toBe("blocked");
+    expect(result.reasons).toEqual([]);
+  });
+
+  it("should treat keys that differ only by surrounding spaces as one key", () => {
+    const result = assessControlRunReadiness(
+      [source(), source({ sourceKey: " processor_settlement " })],
+      NOW
+    );
+
+    expect(result.reasons).toEqual(["duplicate_source_key"]);
+  });
+});
+
+describe("when storage returns entries that are not manifests", () => {
+  it.each<[string, unknown]>([
+    ["null", null],
+    ["undefined", undefined],
+    ["a number", 0],
+    ["a string", "processor_settlement"],
+    ["an array", []],
+  ])("should block an entry that is %s, without throwing", (_label, entry) => {
+    const manifests = [source(), entry] as unknown as RequiredSourceManifest[];
+
+    const result = assessControlRunReadiness(manifests, NOW);
+
+    expect(result.status).toBe("blocked");
+    expect(result.sourceAssessments[1]).toEqual({
+      sourceKey: null,
+      role: null,
+      required: true,
+      status: "blocked",
+      reasons: ["invalid_source_manifest"],
+      warnings: [],
+    });
+  });
+
+  it.each<[string, unknown]>([
+    ["null", null],
+    ["undefined", undefined],
+    ["an object", { processor_settlement: source() }],
+    ["a string", "processor_settlement"],
+  ])(
+    "should block a definition that is %s, without throwing",
+    (_label, definition) => {
+      const result = assessControlRunReadiness(
+        definition as unknown as RequiredSourceManifest[],
+        NOW
+      );
+
+      expect(result).toEqual({
+        status: "blocked",
+        canReconcile: false,
+        mayPublishMatchRate: false,
+        reasons: ["invalid_control_definition"],
+        sourceAssessments: [],
+      });
+    }
+  );
+
+  it("should block a delivery record that is not an object, rather than treat it as not received", () => {
+    const result = assessControlRunReadiness(
+      [
+        {
+          ...source({ cutoffAt: LATER_CUTOFF }),
+          received: "batch-settlement-20261009",
+        } as unknown as RequiredSourceManifest,
+      ],
+      NOW
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.sourceAssessments[0].reasons).toEqual([
+      "invalid_received_manifest",
+    ]);
+  });
+});
+
+describe("when any stored field holds a value it should never hold", () => {
+  // The module promises to fail closed on whatever storage returns: never
+  // throw, never approve. This holds it to that, field by field, rather than
+  // trusting the promise. Values that ARE valid for a field are left out.
+  const HOSTILE: unknown[] = [
+    null,
+    undefined,
+    0,
+    -1,
+    NaN,
+    "",
+    "   ",
+    "x",
+    [],
+    {},
+    true,
+  ];
+  const LEGITIMATE: Record<string, unknown[]> = {
+    sourceKey: ["x"],
+    batchId: ["x"],
+    sourceContractVersion: ["x"],
+    mappingVersion: ["x"],
+    invalidRowCount: [0],
+    controlTotalRequired: [true],
+  };
+  const describeValue = (value: unknown) =>
+    typeof value === "number" && Number.isNaN(value)
+      ? "NaN"
+      : value === undefined
+        ? "undefined"
+        : JSON.stringify(value);
+  const casesFor = (fields: string[], level: "manifest" | "received") =>
+    fields.flatMap(field =>
+      HOSTILE.filter(value => !(LEGITIMATE[field] ?? []).includes(value)).map(
+        value =>
+          [
+            `${level}.${field} = ${describeValue(value)}`,
+            level,
+            field,
+            value,
+          ] as const
+      )
+    );
+  const cases = [
+    ...casesFor(
+      [
+        "sourceKey",
+        "role",
+        "cutoffAt",
+        "controlTotalRequired",
+        "expected",
+        "received",
+      ],
+      "manifest"
+    ),
+    ...casesFor(
+      [
+        "batchId",
+        "receivedAt",
+        "sourceContractVersion",
+        "mappingVersion",
+        "schemaState",
+        "invalidRowCount",
+        "duplicateDelivery",
+        "recordCount",
+        "monetaryTotal",
+        "currency",
+      ],
+      "received"
+    ),
+  ];
+
+  it.each(cases)(
+    "should neither throw nor approve %s",
+    (_label, level, field, value) => {
+      const manifest =
+        level === "manifest"
+          ? ({
+              ...source(),
+              [field]: value,
+            } as unknown as RequiredSourceManifest)
+          : source({ received: loaded({ [field]: value }) });
+
+      let result: ReturnType<typeof assessControlRunReadiness> | undefined;
+      expect(() => {
+        result = assessControlRunReadiness([manifest, register()], NOW);
+      }).not.toThrow();
+
+      expect(result?.status).not.toBe("ready_to_reconcile");
+      expect(result?.mayPublishMatchRate).toBe(false);
+    }
+  );
+
+  it.each(HOSTILE.filter(value => value !== false))(
+    "should still count a source required when `required` is %s",
+    value => {
+      const flagged = {
+        ...source({ received: undefined }),
+        required: value,
+      } as unknown as RequiredSourceManifest;
+
+      const result = assessControlRunReadiness([flagged, register()], NOW);
+
+      expect(result.sourceAssessments[0].required).toBe(true);
+      expect(result.status).not.toBe("ready_to_reconcile");
+    }
+  );
+});

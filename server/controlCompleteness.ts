@@ -73,6 +73,10 @@ export type SourceReadiness =
 
 /** Stable machine reasons: safe to store, translate, trend, and use in policy tests. */
 export type SourceReadinessReason =
+  | "invalid_source_manifest"
+  | "missing_source_key"
+  | "invalid_source_role"
+  | "invalid_received_manifest"
   | "source_not_received"
   | "invalid_evaluation_time"
   | "invalid_cutoff"
@@ -113,6 +117,11 @@ export const SOURCE_REASON_EFFECT: Readonly<
   record_count_mismatch: "population_shortfall",
   currency_mismatch: "population_shortfall",
   monetary_total_mismatch: "population_shortfall",
+  // The entry cannot be read, named or placed, so nothing it says can be used.
+  invalid_source_manifest: "blocks",
+  missing_source_key: "blocks",
+  invalid_source_role: "blocks",
+  invalid_received_manifest: "blocks",
   invalid_evaluation_time: "blocks",
   invalid_cutoff: "blocks",
   invalid_received_at: "blocks",
@@ -135,8 +144,10 @@ export const SOURCE_REASON_EFFECT: Readonly<
 export type SourceReadinessWarning = "duplicate_delivery_deduplicated";
 
 export interface SourceReadinessAssessment {
-  sourceKey: string;
-  role: ControlSourceRole;
+  /** Null when the manifest did not name itself usably; such a source is blocked. */
+  sourceKey: string | null;
+  /** Null when the manifest's role is not one this policy knows; blocked too. */
+  role: ControlSourceRole | null;
   required: boolean;
   status: SourceReadiness;
   reasons: SourceReadinessReason[];
@@ -150,6 +161,7 @@ export type ControlRunReadiness =
   | "blocked";
 
 export type ControlRunReadinessReason =
+  | "invalid_control_definition"
   | "no_required_sources"
   | "invalid_evaluation_time"
   | "duplicate_source_key";
@@ -175,6 +187,15 @@ export function assessControlRunReadiness(
   manifests: RequiredSourceManifest[],
   now: Date
 ): ControlRunAssessment {
+  if (!Array.isArray(manifests)) {
+    return {
+      status: "blocked",
+      canReconcile: false,
+      mayPublishMatchRate: false,
+      reasons: ["invalid_control_definition"],
+      sourceAssessments: [],
+    };
+  }
   const sourceAssessments = manifests.map(manifest =>
     assessSourceReadiness(manifest, now)
   );
@@ -185,7 +206,10 @@ export function assessControlRunReadiness(
   if (!isValidDate(now)) reasons.push("invalid_evaluation_time");
   // Two entries under one key leave a persisted assessment ambiguous about
   // which delivery it describes, so the definition itself is unusable.
-  const keys = manifests.map(manifest => manifest.sourceKey);
+  // Unnamed sources are already blocked; only the named ones can collide.
+  const keys = sourceAssessments
+    .map(assessment => assessment.sourceKey?.trim())
+    .filter((key): key is string => key !== undefined);
   if (new Set(keys).size !== keys.length) reasons.push("duplicate_source_key");
 
   const status: ControlRunReadiness =
@@ -211,8 +235,30 @@ export function assessSourceReadiness(
   manifest: RequiredSourceManifest,
   now: Date
 ): SourceReadinessAssessment {
+  // Read nothing from an entry that is not an object: a null in a stored list
+  // must come back blocked, not as an exception that leaves the caller with
+  // no assessment at all. Unknown requiredness counts as required.
+  if (!isRecord(manifest)) {
+    return {
+      sourceKey: null,
+      role: null,
+      required: true,
+      status: "blocked",
+      reasons: ["invalid_source_manifest"],
+      warnings: [],
+    };
+  }
+
   const reasons: SourceReadinessReason[] = [];
   const warnings: SourceReadinessWarning[] = [];
+
+  // An approval has to say WHAT it approved.
+  const sourceKey = hasMeaningfulValue(manifest.sourceKey)
+    ? manifest.sourceKey
+    : null;
+  if (sourceKey === null) reasons.push("missing_source_key");
+  const role = isSourceRole(manifest.role) ? manifest.role : null;
+  if (role === null) reasons.push("invalid_source_role");
 
   // The clock and the contract come first: neither depends on a delivery, so a
   // batch that has not arrived must not hide that the definition is unusable.
@@ -231,9 +277,12 @@ export function assessSourceReadiness(
     reasons.push("invalid_expected_control_total");
   }
 
-  const received = manifest.received;
-  if (!received) {
+  const received: unknown = manifest.received;
+  if (received === undefined || received === null) {
     reasons.push("source_not_received");
+  } else if (!isRecord(received)) {
+    // Present but not a manifest: never reinterpret it as "not received".
+    reasons.push("invalid_received_manifest");
   } else {
     if (!isValidDate(received.receivedAt)) {
       reasons.push("invalid_received_at");
@@ -282,8 +331,8 @@ export function assessSourceReadiness(
   }
 
   return {
-    sourceKey: manifest.sourceKey,
-    role: manifest.role,
+    sourceKey,
+    role,
     required: manifest.required !== false,
     status: sourceStatus(
       reasons,
@@ -309,11 +358,26 @@ function sourceStatus(
   return onlyAwaitingDelivery && stillDue ? "awaiting_source" : "incomplete";
 }
 
+const SOURCE_ROLES: ReadonlySet<unknown> = new Set<ControlSourceRole>([
+  "settlement",
+  "internal_register",
+  "bank_or_gl",
+]);
+
+function isSourceRole(value: unknown): value is ControlSourceRole {
+  return SOURCE_ROLES.has(value);
+}
+
+/** A plain object, so its fields can be read; never null or an array. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isValidDate(value: unknown): value is Date {
   return value instanceof Date && !Number.isNaN(value.getTime());
 }
 
-function hasMeaningfulValue(value: unknown): boolean {
+function hasMeaningfulValue(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
@@ -321,8 +385,9 @@ function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function isValidControlTotal(total: SourceControlTotal): boolean {
+function isValidControlTotal(total: unknown): total is SourceControlTotal {
   return (
+    isRecord(total) &&
     isNonNegativeInteger(total.recordCount) &&
     typeof total.currency === "string" &&
     /^[A-Za-z]{3}$/.test(total.currency) &&
