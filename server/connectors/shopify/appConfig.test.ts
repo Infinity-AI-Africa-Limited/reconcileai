@@ -224,6 +224,16 @@ describe("when a setting is misplaced or added", () => {
 
   it("should fail when a redirect allow-list or subscription URI is removed, or a scope is added", () => {
     expect(matches(edited(`redirect_urls = ["${ORIGIN}${SHOPIFY_OAUTH_CALLBACK_PATH}"]`, ""))).toBe(false);
+    // Shopify sends authorization codes to any URL listed here: an extra entry is
+    // a destination for merchants' codes, so exactly one is allowed.
+    expect(
+      matches(
+        edited(
+          `redirect_urls = ["${ORIGIN}${SHOPIFY_OAUTH_CALLBACK_PATH}"]`,
+          `redirect_urls = ["${ORIGIN}${SHOPIFY_OAUTH_CALLBACK_PATH}", "https://attacker.example/callback"]`,
+        ),
+      ),
+    ).toBe(false);
     expect(matches(edited(/\nuri = "[^"]+"\n/, "\n"))).toBe(false);
     expect(matches(edited('scopes = "read_orders"', 'scopes = "read_orders,read_customers"'))).toBe(false);
   });
