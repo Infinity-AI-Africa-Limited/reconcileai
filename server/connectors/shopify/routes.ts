@@ -1,32 +1,7 @@
-import crypto from "node:crypto";
-import express, { type Request } from "express";
-import { lt } from "drizzle-orm";
-import {
-  SHOPIFY_OAUTH_STATE_TTL_MS,
-  SHOPIFY_ORDER_LED_SCOPES,
-  shopifyOauthStates,
-} from "../../../drizzle/shopify_schema";
-import { getSessionCookieOptions } from "../../_core/cookies";
-import { ENV } from "../../_core/env";
+import express from "express";
 import { sdk } from "../../_core/sdk";
 import { getDb } from "../../db";
-import { isDuplicateKeyError, loggableError } from "../../dbErrors";
-import {
-  buildShopifyAuthorizationUrl,
-  exchangeAuthorizationCode,
-  normalizeShopDomain,
-  parseUniqueQuery,
-  requiredScopesGranted,
-  sha256,
-  signOAuthState,
-  verifyOAuthState,
-  verifyShopifyCallbackHmac,
-} from "./auth";
-import { fetchShopifyShopMetadata } from "./apiClient";
-import { onboardShopifyMerchant, ShopifyOnboardingError, suspendForReauthorization } from "./onboarding";
-import { onboardingFailureReason } from "./onboardingFailure";
-import { acquireInstallLease, releaseInstallLease, type InstallLease } from "./installLease";
-import { confirmShopifyRuntimeQueues } from "./runtimeQueueReadiness";
+import { normalizeShopDomain } from "./auth";
 import {
   PrivacyArtifactIntegrityError,
   authorizeAndReadPrivacyArtifact,
@@ -34,76 +9,18 @@ import {
   loadPrivacyArtifactForDownload,
 } from "./privacyCompletion";
 import type { ShopifyInstallErrorReason } from "@shared/shopifyInstall";
-import { SHOPIFY_OAUTH_CALLBACK_PATH } from "./paths";
+import { SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_RETIRED_INSTALL_PATH } from "./paths";
 
-const FLOW_COOKIE = "shopify_oauth_flow";
+/** The cookie the retired authorization-code path set; cleared if a browser still holds one. */
+const RETIRED_FLOW_COOKIE = "shopify_oauth_flow";
 
-/** Consumed states are kept this long past expiry for diagnosis, then purged. */
-const STATE_RETENTION_AFTER_EXPIRY_MS = 60 * 60_000;
-
-/**
- * The error-page reason for a failed callback.
- *
- * Kept as this module's name for the classification, which now lives in
- * `onboardingFailure.ts` because App Home must answer the same question and
- * must not answer it differently.
- */
-export const callbackReasonFor: (error: unknown) => ShopifyInstallErrorReason = onboardingFailureReason;
-
-class ShopifyNotConfiguredError extends Error {}
-
-/**
- * The canonical origin for OAuth redirects and emailed sign-in links.
- *
- * In production it must come from APP_URL. Derived from the request it would
- * trust the Host header, and — with no `trust proxy` set — read the protocol as
- * `http` behind Railway's proxy, producing a redirect URI Shopify rejects and
- * magic links on the wrong scheme.
- */
-function appOrigin(req: Request): string {
-  if (ENV.appUrl) return ENV.appUrl.replace(/\/+$/, "");
-  if (ENV.isProduction) throw new ShopifyNotConfiguredError("APP_URL is not configured");
-  const host = req.get("host");
-  if (!host) throw new Error("Request has no host");
-  return `${req.protocol}://${host}`;
-}
-
-function redirectUri(req: Request): string {
-  return `${appOrigin(req)}${SHOPIFY_OAUTH_CALLBACK_PATH}`;
-}
-
-/** cookie-parser is not installed; parse one named cookie without decoding other values. */
-function cookieValue(req: Request, name: string): string | undefined {
-  const header = req.headers.cookie;
-  if (!header) return undefined;
-  for (const part of header.split(";")) {
-    const [key, ...value] = part.trim().split("=");
-    if (key === name) {
-      try {
-        return decodeURIComponent(value.join("="));
-      } catch {
-        return undefined;
-      }
-    }
-  }
-  return undefined;
-}
-
-function sameState(left: string | undefined, right: string): boolean {
-  if (!left) return false;
-  const a = Buffer.from(left, "utf8");
-  const b = Buffer.from(right, "utf8");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-function callbackError(res: express.Response, reason: ShopifyInstallErrorReason): void {
+function installError(res: express.Response, reason: ShopifyInstallErrorReason): void {
   res.redirect(302, `/shopify/error?reason=${encodeURIComponent(reason)}`);
 }
 
 /**
- * OAuth endpoints are HTTP rather than tRPC because Shopify initiates the
- * install flow. All callback-controlled values are validated before any token
- * exchange, database write, or external API call.
+ * Shopify HTTP routes that are not tRPC: a privacy-artifact download, and the
+ * retired authorization-code install path.
  *
  * Every `await` sits inside a try. Express 4 does not catch a rejected async
  * handler, and this server registers no `unhandledRejection` handler, so on
@@ -182,215 +99,38 @@ export function createShopifyRouter(): express.Router {
     }
   });
 
-  // No database access and no rate limit, deliberately: the state is signed,
-  // not stored, so an unauthenticated hit costs one HMAC and a redirect. A
-  // limiter here could only have been keyed on a client-written header.
-  router.get("/api/shopify/install", async (req, res) => {
-    const shopDomain = normalizeShopDomain(typeof req.query.shop === "string" ? req.query.shop : undefined);
-    if (!shopDomain) return callbackError(res, "invalid_shop");
-    if (!ENV.shopifyClientId || !ENV.shopifyClientSecret) {
-      console.error("[shopify-oauth] SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET are not configured");
-      return callbackError(res, "not_configured");
-    }
-
-    try {
-      const queueReadiness = await confirmShopifyRuntimeQueues();
-      if (!queueReadiness.durable) {
-        console.error("[shopify-oauth] install refused: Shopify durable queues are unavailable", {
-          code: "shopify_durable_queue_unavailable",
-          reason: queueReadiness.reason,
-        });
-        return callbackError(res, "temporarily_unavailable");
-      }
-      const callbackUri = redirectUri(req);
-      const { state } = signOAuthState({ shopDomain, secret: ENV.shopifyClientSecret, ttlMs: SHOPIFY_OAUTH_STATE_TTL_MS });
-      const baseCookie = getSessionCookieOptions(req);
-      res.cookie(FLOW_COOKIE, state, {
-        ...baseCookie,
-        sameSite: "lax",
-        path: "/api/shopify",
-        maxAge: SHOPIFY_OAUTH_STATE_TTL_MS,
-      });
-      return res.redirect(
-        302,
-        buildShopifyAuthorizationUrl({
-          shopDomain,
-          clientId: ENV.shopifyClientId,
-          redirectUri: callbackUri,
-          scopes: SHOPIFY_ORDER_LED_SCOPES,
-          state,
-        }),
-      );
-    } catch (error) {
-      if (error instanceof ShopifyNotConfiguredError) {
-        console.error("[shopify-oauth] install refused: APP_URL is not configured in production");
-        return callbackError(res, "not_configured");
-      }
-      console.error("[shopify-oauth] install start failed", {
-        shopDomain,
-        ...loggableError(error),
-      });
-      return callbackError(res, "temporarily_unavailable");
-    }
+  // ── The authorization-code install path, retired ───────────────────────────
+  //
+  // Installation and reconnection are Shopify-managed (managedInstall.ts): App
+  // Home verifies a fresh App Bridge ID token and exchanges it server-side, under
+  // the install lease, suspension and redaction fence. That covers every store
+  // this path used to: a new shop, an uninstalled one, and one whose credentials
+  // died. A second way in was a second onboarding path to keep in step, behind
+  // an unauthenticated public entry point.
+  //
+  // Both routes stay mounted only to answer a stale link, or a grant, clearly,
+  // and both answer before any database access or network call:
+  //   - the install route starts nothing, so no authorization-code grant can
+  //     begin here;
+  //   - the callback exchanges nothing, so a code Shopify delivers to the
+  //     redirect URL shopify.app.toml must still list (the CLI requires one) is
+  //     never redeemed.
+  router.get(SHOPIFY_RETIRED_INSTALL_PATH, (req, res) => {
+    console.warn("[shopify-oauth] retired install route answered", {
+      code: "legacy_install_retired",
+      shopDomain: normalizeShopDomain(typeof req.query.shop === "string" ? req.query.shop : undefined),
+    });
+    installError(res, "managed_install_only");
   });
 
-  router.get(SHOPIFY_OAUTH_CALLBACK_PATH, async (req, res) => {
-    const query = parseUniqueQuery(req.query as Record<string, unknown>);
-    if (!query || !ENV.shopifyClientId || !ENV.shopifyClientSecret) return callbackError(res, "invalid_callback");
-
-    const shopDomain = normalizeShopDomain(query.shop);
-    const state = query.state;
-    const code = query.code;
-    const cookieState = cookieValue(req, FLOW_COOKIE);
-    // The flow cookie is spent once this state is DECIDED: rejected here, or
-    // consumed below. A temporary refusal in between (durable queues not ready,
-    // no database) keeps it, so retrying the same callback once the dependency
-    // recovers can still pass this check. Clearing it up front made every such
-    // refusal permanent: the retry failed the cookie check and the merchant had
-    // to start the install again.
-    const spendFlowCookie = () => res.clearCookie(FLOW_COOKIE, { path: "/api/shopify" });
-    if (!shopDomain || !state || !code || !sameState(cookieState, state)) {
-      spendFlowCookie();
-      return callbackError(res, "security_check_failed");
-    }
-    if (!verifyShopifyCallbackHmac(query, ENV.shopifyClientSecret)) {
-      spendFlowCookie();
-      return callbackError(res, "security_check_failed");
-    }
-
-    // Authentic, unexpired and issued for THIS shop — checked without the database.
-    const stateExpiresAt = verifyOAuthState(state, {
-      shopDomain,
-      secret: ENV.shopifyClientSecret,
-      ttlMs: SHOPIFY_OAUTH_STATE_TTL_MS,
+  router.get(SHOPIFY_OAUTH_CALLBACK_PATH, (req, res) => {
+    console.warn("[shopify-oauth] retired callback answered; no code exchanged", {
+      code: "legacy_callback_retired",
+      shopDomain: normalizeShopDomain(typeof req.query.shop === "string" ? req.query.shop : undefined),
     });
-    if (!stateExpiresAt) {
-      spendFlowCookie();
-      return callbackError(res, "expired_or_replayed");
-    }
-
-    try {
-      // Redis could fail after install begins. Verify again before a callback
-      // can exchange an authorization code or alter a store's connection state.
-      const queueReadiness = await confirmShopifyRuntimeQueues();
-      if (!queueReadiness.durable) {
-        console.error("[shopify-oauth] callback refused: Shopify durable queues are unavailable", {
-          code: "shopify_durable_queue_unavailable",
-          reason: queueReadiness.reason,
-        });
-        return callbackError(res, "temporarily_unavailable");
-      }
-      const db = await getDb();
-      if (!db) return callbackError(res, "temporarily_unavailable");
-      const origin = appOrigin(req);
-
-      // From here the state is consumed, so the cookie is spent whatever follows.
-      spendFlowCookie();
-
-      // Consume before the external exchange so a retry cannot reuse the same
-      // authorization code. The unique index on stateHash is the arbiter: of
-      // two concurrent callbacks carrying one state, exactly one insert lands.
-      // This is the first write in the flow, and it happens only after Shopify's
-      // HMAC and our own signature have both verified.
-      try {
-        await db.insert(shopifyOauthStates).values({
-          shopDomain,
-          stateHash: sha256(state),
-          expiresAt: stateExpiresAt,
-          consumedAt: new Date(),
-        });
-      } catch (error) {
-        if (isDuplicateKeyError(error)) return callbackError(res, "expired_or_replayed");
-        throw error;
-      }
-      await purgeExpiredStates(db);
-
-      // One installation in flight per shop (see shopifyInstallLeases). Refused
-      // BEFORE the exchange, so an overlapping callback's grant never happens
-      // and cannot retire the credentials this one is about to store.
-      const leaseId = await acquireInstallLease(db, shopDomain);
-      if (!leaseId) return callbackError(res, "installation_in_progress");
-      try {
-        return await completeLeasedInstall(res, { lease: { shopDomain, leaseId }, code, origin });
-      } finally {
-        await releaseInstallLease(db, shopDomain, leaseId).catch((error: unknown) => {
-          // The lease expires on its own; a failed release only delays the next install.
-          console.warn("[shopify-oauth] install lease release failed", {
-            shopDomain,
-            ...loggableError(error),
-          });
-        });
-      }
-    } catch (error) {
-      if (error instanceof ShopifyNotConfiguredError) {
-        console.error("[shopify-oauth] callback refused: APP_URL is not configured in production");
-        return callbackError(res, "not_configured");
-      }
-      console.error("[shopify-oauth] callback failed", {
-        shopDomain,
-        code: error instanceof ShopifyOnboardingError ? error.code : undefined,
-        storeFailClosed: error instanceof ShopifyOnboardingError ? error.storeFailClosed : undefined,
-        ...loggableError(error),
-      });
-      return callbackError(res, callbackReasonFor(error));
-    }
+    res.clearCookie(RETIRED_FLOW_COOKIE, { path: "/api/shopify" });
+    installError(res, "managed_install_only");
   });
 
   return router;
-}
-
-/**
- * The part of the callback that runs under the shop's install lease: suspend,
- * exchange, onboard. Separate so the lease's acquire/release reads as one
- * bracket around it in the route.
- */
-async function completeLeasedInstall(
-  res: express.Response,
-  params: { lease: InstallLease; code: string; origin: string },
-): Promise<void> {
-  const { lease, code, origin } = params;
-  const { shopDomain } = lease;
-  // Last write before the exchange, and deliberately so: the exchange retires
-  // the shop's stored refresh token, so its live connection goes out of
-  // service first. If this fails we stop here, with nothing retired.
-  //
-  // It also verifies and renews the lease in the same transaction, immediately
-  // before the exchange (which times out far inside the TTL), so this callback's
-  // grant happens while it holds the shop. Lost while we stalled -> null, and
-  // nothing — not even the suspension — has been written.
-  const reauthorization = await suspendForReauthorization(lease);
-  if (!reauthorization) return callbackError(res, "installation_in_progress");
-
-  const tokens = await exchangeAuthorizationCode({
-    shopDomain,
-    clientId: ENV.shopifyClientId,
-    clientSecret: ENV.shopifyClientSecret,
-    code,
-  });
-  if (!requiredScopesGranted(tokens.scope, SHOPIFY_ORDER_LED_SCOPES)) {
-    return callbackError(res, "required_permissions_not_granted");
-  }
-  const metadata = await fetchShopifyShopMetadata({ shopDomain, accessToken: tokens.access_token });
-  const result = await onboardShopifyMerchant({ shopDomain, metadata, tokenResponse: tokens, origin, reauthorization, lease });
-  // No internal store id in the URL: the page needs only the shop, and an id
-  // in a shareable link is an enumeration handle with no purpose.
-  const query = new URLSearchParams({
-    shop: shopDomain,
-    installed: result.isReinstallation ? "reconnected" : "connected",
-    email: result.welcomeEmailSent ? "sent" : "pending",
-  });
-  return res.redirect(302, `/shopify/welcome?${query.toString()}`);
-}
-
-/** Best-effort housekeeping: OAuth states are single-use and short-lived. */
-async function purgeExpiredStates(db: NonNullable<Awaited<ReturnType<typeof getDb>>>): Promise<void> {
-  try {
-    await db
-      .delete(shopifyOauthStates)
-      .where(lt(shopifyOauthStates.expiresAt, new Date(Date.now() - STATE_RETENTION_AFTER_EXPIRY_MS)));
-  } catch (error) {
-    console.warn("[shopify-oauth] expired state purge failed", {
-      ...loggableError(error),
-    });
-  }
 }

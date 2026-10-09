@@ -13,5 +13,11 @@
  * on the same route.
  */
 export const SHOPIFY_APP_HOME_PATH = "/shopify/app";
+/**
+ * The retired authorization-code path. Both routes still answer (routes.ts),
+ * only to refuse: installation is Shopify-managed. The callback stays listed in
+ * shopify.app.toml because the CLI requires a redirect allow-list.
+ */
+export const SHOPIFY_RETIRED_INSTALL_PATH = "/api/shopify/install";
 export const SHOPIFY_OAUTH_CALLBACK_PATH = "/api/shopify/callback";
 export const SHOPIFY_WEBHOOK_PATH = "/api/webhooks/shopify";

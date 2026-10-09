@@ -1,68 +1,15 @@
 import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  buildShopifyAuthorizationUrl,
   exchangeShopifyIdTokenForOfflineAccess,
   normalizeShopDomain,
   refreshExpiringOfflineToken,
   requiredScopesGranted,
-  signOAuthState,
   shopifyWebhookPayloadDigest,
-  verifyOAuthState,
   shopifyAdminHmacMessage,
   verifyShopifyCallbackHmac,
   verifyShopifyWebhookHmac,
 } from "./auth";
-
-describe("when the state carried through an install is signed and read back", () => {
-  const SECRET = "client-secret";
-  const TTL = 10 * 60_000;
-  const NOW = 1_790_000_000_000;
-  const SHOP = "merchant.myshopify.com";
-  const issue = () => signOAuthState({ shopDomain: SHOP, secret: SECRET, ttlMs: TTL, now: NOW });
-  const check = (state: string, over: Partial<{ shopDomain: string; secret: string; now: number }> = {}) =>
-    verifyOAuthState(state, { shopDomain: SHOP, secret: SECRET, ttlMs: TTL, now: NOW + 1_000, ...over });
-
-  it("should verify a state it issued, for the same shop, returning its expiry", () => {
-    const { state, expiresAt } = issue();
-    expect(check(state)?.getTime()).toBe(expiresAt.getTime());
-  });
-
-  it("should refuse the state for a different shop", () => {
-    expect(check(issue().state, { shopDomain: "attacker.myshopify.com" })).toBeNull();
-  });
-
-  it("should refuse it once expired", () => {
-    expect(check(issue().state, { now: NOW + TTL })).toBeNull();
-  });
-
-  it("should refuse a state signed with another secret", () => {
-    expect(check(issue().state, { secret: "someone-else" })).toBeNull();
-  });
-
-  it("should refuse a state whose expiry was extended after signing", () => {
-    const [, nonce, mac] = issue().state.split(".");
-    expect(check(`${NOW + TTL + 60_000}.${nonce}.${mac}`)).toBeNull();
-  });
-
-  it("should refuse a validly-signed state that claims to live longer than one TTL", () => {
-    // Not forgeable without the secret, but a state is never legitimately
-    // longer-lived than the TTL it was issued with, so none is accepted as one.
-    const longLived = signOAuthState({ shopDomain: SHOP, secret: SECRET, ttlMs: TTL * 10, now: NOW });
-    expect(check(longLived.state)).toBeNull();
-  });
-
-  it.each(["", "a.b", "1.2.3.4", "notanumber.nonce-nonce-nonce-nonce.mac", `${NOW + 1000}.short.mac`])(
-    "should refuse the malformed state %j",
-    (state) => {
-      expect(check(state)).toBeNull();
-    },
-  );
-
-  it("should issue a fresh nonce every time", () => {
-    expect(issue().state).not.toBe(issue().state);
-  });
-});
 
 describe("when a shop domain, callback signature or granted scope is checked", () => {
   it("should accept only canonical myshopify.com store hostnames", () => {
@@ -70,21 +17,6 @@ describe("when a shop domain, callback signature or granted scope is checked", (
     expect(normalizeShopDomain("https://shop.myshopify.com")).toBeNull();
     expect(normalizeShopDomain("shop.myshopify.com.evil.example")).toBeNull();
     expect(normalizeShopDomain("shop.myshopify.com:443")).toBeNull();
-  });
-
-  it("should build an authorization URL with only the requested read scope", () => {
-    const url = new URL(
-      buildShopifyAuthorizationUrl({
-        shopDomain: "merchant.myshopify.com",
-        clientId: "client-id",
-        redirectUri: "https://www.reconcileaiafrica.com/api/shopify/callback",
-        scopes: ["read_orders"],
-        state: "high-entropy-state",
-      }),
-    );
-    expect(url.origin).toBe("https://merchant.myshopify.com");
-    expect(url.searchParams.get("scope")).toBe("read_orders");
-    expect(url.searchParams.get("state")).toBe("high-entropy-state");
   });
 
   it("should verify the exact OAuth callback HMAC and reject altered parameters", () => {

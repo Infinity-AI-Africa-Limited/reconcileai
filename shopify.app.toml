@@ -18,12 +18,11 @@ use_legacy_install_flow = false
 
 [auth]
 # Shopify CLI requires this allow-list for a public app, even under managed
-# installation. It is NOT inert: Shopify sends an authorization-code grant only
-# to a URL listed here, and this route is still served (routes.ts), so the
-# authorization-code path (/api/shopify/install → this callback) keeps working
-# for reinstall and reauthorization, under the same install lease, suspension
-# and redaction fence as a managed installation. One exact URL, bound to the
-# served path by appConfig.test.ts; list nothing else.
+# installation. The authorization-code path it once served is RETIRED:
+# installation and reconnection both run through App Home, and this route now
+# answers every request with a refusal and redeems no code (routes.ts). Shopify
+# sends a grant only to a URL listed here, so one exact URL, bound to that
+# refusing route by appConfig.test.ts; list nothing else.
 redirect_urls = ["https://www.reconcileaiafrica.com/api/shopify/callback"]
 
 [webhooks]
