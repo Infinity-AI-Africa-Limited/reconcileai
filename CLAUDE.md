@@ -1435,9 +1435,14 @@ Most of the original launch-blocking debt is now **resolved**. Current status:
 > **Never** infer it from webhooks returning 200: they return 200 either way.
 >
 > An unreachable Redis **hangs** rather than failing, because BullMQ's default
-> retry never gives up. So every queue read is bounded by a deadline and
-> `/api/health` reports `unreachable` instead of hanging. Never add an
-> unbounded await on a queue read, and never await a Redis probe before
+> retry never gives up. Only the health and readiness count reads carry
+> deadlines (`allQueueStats` via `boundedStats`, and
+> `confirmShopifyRuntimeQueues`), so `/api/health` reports `unreachable`
+> instead of hanging. **Other queue calls are NOT bounded.** `enqueue()` awaits
+> `queue.getJob()` and `isFailed()` with no deadline, and the connection is
+> `{ url }` only, which keeps ioredis's default offline queue, so they can hang
+> while Redis is unreachable. Never assume a queue call cannot hang, never add an unbounded
+> await on one in a request path, and never await a Redis probe before
 > `server.listen`.
 
 ---
