@@ -121,7 +121,7 @@ describe("when Shopify delivers an authorization code to the callback", () => {
   });
 });
 
-describe("the routes shopify.app.toml names", () => {
+describe("when the configured Shopify routes are mounted", () => {
   it("should still answer at exactly the paths Shopify was given", () => {
     // The callback stays listed as the redirect allow-list the CLI requires.
     expect(() => handlerFor(SHOPIFY_OAUTH_CALLBACK_PATH)).not.toThrow();
