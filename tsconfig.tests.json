@@ -18,6 +18,7 @@
   },
   "include": [],  "files": [
     "client/src/lib/shopifyAppBridge.test.ts",
+    "client/src/lib/shopifyConnection.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
     "client/src/lib/shopifyPrivacyDeliveries.test.ts",
     "client/src/lib/shopifySettlementMapping.test.ts",

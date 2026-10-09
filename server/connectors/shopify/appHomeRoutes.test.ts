@@ -36,7 +36,7 @@ describe("when the Shopify App Home document is served", () => {
   it("should let only Shopify Admin and the named store frame it, on /shopify/app only, never with X-Frame-Options", async () => {
     const base = await start();
     const embedded = await fetch(`${base}/shopify/app?shop=merchant.myshopify.com&host=abc`);
-    const ordinary = await fetch(`${base}/shopify/welcome`);
+    const ordinary = await fetch(`${base}/shopify/error`);
 
     expect(embedded.headers.get("content-security-policy")).toBe(
       "frame-ancestors https://merchant.myshopify.com https://admin.shopify.com",

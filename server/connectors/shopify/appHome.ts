@@ -66,7 +66,7 @@ export type ShopifyAppHomeErrorMessage =
   | "active_admin_required"
   | "invalid_request"
   // Onboarding refusals that no retry can clear. They are spelled exactly as
-  // the legacy install reasons (`shared/shopifyInstall.ts`) so the client
+  // the shared install reasons (`shared/shopifyInstall.ts`) so the client
   // renders them from the copy that already exists for the install error page,
   // rather than carrying a second wording of the same refusal.
   | "ownership_verification_required"
@@ -107,8 +107,7 @@ export function managedInstallFailure(error: unknown): TRPCError {
    * every retry re-runs the token exchange, which retires the offline token
    * pair Shopify issued for the previous attempt — while the shop still has no
    * contact email, or its email still belongs to another workspace, so the
-   * attempt can never succeed. Classified by the same function the legacy
-   * install page uses (onboardingFailure.ts).
+   * attempt can never succeed. Classified in one place (onboardingFailure.ts).
    */
   if (error instanceof ShopifyOnboardingError) {
     const reason = onboardingFailureReason(error);

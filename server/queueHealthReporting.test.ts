@@ -30,7 +30,7 @@ const bullmq = { durable: true };
 const inProcess = { durable: false };
 const unanswered = { durable: true, error: "count read timed out" };
 
-describe("before any queue has been built", () => {
+describe("when no queue has been built yet", () => {
   it("should NOT claim durability merely because REDIS_URL is set", () => {
     // A wrong or unreachable URL is indistinguishable from a good one until
     // something connects. Claiming `durable` here is an assertion about a
@@ -60,7 +60,7 @@ describe("before any queue has been built", () => {
   });
 });
 
-describe("once queues exist", () => {
+describe("when queues exist", () => {
   it("should confirm durability only when every queue is durable and answered", () => {
     expect(classifyQueueDurability({ a: bullmq, b: bullmq }, "redis://x")).toEqual({
       durable: true,
@@ -99,7 +99,7 @@ describe("once queues exist", () => {
   });
 });
 
-describe("the callers", () => {
+describe("when the health endpoint and the pilot gate report durability", () => {
   const read = (rel: string) => fs.readFileSync(path.join(__dirname, rel), "utf8");
 
   it("should both use the one rule rather than keep their own", () => {

@@ -100,39 +100,15 @@ export type ShopifyConnectorToken = typeof shopifyConnectorTokens.$inferSelect;
 export type InsertShopifyConnectorToken = typeof shopifyConnectorTokens.$inferInsert;
 
 /**
- * Ledger of CONSUMED OAuth states, hash-only. A state is self-verifying (signed
- * and shop-bound, see signOAuthState), so no row exists until its callback has
- * passed both Shopify's HMAC and our signature; the unique `stateHash` then
- * makes each state usable exactly once. Raw state values live only in the
- * browser's short-lived flow cookie.
- */
-export const shopifyOauthStates = mysqlTable(
-  "shopify_oauth_states",
-  {
-    id: int("id").autoincrement().primaryKey(),
-    shopDomain: varchar("shopDomain", { length: 253 }).notNull(),
-    stateHash: varchar("stateHash", { length: 64 }).notNull(),
-    expiresAt: timestamp("expiresAt").notNull(),
-    consumedAt: timestamp("consumedAt"),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-  },
-  (t) => [
-    uniqueIndex("uq_shopify_oauth_state_hash").on(t.stateHash),
-    index("idx_shopify_oauth_state_expiry").on(t.expiresAt),
-  ],
-);
-export type ShopifyOauthState = typeof shopifyOauthStates.$inferSelect;
-
-/**
- * One installation in flight per shop. A callback takes the shop's lease BEFORE
- * exchanging its authorization code and holds it through onboarding.
+ * One installation in flight per shop. A managed installation (managedInstall.ts)
+ * takes the shop's lease BEFORE its token exchange and holds it through onboarding.
  *
- * Every authorization-code grant retires the refresh tokens the store held, and
- * the moment it does so is not observable from here. Two callbacks exchanging
- * concurrently can therefore each retire the other's credentials, and no
- * after-the-fact fence can tell which pair survived. Serializing the exchanges
- * removes the question: a callback that cannot take the lease is refused before
- * it exchanges, so its grant never happens and retires nothing.
+ * Every grant of a new offline pair retires the refresh tokens the store held,
+ * and the moment it does so is not observable from here. Two installations
+ * exchanging concurrently can therefore each retire the other's credentials, and
+ * no after-the-fact fence can tell which pair survived. Serializing the exchanges
+ * removes the question: an installation that cannot take the lease is refused
+ * before it exchanges, so its grant never happens and retires nothing.
  */
 export const shopifyInstallLeases = mysqlTable("shopify_install_leases", {
   shopDomain: varchar("shopDomain", { length: 253 }).primaryKey(),
@@ -597,13 +573,12 @@ export type ShopifyStatusReason = (typeof SHOPIFY_STATUS_REASONS)[number];
 
 export const SHOPIFY_ORDER_LED_SCOPES = ["read_orders"] as const;
 export const SHOPIFY_API_VERSION = "2026-07";
-export const SHOPIFY_OAUTH_STATE_TTL_MS = 10 * 60_000;
 export const SHOPIFY_ACCESS_TOKEN_REFRESH_SKEW_MS = 5 * 60_000;
 export const SHOPIFY_REFRESH_LEASE_MS = 60_000;
 /**
  * How long an install lease is held at most. Everything done under it is
- * bounded — the code exchange and metadata lookup each time out at 30s — so a
- * healthy callback finishes far inside this; the TTL only frees a shop whose
- * callback crashed mid-install.
+ * bounded — the token exchange and metadata lookup each time out at 30s — so a
+ * healthy installation finishes far inside this; the TTL only frees a shop whose
+ * installation crashed mid-way.
  */
 export const SHOPIFY_INSTALL_LEASE_MS = 5 * 60_000;

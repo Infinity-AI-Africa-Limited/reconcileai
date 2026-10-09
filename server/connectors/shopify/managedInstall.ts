@@ -79,8 +79,8 @@ export async function completeShopifyManagedInstall(params: {
   const lease = { shopDomain: identity.shopDomain, leaseId };
 
   try {
-    // A callback may have completed while this request waited for the lease. The
-    // lease serializes both legacy callbacks and managed exchanges, so after this
+    // Another installation may have completed while this request waited for the
+    // lease, which serializes every installation of a shop, so after this
     // second check no other installation can make the store active behind us.
     if (await hasActiveStore(db, identity.shopDomain))
       return { status: "already_connected" };

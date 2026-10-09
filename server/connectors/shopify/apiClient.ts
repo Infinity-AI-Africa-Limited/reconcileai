@@ -17,7 +17,7 @@ function endpointFor(shopDomain: string): string {
 /**
  * Minimal metadata lookup that deliberately omits order, customer and payment
  * fields. It obtains a store-owned contact address for the initial invited
- * administrator, rather than trusting a callback query parameter.
+ * administrator, rather than trusting a request's query parameter.
  */
 export async function fetchShopifyShopMetadata(params: {
   shopDomain: string;
