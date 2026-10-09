@@ -139,6 +139,9 @@ export const controlSourceContracts = mysqlTable("control_source_contracts", {
 }, (table) => [
   uniqueIndex("uq_control_source_contract_org_key_version").on(table.organizationId, table.sourceKey, table.version),
   index("idx_control_source_contract_org_status").on(table.organizationId, table.status),
+  // The default read order of controlEvidence.get, and the keyset it pages by.
+  // Without it every page filesorts the tenant's whole contract partition.
+  index("idx_control_source_contract_org_effective").on(table.organizationId, table.effectiveAt, table.id),
 ]);
 
 export type ControlSourceContract = typeof controlSourceContracts.$inferSelect;
@@ -175,6 +178,10 @@ export const controlBatchManifests = mysqlTable("control_batch_manifests", {
   uniqueIndex("uq_control_batch_manifest_contract_period_delivery").on(table.sourceContractId, table.controlPeriod, table.deliveryIdentity),
   index("idx_control_batch_manifest_org_period").on(table.organizationId, table.controlPeriod),
   index("idx_control_batch_manifest_contract").on(table.sourceContractId),
+  // The default read order of controlEvidence.get, and the keyset it pages by.
+  // Manifests accrue one row per source per period, so this partition is the
+  // one that grows without bound; paging it by filesort would not hold up.
+  index("idx_control_batch_manifest_org_received").on(table.organizationId, table.receivedAt, table.id),
 ]);
 
 export type ControlBatchManifest = typeof controlBatchManifests.$inferSelect;

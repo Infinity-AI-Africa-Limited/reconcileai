@@ -1,3 +1,16 @@
+/**
+ * controlEvidence — the tenant-scoped write boundary for a daily control.
+ *
+ * Every case runs through the REAL procedures and a scripted database that
+ * models transactions, so a rollback is an actual rollback: `committed()`
+ * excludes the operations of a transaction whose callback threw. The earlier
+ * harness replaced `transaction` with a plain callback runner, which cannot
+ * distinguish "saved" from "attempted and discarded" — the one property an
+ * evidence store most needs to hold.
+ *
+ * Portal and cross-tenant override refusals for these same procedures are
+ * rostered in server/portalOrgScope.test.ts, through their base procedure.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TRPCError } from "@trpc/server";
 
@@ -23,9 +36,15 @@ vi.mock("./shared", async importOriginal => ({
   logAuditStrict: state.audit,
 }));
 
+import { rowOf, scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
 import { controlEvidenceRouter } from "./controlEvidence";
 
 const organizationId = 42;
+const OTHER_TENANT = 60001;
+const CONTRACTS = "control_source_contracts";
+const MANIFESTS = "control_batch_manifests";
+const BATCHES = "upload_batches";
+
 const contract = {
   id: 41,
   organizationId,
@@ -68,7 +87,7 @@ const batchManifestInput = {
   sourceContractId: 41,
   controlPeriod: "2026-10-09",
   deliveryIdentity: "switch-settlement-2026-10-09-v1",
-  uploadBatchId: null,
+  uploadBatchId: null as number | null,
   receivedAt: "2026-10-09T16:45:00.000Z",
   mappingVersion: "mapping-v1",
   reconciliationPolicyVersion: "reconciliation-v1",
@@ -83,68 +102,56 @@ const batchManifestInput = {
   receivedCurrency: "NGN",
 };
 
-function sourceContractDb() {
-  const values = vi.fn(async () => [{ insertId: 71 }]);
-  const insert = vi.fn(() => ({ values }));
-  const tx = { insert };
-  return {
-    db: {
-      transaction: vi.fn(
-        async (run: (executor: typeof tx) => Promise<unknown>) => run(tx)
-      ),
+/** A database that answers the contract lookup, and optionally a batch lookup. */
+function evidenceDb(options: { batch?: unknown[]; insertId?: number } = {}) {
+  const fake = scriptedDb({
+    select: {
+      [CONTRACTS]: [[contract]],
+      ...(options.batch === undefined ? {} : { [BATCHES]: [options.batch] }),
     },
-    insert,
-    values,
-  };
+    insert: {
+      [CONTRACTS]: [options.insertId ?? 71],
+      [MANIFESTS]: [options.insertId ?? 72],
+    },
+  });
+  state.db = fake.db;
+  return fake;
 }
 
-function batchManifestDb() {
-  const select = vi.fn(() => ({
-    from: vi.fn(() => ({
-      where: vi.fn(() => ({
-        limit: vi.fn(async () => [contract]),
-      })),
-    })),
-  }));
-  const values = vi.fn(async () => [{ insertId: 72 }]);
-  const insert = vi.fn(() => ({ values }));
-  const tx = { select, insert };
-  return {
-    db: {
-      transaction: vi.fn(
-        async (run: (executor: typeof tx) => Promise<unknown>) => run(tx)
-      ),
-    },
-    select,
-    insert,
-    values,
-  };
+async function failureOf(run: () => Promise<unknown>) {
+  try {
+    await run();
+    return null;
+  } catch (error) {
+    return error instanceof TRPCError ? error : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: String(error) });
+  }
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  state.audit.mockResolvedValue(undefined);
   state.db = null;
 });
 
-describe("control evidence write boundary", () => {
-  it("records a tenant-owned source contract and its audit evidence in one transaction", async () => {
-    const { db, insert, values } = sourceContractDb();
-    state.db = db;
+describe("when an operations owner records a source contract", () => {
+  it("should save it against their own tenant and audit it inside the same transaction", async () => {
+    const fake = evidenceDb();
 
     await expect(
       caller().createSourceContract(sourceContractInput)
     ).resolves.toEqual({ id: 71 });
 
-    expect(insert).toHaveBeenCalledTimes(1);
-    expect(values).toHaveBeenCalledWith(
-      expect.objectContaining({
-        organizationId,
-        createdByUserId: 7,
-        sourceKey: "switch-settlement",
-        version: 1,
-        effectiveAt: new Date("2026-10-09T08:00:00.000Z"),
-      })
-    );
+    const write = fake.writes("insert", CONTRACTS);
+    expect(write).toHaveLength(1);
+    expect(rowOf(write[0])).toMatchObject({
+      organizationId,
+      createdByUserId: 7,
+      sourceKey: "switch-settlement",
+      version: 1,
+      effectiveAt: new Date("2026-10-09T08:00:00.000Z"),
+    });
+    // The audit row must be written by the same executor, or a rollback of the
+    // insert would leave an audit entry claiming evidence that is not there.
     expect(state.audit).toHaveBeenCalledWith(
       expect.objectContaining({
         organizationId,
@@ -153,27 +160,29 @@ describe("control evidence write boundary", () => {
         executor: expect.anything(),
       })
     );
+    expect(write[0]?.txId).not.toBeNull();
   });
+});
 
-  it("records a batch manifest only against a same-tenant active source contract and audits it", async () => {
-    const { db, select, insert, values } = batchManifestDb();
-    state.db = db;
+describe("when an operations owner records a batch manifest", () => {
+  it("should bind it to a same-tenant source contract and carry that contract's version", async () => {
+    const fake = evidenceDb();
 
     await expect(
       caller().recordBatchManifest(batchManifestInput)
     ).resolves.toEqual({ id: 72 });
 
-    expect(select).toHaveBeenCalledTimes(1);
-    expect(insert).toHaveBeenCalledTimes(1);
-    expect(values).toHaveBeenCalledWith(
-      expect.objectContaining({
+    const lookup = fake.ops.find(op => op.kind === "select" && op.table === CONTRACTS);
+    // Scoped by tenant as well as id: an id alone would reach another tenant's
+    // contract and bind this manifest to it.
+    expect(lookup?.where?.params).toEqual(expect.arrayContaining([41, organizationId]));
+    expect(rowOf(fake.writes("insert", MANIFESTS)[0])).toMatchObject({
       organizationId,
       recordedByUserId: 7,
       sourceContractId: 41,
       sourceContractVersion: 1,
       deliveryIdentity: "switch-settlement-2026-10-09-v1",
-      })
-    );
+    });
     expect(state.audit).toHaveBeenCalledWith(
       expect.objectContaining({
         organizationId,
@@ -184,31 +193,144 @@ describe("control evidence write boundary", () => {
     );
   });
 
-  it("refuses non-operational roles before it accesses the database", async () => {
-    const refusal = await caller("compliance")
-      .createSourceContract(sourceContractInput)
-      .catch(error => error);
-    expect(refusal).toBeInstanceOf(TRPCError);
-    expect((refusal as TRPCError).code).toBe("FORBIDDEN");
+  it("should not look for an upload batch when the manifest names none", async () => {
+    const fake = evidenceDb();
+
+    await caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: null });
+
+    expect(fake.ops.some(op => op.table === BATCHES)).toBe(false);
+  });
+});
+
+describe("when a batch manifest names an upload batch", () => {
+  it("should save it once that upload has completed", async () => {
+    const fake = evidenceDb({ batch: [{ id: 88, status: "completed" }] });
+
+    await expect(
+      caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 88 })
+    ).resolves.toEqual({ id: 72 });
+
+    expect(rowOf(fake.writes("insert", MANIFESTS)[0])).toMatchObject({ uploadBatchId: 88 });
+  });
+
+  it("should look the upload up by tenant as well as id, so another tenant's batch is simply absent", async () => {
+    // The foreign-tenant case IS this query: scoped by organizationId, a batch
+    // belonging to tenant 60001 returns no row at all.
+    const fake = evidenceDb({ batch: [] });
+
+    const refusal = await failureOf(() =>
+      caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 88 })
+    );
+
+    expect(refusal?.code).toBe("NOT_FOUND");
+    const lookup = fake.ops.find(op => op.kind === "select" && op.table === BATCHES);
+    expect(lookup?.where?.params).toEqual(expect.arrayContaining([88, organizationId]));
+    expect(lookup?.where?.params).not.toContain(OTHER_TENANT);
+    expect(fake.committed().some(op => op.kind === "insert")).toBe(false);
+  });
+
+  it("should refuse a missing upload batch and save nothing", async () => {
+    const fake = evidenceDb({ batch: [] });
+
+    const refusal = await failureOf(() =>
+      caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 404 })
+    );
+
+    expect(refusal?.code).toBe("NOT_FOUND");
+    expect(refusal?.message).toBe("Upload batch not found");
+    expect(fake.committed().some(op => op.kind === "insert")).toBe(false);
+  });
+
+  it.each(["pending", "processing", "failed"])(
+    "should refuse an upload still in %s, because unfinished rows are not evidence",
+    async status => {
+      const fake = evidenceDb({ batch: [{ id: 88, status }] });
+
+      const refusal = await failureOf(() =>
+        caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 88 })
+      );
+
+      expect(refusal?.code).toBe("PRECONDITION_FAILED");
+      expect(refusal?.message).toMatch(/completed upload batch/i);
+      expect(fake.committed().some(op => op.kind === "insert")).toBe(false);
+      expect(state.audit).not.toHaveBeenCalled();
+    }
+  );
+});
+
+describe("when the audit entry for a piece of evidence cannot be written", () => {
+  it("should leave no source contract saved", async () => {
+    const fake = evidenceDb();
+    state.audit.mockRejectedValue(new Error("audit chain unavailable"));
+
+    expect(await failureOf(() => caller().createSourceContract(sourceContractInput))).not.toBeNull();
+
+    // Attempted, then discarded: the operation is in `ops` but not in
+    // `committed()`, which is exactly the distinction that matters here.
+    expect(fake.writes("insert", CONTRACTS)).toHaveLength(0);
+    expect(fake.ops.some(op => op.kind === "insert" && op.table === CONTRACTS)).toBe(true);
+  });
+
+  it("should leave no batch manifest saved", async () => {
+    const fake = evidenceDb();
+    state.audit.mockRejectedValue(new Error("audit chain unavailable"));
+
+    expect(await failureOf(() => caller().recordBatchManifest(batchManifestInput))).not.toBeNull();
+
+    expect(fake.writes("insert", MANIFESTS)).toHaveLength(0);
+    expect(fake.ops.some(op => op.kind === "insert" && op.table === MANIFESTS)).toBe(true);
+  });
+});
+
+describe("when the database does not report the row it inserted", () => {
+  it("should refuse rather than audit evidence against a missing id", async () => {
+    // An entityId of 0 would be an audit entry pointing at nothing, while the
+    // caller was told the evidence had been recorded.
+    const fake = evidenceDb({ insertId: 0 });
+
+    const refusal = await failureOf(() => caller().createSourceContract(sourceContractInput));
+
+    expect(refusal?.code).toBe("INTERNAL_SERVER_ERROR");
+    expect(state.audit).not.toHaveBeenCalled();
+    expect(fake.committed().some(op => op.kind === "insert")).toBe(false);
+  });
+});
+
+describe("when the caller may not record control evidence", () => {
+  it("should refuse a non-operational role before it reaches the database", async () => {
+    const refusal = await failureOf(() => caller("compliance").createSourceContract(sourceContractInput));
+
+    expect(refusal?.code).toBe("FORBIDDEN");
     expect(state.db).toBeNull();
   });
 
-  it("returns a stable validation code rather than the control-policy detail", async () => {
-    const refusal = await caller()
-      .createSourceContract({ ...sourceContractInput, approvalReference: null })
-      .catch(error => error);
-    expect(refusal).toBeInstanceOf(TRPCError);
-    expect((refusal as TRPCError).code).toBe("BAD_REQUEST");
-    expect((refusal as TRPCError).message).toBe("invalid_control_evidence");
+  it("should refuse a guest even when their role would otherwise allow it", async () => {
+    const refusal = await failureOf(() =>
+      caller("admin", true).createSourceContract(sourceContractInput)
+    );
+
+    expect(refusal?.code).toBe("FORBIDDEN");
     expect(state.db).toBeNull();
   });
 
-  it("does not let an ordinary tenant user choose another organization", async () => {
-    const refusal = await caller("operations")
-      .createSourceContract({ ...sourceContractInput, organizationId: 60001 })
-      .catch(error => error);
-    expect(refusal).toBeInstanceOf(TRPCError);
-    expect((refusal as TRPCError).code).toBe("FORBIDDEN");
+  it("should refuse an ordinary tenant user naming another organisation", async () => {
+    const refusal = await failureOf(() =>
+      caller("operations").createSourceContract({ ...sourceContractInput, organizationId: OTHER_TENANT })
+    );
+
+    expect(refusal?.code).toBe("FORBIDDEN");
+    expect(state.db).toBeNull();
+  });
+});
+
+describe("when control policy refuses the evidence itself", () => {
+  it("should answer a stable code rather than the policy's wording", async () => {
+    const refusal = await failureOf(() =>
+      caller().createSourceContract({ ...sourceContractInput, approvalReference: null })
+    );
+
+    expect(refusal?.code).toBe("BAD_REQUEST");
+    expect(refusal?.message).toBe("invalid_control_evidence");
     expect(state.db).toBeNull();
   });
 });

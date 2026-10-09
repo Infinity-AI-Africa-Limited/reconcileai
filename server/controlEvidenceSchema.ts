@@ -24,9 +24,51 @@ const nullableCurrency = z
   .nullable();
 const decimal = z.string().trim().min(1).max(40);
 
+/**
+ * The most rows one `controlEvidence.get` may return per collection.
+ *
+ * Evidence accrues one manifest per source per control period, so a tenant
+ * running a handful of daily sources passes any fixed ceiling within months.
+ * A page is therefore a page: it is bounded, it says whether more exists, and
+ * it hands back the cursor that reaches the rest.
+ */
+export const CONTROL_EVIDENCE_PAGE_MAX = 200;
+export const CONTROL_EVIDENCE_PAGE_DEFAULT = 50;
+
+/**
+ * A keyset cursor. It names the last row of the page just read, so the next
+ * page starts strictly after it — stable while new evidence is being recorded,
+ * which OFFSET is not: an insert ahead of the window shifts every later row and
+ * silently skips one.
+ *
+ * It is not opaque, deliberately: a forged cursor can only move the window
+ * within the caller's own organisation, which the query scopes regardless, and
+ * an operator reading a support transcript can see where a page began.
+ */
+const contractCursorInput = z
+  .object({ effectiveAt: dateInput, id: z.number().int().positive() })
+  .strict();
+const manifestCursorInput = z
+  .object({ receivedAt: dateInput, id: z.number().int().positive() })
+  .strict();
+
 export const controlEvidenceScopeInput = z.object({
   organizationId: z.number().int().positive().optional(),
+  /** Index-backed by `idx_control_batch_manifest_org_period`. */
+  controlPeriod: nonEmptyText(64).optional(),
+  sourceContractId: z.number().int().positive().optional(),
+  sourceKey: nonEmptyText(100).optional(),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(CONTROL_EVIDENCE_PAGE_MAX)
+    .optional(),
+  contractCursor: contractCursorInput.optional(),
+  manifestCursor: manifestCursorInput.optional(),
 });
+
+export type ControlEvidenceScope = z.infer<typeof controlEvidenceScopeInput>;
 
 export const controlSourceContractInput = z.object({
   organizationId: z.number().int().positive().optional(),

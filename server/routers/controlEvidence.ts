@@ -20,13 +20,20 @@ import { getClientInfo } from "./shared";
  * declare a control ready; run orchestration is a later reviewed increment.
  */
 export const controlEvidenceRouter = router({
+  /**
+   * One bounded page per collection, with `hasMore` and a cursor. Older
+   * evidence is reached by `controlPeriod` or by following `nextCursor`;
+   * neither list is ever silently truncated.
+   */
   get: protectedProcedure
     .input(controlEvidenceScopeInput)
-    .query(({ ctx, input }) =>
-      listControlEvidence(
-        resolveControlEvidenceScope(ctx.user, input.organizationId)
-      )
-    ),
+    .query(({ ctx, input }) => {
+      const { organizationId: _requested, ...options } = input;
+      return listControlEvidence(
+        resolveControlEvidenceScope(ctx.user, input.organizationId),
+        options
+      );
+    }),
 
   createSourceContract: protectedProcedure
     .input(controlSourceContractInput)

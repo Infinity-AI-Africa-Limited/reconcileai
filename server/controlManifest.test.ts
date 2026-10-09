@@ -75,38 +75,38 @@ function manifestInput(
   };
 }
 
-describe("control source contract validation", () => {
-  it("accepts an approved, versioned source contract with an approval reference", () => {
+describe("when a source contract is validated", () => {
+  it("should accept an approved, versioned contract that carries an approval reference", () => {
     expect(() => validateSourceContract(contractInput())).not.toThrow();
   });
 
-  it("requires an approval reference before a contract leaves draft", () => {
+  it("should require an approval reference before a contract leaves draft", () => {
     expect(() =>
       validateSourceContract(contractInput({ approvalReference: null }))
     ).toThrow(/approval reference/i);
   });
 
-  it("does not allow a contract to claim required totals without a currency", () => {
+  it("should refuse a contract that claims required totals without a currency", () => {
     expect(() =>
       validateSourceContract(contractInput({ expectedCurrency: null }))
     ).toThrow(/expected currency/i);
   });
 
-  it("does not permit an expected currency where the contract says no total is required", () => {
+  it("should refuse an expected currency where no control total is required", () => {
     expect(() =>
       validateSourceContract(contractInput({ controlTotalRequired: false }))
     ).toThrow(/must be omitted/i);
   });
 });
 
-describe("control batch manifest validation", () => {
-  it("accepts exact expected and received totals bound to an active source contract", () => {
+describe("when a batch manifest is validated against its source contract", () => {
+  it("should accept exact expected and received totals against an active contract", () => {
     expect(() =>
       validateBatchManifest(manifestInput(), storedContract())
     ).not.toThrow();
   });
 
-  it("rejects a manifest against a draft source contract", () => {
+  it("should refuse a manifest against a draft source contract", () => {
     expect(() =>
       validateBatchManifest(
         manifestInput(),
@@ -115,7 +115,7 @@ describe("control batch manifest validation", () => {
     ).toThrow(/approved, tested, or active/i);
   });
 
-  it("rejects an expected currency that disagrees with the approved contract", () => {
+  it("should refuse an expected currency that disagrees with the approved contract", () => {
     expect(() =>
       validateBatchManifest(
         manifestInput({ expectedCurrency: "USD" }),
@@ -124,7 +124,7 @@ describe("control batch manifest validation", () => {
     ).toThrow(/match the approved source contract/i);
   });
 
-  it("rejects a JavaScript-number style total that is not an exact decimal string", () => {
+  it("should refuse a total that is not an exact decimal string", () => {
     expect(() =>
       validateBatchManifest(
         manifestInput({ receivedMonetaryTotal: "1,250.10" }),
@@ -133,7 +133,7 @@ describe("control batch manifest validation", () => {
     ).toThrow(ControlManifestValidationError);
   });
 
-  it("rejects expected totals when the contract does not require them", () => {
+  it("should refuse expected totals when the contract does not require them", () => {
     expect(() =>
       validateBatchManifest(
         manifestInput(),
