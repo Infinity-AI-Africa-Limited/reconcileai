@@ -124,6 +124,11 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   corporate_b2b_pilot_sources: "tenant_required",
   // Shared workflow/pilot evidence is tenant-owned from its first migration.
   control_fit_briefs: "tenant_required",
+  // Governed-control source contracts and batch manifests are customer control
+  // evidence, never platform reference data. They are tenant-required from the
+  // first migration and are read/written through an explicit org scope.
+  control_source_contracts: "tenant_required",
+  control_batch_manifests: "tenant_required",
   distributors: "tenant_nullable",
   agent_action_drafts: "tenant_nullable",
   agent_memory: "tenant_nullable",
