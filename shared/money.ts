@@ -68,6 +68,52 @@ export function parseMoney(raw: string | number | undefined | null): number | nu
   return parenNegative ? -Math.abs(n) : n;
 }
 
+/**
+ * An exact decimal: a whole number of units at a stated scale, so
+ * `{ units: 125010n, scale: 2 }` is 1250.10. Never a JS float.
+ */
+export interface ExactDecimal {
+  units: bigint;
+  scale: number;
+}
+
+/** No real money total needs more; a longer string is refused, not turned into a huge BigInt. */
+const MAX_EXACT_DECIMAL_LENGTH = 64;
+
+/**
+ * Read a CANONICAL decimal string exactly: the strict counterpart of
+ * `parseMoney`, for values a contract states rather than values a file happens
+ * to contain.
+ *
+ * `parseMoney` is lenient on purpose. It reads "₦1,250.10", "1.234,56" and
+ * "(12.30)" as real exports write them, and it returns a float. Neither suits
+ * a control total, which is agreed in advance and compared for equality:
+ * leniency would let a malformed contract value through, and a float cannot
+ * promise that two equal totals compare equal.
+ *
+ * Accepts an optional sign, digits, and a fraction of ANY length, because
+ * currencies differ: TND and LYD have three minor-unit digits, JPY none.
+ * Returns null for anything else, including a number, which has already been
+ * through a float by the time it arrives.
+ */
+export function parseExactDecimal(raw: unknown): ExactDecimal | null {
+  if (typeof raw !== "string" || raw.length > MAX_EXACT_DECIMAL_LENGTH) return null;
+  const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(raw.trim());
+  if (!match) return null;
+  const [, sign, whole, fraction = ""] = match;
+  const units = BigInt(whole + fraction);
+  return { units: sign === "-" ? -units : units, scale: fraction.length };
+}
+
+/** Exact equality at any scale: 1250.1, 1250.10 and 1250.100 are one amount. */
+export function exactDecimalsEqual(a: ExactDecimal, b: ExactDecimal): boolean {
+  const scale = Math.max(a.scale, b.scale);
+  return (
+    a.units * 10n ** BigInt(scale - a.scale) ===
+    b.units * 10n ** BigInt(scale - b.scale)
+  );
+}
+
 /** Parse a date, returning null (never an Invalid Date) when unreadable. */
 export function parseMoneyDate(raw: string | Date | undefined | null): Date | null {
   if (!raw) return null;
