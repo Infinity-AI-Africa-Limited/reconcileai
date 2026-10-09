@@ -132,6 +132,25 @@ describe("migration 0084 (exception ownership)", () => {
 });
 
 /**
+ * Executable SQL only.
+ *
+ * A migration header may legitimately NAME a forbidden construct while
+ * explaining why not to use it. Migration 0090's header does exactly that, and
+ * it tripped this guard in CI — the guard fired on the documentation telling
+ * people not to do the thing. Scanning raw text teaches readers to delete the
+ * explanation rather than fix the SQL.
+ *
+ * Only WHOLE-LINE comments are dropped. A trailing `-- note` after real DDL
+ * leaves that DDL on the line and still scannable, so this narrows what is
+ * examined without creating a place to hide a statement.
+ */
+const executableSql = (sql: string): string =>
+  sql
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n");
+
+/**
  * Engine portability.
  *
  * Migrations run against TWO engines, and they do not accept the same SQL:
@@ -163,25 +182,6 @@ describe("migration SQL portability", () => {
     },
   ];
 
-  /**
-   * Executable SQL only.
-   *
-   * A migration header may legitimately NAME a forbidden construct while
-   * explaining why not to use it. Migration 0090's header does exactly that, and
-   * it tripped this guard in CI — the guard fired on the documentation telling
-   * people not to do the thing. Scanning raw text teaches readers to delete the
-   * explanation rather than fix the SQL.
-   *
-   * Only WHOLE-LINE comments are dropped. A trailing `-- note` after real DDL
-   * leaves that DDL on the line and still scannable, so this narrows what is
-   * examined without creating a place to hide a statement.
-   */
-  const executableSql = (sql: string): string =>
-    sql
-      .split("\n")
-      .filter((line) => !line.trim().startsWith("--"))
-      .join("\n");
-
   it("should contain no TiDB-only syntax that MySQL would reject", () => {
     const offenders: string[] = [];
     for (const file of fs.readdirSync(DRIZZLE).filter((f) => f.endsWith(".sql"))) {
@@ -210,5 +210,45 @@ describe("migration SQL portability", () => {
 
   it("should still catch it when a trailing comment follows the statement", () => {
     expect(matches("CREATE INDEX IF NOT EXISTS `idx_y` ON `t` (`c`); -- added later")).toHaveLength(1);
+  });
+});
+
+/**
+ * A destructive statement must survive being run twice.
+ *
+ * MySQL commits DDL implicitly, so the migrator cannot make a migration's
+ * statements and its `__drizzle_migrations` row atomic. A deploy that dies
+ * between the two leaves the change made but unrecorded, and the next deploy
+ * runs it again — the trap CLAUDE.md §12 describes, seen from the other side.
+ * A retried `DROP TABLE` then fails on the table it already dropped, on every
+ * deploy that follows, and no new migration can fix that because this one
+ * still runs first.
+ *
+ * `DROP TABLE IF EXISTS` is a guard both MySQL 8.0 and TiDB accept (unlike
+ * `DROP INDEX IF EXISTS`, refused above).
+ */
+describe("when a migration drops a table", () => {
+  const UNGUARDED_DROP_TABLE = /\bDROP\s+(?:TEMPORARY\s+)?TABLE\s+(?!IF\s+EXISTS\b)/i;
+  const unguarded = (sql: string) => UNGUARDED_DROP_TABLE.test(executableSql(sql));
+
+  it("should guard it with IF EXISTS, so a deploy interrupted after the drop can be retried", () => {
+    const offenders = fs
+      .readdirSync(DRIZZLE)
+      .filter((file) => file.endsWith(".sql"))
+      .filter((file) => unguarded(fs.readFileSync(path.join(DRIZZLE, file), "utf8")));
+    expect(offenders).toEqual([]);
+  });
+
+  it("should flag an unguarded drop in any spelling", () => {
+    // The control that makes the test above evidence: a pattern that matched
+    // nothing would pass every migration.
+    expect(unguarded("DROP TABLE `shopify_oauth_states`;")).toBe(true);
+    expect(unguarded("drop  table t;")).toBe(true);
+    expect(unguarded("DROP TEMPORARY TABLE t;")).toBe(true);
+  });
+
+  it("should accept the guarded form, and a drop named only in a comment", () => {
+    expect(unguarded("DROP TABLE IF EXISTS `shopify_oauth_states`;")).toBe(false);
+    expect(unguarded("-- an unguarded DROP TABLE would be retried on a missing table")).toBe(false);
   });
 });

@@ -68,6 +68,7 @@
     "server/jobQueue.replaceFailed.test.ts",
     "server/jobQueue.statsTimeout.test.ts",
     "server/logSafety.test.ts",
+    "server/migrationIntegrity.test.ts",
     "server/queueHealthReporting.test.ts",
     "server/reconciliationEngine.direction.test.ts",
     "server/reversalSignals.test.ts",
