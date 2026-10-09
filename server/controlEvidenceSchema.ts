@@ -45,11 +45,23 @@ export const CONTROL_EVIDENCE_PAGE_DEFAULT = 50;
  * within the caller's own organisation, which the query scopes regardless, and
  * an operator reading a support transcript can see where a page began.
  */
+/**
+ * A cursor's position, as either form a caller can hold it in.
+ *
+ * `get` hands `nextCursor` back as an ISO string so it round-trips through
+ * plain JSON as well as through superjson. But superjson is this API's
+ * transformer, so a caller who builds a cursor from a returned ROW holds a real
+ * `Date` — and the first version of this schema took `z.string()` only, which
+ * answered BAD_REQUEST to exactly that. Both are accepted; both arrive as a
+ * Date.
+ */
+const cursorPosition = z.union([z.date(), dateInput]);
+
 const contractCursorInput = z
-  .object({ effectiveAt: dateInput, id: z.number().int().positive() })
+  .object({ effectiveAt: cursorPosition, id: z.number().int().positive() })
   .strict();
 const manifestCursorInput = z
-  .object({ receivedAt: dateInput, id: z.number().int().positive() })
+  .object({ receivedAt: cursorPosition, id: z.number().int().positive() })
   .strict();
 
 export const controlEvidenceScopeInput = z.object({

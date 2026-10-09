@@ -208,18 +208,29 @@ export async function listControlEvidence(
   return {
     organizationId,
     limit,
+    // The cursor goes back as an ISO string, not a Date: it is meant to be
+    // handed straight to the next call, and a string survives plain JSON as
+    // well as this API's superjson transformer. The input schema accepts
+    // either form, so a caller building a cursor from a returned row — where
+    // the dates ARE Dates — is not punished for it.
     sourceContracts: {
       rows: contracts.rows,
       hasMore: contracts.hasMore,
       nextCursor: contracts.nextCursor
-        ? { effectiveAt: contracts.nextCursor.at, id: contracts.nextCursor.id }
+        ? {
+            effectiveAt: contracts.nextCursor.at.toISOString(),
+            id: contracts.nextCursor.id,
+          }
         : null,
     },
     manifests: {
       rows: manifests.rows,
       hasMore: manifests.hasMore,
       nextCursor: manifests.nextCursor
-        ? { receivedAt: manifests.nextCursor.at, id: manifests.nextCursor.id }
+        ? {
+            receivedAt: manifests.nextCursor.at.toISOString(),
+            id: manifests.nextCursor.id,
+          }
         : null,
     },
   };

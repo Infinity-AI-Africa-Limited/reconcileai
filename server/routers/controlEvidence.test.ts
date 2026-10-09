@@ -323,6 +323,78 @@ describe("when the caller may not record control evidence", () => {
   });
 });
 
+describe("when a caller pages through the evidence", () => {
+  /**
+   * The chain, not the links. The store's own tests call it directly with Date
+   * objects and so never cross the router's Zod input — where the first version
+   * of the cursor schema took `z.string()` only and answered BAD_REQUEST to the
+   * very cursor `get` had just returned. Both callers' forms are exercised here.
+   */
+  function pagedDb(rows: number) {
+    const fake = scriptedDb({
+      select: {
+        [CONTRACTS]: [
+          Array.from({ length: rows }, (_, i) => ({
+            id: rows - i,
+            organizationId,
+            effectiveAt: new Date(Date.UTC(2026, 9, rows - i, 8, 0, 0)),
+          })),
+        ],
+        [MANIFESTS]: [
+          Array.from({ length: rows }, (_, i) => ({
+            id: rows - i,
+            organizationId,
+            receivedAt: new Date(Date.UTC(2026, 9, rows - i, 16, 0, 0)),
+          })),
+        ],
+      },
+    });
+    state.db = fake.db;
+    return fake;
+  }
+
+  it("should accept the cursor it just returned, unchanged", async () => {
+    pagedDb(3);
+    const first = await caller().get({ limit: 2 });
+    expect(first.manifests.hasMore).toBe(true);
+
+    pagedDb(3);
+    const next = await caller().get({
+      limit: 2,
+      contractCursor: first.sourceContracts.nextCursor ?? undefined,
+      manifestCursor: first.manifests.nextCursor ?? undefined,
+    });
+
+    expect(next.manifests.rows.length).toBeGreaterThan(0);
+  });
+
+  it("should also accept a cursor built from a returned row, whose dates are Dates", async () => {
+    // superjson is this API's transformer, so a row's `receivedAt` reaches a
+    // typed caller as a real Date. Rejecting that would make the obvious way to
+    // build a cursor the one that fails.
+    pagedDb(3);
+    const first = await caller().get({ limit: 2 });
+    const lastRow = first.manifests.rows[first.manifests.rows.length - 1];
+    expect(lastRow?.receivedAt).toBeInstanceOf(Date);
+
+    pagedDb(3);
+    await expect(
+      caller().get({
+        limit: 2,
+        manifestCursor: { receivedAt: lastRow?.receivedAt as Date, id: lastRow?.id as number },
+      })
+    ).resolves.toBeTruthy();
+  });
+
+  it("should refuse a limit beyond the page ceiling rather than silently clamp it", async () => {
+    pagedDb(1);
+
+    const refusal = await failureOf(() => caller().get({ limit: 5_000 }));
+
+    expect(refusal?.code).toBe("BAD_REQUEST");
+  });
+});
+
 describe("when control policy refuses the evidence itself", () => {
   it("should answer a stable code rather than the policy's wording", async () => {
     const refusal = await failureOf(() =>

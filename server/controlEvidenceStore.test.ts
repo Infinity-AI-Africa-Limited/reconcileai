@@ -121,8 +121,14 @@ describe("when more evidence exists than one page holds", () => {
     // Newest first: ids 3, 2 returned; 1 withheld. The cursor is row 2.
     const lastContract = page.sourceContracts.rows[1];
     const lastManifest = page.manifests.rows[1];
-    expect(page.sourceContracts.nextCursor).toEqual({ id: lastContract?.id, effectiveAt: lastContract?.effectiveAt });
-    expect(page.manifests.nextCursor).toEqual({ id: lastManifest?.id, receivedAt: lastManifest?.receivedAt });
+    expect(page.sourceContracts.nextCursor).toEqual({
+      id: lastContract?.id,
+      effectiveAt: lastContract?.effectiveAt.toISOString(),
+    });
+    expect(page.manifests.nextCursor).toEqual({
+      id: lastManifest?.id,
+      receivedAt: lastManifest?.receivedAt.toISOString(),
+    });
   });
 
   it("should never return a cursor for a page that ended the collection", async () => {
