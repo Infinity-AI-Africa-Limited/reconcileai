@@ -1,0 +1,101 @@
+import { TRPCError } from "@trpc/server";
+import { z } from "zod";
+import { CONTROL_SOURCE_CONTRACT_STATUSES } from "./controlManifest";
+import { resolveOrgScope } from "./_core/tenancy";
+
+const nonEmptyText = (max: number) => z.string().trim().min(1).max(max);
+const nullableText = (max: number) => nonEmptyText(max).nullable();
+const dateInput = z
+  .string()
+  .datetime({ offset: true })
+  .transform((value, ctx) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      ctx.addIssue({ code: "custom", message: "Invalid ISO date-time" });
+      return z.NEVER;
+    }
+    return date;
+  });
+const nullableCurrency = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z]{3}$/)
+  .transform(value => value.toUpperCase())
+  .nullable();
+const decimal = z.string().trim().min(1).max(40);
+
+export const controlEvidenceScopeInput = z.object({
+  organizationId: z.number().int().positive().optional(),
+});
+
+export const controlSourceContractInput = z.object({
+  organizationId: z.number().int().positive().optional(),
+  sourceKey: nonEmptyText(100),
+  version: z.number().int().positive(),
+  role: z.enum(["settlement", "internal_register", "bank_or_gl"]),
+  displayName: nonEmptyText(255),
+  systemName: nonEmptyText(255),
+  controlPurpose: nonEmptyText(2_000),
+  accountableOwner: nonEmptyText(255),
+  escalationOwner: nonEmptyText(255),
+  deliveryRoute: nonEmptyText(64),
+  timeZone: nonEmptyText(64),
+  cutoffMinutes: z.number().int().min(0).max(1_439),
+  schemaVersion: nonEmptyText(128),
+  controlTotalRequired: z.boolean(),
+  expectedCurrency: nullableCurrency,
+  status: z.enum(CONTROL_SOURCE_CONTRACT_STATUSES),
+  approvalReference: nullableText(255),
+  effectiveAt: dateInput,
+});
+
+export const controlBatchManifestInput = z.object({
+  organizationId: z.number().int().positive().optional(),
+  sourceContractId: z.number().int().positive(),
+  controlPeriod: nonEmptyText(64),
+  deliveryIdentity: nonEmptyText(255),
+  uploadBatchId: z.number().int().positive().nullable(),
+  receivedAt: dateInput,
+  mappingVersion: nonEmptyText(128),
+  reconciliationPolicyVersion: nonEmptyText(128),
+  schemaState: z.enum(["accepted", "rejected", "unknown"]),
+  duplicateDelivery: z.enum(["none", "deduplicated", "rejected"]),
+  invalidRowCount: z.number().int().min(0),
+  expectedRecordCount: z.number().int().min(0).nullable(),
+  expectedMonetaryTotal: decimal.nullable(),
+  expectedCurrency: nullableCurrency,
+  receivedRecordCount: z.number().int().min(0),
+  receivedMonetaryTotal: decimal,
+  receivedCurrency: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{3}$/)
+    .transform(value => value.toUpperCase()),
+});
+
+export type ControlEvidenceActor = {
+  id: number;
+  role: string;
+  organizationId: number | null;
+  isGuest?: boolean | null;
+};
+
+export function assertControlEvidenceWriter(actor: ControlEvidenceActor): void {
+  if (
+    actor.isGuest ||
+    !["super_admin", "admin", "cfo", "operations"].includes(actor.role)
+  ) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message:
+        "Only an administrator, CFO, or operations owner can record control evidence.",
+    });
+  }
+}
+
+export function resolveControlEvidenceScope(
+  actor: ControlEvidenceActor,
+  requested?: number
+): number {
+  return resolveOrgScope(actor, requested);
+}
