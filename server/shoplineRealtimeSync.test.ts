@@ -53,6 +53,10 @@ const done = { error: undefined, ordersIngested: 1, paymentsIngested: 1, matched
 
 beforeEach(async () => {
   await __resetRealtimeQueue();
+  // In-process, always: with REDIS_URL set these would open the PRODUCTION
+  // queue name on that Redis, where fake timers cannot move jobs and the mocked
+  // worker could consume an app's real requests.
+  vi.stubEnv("REDIS_URL", "");
   queueFaults.create = false;
   queueFaults.enqueue = false;
   vi.useFakeTimers();
@@ -64,6 +68,7 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   await __resetRealtimeQueue();
+  vi.unstubAllEnvs();
 });
 
 describe("when a webhook topic is or is not a reconciliation event", () => {

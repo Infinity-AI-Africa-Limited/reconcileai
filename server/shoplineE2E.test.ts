@@ -253,6 +253,10 @@ function makeOrderPaidPayload(orderId = "SL_ORDER_001") {
 
 beforeEach(async () => {
   await __resetRealtimeQueue();
+  // In-process, always: with REDIS_URL set these would open the PRODUCTION
+  // queue name on that Redis, where fake timers cannot move jobs and the mocked
+  // worker could consume an app's real requests.
+  vi.stubEnv("REDIS_URL", "");
   vi.useFakeTimers();
   runSyncCycleMock.mockClear();
   storedWebhookIds = new Set();
@@ -270,11 +274,12 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.useRealTimers();
   await __resetRealtimeQueue();
+  vi.unstubAllEnvs();
 });
 
 // ─── A0. Durable admission ────────────────────────────────────────────────────
 
-describe("A0. A delivery is durable before it is acknowledged", () => {
+describe("when a delivery is admitted, before it is acknowledged", () => {
   it("should return the stored event id from admission, without processing it", async () => {
     // The HTTP receiver acks between these two halves. Admission therefore has
     // to be complete on its own — if it returned before the insert, a 200 would
@@ -347,7 +352,7 @@ describe("A0. A delivery is durable before it is acknowledged", () => {
 
 // ─── A1. Recovery for admitted-but-unfinished events ──────────────────────────
 
-describe("A1. An admitted delivery that never finished is recovered", () => {
+describe("when an admitted delivery never finished", () => {
   function stalledRow(over: Partial<Record<string, unknown>> = {}) {
     return {
       id: 7001,
@@ -456,8 +461,8 @@ describe("A1. An admitted delivery that never finished is recovered", () => {
 
 // ─── A. Happy Path ────────────────────────────────────────────────────────────
 
-describe("A. Happy path — paid order → webhook → sync → Settlement Monitor data", () => {
-  it("ingestWebhook returns 'processed' for a valid orders/paid webhook", async () => {
+describe("when a paid order's webhook arrives (happy path)", () => {
+  it("should report a valid orders/paid webhook as processed", async () => {
     // Simulate no duplicate (first delivery)
     mockDb.limit.mockImplementationOnce(async () => [mockStore]) // store lookup
       .mockImplementationOnce(async () => []); // duplicate check
@@ -471,7 +476,7 @@ describe("A. Happy path — paid order → webhook → sync → Settlement Monit
     }
   });
 
-  it("scheduleReconciliation is called after a valid orders/paid webhook", async () => {
+  it("should queue the store's sync, and run it only when the window closes", async () => {
     mockDb.limit.mockImplementationOnce(async () => [mockStore])
       .mockImplementationOnce(async () => []);
 
@@ -486,7 +491,7 @@ describe("A. Happy path — paid order → webhook → sync → Settlement Monit
     );
   });
 
-  it("runSyncCycle is called exactly once after the coalescing window", async () => {
+  it("should run the store's sync exactly once when the window closes", async () => {
     scheduleReconciliation(7, 42, "orders/paid");
 
     expect(runSyncCycleMock).not.toHaveBeenCalled();
@@ -498,7 +503,7 @@ describe("A. Happy path — paid order → webhook → sync → Settlement Monit
     );
   });
 
-  it("syncStatus reflects updated data after a sync completes", async () => {
+  it("should reflect the completed sync in syncStatus", async () => {
     // Simulate the sync cycle completing with 1 order matched
     const report = await runSyncCycleMock({
       organizationId: 7,
@@ -519,8 +524,8 @@ describe("A. Happy path — paid order → webhook → sync → Settlement Monit
 
 // ─── B. Duplicate Webhook ─────────────────────────────────────────────────────
 
-describe("B. Duplicate webhook — idempotency", () => {
-  it("returns 'duplicate' when the same webhook-id is delivered twice", async () => {
+describe("when the same webhook is delivered twice", () => {
+  it("should report the second delivery as a duplicate", async () => {
     const webhookId = "wh_idempotency_test_001";
 
     // First delivery: store found, no duplicate
@@ -543,7 +548,7 @@ describe("B. Duplicate webhook — idempotency", () => {
     }
   });
 
-  it("does NOT schedule a second reconciliation for a duplicate webhook", async () => {
+  it("should not schedule a second reconciliation for the duplicate", async () => {
     const webhookId = "wh_idempotency_test_002";
 
     // First delivery
@@ -566,8 +571,8 @@ describe("B. Duplicate webhook — idempotency", () => {
 
 // ─── C. Invalid HMAC ──────────────────────────────────────────────────────────
 
-describe("C. Invalid HMAC — webhook rejected before any DB write", () => {
-  it("returns 'invalid_signature' for a tampered payload", async () => {
+describe("when a webhook's signature is invalid", () => {
+  it("should report a tampered payload as invalid_signature", async () => {
     const payload = makeOrderPaidPayload();
     const rawBody = Buffer.from(JSON.stringify(payload), "utf8");
     // Use a wrong secret to generate the HMAC
@@ -585,7 +590,7 @@ describe("C. Invalid HMAC — webhook rejected before any DB write", () => {
     expect(result.status).toBe("invalid_signature");
   });
 
-  it("does NOT write to the DB when signature is invalid", async () => {
+  it("should write nothing to the database", async () => {
     const insertSpy = vi.spyOn(mockDb, "insert");
     const payload = makeOrderPaidPayload();
     const rawBody = Buffer.from(JSON.stringify(payload), "utf8");
@@ -602,7 +607,7 @@ describe("C. Invalid HMAC — webhook rejected before any DB write", () => {
     expect(insertSpy).not.toHaveBeenCalled();
   });
 
-  it("does NOT schedule reconciliation for an invalid webhook", async () => {
+  it("should schedule no reconciliation", async () => {
     const payload = makeOrderPaidPayload();
     const rawBody = Buffer.from(JSON.stringify(payload), "utf8");
     const badHmac = "invalid-hmac-value";
@@ -622,13 +627,13 @@ describe("C. Invalid HMAC — webhook rejected before any DB write", () => {
 
 // ─── D. Refund Path ───────────────────────────────────────────────────────────
 
-describe("D. Refund path — refunds/create triggers reconciliation", () => {
-  it("isReconciliationTrigger returns true for refunds/create", () => {
+describe("when a refund webhook arrives", () => {
+  it("should treat refunds/create and refunds/update as triggers", () => {
     expect(isReconciliationTrigger("refunds/create")).toBe(true);
     expect(isReconciliationTrigger("refunds/update")).toBe(true);
   });
 
-  it("a refund webhook triggers one sync when its window closes, not before", async () => {
+  it("should trigger one sync when its window closes, not before", async () => {
     scheduleReconciliation(7, 42, "refunds/create");
     await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS - 1_000);
     expect(runSyncCycleMock).not.toHaveBeenCalled();
@@ -639,8 +644,8 @@ describe("D. Refund path — refunds/create triggers reconciliation", () => {
 
 // ─── E. Subscription Gate ─────────────────────────────────────────────────────
 
-describe("E. Subscription gate — expired subscription blocks sync", () => {
-  it("runSyncCycle returns an error report when subscription is expired", async () => {
+describe("when the store's subscription gates the sync", () => {
+  it("should block the sync when the subscription has expired", async () => {
     subscriptionBlocked = true;
     // Temporarily override the mock to use the real syncOrchestrator logic
     // We test the gate logic directly via the mock
@@ -650,7 +655,7 @@ describe("E. Subscription gate — expired subscription blocks sync", () => {
     expect(gate.status).toBe("expired");
   });
 
-  it("sync is NOT blocked when subscription is active", async () => {
+  it("should not block the sync when the subscription is active", async () => {
     subscriptionBlocked = false;
     const { isSyncBlockedBySubscription } = await import("./connectors/shopline/billingWebhook");
     const gate = await isSyncBlockedBySubscription(mockDb as never, 42);
@@ -660,8 +665,8 @@ describe("E. Subscription gate — expired subscription blocks sync", () => {
 
 // ─── F. Debounce Coalescing ───────────────────────────────────────────────────
 
-describe("F. Coalescing — burst of webhooks → exactly 1 sync", () => {
-  it("10 rapid orders/paid webhooks produce exactly 1 runSyncCycle call", async () => {
+describe("when a burst of webhooks arrives", () => {
+  it("should run exactly one sync for 10 rapid orders/paid webhooks", async () => {
     for (let i = 0; i < 10; i++) {
       scheduleReconciliation(7, 42, "orders/paid");
     }
@@ -670,7 +675,7 @@ describe("F. Coalescing — burst of webhooks → exactly 1 sync", () => {
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
   });
 
-  it("50 rapid webhooks across 3 topics still produce exactly 1 sync", async () => {
+  it("should still run exactly one sync for 50 webhooks across 3 topics", async () => {
     const topics = ["orders/paid", "orders/updated", "order_transactions/create"];
     for (let i = 0; i < 50; i++) {
       scheduleReconciliation(7, 42, topics[i % 3]);
@@ -679,7 +684,7 @@ describe("F. Coalescing — burst of webhooks → exactly 1 sync", () => {
     expect(runSyncCycleMock).toHaveBeenCalledTimes(1);
   });
 
-  it("two different stores each get their own sync (no cross-store coalescing)", async () => {
+  it("should give two stores a sync each, never coalescing across stores", async () => {
     scheduleReconciliation(7, 42, "orders/paid");
     scheduleReconciliation(8, 99, "orders/paid");
     await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
@@ -692,8 +697,8 @@ describe("F. Coalescing — burst of webhooks → exactly 1 sync", () => {
 
 // ─── G. In-Flight Guard ───────────────────────────────────────────────────────
 
-describe("G. In-flight guard — webhook during active sync queues one rerun", () => {
-  it("events during an active sync trigger exactly one follow-up sync", async () => {
+describe("when webhooks arrive during an active sync", () => {
+  it("should trigger at most one follow-up sync", async () => {
     // Start a sync
     scheduleReconciliation(7, 42, "orders/paid");
     await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 100);
@@ -714,34 +719,34 @@ describe("G. In-flight guard — webhook during active sync queues one rerun", (
 
 // ─── H. Topic Filter ─────────────────────────────────────────────────────────
 
-describe("H. Topic filter — only reconciliation-relevant topics trigger sync", () => {
-  it("all RECONCILIATION_TRIGGER_TOPICS are recognised", () => {
+describe("when a webhook's topic may or may not be a reconciliation event", () => {
+  it("should recognise every RECONCILIATION_TRIGGER_TOPICS entry", () => {
     for (const topic of RECONCILIATION_TRIGGER_TOPICS) {
       expect(isReconciliationTrigger(topic)).toBe(true);
     }
   });
 
-  it("orders/create does NOT trigger reconciliation (order is unpaid at creation)", () => {
+  it("should not trigger on orders/create (the order is unpaid at creation)", () => {
     expect(isReconciliationTrigger("orders/create")).toBe(false);
   });
 
-  it("GDPR topics do NOT trigger reconciliation", () => {
+  it("should not trigger on GDPR topics", () => {
     for (const topic of ["customers/redact", "shop/redact", "customers/data_request"]) {
       expect(isReconciliationTrigger(topic)).toBe(false);
     }
   });
 
-  it("billing topics do NOT trigger reconciliation", () => {
+  it("should not trigger on billing topics", () => {
     for (const topic of ["appsubscription/create", "appsubscription/paid", "appsubscription/expiration"]) {
       expect(isReconciliationTrigger(topic)).toBe(false);
     }
   });
 
-  it("orders/delete does NOT trigger reconciliation", () => {
+  it("should not trigger on orders/delete", () => {
     expect(isReconciliationTrigger("orders/delete")).toBe(false);
   });
 
-  it("non-trigger topics queue no sync", async () => {
+  it("should queue no sync for a non-trigger topic", async () => {
     scheduleReconciliation(7, 42, "orders/create");
     scheduleReconciliation(7, 42, "customers/redact");
     await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS * 3);
@@ -751,8 +756,8 @@ describe("H. Topic filter — only reconciliation-relevant topics trigger sync",
 
 // ─── I. Store Not Found ───────────────────────────────────────────────────────
 
-describe("I. Store not found — webhook for unknown store is handled gracefully", () => {
-  it("returns 'store_not_found' when the shop domain is not in the DB", async () => {
+describe("when a webhook names a store that is not in the database", () => {
+  it("should report store_not_found", async () => {
     // Store lookup returns empty array
     mockDb.limit.mockImplementationOnce(async () => []);
 
@@ -762,7 +767,7 @@ describe("I. Store not found — webhook for unknown store is handled gracefully
     expect(result.status).toBe("store_not_found");
   });
 
-  it("does NOT schedule reconciliation for an unknown store", async () => {
+  it("should schedule no reconciliation for it", async () => {
     mockDb.limit.mockImplementationOnce(async () => []);
 
     const webhook = makeSignedWebhook("orders/paid", makeOrderPaidPayload());
@@ -775,8 +780,8 @@ describe("I. Store not found — webhook for unknown store is handled gracefully
 
 // ─── J. Steady stream ─────────────────────────────────────────────────────────
 
-describe("J. A steady stream is serviced once per window, never starved", () => {
-  it("syncs once per window while events keep arriving, never closer together", async () => {
+describe("when a steady stream of events never stops", () => {
+  it("should sync once per window, never closer together, and never be starved", async () => {
     // An event every 5 seconds for 80 seconds. The window opens at the first
     // event and does not move, so the stream cannot hold the sync back — and
     // the store is never synced more often than once per window.

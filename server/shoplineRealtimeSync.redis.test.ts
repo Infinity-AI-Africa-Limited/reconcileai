@@ -47,7 +47,7 @@ async function until(check: () => boolean, label: string, timeoutMs = 8000): Pro
   throw new Error(`timed out waiting for ${label}`);
 }
 
-describe.skipIf(!REDIS_URL)("the SHOPLINE realtime trigger on BullMQ, across two instances", () => {
+describe.skipIf(!REDIS_URL)("when two instances share one Redis", () => {
   const instances: Array<JobQueue<ShoplineRealtimeSyncPayload>> = [];
 
   afterAll(async () => {

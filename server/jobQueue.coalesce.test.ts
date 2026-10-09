@@ -163,7 +163,7 @@ describe.skipIf(!REDIS_URL)("coalesceKey on the bullmq backend, before a run has
   });
 });
 
-describe("delayMs on the in-process backend", () => {
+describe("when a request is delayed on the in-process backend", () => {
   // Fake timers, not real ones: the property is about WHEN work runs, and a
   // margin on a loaded runner is how a timing test becomes a flake.
   afterEach(() => {

@@ -15,6 +15,8 @@
  * So these pin the request, and the real-Redis test
  * (shoplineRealtimeSync.redis.test.ts) pins the behaviour.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const bull = vi.hoisted(() => ({
@@ -50,6 +52,7 @@ import {
   COALESCE_WINDOW_MS,
   realtimeCoalesceKey,
   scheduleReconciliation,
+  startShoplineRealtimeWorker,
 } from "./connectors/shopline/realtimeSync";
 
 /** Wait for the background enqueue that scheduleReconciliation starts. */
@@ -120,5 +123,39 @@ describe("when an instance's worker picks up a store's job", () => {
     expect(bull.workers[0].opts).toMatchObject({ concurrency: 4 });
     await bull.workers[0].processor({ name: "store-42", data: bull.adds[0].data, attemptsMade: 0 });
     expect(runSyncCycle).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 7, slStoreId: 42 }));
+  });
+});
+
+describe("when an instance boots", () => {
+  /** Wait for the worker the boot hook builds in the background. */
+  async function workers(count: number): Promise<void> {
+    for (let i = 0; i < 50 && bull.workers.length < count; i++) await new Promise(r => setTimeout(r, 5));
+  }
+
+  it("should start its worker with no webhook, so requests saved before a restart resume", async () => {
+    // The 15-minute poll runs syncs directly and never drains this queue, so
+    // without a worker a saved delayed job would wait for the next webhook.
+    startShoplineRealtimeWorker();
+    await workers(1);
+
+    expect(bull.workers).toHaveLength(1);
+    expect(bull.adds).toHaveLength(0);
+  });
+
+  it("should start one worker however often it is asked", async () => {
+    startShoplineRealtimeWorker();
+    startShoplineRealtimeWorker();
+    scheduleReconciliation(7, 42, "orders/paid");
+    await settled(1);
+
+    expect(bull.workers).toHaveLength(1);
+  });
+
+  it("should be started by the server's boot sequence", () => {
+    const boot = fs.readFileSync(path.join(__dirname, "_core/index.ts"), "utf8");
+    const hook = boot.indexOf('import("../connectors/shopline/realtimeSync")');
+    expect(hook).toBeGreaterThan(-1);
+    // The call belongs to that import, not to some other mention of the name.
+    expect(boot.slice(hook, hook + 160)).toContain(".then((r) => r.startShoplineRealtimeWorker())");
   });
 });

@@ -153,6 +153,23 @@ function realtimeQueue(): Promise<JobQueue<ShoplineRealtimeSyncPayload>> {
 }
 
 /**
+ * Start this instance's worker at boot, so delayed requests saved in Redis
+ * before a restart resume without waiting for the next webhook. The 15-minute
+ * poll calls runSyncCycle directly and never drains this queue, so without
+ * this they sat idle.
+ *
+ * Fire-and-forget, and it awaits no Redis connection: BullMQ connects in the
+ * background, and nothing may hold up `server.listen` on Redis (CLAUDE.md §10).
+ */
+export function startShoplineRealtimeWorker(): void {
+  realtimeQueue().catch(err =>
+    console.error("[shopline-realtime] worker could not start; saved requests wait for the next webhook", {
+      ...loggableError(err),
+    })
+  );
+}
+
+/**
  * Test seam: drop the queue so the next request builds a fresh one. A test
  * that leaves work behind would otherwise share it with the next.
  */
