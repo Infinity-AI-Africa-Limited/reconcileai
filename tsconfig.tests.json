@@ -18,6 +18,7 @@
   },
   "include": [],
   "files": [
+    ".github/scripts/startTestMysql.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/useDailyControlReadiness.test.ts",
     "client/src/lib/shopifyAppBridge.test.ts",

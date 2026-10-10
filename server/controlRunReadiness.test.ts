@@ -264,6 +264,111 @@ describe("when a source contract took effect after the day being assessed", () =
   });
 });
 
+describe("when a source was retired after the day being assessed", () => {
+  // Lagos is UTC+1 year round: a 18:00 local cut-off on the 8th is
+  // 2026-10-08T17:00:00Z. The day is assessed on the 10th.
+  const EIGHTH = "2026-10-08";
+  const ON_THE_TENTH = new Date("2026-10-10T09:00:00.000Z");
+  const cutoffOnTheEighth = new Date("2026-10-08T17:00:00.000Z");
+
+  const retired = (retiredAt: Date | null) =>
+    contract({
+      status: "retired",
+      effectiveAt: new Date("2026-10-01T08:00:00.000Z"),
+      retiredAt,
+    });
+
+  const assessEighth = (contracts: PersistedSourceContract[]) =>
+    assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: contracts,
+    });
+
+  it("should still require a source that was retired after that day's cut-off", () => {
+    // The dangerous direction. Dropped by status alone, the 8th read COMPLETE
+    // with a source that was genuinely required on it simply absent — a false
+    // pass, where requiring a source too early is only a false block.
+    const result = assessEighth([
+      retired(new Date("2026-10-10T08:00:00.000Z")),
+    ]);
+
+    expect(result.sourceContractCount).toBe(1);
+    expect(result.persistenceReasons).not.toContain(
+      "no_eligible_source_contracts"
+    );
+    expect(result.status).toBe("blocked");
+  });
+
+  it("should not require a source that was already retired before that day's cut-off", () => {
+    const result = assessEighth([
+      retired(new Date("2026-10-07T08:00:00.000Z")),
+    ]);
+
+    expect(result.sourceContractCount).toBe(0);
+    expect(result.persistenceReasons).toContain("no_eligible_source_contracts");
+  });
+
+  it("should treat the cut-off instant itself as already retired", () => {
+    // Retired AT the cut-off means it was not in service for that deadline.
+    // Strict comparison, and the boundary is where an off-by-one would hide.
+    expect(assessEighth([retired(cutoffOnTheEighth)]).sourceContractCount).toBe(
+      0
+    );
+    expect(
+      assessEighth([retired(new Date(cutoffOnTheEighth.getTime() + 60_000))])
+        .sourceContractCount
+    ).toBe(1);
+  });
+
+  it("should not require a retired source whose retirement carries no date", () => {
+    // Nothing retires a contract yet, so every retired row today is one that
+    // was CREATED retired — never in effect. Unchanged behaviour, and it fails
+    // closed: including on uncertainty would demand evidence for a source that
+    // may never have been required.
+    const result = assessEighth([retired(null)]);
+
+    expect(result.sourceContractCount).toBe(0);
+    expect(result.persistenceReasons).toContain("no_eligible_source_contracts");
+  });
+
+  it("should not require a retired source whose cut-off cannot be resolved", () => {
+    // A live contract is KEPT here, so `invalid_source_cutoff` still reports a
+    // misconfiguration. A retired one is not: it must never be the reason a
+    // day blocks, since it may not have been required at all.
+    const result = assessEighth([
+      contract({
+        status: "retired",
+        timeZone: "not/a-zone",
+        effectiveAt: new Date("2026-10-01T08:00:00.000Z"),
+        retiredAt: new Date("2026-10-10T08:00:00.000Z"),
+      }),
+    ]);
+
+    expect(result.sourceContractCount).toBe(0);
+    expect(result.persistenceReasons).not.toContain("invalid_source_cutoff");
+  });
+
+  it("should leave a live source unaffected by the retirement test", () => {
+    const result = assessOn({
+      controlPeriod: EIGHTH,
+      evaluatedAt: ON_THE_TENTH,
+      sourceContracts: [
+        contract({ effectiveAt: new Date("2026-10-01T08:00:00.000Z") }),
+      ],
+      batchManifests: [
+        manifest({
+          controlPeriod: EIGHTH,
+          receivedAt: new Date("2026-10-08T16:45:00.000Z"),
+        }),
+      ],
+    });
+
+    expect(result.sourceContractCount).toBe(1);
+    expect(result.status).toBe("ready_to_reconcile");
+  });
+});
+
 describe("when a source cut-off falls in a daylight-saving transition", () => {
   // America/New_York, verified against Intl: the 2026 transitions are
   // 2026-03-08T07:00Z (−5 → −4) and 2026-11-01T06:00Z (−4 → −5).

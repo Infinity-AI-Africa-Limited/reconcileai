@@ -1,8 +1,8 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "1a356f38-7f75-44e0-a811-f204d8407ece",
-  "prevId": "cba1470b-363a-438d-82c2-1776ba4c3f2a",
+  "id": "84873f1d-9d7d-4bd0-a4df-21eda67c8267",
+  "prevId": "1a356f38-7f75-44e0-a811-f204d8407ece",
   "tables": {
     "agent_action_drafts": {
       "name": "agent_action_drafts",
@@ -3669,6 +3669,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "channelId": {
+          "name": "channelId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "sourceKey": {
           "name": "sourceKey",
           "type": "varchar(100)",
@@ -3837,6 +3844,14 @@
           "columns": [
             "organizationId",
             "status"
+          ],
+          "isUnique": false
+        },
+        "idx_control_source_contract_org_channel": {
+          "name": "idx_control_source_contract_org_channel",
+          "columns": [
+            "organizationId",
+            "channelId"
           ],
           "isUnique": false
         },

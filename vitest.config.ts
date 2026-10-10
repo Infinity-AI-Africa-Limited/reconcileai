@@ -31,6 +31,11 @@ export default defineConfig({
       // can write to production is only as safe as the check that stops it, and
       // an uncollected test is the same as no test.
       "scripts/**/*.test.ts",
+      // CI's own shell scripts. start-test-mysql.sh exists entirely for the
+      // case where a registry is down, so a healthy pipeline proves none of
+      // its behaviour — the retry, the attempt caps, the container log. Those
+      // are exercised here against a fake `docker`.
+      ".github/scripts/**/*.test.ts",
     ],
   },
 });

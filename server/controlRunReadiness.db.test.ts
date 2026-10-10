@@ -9,7 +9,10 @@ vi.mock("./db", async importOriginal => ({
 }));
 
 import { scriptedDb } from "./connectors/shopify/scriptedDb.testkit";
-import { assessPersistedControlRun } from "./controlRunReadiness";
+import {
+  ASSESSABLE_CONTRACT_STATUSES,
+  assessPersistedControlRun,
+} from "./controlRunReadiness";
 
 const organizationId = 42;
 const period = "2026-10-09";
@@ -122,6 +125,93 @@ describe("when the business day assessed is not the day it is assessed on", () =
     // assertion pass or fail depending on where it runs; drizzle renders in
     // UTC, so the string itself is the stable thing to compare.
     expect(contractQuery?.where?.params.at(-1)).toBe("2026-10-09 14:00:00.000");
+  });
+});
+
+describe("when a source has since been retired", () => {
+  it("should load retired contracts, so a past day can still require them", () => {
+    // The in-memory rule can only judge a retired contract the query actually
+    // returns. Excluded in SQL, a source retired today vanishes from every
+    // past day it was required on and that day reads COMPLETE.
+    expect([...ASSESSABLE_CONTRACT_STATUSES]).toContain("retired");
+    // `draft` stays out: never approved, so never required.
+    expect([...ASSESSABLE_CONTRACT_STATUSES]).not.toContain("draft");
+  });
+
+  it("should ask the database for exactly those statuses", async () => {
+    const fake = readinessDb();
+
+    await assessPersistedControlRun({
+      organizationId,
+      controlPeriod: period,
+      evaluatedAt: new Date("2026-10-09T17:05:00.000Z"),
+    });
+
+    const contractQuery = fake.ops.find(
+      op => op.kind === "select" && op.table === CONTRACTS
+    );
+    expect(contractQuery?.where?.params).toEqual(
+      expect.arrayContaining([...ASSESSABLE_CONTRACT_STATUSES])
+    );
+  });
+
+  it("should select the retirement date, not only the status", async () => {
+    // Loading `retired` rows is half of it. Without this column the rule that
+    // judges them reads `undefined` on every row, fails closed by design, and
+    // drops every retired source again — so the fix would be undone by a
+    // one-line change to the projection with every test still green. The fake
+    // answers from a fixture and returns fields nobody asked for, which is
+    // exactly why this asserts the projection rather than the rows.
+    const fake = readinessDb();
+
+    await assessPersistedControlRun({
+      organizationId,
+      controlPeriod: period,
+      evaluatedAt: new Date("2026-10-09T17:05:00.000Z"),
+    });
+
+    const contractQuery = fake.ops.find(
+      op => op.kind === "select" && op.table === CONTRACTS
+    );
+    expect(contractQuery?.fields).toContain("retiredAt");
+    expect(contractQuery?.fields).toContain("status");
+  });
+
+  it("should still require a source retired after the day being assessed", async () => {
+    // End to end, through the real query shape: a source retired the morning
+    // after the 9th was required ON the 9th, so its evidence still counts and
+    // the day reconciles. Asserting a PASS is deliberate — a projection or
+    // fetch that loses the retired contract answers `blocked` too, so a test
+    // expecting `blocked` here would pass while the bug was back.
+    const fake = readinessDb({
+      contracts: [
+        {
+          ...contract,
+          status: "retired",
+          // 01:00 WAT on the 10th — after the 18:00 WAT cut-off on the 9th.
+          retiredAt: new Date("2026-10-10T00:00:00.000Z"),
+        },
+      ],
+    });
+
+    const result = await assessPersistedControlRun({
+      organizationId,
+      controlPeriod: period,
+      evaluatedAt: new Date("2026-10-10T09:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
+      status: "ready_to_reconcile",
+      canReconcile: true,
+      sourceContractCount: 1,
+    });
+    expect(result.persistenceReasons).not.toContain(
+      "no_eligible_source_contracts"
+    );
+    // It genuinely went looking for that source's evidence.
+    expect(
+      fake.ops.some(op => op.kind === "select" && op.table === MANIFESTS)
+    ).toBe(true);
   });
 });
 

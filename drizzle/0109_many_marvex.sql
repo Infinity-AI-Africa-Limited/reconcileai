@@ -1,0 +1,1 @@
+ALTER TABLE `control_source_contracts` ADD `retiredAt` timestamp;
