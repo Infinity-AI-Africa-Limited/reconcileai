@@ -114,8 +114,11 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
   { label: "Dashboard", path: "/dashboard", group: "main", segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
   { label: "Control Fit Brief", path: "/control-fit", group: "main", roles: ["admin", "cfo", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b"], strictSegment: true },
-  // Read-only preflight over approved source contracts and immutable manifests.
-  // It never starts matching, creates no job, and does not publish a conclusion.
+  // Preflight over approved source contracts and immutable manifests, plus the
+  // one governed action that may start a run from it. The page is READ-only for
+  // `cfo`, which is why that role is listed: `operationsProcedure` refuses
+  // reconciliation writes from it, so Start is withheld there
+  // (`canStartGovernedControl`) rather than the page being taken away.
   // Retail retains its deliberately narrow SHOPLINE settlement surface.
   { label: "Daily Control", path: "/daily-control", group: "main", roles: ["admin", "cfo", "operations"], segments: ["financial_services", "corporate_b2b"], strictSegment: true },
   // Corporate B2B pilots run no-write and AI-off by default. Their operators use

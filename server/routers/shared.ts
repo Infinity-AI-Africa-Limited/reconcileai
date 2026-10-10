@@ -13,6 +13,7 @@ import { eq, inArray } from "drizzle-orm";
 import { moduleAppliesTo, moduleUnavailableReason } from "@shared/moduleScope";
 import { featureAppliesTo, featureUnavailableReason, type VerticalFeature } from "@shared/verticalFeatures";
 import { isTenantId } from "@shared/tenantId";
+import { roleCanWriteReconciliation } from "@shared/reconciliationWriteRoles";
 import { clientIpOrUnknown } from "../_core/clientIp";
 import { currentAuditOrganizationId, currentPortalOrganizationId, runInRequestScope } from "../_core/requestScope";
 import { protectedProcedure, publicProcedure } from "../_core/trpc";
@@ -466,11 +467,13 @@ export const guestProtectedProcedure = protectedProcedure.use(({ ctx, next }) =>
 // Blocks CFO and Compliance/Audit roles from performing reconciliation
 // and exception mutations. Admins and Operations users are allowed.
 export const operationsProcedure = protectedProcedure.use(({ ctx, next }) => {
-  const restrictedRoles = ["cfo", "compliance"];
   if (ctx.user.isGuest) {
     throw new TRPCError({ code: "FORBIDDEN", message: "Guest users cannot perform write operations." });
   }
-  if (restrictedRoles.includes(ctx.user.role as string)) {
+  // The list lives in shared/ so the UI hides exactly what this refuses. A
+  // page that offers a write this rejects produces a button that always
+  // answers FORBIDDEN.
+  if (!roleCanWriteReconciliation(ctx.user.role as string | null | undefined)) {
     throw new TRPCError({
       code: "FORBIDDEN",
       message: `Your role (${ctx.user.role}) does not have permission to perform reconciliation or exception write operations. This is a read-only action for your role.`,

@@ -958,6 +958,17 @@ export type JobInsertOptions = {
    * with the new job's id; if it throws, the job is never created.
    */
   inTransaction?: (tx: DbTransaction, jobId: number) => Promise<void>;
+  /**
+   * A precondition checked in the insert's transaction, BEFORE the insert and
+   * after the tenant row lock below. If it throws, no job is created.
+   *
+   * The lock is the point: it serialises every job insert for one tenant, so a
+   * "is another run already holding this?" question asked here cannot be
+   * answered by two callers at once. The same check made before calling this
+   * function would be a read outside the lock — two concurrent requests would
+   * both pass it, and both create a job.
+   */
+  beforeInsert?: (tx: DbTransaction) => Promise<void>;
 };
 
 /**
@@ -995,6 +1006,7 @@ export async function insertJobUnderTenantLock(
       .from(organizations)
       .where(eq(organizations.id, data.organizationId))
       .for("update");
+    await options.beforeInsert?.(tx);
     const result = await tx.insert(reconciliationJobs).values(data);
     const jobId = result[0].insertId;
     await options.inTransaction?.(tx, jobId);

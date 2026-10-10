@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { useDailyControlReadiness } from "@/hooks/useDailyControlReadiness";
 import {
+  canStartGovernedControl,
   dailyControlSourceStatusCopy,
   dailyControlStatusCopy,
   governedStartBlockers,
@@ -34,6 +35,7 @@ import {
   localControlPeriod,
   type DailyControlView,
 } from "@/lib/dailyControl";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 type Tone = "ready" | "waiting" | "attention" | "blocked";
 
@@ -110,6 +112,8 @@ function ViewNotice({ view, errorMessage }: { view: DailyControlView; errorMessa
 export default function DailyControl() {
   const [, setLocation] = useLocation();
   const { viewAsOrg } = usePortalContext();
+  // Read-only roles legitimately open this page; only Start is withheld.
+  const { user } = useAuth();
   const [controlPeriod, setControlPeriod] = useState(() =>
     localControlPeriod()
   );
@@ -120,7 +124,16 @@ export default function DailyControl() {
   // No cast: the status is the server's own union, so a state the API adds
   // later fails to compile here rather than rendering as nothing.
   const presentation = assessment ? dailyControlStatusCopy(assessment.status) : null;
-  const startBlockers = assessment ? governedStartBlockers(assessment.governedAdmission) : [];
+  const caller = { role: user?.role };
+  const startBlockers = assessment
+    ? governedStartBlockers(assessment.governedAdmission, caller)
+    : [];
+  const canStart = assessment
+    ? canStartGovernedControl({
+        governedAdmission: assessment.governedAdmission,
+        role: caller.role,
+      })
+    : false;
 
   const startRun = async () => {
     try {
@@ -255,7 +268,7 @@ export default function DailyControl() {
                 <CardDescription>Governed admission</CardDescription>
                 <Button
                   className="mt-2 w-full"
-                  disabled={!assessment.governedAdmission.admissible || startGovernedControl.isPending}
+                  disabled={!canStart || startGovernedControl.isPending}
                   onClick={() => void startRun()}
                 >
                   {startGovernedControl.isPending ? (

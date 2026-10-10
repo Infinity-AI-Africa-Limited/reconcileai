@@ -1,7 +1,8 @@
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import {
   controlBatchManifests,
+  reconciliationJobs,
   transactions,
   uploadBatches,
   type Transaction,
@@ -20,6 +21,25 @@ import {
  * will replace this value in the next control-kernel increment.
  */
 export const GOVERNED_DAILY_CONTROL_AMOUNT_TOLERANCE = 0.005;
+
+/**
+ * The date allowance for a governed run, in days. Same standing as the amount
+ * tolerance above, and replaced by the same policy-versioned record.
+ *
+ * One day, not zero. The window cannot widen a governed population — that is
+ * pinned to the approved upload batches, by identifier, and `loadGovernedPopulation`
+ * re-proves it. So the window only decides whether two rows ALREADY inside the
+ * approved day may pair, and one day is what lets them: the two legs of one
+ * payment routinely carry timestamps hours apart, and an approved local
+ * business day straddles a UTC date boundary for most time zones we serve.
+ *
+ * Zero demanded that the two legs carry the identical instant. Pass 1 matches
+ * on reference and was unaffected, but every amount-based pair in a governed
+ * run would have failed to match and been reported as an exception — a control
+ * that manufactures breaks. It also made `timing_difference` unreachable, since
+ * that classification needs `dateDiff > window`.
+ */
+export const GOVERNED_DAILY_CONTROL_DATE_WINDOW_DAYS = 1;
 
 /**
  * Why a governed run may not start. Stable and payload-free: the same codes are
@@ -327,6 +347,89 @@ export class GovernedPopulationError extends Error {
 }
 
 export type GovernedSides = { settlement: GovernedSide; register: GovernedSide };
+
+/** A run already holds the approved batches this one was admitted for. */
+export class GovernedRunInFlightError extends Error {
+  constructor(readonly jobId: number) {
+    super(`A governed run is already in flight for these approved batches (job ${jobId})`);
+    this.name = "GovernedRunInFlightError";
+  }
+}
+
+/**
+ * Refuse a second governed run over batches a run already holds.
+ *
+ * Call this INSIDE the job-insert transaction, which holds a `FOR UPDATE` lock
+ * on the tenant's organisation row (`insertJobUnderTenantLock`). That lock is
+ * what makes the check atomic: without it two Start requests — two clicks, or
+ * two instances behind the same queue — both pass the check, both create a
+ * job, and both load the same `unmatched` rows, because
+ * `loadGovernedPopulation` reads under a transaction that closes long before
+ * the worker saves anything. The two runs then write matches for the same
+ * transactions. Duplicate matches are the failure this platform can least
+ * afford, and nothing downstream would have reported it.
+ *
+ * Keyed on the approved upload batches rather than on the control period: the
+ * batch is the resource being consumed, so this also catches a run admitted
+ * for a different period that resolved to the same batch.
+ *
+ * Only `pending` and `running` block — the same pair the dashboard counts as
+ * active. A run that completed, failed or was cancelled releases its batches by
+ * reaching a terminal status, so a day can always be re-run; a claim that
+ * outlived its run would make a failed control permanently unrepeatable, which
+ * is the opposite trap.
+ */
+export async function assertGovernedBatchesNotInFlight(
+  executor: DbExecutor,
+  organizationId: number,
+  sides: GovernedSides
+): Promise<void> {
+  const inFlight = await executor
+    .select({
+      id: reconciliationJobs.id,
+      engineConfig: reconciliationJobs.engineConfig,
+    })
+    .from(reconciliationJobs)
+    .where(
+      and(
+        eq(reconciliationJobs.organizationId, organizationId),
+        inArray(reconciliationJobs.status, ["pending", "running"])
+      )
+    );
+  const wanted = new Set([
+    sides.settlement.uploadBatchId,
+    sides.register.uploadBatchId,
+  ]);
+  for (const job of inFlight) {
+    for (const batchId of governedBatchIdsOf(job.engineConfig)) {
+      if (wanted.has(batchId)) throw new GovernedRunInFlightError(job.id);
+    }
+  }
+}
+
+/**
+ * The approved batch ids a job holds, or none for an ordinary job.
+ *
+ * Unreadable config yields none rather than throwing: this runs over every
+ * in-flight job in the tenant, and one malformed row must not be able to stop
+ * an unrelated control from starting. `loadGovernedPopulation` is where an
+ * unreadable governed config is refused, for the run it actually belongs to.
+ */
+function governedBatchIdsOf(engineConfig: unknown): number[] {
+  let parsed: unknown = engineConfig;
+  if (typeof engineConfig === "string") {
+    try {
+      parsed = JSON.parse(engineConfig);
+    } catch {
+      return [];
+    }
+  }
+  const governed = isRecord(parsed) ? parsed.governedDailyControl : undefined;
+  if (!isRecord(governed)) return [];
+  return [asSide(governed.settlement), asSide(governed.register)]
+    .filter((side): side is GovernedSide => side !== null)
+    .map(side => side.uploadBatchId);
+}
 
 /**
  * The approved sides a job was admitted with, read back from its engine
