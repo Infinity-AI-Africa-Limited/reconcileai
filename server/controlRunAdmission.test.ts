@@ -1,10 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { TRPCError } from "@trpc/server";
 import {
-  admissionFromAssessment,
-  type GovernedControlAdmission,
+  GovernedPopulationError,
+  governedAdmissionPlan,
+  governedSidesOf,
+  populationReasons,
+  type PopulationSummary,
 } from "./controlRunAdmission";
 import type { PersistedControlRunAssessment } from "./controlRunReadiness";
+
+type Binding = PersistedControlRunAssessment["sourceContractBindings"][number];
+
+const settlement = (overrides: Partial<Binding> = {}): Binding => ({
+  id: 11,
+  sourceKey: "switch-settlement",
+  role: "settlement",
+  version: 1,
+  channelId: 101,
+  timeZone: "Africa/Lagos",
+  manifestId: 701,
+  uploadBatchId: 901,
+  ...overrides,
+});
+
+const register = (overrides: Partial<Binding> = {}): Binding => ({
+  id: 12,
+  sourceKey: "internal-settlement-register",
+  role: "internal_register",
+  version: 1,
+  channelId: 102,
+  timeZone: "Africa/Lagos",
+  manifestId: 702,
+  uploadBatchId: 902,
+  ...overrides,
+});
 
 function assessment(
   overrides: Partial<PersistedControlRunAssessment> = {}
@@ -22,115 +50,135 @@ function assessment(
     sourceContractCount: 2,
     batchManifestCount: 2,
     reconciliationPolicyVersions: ["settlement-ledger-v1"],
-    sourceContractBindings: [
-      {
-        id: 11,
-        sourceKey: "switch-settlement",
-        role: "settlement",
-        version: 1,
-        channelId: 101,
-        timeZone: "Africa/Lagos",
-      },
-      {
-        id: 12,
-        sourceKey: "internal-settlement-register",
-        role: "internal_register",
-        version: 1,
-        channelId: 102,
-        timeZone: "Africa/Lagos",
-      },
-    ],
+    sourceContractBindings: [settlement(), register()],
     ...overrides,
   };
 }
 
-function codeOf(run: () => unknown): string | null {
-  try {
-    run();
-    return null;
-  } catch (error) {
-    return error instanceof TRPCError ? error.code : null;
-  }
+function reasonsOf(input: PersistedControlRunAssessment) {
+  const plan = governedAdmissionPlan(input);
+  return plan.ok ? [] : plan.reasons;
 }
 
-describe("governed daily-control reconciliation admission", () => {
-  it("should admit only an explicitly ready persisted assessment", () => {
-    const admission: GovernedControlAdmission =
-      admissionFromAssessment(assessment());
+describe("when the day's evidence is ready and bound to one batch per side", () => {
+  it("should admit it, deriving the channels, the business day and the exact batches", () => {
+    const plan = governedAdmissionPlan(assessment());
 
-    expect(admission).toEqual({
-      controlPeriod: "2026-10-10",
-      assessedAt: "2026-10-10T18:05:00.000Z",
-      sourceChannelId: 101,
-      targetChannelId: 102,
-      dateFrom: new Date("2026-10-09T23:00:00.000Z"),
-      dateTo: new Date("2026-10-10T22:59:59.999Z"),
-      sourceContractCount: 2,
-      batchManifestCount: 2,
-      reconciliationPolicyVersions: ["settlement-ledger-v1"],
+    expect(plan).toEqual({
+      ok: true,
+      admission: {
+        controlPeriod: "2026-10-10",
+        assessedAt: "2026-10-10T18:05:00.000Z",
+        sourceChannelId: 101,
+        targetChannelId: 102,
+        dateFrom: new Date("2026-10-09T23:00:00.000Z"),
+        dateTo: new Date("2026-10-10T22:59:59.999Z"),
+        sourceContractCount: 2,
+        batchManifestCount: 2,
+        reconciliationPolicyVersions: ["settlement-ledger-v1"],
+        settlement: { channelId: 101, manifestId: 701, uploadBatchId: 901 },
+        register: { channelId: 102, manifestId: 702, uploadBatchId: 902 },
+      },
     });
   });
+});
 
+describe("when the evidence is not ready", () => {
   it.each(["awaiting_sources", "incomplete", "blocked"] as const)(
-    "should refuse a %s assessment",
+    "should refuse a %s day",
     status => {
-      expect(
-        codeOf(() =>
-          admissionFromAssessment(
-            assessment({
-              status,
-              canReconcile: false,
-              mayPublishMatchRate: false,
-            })
-          )
-        )
-      ).toBe("PRECONDITION_FAILED");
+      expect(reasonsOf(assessment({ status, canReconcile: false }))).toContain("evidence_not_ready");
     }
   );
 
-  it("should refuse a contradictory ready label without permission", () => {
-    expect(
-      codeOf(() => admissionFromAssessment(assessment({ canReconcile: false })))
-    ).toBe("PRECONDITION_FAILED");
+  it("should refuse a ready label that does not grant reconciliation", () => {
+    expect(reasonsOf(assessment({ canReconcile: false }))).toContain("evidence_not_ready");
+  });
+});
+
+describe("when the evidence is ready but admission's own rules are not met", () => {
+  // Each of these is "ready" to the completeness policy and still inadmissible:
+  // the cases the Daily Control Start button used to enable and then fail.
+  it.each<[string, Binding[], string]>([
+    ["only a settlement source", [settlement()], "internal_register_source_count"],
+    ["two settlement sources", [settlement(), settlement({ id: 13 }), register()], "settlement_source_count"],
+    ["two register sources", [settlement(), register(), register({ id: 14 })], "internal_register_source_count"],
+    ["a source with no channel", [settlement({ channelId: null }), register()], "unmapped_channel"],
+    ["both sides on one channel", [settlement(), register({ channelId: 101 })], "same_channel"],
+    ["two time zones", [settlement(), register({ timeZone: "Africa/Nairobi" })], "mixed_time_zones"],
+    ["a manifest with no upload batch", [settlement({ uploadBatchId: null }), register()], "manifest_without_upload_batch"],
+    ["no manifest at all", [settlement(), register({ manifestId: null, uploadBatchId: null })], "manifest_without_upload_batch"],
+  ])("should refuse %s", (_label, bindings, reason) => {
+    expect(reasonsOf(assessment({ sourceContractBindings: bindings }))).toContain(reason);
   });
 
-  it("should refuse a ready assessment without one mapped settlement-register pair", () => {
-    expect(
-      codeOf(() =>
-        admissionFromAssessment(
-          assessment({
-            sourceContractBindings: [
-              {
-                id: 11,
-                sourceKey: "switch-settlement",
-                role: "settlement",
-                version: 1,
-                channelId: 101,
-                timeZone: "Africa/Lagos",
-              },
-            ],
-          })
-        )
-      )
-    ).toBe("PRECONDITION_FAILED");
+  it("should refuse a business day the zone cannot resolve", () => {
+    const bindings = [settlement({ timeZone: "Not/AZone" }), register({ timeZone: "Not/AZone" })];
+    expect(reasonsOf(assessment({ sourceContractBindings: bindings }))).toContain(
+      "invalid_business_day_window"
+    );
   });
 
-  it("should not return source-level reasons through the admission error", () => {
-    try {
-      admissionFromAssessment(
-        assessment({
-          status: "blocked",
-          canReconcile: false,
-          mayPublishMatchRate: false,
-          persistenceReasons: ["invalid_source_cutoff"],
-        })
-      );
-      throw new Error("Expected the admission boundary to refuse");
-    } catch (error) {
-      expect(error).toMatchObject({
-        code: "PRECONDITION_FAILED",
-        message: "Daily control is not ready for reconciliation.",
-      });
-    }
+  it("should allow an optional bank or GL source beside the governed pair", () => {
+    const bank = settlement({ id: 15, role: "bank_or_gl", channelId: 103, manifestId: 703, uploadBatchId: 903 });
+    expect(governedAdmissionPlan(assessment({ sourceContractBindings: [settlement(), register(), bank] })).ok).toBe(true);
+  });
+});
+
+describe("when a batch's rows are compared with the manifest that approved them", () => {
+  const manifest = { receivedRecordCount: 2, receivedMonetaryTotal: "1250.10", receivedCurrency: "NGN" };
+  const agreeing: PopulationSummary = {
+    rowCount: 2,
+    offChannelCount: 0,
+    notUnmatchedCount: 0,
+    currencies: ["NGN"],
+    total: "1250.10",
+  };
+
+  it("should accept the exact population, comparing money as exact decimals", () => {
+    expect(populationReasons(agreeing, manifest)).toEqual([]);
+    expect(populationReasons({ ...agreeing, total: "1250.1" }, manifest)).toEqual([]);
+  });
+
+  it.each<[string, Partial<PopulationSummary>, string]>([
+    ["a row on another channel or tenant", { offChannelCount: 1 }, "population_off_channel"],
+    ["a row already matched", { notUnmatchedCount: 1 }, "population_not_unmatched"],
+    ["a row in another currency", { currencies: ["NGN", "USD"] }, "population_currency_mismatch"],
+    ["a row added after the manifest", { rowCount: 3 }, "population_count_mismatch"],
+    ["a total a kobo out", { total: "1250.11" }, "population_total_mismatch"],
+    ["an empty batch against a non-zero manifest", { rowCount: 0, total: null, currencies: [] }, "population_total_mismatch"],
+  ])("should refuse %s", (_label, change, reason) => {
+    expect(populationReasons({ ...agreeing, ...change }, manifest)).toContain(reason);
+  });
+});
+
+describe("when the worker reads a job's governed snapshot", () => {
+  const run = { sourceChannelId: 101, targetChannelId: 102 };
+  const governed = {
+    governedDailyControl: {
+      settlement: { channelId: 101, manifestId: 701, uploadBatchId: 901 },
+      register: { channelId: 102, manifestId: 702, uploadBatchId: 902 },
+    },
+  };
+
+  it("should return null for an ordinary job, which keeps its date window", () => {
+    expect(governedSidesOf(JSON.stringify({ amountTolerance: 0.01 }), run)).toBeNull();
+    expect(governedSidesOf(null, run)).toBeNull();
+  });
+
+  it("should read the sides whether the column comes back as text or parsed", () => {
+    const expected = { settlement: governed.governedDailyControl.settlement, register: governed.governedDailyControl.register };
+    expect(governedSidesOf(JSON.stringify(governed), run)).toEqual(expected);
+    expect(governedSidesOf(governed, run)).toEqual(expected);
+  });
+
+  it.each<[string, unknown]>([
+    ["unreadable text", "{not json"],
+    ["a governed marker with no sides", { governedDailyControl: {} }],
+    ["sides naming other channels than the run", {
+      governedDailyControl: { ...governed.governedDailyControl, settlement: { channelId: 999, manifestId: 701, uploadBatchId: 901 } },
+    }],
+  ])("should refuse %s rather than fall back to the date window", (_label, config) => {
+    expect(() => governedSidesOf(config, run)).toThrow(GovernedPopulationError);
   });
 });

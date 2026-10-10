@@ -335,7 +335,11 @@ export async function recordControlBatchManifest(params: {
       validateBatchManifest(manifest, contract);
       if (manifest.uploadBatchId !== null) {
         const [batch] = await tx
-          .select({ id: uploadBatches.id, status: uploadBatches.status })
+          .select({
+            id: uploadBatches.id,
+            status: uploadBatches.status,
+            channelId: uploadBatches.channelId,
+          })
           .from(uploadBatches)
           .where(
             and(
@@ -354,6 +358,16 @@ export async function recordControlBatchManifest(params: {
             code: "PRECONDITION_FAILED",
             message:
               "A batch manifest can reference only a completed upload batch.",
+          });
+        }
+        // The batch must be on the contract's own channel: otherwise one
+        // channel's evidence would approve a governed run over another's rows.
+        // A legacy contract with no channel binding cannot vouch for a batch.
+        if (contract.channelId === null || batch.channelId !== contract.channelId) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message:
+              "A batch manifest can reference only an upload batch on its source contract's channel.",
           });
         }
       }

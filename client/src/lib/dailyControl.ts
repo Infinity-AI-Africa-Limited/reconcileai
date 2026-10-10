@@ -97,6 +97,21 @@ export function dailyControlSourceStatusCopy(
   }
 }
 
+/**
+ * Why Start is withheld when the evidence itself is ready. "evidence_not_ready"
+ * is left out because the status banner already says so; every other reason is
+ * a governed-admission rule the preflight alone does not express (one
+ * settlement and one register source, one time zone, a bound upload batch, a
+ * population that still matches its manifest).
+ */
+export function governedStartBlockers(governedAdmission: {
+  admissible: boolean;
+  reasons: readonly string[];
+}): string[] {
+  if (governedAdmission.admissible) return [];
+  return governedAdmission.reasons.filter(reason => reason !== "evidence_not_ready");
+}
+
 /** Machine reasons are intentionally stored and returned without customer data. */
 export function humanizeControlReason(reason: string): string {
   return reason

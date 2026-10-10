@@ -110,10 +110,10 @@ const batchManifestInput = {
 };
 
 /** A database that answers the contract lookup, and optionally a batch lookup. */
-function evidenceDb(options: { batch?: unknown[]; insertId?: number } = {}) {
+function evidenceDb(options: { batch?: unknown[]; insertId?: number; contract?: Record<string, unknown> } = {}) {
   const fake = scriptedDb({
     select: {
-      [CONTRACTS]: [[contract]],
+      [CONTRACTS]: [[{ ...contract, ...options.contract }]],
       ...(options.batch === undefined ? {} : { [BATCHES]: [options.batch] }),
     },
     insert: {
@@ -211,7 +211,7 @@ describe("when an operations owner records a batch manifest", () => {
 
 describe("when a batch manifest names an upload batch", () => {
   it("should save it once that upload has completed", async () => {
-    const fake = evidenceDb({ batch: [{ id: 88, status: "completed" }] });
+    const fake = evidenceDb({ batch: [{ id: 88, status: "completed", channelId: 101 }] });
 
     await expect(
       caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 88 })
@@ -263,6 +263,34 @@ describe("when a batch manifest names an upload batch", () => {
       expect(state.audit).not.toHaveBeenCalled();
     }
   );
+});
+
+describe("when a batch manifest names an upload batch on another channel", () => {
+  // One channel's evidence must never approve a governed run over another's
+  // rows: the run matches exactly the batch the manifest names.
+  it("should refuse a batch that is not on its source contract's channel, and save nothing", async () => {
+    const fake = evidenceDb({ batch: [{ id: 88, status: "completed", channelId: 555 }] });
+
+    const refusal = await failureOf(() =>
+      caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 88 })
+    );
+
+    expect(refusal?.code).toBe("PRECONDITION_FAILED");
+    expect(refusal?.message).toMatch(/source contract's channel/);
+    expect(fake.committed().some(op => op.kind === "insert")).toBe(false);
+    expect(state.audit).not.toHaveBeenCalled();
+  });
+
+  it("should refuse to bind any batch to a legacy contract with no channel", async () => {
+    const fake = evidenceDb({ contract: { channelId: null }, batch: [{ id: 88, status: "completed", channelId: 101 }] });
+
+    const refusal = await failureOf(() =>
+      caller().recordBatchManifest({ ...batchManifestInput, uploadBatchId: 88 })
+    );
+
+    expect(refusal?.code).toBe("PRECONDITION_FAILED");
+    expect(fake.committed().some(op => op.kind === "insert")).toBe(false);
+  });
 });
 
 describe("when the audit entry for a piece of evidence cannot be written", () => {

@@ -29,6 +29,7 @@ import { useDailyControlReadiness } from "@/hooks/useDailyControlReadiness";
 import {
   dailyControlSourceStatusCopy,
   dailyControlStatusCopy,
+  governedStartBlockers,
   humanizeControlReason,
   localControlPeriod,
   type DailyControlView,
@@ -119,6 +120,7 @@ export default function DailyControl() {
   // No cast: the status is the server's own union, so a state the API adds
   // later fails to compile here rather than rendering as nothing.
   const presentation = assessment ? dailyControlStatusCopy(assessment.status) : null;
+  const startBlockers = assessment ? governedStartBlockers(assessment.governedAdmission) : [];
 
   const startRun = async () => {
     try {
@@ -253,7 +255,7 @@ export default function DailyControl() {
                 <CardDescription>Governed admission</CardDescription>
                 <Button
                   className="mt-2 w-full"
-                  disabled={!assessment.canReconcile || startGovernedControl.isPending}
+                  disabled={!assessment.governedAdmission.admissible || startGovernedControl.isPending}
                   onClick={() => void startRun()}
                 >
                   {startGovernedControl.isPending ? (
@@ -264,9 +266,19 @@ export default function DailyControl() {
                   Start governed control
                 </Button>
               </CardHeader>
-              <CardContent className="pt-0 text-xs text-muted-foreground">
-                The server derives the approved channels and business-day window
-                again before a job can be admitted.
+              <CardContent className="space-y-2 pt-0 text-xs text-muted-foreground">
+                {startBlockers.length > 0 ? (
+                  <div role="status">
+                    <p className="font-medium text-foreground">
+                      Start is withheld:
+                    </p>
+                    <ReasonList reasons={startBlockers} />
+                  </div>
+                ) : null}
+                <p>
+                  The server derives the approved channels, business-day window
+                  and upload batches again before a job can be admitted.
+                </p>
               </CardContent>
             </Card>
           </div>

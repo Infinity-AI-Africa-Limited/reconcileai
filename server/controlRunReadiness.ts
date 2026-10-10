@@ -64,6 +64,13 @@ export type PersistedControlRunAssessment = ControlRunAssessment & {
     version: number;
     channelId: number | null;
     timeZone: string;
+    /**
+     * The one manifest recorded for this source and day, and the upload batch
+     * it vouches for. Null when there is none, or more than one. A governed
+     * run reconciles exactly these batches' rows, never a date window.
+     */
+    manifestId: number | null;
+    uploadBatchId: number | null;
   }>;
 };
 
@@ -88,6 +95,8 @@ export type PersistedBatchManifest = {
   sourceContractVersion: number;
   controlPeriod: string;
   deliveryIdentity: string;
+  /** Optional on older test fixtures; null when the route created no upload row. */
+  uploadBatchId?: number | null;
   receivedAt: Date;
   mappingVersion: string;
   reconciliationPolicyVersion: string;
@@ -125,6 +134,7 @@ const BATCH_MANIFEST_FIELDS = {
   sourceContractVersion: controlBatchManifests.sourceContractVersion,
   controlPeriod: controlBatchManifests.controlPeriod,
   deliveryIdentity: controlBatchManifests.deliveryIdentity,
+  uploadBatchId: controlBatchManifests.uploadBatchId,
   receivedAt: controlBatchManifests.receivedAt,
   mappingVersion: controlBatchManifests.mappingVersion,
   reconciliationPolicyVersion:
@@ -378,14 +388,23 @@ export function assessPersistedControlEvidence(params: {
     sourceContractCount: contracts.length,
     batchManifestCount: manifests.length,
     reconciliationPolicyVersions: [...policyVersions].sort(),
-    sourceContractBindings: contracts.map(contract => ({
-      id: contract.id,
-      sourceKey: contract.sourceKey,
-      role: contract.role as ControlSourceRole,
-      version: contract.version,
-      channelId: contract.channelId,
-      timeZone: contract.timeZone,
-    })),
+    sourceContractBindings: contracts.map(contract => {
+      const own = manifests.filter(
+        manifest => manifest?.sourceContractId === contract.id
+      );
+      // Exactly one manifest, or none to bind: two would be ambiguous evidence.
+      const manifest = own.length === 1 ? own[0] : undefined;
+      return {
+        id: contract.id,
+        sourceKey: contract.sourceKey,
+        role: contract.role as ControlSourceRole,
+        version: contract.version,
+        channelId: contract.channelId,
+        timeZone: contract.timeZone,
+        manifestId: manifest?.id ?? null,
+        uploadBatchId: manifest?.uploadBatchId ?? null,
+      };
+    }),
   };
 }
 

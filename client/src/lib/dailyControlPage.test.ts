@@ -52,6 +52,9 @@ function assessment(overrides: Partial<Assessment> = {}): Assessment {
     persistenceReasons: [],
     sourceContractCount: 0,
     batchManifestCount: 0,
+    reconciliationPolicyVersions: [],
+    sourceContractBindings: [],
+    governedAdmission: { admissible: false, reasons: ["evidence_not_ready"] },
     ...overrides,
   } as Assessment;
 }
@@ -106,5 +109,53 @@ describe("when an assessment has no control-level reasons", () => {
 
     expect(html).toContain("Awaiting source evidence");
     expect(html).not.toContain("Control-level evidence");
+  });
+});
+
+/** The Start button's opening tag, to read whether it is disabled. */
+function startButton(html: string): string {
+  const match = /<button[^>]*>(?:(?!<\/button>).)*Start governed control/s.exec(html);
+  if (!match) throw new Error("no Start button rendered");
+  return match[0].slice(0, match[0].indexOf(">") + 1);
+}
+
+describe("when the evidence is ready but a governed run would be refused", () => {
+  it("should keep Start disabled and say why, instead of letting every click fail", () => {
+    const html = render({
+      assessment: assessment({
+        status: "ready_to_reconcile",
+        canReconcile: true,
+        governedAdmission: { admissible: false, reasons: ["internal_register_source_count"] },
+      }),
+    });
+
+    expect(startButton(html)).toContain('disabled=""');
+    expect(html).toContain("Start is withheld");
+    expect(html).toContain("Internal Register Source Count");
+  });
+});
+
+describe("when a governed run would be admitted", () => {
+  it("should enable Start, with no withheld notice", () => {
+    const html = render({
+      assessment: assessment({
+        status: "ready_to_reconcile",
+        canReconcile: true,
+        governedAdmission: { admissible: true, reasons: [] },
+      }),
+    });
+
+    // The attribute, not the word: the button's classes contain "disabled:".
+    expect(startButton(html)).not.toContain('disabled=""');
+    expect(html).not.toContain("Start is withheld");
+  });
+});
+
+describe("when the evidence is not ready", () => {
+  it("should keep Start disabled, leaving the explanation to the status banner", () => {
+    const html = render({ assessment: assessment() });
+
+    expect(startButton(html)).toContain('disabled=""');
+    expect(html).not.toContain("Start is withheld");
   });
 });

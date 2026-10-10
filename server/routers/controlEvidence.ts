@@ -12,6 +12,7 @@ import {
   recordControlBatchManifest,
   recordControlSourceContract,
 } from "../controlEvidenceStore";
+import { evaluateGovernedAdmission } from "../controlRunAdmission";
 import { assessPersistedControlRun } from "../controlRunReadiness";
 import { getClientInfo } from "./shared";
 
@@ -29,15 +30,24 @@ export const controlEvidenceRouter = router({
    */
   assessReadiness: protectedProcedure
     .input(controlRunReadinessInput)
-    .query(({ ctx, input }) =>
-      assessPersistedControlRun({
+    .query(async ({ ctx, input }) => {
+      const assessment = await assessPersistedControlRun({
         organizationId: resolveControlEvidenceScope(
           ctx.user,
           input.organizationId
         ),
         controlPeriod: input.controlPeriod,
-      })
-    ),
+      });
+      // The same verdict admission enforces, so the page offers Start exactly
+      // when reconciliation.createGovernedDailyControl would accept it — and
+      // says why not otherwise. A ready preflight alone is not enough: one
+      // settlement source with no internal register is "ready" and inadmissible.
+      const verdict = await evaluateGovernedAdmission(assessment);
+      return {
+        ...assessment,
+        governedAdmission: { admissible: verdict.admissible, reasons: verdict.reasons },
+      };
+    }),
 
   /**
    * One bounded page per collection, with `hasMore` and a cursor. Older
