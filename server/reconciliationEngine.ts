@@ -171,6 +171,36 @@ function amountDifferencePercent(a1: number, a2: number): number {
   return Math.abs(a1 - a2) / base;
 }
 
+/**
+ * How close a difference sits to perfect within its allowance, as 0..1.
+ *
+ * A zero allowance is the case this exists for. The callers below have already
+ * rejected anything bigger than the allowance, so reaching here with a zero
+ * allowance means the difference is zero too — a perfect hit, scoring 1. The
+ * arithmetic would otherwise be `0 / 0`, i.e. `NaN`, and that poisons the whole
+ * pass rather than one pair: `base` becomes `NaN`, every `base > bestBase`
+ * comparison is false, no candidate is ever chosen, and legitimate pairs are
+ * reported as exceptions. On a reconciliation platform a false exception
+ * corrupts the primary output, so the silence is the dangerous part.
+ *
+ * For a positive allowance this is exactly `1 - difference / allowance`; the
+ * clamp cannot bind, because the callers filter on that same allowance first.
+ * `!(allowance > 0)` rather than `allowance === 0` so a NaN or negative
+ * allowance cannot slip through either.
+ *
+ * The `: 0` arm is unreachable from the call sites in this file, for the same
+ * reason: they skip a difference larger than the allowance before scoring it.
+ * It is kept so the function is correct on its own rather than only in company,
+ * and exported so that arm is actually proven instead of merely written — a
+ * mutation that returned 1 unconditionally passed every through-the-engine
+ * test, which is what an untested branch looks like from the outside.
+ */
+export function proximityScore(difference: number, allowance: number): number {
+  if (!Number.isFinite(difference)) return 0;
+  if (!(allowance > 0)) return difference === 0 ? 1 : 0;
+  return Math.max(0, Math.min(1, 1 - difference / allowance));
+}
+
 // First index `i` in a sorted ascending array where arr[i] >= target (lower bound).
 function lowerBound(arr: number[], target: number): number {
   let lo = 0;
@@ -496,8 +526,8 @@ export function runMatchingEngine(
 
         const base =
           70 +
-          (1 - amtDiffPct / config.amountTolerance) * 15 +
-          (1 - dateDiff / config.dateWindowDays) * 10;
+          proximityScore(amtDiffPct, config.amountTolerance) * 15 +
+          proximityScore(dateDiff, config.dateWindowDays) * 10;
 
         if (base > bestBase) {
           bestBase = base;

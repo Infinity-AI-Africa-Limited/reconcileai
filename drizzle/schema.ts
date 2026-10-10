@@ -115,6 +115,12 @@ export type ControlFitBrief = typeof controlFitBriefs.$inferSelect;
 export const controlSourceContracts = mysqlTable("control_source_contracts", {
   id: int("id").autoincrement().primaryKey(),
   organizationId: int("organizationId").notNull(),
+  /**
+   * The tenant-visible reconciliation channel carrying this approved source.
+   * Nullable only for pre-existing records created before governed admission;
+   * those records are deliberately not eligible to start a governed run.
+   */
+  channelId: int("channelId"),
   sourceKey: varchar("sourceKey", { length: 100 }).notNull(),
   version: int("version").notNull(),
   role: mysqlEnum("role", ["settlement", "internal_register", "bank_or_gl"]).notNull(),
@@ -156,6 +162,7 @@ export const controlSourceContracts = mysqlTable("control_source_contracts", {
 }, (table) => [
   uniqueIndex("uq_control_source_contract_org_key_version").on(table.organizationId, table.sourceKey, table.version),
   index("idx_control_source_contract_org_status").on(table.organizationId, table.status),
+  index("idx_control_source_contract_org_channel").on(table.organizationId, table.channelId),
   // The default read order of controlEvidence.get, and the keyset it pages by.
   // Without it every page filesorts the tenant's whole contract partition.
   index("idx_control_source_contract_org_effective").on(table.organizationId, table.effectiveAt, table.id),

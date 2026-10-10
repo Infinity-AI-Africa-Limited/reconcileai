@@ -19,7 +19,7 @@ import {
   controlBatchManifestInput,
   controlSourceContractInput,
 } from "./controlEvidenceSchema";
-import { getDb } from "./db";
+import { getChannelByIdForOrg, getDb } from "./db";
 import { isDuplicateKeyError } from "./dbErrors";
 import { logAuditStrict } from "./routers/shared";
 
@@ -39,6 +39,7 @@ type BatchManifestInput = z.infer<typeof controlBatchManifestInput>;
 const CONTROL_SOURCE_CONTRACT_FIELDS = {
   id: controlSourceContracts.id,
   organizationId: controlSourceContracts.organizationId,
+  channelId: controlSourceContracts.channelId,
   sourceKey: controlSourceContracts.sourceKey,
   version: controlSourceContracts.version,
   role: controlSourceContracts.role,
@@ -246,6 +247,13 @@ export async function recordControlSourceContract(params: {
   const { organizationId: _requested, ...contract } = params.input;
   try {
     validateSourceContract(contract);
+    const channel = await getChannelByIdForOrg(contract.channelId, organizationId);
+    if (!channel) {
+      throw new TRPCError({
+        code: "NOT_FOUND",
+        message: "Reconciliation channel not found",
+      });
+    }
     const db = await getDb();
     if (!db)
       throw new TRPCError({
@@ -266,6 +274,7 @@ export async function recordControlSourceContract(params: {
         entityType: "control_source_contract",
         entityId: id,
         details: {
+          channelId: contract.channelId,
           sourceKey: contract.sourceKey,
           version: contract.version,
           role: contract.role,
@@ -303,6 +312,7 @@ export async function recordControlBatchManifest(params: {
         .select({
           id: controlSourceContracts.id,
           organizationId: controlSourceContracts.organizationId,
+          channelId: controlSourceContracts.channelId,
           sourceKey: controlSourceContracts.sourceKey,
           version: controlSourceContracts.version,
           status: controlSourceContracts.status,
@@ -325,7 +335,11 @@ export async function recordControlBatchManifest(params: {
       validateBatchManifest(manifest, contract);
       if (manifest.uploadBatchId !== null) {
         const [batch] = await tx
-          .select({ id: uploadBatches.id, status: uploadBatches.status })
+          .select({
+            id: uploadBatches.id,
+            status: uploadBatches.status,
+            channelId: uploadBatches.channelId,
+          })
           .from(uploadBatches)
           .where(
             and(
@@ -344,6 +358,16 @@ export async function recordControlBatchManifest(params: {
             code: "PRECONDITION_FAILED",
             message:
               "A batch manifest can reference only a completed upload batch.",
+          });
+        }
+        // The batch must be on the contract's own channel: otherwise one
+        // channel's evidence would approve a governed run over another's rows.
+        // A legacy contract with no channel binding cannot vouch for a batch.
+        if (contract.channelId === null || batch.channelId !== contract.channelId) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message:
+              "A batch manifest can reference only an upload batch on its source contract's channel.",
           });
         }
       }

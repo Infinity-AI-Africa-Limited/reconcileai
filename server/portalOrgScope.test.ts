@@ -155,6 +155,7 @@ const OVERRIDE_CALLS: ReadonlyArray<readonly [string, (ctx: Ctx, organizationId:
     "controlEvidence.createSourceContract",
     (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).createSourceContract({
       organizationId,
+      channelId: 101,
       sourceKey: "settlement-source",
       version: 1,
       role: "settlement",

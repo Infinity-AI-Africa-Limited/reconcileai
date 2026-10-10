@@ -28,6 +28,7 @@ export type PersistedControlReadinessReason =
   | "invalid_control_period"
   | "no_eligible_source_contracts"
   | "ambiguous_source_contract"
+  | "unmapped_source_contract"
   | "invalid_source_cutoff"
   | "multiple_batch_manifests"
   | "source_contract_version_mismatch"
@@ -46,11 +47,37 @@ export type PersistedControlRunAssessment = ControlRunAssessment & {
   persistenceReasons: PersistedControlReadinessReason[];
   sourceContractCount: number;
   batchManifestCount: number;
+  /**
+   * The version(s) carried by the immutable manifests assessed for this day.
+   * A ready control has exactly one. Exposing the bounded identifiers lets the
+   * admission boundary snapshot what it evaluated without copying source data.
+   */
+  reconciliationPolicyVersions: string[];
+  /**
+   * Tenant-visible channel bindings evaluated for this day. They contain only
+   * contract metadata, never source rows or source credentials.
+   */
+  sourceContractBindings: Array<{
+    id: number;
+    sourceKey: string;
+    role: ControlSourceRole;
+    version: number;
+    channelId: number | null;
+    timeZone: string;
+    /**
+     * The one manifest recorded for this source and day, and the upload batch
+     * it vouches for. Null when there is none, or more than one. A governed
+     * run reconciles exactly these batches' rows, never a date window.
+     */
+    manifestId: number | null;
+    uploadBatchId: number | null;
+  }>;
 };
 
 export type PersistedSourceContract = {
   id: number;
   organizationId: number;
+  channelId: number | null;
   sourceKey: string;
   version: number;
   role: string;
@@ -70,6 +97,8 @@ export type PersistedBatchManifest = {
   sourceContractVersion: number;
   controlPeriod: string;
   deliveryIdentity: string;
+  /** Optional on older test fixtures; null when the route created no upload row. */
+  uploadBatchId?: number | null;
   receivedAt: Date;
   mappingVersion: string;
   reconciliationPolicyVersion: string;
@@ -105,6 +134,7 @@ export const ASSESSABLE_CONTRACT_STATUSES = [
 const SOURCE_CONTRACT_FIELDS = {
   id: controlSourceContracts.id,
   organizationId: controlSourceContracts.organizationId,
+  channelId: controlSourceContracts.channelId,
   sourceKey: controlSourceContracts.sourceKey,
   version: controlSourceContracts.version,
   role: controlSourceContracts.role,
@@ -123,6 +153,7 @@ const BATCH_MANIFEST_FIELDS = {
   sourceContractVersion: controlBatchManifests.sourceContractVersion,
   controlPeriod: controlBatchManifests.controlPeriod,
   deliveryIdentity: controlBatchManifests.deliveryIdentity,
+  uploadBatchId: controlBatchManifests.uploadBatchId,
   receivedAt: controlBatchManifests.receivedAt,
   mappingVersion: controlBatchManifests.mappingVersion,
   reconciliationPolicyVersion:
@@ -311,6 +342,12 @@ export function assessPersistedControlEvidence(params: {
     if ((contractsByKey.get(key)?.length ?? 0) > 1) {
       addReason(persistenceReasons, "ambiguous_source_contract");
     }
+    if (
+      !Number.isSafeInteger(contract?.channelId) ||
+      (contract?.channelId ?? 0) < 1
+    ) {
+      addReason(persistenceReasons, "unmapped_source_contract");
+    }
 
     const sourceManifests = manifests.filter(
       manifest => manifest?.sourceContractId === contract?.id
@@ -372,6 +409,24 @@ export function assessPersistedControlEvidence(params: {
     persistenceReasons,
     sourceContractCount: contracts.length,
     batchManifestCount: manifests.length,
+    reconciliationPolicyVersions: [...policyVersions].sort(),
+    sourceContractBindings: contracts.map(contract => {
+      const own = manifests.filter(
+        manifest => manifest?.sourceContractId === contract.id
+      );
+      // Exactly one manifest, or none to bind: two would be ambiguous evidence.
+      const manifest = own.length === 1 ? own[0] : undefined;
+      return {
+        id: contract.id,
+        sourceKey: contract.sourceKey,
+        role: contract.role as ControlSourceRole,
+        version: contract.version,
+        channelId: contract.channelId,
+        timeZone: contract.timeZone,
+        manifestId: manifest?.id ?? null,
+        uploadBatchId: manifest?.uploadBatchId ?? null,
+      };
+    }),
   };
 }
 
@@ -500,6 +555,28 @@ function contractEligibilityHorizon(controlPeriod: string): Date | null {
 }
 
 /**
+ * Resolve a customer-defined business day in its approved IANA time zone.
+ *
+ * The worker currently filters inclusively, so `dateTo` is the final
+ * millisecond before the following local midnight. An invalid or DST-ambiguous
+ * boundary returns null; a governed run must block rather than silently use
+ * the server's clock or an invented offset.
+ */
+export function businessDayWindow(
+  controlPeriod: string,
+  timeZone: string
+): { dateFrom: Date; dateTo: Date } | null {
+  const dateFrom = cutoffAtFor(controlPeriod, timeZone, 0);
+  if (!dateFrom) return null;
+
+  const nextPeriod = nextControlPeriod(controlPeriod);
+  const nextStart = nextPeriod ? cutoffAtFor(nextPeriod, timeZone, 0) : null;
+  if (!nextStart || nextStart.getTime() <= dateFrom.getTime()) return null;
+
+  return { dateFrom, dateTo: new Date(nextStart.getTime() - 1) };
+}
+
+/**
  * Converts an approved local cut-off to a UTC instant without accepting a
  * nonexistent or ambiguous local time. The latter occurs around DST changes;
  * blocking is safer than guessing an instant for a control deadline.
@@ -557,6 +634,13 @@ function cutoffAtFor(
   } catch {
     return null;
   }
+}
+
+function nextControlPeriod(controlPeriod: string): string | null {
+  if (!isControlPeriod(controlPeriod)) return null;
+  const [year, month, day] = controlPeriod.split("-").map(Number);
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  return next.toISOString().slice(0, 10);
 }
 
 function readLocalParts(

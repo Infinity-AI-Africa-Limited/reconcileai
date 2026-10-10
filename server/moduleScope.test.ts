@@ -170,6 +170,7 @@ describe("when the guard is enforced server-side", () => {
   const ROUTERS = read("routers.ts");
   const MODULES = read("routers/modules.ts");
   const RECONCILIATION = read("routers/reconciliation.ts");
+  const GOVERNED = read("routers/governedDailyControl.ts");
   const SHARED = read("routers/shared.ts");
   const GUARD = "await assertModuleAvailable(ctx, input.moduleType)";
 
@@ -208,6 +209,12 @@ describe("when the guard is enforced server-side", () => {
     // the guard has to sit on the procedure, not on the UI that fronts it.
     expect(between(RECONCILIATION, "create: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
     expect(between(RECONCILIATION, "createMultiChannel: operationsProcedure", "db.createReconciliationJob(")).toContain(GUARD);
+    // The governed daily control lives in its own module and fixes its module
+    // rather than taking one from the caller; it must still check it is offered.
+    expect(between(GOVERNED, "createGovernedDailyControl: operationsProcedure", "db.createReconciliationJob(")).toContain(
+      'await assertModuleAvailable(ctx, "settlement")'
+    );
+    expect(RECONCILIATION).toContain("...governedDailyControlProcedures");
   });
 
   it("should decide using the shared rule, not a second inline copy", () => {
