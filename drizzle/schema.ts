@@ -133,6 +133,23 @@ export const controlSourceContracts = mysqlTable("control_source_contracts", {
   status: mysqlEnum("status", ["draft", "approved", "tested", "active", "retired"]).default("draft").notNull(),
   approvalReference: varchar("approvalReference", { length: 255 }),
   effectiveAt: timestamp("effectiveAt").notNull(),
+  /**
+   * When this source stopped being required, for a `retired` contract.
+   *
+   * `status` alone cannot answer "was this source required on the 8th?" once it
+   * is retired on the 10th — and a daily control is assessed for past days
+   * routinely. Without a date, a source retired today silently disappears from
+   * every past day it was actually required on, so that day can read COMPLETE
+   * while a then-required source is missing. That is the dangerous direction:
+   * a false pass rather than a false block.
+   *
+   * Nullable because it is meaningless for a live contract, and because
+   * nothing retires a contract yet (there is no status-transition path). A
+   * `retired` row with no date cannot be placed in time, so readiness treats it
+   * as never having been in effect — which is what it means for the only way a
+   * retired row can exist today, namely being created that way.
+   */
+  retiredAt: timestamp("retiredAt"),
   createdByUserId: int("createdByUserId").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

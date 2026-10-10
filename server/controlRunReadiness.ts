@@ -58,6 +58,8 @@ export type PersistedSourceContract = {
   controlTotalRequired: boolean;
   status: string;
   effectiveAt: Date;
+  /** Set only for a retired contract, and only once something dates it. */
+  retiredAt?: Date | null;
 };
 
 export type PersistedBatchManifest = {
@@ -81,7 +83,23 @@ export type PersistedBatchManifest = {
   receivedCurrency: string;
 };
 
-const ELIGIBLE_CONTRACT_STATUSES = ["approved", "tested", "active"] as const;
+/**
+ * Statuses a contract can be REQUIRED under on the day it was live.
+ *
+ * `retired` is loaded too, which it was not before: a source retired today was
+ * still required on a past day being assessed now, and excluding it in SQL made
+ * that day read COMPLETE with a then-required source missing. Whether a retired
+ * contract is actually required for the day is decided in memory, where its
+ * retirement date can be compared with that day's cut-off.
+ *
+ * `draft` stays out: it was never approved, so it was never required.
+ */
+export const ASSESSABLE_CONTRACT_STATUSES = [
+  "approved",
+  "tested",
+  "active",
+  "retired",
+] as const;
 
 const SOURCE_CONTRACT_FIELDS = {
   id: controlSourceContracts.id,
@@ -94,6 +112,7 @@ const SOURCE_CONTRACT_FIELDS = {
   controlTotalRequired: controlSourceContracts.controlTotalRequired,
   status: controlSourceContracts.status,
   effectiveAt: controlSourceContracts.effectiveAt,
+  retiredAt: controlSourceContracts.retiredAt,
 } as const;
 
 const BATCH_MANIFEST_FIELDS = {
@@ -154,7 +173,7 @@ export async function assessPersistedControlRun(params: {
     .where(
       and(
         eq(controlSourceContracts.organizationId, params.organizationId),
-        inArray(controlSourceContracts.status, [...ELIGIBLE_CONTRACT_STATUSES]),
+        inArray(controlSourceContracts.status, [...ASSESSABLE_CONTRACT_STATUSES]),
         lte(
           controlSourceContracts.effectiveAt,
           contractEligibilityHorizon(params.controlPeriod) ?? evaluatedAt
@@ -243,7 +262,10 @@ export function assessPersistedControlEvidence(params: {
     ),
   }));
   const contracts = dated
-    .filter(({ contract, cutoffAt }) => isInEffectBy(contract, cutoffAt))
+    .filter(
+      ({ contract, cutoffAt }) =>
+        isInEffectBy(contract, cutoffAt) && wasNotRetiredBy(contract, cutoffAt)
+    )
     .map(({ contract }) => contract);
   /**
    * Evidence belonging to the sources this day actually requires.
@@ -419,6 +441,35 @@ function addReason(
  * a control it may well belong to. Both of those end in a blocked assessment a
  * human can see, which is the safe direction for a control.
  */
+/**
+ * Was this contract still un-retired at the business day's cut-off?
+ *
+ * The mirror of `isInEffectBy`, and the more dangerous direction. A source
+ * retired on the 10th was still required on the 8th; dropping it by status
+ * alone let the 8th read COMPLETE with a then-required source absent — a false
+ * pass, where requiring a source too early is only a false block.
+ *
+ * Unlike `isInEffectBy` this fails CLOSED for a retired contract: it is
+ * included only when its retirement can be PROVED later than the cut-off.
+ * Anything else about a retired contract — no date, an unusable date, or a
+ * cut-off that could not be resolved — leaves it out, exactly as before this
+ * column existed. That direction is deliberate: including on uncertainty would
+ * newly demand evidence for a source that may not have been required, which is
+ * the unclearable block this module has twice been fixed for.
+ */
+function wasNotRetiredBy(
+  contract: PersistedSourceContract | undefined,
+  cutoffAt: Date | null
+): boolean {
+  if (contract?.status !== "retired") return true;
+  if (!cutoffAt) return false;
+  const retiredAt = contract.retiredAt;
+  if (!(retiredAt instanceof Date) || Number.isNaN(retiredAt.getTime())) {
+    return false;
+  }
+  return retiredAt.getTime() > cutoffAt.getTime();
+}
+
 function isInEffectBy(
   contract: PersistedSourceContract | undefined,
   cutoffAt: Date | null

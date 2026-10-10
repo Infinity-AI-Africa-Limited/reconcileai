@@ -9,7 +9,10 @@ vi.mock("./db", async importOriginal => ({
 }));
 
 import { scriptedDb } from "./connectors/shopify/scriptedDb.testkit";
-import { assessPersistedControlRun } from "./controlRunReadiness";
+import {
+  ASSESSABLE_CONTRACT_STATUSES,
+  assessPersistedControlRun,
+} from "./controlRunReadiness";
 
 const organizationId = 42;
 const period = "2026-10-09";
@@ -122,6 +125,34 @@ describe("when the business day assessed is not the day it is assessed on", () =
     // assertion pass or fail depending on where it runs; drizzle renders in
     // UTC, so the string itself is the stable thing to compare.
     expect(contractQuery?.where?.params.at(-1)).toBe("2026-10-09 14:00:00.000");
+  });
+});
+
+describe("when a source has since been retired", () => {
+  it("should load retired contracts, so a past day can still require them", () => {
+    // The in-memory rule can only judge a retired contract the query actually
+    // returns. Excluded in SQL, a source retired today vanishes from every
+    // past day it was required on and that day reads COMPLETE.
+    expect([...ASSESSABLE_CONTRACT_STATUSES]).toContain("retired");
+    // `draft` stays out: never approved, so never required.
+    expect([...ASSESSABLE_CONTRACT_STATUSES]).not.toContain("draft");
+  });
+
+  it("should ask the database for exactly those statuses", async () => {
+    const fake = readinessDb();
+
+    await assessPersistedControlRun({
+      organizationId,
+      controlPeriod: period,
+      evaluatedAt: new Date("2026-10-09T17:05:00.000Z"),
+    });
+
+    const contractQuery = fake.ops.find(
+      op => op.kind === "select" && op.table === CONTRACTS
+    );
+    expect(contractQuery?.where?.params).toEqual(
+      expect.arrayContaining([...ASSESSABLE_CONTRACT_STATUSES])
+    );
   });
 });
 
