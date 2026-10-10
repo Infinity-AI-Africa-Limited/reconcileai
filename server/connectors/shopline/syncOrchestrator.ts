@@ -510,7 +510,10 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     await updateUploadBatch(batchId, {
       status: "completed",
       validRows: allRows.length,
-      invalidRows: 0,
+      // Undated rows ARE invalid rows, and this column already shows in the
+      // upload history — so the gap is visible to the merchant without a new
+      // field anywhere. Hardcoding 0 is what made a partial sync read clean.
+      invalidRows: undatedRowsSkipped,
       completedAt: new Date(),
     });
 

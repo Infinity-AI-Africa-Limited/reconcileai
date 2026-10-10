@@ -56,9 +56,22 @@ export interface SyncResult {
   ordersIngested: number;
   transactionsIngested: number;
   payoutsIngested: number;
+  /** Rows that actually reached the engine, after undated rows were dropped. */
+  ordersReconciled?: number;
+  transactionsReconciled?: number;
   exceptionsFound: number;
   durationMs: number;
   error?: string;
+  /**
+   * Orders and captures SHOPLINE returned that could not be dated, and so
+   * never reached the engine.
+   *
+   * Reported because the counts above are what the API RETURNED, not what was
+   * reconciled: without this, a paid order missing `processed_at` vanished
+   * from reconciliation while still being counted as ingested, which reads as
+   * a complete sync over a real gap.
+   */
+  undatedRowsSkipped?: number;
 }
 
 /**
@@ -164,12 +177,17 @@ export async function runSettlementSync(
     } while (payoutPageInfo);
 
     // ── Normalise to source/target Transaction arrays ─────────────────────
-    const { sourceTxns, targetTxns } = normaliseToTransactions(
+    const { sourceTxns, targetTxns, undatedRowsSkipped } = normaliseToTransactions(
       orders,
       transactions,
       payouts,
       store.currency ?? "USD",
     );
+    if (undatedRowsSkipped > 0) {
+      console.warn(
+        `[SHOPLINE settlement] store=${storeHandle} skipped ${undatedRowsSkipped} row(s) with an unreadable transaction date`,
+      );
+    }
 
     // ── Build a minimal retail config ─────────────────────────────────────
     const config: RetailReconciliationConfig = {
@@ -194,11 +212,16 @@ export async function runSettlementSync(
       slStoreId,
       storeHandle,
       window,
+      // What the API returned. `undatedRowsSkipped` is how many of those
+      // never reached the engine, so the two are read together.
       ordersIngested: orders.length,
       transactionsIngested: transactions.length,
       payoutsIngested: payouts.length,
+      ordersReconciled: sourceTxns.length,
+      transactionsReconciled: targetTxns.length,
       exceptionsFound: engineResult.retailExceptions.length,
       durationMs: Date.now() - startedAt,
+      ...(undatedRowsSkipped > 0 ? { undatedRowsSkipped } : {}),
     };
   } catch (err) {
     return {
@@ -232,7 +255,17 @@ export function normaliseToTransactions(
   transactions: ShoplinePaymentTransaction[],
   _payouts: ShoplinePayout[],
   currency: string,
-): { sourceTxns: Transaction[]; targetTxns: Transaction[] } {
+): {
+  sourceTxns: Transaction[];
+  targetTxns: Transaction[];
+  /**
+   * How many eligible rows were dropped for an unreadable date.
+   *
+   * Returned rather than merely filtered, so a caller cannot report the
+   * fetched counts as reconciled ones over a silent gap.
+   */
+  undatedRowsSkipped: number;
+} {
   // Synthetic batch/channel/user IDs for engine compatibility
   const SYNTHETIC_BATCH = -1;
   const SYNTHETIC_CHANNEL = -1;
@@ -334,5 +367,15 @@ export function normaliseToTransactions(
     })
     .filter((row): row is NonNullable<typeof row> => row !== null);
 
-  return { sourceTxns, targetTxns };
+  const eligibleOrders = orders.filter(
+    (o) => o.financial_status === "paid" || o.financial_status === "partially_refunded",
+  ).length;
+  const eligibleCaptures = transactions.filter((t) => t.status === "SUCCEEDED").length;
+  // Counted against the ELIGIBLE rows, not every row fetched: an order that
+  // was never paid is not a dropped payment, and folding the two together
+  // would report a skip on every unpaid order in the window.
+  const undatedRowsSkipped =
+    eligibleOrders - sourceTxns.length + (eligibleCaptures - targetTxns.length);
+
+  return { sourceTxns, targetTxns, undatedRowsSkipped };
 }

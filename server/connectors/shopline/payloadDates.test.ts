@@ -194,6 +194,38 @@ describe("when the settlement sync builds engine rows", () => {
     expect(result.targetTxns).toHaveLength(1);
   });
 
+  it("should report how many eligible rows it dropped", () => {
+    // Filtering without counting is what let the caller report `orders.length`
+    // as ingested over a row that never reached the engine — a complete-looking
+    // sync with a real gap in it.
+    const result = normaliseToTransactions(
+      [
+        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z"),
+        order("2026-10-09T10:00:00Z", undefined),
+      ],
+      [payment("2026-10-09T12:00:00Z"), payment("")],
+      [],
+      "USD"
+    );
+
+    expect(result.undatedRowsSkipped).toBe(2);
+  });
+
+  it("should not count an unpaid order as a dropped one", () => {
+    // Counted against the ELIGIBLE rows: an order that was never paid is
+    // filtered for a different reason, and folding the two together would
+    // report a skip for every unpaid order in the window.
+    const unpaid = order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z") as {
+      financial_status: string;
+    };
+    unpaid.financial_status = "pending";
+
+    const result = normaliseToTransactions([unpaid as never], [], [], "USD");
+
+    expect(result.sourceTxns).toHaveLength(0);
+    expect(result.undatedRowsSkipped).toBe(0);
+  });
+
   it("should never hand the engine an Invalid Date", () => {
     // The assertion that matters whatever the filtering looks like: every row
     // that reaches the engine can be dated. An Invalid Date there used to fail
