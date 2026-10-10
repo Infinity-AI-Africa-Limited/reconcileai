@@ -22,6 +22,28 @@ import path from "node:path";
 
 const run = promisify(execFile);
 
+/**
+ * Every variable the script reads, scrubbed from the inherited environment
+ * before each run.
+ *
+ * The child otherwise inherits the developer's shell, where an exported
+ * `MYSQL_IMAGE` or `MYSQL_DATABASE` silently changes what the script does and
+ * fails the assertions below for a reason that has nothing to do with the
+ * script. Scrubbed rather than pinned to the defaults, because CI passes none
+ * of these: clearing them is what makes these runs the CI run. A test's own
+ * override is applied afterwards and still wins.
+ */
+const SCRIPT_ENV_KNOBS = [
+  "MYSQL_IMAGE",
+  "MYSQL_CONTAINER",
+  "MYSQL_ROOT_PASSWORD",
+  "MYSQL_DATABASE",
+  "MYSQL_PULL_ATTEMPTS",
+  "MYSQL_PULL_BACKOFF_SECONDS",
+  "MYSQL_READY_ATTEMPTS",
+  "MYSQL_READY_INTERVAL_SECONDS",
+] as const;
+
 /** Forward slashes: bash reads this path on Windows too (Git Bash). */
 const SCRIPT = path
   .resolve(__dirname, "start-test-mysql.sh")
@@ -91,8 +113,10 @@ async function runScript(
   env: Record<string, string> = {},
 ): Promise<Result> {
   const bin = path.join(workDir, "bin").replace(/\\/g, "/");
+  const inherited: NodeJS.ProcessEnv = { ...process.env };
+  for (const knob of SCRIPT_ENV_KNOBS) delete inherited[knob];
   const shared = {
-    ...process.env,
+    ...inherited,
     FAKE_BIN: bin,
     SCRIPT_PATH: SCRIPT,
     FAKE_DOCKER_MODE: mode,
@@ -164,6 +188,45 @@ describe("when the registry is healthy", () => {
     expect(runLine).toContain("MYSQL_ROOT_PASSWORD=root");
     expect(runLine).toContain("MYSQL_DATABASE=reconcileai_test");
     expect(runLine).toContain("3306:3306");
+  });
+});
+
+describe("when the developer's own shell exports the script's variables", () => {
+  it("should still run the defaults CI runs, not the developer's values", async () => {
+    // Without the scrub these assertions fail on one machine and pass on every
+    // other, which reads as a flaky script rather than a dirty environment.
+    const hostile = { MYSQL_IMAGE: "mysql:5.5", MYSQL_DATABASE: "my_local_db" };
+    const saved = new Map(
+      Object.keys(hostile).map(key => [key, process.env[key]])
+    );
+    Object.assign(process.env, hostile);
+    try {
+      const result = await runScript("ready");
+
+      const runLine = result.calls
+        .split("\n")
+        .find(line => line.startsWith("run "));
+      expect(runLine).toContain("mysql:8.0");
+      expect(runLine).toContain("MYSQL_DATABASE=reconcileai_test");
+      expect(runLine).not.toContain("mysql:5.5");
+      expect(runLine).not.toContain("my_local_db");
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it("should still let a test override one, so the pinned waits keep working", async () => {
+    // The scrub must not also discard the overrides the other cases depend on
+    // — they are what keeps the readiness loop from waiting in real seconds.
+    const result = await runScript("ready", { MYSQL_DATABASE: "chosen_by_test" });
+
+    const runLine = result.calls
+      .split("\n")
+      .find(line => line.startsWith("run "));
+    expect(runLine).toContain("MYSQL_DATABASE=chosen_by_test");
   });
 });
 
