@@ -12,6 +12,10 @@ export default defineConfig({
       "@assets": path.resolve(templateRoot, "attached_assets"),
     },
   },
+  // The app compiles JSX with React's automatic runtime (@vitejs/plugin-react).
+  // tsconfig says "preserve", which leaves vitest on the classic transform, so a
+  // test that renders a .tsx page would fail with "React is not defined".
+  esbuild: { jsx: "automatic" },
   test: {
     environment: "node",
     include: [

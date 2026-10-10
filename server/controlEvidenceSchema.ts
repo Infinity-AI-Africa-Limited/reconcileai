@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { CONTROL_SOURCE_CONTRACT_STATUSES } from "./controlManifest";
 import { resolveOrgScope } from "./_core/tenancy";
+import { isControlPeriod } from "../shared/controlPeriod";
 
 const nonEmptyText = (max: number) => z.string().trim().min(1).max(max);
 const nullableText = (max: number) => nonEmptyText(max).nullable();
@@ -70,17 +71,29 @@ export const controlEvidenceScopeInput = z.object({
   controlPeriod: nonEmptyText(64).optional(),
   sourceContractId: z.number().int().positive().optional(),
   sourceKey: nonEmptyText(100).optional(),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(CONTROL_EVIDENCE_PAGE_MAX)
-    .optional(),
+  limit: z.number().int().min(1).max(CONTROL_EVIDENCE_PAGE_MAX).optional(),
   contractCursor: contractCursorInput.optional(),
   manifestCursor: manifestCursorInput.optional(),
 });
 
 export type ControlEvidenceScope = z.infer<typeof controlEvidenceScopeInput>;
+
+/**
+ * A governed daily control is assessed against a customer-defined local
+ * business day. Unlike the general evidence filter (which preserves legacy
+ * customer period labels), the readiness gate accepts only an ISO calendar day
+ * so it can derive a source contract's approved local cut-off without guessing.
+ */
+// The same rule the Daily Control page applies before it asks
+// (shared/controlPeriod.ts), so the page never sends a day the API refuses.
+const dailyControlPeriod = z
+  .string()
+  .refine(isControlPeriod, "Control period must be a real ISO calendar day.");
+
+export const controlRunReadinessInput = z.object({
+  organizationId: z.number().int().positive().optional(),
+  controlPeriod: dailyControlPeriod,
+});
 
 export const controlSourceContractInput = z.object({
   organizationId: z.number().int().positive().optional(),
