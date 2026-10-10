@@ -1,3 +1,28 @@
+import { isControlPeriod } from "@shared/controlPeriod";
+
+/** The API's own rule for a period (shared/controlPeriod.ts), so the two cannot disagree. */
+export { isControlPeriod };
+
+/**
+ * What the page body shows. The period controls are rendered in EVERY state:
+ * if an error or a bad date removed the date picker, the only way to correct
+ * the date would be to leave the page.
+ */
+export type DailyControlView = "invalid_period" | "loading" | "error" | "assessed";
+
+export function dailyControlView(state: {
+  periodIsValid: boolean;
+  isLoading: boolean;
+  hasError: boolean;
+}): DailyControlView {
+  // Checked first: the query is held back for such a period, so neither
+  // "loading" nor "error" could describe it.
+  if (!state.periodIsValid) return "invalid_period";
+  if (state.hasError) return "error";
+  if (state.isLoading) return "loading";
+  return "assessed";
+}
+
 export type DailyControlStatus =
   | "ready_to_reconcile"
   | "awaiting_sources"

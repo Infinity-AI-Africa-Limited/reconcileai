@@ -12,6 +12,7 @@ import {
   type RequiredSourceManifest,
 } from "./controlCompleteness";
 import { getDb } from "./db";
+import { isControlPeriod } from "../shared/controlPeriod";
 
 /**
  * Storage-backed preflight for a governed daily control.
@@ -208,7 +209,7 @@ export function assessPersistedControlEvidence(params: {
   batchManifests: PersistedBatchManifest[];
 }): PersistedControlRunAssessment {
   const persistenceReasons: PersistedControlReadinessReason[] = [];
-  if (!isIsoCalendarDate(params.controlPeriod)) {
+  if (!isControlPeriod(params.controlPeriod)) {
     persistenceReasons.push("invalid_control_period");
   }
 
@@ -442,22 +443,9 @@ function isInEffectBy(
  * under-fetching would silently drop a required source.
  */
 function contractEligibilityHorizon(controlPeriod: string): Date | null {
-  if (!isIsoCalendarDate(controlPeriod)) return null;
+  if (!isControlPeriod(controlPeriod)) return null;
   const [year, month, day] = controlPeriod.split("-").map(Number);
   return new Date(Date.UTC(year, month - 1, day + 1) + 14 * 60 * 60 * 1_000);
-}
-
-/** `YYYY-MM-DD`, including real calendar days only. */
-function isIsoCalendarDate(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return false;
-  const [year, month, day] = match.slice(1).map(Number);
-  const parsed = new Date(Date.UTC(year, month - 1, day));
-  return (
-    parsed.getUTCFullYear() === year &&
-    parsed.getUTCMonth() === month - 1 &&
-    parsed.getUTCDate() === day
-  );
 }
 
 /**
@@ -471,7 +459,7 @@ function cutoffAtFor(
   cutoffMinutes: unknown
 ): Date | null {
   if (
-    !isIsoCalendarDate(controlPeriod) ||
+    !isControlPeriod(controlPeriod) ||
     !isMeaningfulText(timeZone) ||
     !isValidCutoffMinutes(cutoffMinutes)
   ) {

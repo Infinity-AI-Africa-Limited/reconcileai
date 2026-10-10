@@ -18,6 +18,8 @@
   },
   "include": [],
   "files": [
+    "client/src/lib/dailyControlPage.test.ts",
+    "client/src/lib/useDailyControlReadiness.test.ts",
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifyConnection.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",

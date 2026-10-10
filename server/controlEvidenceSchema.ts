@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { CONTROL_SOURCE_CONTRACT_STATUSES } from "./controlManifest";
 import { resolveOrgScope } from "./_core/tenancy";
+import { isControlPeriod } from "../shared/controlPeriod";
 
 const nonEmptyText = (max: number) => z.string().trim().min(1).max(max);
 const nullableText = (max: number) => nonEmptyText(max).nullable();
@@ -83,18 +84,11 @@ export type ControlEvidenceScope = z.infer<typeof controlEvidenceScopeInput>;
  * customer period labels), the readiness gate accepts only an ISO calendar day
  * so it can derive a source contract's approved local cut-off without guessing.
  */
+// The same rule the Daily Control page applies before it asks
+// (shared/controlPeriod.ts), so the page never sends a day the API refuses.
 const dailyControlPeriod = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine(value => {
-    const [year, month, day] = value.split("-").map(Number);
-    const parsed = new Date(Date.UTC(year, month - 1, day));
-    return (
-      parsed.getUTCFullYear() === year &&
-      parsed.getUTCMonth() === month - 1 &&
-      parsed.getUTCDate() === day
-    );
-  }, "Control period must be a real ISO calendar day.");
+  .refine(isControlPeriod, "Control period must be a real ISO calendar day.");
 
 export const controlRunReadinessInput = z.object({
   organizationId: z.number().int().positive().optional(),

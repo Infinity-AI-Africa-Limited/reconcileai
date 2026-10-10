@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useLocation } from "wouter";
 import { usePortalContext } from "@/contexts/PortalContext";
 import { Badge } from "@/components/ui/badge";
@@ -22,14 +22,13 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import { trpc } from "@/lib/trpc";
+import { useDailyControlReadiness } from "@/hooks/useDailyControlReadiness";
 import {
   dailyControlSourceStatusCopy,
   dailyControlStatusCopy,
   humanizeControlReason,
   localControlPeriod,
-  type DailyControlSourceStatus,
-  type DailyControlStatus,
+  type DailyControlView,
 } from "@/lib/dailyControl";
 
 type Tone = "ready" | "waiting" | "attention" | "blocked";
@@ -73,41 +72,48 @@ function ReasonList({ reasons }: { reasons: string[] }) {
   );
 }
 
+/**
+ * The page body's state, shown BELOW the period controls. Nothing here may
+ * replace those controls: a user who cleared the date, or met an error, must
+ * be able to pick another day without leaving the page.
+ */
+function ViewNotice({ view, errorMessage }: { view: DailyControlView; errorMessage: string | null }) {
+  switch (view) {
+    case "invalid_period":
+      return (
+        <p role="alert" className="text-sm text-destructive">
+          Enter a complete calendar date to assess its evidence.
+        </p>
+      );
+    case "error":
+      return (
+        <p role="alert" className="text-sm text-destructive">
+          {errorMessage ?? "Readiness could not be loaded."}
+        </p>
+      );
+    case "loading":
+      return (
+        <div className="flex h-32 items-center justify-center text-muted-foreground">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading daily-control
+          evidence…
+        </div>
+      );
+    case "assessed":
+      return null;
+  }
+}
+
 export default function DailyControl() {
   const [, setLocation] = useLocation();
   const { viewAsOrg } = usePortalContext();
   const [controlPeriod, setControlPeriod] = useState(() =>
     localControlPeriod()
   );
-  const input = useMemo(
-    () => ({ organizationId: viewAsOrg?.id, controlPeriod }),
-    [controlPeriod, viewAsOrg?.id]
-  );
-  const readiness = trpc.controlEvidence.assessReadiness.useQuery(input, {
-    retry: false,
-  });
-
-  const assessment = readiness.data;
-  const status = assessment?.status as DailyControlStatus | undefined;
-  const presentation = status ? dailyControlStatusCopy(status) : null;
-
-  if (readiness.isLoading) {
-    return (
-      <div className="flex h-64 items-center justify-center text-muted-foreground">
-        <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading daily-control
-        evidence…
-      </div>
-    );
-  }
-
-  if (readiness.error) {
-    return (
-      <div className="space-y-3 p-6">
-        <h1 className="text-2xl font-bold tracking-tight">Daily Control</h1>
-        <p className="text-sm text-destructive">{readiness.error.message}</p>
-      </div>
-    );
-  }
+  const readiness = useDailyControlReadiness(controlPeriod, viewAsOrg?.id);
+  const { assessment } = readiness;
+  // No cast: the status is the server's own union, so a state the API adds
+  // later fails to compile here rather than rendering as nothing.
+  const presentation = assessment ? dailyControlStatusCopy(assessment.status) : null;
 
   return (
     <div className="space-y-6">
@@ -143,6 +149,7 @@ export default function DailyControl() {
           <div className="flex items-center gap-2">
             <Input
               aria-label="Control period"
+              aria-invalid={readiness.view === "invalid_period"}
               type="date"
               value={controlPeriod}
               onChange={event => setControlPeriod(event.target.value)}
@@ -150,8 +157,8 @@ export default function DailyControl() {
             />
             <Button
               variant="outline"
-              onClick={() => void readiness.refetch()}
-              disabled={readiness.isFetching}
+              onClick={readiness.refetch}
+              disabled={readiness.view === "invalid_period" || readiness.isFetching}
             >
               {readiness.isFetching ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -163,6 +170,8 @@ export default function DailyControl() {
           </div>
         </CardHeader>
       </Card>
+
+      <ViewNotice view={readiness.view} errorMessage={readiness.errorMessage} />
 
       {assessment && presentation ? (
         <>
@@ -218,8 +227,8 @@ export default function DailyControl() {
             </Card>
           </div>
 
-          {(assessment.reasons.length > 0 ||
-            assessment.persistenceReasons.length > 0) && (
+          {assessment.reasons.length > 0 ||
+          assessment.persistenceReasons.length > 0 ? (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -246,7 +255,7 @@ export default function DailyControl() {
                 </div>
               </CardContent>
             </Card>
-          )}
+          ) : null}
 
           <Card>
             <CardHeader>
@@ -282,7 +291,7 @@ export default function DailyControl() {
                     <tbody>
                       {assessment.sourceAssessments.map((source, index) => {
                         const sourcePresentation = dailyControlSourceStatusCopy(
-                          source.status as DailyControlSourceStatus
+                          source.status
                         );
                         return (
                           <tr
