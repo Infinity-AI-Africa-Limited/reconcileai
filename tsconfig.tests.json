@@ -24,6 +24,7 @@
     "client/src/lib/shopifyPrivacyDeliveries.test.ts",
     "client/src/lib/shopifySettlementMapping.test.ts",
     "client/src/lib/shoplineSettlementImport.test.ts",
+    "client/src/lib/dailyControl.test.ts",
     "server/_core/tenantHardening.test.ts",
     "server/appOrigin.test.ts",
     "server/connectors/shopify/appConfig.test.ts",

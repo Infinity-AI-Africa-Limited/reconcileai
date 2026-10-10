@@ -82,6 +82,7 @@ import Terms from "./pages/Terms";
 import Support from "./pages/Support";
 import SettlementMonitor from "./pages/SettlementMonitor";
 import ControlFit from "./pages/ControlFit";
+import DailyControl from "./pages/DailyControl";
 import ShoplineSyncStatus from "./pages/ShoplineSyncStatus";
 import ShoplineReviewWorkspace from "./pages/ShoplineReviewWorkspace";
 
@@ -298,6 +299,7 @@ function Router() {
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>
       <Route path="/control-fit">{() => <DashboardPage component={ControlFit} />}</Route>
+      <Route path="/daily-control">{() => <DashboardPage component={DailyControl} />}</Route>
       <Route path="/shopline/sync-status">{() => <DashboardPage component={ShoplineSyncStatus} />}</Route>
       {/*
         Deliberately NOT wrapped in PocAccessGate. This portal's access model is
