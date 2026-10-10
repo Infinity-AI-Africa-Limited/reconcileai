@@ -114,6 +114,10 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Settlement Monitor", path: "/settlement-monitor", group: "main", segments: ["retail_commerce"] },
   { label: "Dashboard", path: "/dashboard", group: "main", segments: ["retail_commerce", "financial_services", "corporate_b2b", "super_admin"] },
   { label: "Control Fit Brief", path: "/control-fit", group: "main", roles: ["admin", "cfo", "operations"], segments: ["retail_commerce", "financial_services", "corporate_b2b"], strictSegment: true },
+  // Read-only preflight over approved source contracts and immutable manifests.
+  // It never starts matching, creates no job, and does not publish a conclusion.
+  // Retail retains its deliberately narrow SHOPLINE settlement surface.
+  { label: "Daily Control", path: "/daily-control", group: "main", roles: ["admin", "cfo", "operations"], segments: ["financial_services", "corporate_b2b"], strictSegment: true },
   // Corporate B2B pilots run no-write and AI-off by default. Their operators use
   // the governed exception and approval queues below; agent-assisted diagnosis is
   // deliberately not offered until the customer has recorded an approved private

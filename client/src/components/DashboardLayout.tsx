@@ -76,6 +76,7 @@ type NavItem = NavEntry & { icon: React.ElementType };
 const NAV_ICONS: Record<string, React.ElementType> = {
   "/dashboard": LayoutDashboard,
   "/control-fit": Target,
+  "/daily-control": ClipboardCheck,
   "/super-agent": Sparkles,
   "/exception-intelligence": Network,
   "/demo-dashboard": LayoutGrid,
