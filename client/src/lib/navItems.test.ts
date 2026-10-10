@@ -50,6 +50,7 @@ const APPROVED_RETAIL = [
 const APPROVED_CORPORATE_B2B_PILOT = [
   "/dashboard",
   "/control-fit",
+  "/daily-control",
   "/distributors",
   "/corporate-pilot-controls",
   "/upload",
@@ -151,6 +152,23 @@ describe("when a Corporate B2B pilot user signs in", () => {
     for (const path of APPROVED_CORPORATE_B2B_PILOT) {
       expect(canReachPath(path, "corporate_b2b", "admin"), `${path} must remain reachable for a B2B pilot`).toBe(true);
     }
+  });
+});
+
+describe("when a governed daily control is opened", () => {
+  it("should admit accountable roles in financial and corporate B2B verticals", () => {
+    for (const segment of ["financial_services", "corporate_b2b"] as const) {
+      for (const role of ["admin", "cfo", "operations"]) {
+        expect(canReachPath("/daily-control", segment, role), `${segment}/${role}`).toBe(true);
+      }
+      expect(canReachPath("/daily-control", segment, "user"), `${segment}/user`).toBe(false);
+    }
+    expect(canReachPath("/daily-control", "retail_commerce", "admin")).toBe(false);
+  });
+
+  it("should keep the tenant workspace off the staff own-account shortcut", () => {
+    expect(canReachPath("/daily-control", "super_admin", "super_admin")).toBe(false);
+    expect(canReachPath("/daily-control", "financial_services", "super_admin", { portal: true })).toBe(true);
   });
 });
 
