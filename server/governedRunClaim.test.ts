@@ -164,7 +164,7 @@ describe("when the tenant's in-flight runs are not governed ones", () => {
  * the whole defect in miniature — the claim never runs in production and
  * nothing says so.
  */
-describe("the job insert's precondition hook", () => {
+describe("when a job insert carries a precondition hook", () => {
   const job = {
     userId: 1,
     organizationId,

@@ -129,7 +129,7 @@ describe("when the amount allowance is zero", () => {
   });
 });
 
-describe("the proximity score on its own", () => {
+describe("when the proximity score is called directly", () => {
   // Directly, because the engine's own passes filter a too-large difference
   // out before scoring it. Through the engine alone, a version that called
   // every zero-allowance pair perfect was indistinguishable from the real one.

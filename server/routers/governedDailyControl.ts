@@ -14,11 +14,12 @@ import * as db from "../db";
 import { governedControlRunInput } from "../controlEvidenceSchema";
 import {
   assertGovernedBatchesNotInFlight,
-  GOVERNED_DAILY_CONTROL_AMOUNT_TOLERANCE,
-  GOVERNED_DAILY_CONTROL_DATE_WINDOW_DAYS,
-  GovernedRunInFlightError,
   requireGovernedControlAdmission,
 } from "../controlRunAdmission";
+import {
+  asGovernedJobError,
+  governedEngineConfig,
+} from "../governedDailyControlJob";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
 import {
   assertModuleAvailable,
@@ -30,30 +31,6 @@ import {
   runOwner,
   sanitizeInput,
 } from "./shared";
-
-/**
- * Turn a refused claim into the status it deserves.
- *
- * A second Start over batches a run already holds is the caller being early,
- * not the server failing, so it answers 409 naming the run that holds them.
- * Reported as a 500 it would read as a platform fault and invite a retry,
- * which is exactly the thing the claim exists to prevent.
- *
- * Inline at the call site rather than wrapped around it: `moduleScope.test.ts`
- * ratchets that `assertModuleAvailable` appears between this procedure's
- * opening and its literal `db.createReconciliationJob(` call, so moving that
- * call into a helper silently disarmed the guard's own test.
- */
-function asGovernedJobError(error: unknown): unknown {
-  if (error instanceof GovernedRunInFlightError) {
-    return new TRPCError({
-      code: "CONFLICT",
-      message: `A governed run for these approved batches is already in progress (job ${error.jobId}). Wait for it to finish rather than starting another.`,
-      cause: error,
-    });
-  }
-  return error;
-}
 
 export const governedDailyControlProcedures = {
   createGovernedDailyControl: operationsProcedure
@@ -84,23 +61,10 @@ export const governedDailyControlProcedures = {
         input.name ?? `Daily control — ${input.controlPeriod}`,
         MAX_NAME_LENGTH,
       );
-      const engineConfig = {
-        amountTolerance: GOVERNED_DAILY_CONTROL_AMOUNT_TOLERANCE,
-        dateWindowDays: GOVERNED_DAILY_CONTROL_DATE_WINDOW_DAYS,
-        sourceChannel: sourceChannel.code,
-        targetChannel: targetChannel.code,
-        governedDailyControl: {
-          controlPeriod: admission.controlPeriod,
-          assessedAt: admission.assessedAt,
-          sourceContractCount: admission.sourceContractCount,
-          batchManifestCount: admission.batchManifestCount,
-          reconciliationPolicyVersions: admission.reconciliationPolicyVersions,
-          // Identifiers only. The worker matches exactly these batches' rows,
-          // re-checked against these manifests, never a date window.
-          settlement: admission.settlement,
-          register: admission.register,
-        },
-      };
+      const engineConfig = governedEngineConfig(admission, {
+        source: sourceChannel.code,
+        target: targetChannel.code,
+      });
       const { ip, ua } = getClientInfo(ctx);
       const jobId = await db.createReconciliationJob(
         {
@@ -112,15 +76,15 @@ export const governedDailyControlProcedures = {
           targetChannelId: admission.targetChannelId,
           dateFrom: admission.dateFrom,
           dateTo: admission.dateTo,
-          amountTolerance: String(GOVERNED_DAILY_CONTROL_AMOUNT_TOLERANCE),
-          dateWindowDays: GOVERNED_DAILY_CONTROL_DATE_WINDOW_DAYS,
+          // From the snapshot, so the row, the snapshot and the queued config
+          // cannot state three different policies.
+          amountTolerance: String(engineConfig.amountTolerance),
+          dateWindowDays: engineConfig.dateWindowDays,
           engineConfig: JSON.stringify(engineConfig),
           status: "pending",
         },
         {
-          // Under the insert's tenant row lock, so two Start requests cannot
-          // both admit a run over the same approved batches and both write
-          // matches for the same rows.
+          // Under the insert's tenant row lock — see the claim's own docblock.
           beforeInsert: tx =>
             assertGovernedBatchesNotInFlight(tx, tenant, {
               settlement: admission.settlement,
@@ -149,9 +113,7 @@ export const governedDailyControlProcedures = {
               executor: tx,
             }),
         },
-      ).catch(error => {
-        throw asGovernedJobError(error);
-      });
+      ).catch((error: unknown) => { throw asGovernedJobError(error); });
       if (!jobId) {
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create reconciliation job" });
       }

@@ -22,7 +22,7 @@ import { governedStartBlockers, canStartGovernedControl } from "../client/src/li
 
 const admissible = { admissible: true, reasons: [] as string[] };
 
-describe("the read-only reconciliation roles", () => {
+describe("when a role is checked against the reconciliation write rule", () => {
   it("should be exactly the two roles the API refuses", () => {
     // Pinned as a value, not re-derived: this is the contract both sides read.
     expect([...RECONCILIATION_READ_ONLY_ROLES]).toEqual(["cfo", "compliance"]);
