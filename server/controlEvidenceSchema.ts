@@ -70,17 +70,36 @@ export const controlEvidenceScopeInput = z.object({
   controlPeriod: nonEmptyText(64).optional(),
   sourceContractId: z.number().int().positive().optional(),
   sourceKey: nonEmptyText(100).optional(),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(CONTROL_EVIDENCE_PAGE_MAX)
-    .optional(),
+  limit: z.number().int().min(1).max(CONTROL_EVIDENCE_PAGE_MAX).optional(),
   contractCursor: contractCursorInput.optional(),
   manifestCursor: manifestCursorInput.optional(),
 });
 
 export type ControlEvidenceScope = z.infer<typeof controlEvidenceScopeInput>;
+
+/**
+ * A governed daily control is assessed against a customer-defined local
+ * business day. Unlike the general evidence filter (which preserves legacy
+ * customer period labels), the readiness gate accepts only an ISO calendar day
+ * so it can derive a source contract's approved local cut-off without guessing.
+ */
+const dailyControlPeriod = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine(value => {
+    const [year, month, day] = value.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    );
+  }, "Control period must be a real ISO calendar day.");
+
+export const controlRunReadinessInput = z.object({
+  organizationId: z.number().int().positive().optional(),
+  controlPeriod: dailyControlPeriod,
+});
 
 export const controlSourceContractInput = z.object({
   organizationId: z.number().int().positive().optional(),

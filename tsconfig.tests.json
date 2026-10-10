@@ -16,7 +16,8 @@
     "noEmit": true,
     "incremental": false
   },
-  "include": [],  "files": [
+  "include": [],
+  "files": [
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifyConnection.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
@@ -60,6 +61,8 @@
     "server/connectors/shopline/settlementImportRequest.test.ts",
     "server/connectors/shopline/syncIngestLock.test.ts",
     "server/controlCompleteness.test.ts",
+    "server/controlRunReadiness.db.test.ts",
+    "server/controlRunReadiness.test.ts",
     "server/controlEvidenceStore.test.ts",
     "server/controlManifest.test.ts",
     "server/corporateB2BPilot.test.ts",
@@ -82,6 +85,7 @@
     "server/reviewerLinkOrigin.test.ts",
     "server/rlsAudit.test.ts",
     "server/routers/controlEvidence.test.ts",
+    "server/routers/controlEvidenceReadiness.test.ts",
     "server/routers/shopifyAppHome.test.ts",
     "server/routers/shopifyConnector.test.ts",
     "server/sanitizeRef.test.ts",
