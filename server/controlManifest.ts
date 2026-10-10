@@ -17,6 +17,7 @@ export type ControlSourceContractStatus =
   (typeof CONTROL_SOURCE_CONTRACT_STATUSES)[number];
 
 export interface ControlSourceContractInput {
+  channelId: number;
   sourceKey: string;
   version: number;
   role: ControlSourceRole;
@@ -58,6 +59,7 @@ export interface ControlBatchManifestInput {
 export interface StoredControlSourceContract {
   id: number;
   organizationId: number;
+  channelId: number | null;
   sourceKey: string;
   version: number;
   status: ControlSourceContractStatus;
@@ -82,6 +84,11 @@ export class ControlManifestConflictError extends Error {
 export function validateSourceContract(
   input: ControlSourceContractInput
 ): void {
+  if (!Number.isSafeInteger(input.channelId) || input.channelId < 1) {
+    throw new ControlManifestValidationError(
+      "A tenant-visible reconciliation channel is required for a source contract."
+    );
+  }
   if (!Number.isSafeInteger(input.version) || input.version < 1) {
     throw new ControlManifestValidationError(
       "Source-contract version must be a positive integer."

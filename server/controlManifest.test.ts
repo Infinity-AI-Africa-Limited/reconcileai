@@ -15,6 +15,7 @@ function contractInput(
   overrides: Partial<ControlSourceContractInput> = {}
 ): ControlSourceContractInput {
   return {
+    channelId: 101,
     sourceKey: "switch-settlement",
     version: 1,
     role: "settlement",
@@ -42,6 +43,7 @@ function storedContract(
   return {
     id: 41,
     organizationId: 42,
+    channelId: 101,
     sourceKey: "switch-settlement",
     version: 1,
     status: "active",
@@ -84,6 +86,12 @@ describe("when a source contract is validated", () => {
     expect(() =>
       validateSourceContract(contractInput({ approvalReference: null }))
     ).toThrow(/approval reference/i);
+  });
+
+  it("should require a tenant-visible reconciliation channel", () => {
+    expect(() =>
+      validateSourceContract(contractInput({ channelId: 0 }))
+    ).toThrow(/reconciliation channel/i);
   });
 
   it("should refuse a contract that claims required totals without a currency", () => {

@@ -22,6 +22,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { assertTenantAiAllowed, isTenantAiAllowed, TenantAiDisabledError } from "./aiGate";
 import * as db from "./db";
+import { governedSidesOf, loadGovernedPopulation } from "./controlRunAdmission";
 import { isTenantId } from "@shared/tenantId";
 import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
 import { storagePut } from "./storage";
@@ -7114,14 +7115,24 @@ async function runReconciliation(
     // Financial Services run without an attributable owner is unsafe: it could
     // create data that cannot be authorized, audited or safely sent to the
     // deferred AI pass. Legacy/orgless jobs must be remediated, not re-run.
-    const runOrganizationId = (await db.getReconciliationJob(jobId))?.organizationId;
+    const runJob = await db.getReconciliationJob(jobId);
+    const runOrganizationId = runJob?.organizationId;
     if (runOrganizationId == null) {
       throw new Error(`[Reconciliation] job ${jobId} has no owning organization; refusing to run`);
     }
 
     await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
-    const sourceTxns = await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo);
-    const targetTxns = await db.getTransactionsForReconciliation(targetChannelId, dateFrom, dateTo);
+    // A governed daily control matches exactly the rows its manifests approved,
+    // re-proven here against those manifests; every other run matches its
+    // channels' unmatched rows in its date window. governedSidesOf throws for a
+    // governed job it cannot read, so it can never fall back to the window.
+    const governedSides = governedSidesOf(runJob?.engineConfig, { sourceChannelId, targetChannelId });
+    const { sourceTxns, targetTxns } = governedSides
+      ? await loadGovernedPopulation(runOrganizationId, governedSides)
+      : {
+          sourceTxns: await db.getTransactionsForReconciliation(sourceChannelId, dateFrom, dateTo),
+          targetTxns: await db.getTransactionsForReconciliation(targetChannelId, dateFrom, dateTo),
+        };
 
     await db.updateReconciliationJob(jobId, {
       totalSourceTxns: sourceTxns.length,

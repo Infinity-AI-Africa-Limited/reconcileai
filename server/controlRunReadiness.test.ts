@@ -15,6 +15,7 @@ function contract(
   return {
     id: 41,
     organizationId,
+    channelId: 101,
     sourceKey: "switch-settlement",
     version: 1,
     role: "settlement",
@@ -187,7 +188,9 @@ describe("when a source contract took effect after the day being assessed", () =
       sourceContracts: [v1, v2],
     });
 
-    expect(result.persistenceReasons).not.toContain("ambiguous_source_contract");
+    expect(result.persistenceReasons).not.toContain(
+      "ambiguous_source_contract"
+    );
     expect(result.sourceContractCount).toBe(1);
   });
 

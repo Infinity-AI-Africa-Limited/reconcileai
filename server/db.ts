@@ -942,11 +942,34 @@ export async function findDuplicateTransactions(
  * healthy on runs the seeders insert directly. Making it required turns a
  * forgotten owner into a compile error instead of a dead run.
  */
-export async function createReconciliationJob(data: InsertReconciliationJob & { organizationId: number }) {
+export async function createReconciliationJob(
+  data: InsertReconciliationJob & { organizationId: number },
+  options: JobInsertOptions = {},
+) {
   const db = await getDb();
   if (!db) return null;
-  return insertJobUnderTenantLock(db, data);
+  return insertJobUnderTenantLock(db, data, options);
 }
+
+export type JobInsertOptions = {
+  /**
+   * Work that must commit with the job or not at all — an admission audit
+   * record, say. It runs in the insert's own transaction, after the insert,
+   * with the new job's id; if it throws, the job is never created.
+   */
+  inTransaction?: (tx: DbTransaction, jobId: number) => Promise<void>;
+  /**
+   * A precondition checked in the insert's transaction, BEFORE the insert and
+   * after the tenant row lock below. If it throws, no job is created.
+   *
+   * The lock is the point: it serialises every job insert for one tenant, so a
+   * "is another run already holding this?" question asked here cannot be
+   * answered by two callers at once. The same check made before calling this
+   * function would be a read outside the lock — two concurrent requests would
+   * both pass it, and both create a job.
+   */
+  beforeInsert?: (tx: DbTransaction) => Promise<void>;
+};
 
 /**
  * Insert a reconciliation job while holding its tenant's `organizations` row
@@ -975,6 +998,7 @@ export async function createReconciliationJob(data: InsertReconciliationJob & { 
 export async function insertJobUnderTenantLock(
   db: DbHandle,
   data: InsertReconciliationJob & { organizationId: number },
+  options: JobInsertOptions = {},
 ): Promise<number> {
   return db.transaction(async (tx) => {
     await tx
@@ -982,8 +1006,11 @@ export async function insertJobUnderTenantLock(
       .from(organizations)
       .where(eq(organizations.id, data.organizationId))
       .for("update");
+    await options.beforeInsert?.(tx);
     const result = await tx.insert(reconciliationJobs).values(data);
-    return result[0].insertId;
+    const jobId = result[0].insertId;
+    await options.inTransaction?.(tx, jobId);
+    return jobId;
   });
 }
 

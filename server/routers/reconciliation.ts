@@ -32,8 +32,11 @@ import {
 } from "./shared";
 import * as db from "../db";
 import { assertReconciliationQueueAvailable, enqueueReconciliationRun } from "../reconciliationQueue";
+import { governedDailyControlProcedures } from "./governedDailyControl";
 
 export const reconciliationRouter = router({
+  ...governedDailyControlProcedures,
+
   create: operationsProcedure
     .input(
       z.object({

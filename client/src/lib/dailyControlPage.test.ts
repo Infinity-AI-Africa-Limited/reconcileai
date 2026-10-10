@@ -14,17 +14,30 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { DailyControlReadiness } from "@/hooks/useDailyControlReadiness";
 
-const hook = vi.hoisted(() => ({ state: null as unknown }));
+const hook = vi.hoisted(() => ({ state: null as unknown, role: "operations" as string | null }));
 
 vi.mock("wouter", () => ({ useLocation: () => ["/daily-control", () => {}] }));
 vi.mock("@/contexts/PortalContext", () => ({ usePortalContext: () => ({ viewAsOrg: null }) }));
 vi.mock("@/hooks/useDailyControlReadiness", () => ({ useDailyControlReadiness: () => hook.state }));
+// The page reads the caller's role to decide whether Start may be offered at
+// all. Defaulted to a writable role so every case below keeps asking about the
+// evidence; the role cases set it explicitly.
+vi.mock("@/_core/hooks/useAuth", () => ({
+  useAuth: () => ({ user: hook.role === null ? null : { role: hook.role } }),
+}));
+vi.mock("@/lib/trpc", () => ({
+  trpc: { reconciliation: { createGovernedDailyControl: { useMutation: () => ({ isPending: false, mutateAsync: vi.fn() }) } } },
+}));
 
 import DailyControl from "@/pages/DailyControl";
 
 type Assessment = NonNullable<DailyControlReadiness["assessment"]>;
 
-function render(state: Partial<DailyControlReadiness>): string {
+function render(
+  state: Partial<DailyControlReadiness>,
+  options: { role?: string | null } = {}
+): string {
+  hook.role = options.role === undefined ? "operations" : options.role;
   hook.state = {
     view: "assessed",
     assessment: undefined,
@@ -49,6 +62,9 @@ function assessment(overrides: Partial<Assessment> = {}): Assessment {
     persistenceReasons: [],
     sourceContractCount: 0,
     batchManifestCount: 0,
+    reconciliationPolicyVersions: [],
+    sourceContractBindings: [],
+    governedAdmission: { admissible: false, reasons: ["evidence_not_ready"] },
     ...overrides,
   } as Assessment;
 }
@@ -103,5 +119,105 @@ describe("when an assessment has no control-level reasons", () => {
 
     expect(html).toContain("Awaiting source evidence");
     expect(html).not.toContain("Control-level evidence");
+  });
+});
+
+/** The Start button's opening tag, to read whether it is disabled. */
+function startButton(html: string): string {
+  const match = /<button[^>]*>(?:(?!<\/button>).)*Start governed control/s.exec(html);
+  if (!match) throw new Error("no Start button rendered");
+  return match[0].slice(0, match[0].indexOf(">") + 1);
+}
+
+describe("when the evidence is ready but a governed run would be refused", () => {
+  it("should keep Start disabled and say why, instead of letting every click fail", () => {
+    const html = render({
+      assessment: assessment({
+        status: "ready_to_reconcile",
+        canReconcile: true,
+        governedAdmission: { admissible: false, reasons: ["internal_register_source_count"] },
+      }),
+    });
+
+    expect(startButton(html)).toContain('disabled=""');
+    expect(html).toContain("Start is withheld");
+    expect(html).toContain("Internal Register Source Count");
+  });
+});
+
+describe("when a governed run would be admitted", () => {
+  it("should enable Start, with no withheld notice", () => {
+    const html = render({
+      assessment: assessment({
+        status: "ready_to_reconcile",
+        canReconcile: true,
+        governedAdmission: { admissible: true, reasons: [] },
+      }),
+    });
+
+    // The attribute, not the word: the button's classes contain "disabled:".
+    expect(startButton(html)).not.toContain('disabled=""');
+    expect(html).not.toContain("Start is withheld");
+  });
+});
+
+describe("when the viewer's role may read the control but not run it", () => {
+  const admitted = {
+    status: "ready_to_reconcile" as const,
+    canReconcile: true,
+    governedAdmission: { admissible: true, reasons: [] },
+  };
+
+  it("should withhold Start from a CFO on a day that is otherwise admissible", () => {
+    // A CFO is given this page deliberately, and `operationsProcedure` refuses
+    // every reconciliation write from that role. Gated on admission alone, the
+    // button was enabled on exactly the days it could not work, and answered
+    // FORBIDDEN on a day the page had just called ready.
+    const html = render({ assessment: assessment(admitted) }, { role: "cfo" });
+
+    expect(startButton(html)).toContain('disabled=""');
+    expect(html).toContain("Start is withheld");
+    expect(html).toContain("Your Role Cannot Start A Run");
+  });
+
+  it("should withhold it from compliance too, the other read-only role", () => {
+    const html = render({ assessment: assessment(admitted) }, { role: "compliance" });
+
+    expect(startButton(html)).toContain('disabled=""');
+    expect(html).toContain("Your Role Cannot Start A Run");
+  });
+
+  it("should still show a CFO why the evidence itself is blocked", () => {
+    // Their reason is added to the evidence reasons, not substituted for them:
+    // a read-only viewer is often the person who needs to know what is wrong.
+    const html = render(
+      {
+        assessment: assessment({
+          status: "ready_to_reconcile",
+          canReconcile: true,
+          governedAdmission: { admissible: false, reasons: ["internal_register_source_count"] },
+        }),
+      },
+      { role: "cfo" }
+    );
+
+    expect(html).toContain("Internal Register Source Count");
+    expect(html).toContain("Your Role Cannot Start A Run");
+  });
+
+  it("should leave an operations user's admissible day untouched", () => {
+    const html = render({ assessment: assessment(admitted) }, { role: "operations" });
+
+    expect(startButton(html)).not.toContain('disabled=""');
+    expect(html).not.toContain("Start is withheld");
+  });
+});
+
+describe("when the evidence is not ready", () => {
+  it("should keep Start disabled, leaving the explanation to the status banner", () => {
+    const html = render({ assessment: assessment() });
+
+    expect(startButton(html)).toContain('disabled=""');
+    expect(html).not.toContain("Start is withheld");
   });
 });

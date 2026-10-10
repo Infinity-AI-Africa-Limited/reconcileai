@@ -3,6 +3,7 @@ import {
   dailyControlSourceStatusCopy,
   dailyControlStatusCopy,
   dailyControlView,
+  governedStartBlockers,
   humanizeControlReason,
   isControlPeriod,
   localControlPeriod,
@@ -75,5 +76,17 @@ describe("when readiness is presented to an operator", () => {
     expect(humanizeControlReason("source_contract_version_mismatch")).toBe(
       "Source Contract Version Mismatch"
     );
+  });
+});
+
+describe("when Start is withheld although the evidence is ready", () => {
+  it("should list the governed-admission rules that refuse it, but not repeat that evidence is not ready", () => {
+    expect(
+      governedStartBlockers({ admissible: false, reasons: ["evidence_not_ready", "mixed_time_zones"] })
+    ).toEqual(["mixed_time_zones"]);
+  });
+
+  it("should list nothing once a run would be admitted", () => {
+    expect(governedStartBlockers({ admissible: true, reasons: [] })).toEqual([]);
   });
 });

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
+import { toast } from "sonner";
 import { usePortalContext } from "@/contexts/PortalContext";
+import { trpc } from "@/lib/trpc";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,17 +21,21 @@ import {
   Clock3,
   Database,
   Loader2,
+  Play,
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
 import { useDailyControlReadiness } from "@/hooks/useDailyControlReadiness";
 import {
+  canStartGovernedControl,
   dailyControlSourceStatusCopy,
   dailyControlStatusCopy,
+  governedStartBlockers,
   humanizeControlReason,
   localControlPeriod,
   type DailyControlView,
 } from "@/lib/dailyControl";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 type Tone = "ready" | "waiting" | "attention" | "blocked";
 
@@ -106,14 +112,45 @@ function ViewNotice({ view, errorMessage }: { view: DailyControlView; errorMessa
 export default function DailyControl() {
   const [, setLocation] = useLocation();
   const { viewAsOrg } = usePortalContext();
+  // Read-only roles legitimately open this page; only Start is withheld.
+  const { user } = useAuth();
   const [controlPeriod, setControlPeriod] = useState(() =>
     localControlPeriod()
   );
   const readiness = useDailyControlReadiness(controlPeriod, viewAsOrg?.id);
+  const startGovernedControl =
+    trpc.reconciliation.createGovernedDailyControl.useMutation();
   const { assessment } = readiness;
   // No cast: the status is the server's own union, so a state the API adds
   // later fails to compile here rather than rendering as nothing.
   const presentation = assessment ? dailyControlStatusCopy(assessment.status) : null;
+  const caller = { role: user?.role };
+  const startBlockers = assessment
+    ? governedStartBlockers(assessment.governedAdmission, caller)
+    : [];
+  const canStart = assessment
+    ? canStartGovernedControl({
+        governedAdmission: assessment.governedAdmission,
+        role: caller.role,
+      })
+    : false;
+
+  const startRun = async () => {
+    try {
+      const result = await startGovernedControl.mutateAsync({
+        organizationId: viewAsOrg?.id,
+        controlPeriod,
+      });
+      toast.success(`Governed daily control admitted for ${result.controlPeriod}.`);
+      setLocation("/reconciliation");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to admit the governed daily control."
+      );
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -125,8 +162,9 @@ export default function DailyControl() {
           <h1 className="text-2xl font-bold tracking-tight">Daily Control</h1>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
             Check whether approved source evidence is fit to interpret before a
-            reconciliation run. This workspace does not start matching, create a
-            job, publish a match rate, post funds, or resolve an exception.
+            reconciliation run. A run can start only after this preflight is
+            ready; the server then rechecks it before admitting the job. This
+            workspace never posts funds or resolves an exception.
           </p>
         </div>
         <Button
@@ -198,7 +236,7 @@ export default function DailyControl() {
             </div>
           </section>
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-4">
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Approved source contracts</CardDescription>
@@ -224,6 +262,37 @@ export default function DailyControl() {
                     : "Reconciliation is withheld"}
                 </CardTitle>
               </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Governed admission</CardDescription>
+                <Button
+                  className="mt-2 w-full"
+                  disabled={!canStart || startGovernedControl.isPending}
+                  onClick={() => void startRun()}
+                >
+                  {startGovernedControl.isPending ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="mr-2 h-4 w-4" />
+                  )}
+                  Start governed control
+                </Button>
+              </CardHeader>
+              <CardContent className="space-y-2 pt-0 text-xs text-muted-foreground">
+                {startBlockers.length > 0 ? (
+                  <div role="status">
+                    <p className="font-medium text-foreground">
+                      Start is withheld:
+                    </p>
+                    <ReasonList reasons={startBlockers} />
+                  </div>
+                ) : null}
+                <p>
+                  The server derives the approved channels, business-day window
+                  and upload batches again before a job can be admitted.
+                </p>
+              </CardContent>
             </Card>
           </div>
 

@@ -1,4 +1,5 @@
 import { isControlPeriod } from "@shared/controlPeriod";
+import { roleCanWriteReconciliation } from "@shared/reconciliationWriteRoles";
 
 /** The API's own rule for a period (shared/controlPeriod.ts), so the two cannot disagree. */
 export { isControlPeriod };
@@ -95,6 +96,52 @@ export function dailyControlSourceStatusCopy(
     case "blocked":
       return { label: "Blocked", tone: "blocked" };
   }
+}
+
+/**
+ * Why Start is withheld when the evidence itself is ready. "evidence_not_ready"
+ * is left out because the status banner already says so; every other reason is
+ * a governed-admission rule the preflight alone does not express (one
+ * settlement and one register source, one time zone, a bound upload batch, a
+ * population that still matches its manifest).
+ */
+export function governedStartBlockers(
+  governedAdmission: {
+    admissible: boolean;
+    reasons: readonly string[];
+  },
+  caller: { role?: string | null } = {}
+): string[] {
+  const evidenceBlockers = governedAdmission.admissible
+    ? []
+    : governedAdmission.reasons.filter(
+        reason => reason !== "evidence_not_ready"
+      );
+  // Listed alongside the evidence reasons, not instead of them: a CFO on a
+  // blocked day should still see why the day is blocked. Theirs is the last
+  // reason because it is about the viewer, not the control.
+  return roleCanWriteReconciliation(caller.role)
+    ? evidenceBlockers
+    : [...evidenceBlockers, "your_role_cannot_start_a_run"];
+}
+
+/**
+ * Whether this caller may press Start at all.
+ *
+ * Both halves are required, and they answer different questions: admission is
+ * about the evidence, the role is about the viewer. A CFO is deliberately
+ * given this page to READ (`navItems.ts`), and `operationsProcedure` refuses
+ * every reconciliation write from that role — so gating Start on admission
+ * alone offered them a button that always answered FORBIDDEN, on a day the
+ * page had just called ready.
+ */
+export function canStartGovernedControl(state: {
+  governedAdmission: { admissible: boolean };
+  role?: string | null;
+}): boolean {
+  return (
+    state.governedAdmission.admissible && roleCanWriteReconciliation(state.role)
+  );
 }
 
 /** Machine reasons are intentionally stored and returned without customer data. */
