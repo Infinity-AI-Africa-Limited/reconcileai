@@ -22,6 +22,9 @@
 
 import { getDb } from "../../db";
 import { errorSummary } from "../../errorText";
+// The same date rule as the file-based settlement import and the API ingest
+// path: one parser, so the two ways into this connector cannot disagree.
+import { parseMoneyDate as parseDate } from "../../../shared/money";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { eq, and } from "drizzle-orm";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
@@ -244,6 +247,14 @@ export function normaliseToTransactions(
     .map((o, idx) => {
       const totalPrice = o.current_total_price_set?.shop_money?.amount ?? "0";
       const gateway = o.payment_gateway_names?.[0] ?? "unknown";
+      // SHOPLINE types these timestamps as required strings, but they are
+      // hand-written interfaces over third-party JSON with nothing validating
+      // them — and this leg dates off `processed_at`, which an order may
+      // simply not carry. An unreadable date cannot be reconciled, and these
+      // rows are never persisted, so the row is dropped below rather than fed
+      // to the engine as an Invalid Date.
+      const transactionDate = parseDate(o.processed_at);
+      if (!transactionDate) return null;
       return {
         id: -(idx + 1), // negative IDs to avoid DB collision — engine uses these for matching only
         batchId: SYNTHETIC_BATCH,
@@ -257,7 +268,7 @@ export function normaliseToTransactions(
         description: `Order ${o.name} via ${gateway}`,
         amount: totalPrice,
         currency,
-        transactionDate: new Date(o.processed_at),
+        transactionDate,
         valueDate: null,
         shopifyOrderCurrency: null,
         shopifyUpdatedAt: null,
@@ -270,16 +281,23 @@ export function normaliseToTransactions(
         status: "unmatched" as const,
         matchId: null,
         rawData: { orderId: o.id, gateway, financialStatus: o.financial_status },
-        createdAt: new Date(o.created_at),
+        // Falls back to the transaction date rather than the clock: for a
+        // synthetic row the engine never persists, "when we know it happened"
+        // beats a timestamp that would claim it arrived now.
+        createdAt: parseDate(o.created_at) ?? transactionDate,
       };
-    });
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
 
   // Target = successful payment transactions (actual gateway captures).
   // PAYMENT rows use status SUCCEEDED (spec §A6) — payouts use SUCCESS.
   // Match key: seller_order_id joins back to the order id on the source leg.
   const targetTxns: Transaction[] = transactions
     .filter((t) => t.status === "SUCCEEDED")
-    .map((t, idx) => ({
+    .map((t, idx) => {
+      const transactionDate = parseDate(t.create_time);
+      if (!transactionDate) return null;
+      return {
       id: -(orders.length + idx + 1),
       batchId: SYNTHETIC_BATCH,
       channelId: SYNTHETIC_CHANNEL,
@@ -292,7 +310,7 @@ export function normaliseToTransactions(
       description: `${t.payment_method} capture via ${t.sub_payment_method ?? t.payment_method}`,
       amount: t.paid_amount ?? t.amount,
       currency: t.currency,
-      transactionDate: new Date(t.create_time),
+      transactionDate,
       valueDate: null,
       shopifyOrderCurrency: null,
       shopifyUpdatedAt: null,
@@ -311,8 +329,10 @@ export function normaliseToTransactions(
         fee: t.fee,
         disputeType: t.dispute_type,
       },
-      createdAt: new Date(t.create_time),
-    }));
+      createdAt: transactionDate,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
 
   return { sourceTxns, targetTxns };
 }

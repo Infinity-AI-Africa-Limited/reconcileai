@@ -92,6 +92,16 @@ export interface SyncReport {
    * sync still succeeds; this records that its coverage was partial.
    */
   degradedLegs?: string[];
+  /**
+   * Rows SHOPLINE returned that could not be dated, and so were not ingested.
+   *
+   * Same standing as `degradedLegs`: the sync still succeeds, and this records
+   * that its coverage was partial. Reported rather than logged alone, because
+   * a dropped payment makes a control period read complete while real money is
+   * missing from it — and `lastSyncError` stays null on a successful sync, so
+   * nothing else would have carried the fact.
+   */
+  undatedRowsSkipped?: number;
 }
 
 /**
@@ -461,7 +471,21 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     const paymentRows = payments.data.map((p) => normalisePaymentTransaction(p, ctx));
     const payoutRows = payouts.data.map((p) => normalisePayout(p, ctx));
 
-    const candidateRows = [...orderRows, ...paymentRows, ...payoutRows];
+    // A normaliser answers null for a row whose own transaction date SHOPLINE
+    // sent unreadably: it cannot be placed in a control period, and filing it
+    // under a guessed date would put real money in the wrong day. Counted
+    // rather than quietly dropped — a payment that vanishes makes a day read
+    // complete when it is not.
+    const dated = [...orderRows, ...paymentRows, ...payoutRows];
+    const candidateRows = dated.filter(
+      (row): row is NonNullable<typeof row> => row !== null,
+    );
+    const undatedRowsSkipped = dated.length - candidateRows.length;
+    if (undatedRowsSkipped > 0) {
+      console.warn(
+        `[SHOPLINE] store=${storeHandle} skipped ${undatedRowsSkipped} row(s) of ${dated.length} with an unreadable transaction date`,
+      );
+    }
     // The check and the insert as ONE step per store, serialised with every
     // other writer of this store's ledger (lockShoplineStoreForIngest).
     const allRows = await db.transaction(async (tx) => {
@@ -540,6 +564,7 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       exceptionCount,
       durationMs: Date.now() - startedAt,
       ...(degraded.length > 0 ? { degradedLegs: degraded } : {}),
+      ...(undatedRowsSkipped > 0 ? { undatedRowsSkipped } : {}),
     };
   } catch (err) {
     const message = errorSummary(err);

@@ -59,6 +59,7 @@
     "server/connectors/shopify/tokenStore.test.ts",
     "server/connectors/shopify/webhookBody.test.ts",
     "server/connectors/shopify/webhooks.test.ts",
+    "server/connectors/shopline/payloadDates.test.ts",
     "server/connectors/shopline/settlementEvents.test.ts",
     "server/connectors/shopline/settlementFileCommit.test.ts",
     "server/connectors/shopline/settlementFileDedupe.test.ts",
