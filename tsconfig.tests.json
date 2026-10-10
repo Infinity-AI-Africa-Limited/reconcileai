@@ -17,6 +17,7 @@
     "incremental": false
   },
   "include": [],  "files": [
+    ".github/scripts/startTestMysql.test.ts",
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifyConnection.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
