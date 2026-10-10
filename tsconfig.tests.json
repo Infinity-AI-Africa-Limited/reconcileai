@@ -66,6 +66,7 @@
     "server/controlCompleteness.test.ts",
     "server/controlRunAdmission.test.ts",
     "server/controlRunPopulation.test.ts",
+    "server/governedDailyControl.db.test.ts",
     "server/controlRunReadiness.db.test.ts",
     "server/controlRunReadiness.test.ts",
     "server/controlEvidenceStore.test.ts",
