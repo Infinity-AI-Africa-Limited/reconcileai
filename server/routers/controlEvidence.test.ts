@@ -26,6 +26,11 @@ const state = vi.hoisted(() => ({
 vi.mock("../db", async importOriginal => ({
   ...(await importOriginal<typeof import("../db")>()),
   getDb: vi.fn(async () => state.db),
+  getChannelByIdForOrg: vi.fn(async (channelId: number, orgId: number) =>
+    channelId === 101 && orgId === 42
+      ? { id: channelId, organizationId: orgId }
+      : undefined
+  ),
 }));
 vi.mock("./shared", async importOriginal => ({
   ...(await importOriginal<typeof import("./shared")>()),
@@ -48,6 +53,7 @@ const BATCHES = "upload_batches";
 const contract = {
   id: 41,
   organizationId,
+  channelId: 101,
   sourceKey: "switch-settlement",
   version: 1,
   status: "active" as const,
@@ -64,6 +70,7 @@ const caller = (role = "operations", isGuest = false) =>
   } as never);
 
 const sourceContractInput = {
+  channelId: 101,
   sourceKey: "switch-settlement",
   version: 1,
   role: "settlement" as const,

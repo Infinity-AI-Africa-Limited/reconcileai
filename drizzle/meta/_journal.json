@@ -764,6 +764,13 @@
       "when": 1791563669777,
       "tag": "0108_melodic_weapon_omega",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "5",
+      "when": 1791623293241,
+      "tag": "0109_tranquil_wallop",
+      "breakpoints": true
     }
   ]
 }

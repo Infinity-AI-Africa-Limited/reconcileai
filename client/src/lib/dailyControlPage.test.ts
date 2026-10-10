@@ -19,6 +19,9 @@ const hook = vi.hoisted(() => ({ state: null as unknown }));
 vi.mock("wouter", () => ({ useLocation: () => ["/daily-control", () => {}] }));
 vi.mock("@/contexts/PortalContext", () => ({ usePortalContext: () => ({ viewAsOrg: null }) }));
 vi.mock("@/hooks/useDailyControlReadiness", () => ({ useDailyControlReadiness: () => hook.state }));
+vi.mock("@/lib/trpc", () => ({
+  trpc: { reconciliation: { createGovernedDailyControl: { useMutation: () => ({ isPending: false, mutateAsync: vi.fn() }) } } },
+}));
 
 import DailyControl from "@/pages/DailyControl";
 

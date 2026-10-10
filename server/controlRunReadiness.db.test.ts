@@ -19,6 +19,7 @@ const MANIFESTS = "control_batch_manifests";
 const contract = {
   id: 41,
   organizationId,
+  channelId: 101,
   sourceKey: "switch-settlement",
   version: 1,
   role: "settlement",
@@ -96,7 +97,6 @@ describe("when stored evidence is read for one tenant and control period", () =>
       expect.arrayContaining([organizationId, period, contract.id])
     );
   });
-
 });
 
 describe("when the business day assessed is not the day it is assessed on", () => {
@@ -147,7 +147,6 @@ describe("when the tenant has no eligible source contract", () => {
       fake.ops.some(op => op.kind === "select" && op.table === MANIFESTS)
     ).toBe(false);
   });
-
 });
 
 describe("when evidence storage is unavailable", () => {

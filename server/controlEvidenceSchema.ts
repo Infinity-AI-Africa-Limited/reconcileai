@@ -95,8 +95,17 @@ export const controlRunReadinessInput = z.object({
   controlPeriod: dailyControlPeriod,
 });
 
+/**
+ * A governed run derives its channels and date window from approved evidence;
+ * callers supply only the customer-defined control period and a bounded label.
+ */
+export const governedControlRunInput = controlRunReadinessInput.extend({
+  name: nonEmptyText(255).optional(),
+});
+
 export const controlSourceContractInput = z.object({
   organizationId: z.number().int().positive().optional(),
+  channelId: z.number().int().positive(),
   sourceKey: nonEmptyText(100),
   version: z.number().int().positive(),
   role: z.enum(["settlement", "internal_register", "bank_or_gl"]),
