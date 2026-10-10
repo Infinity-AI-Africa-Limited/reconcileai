@@ -105,26 +105,26 @@ jobs:
   # its own (run 30700238964). That now blocks a merge. If it proves flaky,
   # make that step retry — do not restore continue-on-error, which would hide
   # real test failures to paper over an infrastructure one.
+  #
+  # MySQL is started by a STEP, not by `services:`, for exactly that reason.
+  # A service container is pulled before any step runs, so a registry blip
+  # fails the job before a single test executes and nothing here can retry it:
+  # run 37995168085 died on three `auth.docker.io` timeouts in about a minute,
+  # with `Tests` red and no test results at all. The script retries the pull
+  # over a window several times longer. See .github/scripts/start-test-mysql.sh
+  # for why our own Docker Hub credentials would NOT have helped, and why the
+  # image stays pinned rather than using the MySQL the runner ships.
   test:
     name: Tests
     runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: reconcileai_test
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=15
     env:
       DATABASE_URL: "mysql://root:root@127.0.0.1:3306/reconcileai_test"
     steps:
       - uses: actions/checkout@v4
+      # Before the Node setup: an outage here should cost seconds, not a full
+      # install, and the pull runs while nothing else needs the runner.
+      - name: Start test MySQL
+        run: .github/scripts/start-test-mysql.sh
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
