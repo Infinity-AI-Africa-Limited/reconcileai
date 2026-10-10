@@ -101,12 +101,31 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
     return found.length;
   }
 
-  async function waitForJob(jobId: number): Promise<Job> {
+  /**
+   * Wait for the worker to finish a job. The job's status turns terminal BEFORE
+   * the worker's last writes — the completion audit and the final progress
+   * event on success, the failure event on refusal — so a status read races
+   * them. The terminal event is the run's last write on both paths: wait for it,
+   * then read the job.
+   */
+  async function finishedJob(jobId: number): Promise<{ job: Job; finalMessage: string | null }> {
     const deadline = Date.now() + RUN_TIMEOUT_MS - 5_000;
     for (;;) {
-      const [job] = await db.select().from(reconciliationJobs).where(eq(reconciliationJobs.id, jobId));
-      if (job && (job.status === "completed" || job.status === "failed")) return job;
-      if (Date.now() > deadline) throw new Error(`job ${jobId} still ${job?.status ?? "missing"}`);
+      const [event] = await db
+        .select({ message: jobProgressEvents.message })
+        .from(jobProgressEvents)
+        .where(
+          and(
+            eq(jobProgressEvents.jobId, jobId),
+            inArray(jobProgressEvents.phase, ["completed", "failed"])
+          )
+        )
+        .limit(1);
+      if (event) {
+        const [job] = await db.select().from(reconciliationJobs).where(eq(reconciliationJobs.id, jobId));
+        return { job, finalMessage: event.message };
+      }
+      if (Date.now() > deadline) throw new Error(`job ${jobId} recorded no terminal progress event`);
       await new Promise(resolve => setTimeout(resolve, 200));
     }
   }
@@ -311,7 +330,7 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
     async () => {
       const { jobId } = await caller.reconciliation.createGovernedDailyControl({ controlPeriod: PERIOD });
       jobIds.push(jobId);
-      const job = await waitForJob(jobId);
+      const { job } = await finishedJob(jobId);
 
       expect(job.status).toBe("completed");
       // The decoy sits inside the run's window, so a date-window run would have
@@ -390,15 +409,11 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
         userId,
       });
 
-      const job = await waitForJob(jobId);
+      const { job, finalMessage } = await finishedJob(jobId);
       expect(job.status).toBe("failed");
+      expect(finalMessage).toContain("population_not_unmatched");
       expect(await db.select().from(matches).where(eq(matches.jobId, jobId))).toEqual([]);
       expect(await db.select().from(exceptions).where(eq(exceptions.jobId, jobId))).toEqual([]);
-      const [failure] = await db
-        .select({ message: jobProgressEvents.message })
-        .from(jobProgressEvents)
-        .where(and(eq(jobProgressEvents.jobId, jobId), eq(jobProgressEvents.phase, "failed")));
-      expect(failure?.message).toContain("population_not_unmatched");
     },
     RUN_TIMEOUT_MS
   );
