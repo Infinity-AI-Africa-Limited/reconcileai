@@ -7184,7 +7184,11 @@ async function runReconciliation(
       matchType: m.matchType,
       confidenceScore: String(m.confidenceScore),
       amountDifference: String(m.amountDifference),
-      dateDifference: Math.round(m.dateDifference),
+      // Null, not 0: a reference match against a row whose date is unreadable
+      // has no date gap to state, and `matches.dateDifference` is nullable for
+      // exactly that. Rounding it used to send NaN to the column.
+      dateDifference:
+        m.dateDifference === null ? null : Math.round(m.dateDifference),
       matchReason: m.matchReason,
       status: m.confidenceScore >= 85 ? ("confirmed" as const) : ("pending_review" as const),
     }));

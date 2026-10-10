@@ -11,7 +11,13 @@ export interface MatchCandidate {
   matchType: "exact" | "fuzzy" | "amount_tolerance" | "date_window" | "ai_suggested" | "reversal";
   confidenceScore: number;
   amountDifference: number;
-  dateDifference: number;
+  /**
+   * Null when either side's date is unreadable: pass 1 matches on reference
+   * alone, so it legitimately pairs an undated row and then has no date gap to
+   * report. `matches.dateDifference` is a nullable `int`, so null is both
+   * representable and honest — NaN was neither.
+   */
+  dateDifference: number | null;
   matchReason: string;
 }
 
@@ -75,19 +81,34 @@ interface EngineStats {
 
 // ─── Index Structures for O(1) Lookups ──────────────────────────────
 
+/**
+ * Only `byRef` — deliberately.
+ *
+ * This built two further indexes, `byAmount` and `byAmountDate`, and **neither
+ * was ever read**: `targetIndex.byRef` is the single consumer anywhere in this
+ * file. Pass 2 builds its own day/amount structure (`dayAmountIndex`) and does
+ * not touch these. So they were per-row work on every run for nothing, which
+ * matters on the 500k-row populations this engine is tuned for.
+ *
+ * It also mattered for correctness, which is why they are gone rather than
+ * merely unused: the `byAmountDate` key was
+ * `new Date(txn.transactionDate).toISOString()`, which **throws** `RangeError:
+ * Invalid time value` on an unreadable date. Built in a loop over every target
+ * before any matching, one bad timestamp failed the whole run. Guarding that
+ * line would have protected a map nobody reads; deleting it removes the throw
+ * structurally, so it cannot come back.
+ */
 interface TransactionIndex {
   byRef: Map<string, Transaction[]>;
-  byAmount: Map<string, Transaction[]>;
-  byAmountDate: Map<string, Transaction[]>;
 }
 
 function buildIndex(txns: Transaction[]): TransactionIndex {
   const byRef = new Map<string, Transaction[]>();
-  const byAmount = new Map<string, Transaction[]>();
-  const byAmountDate = new Map<string, Transaction[]>();
 
   for (const txn of txns) {
-    // Index by normalized reference
+    // Index by normalized reference. No date is read here, so a row whose
+    // timestamp is unreadable is still matchable by an exact reference — which
+    // is right: a reference match is just as certain either way.
     if (txn.transactionRef) {
       const normRef = normalizeString(txn.transactionRef);
       if (normRef) {
@@ -96,22 +117,9 @@ function buildIndex(txns: Transaction[]): TransactionIndex {
         byRef.set(normRef, existing);
       }
     }
-
-    // Index by rounded amount (for quick lookup)
-    const amtKey = parseFloat(String(txn.amount)).toFixed(2);
-    const existingAmt = byAmount.get(amtKey) || [];
-    existingAmt.push(txn);
-    byAmount.set(amtKey, existingAmt);
-
-    // Index by amount + date (YYYY-MM-DD)
-    const dateKey = new Date(txn.transactionDate).toISOString().split("T")[0];
-    const compositeKey = `${amtKey}|${dateKey}`;
-    const existingComposite = byAmountDate.get(compositeKey) || [];
-    existingComposite.push(txn);
-    byAmountDate.set(compositeKey, existingComposite);
   }
 
-  return { byRef, byAmount, byAmountDate };
+  return { byRef };
 }
 
 // ─── Utility Functions ───────────────────────────────────────────────
@@ -165,6 +173,47 @@ function daysDifference(d1: Date, d2: Date): number {
   return Math.abs(d1.getTime() - d2.getTime()) / MS_PER_DAY;
 }
 
+/**
+ * The UTC calendar day a transaction belongs to, or null when its timestamp
+ * cannot be read.
+ *
+ * `new Date(x).toISOString()` **throws** `RangeError: Invalid time value` on an
+ * unreadable date, and the keys that used it were built in a loop over every
+ * row before any matching began — so one bad timestamp failed the ENTIRE
+ * reconciliation run, taking every sound row with it. A run that dies gives
+ * the operator nothing to act on; one flagged row gives them the row.
+ *
+ * Reachable, not hypothetical: `server/connectors/shopline/ingest.ts` and
+ * `server/connectors/shopify/ingest.ts` build `transactionDate` with a bare
+ * `new Date(payload.field)`, so a third-party response carrying a missing or
+ * oddly-formatted timestamp yields an Invalid Date on a canonical row. The
+ * shared file parser (`parseMoneyDate`) already returns null instead, and the
+ * API ingestion path refuses such a row outright — those two paths are safe.
+ */
+export function transactionDayKey(value: Date): string | null {
+  const ms = transactionTimeMs(value);
+  return ms === null ? null : new Date(ms).toISOString().split("T")[0];
+}
+
+/** A transaction's timestamp in milliseconds, or null when unreadable. */
+function transactionTimeMs(value: Date): number | null {
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * A difference fit to be stored, or null.
+ *
+ * `matches.dateDifference` is a nullable `int`, and `daysDifference` yields NaN
+ * when either side's date is unreadable. Pass 1 matches on reference ALONE, so
+ * it legitimately pairs an undated row — and then wrote NaN into that column.
+ * Null is both representable and the honest answer: matched by reference, date
+ * gap unknown.
+ */
+function storableDifference(value: number): number | null {
+  return Number.isFinite(value) ? value : null;
+}
+
 function amountDifferencePercent(a1: number, a2: number): number {
   if (a1 === 0 && a2 === 0) return 0;
   const base = Math.max(Math.abs(a1), Math.abs(a2));
@@ -194,7 +243,11 @@ function detectDuplicates(txns: Transaction[]): DuplicateGroup[] {
     // currencies is NOT a duplicate (WS-6).
     const ref = normalizeString(txn.transactionRef);
     const amt = parseFloat(String(txn.amount)).toFixed(2);
-    const date = new Date(txn.transactionDate).toISOString().split("T")[0];
+    // A sentinel rather than a throw, and one that cannot collide with a real
+    // `YYYY-MM-DD`: two undated rows sharing a reference, amount, currency and
+    // channel are still each other's duplicate, which is exactly the kind of
+    // row worth flagging.
+    const date = transactionDayKey(txn.transactionDate) ?? "undated";
     const key = `${ref}|${amt}|${txn.currency}|${date}|${txn.channelId}`;
 
     if (ref) { // Only check duplicates for transactions with references
@@ -432,7 +485,9 @@ export function runMatchingEngine(
           matchType: "exact",
           confidenceScore: 100,
           amountDifference: 0,
-          dateDifference: daysDifference(new Date(src.transactionDate), new Date(tgt.transactionDate)),
+          dateDifference: storableDifference(
+            daysDifference(new Date(src.transactionDate), new Date(tgt.transactionDate))
+          ),
           matchReason: `Exact reference match: ${src.transactionRef}`,
         });
         matchedSourceIds.add(src.id);
@@ -572,7 +627,9 @@ export function runMatchingEngine(
             matchType: "fuzzy",
             confidenceScore: confidence,
             amountDifference: Math.round((srcAmt - tgtAmt) * 100) / 100,
-            dateDifference: daysDifference(new Date(src.transactionDate), new Date(tgt.transactionDate)),
+            dateDifference: storableDifference(
+              daysDifference(new Date(src.transactionDate), new Date(tgt.transactionDate))
+            ),
             matchReason: `Fuzzy match: description similarity ${(combinedSim * 100).toFixed(0)}%`,
           };
         }
@@ -631,6 +688,26 @@ export function categorizeException(
 } {
   const txnAmt = parseFloat(String(txn.amount));
   const txnDate = new Date(txn.transactionDate);
+  const txnDay = transactionDayKey(txn.transactionDate);
+
+  /**
+   * Checked before every other classification, because an unreadable date is
+   * the reason this row could not be matched rather than a finding about its
+   * counterparty. Calling it "no matching transaction found" would send an
+   * operator looking for a counterparty that may well exist.
+   *
+   * It is also the third site that threw: the default return below formats
+   * this date, so fixing only the index would have moved the `RangeError`
+   * here, from the row's indexing to the row's explanation.
+   */
+  if (txnDay === null) {
+    return {
+      category: "format_error",
+      severity: "high",
+      description: `Transaction ${txn.transactionRef || txn.id} (${txn.currency} ${txnAmt}) carries an unreadable transaction date, so it cannot be matched on date or placed in a control period.`,
+      suggestedResolution: `Correct the transaction date at its source and re-ingest the row. If it arrived through a connector, the source system sent a timestamp the platform could not read — check that feed's date format before re-running.`,
+    };
+  }
 
   // Check for reversal that couldn't be matched
   const reversalPatterns = [/reversal/i, /reversed/i, /rvsl/i, /refund/i, /chargeback/i];
@@ -732,7 +809,7 @@ export function categorizeException(
   return {
     category: "unmatched",
     severity: txnAmt > 1000000 ? "high" : "medium", // High severity for large amounts
-    description: `No matching transaction found for ${txn.transactionRef || txn.id} (${txn.currency} ${txnAmt.toLocaleString()}) on ${txnDate.toISOString().split("T")[0]}.`,
+    description: `No matching transaction found for ${txn.transactionRef || txn.id} (${txn.currency} ${txnAmt.toLocaleString()}) on ${txnDay}.`,
     suggestedResolution: `Investigate whether the counterparty transaction exists in a different channel or time period. For Nigerian banking, check NIBSS Instant Payment (NIP) logs and the bank's core banking system.`,
   };
 }
