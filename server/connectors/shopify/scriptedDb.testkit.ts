@@ -43,6 +43,18 @@ export interface RecordedOp {
    * fake behaves identically while production always reports no further pages.
    */
   limit?: number;
+  /**
+   * The column aliases a select projected, when it named them.
+   *
+   * Same blind spot as `limit`, one step earlier: the fake answers from a
+   * scripted array, so every field a test puts in a fixture row comes back
+   * whether or not the real query asked for it. Drop a column from the
+   * projection and production hands that field back as `undefined` on every
+   * row while the fake stays green — and a rule that reads the missing field
+   * then decides on absent data, silently. `undefined` when the select took
+   * no field map, i.e. asked for the whole row.
+   */
+  fields?: string[];
 }
 
 /**
@@ -128,11 +140,15 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
     };
 
     return {
-      select(_fields?: unknown) {
+      select(fields?: unknown) {
         let table = "";
         let where: RecordedOp["where"] = null;
         let locked = false;
         let limit: number | undefined;
+        const selected =
+          fields && typeof fields === "object"
+            ? Object.keys(fields as Record<string, unknown>)
+            : undefined;
         const query = {
           from(t: Table) { table = getTableName(t); return query; },
           innerJoin() { return query; },
@@ -143,7 +159,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
           limit(rows?: number) { limit = rows; return query; },
           for() { locked = true; return query; },
           ...settle(() => {
-            record({ kind: "select", table, where, data: null, upsert: false, locked, ...(limit === undefined ? {} : { limit }) });
+            record({ kind: "select", table, where, data: null, upsert: false, locked, ...(limit === undefined ? {} : { limit }), ...(selected === undefined ? {} : { fields: selected }) });
             const answer = take("select", table);
             if (answer instanceof Error) throw answer;
             return Array.isArray(answer) ? answer : (script.standing?.[table] ?? []);
