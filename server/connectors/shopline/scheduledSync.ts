@@ -166,6 +166,9 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       totalPayments: reports.reduce((sum, r) => sum + r.paymentsIngested, 0),
       totalPayouts: reports.reduce((sum, r) => sum + r.payoutsIngested, 0),
       totalExceptions: reports.reduce((sum, r) => sum + r.exceptionCount, 0),
+      // Rows dropped for an unreadable transaction date. An operator running
+      // this by hand must see a partial sync as partial.
+      totalUndatedSkipped: reports.reduce((sum, r) => sum + (r.undatedRowsSkipped ?? 0), 0),
       durationMs: Date.now() - startedAt,
       // Per-store detail so an operator running this by hand sees WHICH store
       // failed and why, without needing the log stream or a DB query.
@@ -178,6 +181,7 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
         payouts: r.payoutsIngested,
         matched: r.matchedCount,
         exceptions: r.exceptionCount,
+        undatedSkipped: r.undatedRowsSkipped ?? 0,
         error: r.error ?? null,
         durationMs: r.durationMs,
       })),
@@ -258,12 +262,14 @@ export async function handleShoplineDailyBatch(req: Request, res: Response): Pro
       totalPayouts: reports.reduce((sum, r) => sum + r.payoutsIngested, 0),
       totalReconciled,
       totalExceptions,
+      totalUndatedSkipped: reports.reduce((sum, r) => sum + (r.undatedRowsSkipped ?? 0), 0),
       durationMs: Date.now() - startedAt,
       reports: reports.map((r) => ({
         store: r.storeHandle,
         success: r.success,
         matched: r.matchedCount,
         exceptions: r.exceptionCount,
+        undatedSkipped: r.undatedRowsSkipped ?? 0,
         error: r.error,
       })),
     });

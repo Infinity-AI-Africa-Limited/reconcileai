@@ -92,6 +92,16 @@ export interface SyncReport {
    * sync still succeeds; this records that its coverage was partial.
    */
   degradedLegs?: string[];
+  /**
+   * Rows SHOPLINE returned that could not be dated, and so were not ingested.
+   *
+   * Same standing as `degradedLegs`: the sync still succeeds, and this records
+   * that its coverage was partial. Reported rather than logged alone, because
+   * a dropped payment makes a control period read complete while real money is
+   * missing from it — and `lastSyncError` stays null on a successful sync, so
+   * nothing else would have carried the fact.
+   */
+  undatedRowsSkipped?: number;
 }
 
 /**
@@ -461,7 +471,36 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     const paymentRows = payments.data.map((p) => normalisePaymentTransaction(p, ctx));
     const payoutRows = payouts.data.map((p) => normalisePayout(p, ctx));
 
-    const candidateRows = [...orderRows, ...paymentRows, ...payoutRows];
+    // A normaliser answers null for a row whose own transaction date SHOPLINE
+    // sent unreadably: it cannot be placed in a control period, and filing it
+    // under a guessed date would put real money in the wrong day. Counted
+    // rather than quietly dropped — a payment that vanishes makes a day read
+    // complete when it is not.
+    const dated = [...orderRows, ...paymentRows, ...payoutRows];
+    const candidateRows = dated.filter(
+      (row): row is NonNullable<typeof row> => row !== null,
+    );
+    const undatedRowsSkipped = dated.length - candidateRows.length;
+    // The order references the dropped rows WOULD have carried, read from the
+    // raw payloads because the row itself was never built. Both legs join on
+    // this ref (an order's own id; a payment's seller_order_id), so an
+    // affected pair can be left out of matching entirely — otherwise the
+    // surviving half is excepted as a payment that is missing when it is
+    // merely undated.
+    const brokenPairRefs = [
+      ...orders.filter((_, i) => orderRows[i] === null).map((o) => o.id),
+      ...payments.data
+        .filter((_, i) => paymentRows[i] === null)
+        .map((p) => p.seller_order_id || p.trade_order_id),
+    ].filter(Boolean);
+    if (undatedRowsSkipped > 0) {
+      console.warn(
+        `[SHOPLINE] store=${storeHandle} skipped ${undatedRowsSkipped} row(s) of ${dated.length} with an unreadable transaction date` +
+          (brokenPairRefs.length > 0
+            ? `; ${brokenPairRefs.length} order(s) held back from matching so their counterpart is not reported missing`
+            : ""),
+      );
+    }
     // The check and the insert as ONE step per store, serialised with every
     // other writer of this store's ledger (lockShoplineStoreForIngest).
     const allRows = await db.transaction(async (tx) => {
@@ -486,7 +525,10 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
     await updateUploadBatch(batchId, {
       status: "completed",
       validRows: allRows.length,
-      invalidRows: 0,
+      // Undated rows ARE invalid rows, and this column already shows in the
+      // upload history — so the gap is visible to the merchant without a new
+      // field anywhere. Hardcoding 0 is what made a partial sync read clean.
+      invalidRows: undatedRowsSkipped,
       completedAt: new Date(),
     });
 
@@ -520,6 +562,12 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
         from,
         to,
         store.currency ?? "USD",
+        // No `orderRefs`: this pass restricts nothing and only holds back the
+        // broken pairs. Passing `orderRefs: []` would mean "no refs qualify"
+        // and match nothing at all.
+        brokenPairRefs.length > 0
+          ? { excludeOrderRefs: brokenPairRefs }
+          : undefined,
       );
       matchedCount = result.matchedCount;
       exceptionCount = result.exceptionCount;
@@ -540,6 +588,7 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       exceptionCount,
       durationMs: Date.now() - startedAt,
       ...(degraded.length > 0 ? { degradedLegs: degraded } : {}),
+      ...(undatedRowsSkipped > 0 ? { undatedRowsSkipped } : {}),
     };
   } catch (err) {
     const message = errorSummary(err);
@@ -694,8 +743,26 @@ export async function resolveChannelIds(
  * same transaction and category is not raised a second time.
  */
 export interface ReconciliationScope {
-  /** Order references as stored in `transactionRef` on both legs. */
-  orderRefs: string[];
+  /**
+   * Order references as stored in `transactionRef` on both legs — matching is
+   * restricted to these.
+   *
+   * Optional, and absent is NOT the same as empty: absent restricts nothing,
+   * while an empty array means "no refs qualify" and matches nothing. A scope
+   * that only excludes refs must therefore omit this rather than pass `[]`.
+   */
+  orderRefs?: string[];
+  /**
+   * Order references to leave OUT of matching entirely, on both legs.
+   *
+   * For an order whose payment leg SHOPLINE sent with an unreadable date. That
+   * payment is not ingested, so matching the order against what remains would
+   * raise "No matching transaction found" — and that claim is untrue in the
+   * same way it is when the payments feed is unavailable: the payment exists,
+   * we simply could not date it. Reported as a skip, never as a missing
+   * payment. Every unaffected order still reconciles as usual.
+   */
+  excludeOrderRefs?: string[];
   /**
    * Which unmatched rows may be raised as exceptions. Matching is never limited.
    *  - absent: every one, as always;
@@ -846,16 +913,26 @@ export async function runReconciliationOnPersistedData(
   currency: string,
   scope?: ReconciliationScope,
 ): Promise<{ matchedCount: number; exceptionCount: number }> {
-  const orderRefs = scope ? [...new Set(scope.orderRefs.filter(Boolean))] : undefined;
+  const orderRefs = scope?.orderRefs
+    ? [...new Set(scope.orderRefs.filter(Boolean))]
+    : undefined;
   if (orderRefs && orderRefs.length === 0) return { matchedCount: 0, exceptionCount: 0 };
+
+  // Both legs, minus any order whose counterpart could not be dated: a pair
+  // broken by an unreadable timestamp must not be matched, because an unmatched
+  // half becomes a "No matching transaction found" exception about a payment
+  // that exists.
+  const excluded = new Set((scope?.excludeOrderRefs ?? []).filter(Boolean));
+  const usable = (row: { transactionRef: string | null }) =>
+    !refundReturnedNoMoney(row as never) && !excluded.has(row.transactionRef ?? "");
 
   // Fetch persisted transactions for the window
   const sourceRows = (
     await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs })
-  ).filter((row) => !refundReturnedNoMoney(row));
+  ).filter(usable);
   const targetRows = (
     await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs })
-  ).filter((row) => !refundReturnedNoMoney(row));
+  ).filter(usable);
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
     return { matchedCount: 0, exceptionCount: 0 };

@@ -22,6 +22,9 @@
 
 import { getDb } from "../../db";
 import { errorSummary } from "../../errorText";
+// The same date rule as the file-based settlement import and the API ingest
+// path: one parser, so the two ways into this connector cannot disagree.
+import { parseMoneyDate as parseDate } from "../../../shared/money";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 import { eq, and } from "drizzle-orm";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
@@ -53,9 +56,22 @@ export interface SyncResult {
   ordersIngested: number;
   transactionsIngested: number;
   payoutsIngested: number;
+  /** Rows that actually reached the engine, after undated rows were dropped. */
+  ordersReconciled?: number;
+  transactionsReconciled?: number;
   exceptionsFound: number;
   durationMs: number;
   error?: string;
+  /**
+   * Orders and captures SHOPLINE returned that could not be dated, and so
+   * never reached the engine.
+   *
+   * Reported because the counts above are what the API RETURNED, not what was
+   * reconciled: without this, a paid order missing `processed_at` vanished
+   * from reconciliation while still being counted as ingested, which reads as
+   * a complete sync over a real gap.
+   */
+  undatedRowsSkipped?: number;
 }
 
 /**
@@ -161,12 +177,17 @@ export async function runSettlementSync(
     } while (payoutPageInfo);
 
     // ── Normalise to source/target Transaction arrays ─────────────────────
-    const { sourceTxns, targetTxns } = normaliseToTransactions(
+    const { sourceTxns, targetTxns, undatedRowsSkipped } = normaliseToTransactions(
       orders,
       transactions,
       payouts,
       store.currency ?? "USD",
     );
+    if (undatedRowsSkipped > 0) {
+      console.warn(
+        `[SHOPLINE settlement] store=${storeHandle} skipped ${undatedRowsSkipped} row(s) with an unreadable transaction date`,
+      );
+    }
 
     // ── Build a minimal retail config ─────────────────────────────────────
     const config: RetailReconciliationConfig = {
@@ -191,11 +212,16 @@ export async function runSettlementSync(
       slStoreId,
       storeHandle,
       window,
+      // What the API returned. `undatedRowsSkipped` is how many of those
+      // never reached the engine, so the two are read together.
       ordersIngested: orders.length,
       transactionsIngested: transactions.length,
       payoutsIngested: payouts.length,
+      ordersReconciled: sourceTxns.length,
+      transactionsReconciled: targetTxns.length,
       exceptionsFound: engineResult.retailExceptions.length,
       durationMs: Date.now() - startedAt,
+      ...(undatedRowsSkipped > 0 ? { undatedRowsSkipped } : {}),
     };
   } catch (err) {
     return {
@@ -229,7 +255,17 @@ export function normaliseToTransactions(
   transactions: ShoplinePaymentTransaction[],
   _payouts: ShoplinePayout[],
   currency: string,
-): { sourceTxns: Transaction[]; targetTxns: Transaction[] } {
+): {
+  sourceTxns: Transaction[];
+  targetTxns: Transaction[];
+  /**
+   * How many eligible rows were dropped for an unreadable date.
+   *
+   * Returned rather than merely filtered, so a caller cannot report the
+   * fetched counts as reconciled ones over a silent gap.
+   */
+  undatedRowsSkipped: number;
+} {
   // Synthetic batch/channel/user IDs for engine compatibility
   const SYNTHETIC_BATCH = -1;
   const SYNTHETIC_CHANNEL = -1;
@@ -244,6 +280,14 @@ export function normaliseToTransactions(
     .map((o, idx) => {
       const totalPrice = o.current_total_price_set?.shop_money?.amount ?? "0";
       const gateway = o.payment_gateway_names?.[0] ?? "unknown";
+      // SHOPLINE types these timestamps as required strings, but they are
+      // hand-written interfaces over third-party JSON with nothing validating
+      // them — and this leg dates off `processed_at`, which an order may
+      // simply not carry. An unreadable date cannot be reconciled, and these
+      // rows are never persisted, so the row is dropped below rather than fed
+      // to the engine as an Invalid Date.
+      const transactionDate = parseDate(o.processed_at);
+      if (!transactionDate) return null;
       return {
         id: -(idx + 1), // negative IDs to avoid DB collision — engine uses these for matching only
         batchId: SYNTHETIC_BATCH,
@@ -257,7 +301,7 @@ export function normaliseToTransactions(
         description: `Order ${o.name} via ${gateway}`,
         amount: totalPrice,
         currency,
-        transactionDate: new Date(o.processed_at),
+        transactionDate,
         valueDate: null,
         shopifyOrderCurrency: null,
         shopifyUpdatedAt: null,
@@ -270,16 +314,23 @@ export function normaliseToTransactions(
         status: "unmatched" as const,
         matchId: null,
         rawData: { orderId: o.id, gateway, financialStatus: o.financial_status },
-        createdAt: new Date(o.created_at),
+        // Falls back to the transaction date rather than the clock: for a
+        // synthetic row the engine never persists, "when we know it happened"
+        // beats a timestamp that would claim it arrived now.
+        createdAt: parseDate(o.created_at) ?? transactionDate,
       };
-    });
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
 
   // Target = successful payment transactions (actual gateway captures).
   // PAYMENT rows use status SUCCEEDED (spec §A6) — payouts use SUCCESS.
   // Match key: seller_order_id joins back to the order id on the source leg.
   const targetTxns: Transaction[] = transactions
     .filter((t) => t.status === "SUCCEEDED")
-    .map((t, idx) => ({
+    .map((t, idx) => {
+      const transactionDate = parseDate(t.create_time);
+      if (!transactionDate) return null;
+      return {
       id: -(orders.length + idx + 1),
       batchId: SYNTHETIC_BATCH,
       channelId: SYNTHETIC_CHANNEL,
@@ -292,7 +343,7 @@ export function normaliseToTransactions(
       description: `${t.payment_method} capture via ${t.sub_payment_method ?? t.payment_method}`,
       amount: t.paid_amount ?? t.amount,
       currency: t.currency,
-      transactionDate: new Date(t.create_time),
+      transactionDate,
       valueDate: null,
       shopifyOrderCurrency: null,
       shopifyUpdatedAt: null,
@@ -311,8 +362,44 @@ export function normaliseToTransactions(
         fee: t.fee,
         disputeType: t.dispute_type,
       },
-      createdAt: new Date(t.create_time),
-    }));
+      createdAt: transactionDate,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
 
-  return { sourceTxns, targetTxns };
+  const eligibleOrders = orders.filter(
+    (o) => o.financial_status === "paid" || o.financial_status === "partially_refunded",
+  ).length;
+  const eligibleCaptures = transactions.filter((t) => t.status === "SUCCEEDED").length;
+
+  // A pair broken by an unreadable date is withheld from BOTH legs. Keeping
+  // the surviving half would have the engine report "no matching transaction"
+  // about a counterpart that exists and simply could not be dated — turning a
+  // data-quality problem into a false missing-payment alert, which is the
+  // reading that corrupts a reconciliation.
+  const kept = (rows: Transaction[], refs: Set<string>) =>
+    rows.filter((row) => !refs.has(row.transactionRef ?? ""));
+  const brokenRefs = new Set<string>([
+    ...orders
+      .filter(
+        (o) =>
+          (o.financial_status === "paid" || o.financial_status === "partially_refunded") &&
+          !parseDate(o.processed_at),
+      )
+      .map((o) => o.id),
+    ...transactions
+      .filter((t) => t.status === "SUCCEEDED" && !parseDate(t.create_time))
+      .map((t) => t.seller_order_id ?? t.trade_order_id),
+  ].filter(Boolean));
+  // Counted against the ELIGIBLE rows, not every row fetched: an order that
+  // was never paid is not a dropped payment, and folding the two together
+  // would report a skip on every unpaid order in the window.
+  const undatedRowsSkipped =
+    eligibleOrders - sourceTxns.length + (eligibleCaptures - targetTxns.length);
+
+  return {
+    sourceTxns: kept(sourceTxns, brokenRefs),
+    targetTxns: kept(targetTxns, brokenRefs),
+    undatedRowsSkipped,
+  };
 }
