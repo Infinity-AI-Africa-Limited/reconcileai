@@ -24,6 +24,7 @@ import { assertTenantAiAllowed, isTenantAiAllowed, TenantAiDisabledError } from 
 import * as db from "./db";
 import { governedSidesOf, loadGovernedPopulation } from "./controlRunAdmission";
 import { isTenantId } from "@shared/tenantId";
+import { dateGapCsvCell, dateGapSheetCell } from "@shared/matchDateGap";
 import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
 import { storagePut } from "./storage";
 import {
@@ -1985,7 +1986,8 @@ export const appRouter = router({
           csvContent += "=== MATCHES ===\n";
           csvContent += "Match ID,Source Txn ID,Target Txn ID,Match Type,Confidence,Amount Diff,Date Diff,Reason,Status\n";
           for (const m of report.matches) {
-            csvContent += `${m.id},${m.sourceTransactionId},${m.targetTransactionId},${m.matchType},${m.confidenceScore},${m.amountDifference || 0},${m.dateDifference || 0},"${(m.matchReason || "").replace(/"/g, '""')}",${m.status}\n`;
+            // An unknown date gap exports blank, not 0 — see shared/matchDateGap.ts.
+            csvContent += `${m.id},${m.sourceTransactionId},${m.targetTransactionId},${m.matchType},${m.confidenceScore},${m.amountDifference || 0},${dateGapCsvCell(m.dateDifference)},"${(m.matchReason || "").replace(/"/g, '""')}",${m.status}\n`;
           }
         }
 
@@ -2095,7 +2097,10 @@ export const appRouter = router({
             matchType: m.matchType,
             confidenceScore: m.confidenceScore,
             amountDifference: m.amountDifference ?? 0,
-            dateDifference: m.dateDifference ?? 0,
+            // Null, so the cell is empty and the column still aggregates over
+            // the rows that DO have a gap, instead of being pulled to zero by
+            // the ones whose gap is unknown.
+            dateDifference: dateGapSheetCell(m.dateDifference),
             matchReason: m.matchReason ?? "",
             status: m.status,
           })));
