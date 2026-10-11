@@ -481,9 +481,24 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       (row): row is NonNullable<typeof row> => row !== null,
     );
     const undatedRowsSkipped = dated.length - candidateRows.length;
+    // The order references the dropped rows WOULD have carried, read from the
+    // raw payloads because the row itself was never built. Both legs join on
+    // this ref (an order's own id; a payment's seller_order_id), so an
+    // affected pair can be left out of matching entirely — otherwise the
+    // surviving half is excepted as a payment that is missing when it is
+    // merely undated.
+    const brokenPairRefs = [
+      ...orders.filter((_, i) => orderRows[i] === null).map((o) => o.id),
+      ...payments.data
+        .filter((_, i) => paymentRows[i] === null)
+        .map((p) => p.seller_order_id || p.trade_order_id),
+    ].filter(Boolean);
     if (undatedRowsSkipped > 0) {
       console.warn(
-        `[SHOPLINE] store=${storeHandle} skipped ${undatedRowsSkipped} row(s) of ${dated.length} with an unreadable transaction date`,
+        `[SHOPLINE] store=${storeHandle} skipped ${undatedRowsSkipped} row(s) of ${dated.length} with an unreadable transaction date` +
+          (brokenPairRefs.length > 0
+            ? `; ${brokenPairRefs.length} order(s) held back from matching so their counterpart is not reported missing`
+            : ""),
       );
     }
     // The check and the insert as ONE step per store, serialised with every
@@ -547,6 +562,12 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
         from,
         to,
         store.currency ?? "USD",
+        // No `orderRefs`: this pass restricts nothing and only holds back the
+        // broken pairs. Passing `orderRefs: []` would mean "no refs qualify"
+        // and match nothing at all.
+        brokenPairRefs.length > 0
+          ? { excludeOrderRefs: brokenPairRefs }
+          : undefined,
       );
       matchedCount = result.matchedCount;
       exceptionCount = result.exceptionCount;
@@ -722,8 +743,26 @@ export async function resolveChannelIds(
  * same transaction and category is not raised a second time.
  */
 export interface ReconciliationScope {
-  /** Order references as stored in `transactionRef` on both legs. */
-  orderRefs: string[];
+  /**
+   * Order references as stored in `transactionRef` on both legs — matching is
+   * restricted to these.
+   *
+   * Optional, and absent is NOT the same as empty: absent restricts nothing,
+   * while an empty array means "no refs qualify" and matches nothing. A scope
+   * that only excludes refs must therefore omit this rather than pass `[]`.
+   */
+  orderRefs?: string[];
+  /**
+   * Order references to leave OUT of matching entirely, on both legs.
+   *
+   * For an order whose payment leg SHOPLINE sent with an unreadable date. That
+   * payment is not ingested, so matching the order against what remains would
+   * raise "No matching transaction found" — and that claim is untrue in the
+   * same way it is when the payments feed is unavailable: the payment exists,
+   * we simply could not date it. Reported as a skip, never as a missing
+   * payment. Every unaffected order still reconciles as usual.
+   */
+  excludeOrderRefs?: string[];
   /**
    * Which unmatched rows may be raised as exceptions. Matching is never limited.
    *  - absent: every one, as always;
@@ -874,16 +913,26 @@ export async function runReconciliationOnPersistedData(
   currency: string,
   scope?: ReconciliationScope,
 ): Promise<{ matchedCount: number; exceptionCount: number }> {
-  const orderRefs = scope ? [...new Set(scope.orderRefs.filter(Boolean))] : undefined;
+  const orderRefs = scope?.orderRefs
+    ? [...new Set(scope.orderRefs.filter(Boolean))]
+    : undefined;
   if (orderRefs && orderRefs.length === 0) return { matchedCount: 0, exceptionCount: 0 };
+
+  // Both legs, minus any order whose counterpart could not be dated: a pair
+  // broken by an unreadable timestamp must not be matched, because an unmatched
+  // half becomes a "No matching transaction found" exception about a payment
+  // that exists.
+  const excluded = new Set((scope?.excludeOrderRefs ?? []).filter(Boolean));
+  const usable = (row: { transactionRef: string | null }) =>
+    !refundReturnedNoMoney(row as never) && !excluded.has(row.transactionRef ?? "");
 
   // Fetch persisted transactions for the window
   const sourceRows = (
     await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs })
-  ).filter((row) => !refundReturnedNoMoney(row));
+  ).filter(usable);
   const targetRows = (
     await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs })
-  ).filter((row) => !refundReturnedNoMoney(row));
+  ).filter(usable);
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
     return { matchedCount: 0, exceptionCount: 0 };

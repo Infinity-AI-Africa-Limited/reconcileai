@@ -45,9 +45,9 @@ const ctx: IngestContext = {
 /** Every shape SHOPLINE could send in place of a timestamp. */
 const UNREADABLE = ["", "   ", "not a date", "0000-00-00 00:00:00", null, undefined];
 
-const order = (created_at: unknown, processed_at?: unknown) =>
+const order = (created_at: unknown, processed_at?: unknown, id = "ORD1") =>
   ({
-    id: "ORD1",
+    id,
     name: "#1001",
     financial_status: "paid",
     currency: "USD",
@@ -57,10 +57,10 @@ const order = (created_at: unknown, processed_at?: unknown) =>
     processed_at,
   }) as never;
 
-const payment = (create_time: unknown, settle_time?: unknown) =>
+const payment = (create_time: unknown, settle_time?: unknown, seller_order_id = "ORD1") =>
   ({
     trade_order_id: "TRD1",
-    seller_order_id: "ORD1",
+    seller_order_id,
     channel_deal_id: "CD1",
     amount: "100.00",
     currency: "USD",
@@ -169,8 +169,8 @@ describe("when the settlement sync builds engine rows", () => {
     // the likeliest of all these paths to fire in production.
     const result = normaliseToTransactions(
       [
-        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z"),
-        order("2026-10-09T10:00:00Z", undefined),
+        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z", "ORD-OK"),
+        order("2026-10-09T10:00:00Z", undefined, "ORD-UNDATED"),
       ],
       [],
       [],
@@ -186,7 +186,10 @@ describe("when the settlement sync builds engine rows", () => {
   it("should drop a capture it cannot date and keep the others", () => {
     const result = normaliseToTransactions(
       [],
-      [payment("2026-10-09T12:00:00Z"), payment("not a date")],
+      [
+        payment("2026-10-09T12:00:00Z", undefined, "ORD-OK"),
+        payment("not a date", undefined, "ORD-UNDATED"),
+      ],
       [],
       "USD"
     );
@@ -200,10 +203,13 @@ describe("when the settlement sync builds engine rows", () => {
     // sync with a real gap in it.
     const result = normaliseToTransactions(
       [
-        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z"),
-        order("2026-10-09T10:00:00Z", undefined),
+        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z", "ORD-A"),
+        order("2026-10-09T10:00:00Z", undefined, "ORD-B"),
       ],
-      [payment("2026-10-09T12:00:00Z"), payment("")],
+      [
+        payment("2026-10-09T12:00:00Z", undefined, "ORD-A"),
+        payment("", undefined, "ORD-C"),
+      ],
       [],
       "USD"
     );
@@ -224,6 +230,57 @@ describe("when the settlement sync builds engine rows", () => {
 
     expect(result.sourceTxns).toHaveLength(0);
     expect(result.undatedRowsSkipped).toBe(0);
+  });
+
+  it("should withhold an order whose capture could not be dated", () => {
+    // The false-alert case. Dropping the capture and keeping its order has the
+    // engine report "no matching transaction found" about a payment that
+    // exists and merely could not be dated — a data-quality problem rewritten
+    // as a missing payment, which is the reading that corrupts a
+    // reconciliation. Neither half is offered to the engine.
+    const result = normaliseToTransactions(
+      [order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z")],
+      [payment("")],
+      [],
+      "USD"
+    );
+
+    expect(result.sourceTxns).toHaveLength(0);
+    expect(result.targetTxns).toHaveLength(0);
+    expect(result.undatedRowsSkipped).toBe(1);
+  });
+
+  it("should withhold a capture whose order could not be dated", () => {
+    // The mirror: the surviving capture would be excepted as having no order.
+    const result = normaliseToTransactions(
+      [order("2026-10-09T10:00:00Z", undefined)],
+      [payment("2026-10-09T12:00:00Z")],
+      [],
+      "USD"
+    );
+
+    expect(result.sourceTxns).toHaveLength(0);
+    expect(result.targetTxns).toHaveLength(0);
+  });
+
+  it("should still reconcile the pairs that are intact", () => {
+    // The point of withholding per pair rather than skipping the run: one
+    // broken pair must not cost the others their reconciliation.
+    const result = normaliseToTransactions(
+      [
+        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z", "ORD-GOOD"),
+        order("2026-10-09T10:00:00Z", "2026-10-09T12:00:00Z", "ORD-BROKEN"),
+      ],
+      [
+        payment("2026-10-09T12:00:00Z", undefined, "ORD-GOOD"),
+        payment("", undefined, "ORD-BROKEN"),
+      ],
+      [],
+      "USD"
+    );
+
+    expect(result.sourceTxns.map(r => r.transactionRef)).toEqual(["ORD-GOOD"]);
+    expect(result.targetTxns.map(r => r.transactionRef)).toEqual(["ORD-GOOD"]);
   });
 
   it("should never hand the engine an Invalid Date", () => {

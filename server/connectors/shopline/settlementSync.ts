@@ -371,11 +371,35 @@ export function normaliseToTransactions(
     (o) => o.financial_status === "paid" || o.financial_status === "partially_refunded",
   ).length;
   const eligibleCaptures = transactions.filter((t) => t.status === "SUCCEEDED").length;
+
+  // A pair broken by an unreadable date is withheld from BOTH legs. Keeping
+  // the surviving half would have the engine report "no matching transaction"
+  // about a counterpart that exists and simply could not be dated — turning a
+  // data-quality problem into a false missing-payment alert, which is the
+  // reading that corrupts a reconciliation.
+  const kept = (rows: Transaction[], refs: Set<string>) =>
+    rows.filter((row) => !refs.has(row.transactionRef ?? ""));
+  const brokenRefs = new Set<string>([
+    ...orders
+      .filter(
+        (o) =>
+          (o.financial_status === "paid" || o.financial_status === "partially_refunded") &&
+          !parseDate(o.processed_at),
+      )
+      .map((o) => o.id),
+    ...transactions
+      .filter((t) => t.status === "SUCCEEDED" && !parseDate(t.create_time))
+      .map((t) => t.seller_order_id ?? t.trade_order_id),
+  ].filter(Boolean));
   // Counted against the ELIGIBLE rows, not every row fetched: an order that
   // was never paid is not a dropped payment, and folding the two together
   // would report a skip on every unpaid order in the window.
   const undatedRowsSkipped =
     eligibleOrders - sourceTxns.length + (eligibleCaptures - targetTxns.length);
 
-  return { sourceTxns, targetTxns, undatedRowsSkipped };
+  return {
+    sourceTxns: kept(sourceTxns, brokenRefs),
+    targetTxns: kept(targetTxns, brokenRefs),
+    undatedRowsSkipped,
+  };
 }
