@@ -781,6 +781,11 @@ export const shoplineConnectorRouter = router({
         matchedCount: report.matchedCount,
         exceptionCount: report.exceptionCount,
         durationMs: report.durationMs,
+        // Rows SHOPLINE sent with an unreadable transaction date, which were
+        // not ingested. Rebuilding the response without this is what made a
+        // partial sync look complete to the merchant who pressed Sync Now —
+        // the count existed on the report and stopped at the router.
+        undatedRowsSkipped: report.undatedRowsSkipped ?? 0,
       };
     }),
 

@@ -19,8 +19,44 @@
  * Each leg lands in its own channel so the reconciliation engine can
  * cross-match: Orders ↔ Payments (capture completeness) and
  * Payments ↔ Settlements (payout accuracy).
+ *
+ * ## Timestamps from the API are not trusted
+ *
+ * `apiClient.ts` declares these payloads with required fields —
+ * `created_at: string`, `create_time: string`, `posting_time: string` — but
+ * they are hand-written interfaces over third-party JSON, with no runtime
+ * validation behind them. The type asserts a guarantee SHOPLINE never made, so
+ * no call site looked risky while `new Date(order.created_at)` could yield an
+ * **Invalid Date** from a missing, null, empty or oddly-formatted value.
+ *
+ * Every timestamp therefore goes through `parseDate` (`parseMoneyDate` in
+ * shared/money.ts), the same rule the CSV/XLSX settlement import in this
+ * connector already applies — one date rule for both ways in, rather than a
+ * second parser.
+ *
+ * The policy, which these normalisers encode:
+ *
+ * - **A row whose own transaction date is unreadable is not ingested.** The
+ *   normaliser returns null and the caller counts it. It cannot be placed in a
+ *   control period, so it cannot be reconciled either way — and filing it
+ *   under a guessed date would put real money in the wrong day, which is the
+ *   failure that corrupts a reconciliation rather than merely delaying one.
+ * - **Never fall back to the clock.** `new Date()` for a missing timestamp
+ *   silently files a transaction in today's control period. A missing date is
+ *   not evidence that something happened now.
+ * - **An unreadable OPTIONAL timestamp becomes null**, not a skip:
+ *   `valueDate` is nullable, so null is both representable and honest, and the
+ *   row's own date is what reconciliation needs.
+ * - **One bad row never fails the feed.** Returning null per row rather than
+ *   throwing keeps the other 199 orders of a page ingested; a boundary that
+ *   threw would leave the 15-minute poll retrying the same page for ever.
+ *
+ * Skips are counted and reported (`SyncReport.undatedRowsSkipped`) rather than
+ * dropped silently: a payment that vanishes makes a day look complete when it
+ * is not, which is the one outcome worse than a visible gap.
  */
 import type { InsertTransaction } from "../../../drizzle/schema";
+import { parseMoneyDate as parseDate } from "../../../shared/money";
 import type {
   ShoplineOrder,
   ShoplinePaymentTransaction,
@@ -81,9 +117,11 @@ export interface IngestContext {
 export function normaliseOrder(
   order: ShoplineOrder,
   ctx: IngestContext,
-): InsertTransaction {
+): InsertTransaction | null {
   const amount = parseFloat(order.current_total_price_set?.shop_money?.amount || "0");
   const currency = order.currency || ctx.defaultCurrency;
+  const transactionDate = parseDate(order.created_at);
+  if (!transactionDate) return null;
 
   return {
     batchId: ctx.batchId,
@@ -98,8 +136,8 @@ export function normaliseOrder(
     description: `SHOPLINE Order ${order.name || order.id}`,
     amount: String(amount),
     currency,
-    transactionDate: new Date(order.created_at),
-    valueDate: order.processed_at ? new Date(order.processed_at) : null,
+    transactionDate,
+    valueDate: parseDate(order.processed_at),
     debitCredit: "credit" as const,
     counterparty: order.payment_gateway_names?.[0] || "SHOPLINE",
     isReversal: false,
@@ -128,9 +166,11 @@ export function normaliseOrder(
 export function normalisePaymentTransaction(
   txn: ShoplinePaymentTransaction,
   ctx: IngestContext,
-): InsertTransaction {
+): InsertTransaction | null {
   const amount = parseFloat(txn.amount || "0");
   const currency = txn.currency || ctx.defaultCurrency;
+  const transactionDate = parseDate(txn.create_time);
+  if (!transactionDate) return null;
 
   // Determine event type from dispute_type or payment status
   let gatewayEventType: ShoplineRawData["gatewayEventType"] = "payment";
@@ -148,8 +188,8 @@ export function normalisePaymentTransaction(
     description: `SHOPLINE payment — ${txn.payment_method || "unknown"} (${txn.status})`,
     amount: String(Math.abs(amount)),
     currency,
-    transactionDate: new Date(txn.create_time),
-    valueDate: txn.additional_data?.settle_time ? new Date(txn.additional_data.settle_time) : null,
+    transactionDate,
+    valueDate: parseDate(txn.additional_data?.settle_time),
     debitCredit: amount >= 0 ? "credit" : "debit",
     counterparty: txn.payment_method || "SHOPLINE Payments",
     isReversal: false,
@@ -184,9 +224,11 @@ export function normalisePaymentTransaction(
 export function normalisePayout(
   payout: ShoplinePayout,
   ctx: IngestContext,
-): InsertTransaction {
+): InsertTransaction | null {
   const amount = parseFloat(payout.amount || "0");
   const currency = payout.currency || ctx.defaultCurrency;
+  const transactionDate = parseDate(payout.time);
+  if (!transactionDate) return null;
 
   return {
     batchId: ctx.batchId,
@@ -198,8 +240,8 @@ export function normalisePayout(
     description: `SHOPLINE Payout ${payout.payout_transaction_no} (${payout.status})`,
     amount: String(Math.abs(amount)),
     currency,
-    transactionDate: new Date(payout.time),
-    valueDate: payout.status === "SUCCESS" ? new Date(payout.time) : null,
+    transactionDate,
+    valueDate: payout.status === "SUCCESS" ? transactionDate : null,
     debitCredit: "credit" as const,
     counterparty: "SHOPLINE Payments Settlement",
     isReversal: false,
@@ -222,8 +264,10 @@ export function normalisePayout(
 export function normaliseRefund(
   refund: ShoplineRefund,
   ctx: IngestContext,
-): InsertTransaction {
+): InsertTransaction | null {
   // Sum up refund line item subtotals
+  const transactionDate = parseDate(refund.created_at);
+  if (!transactionDate) return null;
   const amount = refund.refund_line_items.reduce(
     (sum, item) => sum + parseFloat(item.subtotal || "0"),
     0,
@@ -239,8 +283,8 @@ export function normaliseRefund(
     description: `SHOPLINE Refund #${refund.id}${refund.note ? ` — ${refund.note}` : ""}`,
     amount: String(Math.abs(amount)),
     currency: ctx.defaultCurrency,
-    transactionDate: new Date(refund.created_at),
-    valueDate: refund.processed_at ? new Date(refund.processed_at) : null,
+    transactionDate,
+    valueDate: parseDate(refund.processed_at),
     debitCredit: "debit" as const, // Refunds are debits (money going back)
     counterparty: "SHOPLINE Customer Refund",
     isReversal: true,
@@ -268,9 +312,11 @@ export function normaliseRefund(
 export function normaliseBalanceTransaction(
   bt: ShoplineBalanceTransaction,
   ctx: IngestContext,
-): InsertTransaction {
+): InsertTransaction | null {
   const amount = parseFloat(bt.amount || "0");
   const currency = bt.transaction_currency || bt.account_currency || ctx.defaultCurrency;
+  const transactionDate = parseDate(bt.posting_time);
+  if (!transactionDate) return null;
 
   // Map SHOPLINE balance transaction types to our event types
   let gatewayEventType: ShoplineRawData["gatewayEventType"] = "fee";
@@ -292,7 +338,7 @@ export function normaliseBalanceTransaction(
     description: `SHOPLINE ${bt.type} (${bt.account_type})`,
     amount: String(Math.abs(amount)),
     currency,
-    transactionDate: new Date(bt.posting_time),
+    transactionDate,
     debitCredit: amount >= 0 ? "credit" : "debit",
     counterparty: "SHOPLINE Payments",
     isReversal: typeUpper.includes("REFUND"),
@@ -319,37 +365,62 @@ export interface IngestBatch {
   balanceTransactions?: ShoplineBalanceTransaction[];
 }
 
+/**
+ * The rows a batch yielded, and how many it could not date.
+ *
+ * A bare array would have made the skip invisible at the call site, which is
+ * the whole failure this guards against — the count has to travel with the
+ * rows so a caller cannot report a clean sync over a silent gap.
+ */
+export interface NormalisedIngestBatch {
+  rows: InsertTransaction[];
+  /** Rows dropped because their own transaction date could not be read. */
+  undatedRowsSkipped: number;
+}
+
 export function normaliseIngestBatch(
   batch: IngestBatch,
   ctx: IngestContext,
-): InsertTransaction[] {
+): NormalisedIngestBatch {
   const rows: InsertTransaction[] = [];
+  let undatedRowsSkipped = 0;
+
+  /**
+   * Counts what it drops. A normaliser returns null only for a row whose own
+   * transaction date is unreadable, and a silently dropped payment is the one
+   * outcome worse than a visible gap: the day reads complete while real money
+   * is missing from it.
+   */
+  const take = (row: InsertTransaction | null) => {
+    if (row) rows.push(row);
+    else undatedRowsSkipped += 1;
+  };
 
   if (batch.orders) {
     for (const order of batch.orders) {
-      rows.push(normaliseOrder(order, ctx));
+      take(normaliseOrder(order, ctx));
     }
   }
   if (batch.paymentTransactions) {
     for (const txn of batch.paymentTransactions) {
-      rows.push(normalisePaymentTransaction(txn, ctx));
+      take(normalisePaymentTransaction(txn, ctx));
     }
   }
   if (batch.payouts) {
     for (const payout of batch.payouts) {
-      rows.push(normalisePayout(payout, ctx));
+      take(normalisePayout(payout, ctx));
     }
   }
   if (batch.refunds) {
     for (const refund of batch.refunds) {
-      rows.push(normaliseRefund(refund, ctx));
+      take(normaliseRefund(refund, ctx));
     }
   }
   if (batch.balanceTransactions) {
     for (const bt of batch.balanceTransactions) {
-      rows.push(normaliseBalanceTransaction(bt, ctx));
+      take(normaliseBalanceTransaction(bt, ctx));
     }
   }
 
-  return rows;
+  return { rows, undatedRowsSkipped };
 }
