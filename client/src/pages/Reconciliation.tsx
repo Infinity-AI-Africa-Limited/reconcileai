@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
+import { dateGapLabel } from "@shared/matchDateGap";
 import AllocationProposals from "@/components/AllocationProposals";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -460,7 +461,7 @@ export default function ReconciliationPage() {
                               </td>
                               <td className="py-2 px-3 text-right font-mono">{parseFloat(m.confidenceScore || "0").toFixed(0)}%</td>
                               <td className="py-2 px-3 text-right font-mono">{parseFloat(m.amountDifference || "0").toFixed(2)}</td>
-                              <td className="py-2 px-3 text-right">{m.dateDifference || 0} days</td>
+                              <td className="py-2 px-3 text-right">{dateGapLabel(m.dateDifference)}</td>
                               <td className="py-2 px-3 max-w-[200px] truncate">{m.matchReason || "-"}</td>
                               <td className="py-2 px-3">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
