@@ -166,6 +166,18 @@ const OVERRIDE_CALLS: ReadonlyArray<readonly [string, (ctx: Ctx, organizationId:
       effectiveAt: "2026-10-13T08:00:00.000Z",
     }),
   ],
+  ["controlPolicies.get", (ctx, organizationId) => controlPoliciesRouter.createCaller(withReqRes(ctx)).get({ organizationId, policyId: 1 })],
+  [
+    "controlPolicies.approve",
+    (ctx, organizationId) =>
+      controlPoliciesRouter.createCaller(withReqRes(ctx)).approve({ organizationId, policyId: 1, approvalReference: "CAB-1" }),
+  ],
+  ["controlPolicies.activate", (ctx, organizationId) => controlPoliciesRouter.createCaller(withReqRes(ctx)).activate({ organizationId, policyId: 1 })],
+  [
+    "controlPolicies.retire",
+    (ctx, organizationId) =>
+      controlPoliciesRouter.createCaller(withReqRes(ctx)).retire({ organizationId, policyId: 1, retirementReference: "CAB-2" }),
+  ],
   [
     "controlEvidence.createSourceContract",
     (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).createSourceContract({
