@@ -13,7 +13,7 @@
  * script under test is invoked exactly as CI invokes it — no seam that exists
  * only for tests.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
@@ -21,6 +21,24 @@ import os from "node:os";
 import path from "node:path";
 
 const run = promisify(execFile);
+
+/** How long one run of the script may take before it is killed. */
+const SCRIPT_TIMEOUT_MS = 30_000;
+
+/**
+ * Every case spawns a real bash, which takes about a second alone and has taken
+ * over five under parallel load — past vitest's 5-second default, which is how
+ * these failed intermittently. So the file sets its own ceiling, and that
+ * ceiling must be LOOSER than the script's kill timeout, not tighter. When the
+ * script's timeout fires first, the test fails on what the script printed, plus
+ * a note from runScript that it was killed, which together say where it got
+ * stuck. When vitest's fires first, all that survives is "Test timed out", and
+ * the output is lost.
+ *
+ * Set for the file rather than per case, so a case added later is covered
+ * without anyone having to remember.
+ */
+vi.setConfig({ testTimeout: SCRIPT_TIMEOUT_MS + 5_000 });
 
 /**
  * Every variable the script reads, scrubbed from the inherited environment
@@ -150,13 +168,25 @@ async function runScript(
   try {
     const { stdout, stderr } = await run("bash", ["-c", command], {
       env: shared,
-      timeout: 30_000,
+      timeout: SCRIPT_TIMEOUT_MS,
     });
     out = stdout + stderr;
   } catch (err) {
-    const e = err as { code?: number; stdout?: string; stderr?: string };
+    const e = err as {
+      code?: number;
+      killed?: boolean;
+      signal?: string;
+      stdout?: string;
+      stderr?: string;
+    };
     code = typeof e.code === "number" ? e.code : 1;
     out = (e.stdout ?? "") + (e.stderr ?? "");
+    // Say so when the timeout ended the run. Otherwise a run killed before it
+    // printed anything fails as `expected '' to contain …`, which hides the
+    // timeout as thoroughly as vitest's own message does.
+    if (e.killed) {
+      out += `\n[killed by the test after ${SCRIPT_TIMEOUT_MS}ms (${e.signal})]`;
+    }
   }
   return {
     code,
