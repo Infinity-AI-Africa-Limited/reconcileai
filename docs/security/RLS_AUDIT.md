@@ -110,6 +110,7 @@ justification comment in the classification map and a row in §2/§3 here.
 |---|---|---|
 | `control_source_contracts` | `tenant_required` | Versioned customer control-input contract: source role, delivery route, local cut-off, schema version, control-total requirement, owner and approval reference. It contains no source credential or source-file payload. |
 | `control_batch_manifests` | `tenant_required` | Per-delivery control evidence bound to one source-contract version: expected and received count/value evidence, mapping/policy versions, schema state and duplicate-delivery result. Monetary totals are stored as exact decimal strings; the record is not a transaction ledger. |
+| `control_policies` | `tenant_required` | Immutable tenant-scoped mapping and reconciliation policy registry. It stores a bounded configuration definition, digest, lifecycle state, approval/retirement references, and actor/timestamp evidence; it does not store credentials, raw source rows, or customer identities. |
 
 ## 8. Shopify public-app connector tables (September 2026, PR #134)
 

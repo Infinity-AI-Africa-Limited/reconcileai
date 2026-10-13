@@ -129,6 +129,9 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // first migration and are read/written through an explicit org scope.
   control_source_contracts: "tenant_required",
   control_batch_manifests: "tenant_required",
+  // Approved mapping and reconciliation policy history is customer control
+  // configuration, not a platform-wide rules catalogue.
+  control_policies: "tenant_required",
   distributors: "tenant_nullable",
   agent_action_drafts: "tenant_nullable",
   agent_memory: "tenant_nullable",
