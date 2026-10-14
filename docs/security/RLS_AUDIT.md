@@ -78,6 +78,39 @@ File keys are access-controlled by signed URLs but not prefixed per tenant.
 *Remediation:* prefix new uploads with `org/<id>/` and add an ownership check
 in `storageGet` (tracked in CLAUDE.md tech-debt table).
 
+**F5 — Outbound webhooks fanned every tenant's events to every tenant — ✅ CLOSED (2026-10-14).**
+`webhooks` was classified `tenant_nullable`, but nothing read it by tenant:
+`dispatchWebhookEvent` selected `WHERE isActive = true` and no caller named a
+tenant, so `reconciliation.completed` (job id, match rate, counts),
+`exception.created/resolved/escalated/in_review`, `upload.completed`,
+`reconciliation.failed` and `kpi.threshold.breached` from tenant A went to any
+tenant's webhook subscribed to that event or to `"*"`. `webhooks.create` never
+set `organizationId`, so such rows could not be listed or deleted by tenant
+either.
+
+*Measured exposure (read-only, production, 2026-10-14):* 0 webhooks, 0
+deliveries — no event has crossed a tenant boundary. The leak was also latent
+for a second reason: `webhooks.create` stored `events` as a JSON *string*,
+which dispatch reads as no subscriptions, so no API-created webhook ever fired.
+Fixing that encoding without the tenant scope would have made the leak live.
+
+*Remediation:* dispatch takes a required tenant id (`isTenantId`) and reads only
+that tenant's active webhooks (`activeWebhooksOfTenant`), with an in-memory
+second barrier; every caller passes the tenant of the job, batch or exception
+the event is about; `webhooks.create` records the creator's organisation and
+refuses an account with none; `webhooks.list` is per organisation and never
+returns the signing secret; upload batches now record their organisation. Rows
+with `organizationId` NULL fail closed (they receive nothing). Enforced by
+`server/webhookDelivery.tenancy.test.ts` (structural: every `webhooks` read
+names `webhooks.organizationId`; every dispatch names a tenant), the callers'
+tenants by `server/webhookTenancy.callers.test.ts`, and on a real database over
+real HTTP by `server/webhookTenancy.db.test.ts`.
+
+*Lesson for the ratchets:* `readScopeRatchet` accepted the dispatcher because
+it checks that a select on a tenant table HAS a where clause, and scans only
+`db.ts`. A where clause is not a tenant predicate, and tenant tables are read
+outside `db.ts`.
+
 ## 4. SHOPLINE connector tables (Phase 1, July 2026)
 
 Three new tables added in the SHOPLINE Phase 1 connector. All three are

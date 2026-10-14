@@ -245,16 +245,40 @@ import { controlFitRouter } from "./routers/controlFit";
 import { controlEvidenceRouter } from "./routers/controlEvidence";
 import { controlPoliciesRouter } from "./routers/controlPolicies";
 import { buildReportSummary } from "./reportSummary";
+import { dispatchWebhookEvent } from "./webhookDelivery";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
 // WS-4: delivery is tracked + retried via server/webhookDelivery.ts (queue
-// abstraction: BullMQ when REDIS_URL is set, in-process otherwise). Kept as a
-// local wrapper so the ~15 call sites stay unchanged.
+// abstraction: BullMQ when REDIS_URL is set, in-process otherwise).
+//
+// `organizationId` is the tenant that OWNS what the event is about — the
+// job's, the exception's, the upload's — and only its webhooks receive it.
+// Until 2026-10-14 there was no tenant here at all and every tenant's events
+// reached every tenant's webhooks. Fire-and-forget: never awaited, never throws.
 
-async function dispatchWebhook(event: string, payload: any) {
-  const { dispatchWebhookEvent } = await import("./webhookDelivery");
-  await dispatchWebhookEvent(event, payload);
+function dispatchWebhook(organizationId: number, event: string, payload: Record<string, unknown>): void {
+  dispatchWebhookEvent(organizationId, event, payload).catch((err) =>
+    console.error("[webhookDelivery] dispatch failed (non-fatal):", loggableError(err)),
+  );
+}
+
+/**
+ * Announce a change to one exception: only when this request changed a row,
+ * and only to the tenant it belongs to.
+ *
+ * `updateException` scopes its WHERE to `tenant`, so a matched row IS that
+ * tenant's exception. An id from anywhere else matches nothing and announces
+ * nothing — it must not reach the row's real owner as an event that never
+ * happened, and it must not tell the caller's own webhook about a stranger's id.
+ */
+function dispatchExceptionEvent(
+  rowsChanged: number,
+  tenant: number | null,
+  event: string,
+  payload: Record<string, unknown>,
+): void {
+  if (rowsChanged > 0 && isTenantId(tenant)) dispatchWebhook(tenant, event, payload);
 }
 
 // ─── Distributor Identity Registry Router ───────────────────────────
@@ -598,8 +622,14 @@ export const appRouter = router({
           }
         }
 
+        // The tenant this upload is filed for: the caller's organisation, which
+        // inside a portal is the tenant on screen (§6) — the same one the
+        // channel was just resolved in. Recorded on the batch so the batch says
+        // whose it is; its upload.completed event goes to that tenant alone.
+        const uploadTenant = ctx.user.organizationId ?? null;
         const batchId = await db.createUploadBatch({
           userId: ctx.user.id,
+          organizationId: uploadTenant,
           channelId: channel.id,
           fileName: sanitizeInput(input.fileName, 500),
           fileHash: input.fileHash || null,
@@ -639,12 +669,14 @@ export const appRouter = router({
             invalidRows,
           }, ip, ua);
 
-          dispatchWebhook("upload.completed", {
-            batchId,
-            channel: input.channelCode,
-            validRows,
-            invalidRows,
-          });
+          if (isTenantId(uploadTenant)) {
+            dispatchWebhook(uploadTenant, "upload.completed", {
+              batchId,
+              channel: input.channelCode,
+              validRows,
+              invalidRows,
+            });
+          }
         }
 
         return {
@@ -729,12 +761,16 @@ export const appRouter = router({
           invalidRows,
         }, ip, ua);
 
-        dispatchWebhook("upload.completed", {
-          batchId: input.batchId,
-          channel: channel?.code ?? String(batch.channelId),
-          validRows,
-          invalidRows,
-        });
+        // The batch's own tenant, recorded when it was created. A batch from
+        // before that was recorded has none, and announces nothing.
+        if (isTenantId(batch.organizationId)) {
+          dispatchWebhook(batch.organizationId, "upload.completed", {
+            batchId: input.batchId,
+            channel: channel?.code ?? String(batch.channelId),
+            validRows,
+            invalidRows,
+          });
+        }
 
         return {
           batchId: input.batchId,
@@ -858,7 +894,7 @@ export const appRouter = router({
         // that row. Against the signed-in organisation the update matched no row,
         // and the button reported success having changed nothing.
         const tenant = portalScopedOrgId(ctx.user, input.viewAsOrgId);
-        await db.updateException(input.id, tenant, {
+        const escalated = await db.updateException(input.id, tenant, {
           status: "escalated",
           ...(input.note ? { resolutionNotes: sanitizeInput(input.note, 2000) } : {}),
         });
@@ -877,7 +913,7 @@ export const appRouter = router({
             }),
           ).catch(() => {});
         }
-        dispatchWebhook("exception.escalated", { exceptionId: input.id });
+        dispatchExceptionEvent(escalated, tenant, "exception.escalated", { exceptionId: input.id });
         return { success: true };
       }),
 
@@ -990,7 +1026,8 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+        const tenant = ctx.user.organizationId ?? null;
+        const resolved = await db.updateException(input.id, tenant, {
           status: input.status,
           resolvedBy: ctx.user.id,
           resolvedAt: new Date(),
@@ -1052,7 +1089,7 @@ export const appRouter = router({
           } catch { /* pattern capture is best-effort; never fail the primary response */ }
         })();
 
-        dispatchWebhook("exception.resolved", { exceptionId: input.id, status: input.status });
+        dispatchExceptionEvent(resolved, tenant, "exception.resolved", { exceptionId: input.id, status: input.status });
         return { success: true };
       }),
 
@@ -1204,7 +1241,8 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+        const tenant = ctx.user.organizationId ?? null;
+        const escalated = await db.updateException(input.id, tenant, {
           status: "escalated",
           resolutionNotes: input.notes ? sanitizeInput(input.notes, 2000) : null,
         });
@@ -1227,7 +1265,7 @@ export const appRouter = router({
           ).catch(() => {});
         }
 
-        dispatchWebhook("exception.escalated", { exceptionId: input.id });
+        dispatchExceptionEvent(escalated, tenant, "exception.escalated", { exceptionId: input.id });
         return { success: true };
       }),
 
@@ -1238,7 +1276,8 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+        const tenant = ctx.user.organizationId ?? null;
+        const movedToReview = await db.updateException(input.id, tenant, {
           status: "in_review",
           assignedTo: ctx.user.id,
           assignedAt: new Date(),
@@ -1249,7 +1288,7 @@ export const appRouter = router({
           assignedTo: ctx.user.id,
           notes: input.notes,
         }, ip, ua);
-        dispatchWebhook("exception.in_review", { exceptionId: input.id, reviewedBy: ctx.user.id });
+        dispatchExceptionEvent(movedToReview, tenant, "exception.in_review", { exceptionId: input.id, reviewedBy: ctx.user.id });
         return { success: true };
       }),
 
@@ -2610,9 +2649,14 @@ export const appRouter = router({
 
   // ─── Webhooks ───────────────────────────────────────────────────
 
+  // A webhook belongs to one organisation and receives only its events.
   webhooks: router({
+    // The organisation's webhooks — the set its events reach, and the set
+    // `delete` can act on. Was per user, so a colleague's webhook receiving the
+    // organisation's events was invisible while still deletable.
     list: protectedProcedure.query(async ({ ctx }) => {
-      return db.getWebhooks(ctx.user.id);
+      const tenant = ctx.user.organizationId;
+      return isTenantId(tenant) ? db.getWebhooks(tenant) : [];
     }),
 
     create: guestProtectedProcedure
@@ -2623,13 +2667,26 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        // The organisation whose events this webhook will receive. An account
+        // with no organisation is refused: its webhook would belong to no one.
+        const organizationId = ctx.user.organizationId;
+        if (!isTenantId(organizationId)) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: "Your account is not linked to an organization",
+          });
+        }
         const secret = crypto.randomBytes(32).toString("hex");
         const id = await db.createWebhook({
+          organizationId,
           userId: ctx.user.id,
           name: sanitizeInput(input.name, MAX_NAME_LENGTH),
           url: input.url,
           secret,
-          events: JSON.stringify(input.events),
+          // The array itself: the column is JSON, and drizzle serialises it.
+          // `JSON.stringify` here stored a JSON *string*, which dispatch reads
+          // as no subscriptions, so no webhook created here ever fired.
+          events: input.events,
           isActive: true,
         });
         await logAudit(ctx.user.id, "create_webhook", "webhook", id || undefined, {
@@ -7109,6 +7166,9 @@ async function runReconciliation(
   }, RECONCILIATION_HEARTBEAT_MS);
   if (typeof heartbeat.unref === "function") heartbeat.unref();
 
+  // The job's own tenant, once read — the catch below announces a failure to it.
+  let jobTenant: number | null = null;
+
   try {
     await db.updateReconciliationJob(jobId, {
       status: "running",
@@ -7127,6 +7187,7 @@ async function runReconciliation(
     if (runOrganizationId == null) {
       throw new Error(`[Reconciliation] job ${jobId} has no owning organization; refusing to run`);
     }
+    jobTenant = runOrganizationId;
 
     await trackProgress(jobId, "loading_data", { message: "Loading transaction data from channels" });
     // A governed daily control matches exactly the rows its manifests approved,
@@ -7347,8 +7408,8 @@ async function runReconciliation(
     // other tenant's row too.
     db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {});
 
-    // Dispatch webhooks (WS-4 event set)
-    dispatchWebhook("reconciliation.completed", {
+    // Dispatch webhooks (WS-4 event set), to the job's own tenant only.
+    dispatchWebhook(runOrganizationId, "reconciliation.completed", {
       jobId,
       matchedCount,
       exceptionCount,
@@ -7359,7 +7420,7 @@ async function runReconciliation(
     // exception.created: one event per job with the batch summary — per-row
     // events would fan a 5,000-exception run into 5,000 HTTP calls.
     if (exceptionCount > 0) {
-      dispatchWebhook("exception.created", {
+      dispatchWebhook(runOrganizationId, "exception.created", {
         jobId,
         count: exceptionCount,
         currency: dominantCurrency,
@@ -7368,7 +7429,7 @@ async function runReconciliation(
     // kpi.threshold.breached: the auto-match floor (85%) is the first wired
     // threshold; others follow as their computations move server-side.
     if (totalTxns > 0 && matchRate < 85) {
-      dispatchWebhook("kpi.threshold.breached", {
+      dispatchWebhook(runOrganizationId, "kpi.threshold.breached", {
         jobId,
         metric: "autoMatchRate",
         value: Math.round(matchRate * 100) / 100,
@@ -7396,7 +7457,15 @@ async function runReconciliation(
     });
 
     await trackProgress(jobId, "failed", { message: `Failed: ${errorSummary(error)}` });
-    dispatchWebhook("reconciliation.failed", { jobId, error: errorSummary(error) });
+    // To the job's own tenant. A run can fail before it read its job, so read
+    // it here; a job that has no tenant (the refusal above) announces nothing.
+    const failedJobTenant =
+      jobTenant ?? (await db.getReconciliationJob(jobId).catch(() => undefined))?.organizationId ?? null;
+    if (isTenantId(failedJobTenant)) {
+      dispatchWebhook(failedJobTenant, "reconciliation.failed", { jobId, error: errorSummary(error) });
+    } else {
+      console.warn(`[Reconciliation] job ${jobId} failed with no owning tenant; no webhook was sent`);
+    }
   } finally {
     // Every exit path, including the early return when the run was abandoned
     // mid-flight — a heartbeat outliving its run would keep a dead job looking

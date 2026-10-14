@@ -1342,15 +1342,20 @@ export async function getExceptions(filters: {
  * Allow-listed in tenancyRatchet.test.ts only because `exceptions` had no
  * organizationId to filter on. It has one now, so the exemption is removed and
  * an id from another tenant updates nothing.
+ *
+ * Returns the rows matched (mysql2 counts found rows, not changed ones), so a
+ * caller can tell "this tenant's exception" from "an id that is not theirs" —
+ * an event must only ever announce the first.
  */
 export async function updateException(
   id: number,
   organizationId: number | null,
   data: Partial<InsertException>,
-) {
+): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.update(exceptions).set(data).where(and(eq(exceptions.id, id), orgFilter(exceptions.organizationId, organizationId)));
+  if (!db) return 0;
+  const result = await db.update(exceptions).set(data).where(and(eq(exceptions.id, id), orgFilter(exceptions.organizationId, organizationId)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 // ─── Exception Age / Escalation Tracker ──────────────────────────────
@@ -1646,34 +1651,41 @@ export async function getReports(organizationId: number | null) {
 
 // ─── Webhooks ────────────────────────────────────────────────────────
 
-export async function createWebhook(data: InsertWebhook) {
+/**
+ * A webhook belongs to ONE organisation and receives only that organisation's
+ * events (webhookDelivery.ts). The type requires it: a webhook created without
+ * one used to be stored with `organizationId` NULL, which the old dispatcher
+ * ignored and the delete gate below could never match.
+ */
+export async function createWebhook(data: InsertWebhook & { organizationId: number }) {
   const db = await getDb();
   if (!db) return null;
   const result = await db.insert(webhooks).values(data);
   return result[0].insertId;
 }
 
-export async function getWebhooks(userId: number) {
+/**
+ * One organisation's webhooks — the ones its events reach and its members can
+ * delete. Never the signing secret: it is shown once, at creation.
+ */
+export async function getWebhooks(organizationId: number) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(webhooks).where(eq(webhooks.userId, userId)).orderBy(desc(webhooks.createdAt));
-}
-
-export async function getActiveWebhooksByEvent(event: string) {
-  const db = await getDb();
-  if (!db) return [];
-  // Get all active webhooks and filter by event in application code
-  const allActive = await db.select().from(webhooks).where(eq(webhooks.isActive, true));
-  return allActive.filter((w) => {
-    const events = w.events as string[];
-    return events && events.includes(event);
-  });
-}
-
-export async function updateWebhook(id: number, data: Partial<InsertWebhook>) {
-  const db = await getDb();
-  if (!db) return;
-  await db.update(webhooks).set(data).where(eq(webhooks.id, id));
+  return db
+    .select({
+      id: webhooks.id,
+      userId: webhooks.userId,
+      name: webhooks.name,
+      url: webhooks.url,
+      events: webhooks.events,
+      isActive: webhooks.isActive,
+      lastTriggeredAt: webhooks.lastTriggeredAt,
+      failureCount: webhooks.failureCount,
+      createdAt: webhooks.createdAt,
+    })
+    .from(webhooks)
+    .where(eq(webhooks.organizationId, organizationId))
+    .orderBy(desc(webhooks.createdAt));
 }
 
 /** Soft-delete a webhook the caller's org owns. Returns rows affected. */

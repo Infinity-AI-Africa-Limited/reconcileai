@@ -12,8 +12,11 @@
  *     the on-premise egress guard, both preserved from the original.
  *
  * Events: exception.created, exception.resolved, exception.escalated,
- * exception.in_review, reconciliation.completed, upload.completed,
- * kpi.threshold.breached.
+ * exception.in_review, reconciliation.completed, reconciliation.failed,
+ * upload.completed, kpi.threshold.breached.
+ *
+ * Every event belongs to one tenant and reaches only that tenant's webhooks
+ * (see dispatchWebhookEvent). webhookDelivery.tenancy.test.ts holds the line.
  */
 import crypto from "crypto";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
@@ -23,6 +26,7 @@ import { isEgressAllowed } from "./_core/egress";
 import { createQueue, QueueOperationTimeoutError, type JobQueue } from "./jobQueue";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
+import { isTenantId } from "@shared/tenantId";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
 const MAX_ATTEMPTS = 6;
@@ -115,21 +119,67 @@ function getQueue(): Promise<JobQueue<DeliveryJob>> {
 // ─── Dispatch (called from routers/gateway) ──────────────────────────────────
 
 /**
- * Fan an event out to every active webhook subscribed to it. Creates a
- * tracked delivery row per target and enqueues it. Never throws — webhook
- * delivery must not fail the operation that triggered the event.
+ * The active webhooks ONE tenant owns. The only way dispatch finds targets.
+ *
+ * Until 2026-10-14 dispatch selected on `isActive` alone, so every tenant's
+ * events went to every tenant's webhooks: a user at bank B could subscribe to
+ * "*" and receive bank A's run results and exception activity. A webhook with
+ * no organisation matches nothing here, so an unattributable row receives no
+ * events at all.
  */
-export async function dispatchWebhookEvent(event: string, payload: Record<string, unknown>): Promise<void> {
-  try {
-    const db = await getDb();
-    if (!db) return;
+export async function activeWebhooksOfTenant(organizationId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(webhooks)
+    .where(and(eq(webhooks.organizationId, organizationId), eq(webhooks.isActive, true)));
+}
 
-    const targets = await db.select().from(webhooks).where(eq(webhooks.isActive, true));
+/**
+ * Fan an event out to the active webhooks of the tenant the event belongs to,
+ * and to no one else. Creates a tracked delivery row per target and enqueues
+ * it. Never throws — webhook delivery must not fail the operation that
+ * triggered the event.
+ *
+ * `organizationId` is the tenant that owns the thing the event is about: the
+ * job's, the exception's, the upload's. Not the caller's by default — staff in
+ * a portal act for a tenant that is not their own (CLAUDE.md §6). It must be a
+ * real tenant (`isTenantId`); anything else is refused and nothing is sent.
+ */
+export async function dispatchWebhookEvent(
+  organizationId: number,
+  event: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    // The type says `number`; this refuses the numbers that are not tenants
+    // (0, negatives, NaN) and anything an `as` smuggled past the compiler.
+    if (!isTenantId(organizationId)) {
+      console.error(
+        `[webhookDelivery] refused ${event}: no owning tenant (got ${String(organizationId)}); nothing was sent`,
+      );
+      return;
+    }
+
+    const targets = await activeWebhooksOfTenant(organizationId);
     const subscribed = targets.filter((w) => {
+      // Second, independent barrier. The query above is the control; this is
+      // here so a future edit to it fails safe rather than open.
+      if (w.organizationId !== organizationId) {
+        console.error(
+          `[webhookDelivery] webhook ${w.id} is not tenant ${organizationId}'s; withheld ${event}. ` +
+            "activeWebhooksOfTenant returned another tenant's row.",
+        );
+        return false;
+      }
       const events = Array.isArray(w.events) ? (w.events as string[]) : [];
       return events.includes(event) || events.includes("*");
     });
     if (subscribed.length === 0) return;
+
+    const db = await getDb();
+    if (!db) return;
 
     const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
     // ids only — delivery rows must never hold transaction data.

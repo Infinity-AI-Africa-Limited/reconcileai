@@ -124,6 +124,9 @@
     "server/shoplineSettlementPreview.test.ts",
     "server/shoplineUninstallTenancy.test.ts",
     "server/ssoFlowCookie.test.ts",
-    "server/webhookDelivery.dispatch.test.ts"
+    "server/webhookDelivery.dispatch.test.ts",
+    "server/webhookDelivery.tenancy.test.ts",
+    "server/webhookTenancy.callers.test.ts",
+    "server/webhookTenancy.db.test.ts"
   ]
 }

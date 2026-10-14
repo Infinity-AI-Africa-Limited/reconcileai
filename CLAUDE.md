@@ -1309,6 +1309,30 @@ table is in `GATED_ELSEWHERE` with a reason.
   looked up WITH `pocSlug`, inside `server/poc-engine.ts` where possible so no
   caller can forget it.
 
+### An outbound webhook event reaches ONE tenant (since 2026-10-14)
+
+| Date | Defect | Exposure measured | Fix |
+|---|---|---|---|
+| 2026-10-14 | `dispatchWebhookEvent` selected every active webhook (`WHERE isActive`), and no caller named a tenant — every tenant's run results, exception counts and resolution events fanned out to every tenant's webhooks, including one subscribed to `"*"` | **None in production.** Read-only count, 2026-10-14: 0 webhooks, 0 deliveries. And `webhooks.create` stored `events` as `JSON.stringify(...)`, so every API-created webhook subscribed to nothing — the leak was latent until that encoding was fixed, which is why both fixes ship together | Tenant-required dispatch; `webhooks.create` records the organisation |
+
+- **`dispatchWebhookEvent(organizationId, event, payload)` takes a REQUIRED
+  tenant** (`number`, and `isTenantId` at runtime — 0, NaN and anything an `as`
+  smuggled through are refused), and selects only `webhooks.organizationId =
+  tenant` via `activeWebhooksOfTenant`. A webhook with no organisation receives
+  nothing.
+- **The tenant is the row's, not the request's**: the job's (`runOrganizationId`,
+  and on failure the job re-read), the upload batch's (now recorded at creation),
+  the exception's — announced only when `updateException` matched a row, since
+  its WHERE pins the tenant. An id from another tenant changes nothing and
+  announces nothing.
+- **`webhookDelivery.tenancy.test.ts` ratchets it structurally**: every read of
+  `webhooks` anywhere in `server/` must name `webhooks.organizationId` in its
+  WHERE, and every dispatch must pass a tenant that is not a literal, an
+  assertion or `ctx`. readScopeRatchet missed this because it asks only whether a
+  select HAS a where clause — this one had one, on `isActive`. **A where clause is
+  not a tenant predicate.** The real-database proof over real HTTP is
+  `webhookTenancy.db.test.ts`.
+
 ---
 
 ## 9A. Feature Evaluation Rubric — The Intelligence Moat Test

@@ -53,8 +53,10 @@ import { QueueOperationTimeoutError } from "./jobQueue";
 import { dispatchWebhookEvent } from "./webhookDelivery";
 
 const EVENT = "reconciliation.completed";
+const TENANT = 42;
 const subscriber = (id: number) => ({
   id,
+  organizationId: TENANT,
   url: `https://hooks.example/${id}`,
   secret: "s",
   isActive: true,
@@ -78,7 +80,7 @@ describe("when an enqueue times out mid fan-out", () => {
       throw new QueueOperationTimeoutError("webhook-delivery", "enqueue", 3_000);
     });
 
-    await expect(dispatchWebhookEvent(EVENT, { jobId: 9 })).resolves.toBeUndefined();
+    await expect(dispatchWebhookEvent(TENANT, EVENT, { jobId: 9 })).resolves.toBeUndefined();
 
     // Only the first waited out the deadline; the rest were settled at once.
     expect(queue.enqueue).toHaveBeenCalledTimes(1);
@@ -94,7 +96,7 @@ describe("when one subscriber's enqueue fails for another reason", () => {
       .mockRejectedValueOnce(new Error("ERR this entry was refused"))
       .mockResolvedValue(undefined);
 
-    await dispatchWebhookEvent(EVENT, { jobId: 9 });
+    await dispatchWebhookEvent(TENANT, EVENT, { jobId: 9 });
 
     expect(queue.enqueue).toHaveBeenCalledTimes(3);
     expect(notQueued()).toHaveLength(1);
@@ -108,7 +110,7 @@ describe("when a delivery that timed out is later sent after all", () => {
       throw new QueueOperationTimeoutError("webhook-delivery", "enqueue", 3_000);
     });
 
-    await dispatchWebhookEvent(EVENT, { jobId: 9 });
+    await dispatchWebhookEvent(TENANT, EVENT, { jobId: 9 });
 
     const where = rendered(notQueued()[0]?.where);
     expect(where?.sql).toMatch(/`status` = \?/);
@@ -127,7 +129,7 @@ describe("when an error message is longer than the delivery row can hold", () =>
       throw new Error("x".repeat(2_000));
     });
 
-    await dispatchWebhookEvent(EVENT, { jobId: 9 });
+    await dispatchWebhookEvent(TENANT, EVENT, { jobId: 9 });
 
     expect(String(notQueued()[0]?.set.lastError).length).toBeLessThanOrEqual(500);
   });
@@ -135,7 +137,7 @@ describe("when an error message is longer than the delivery row can hold", () =>
   it("should store a delivery attempt's error that fits the column", async () => {
     state.webhooks = [subscriber(1)];
     queue.enqueue = vi.fn(async () => {});
-    await dispatchWebhookEvent(EVENT, { jobId: 9 });
+    await dispatchWebhookEvent(TENANT, EVENT, { jobId: 9 });
     const attemptDelivery = queue.handler!;
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("y".repeat(2_000)));
     state.updates.length = 0;
