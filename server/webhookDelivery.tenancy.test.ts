@@ -156,7 +156,7 @@ describe("when a tenant's webhooks subscribe to different events", () => {
   });
 });
 
-describe("the dispatch signature", () => {
+describe("when code names the tenant it dispatches to", () => {
   it("should require a tenant as a number, so null does not compile", () => {
     // Type-level: checked by `pnpm check:tests` (tsconfig.tests.json).
     expectTypeOf(dispatchWebhookEvent).parameter(0).toEqualTypeOf<number>();
@@ -332,7 +332,7 @@ function dispatchOffenders(sf: ts.SourceFile): { offenders: string[]; calls: num
   return { offenders, calls };
 }
 
-describe("the server source, read structurally", () => {
+describe("when the server source is read structurally", () => {
   it("should restrict every read of webhooks to one tenant in its where clause", () => {
     const offenders: string[] = [];
     let reads = 0;
@@ -371,7 +371,7 @@ describe("the server source, read structurally", () => {
   });
 });
 
-describe("the ratchet itself", () => {
+describe("when the ratchet reads a known query shape", () => {
   // Each snippet is a way a read can lose its tenant while still LOOKING
   // scoped. The first is Greptile's (#196): the column selected, not filtered.
   it.each([

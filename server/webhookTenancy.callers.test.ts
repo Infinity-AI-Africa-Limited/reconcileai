@@ -36,9 +36,8 @@ vi.mock("./db", async importOriginal => ({
   // exceptions
   updateException: vi.fn(async () => 1),
   // webhooks
-  createWebhook: vi.fn(async () => 900),
+  createWebhookWithinLimit: vi.fn(async () => ({ status: "created", id: 900 })),
   getWebhooks: vi.fn(async () => []),
-  countActiveWebhooks: vi.fn(async () => 0),
   // the runner
   updateReconciliationJob: vi.fn(async () => {}),
   getReconciliationJob: vi.fn(),
@@ -120,7 +119,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // clearAllMocks keeps implementations; a test that changes one must not leak it.
   vi.mocked(db.updateException).mockResolvedValue(1);
-  vi.mocked(db.countActiveWebhooks).mockResolvedValue(0);
+  vi.mocked(db.createWebhookWithinLimit).mockResolvedValue({ status: "created", id: 900 });
   vi.mocked(registrationProblem).mockResolvedValue(null);
   // mockReset, not clear: a queued once-rejection one path never consumed must not leak.
   vi.mocked(closeExceptionOutsideWorkflow).mockReset().mockResolvedValue(undefined as never);
@@ -179,7 +178,7 @@ describe("when an exception changes", () => {
     ["ageTracker.escalate", "exception.escalated", (c: ReturnType<typeof caller>) => c.ageTracker.escalate({ id: 11 })],
   ] as const;
 
-  it.each(actions)("%s should announce it to the tenant whose row it changed", async (_name, event, act) => {
+  it.each(actions)("should announce it to the tenant whose row it changed (%s)", async (_name, event, act) => {
     await act(caller(TENANT));
     await settle();
 
@@ -188,7 +187,7 @@ describe("when an exception changes", () => {
     expect(dispatched.mock.calls[0][2]).toMatchObject({ exceptionId: 11 });
   });
 
-  it.each(actions)("%s should announce nothing when the id is not the caller's tenant's", async (_name, _event, act) => {
+  it.each(actions)("should announce nothing when the id is not the caller's tenant's (%s)", async (_name, _event, act) => {
     // updateException is scoped to the caller's tenant, so another tenant's id
     // matches no row. It must not reach that row's owner as an event that never
     // happened, nor tell the caller's own webhook about a stranger's id.
@@ -199,7 +198,7 @@ describe("when an exception changes", () => {
     expect(dispatched).not.toHaveBeenCalled();
   });
 
-  it.each(actions)("%s should announce nothing for a caller with no organisation", async (_name, _event, act) => {
+  it.each(actions)("should announce nothing for a caller with no organisation (%s)", async (_name, _event, act) => {
     // Even with a row reported changed, there is no tenant to announce it to.
     vi.mocked(db.updateException).mockResolvedValue(1);
     await act(caller(null));
@@ -230,7 +229,7 @@ describe("when an exception is closed", () => {
     ],
   ] as const;
 
-  it.each(closes)("%s should announce it to the closing tenant", async (_name, act) => {
+  it.each(closes)("should announce it to the closing tenant (%s)", async (_name, act) => {
     await act(caller(TENANT));
     await settle();
 
@@ -238,7 +237,7 @@ describe("when an exception is closed", () => {
     expect(dispatched.mock.calls[0][2]).toMatchObject({ exceptionId: 11, status: "resolved" });
   });
 
-  it.each(closes)("%s should announce nothing when the id is another tenant's", async (_name, act) => {
+  it.each(closes)("should announce nothing when the id is another tenant's (%s)", async (_name, act) => {
     const notFound = new TRPCError({ code: "NOT_FOUND", message: "Exception not found" });
     vi.mocked(closeExceptionOutsideWorkflow).mockRejectedValueOnce(notFound);
     vi.mocked(resolveExceptionWorkflow).mockRejectedValueOnce(notFound);
@@ -264,7 +263,7 @@ describe("when a webhook is registered or listed", () => {
   it("should register it under the caller's organisation, subscribed by an array", async () => {
     await register(admin());
 
-    expect(vi.mocked(db.createWebhook).mock.calls[0][0]).toMatchObject({
+    expect(vi.mocked(db.createWebhookWithinLimit).mock.calls[0][0]).toMatchObject({
       organizationId: TENANT,
       events: ["exception.created"],
     });
@@ -273,7 +272,7 @@ describe("when a webhook is registered or listed", () => {
 
   it.each([null, 0])("should refuse an account whose organisation is %s, storing nothing", async (organizationId) => {
     await expect(register(admin(organizationId), { events: ["*"] })).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
-    expect(db.createWebhook).not.toHaveBeenCalled();
+    expect(db.createWebhookWithinLimit).not.toHaveBeenCalled();
   });
 
   it.each(["operations", "user", "cfo", "compliance"])(
@@ -282,7 +281,7 @@ describe("when a webhook is registered or listed", () => {
       await expect(register(caller(TENANT, role))).rejects.toMatchObject({ code: "FORBIDDEN" });
       await expect(caller(TENANT, role).webhooks.list()).rejects.toMatchObject({ code: "FORBIDDEN" });
       await expect(caller(TENANT, role).webhooks.delete({ id: 1 })).rejects.toMatchObject({ code: "FORBIDDEN" });
-      expect(db.createWebhook).not.toHaveBeenCalled();
+      expect(db.createWebhookWithinLimit).not.toHaveBeenCalled();
     },
   );
 
@@ -292,24 +291,31 @@ describe("when a webhook is registered or listed", () => {
       code: "BAD_REQUEST",
       message: "Webhook URL refused: 127.0.0.1 is a private or internal address",
     });
-    expect(db.createWebhook).not.toHaveBeenCalled();
+    expect(db.createWebhookWithinLimit).not.toHaveBeenCalled();
   });
 
   it("should refuse an event the platform does not send, storing nothing", async () => {
     await expect(register(admin(), { events: ["exception.creatd"] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
-    expect(db.createWebhook).not.toHaveBeenCalled();
+    expect(db.createWebhookWithinLimit).not.toHaveBeenCalled();
   });
 
   it("should store each event once", async () => {
     await register(admin(), { events: ["exception.created", "exception.created", "*"] });
-    expect(vi.mocked(db.createWebhook).mock.calls[0][0].events).toEqual(["exception.created", "*"]);
+    expect(vi.mocked(db.createWebhookWithinLimit).mock.calls[0][0].events).toEqual(["exception.created", "*"]);
   });
 
-  it("should refuse a webhook past the organisation's ceiling", async () => {
-    vi.mocked(db.countActiveWebhooks).mockResolvedValue(25);
+  it("should hand the ceiling to the locked create, and refuse when it is reached", async () => {
+    // The count and the insert happen in ONE transaction under the
+    // organisation's row lock (db.createWebhookWithinLimit); the race itself
+    // is proven on a real database in webhookDestination.db.test.ts.
+    vi.mocked(db.createWebhookWithinLimit).mockResolvedValue({ status: "limit_reached" });
     await expect(register(admin())).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringMatching(/at most 25/) });
-    expect(db.countActiveWebhooks).toHaveBeenCalledWith(TENANT);
-    expect(db.createWebhook).not.toHaveBeenCalled();
+    expect(vi.mocked(db.createWebhookWithinLimit).mock.calls[0][1]).toBe(25);
+  });
+
+  it("should refuse when the organisation no longer exists", async () => {
+    vi.mocked(db.createWebhookWithinLimit).mockResolvedValue({ status: "no_organization" });
+    await expect(register(admin())).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
   });
 
   it("should list the organisation's webhooks, and nothing for an account with none", async () => {

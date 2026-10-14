@@ -9,6 +9,9 @@
  * registration through the API, and rows stored before the guard existed,
  * fired by a real upload through the real worker. A local server counts every
  * connection made to it; the guard's claim is that the count stays at zero.
+ *
+ * It also holds the per-organisation ceiling against concurrent creates, on
+ * real transactions: the race a count-then-insert loses (Greptile, #196).
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -26,7 +29,7 @@ import {
   webhooks,
 } from "../drizzle/schema";
 import type { TrpcContext } from "./_core/context";
-import { getDb } from "./db";
+import { createWebhookWithinLimit, getDb } from "./db";
 import { classifyDatabaseTarget } from "./dbTarget";
 
 const url = process.env.DATABASE_URL;
@@ -180,4 +183,41 @@ describe.runIf(localDatabase)("when a webhook points inside the platform's netwo
     },
     TIMEOUT_MS,
   );
+
+  describe("when two creates reach the ceiling at the same moment", () => {
+    it(
+      "should let exactly one of them in, every time",
+      async () => {
+        const activeCount = async () =>
+          (await db
+            .select({ id: webhooks.id })
+            .from(webhooks)
+            .where(and(eq(webhooks.organizationId, tenant), eq(webhooks.isActive, true)))).length;
+        const row = (n: number) => ({
+          organizationId: tenant,
+          userId,
+          name: `Race ${n}`,
+          url: `https://hooks.example.com/race-${n}`,
+          secret: "race",
+          events: ["*"],
+          isActive: true,
+        });
+
+        const start = await activeCount();
+        const ROUNDS = 8;
+        for (let round = 0; round < ROUNDS; round++) {
+          // One slot left: both see room unless the count and insert are
+          // serialised under the organisation's lock.
+          const limit = (await activeCount()) + 1;
+          const outcomes = await Promise.all([
+            createWebhookWithinLimit(row(round * 2), limit),
+            createWebhookWithinLimit(row(round * 2 + 1), limit),
+          ]);
+          expect(outcomes.map(o => o.status).sort(), `round ${round}`).toEqual(["created", "limit_reached"]);
+        }
+        expect(await activeCount()).toBe(start + ROUNDS);
+      },
+      TIMEOUT_MS,
+    );
+  });
 });

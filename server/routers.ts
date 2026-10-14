@@ -249,9 +249,9 @@ import { exceptionWorkflowRouter } from "./routers/exceptionWorkflow";
 import { closeExceptionOutsideWorkflow } from "./exceptionWorkflow";
 import { afterExceptionClosed } from "./exceptionClosureEffects";
 import { buildReportSummary } from "./reportSummary";
-import { deliveryStats, dispatchWebhookEvent, listDeliveries } from "./webhookDelivery";
-import { destinationPolicy, registrationProblem } from "./outboundDestination";
-import { WEBHOOK_SUBSCRIPTIONS, type WebhookEvent, type WebhookSubscription } from "@shared/webhookEvents";
+import { dispatchWebhookEvent } from "./webhookDelivery";
+import { webhooksRouter } from "./routers/webhooks";
+import type { WebhookEvent } from "@shared/webhookEvents";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
 // ─── Webhook Dispatcher ─────────────────────────────────────────────
@@ -262,10 +262,6 @@ import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 // job's, the exception's, the upload's — and only its webhooks receive it.
 // Until 2026-10-14 there was no tenant here at all and every tenant's events
 // reached every tenant's webhooks. Fire-and-forget: never awaited, never throws.
-
-/** Ceiling on one organisation's active webhooks: each is a request per event. */
-const MAX_ACTIVE_WEBHOOKS_PER_ORG = 25;
-const WEBHOOK_SUBSCRIPTION_VALUES = WEBHOOK_SUBSCRIPTIONS as [WebhookSubscription, ...WebhookSubscription[]];
 
 function dispatchWebhook(organizationId: number, event: WebhookEvent, payload: Record<string, unknown>): void {
   dispatchWebhookEvent(organizationId, event, payload).catch((err) =>
@@ -2620,101 +2616,9 @@ export const appRouter = router({
 
   // ─── Webhooks ───────────────────────────────────────────────────
 
-  // A webhook belongs to one organisation, receives only its events, and is
-  // managed by that organisation's admins. adminProcedure, not
-  // guestProtectedProcedure: the Integrations page is admin-only (navItems.ts),
-  // and an open procedure behind a hidden page is no boundary — any member,
-  // the read-only CFO and Compliance roles included, could otherwise point the
-  // organisation's events at any URL, or read the URLs (which can hold tokens).
-  webhooks: router({
-    // The organisation's webhooks — the set its events reach, and the set
-    // `delete` can act on. Was per user, so a colleague's webhook receiving the
-    // organisation's events was invisible while still deletable.
-    list: adminProcedure.query(async ({ ctx }) => {
-      const tenant = ctx.user.organizationId;
-      return isTenantId(tenant) ? db.getWebhooks(tenant) : [];
-    }),
-
-    create: adminProcedure
-      .input(z.object({
-        name: z.string().min(1).max(MAX_NAME_LENGTH),
-        url: z.string().url().max(2000),
-        events: z.array(z.enum(WEBHOOK_SUBSCRIPTION_VALUES)).min(1).max(WEBHOOK_SUBSCRIPTION_VALUES.length),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-        // The organisation whose events this webhook will receive. An account
-        // with no organisation is refused: its webhook would belong to no one.
-        const organizationId = ctx.user.organizationId;
-        if (!isTenantId(organizationId)) {
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message: "Your account is not linked to an organization",
-          });
-        }
-        // The server will POST to this URL. Refused now when it points inside
-        // a network (a private, loopback or metadata address, an internal
-        // name), and checked again at every delivery: DNS can change.
-        const refused = await registrationProblem(input.url, destinationPolicy());
-        if (refused) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: `Webhook URL refused: ${refused}` });
-        }
-        if ((await db.countActiveWebhooks(organizationId)) >= MAX_ACTIVE_WEBHOOKS_PER_ORG) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: `An organisation can have at most ${MAX_ACTIVE_WEBHOOKS_PER_ORG} active webhooks. Delete one first.`,
-          });
-        }
-        const events = Array.from(new Set(input.events));
-        const secret = crypto.randomBytes(32).toString("hex");
-        const id = await db.createWebhook({
-          organizationId,
-          userId: ctx.user.id,
-          name: sanitizeInput(input.name, MAX_NAME_LENGTH),
-          url: input.url,
-          secret,
-          // The array itself: the column is JSON, and drizzle serialises it.
-          // `JSON.stringify` here stored a JSON *string*, which dispatch reads
-          // as no subscriptions, so no webhook created here ever fired.
-          events,
-          isActive: true,
-        });
-        // The host, not the URL: a webhook URL's path can carry a token.
-        await logAudit(ctx.user.id, "create_webhook", "webhook", id || undefined, {
-          name: input.name,
-          host: new URL(input.url).hostname,
-          events,
-        }, ip, ua);
-        return { id, secret }; // Return secret only on creation
-      }),
-
-    delete: adminProcedure
-      .input(z.object({ id: z.number().int().positive() }))
-      .mutation(async ({ ctx, input }) => {
-        const { ip, ua } = getClientInfo(ctx);
-        const removedWebhook = await db.deleteWebhook(input.id, requireOrg(ctx));
-        if (removedWebhook === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Webhook not found" });
-        await logAudit(ctx.user.id, "delete_webhook", "webhook", input.id, {}, ip, ua);
-        return { success: true };
-      }),
-
-    // WS-4 delivery dashboard: recent tracked deliveries for this org's
-    // webhooks, and the reliability figure (≥99.5% success criterion).
-    deliveries: adminProcedure
-      .input(z.object({ limit: z.number().int().min(1).max(200).default(50) }).optional())
-      .query(async ({ ctx, input }) => {
-        const tenant = ctx.user.organizationId;
-        return isTenantId(tenant) ? listDeliveries(tenant, input?.limit ?? 50) : [];
-      }),
-
-    deliveryStats: adminProcedure
-      .input(z.object({ sinceDays: z.number().int().min(1).max(365).default(30) }).optional())
-      .query(async ({ ctx, input }) => {
-        const tenant = ctx.user.organizationId;
-        if (!isTenantId(tenant)) return { total: 0, delivered: 0, failed: 0, pending: 0, reliability: null };
-        return deliveryStats(tenant, input?.sinceDays ?? 30);
-      }),
-  }),
+  // Outbound webhooks: admin-only, tenant-scoped, destination-checked. See
+  // server/routers/webhooks.ts.
+  webhooks: webhooksRouter,
 
   // ─── API Keys ───────────────────────────────────────────────────
 

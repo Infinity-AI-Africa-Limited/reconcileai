@@ -16,6 +16,8 @@ const state = vi.hoisted(() => ({
   updates: [] as Array<{ set: Record<string, unknown>; where: unknown }>,
   /** Rows written straight to webhook_deliveries (a refused destination's record). */
   inserted: [] as Array<Record<string, unknown>>,
+  /** When set, every read fails as an unreachable database would. */
+  readFails: false,
 }));
 
 /** `.where()` answers like a drizzle query: awaitable, and `.limit()`-able. */
@@ -25,7 +27,16 @@ function answer<T>(rows: T) {
 }
 
 const fakeDb = {
-  select: () => ({ from: () => ({ where: () => answer(state.webhooks) }) }),
+  select: () => ({
+    from: () => ({
+      where: () => {
+        if (!state.readFails) return answer(state.webhooks);
+        const failed = Promise.reject(new Error("connect ECONNRESET"));
+        failed.catch(() => {});
+        return Object.assign(failed, { limit: () => failed });
+      },
+    }),
+  }),
   insert: () => ({
     values: (values: Record<string, unknown>) => {
       state.inserted.push(values);
@@ -92,6 +103,7 @@ afterEach(() => {
   state.webhooks = [];
   state.updates.length = 0;
   state.inserted.length = 0;
+  state.readFails = false;
   vi.restoreAllMocks();
 });
 
@@ -248,6 +260,29 @@ describe("when a queued delivery is attempted", () => {
     await expect(attemptDelivery({ data: job(), attempt: 1 })).resolves.toBeUndefined();
     expect(transport.post).not.toHaveBeenCalled();
     expect(attemptRecord()).toMatchObject({ status: "failed", lastError: "Not sent: the webhook was deleted" });
+  });
+
+  it("should retry when the webhook cannot be read, keeping the row pending", async () => {
+    const attemptDelivery = await deliveryHandler();
+    transport.post = vi.fn(async () => ({ status: 200 }));
+    state.readFails = true;
+
+    await expect(attemptDelivery({ data: job(), attempt: 1 })).rejects.toThrow(/Could not read the webhook/);
+    expect(transport.post).not.toHaveBeenCalled();
+    expect(attemptRecord()).toMatchObject({ status: "pending", attempts: 1 });
+    expect(String(attemptRecord()?.lastError)).toMatch(/^Could not read the webhook: /);
+  });
+
+  it("should settle the delivery as failed when the read fails on the last attempt", async () => {
+    // Greptile (#196): thrown out of the handler, a read failure skipped the
+    // status update, and with no retries left the row stayed pending for ever.
+    const attemptDelivery = await deliveryHandler();
+    transport.post = vi.fn(async () => ({ status: 200 }));
+    state.readFails = true;
+
+    await expect(attemptDelivery({ data: job(), attempt: 6 })).resolves.toBeUndefined();
+    expect(attemptRecord()).toMatchObject({ status: "failed", attempts: 6 });
+    expect(String(attemptRecord()?.lastError)).toMatch(/^Could not read the webhook: /);
   });
 
   it("should treat a redirect as a failure, say so, and retry it", async () => {

@@ -54,10 +54,17 @@ interface DeliveryJob {
 
 // ─── Delivery execution (queue handler) ──────────────────────────────────────
 
-/** The webhook a delivery is for, read within the tenant it was dispatched for. */
-async function deliveryTarget(webhookId: number, organizationId: number) {
+/**
+ * The webhook a delivery is for, read within the tenant it was dispatched for.
+ * Null means it is gone. A database that cannot answer THROWS rather than
+ * reading as "gone": that is a reason to retry, not to give up.
+ */
+async function deliveryTarget(
+  webhookId: number,
+  organizationId: number,
+): Promise<{ url: string; secret: string; isActive: boolean } | null> {
   const db = await getDb();
-  if (!db) return null;
+  if (!db) throw new Error("Database unavailable");
   const [target] = await db
     .select({ url: webhooks.url, secret: webhooks.secret, isActive: webhooks.isActive })
     .from(webhooks)
@@ -76,11 +83,24 @@ async function attemptDelivery(job: { data: DeliveryJob; attempt: number }): Pro
   // is gone. Settled now rather than retried six times.
   let final = false;
 
-  const target = isTenantId(organizationId) ? await deliveryTarget(webhookId, organizationId) : null;
-  if (!target || !target.isActive) {
+  // Read through the same failure path as the send: a read that fails is an
+  // attempt like any other, retried, and on the last attempt settled as
+  // failed. Thrown out of here, it skipped the status update, and the row sat
+  // `pending` for ever once the queue stopped retrying (Greptile, #196).
+  let target: Awaited<ReturnType<typeof deliveryTarget>> = null;
+  let readFailed = false;
+  try {
+    target = isTenantId(organizationId) ? await deliveryTarget(webhookId, organizationId) : null;
+  } catch (err) {
+    readFailed = true;
+    error = `Could not read the webhook: ${errorSummary(err)}`;
+  }
+
+  // A failed read leaves `error` set: retried below, or failed once exhausted.
+  if (!readFailed && !target?.isActive) {
     error = "Not sent: the webhook was deleted";
     final = true;
-  } else {
+  } else if (target?.isActive) {
     const signature = crypto.createHmac("sha256", target.secret).update(body).digest("hex");
     try {
       const res = await postToDestination(

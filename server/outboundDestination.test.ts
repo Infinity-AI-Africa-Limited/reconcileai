@@ -42,7 +42,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("which addresses are public internet hosts", () => {
+describe("when an address is checked against the public internet", () => {
   it.each([
     // [address, why it is refused]
     ["127.0.0.1", "loopback"],

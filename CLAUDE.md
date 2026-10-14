@@ -1334,12 +1334,16 @@ table is in `GATED_ELSEWHERE` with a reason.
   select HAS a where clause — this one had one, on `isActive`. **A where clause is
   not a tenant predicate.** The real-database proof over real HTTP is
   `webhookTenancy.db.test.ts`.
-- **Webhooks are admin-only on the server, as on the page.** `webhooks.*` is
-  `adminProcedure`; the Integrations page always was (`navItems.ts`), and the
-  procedures behind it accepted any member, the read-only CFO and Compliance
-  roles included. Events are the shared list in `shared/webhookEvents.ts` (an
-  unknown name is refused, not stored to never fire), and an organisation may
-  hold at most 25 active webhooks.
+- **Webhooks are admin-only on the server, as on the page.** `webhooks.*`
+  (`server/routers/webhooks.ts`) is `adminProcedure`; the Integrations page
+  always was (`navItems.ts`), and the procedures behind it accepted any member,
+  the read-only CFO and Compliance roles included. Events are the shared list
+  in `shared/webhookEvents.ts` (an unknown name is refused, not stored to never
+  fire). An organisation may hold at most 25 active webhooks, enforced by
+  `db.createWebhookWithinLimit` in ONE transaction under the organisation's row
+  lock, with the count itself a locking read (TiDB's plain reads use the
+  transaction's start snapshot). A separate count and insert let two creates
+  at the ceiling both in — proven on real MySQL, round 0.
 - **A queued delivery carries ids and the signed body only.** The URL and
   signing secret are read at each attempt, within the job's tenant — so the
   secret never sits in Redis, and a webhook deleted after dispatch receives

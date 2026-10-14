@@ -1651,17 +1651,50 @@ export async function getReports(organizationId: number | null) {
 
 // ─── Webhooks ────────────────────────────────────────────────────────
 
+export type CreateWebhookOutcome =
+  | { status: "created"; id: number }
+  | { status: "limit_reached" }
+  | { status: "no_organization" };
+
 /**
+ * Create a webhook, unless its organisation already holds `limit` active ones.
+ *
  * A webhook belongs to ONE organisation and receives only that organisation's
- * events (webhookDelivery.ts). The type requires it: a webhook created without
- * one used to be stored with `organizationId` NULL, which the old dispatcher
- * ignored and the delete gate below could never match.
+ * events (webhookDelivery.ts); the type requires it. Without one it was stored
+ * with `organizationId` NULL, which the old dispatcher ignored and the delete
+ * gate could never match.
+ *
+ * The ceiling is held by ONE transaction under the organisation's row lock.
+ * A count and an insert made separately let two creates at the ceiling both
+ * count under it and both insert (Greptile, #196). The count is a locking read
+ * as well: TiDB's plain reads use the transaction's start snapshot, which can
+ * predate a create that committed while this one waited for the lock.
  */
-export async function createWebhook(data: InsertWebhook & { organizationId: number }) {
+export async function createWebhookWithinLimit(
+  data: InsertWebhook & { organizationId: number },
+  limit: number,
+): Promise<CreateWebhookOutcome> {
   const db = await getDb();
-  if (!db) return null;
-  const result = await db.insert(webhooks).values(data);
-  return result[0].insertId;
+  if (!db) throw new Error("Database unavailable");
+  return db.transaction(async (tx) => {
+    const [organization] = await tx
+      .select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.id, data.organizationId))
+      .limit(1)
+      .for("update");
+    if (!organization) return { status: "no_organization" };
+
+    const active = await tx
+      .select({ id: webhooks.id })
+      .from(webhooks)
+      .where(and(eq(webhooks.organizationId, data.organizationId), eq(webhooks.isActive, true)))
+      .for("update");
+    if (active.length >= limit) return { status: "limit_reached" };
+
+    const [inserted] = await tx.insert(webhooks).values(data);
+    return { status: "created", id: Number(inserted.insertId) };
+  });
 }
 
 /**
@@ -1686,17 +1719,6 @@ export async function getWebhooks(organizationId: number) {
     .from(webhooks)
     .where(eq(webhooks.organizationId, organizationId))
     .orderBy(desc(webhooks.createdAt));
-}
-
-/** How many active webhooks one organisation has: the ceiling `webhooks.create` enforces. */
-export async function countActiveWebhooks(organizationId: number): Promise<number> {
-  const db = await getDb();
-  if (!db) return 0;
-  const [row] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(webhooks)
-    .where(and(eq(webhooks.organizationId, organizationId), eq(webhooks.isActive, true)));
-  return Number(row?.n ?? 0);
 }
 
 /** Soft-delete a webhook the caller's org owns. Returns rows affected. */
