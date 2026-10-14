@@ -244,6 +244,9 @@ import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
 import { controlEvidenceRouter } from "./routers/controlEvidence";
 import { controlPoliciesRouter } from "./routers/controlPolicies";
+import { exceptionWorkflowRouter } from "./routers/exceptionWorkflow";
+import { closeExceptionOutsideWorkflow } from "./exceptionWorkflow";
+import { afterExceptionClosed } from "./exceptionClosureEffects";
 import { buildReportSummary } from "./reportSummary";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
@@ -990,69 +993,31 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
-        await db.updateException(input.id, ctx.user.organizationId ?? null, {
+        const organizationId = ctx.user.organizationId ?? null;
+        const resolutionNotes = input.resolutionNotes ? sanitizeInput(input.resolutionNotes, 2000) : null;
+        // Checked and written in ONE transaction under the exception's lock, the
+        // same lock a governed Start takes (server/exceptionWorkflow.ts): a case
+        // enrolled in a workflow is never closed here, even mid-race. Another
+        // tenant's id is NOT_FOUND; it used to report success.
+        await closeExceptionOutsideWorkflow({
+          organizationId,
+          exceptionId: input.id,
           status: input.status,
-          resolvedBy: ctx.user.id,
-          resolvedAt: new Date(),
-          resolutionNotes: input.resolutionNotes ? sanitizeInput(input.resolutionNotes, 2000) : null,
+          resolutionNotes,
+          actorId: ctx.user.id,
         });
         await logAudit(ctx.user.id, "resolve_exception", "exception", input.id, {
           status: input.status,
           notes: input.resolutionNotes,
         }, ip, ua);
-
-        // Fire-and-forget: capture the resolved exception as a per-institution learning pattern.
-        const _resolveOrgId = ctx.user.organizationId;
-        const _resolveUserId = ctx.user.id;
-        const _resolveInput = input;
-        void (async () => {
-          try {
-            if (!_resolveOrgId) return;
-            const drizzle = await getDb();
-            if (!drizzle) return;
-            const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
-            const rows = await drizzle
-              .select({
-                category: exTbl.category,
-                description: exTbl.description,
-                amount: txTbl.amount,
-                counterparty: txTbl.counterparty,
-                transactionRef: txTbl.transactionRef,
-              })
-              .from(exTbl)
-              .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
-              .where(eq(exTbl.id, _resolveInput.id))
-              .limit(1);
-            if (!rows.length) return;
-            const row = rows[0];
-            const amt = parseFloat(String(row.amount)) || 0;
-            const amtRange: "0-100k" | "100k-1m" | "1m+" = amt < 100_000 ? "0-100k" : amt < 1_000_000 ? "100k-1m" : "1m+";
-            const ei = await import("./exceptionIntelligence");
-            const cpType = ei.counterpartyTypeOf(row.counterparty);
-            const resolution = _resolveInput.resolutionNotes || "Exception resolved";
-            const actionClass = ei.classifyResolutionAction(resolution);
-            const outcome: "resolved" | "rejected" = _resolveInput.status === "resolved" ? "resolved" : "rejected";
-            await drizzle.insert(agentMemory).values({
-              organizationId: _resolveOrgId,
-              exceptionId: _resolveInput.id,
-              exceptionCategory: row.category,
-              transactionRef: row.transactionRef ?? null,
-              amountRange: amtRange,
-              counterpartyType: cpType,
-              deductionType: null,
-              resolution,
-              outcome,
-              reasoning: row.description || "Exception resolved by operations team",
-              embeddingText: `category:${row.category} amount:${amtRange} counterparty:${cpType} resolution:${actionClass} outcome:${outcome}`,
-              resolvedBy: _resolveUserId,
-            });
-            // Also feed the anonymized cross-institution pool.
-            const sig = ei.deriveSignature({ exceptionCategory: row.category, amount: amt, counterparty: row.counterparty, resolution, outcome });
-            await ei.recordLocalSignature(_resolveOrgId, sig);
-          } catch { /* pattern capture is best-effort; never fail the primary response */ }
-        })();
-
-        dispatchWebhook("exception.resolved", { exceptionId: input.id, status: input.status });
+        // Learning and the exception.resolved webhook, shared with governed closure.
+        void afterExceptionClosed({
+          organizationId,
+          exceptionId: input.id,
+          userId: ctx.user.id,
+          outcome: input.status,
+          resolutionNotes,
+        });
         return { success: true };
       }),
 
@@ -4221,6 +4186,7 @@ export const appRouter = router({
   controlFit: controlFitRouter,
   controlEvidence: controlEvidenceRouter,
   controlPolicies: controlPoliciesRouter,
+  exceptionWorkflow: exceptionWorkflowRouter,
   superAgent: router({
     query: protectedProcedure
       .input(z.object({

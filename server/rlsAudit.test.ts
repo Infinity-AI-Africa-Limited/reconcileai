@@ -132,6 +132,11 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // Approved mapping and reconciliation policy history is customer control
   // configuration, not a platform-wide rules catalogue.
   control_policies: "tenant_required",
+  // Material-exception ownership, due dates, decision evidence and human
+  // approvals are all customer control records and are tenant-required.
+  exception_workflows: "tenant_required",
+  // Append-only step history of those workflows, narratives included.
+  exception_workflow_events: "tenant_required",
   distributors: "tenant_nullable",
   agent_action_drafts: "tenant_nullable",
   agent_memory: "tenant_nullable",
