@@ -8,11 +8,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Download, Lock } from "lucide-react";
+import { Loader2, Play, Eye, CheckCircle2, Clock, AlertTriangle, XCircle, Download, Lock, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
+import { evidencePackIssueCopy, evidencePackStateCopy, formatEvidenceTime, looksLikeGovernedControl } from "@/lib/governedControlEvidence";
 
 export default function ReconciliationPage() {
   // Super admins inside a tenant portal must read THAT tenant's data.
@@ -47,6 +48,12 @@ export default function ReconciliationPage() {
     { id: selectedJob! },
     { enabled: !!selectedJob }
   );
+  const isGovernedControl = looksLikeGovernedControl(jobDetail?.job.engineConfig);
+  const { data: evidencePack, isLoading: evidencePackLoading, error: evidencePackError } =
+    trpc.controlEvidence.getGovernedRunEvidencePack.useQuery(
+      { jobId: selectedJob! },
+      { enabled: !!selectedJob && isGovernedControl },
+    );
 
   const channelMap = useMemo(() => new Map(channels?.map((c) => [c.id, c]) || []), [channels]);
 
@@ -378,6 +385,86 @@ export default function ReconciliationPage() {
                     <p className="text-xl font-bold text-amber-700">{jobDetail.job.exceptionCount || 0}</p>
                   </div>
                 </div>
+
+                {isGovernedControl && (
+                  <div className="rounded-xl border bg-slate-50/50 p-4 space-y-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <h4 className="flex items-center gap-2 font-semibold text-sm">
+                          <ShieldCheck className="h-4 w-4 text-primary" /> Governed control evidence pack
+                        </h4>
+                        <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
+                          A read-only reconstruction of admitted source evidence, run lifecycle, governed-exception activity and audit references. It contains no raw source records and does not publish a control conclusion.
+                        </p>
+                      </div>
+                      {evidencePack ? (() => {
+                        const copy = evidencePackStateCopy(evidencePack.state);
+                        return <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${copy.className}`}>{copy.label}</span>;
+                      })() : null}
+                    </div>
+                    {evidencePackLoading ? (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-4 w-4 animate-spin" /> Reconstructing linked evidence…
+                      </div>
+                    ) : evidencePackError ? (
+                      <p role="alert" className="text-xs text-destructive">Evidence pack could not be loaded for this governed run.</p>
+                    ) : evidencePack ? (
+                      <>
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                          <div className="rounded-lg border bg-background p-3">
+                            <p className="text-[11px] text-muted-foreground">Control period</p>
+                            <p className="mt-1 text-sm font-semibold">{evidencePack.admission.controlPeriod}</p>
+                          </div>
+                          <div className="rounded-lg border bg-background p-3">
+                            <p className="text-[11px] text-muted-foreground">Admission assessed</p>
+                            <p className="mt-1 text-xs font-medium">{formatEvidenceTime(evidencePack.admission.assessedAt)}</p>
+                          </div>
+                          <div className="rounded-lg border bg-background p-3">
+                            <p className="text-[11px] text-muted-foreground">Run lifecycle</p>
+                            <p className="mt-1 text-xs font-medium">{formatEvidenceTime(evidencePack.run.startedAt)} → {formatEvidenceTime(evidencePack.run.completedAt)}</p>
+                          </div>
+                          <div className="rounded-lg border bg-background p-3">
+                            <p className="text-[11px] text-muted-foreground">Admitted policy</p>
+                            <p className="mt-1 text-xs font-medium break-words">{evidencePack.admission.reconciliationPolicyVersions.join(", ")}</p>
+                          </div>
+                        </div>
+                        <div className="grid gap-4 lg:grid-cols-2">
+                          <div>
+                            <p className="mb-2 text-xs font-semibold">Source evidence</p>
+                            <div className="space-y-2">
+                              {evidencePack.sourceEvidence.map(source => (
+                                <div key={source.role} className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2 text-xs">
+                                  <div>
+                                    <p className="font-medium capitalize">{source.role.replaceAll("_", " ")}</p>
+                                    <p className="text-muted-foreground">Received {formatEvidenceTime(source.receivedAt)} · {source.mappingVersion ?? "No mapping version"}</p>
+                                  </div>
+                                  <span className={`rounded-full px-2 py-0.5 font-medium ${source.verified ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-800"}`}>
+                                    {source.verified ? "Linked" : "Check"}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <p className="mb-2 text-xs font-semibold">Governed exception activity</p>
+                            <div className="rounded-lg border bg-background p-3 text-xs text-muted-foreground">
+                              <p>{evidencePack.governedExceptionWorkflow.events.length} recorded workflow event{evidencePack.governedExceptionWorkflow.events.length === 1 ? "" : "s"}; event narratives remain in the governed workflow, not this pack.</p>
+                              <p className="mt-2">Audit references: {evidencePack.auditEvidence.events.length}. Full audit-chain verification remains an administrator action in Audit Trail.</p>
+                            </div>
+                          </div>
+                        </div>
+                        {evidencePack.issues.length > 0 && (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                            <p className="font-semibold">Evidence items requiring investigation</p>
+                            <ul className="mt-2 space-y-1 list-disc pl-4">
+                              {evidencePack.issues.map(issue => <li key={issue}>{evidencePackIssueCopy(issue)}</li>)}
+                            </ul>
+                          </div>
+                        )}
+                      </>
+                    ) : null}
+                  </div>
+                )}
 
                 {/* Fee/charge noise set aside from the reconciliation */}
                 {(() => {

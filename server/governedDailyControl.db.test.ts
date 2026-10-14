@@ -374,6 +374,43 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
     RUN_TIMEOUT_MS
   );
 
+  it("should reconstruct a metadata-only evidence pack from the admitted run", async () => {
+    const jobId = jobIds[0];
+    expect(jobId, "the completed governed run must exist before its evidence is read").toBeTruthy();
+
+    const pack = await caller.controlEvidence.getGovernedRunEvidencePack({ jobId });
+
+    expect(pack).toMatchObject({
+      schemaVersion: "governed-control-evidence-pack-v1",
+      state: "reconstructable",
+      issues: [],
+      boundary: {
+        rawSourceDataIncluded: false,
+        sourcePayloadIncluded: false,
+        financialDecisionMade: false,
+        auditChainVerified: false,
+      },
+      admission: {
+        controlPeriod: PERIOD,
+        sourceContractCount: 2,
+        batchManifestCount: 2,
+        reconciliationPolicyVersions: ["settlement-ledger-v1"],
+      },
+      run: {
+        status: "completed",
+        totals: { sourceRecords: 2, targetRecords: 2, matchedRecords: 1, exceptionRecords: 2 },
+      },
+    });
+    expect(pack.sourceEvidence).toEqual([
+      expect.objectContaining({ role: "settlement", verified: true }),
+      expect.objectContaining({ role: "internal_register", verified: true }),
+    ]);
+    // A control pack can point to evidence without becoming an export of the
+    // transaction records or delivery identity it was admitted from.
+    expect(JSON.stringify(pack)).not.toContain("GOV-S1");
+    expect(JSON.stringify(pack)).not.toContain("governed-settlement");
+  });
+
   it(
     "should fail a governed run in the worker, writing nothing, once its approved rows have moved on",
     async () => {
