@@ -64,7 +64,7 @@ function evidenceDb(options: { manifests?: unknown[]; progress?: unknown[]; work
       control_batch_manifests: [options.manifests ?? [manifest(), manifest({ id: 702, sourceContractId: 502, uploadBatchId: 902, role: "internal_register", channelId: 12 })]],
       job_progress_events: [options.progress ?? [{ phase: "completed", progress: 100, createdAt: new Date("2026-10-10T08:03:00.000Z") }]],
       exception_workflow_events: [options.workflowEvents ?? [{ eventType: "decision_approved", outcome: null, createdAt: new Date("2026-10-10T08:04:00.000Z") }]],
-      exception_workflows: [options.workflowStates ?? [{ status: "approved" }]],
+      exception_workflows: [options.workflowStates ?? [{ status: "approved", count: 1 }]],
       audit_logs: [options.audits ?? [
         { action: "control_batch_manifest_recorded", entityType: "control_batch_manifest", createdAt: new Date("2026-10-09T20:00:00.000Z"), sequenceNumber: 30, signed: "h1" },
         { action: "create_governed_daily_control_run", entityType: "reconciliation_job", createdAt: new Date("2026-10-10T08:01:00.000Z"), sequenceNumber: 31, signed: "h2" },
@@ -79,8 +79,8 @@ beforeEach(() => {
   state.db = null;
 });
 
-describe("governed admission snapshots", () => {
-  it("accepts only a complete two-source governed snapshot", () => {
+describe("when a governed admission snapshot is read", () => {
+  it("should accept only a complete two-source governed snapshot", () => {
     expect(governedAdmissionOf(job.engineConfig)).toMatchObject({
       controlPeriod: "2026-10-09",
       settlement: { manifestId: 701 },
@@ -93,13 +93,13 @@ describe("governed admission snapshots", () => {
     ["a caller-chosen date", JSON.stringify({ governedDailyControl: { controlPeriod: "not-a-day" } })],
     ["a partial evidence set", JSON.stringify({ governedDailyControl: { controlPeriod: "2026-10-09", assessedAt: "2026-10-10T08:00:00Z", sourceContractCount: 1, batchManifestCount: 1, reconciliationPolicyVersions: ["v1"], settlement: { channelId: 1, manifestId: 1, uploadBatchId: 1 }, register: { channelId: 2, manifestId: 2, uploadBatchId: 2 } } })],
     ["the same batch on both sides", JSON.stringify({ governedDailyControl: { controlPeriod: "2026-10-09", assessedAt: "2026-10-10T08:00:00Z", sourceContractCount: 2, batchManifestCount: 2, reconciliationPolicyVersions: ["v1"], settlement: { channelId: 1, manifestId: 1, uploadBatchId: 1 }, register: { channelId: 2, manifestId: 2, uploadBatchId: 1 } } })],
-  ])("refuses %s", (_label, config) => {
+  ])("should refuse %s", (_label, config) => {
     expect(governedAdmissionOf(config)).toBeNull();
   });
 });
 
 describe("when an eligible reader opens a governed evidence pack", () => {
-  it("reconstructs bounded non-payload evidence from tenant-scoped rows", async () => {
+  it("should reconstruct bounded non-payload evidence from tenant-scoped rows", async () => {
     const fake = evidenceDb();
 
     const result = await buildGovernedControlEvidencePack(job);
@@ -133,10 +133,13 @@ describe("when an eligible reader opens a governed evidence pack", () => {
     expect(workflowRead?.where?.params).toEqual(expect.arrayContaining([organizationId, job.id]));
     const auditRead = fake.ops.find(op => op.kind === "select" && op.table === "audit_logs");
     expect(auditRead?.where?.params).toEqual(expect.arrayContaining([organizationId, job.id, 701, 702]));
+    expect(auditRead?.where?.params).toContain("exception_workflow");
+    const workflowCountRead = fake.ops.find(op => op.kind === "select" && op.table === "exception_workflows");
+    expect(workflowCountRead?.fields).toEqual(expect.arrayContaining(["status", "count"]));
     expect(fake.writes("insert", "audit_logs")).toHaveLength(0);
   });
 
-  it("reports evidence gaps instead of reconstructing a plausible pass", async () => {
+  it("should report evidence gaps instead of reconstructing a plausible pass", async () => {
     evidenceDb({
       manifests: [
         manifest({ schemaState: "unknown", invalidRowCount: 3, duplicateDelivery: "rejected" }),
@@ -160,7 +163,7 @@ describe("when an eligible reader opens a governed evidence pack", () => {
     expect(result.sourceEvidence.every(source => source.verified === false)).toBe(true);
   });
 
-  it("refuses an ordinary or legacy job rather than returning another run's records", async () => {
+  it("should refuse an ordinary or legacy job rather than returning another run's records", async () => {
     await expect(buildGovernedControlEvidencePack({ ...job, engineConfig: "{}" })).rejects.toMatchObject({
       code: "PRECONDITION_FAILED",
     });

@@ -1,5 +1,5 @@
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, count, eq, inArray, or } from "drizzle-orm";
 import {
   auditLogs,
   controlBatchManifests,
@@ -321,8 +321,28 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
     at: row.createdAt.toISOString(),
   }));
 
-  const workflowStates = await db
-    .select({ status: exceptionWorkflows.status })
+  const workflowStatuses = await db
+    .select({ status: exceptionWorkflows.status, count: count() })
+    .from(exceptionWorkflows)
+    .innerJoin(
+      exceptions,
+      and(
+        eq(exceptions.id, exceptionWorkflows.exceptionId),
+        eq(exceptions.organizationId, exceptionWorkflows.organizationId),
+      ),
+    )
+    .where(and(eq(exceptionWorkflows.organizationId, organizationId), eq(exceptions.jobId, job.id)))
+    .groupBy(exceptionWorkflows.status);
+  const materialWorkflowStatusCounts = Object.fromEntries(
+    workflowStatuses.map(row => [row.status, Number(row.count)]),
+  );
+
+  const contractIds = manifests.map(manifest => manifest.sourceContractId);
+  // This remains a SQL subquery. Fetching every workflow id just to build the
+  // audit filter would reintroduce the unbounded read avoided by the grouped
+  // status query above.
+  const workflowIdsForJob = db
+    .select({ id: exceptionWorkflows.id })
     .from(exceptionWorkflows)
     .innerJoin(
       exceptions,
@@ -332,12 +352,16 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
       ),
     )
     .where(and(eq(exceptionWorkflows.organizationId, organizationId), eq(exceptions.jobId, job.id)));
-  const materialWorkflowStatusCounts = workflowStates.reduce<Record<string, number>>((counts, row) => {
-    counts[row.status] = (counts[row.status] ?? 0) + 1;
-    return counts;
-  }, {});
-
-  const contractIds = manifests.map(manifest => manifest.sourceContractId);
+  const auditTargets = [
+    and(eq(auditLogs.entityType, "reconciliation_job"), eq(auditLogs.entityId, job.id)),
+    and(eq(auditLogs.entityType, "control_batch_manifest"), inArray(auditLogs.entityId, manifestIds)),
+    and(eq(auditLogs.entityType, "exception_workflow"), inArray(auditLogs.entityId, workflowIdsForJob)),
+  ];
+  if (contractIds.length > 0) {
+    auditTargets.push(
+      and(eq(auditLogs.entityType, "control_source_contract"), inArray(auditLogs.entityId, contractIds)),
+    );
+  }
   const auditRows = await db
     .select({
       action: auditLogs.action,
@@ -350,13 +374,7 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
     .where(
       and(
         eq(auditLogs.organizationId, organizationId),
-        or(
-          and(eq(auditLogs.entityType, "reconciliation_job"), eq(auditLogs.entityId, job.id)),
-          and(eq(auditLogs.entityType, "control_batch_manifest"), inArray(auditLogs.entityId, manifestIds)),
-          contractIds.length > 0
-            ? and(eq(auditLogs.entityType, "control_source_contract"), inArray(auditLogs.entityId, contractIds))
-            : undefined,
-        ),
+        or(...auditTargets),
       ),
     )
     .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id))

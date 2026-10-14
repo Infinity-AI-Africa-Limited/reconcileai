@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
-import { evidencePackIssueCopy, evidencePackStateCopy, formatEvidenceTime, looksLikeGovernedControl } from "@/lib/governedControlEvidence";
+import { boundedEvidenceCount, evidencePackIssueCopy, evidencePackStateCopy, formatEvidenceTime, looksLikeGovernedControl } from "@/lib/governedControlEvidence";
 
 export default function ReconciliationPage() {
   // Super admins inside a tenant portal must read THAT tenant's data.
@@ -386,7 +386,7 @@ export default function ReconciliationPage() {
                   </div>
                 </div>
 
-                {isGovernedControl && (
+                {isGovernedControl ? (
                   <div className="rounded-xl border bg-slate-50/50 p-4 space-y-4">
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div>
@@ -448,23 +448,23 @@ export default function ReconciliationPage() {
                           <div>
                             <p className="mb-2 text-xs font-semibold">Governed exception activity</p>
                             <div className="rounded-lg border bg-background p-3 text-xs text-muted-foreground">
-                              <p>{evidencePack.governedExceptionWorkflow.events.length} recorded workflow event{evidencePack.governedExceptionWorkflow.events.length === 1 ? "" : "s"}; event narratives remain in the governed workflow, not this pack.</p>
-                              <p className="mt-2">Audit references: {evidencePack.auditEvidence.events.length}. Full audit-chain verification remains an administrator action in Audit Trail.</p>
+                              <p>{boundedEvidenceCount(evidencePack.governedExceptionWorkflow.events.length, evidencePack.governedExceptionWorkflow.truncated, "recorded workflow event")}; event narratives remain in the governed workflow, not this pack.</p>
+                              <p className="mt-2">Audit references: {boundedEvidenceCount(evidencePack.auditEvidence.events.length, evidencePack.auditEvidence.truncated, "reference")}. Full audit-chain verification remains an administrator action in Audit Trail.</p>
                             </div>
                           </div>
                         </div>
-                        {evidencePack.issues.length > 0 && (
+                        {evidencePack.issues.length > 0 ? (
                           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
                             <p className="font-semibold">Evidence items requiring investigation</p>
                             <ul className="mt-2 space-y-1 list-disc pl-4">
                               {evidencePack.issues.map(issue => <li key={issue}>{evidencePackIssueCopy(issue)}</li>)}
                             </ul>
                           </div>
-                        )}
+                        ) : null}
                       </>
                     ) : null}
                   </div>
-                )}
+                ) : null}
 
                 {/* Fee/charge noise set aside from the reconciliation */}
                 {(() => {

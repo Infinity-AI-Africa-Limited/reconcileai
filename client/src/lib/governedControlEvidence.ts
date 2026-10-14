@@ -35,6 +35,12 @@ export function formatEvidenceTime(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "Not yet recorded";
 }
 
+/** State when the server's bounded timeline includes more records than shown. */
+export function boundedEvidenceCount(count: number, truncated: boolean, noun: string): string {
+  const label = `${count} ${noun}${count === 1 ? "" : "s"}`;
+  return truncated ? `At least ${label}` : label;
+}
+
 /** A client-side hint only; the server strictly parses and authorizes the pack. */
 export function looksLikeGovernedControl(engineConfig: unknown): boolean {
   try {

@@ -29,14 +29,14 @@ beforeEach(() => {
 });
 
 describe("when a governed evidence pack is requested by job id", () => {
-  it("derives the resource tenant from the visible job instead of accepting an organization input", async () => {
+  it("should derive the resource tenant from the visible job instead of accepting an organization input", async () => {
     await expect(caller().getGovernedRunEvidencePack({ jobId: 91 })).resolves.toEqual(state.pack);
 
     expect(assertJobVisible).toHaveBeenCalledWith(user, 91);
     expect(buildGovernedControlEvidencePack).toHaveBeenCalledWith(state.job);
   });
 
-  it("does not expose an organization override at the route boundary", async () => {
+  it("should not expose an organization override at the route boundary", async () => {
     await expect(caller().getGovernedRunEvidencePack({ jobId: 91, organizationId: 60001 } as never)).rejects.toMatchObject({
       code: "BAD_REQUEST",
     });
