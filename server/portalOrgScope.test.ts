@@ -28,6 +28,7 @@ import { runInRequestScope } from "./_core/requestScope";
 import { resolveOrgScope } from "./_core/tenancy";
 import { controlFitRouter } from "./routers/controlFit";
 import { controlEvidenceRouter } from "./routers/controlEvidence";
+import { controlPoliciesRouter } from "./routers/controlPolicies";
 import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { lapoRouter } from "./routers/lapo";
 import { ugandaRouter } from "./routers/uganda";
@@ -151,6 +152,32 @@ const OVERRIDE_CALLS: ReadonlyArray<readonly [string, (ctx: Ctx, organizationId:
       }),
   ],
   ["controlEvidence.get", (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).get({ organizationId })],
+  ["controlPolicies.list", (ctx, organizationId) => controlPoliciesRouter.createCaller(withReqRes(ctx)).list({ organizationId })],
+  [
+    "controlPolicies.createDraft",
+    (ctx, organizationId) => controlPoliciesRouter.createCaller(withReqRes(ctx)).createDraft({
+      organizationId,
+      policyType: "reconciliation",
+      policyKey: "settlement-to-register",
+      version: 1,
+      displayName: "Daily settlement control",
+      description: "Approved daily settlement to register matching policy.",
+      definition: { amountTolerance: "0.00", dateWindowDays: 0 },
+      effectiveAt: "2026-10-13T08:00:00.000Z",
+    }),
+  ],
+  ["controlPolicies.get", (ctx, organizationId) => controlPoliciesRouter.createCaller(withReqRes(ctx)).get({ organizationId, policyId: 1 })],
+  [
+    "controlPolicies.approve",
+    (ctx, organizationId) =>
+      controlPoliciesRouter.createCaller(withReqRes(ctx)).approve({ organizationId, policyId: 1, approvalReference: "CAB-1" }),
+  ],
+  ["controlPolicies.activate", (ctx, organizationId) => controlPoliciesRouter.createCaller(withReqRes(ctx)).activate({ organizationId, policyId: 1 })],
+  [
+    "controlPolicies.retire",
+    (ctx, organizationId) =>
+      controlPoliciesRouter.createCaller(withReqRes(ctx)).retire({ organizationId, policyId: 1, retirementReference: "CAB-2" }),
+  ],
   [
     "controlEvidence.createSourceContract",
     (ctx, organizationId) => controlEvidenceRouter.createCaller(withReqRes(ctx)).createSourceContract({

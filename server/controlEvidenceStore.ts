@@ -1,6 +1,5 @@
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, lt, or } from "drizzle-orm";
-import type { MySqlColumn } from "drizzle-orm/mysql-core";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import {
   controlBatchManifests,
@@ -21,6 +20,7 @@ import {
 } from "./controlEvidenceSchema";
 import { getChannelByIdForOrg, getDb } from "./db";
 import { isDuplicateKeyError } from "./dbErrors";
+import { afterCursor, page } from "./keysetPage";
 import { logAuditStrict } from "./routers/shared";
 
 type ClientInfo = { ip: string; ua: string };
@@ -85,42 +85,6 @@ const CONTROL_BATCH_MANIFEST_FIELDS = {
   recordedByUserId: controlBatchManifests.recordedByUserId,
   createdAt: controlBatchManifests.createdAt,
 } as const;
-
-/**
- * Rows strictly after a keyset cursor, in `<sort> DESC, id DESC` order.
- *
- * The ORDER BY must be exactly these two columns. A third sort key the cursor
- * does not carry would let two rows tie on the cursor's terms, and the page
- * boundary would then repeat or skip whichever the engine happened to order
- * differently between calls.
- */
-function afterCursor(
-  sortColumn: MySqlColumn,
-  idColumn: MySqlColumn,
-  position: { sort: Date; id: number }
-) {
-  return or(
-    lt(sortColumn, position.sort),
-    and(eq(sortColumn, position.sort), lt(idColumn, position.id))
-  );
-}
-
-/** A bounded page, and the cursor that reaches what it did not return. */
-function page<Row extends { id: number }>(
-  rows: Row[],
-  limit: number,
-  positionOf: (row: Row) => Date
-): { rows: Row[]; hasMore: boolean; nextCursor: { id: number; at: Date } | null } {
-  // One row beyond the limit was fetched purely to answer "is there more?".
-  const hasMore = rows.length > limit;
-  const visible = hasMore ? rows.slice(0, limit) : rows;
-  const last = visible[visible.length - 1];
-  return {
-    rows: visible,
-    hasMore,
-    nextCursor: hasMore && last ? { id: last.id, at: positionOf(last) } : null,
-  };
-}
 
 /**
  * One page of a tenant's control evidence.

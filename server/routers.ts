@@ -243,6 +243,7 @@ import { corporateB2BPilotRouter } from "./routers/corporateB2BPilot";
 import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
 import { controlEvidenceRouter } from "./routers/controlEvidence";
+import { controlPoliciesRouter } from "./routers/controlPolicies";
 import { buildReportSummary } from "./reportSummary";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
@@ -4219,6 +4220,7 @@ export const appRouter = router({
   allocations: allocationsRouter,
   controlFit: controlFitRouter,
   controlEvidence: controlEvidenceRouter,
+  controlPolicies: controlPoliciesRouter,
   superAgent: router({
     query: protectedProcedure
       .input(z.object({
