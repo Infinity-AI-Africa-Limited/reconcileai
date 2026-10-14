@@ -599,6 +599,56 @@ export const exceptions = mysqlTable("exceptions", {
 export type Exception = typeof exceptions.$inferSelect;
 export type InsertException = typeof exceptions.$inferInsert;
 
+// ─── Governed exception workflows ───────────────────────────────────
+// Optional control-plane records for material exceptions. Existing exceptions
+// retain their established path; once enrolled here, resolution is fail-closed
+// until decision evidence (and, when required, a distinct human approval) exists.
+export const exceptionWorkflows = mysqlTable("exception_workflows", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  exceptionId: int("exceptionId").notNull(),
+  // An exception can re-open after a later source check. Attempts preserve the
+  // original workflow evidence while allowing a new governed decision cycle.
+  attemptNumber: int("attemptNumber").notNull(),
+  ownerUserId: int("ownerUserId").notNull(),
+  dueAt: timestamp("dueAt").notNull(),
+  approvalRequired: boolean("approvalRequired").default(false).notNull(),
+  status: mysqlEnum("status", [
+    "active",
+    "escalated",
+    "decision_recorded",
+    "decision_submitted",
+    "approved",
+    "closed",
+  ])
+    .default("active")
+    .notNull(),
+  decisionRationale: text("decisionRationale"),
+  // A customer-approved evidence locator, never raw customer or transaction data.
+  decisionEvidenceReference: varchar("decisionEvidenceReference", { length: 500 }),
+  decisionSubmittedByUserId: int("decisionSubmittedByUserId"),
+  decisionSubmittedAt: timestamp("decisionSubmittedAt"),
+  escalationNote: text("escalationNote"),
+  escalatedAt: timestamp("escalatedAt"),
+  escalatedByUserId: int("escalatedByUserId"),
+  approvedByUserId: int("approvedByUserId"),
+  approvedAt: timestamp("approvedAt"),
+  approvalNote: text("approvalNote"),
+  closedByUserId: int("closedByUserId"),
+  closedAt: timestamp("closedAt"),
+  finalOutcome: mysqlEnum("finalOutcome", ["resolved", "dismissed"]),
+  startedByUserId: int("startedByUserId").notNull(),
+  startedAt: timestamp("startedAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_exception_workflows_org_exception_attempt").on(table.organizationId, table.exceptionId, table.attemptNumber),
+  index("idx_exception_workflows_org_status_due").on(table.organizationId, table.status, table.dueAt),
+  index("idx_exception_workflows_owner").on(table.organizationId, table.ownerUserId, table.status),
+]);
+
+export type ExceptionWorkflow = typeof exceptionWorkflows.$inferSelect;
+export type InsertExceptionWorkflow = typeof exceptionWorkflows.$inferInsert;
+
 // ─── Audit Logs ──────────────────────────────────────────────────────
 export const auditLogs = mysqlTable("audit_logs", {
   id: int("id").autoincrement().primaryKey(),

@@ -244,6 +244,8 @@ import { allocationsRouter } from "./routers/allocations";
 import { controlFitRouter } from "./routers/controlFit";
 import { controlEvidenceRouter } from "./routers/controlEvidence";
 import { controlPoliciesRouter } from "./routers/controlPolicies";
+import { exceptionWorkflowRouter } from "./routers/exceptionWorkflow";
+import { assertLegacyExceptionResolutionPermitted } from "./exceptionWorkflow";
 import { buildReportSummary } from "./reportSummary";
 import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 
@@ -990,6 +992,10 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         const { ip, ua } = getClientInfo(ctx);
+        await assertLegacyExceptionResolutionPermitted(
+          ctx.user.organizationId ?? null,
+          input.id,
+        );
         await db.updateException(input.id, ctx.user.organizationId ?? null, {
           status: input.status,
           resolvedBy: ctx.user.id,
@@ -4221,6 +4227,7 @@ export const appRouter = router({
   controlFit: controlFitRouter,
   controlEvidence: controlEvidenceRouter,
   controlPolicies: controlPoliciesRouter,
+  exceptionWorkflow: exceptionWorkflowRouter,
   superAgent: router({
     query: protectedProcedure
       .input(z.object({

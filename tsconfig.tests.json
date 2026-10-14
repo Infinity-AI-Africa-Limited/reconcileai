@@ -20,6 +20,7 @@
   "files": [
     ".github/scripts/startTestMysql.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
+    "client/src/lib/exceptionWorkflowPresentation.test.ts",
     "client/src/lib/useDailyControlReadiness.test.ts",
     "client/src/lib/shopifyAppBridge.test.ts",
     "client/src/lib/shopifyConnection.test.ts",
@@ -77,6 +78,7 @@
     "server/controlPolicySchema.test.ts",
     "server/controlPolicyStore.db.test.ts",
     "server/controlPolicyStore.test.ts",
+    "server/exceptionWorkflow.test.ts",
     "server/controlManifest.test.ts",
     "server/corporateB2BPilot.test.ts",
     "server/dbErrors.test.ts",
@@ -105,6 +107,7 @@
     "server/routers/controlEvidence.test.ts",
     "server/routers/controlEvidenceReadiness.test.ts",
     "server/routers/controlPolicies.test.ts",
+    "server/routers/exceptionWorkflow.test.ts",
     "server/routers/governedControlAdmission.test.ts",
     "server/routers/reconciliationOwner.test.ts",
     "server/routers/shopifyAppHome.test.ts",
