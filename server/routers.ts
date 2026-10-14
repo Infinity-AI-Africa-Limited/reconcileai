@@ -62,6 +62,7 @@ import {
 import { startBucketPolling } from "./bucketIngestionService";
 import { startSLAMonitoring } from "./slaMonitoringService";
 import { startDemoTimelineRoll } from "./demoTimelineRoll";
+import { startExceptionWorkflowDueMonitor } from "./exceptionWorkflowDueMonitor";
 import { detectAnomalies, type AnomalyDetectionConfig } from "./anomalyDetectionService";
 import {
   runFullPOC,
@@ -7473,6 +7474,9 @@ startSftpPolling();
 startBucketPolling();
 // Start SLA monitoring service (check every 60 minutes)
 startSLAMonitoring(60);
+// Record missed material-exception deadlines with durable evidence. It is an
+// application-owned control and starts only in the production service.
+startExceptionWorkflowDueMonitor();
 // Keep the two demo tenants' timelines current (hourly; allow-listed by code,
 // refuses anything that is not a demo tenant). Runs ONLY in the deployed
 // production service — never under `pnpm dev`, whose .env may name production.

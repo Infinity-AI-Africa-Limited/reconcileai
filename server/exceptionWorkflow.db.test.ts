@@ -55,8 +55,11 @@ describe.runIf(localDatabase)("when governed workflows run on a real database", 
   async function newException(org = organizationId, status: "open" | "resolved" = "open"): Promise<number> {
     const [result] = await db.insert(exceptions).values({
       organizationId: org,
-      jobId: 1,
-      transactionId: 1,
+      // No job or transaction owns these rows, so they name ids none can have.
+      // `1` was the first real job in a fresh database: another test reading
+      // its job's exceptions, in parallel, found these as well.
+      jobId: organizationId,
+      transactionId: organizationId,
       category: "amount_mismatch",
       severity: "high",
       status,

@@ -62,6 +62,10 @@ export const resolveExceptionWorkflowInput = exceptionWorkflowScopeInput.extend(
   {
     outcome: z.enum(["resolved", "dismissed"]),
     resolutionNotes: boundedText("Resolution notes", 2_000),
+    // Required by the service only after the due monitor has recorded an
+    // elapsed due date. Optional at the boundary keeps ordinary on-time closes
+    // unchanged and makes an ungoverned close impossible to broaden here.
+    lateResolutionReason: boundedText("Late-resolution reason", 2_000).optional(),
   }
 );
 

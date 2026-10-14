@@ -15,7 +15,7 @@ type View = NonNullable<ExceptionWorkflowView>;
 type Workflow = NonNullable<View["workflow"]>;
 
 function personName(view: View, id: number | null | undefined): string {
-  if (id == null) return "—";
+  if (id == null) return "System control";
   return view.people.find(person => person.id === id)?.name || `User ${id}`;
 }
 
@@ -176,10 +176,12 @@ function WorkflowFacts({ view, workflow }: { view: View; workflow: Workflow }) {
   return (
     <div className="text-xs text-muted-foreground space-y-0.5">
       <p>Owner: {personName(view, workflow.ownerUserId)} · Due: {when(workflow.dueAt)}</p>
+      {workflow.overdueAt ? <p className="font-medium text-amber-800">Overdue since: {when(workflow.overdueAt)} · System escalation recorded</p> : null}
       {workflow.decisionEvidenceReference ? <p>Decision evidence: {workflow.decisionEvidenceReference}</p> : null}
       {workflow.approvedByUserId !== null ? (
         <p>Approved by {personName(view, workflow.approvedByUserId)} · {when(workflow.approvedAt)}</p>
       ) : null}
+      {workflow.lateResolutionReason ? <p>Late-resolution reason: {workflow.lateResolutionReason}</p> : null}
     </div>
   );
 }
@@ -208,6 +210,7 @@ function WorkflowHistory({ view }: { view: View }) {
             ) : null}
             {event.note ? <span className="block whitespace-pre-wrap pl-2">{event.note}</span> : null}
             {event.decisionEvidenceReference ? <span className="block pl-2">Evidence: {event.decisionEvidenceReference}</span> : null}
+            {event.lateResolutionReason ? <span className="block whitespace-pre-wrap pl-2">Late-resolution reason: {event.lateResolutionReason}</span> : null}
           </li>
         ))}
       </ol>
