@@ -19,21 +19,25 @@ const harness = vi.hoisted(() => {
   const cache = () => ({ cancel: vi.fn(async () => {}), getData: vi.fn(), setData: vi.fn(), invalidate: vi.fn(async () => {}) });
   const utils = { exceptions: { list: cache() }, exceptionWorkflow: { get: cache() } };
   const captured: Record<string, Options> = {};
+  const mutateAsync: Record<string, ReturnType<typeof vi.fn>> = {};
   const mutation = (name: string) => ({
     useMutation: (options: Options) => {
       captured[name] = options;
-      return { mutateAsync: vi.fn(), isPending: false };
+      mutateAsync[name] ??= vi.fn(async () => ({}));
+      return { mutateAsync: mutateAsync[name], isPending: false };
     },
   });
-  return { utils, captured, mutation };
+  const state: { view: unknown; result: unknown } = { view: undefined, result: undefined };
+  return { utils, captured, mutateAsync, mutation, state };
 });
 
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock("sonner", () => ({ toast }));
 vi.mock("@/lib/trpc", () => ({
   trpc: {
     useUtils: () => harness.utils,
     exceptionWorkflow: {
-      get: { useQuery: () => ({ data: undefined, isLoading: false }) },
+      get: { useQuery: () => ({ data: harness.state.view, isLoading: false }) },
       owners: { useQuery: () => ({ data: [], isLoading: false }) },
       start: harness.mutation("start"),
       escalate: harness.mutation("escalate"),
@@ -52,8 +56,9 @@ const viewKey = { exceptionId: 5, viewAsOrgId: undefined };
 const page = { total: 2, data: [{ id: 5, status: "open", assignedTo: null }, { id: 6, status: "open", assignedTo: null }] };
 const view = { exceptionStatus: "in_review", workflow: { id: 91, status: "active" }, history: [], people: [] };
 
+const closeDirect = vi.fn(async () => {});
 function Probe() {
-  useExceptionWorkflow({ exceptionId: 5, listInput, viewAsOrgId: undefined, canManage: true, currentUserId: 71, onClosed: () => {} });
+  harness.state.result = useExceptionWorkflow({ exceptionId: 5, listInput, viewAsOrgId: undefined, canManage: true, currentUserId: 71, onClosed: () => {}, closeDirect });
   return null;
 }
 
@@ -112,5 +117,48 @@ describe("when a step changes the workflow but not the list", () => {
     await captured[name].onSettled!(undefined, null, { exceptionId: 5 });
     expect(utils.exceptionWorkflow.get.invalidate).toHaveBeenCalledWith(viewKey);
     expect(utils.exceptions.list.invalidate).not.toHaveBeenCalled();
+  });
+});
+
+type HookResult = ReturnType<typeof useExceptionWorkflow>;
+function hookWith(viewForCase: unknown): HookResult {
+  harness.state.view = viewForCase;
+  renderToStaticMarkup(createElement(Probe));
+  return harness.state.result as HookResult;
+}
+
+describe("when the page closes an exception through the hook", () => {
+  beforeEach(() => {
+    closeDirect.mockClear();
+    toast.error.mockClear();
+    harness.mutateAsync.resolve?.mockClear();
+  });
+
+  it("should use the ordinary resolve for an exception never governed", async () => {
+    const hook = hookWith({ exceptionStatus: "open", workflow: null, attempts: [], history: [], people: [] });
+    await hook.closeException("resolved", "Matched manually");
+    expect(closeDirect).toHaveBeenCalledWith("resolved");
+    expect(harness.mutateAsync.resolve).not.toHaveBeenCalled();
+  });
+
+  it("should close through the governed workflow once its evidence is complete", async () => {
+    const hook = hookWith({ exceptionStatus: "in_review", workflow: { id: 91, status: "approved", approvalRequired: true }, attempts: [], history: [], people: [] });
+    await hook.closeException("dismissed", "Duplicate");
+    expect(harness.mutateAsync.resolve).toHaveBeenCalledWith(expect.objectContaining({ exceptionId: 5, outcome: "dismissed", resolutionNotes: "Duplicate" }));
+    expect(closeDirect).not.toHaveBeenCalled();
+  });
+
+  it("should refuse a blocked close, saying why, and call neither path", async () => {
+    const hook = hookWith({ exceptionStatus: "in_review", workflow: { id: 91, status: "decision_submitted", approvalRequired: true }, attempts: [], history: [], people: [] });
+    await hook.closeException("resolved", "Too early");
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/separate human approval/));
+    expect(closeDirect).not.toHaveBeenCalled();
+    expect(harness.mutateAsync.resolve).not.toHaveBeenCalled();
+  });
+
+  it("should block Move to Review only while a workflow is in progress", () => {
+    expect(hookWith({ exceptionStatus: "in_review", workflow: { id: 91, status: "active", approvalRequired: true }, attempts: [], history: [], people: [] }).moveToReviewBlocked).toBe(true);
+    expect(hookWith({ exceptionStatus: "open", workflow: { id: 91, status: "closed", approvalRequired: true }, attempts: [], history: [], people: [] }).moveToReviewBlocked).toBe(false);
+    expect(hookWith({ exceptionStatus: "open", workflow: null, attempts: [], history: [], people: [] }).moveToReviewBlocked).toBe(false);
   });
 });

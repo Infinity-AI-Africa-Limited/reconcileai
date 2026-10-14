@@ -61,6 +61,15 @@ export function workflowFormKey(exceptionId: number | null, workflow: { id: numb
   return `${exceptionId ?? "none"}:${workflow?.id ?? "none"}`;
 }
 
+/**
+ * A state updater that clears a text box only if it still holds what was
+ * submitted. The box stays editable while the request is in flight, so
+ * clearing unconditionally on success erased whatever was typed meanwhile.
+ */
+export function clearIfStill(submitted: string): (current: string) => string {
+  return current => (current === submitted ? "" : current);
+}
+
 /** A thrown value's message for a toast, or the fallback when it carries none. */
 export function errorMessageOf(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message;

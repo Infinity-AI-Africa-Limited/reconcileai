@@ -5,6 +5,8 @@ import type { AppRouter } from "../../../server/routers";
 import { statusAfterEscalation } from "@shared/exceptionWorkflowRules";
 import { trpc } from "@/lib/trpc";
 import {
+  clearIfStill,
+  closureState,
   defaultWorkflowDueAt,
   errorMessageOf,
   fromDateTimeLocalValue,
@@ -20,9 +22,11 @@ type ExceptionRow = ExceptionListPage["data"][number];
 type Snapshot = { list: ExceptionListPage | undefined; view: ExceptionWorkflowView | undefined };
 
 /**
- * Everything the governed-workflow panel needs: the workflow view, the owner
- * list, the form, and the actions. The page renders it; the rules live in
- * shared/exceptionWorkflowRules.ts and client/src/lib/exceptionWorkflowPresentation.ts.
+ * Everything the governed-workflow panel and the page's close buttons need:
+ * the workflow view, the owner list, the form, the actions, and the decisions
+ * (how this exception may close, whether it may move to review). The page
+ * renders them; the rules live in shared/exceptionWorkflowRules.ts and
+ * client/src/lib/exceptionWorkflowPresentation.ts.
  *
  * Start, escalation and closure change the exceptions list, so they update
  * the cached list (and the workflow view) at once, restore both if the server
@@ -35,8 +39,10 @@ export function useExceptionWorkflow(params: {
   canManage: boolean;
   currentUserId: number | undefined;
   onClosed: () => void;
+  /** The ordinary resolve, for an exception that was never governed. */
+  closeDirect: (outcome: "resolved" | "dismissed") => Promise<void>;
 }) {
-  const { exceptionId, listInput, viewAsOrgId, canManage, currentUserId, onClosed } = params;
+  const { exceptionId, listInput, viewAsOrgId, canManage, currentUserId, onClosed, closeDirect } = params;
   const utils = trpc.useUtils();
   const scope = viewAsOrgId ? { viewAsOrgId } : {};
   const viewInput = (id: number) => ({ exceptionId: id, viewAsOrgId });
@@ -191,7 +197,7 @@ export function useExceptionWorkflow(params: {
         "Workflow escalated with its reason recorded",
         "Failed to escalate workflow"
       );
-      if (escalated) setEscalationNote("");
+      if (escalated) setEscalationNote(clearIfStill(escalationNote));
     },
     recordDecision: async () => {
       if (exceptionId === null) return;
@@ -212,7 +218,7 @@ export function useExceptionWorkflow(params: {
         "Decision approved",
         "Failed to approve decision"
       );
-      if (approved) setApprovalNote("");
+      if (approved) setApprovalNote(clearIfStill(approvalNote));
     },
     close: async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
       if (exceptionId === null) return;
@@ -226,7 +232,21 @@ export function useExceptionWorkflow(params: {
     },
   };
 
+  // The decisions the page's own buttons follow, made here so the page only renders them.
+  const closure = closureState(workflowQuery.data);
+  const workflowInProgress = workflow !== null && workflow.status !== "closed";
+  /** Resolve or dismiss by whichever path this exception allows; a blocked one says why. */
+  const closeException = async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
+    if (closure.mode === "blocked") return void toast.error(closure.reason);
+    if (closure.mode === "governed") return actions.close(outcome, resolutionNotes);
+    return closeDirect(outcome);
+  };
+
   return {
+    closure,
+    /** A workflow in progress owns the case: it does not also go to the review queue. */
+    moveToReviewBlocked: workflowInProgress,
+    closeException,
     view: workflowQuery.data ?? null,
     isLoading: exceptionId !== null && workflowQuery.isLoading,
     owners: ownersQuery.data ?? [],

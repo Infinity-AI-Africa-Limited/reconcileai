@@ -13,6 +13,7 @@ import {
   statusAfterEscalation,
 } from "@shared/exceptionWorkflowRules";
 import {
+  clearIfStill,
   closureState,
   defaultWorkflowDueAt,
   errorMessageOf,
@@ -199,5 +200,16 @@ describe("when the workflow form decides whether to refill", () => {
     expect(workflowFormKey(5, { id: 91 })).not.toBe(workflowFormKey(6, { id: 91 }));
     expect(workflowFormKey(5, { id: 91 })).not.toBe(workflowFormKey(5, { id: 92 }));
     expect(workflowFormKey(5, null)).not.toBe(workflowFormKey(5, { id: 91 }));
+  });
+});
+
+describe("when a note box clears after its action succeeds", () => {
+  it("should clear the note that was submitted", () => {
+    expect(clearIfStill("Approval overdue")("Approval overdue")).toBe("");
+  });
+
+  it("should keep text typed while the request was in flight", () => {
+    // Greptile #194: clearing unconditionally erased the newer text.
+    expect(clearIfStill("Approval overdue")("Approval overdue, and the bank called")).toBe("Approval overdue, and the bank called");
   });
 });

@@ -24,7 +24,7 @@ import { canManageExceptionWorkflows } from "@shared/exceptionWorkflowRules";
 import { roleCanWriteReconciliation } from "@shared/reconciliationWriteRoles";
 import { ExceptionWorkflowPanel } from "@/components/ExceptionWorkflowPanel";
 import { useExceptionWorkflow, type ExceptionListInput } from "@/hooks/useExceptionWorkflow";
-import { closureState, errorMessageOf } from "@/lib/exceptionWorkflowPresentation";
+import { errorMessageOf } from "@/lib/exceptionWorkflowPresentation";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -120,6 +120,7 @@ export default function Exceptions() {
       setSelectedEx(null);
       setResolveNotes("");
     },
+    closeDirect: (outcome) => (selectedEx ? handleResolve(selectedEx.id, outcome) : Promise.resolve()),
   });
 
   const reopenMutation = trpc.exceptions.reopen.useMutation({
@@ -214,13 +215,6 @@ export default function Exceptions() {
   const loaded = filtered.length;
   const matchingTotal = data?.total ?? 0;
   const anyFilter = statusFilter !== "all" || filters.category !== "all" || filters.severity !== "all";
-  const closure = closureState(governed.view);
-  const governedOpen = governed.view?.workflow != null && governed.view.workflow.status !== "closed";
-  const closePending = resolveMutation.isPending || governed.pending.close;
-  const closeException = (outcome: "resolved" | "dismissed") =>
-    closure.mode === "governed"
-      ? governed.actions.close(outcome, resolveNotes)
-      : handleResolve(selectedEx.id, outcome);
 
   return (
     <div className="space-y-6">
@@ -531,17 +525,17 @@ export default function Exceptions() {
                     <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
                   </div>
-                  {closure.mode === "blocked" ? (
-                    <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{closure.reason}</p>
+                  {governed.closure.mode === "blocked" ? (
+                    <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{governed.closure.reason}</p>
                   ) : null}
                   <div className="flex gap-2 flex-wrap">
-                    <Button onClick={() => closeException("resolved")} disabled={closePending || closure.mode === "blocked"} className="flex-1">
+                    <Button onClick={() => governed.closeException("resolved", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
                     </Button>
-                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || governedOpen} className="flex-1">
+                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || governed.moveToReviewBlocked} className="flex-1">
                       <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
                     </Button>
-                    <Button variant="ghost" onClick={() => closeException("dismissed")} disabled={closePending || closure.mode === "blocked"} className="flex-1">
+                    <Button variant="ghost" onClick={() => governed.closeException("dismissed", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       Dismiss
                     </Button>
                   </div>
