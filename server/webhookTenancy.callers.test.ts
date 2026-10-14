@@ -38,6 +38,7 @@ vi.mock("./db", async importOriginal => ({
   // webhooks
   createWebhook: vi.fn(async () => 900),
   getWebhooks: vi.fn(async () => []),
+  countActiveWebhooks: vi.fn(async () => 0),
   // the runner
   updateReconciliationJob: vi.fn(async () => {}),
   getReconciliationJob: vi.fn(),
@@ -64,6 +65,12 @@ vi.mock("./webhookDelivery", () => ({
   listDeliveries: vi.fn(async () => []),
   deliveryStats: vi.fn(async () => ({})),
 }));
+// Registration's destination check does a DNS lookup; it is pinned on its own
+// in outboundDestination.test.ts. Here it is scripted.
+vi.mock("./outboundDestination", async importOriginal => ({
+  ...(await importOriginal<typeof import("./outboundDestination")>()),
+  registrationProblem: vi.fn(async () => null),
+}));
 vi.mock("./exceptionWorkflow", async importOriginal => ({
   ...(await importOriginal<typeof import("./exceptionWorkflow")>()),
   closeExceptionOutsideWorkflow: vi.fn(async () => {}),
@@ -87,6 +94,7 @@ vi.mock("./emailReportService", async importOriginal => ({
 import { TRPCError } from "@trpc/server";
 import * as db from "./db";
 import { closeExceptionOutsideWorkflow, resolveExceptionWorkflow } from "./exceptionWorkflow";
+import { registrationProblem } from "./outboundDestination";
 import { dispatchWebhookEvent } from "./webhookDelivery";
 import { appRouter } from "./routers";
 
@@ -112,6 +120,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   // clearAllMocks keeps implementations; a test that changes one must not leak it.
   vi.mocked(db.updateException).mockResolvedValue(1);
+  vi.mocked(db.countActiveWebhooks).mockResolvedValue(0);
+  vi.mocked(registrationProblem).mockResolvedValue(null);
   // mockReset, not clear: a queued once-rejection one path never consumed must not leak.
   vi.mocked(closeExceptionOutsideWorkflow).mockReset().mockResolvedValue(undefined as never);
   vi.mocked(resolveExceptionWorkflow).mockReset().mockResolvedValue({ status: "resolved" } as never);
@@ -247,28 +257,67 @@ describe("when an exception is closed", () => {
 });
 
 describe("when a webhook is registered or listed", () => {
+  const admin = (organizationId: number | null = TENANT) => caller(organizationId, "admin");
+  const register = (c: ReturnType<typeof caller>, over: Record<string, unknown> = {}) =>
+    c.webhooks.create({ name: "ops", url: "https://hooks.example.com/a", events: ["exception.created"], ...over } as never);
+
   it("should register it under the caller's organisation, subscribed by an array", async () => {
-    await caller(TENANT).webhooks.create({ name: "ops", url: "https://hooks.example/a", events: ["exception.created"] });
+    await register(admin());
 
     expect(vi.mocked(db.createWebhook).mock.calls[0][0]).toMatchObject({
       organizationId: TENANT,
       events: ["exception.created"],
     });
+    expect(registrationProblem).toHaveBeenCalledWith("https://hooks.example.com/a", expect.anything());
   });
 
   it.each([null, 0])("should refuse an account whose organisation is %s, storing nothing", async (organizationId) => {
-    await expect(
-      caller(organizationId).webhooks.create({ name: "x", url: "https://hooks.example/x", events: ["*"] }),
-    ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+    await expect(register(admin(organizationId), { events: ["*"] })).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect(db.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it.each(["operations", "user", "cfo", "compliance"])(
+    "should refuse the %s role: only an admin points the organisation's events somewhere",
+    async (role) => {
+      await expect(register(caller(TENANT, role))).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(caller(TENANT, role).webhooks.list()).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(caller(TENANT, role).webhooks.delete({ id: 1 })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(db.createWebhook).not.toHaveBeenCalled();
+    },
+  );
+
+  it("should refuse a URL the destination guard refuses, saying why, and store nothing", async () => {
+    vi.mocked(registrationProblem).mockResolvedValue("127.0.0.1 is a private or internal address");
+    await expect(register(admin(), { url: "https://127.0.0.1/a" })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: "Webhook URL refused: 127.0.0.1 is a private or internal address",
+    });
+    expect(db.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it("should refuse an event the platform does not send, storing nothing", async () => {
+    await expect(register(admin(), { events: ["exception.creatd"] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it("should store each event once", async () => {
+    await register(admin(), { events: ["exception.created", "exception.created", "*"] });
+    expect(vi.mocked(db.createWebhook).mock.calls[0][0].events).toEqual(["exception.created", "*"]);
+  });
+
+  it("should refuse a webhook past the organisation's ceiling", async () => {
+    vi.mocked(db.countActiveWebhooks).mockResolvedValue(25);
+    await expect(register(admin())).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringMatching(/at most 25/) });
+    expect(db.countActiveWebhooks).toHaveBeenCalledWith(TENANT);
     expect(db.createWebhook).not.toHaveBeenCalled();
   });
 
   it("should list the organisation's webhooks, and nothing for an account with none", async () => {
-    await caller(TENANT).webhooks.list();
+    await admin().webhooks.list();
     expect(db.getWebhooks).toHaveBeenCalledWith(TENANT);
 
     vi.mocked(db.getWebhooks).mockClear();
-    await expect(caller(null).webhooks.list()).resolves.toEqual([]);
+    await expect(admin(null).webhooks.list()).resolves.toEqual([]);
     expect(db.getWebhooks).not.toHaveBeenCalled();
   });
 });

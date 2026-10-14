@@ -1688,6 +1688,17 @@ export async function getWebhooks(organizationId: number) {
     .orderBy(desc(webhooks.createdAt));
 }
 
+/** How many active webhooks one organisation has: the ceiling `webhooks.create` enforces. */
+export async function countActiveWebhooks(organizationId: number): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  const [row] = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(webhooks)
+    .where(and(eq(webhooks.organizationId, organizationId), eq(webhooks.isActive, true)));
+  return Number(row?.n ?? 0);
+}
+
 /** Soft-delete a webhook the caller's org owns. Returns rows affected. */
 export async function deleteWebhook(id: number, organizationId: number): Promise<number> {
   const db = await getDb();

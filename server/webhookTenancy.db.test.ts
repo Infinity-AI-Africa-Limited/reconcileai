@@ -11,11 +11,16 @@
  * real reconciliation through the real queue and worker, delivery over real
  * HTTP to a local receiver. Each tenant's endpoint records what it heard, and
  * the assertions are about who heard what.
+ *
+ * The receiver is on loopback, which the real destination guard refuses (it
+ * is exactly what a server-side request forgery would target). So this file
+ * swaps in a policy that permits http to 127.0.0.1 and nothing else; the real
+ * guard on the same chain is webhookDestination.db.test.ts.
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentMemory,
   auditChainLocks,
@@ -36,6 +41,16 @@ import {
 import type { TrpcContext } from "./_core/context";
 import { getDb, updateException } from "./db";
 import { classifyDatabaseTarget } from "./dbTarget";
+
+vi.mock("./outboundDestination", async importOriginal => {
+  const real = await importOriginal<typeof import("./outboundDestination")>();
+  const loopbackOnly: import("./outboundDestination").DestinationPolicy = {
+    name: "test-loopback",
+    urlProblem: (target) => (target.protocol === "http:" ? null : "test policy: http only"),
+    addressProblem: (address) => (address === "127.0.0.1" ? null : `test policy: ${address} refused`),
+  };
+  return { ...real, destinationPolicy: () => loopbackOnly };
+});
 
 const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
@@ -148,7 +163,9 @@ describe.runIf(localDatabase)("when two tenants' webhooks meet a real database",
         name: `Webhook tenancy operator ${key}`,
         email: `operator-${organizationId}@example.invalid`,
         loginMethod: "email",
-        role: "operations",
+        // Admin: only an admin registers webhooks. Admins may also run and
+        // resolve, which the rest of this suite does.
+        role: "admin",
         organizationId,
       });
       user[key] = insertedId(inserted);

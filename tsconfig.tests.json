@@ -134,6 +134,8 @@
     "server/webhookDelivery.dispatch.test.ts",
     "server/webhookDelivery.tenancy.test.ts",
     "server/webhookTenancy.callers.test.ts",
-    "server/webhookTenancy.db.test.ts"
+    "server/webhookTenancy.db.test.ts",
+    "server/outboundDestination.test.ts",
+    "server/webhookDestination.db.test.ts"
   ]
 }

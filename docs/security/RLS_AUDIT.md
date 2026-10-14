@@ -111,7 +111,21 @@ real HTTP by `server/webhookTenancy.db.test.ts`.
 *Lesson for the ratchets:* `readScopeRatchet` accepted the dispatcher because
 it checks that a select on a tenant table HAS a where clause, and scans only
 `db.ts`. A where clause is not a tenant predicate, and tenant tables are read
-outside `db.ts`.
+outside `db.ts`. The first version of the new ratchet repeated the mistake one
+level down (Greptile, #196): it accepted `webhooks.organizationId` anywhere in
+the query, so a column merely selected passed. It now accepts only shapes that
+provably restrict rows — `eq(webhooks.organizationId, x)`, alone or as a term
+of `and(...)` — and its own tests feed it the shapes that look scoped and are
+not (`or`, `not`, `ne`, a tautology, a variable, a selected column).
+
+**F5a — Server-side request forgery through webhook destinations — ✅ CLOSED (2026-10-14).**
+Fixing the events encoding made webhooks fire, and cloud mode checked no
+destination: an admin could register a loopback, private or metadata address
+and have the delivery worker POST to it. Every destination now passes
+`server/outboundDestination.ts` at registration, at dispatch and at the socket
+(see CLAUDE.md §9C). **Open in the same class:** the SFTP credential host, the
+bucket-ingestion endpoint and the WoodCore connector base URL are
+tenant-configured and unguarded.
 
 ## 4. SHOPLINE connector tables (Phase 1, July 2026)
 

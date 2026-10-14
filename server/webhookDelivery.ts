@@ -8,8 +8,11 @@
  *     reliability KPI;
  *   - retries with exponential backoff through the queue abstraction
  *     (BullMQ when REDIS_URL is set, in-process otherwise);
- *   - HMAC-SHA256 signing (X-ReconcileAI-Signature over the raw body) and
- *     the on-premise egress guard, both preserved from the original.
+ *   - HMAC-SHA256 signing (X-ReconcileAI-Signature over the raw body);
+ *   - a destination guard (outboundDestination.ts): cloud mode sends only to
+ *     public https hosts, checked at the socket so DNS cannot be swapped
+ *     between check and connect, and never follows a redirect. On premise
+ *     the egress allow-list decides.
  *
  * Events: exception.created, exception.resolved, exception.escalated,
  * exception.in_review, reconciliation.completed, reconciliation.failed,
@@ -22,53 +25,97 @@ import crypto from "crypto";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { webhooks, webhookDeliveries } from "../drizzle/schema";
-import { isEgressAllowed } from "./_core/egress";
+import { DestinationRefusedError, bareHost, destinationPolicy, destinationProblem, postToDestination } from "./outboundDestination";
 import { createQueue, QueueOperationTimeoutError, type JobQueue } from "./jobQueue";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
 import { isTenantId } from "@shared/tenantId";
+import { ALL_WEBHOOK_EVENTS, type WebhookEvent } from "@shared/webhookEvents";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
 const MAX_ATTEMPTS = 6;
 const BACKOFF_BASE_MS = 30_000;
 
+/**
+ * What a queued delivery carries: ids and the signed body, nothing else.
+ *
+ * The URL and signing secret are read from the webhook at each attempt. The
+ * secret then never sits in Redis, and a webhook deleted after dispatch stops
+ * receiving the retries already queued for it. `organizationId` scopes that
+ * read, so a job can only ever load its own tenant's webhook.
+ */
 interface DeliveryJob {
   deliveryId: number;
   webhookId: number;
-  url: string;
-  secret: string;
+  organizationId: number;
+  event: WebhookEvent;
   body: string; // pre-serialized so the signature is stable across retries
 }
 
 // ─── Delivery execution (queue handler) ──────────────────────────────────────
 
+/** The webhook a delivery is for, read within the tenant it was dispatched for. */
+async function deliveryTarget(webhookId: number, organizationId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const [target] = await db
+    .select({ url: webhooks.url, secret: webhooks.secret, isActive: webhooks.isActive })
+    .from(webhooks)
+    .where(and(eq(webhooks.organizationId, organizationId), eq(webhooks.id, webhookId)))
+    .limit(1);
+  return target ?? null;
+}
+
 async function attemptDelivery(job: { data: DeliveryJob; attempt: number }): Promise<void> {
-  const { deliveryId, webhookId, url, secret, body } = job.data;
+  const { deliveryId, webhookId, organizationId, event, body } = job.data;
   const db = await getDb();
 
-  const signature = crypto.createHmac("sha256", secret).update(body).digest("hex");
   let responseStatus: number | null = null;
   let error: string | null = null;
+  // A failure no retry can change: the destination is refused, or the webhook
+  // is gone. Settled now rather than retried six times.
+  let final = false;
 
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-ReconcileAI-Signature": signature,
-        "X-ReconcileAI-Delivery": String(deliveryId),
-      },
-      body,
-      signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
-    });
-    responseStatus = res.status;
-    if (!res.ok) error = `HTTP ${res.status}`;
-  } catch (err) {
-    error = err instanceof Error ? errorSummary(err) : "network error";
+  const target = isTenantId(organizationId) ? await deliveryTarget(webhookId, organizationId) : null;
+  if (!target || !target.isActive) {
+    error = "Not sent: the webhook was deleted";
+    final = true;
+  } else {
+    const signature = crypto.createHmac("sha256", target.secret).update(body).digest("hex");
+    try {
+      const res = await postToDestination(
+        target.url,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "ReconcileAI-Webhooks/1.0",
+            // Hex HMAC-SHA256 of the raw body under the webhook's secret. The
+            // body carries a signed `timestamp`, for a receiver's freshness check.
+            "X-ReconcileAI-Signature": signature,
+            "X-ReconcileAI-Event": event,
+            // Stable across retries: a receiver de-duplicates on it.
+            "X-ReconcileAI-Delivery": String(deliveryId),
+          },
+          body,
+          timeoutMs: DELIVERY_TIMEOUT_MS,
+        },
+        destinationPolicy(),
+      );
+      responseStatus = res.status;
+      if (res.status >= 300 && res.status < 400) error = `HTTP ${res.status}: redirects are not followed`;
+      else if (res.status < 200 || res.status >= 300) error = `HTTP ${res.status}`;
+    } catch (err) {
+      if (err instanceof DestinationRefusedError) {
+        error = errorSummary(err);
+        final = true;
+      } else {
+        error = err instanceof Error ? errorSummary(err) : "network error";
+      }
+    }
   }
 
   const delivered = responseStatus !== null && responseStatus >= 200 && responseStatus < 300;
-  const exhausted = !delivered && job.attempt >= MAX_ATTEMPTS;
+  const exhausted = !delivered && (final || job.attempt >= MAX_ATTEMPTS);
 
   if (db) {
     try {
@@ -86,11 +133,11 @@ async function attemptDelivery(job: { data: DeliveryJob; attempt: number }): Pro
       if (delivered) {
         await db.update(webhooks)
           .set({ lastTriggeredAt: new Date() })
-          .where(eq(webhooks.id, webhookId));
+          .where(and(eq(webhooks.organizationId, organizationId), eq(webhooks.id, webhookId)));
       } else if (exhausted) {
         await db.update(webhooks)
           .set({ failureCount: sql`${webhooks.failureCount} + 1` })
-          .where(eq(webhooks.id, webhookId));
+          .where(and(eq(webhooks.organizationId, organizationId), eq(webhooks.id, webhookId)));
       }
     } catch (dbErr) {
       console.error("[webhookDelivery] status update failed (non-fatal):", loggableError(dbErr));
@@ -149,7 +196,7 @@ export async function activeWebhooksOfTenant(organizationId: number) {
  */
 export async function dispatchWebhookEvent(
   organizationId: number,
-  event: string,
+  event: WebhookEvent,
   payload: Record<string, unknown>,
 ): Promise<void> {
   try {
@@ -174,7 +221,7 @@ export async function dispatchWebhookEvent(
         return false;
       }
       const events = Array.isArray(w.events) ? (w.events as string[]) : [];
-      return events.includes(event) || events.includes("*");
+      return events.includes(event) || events.includes(ALL_WEBHOOK_EVENTS);
     });
     if (subscribed.length === 0) return;
 
@@ -188,17 +235,30 @@ export async function dispatchWebhookEvent(
     )}`.slice(0, 500);
 
     const queue = await getQueue();
+    const policy = destinationPolicy();
     // Set once an enqueue times out: every later one in this fan-out would wait
     // out the same deadline, so the rest are recorded as not queued at once.
     let unreachable: QueueOperationTimeoutError | null = null;
     for (const webhook of subscribed) {
-      // Data residency: user-configured webhooks can carry reconciliation
-      // payload references. In on-premise mode, only allowlisted hosts.
-      if (!isEgressAllowed(webhook.url)) {
+      // A destination this deployment refuses (an internal address, a host off
+      // the on-premise allow-list) is recorded as a failed delivery with its
+      // reason, so the admin sees why, and is never queued. Delivery checks
+      // again at the socket: DNS can change after this.
+      const refused = destinationProblem(webhook.url, policy);
+      if (refused) {
         console.warn(
-          `[webhookDelivery] on-premise mode: blocked delivery to ${webhook.url} (event ${event}). ` +
-            "Add the host to EGRESS_ALLOWLIST to permit it.",
+          `[webhookDelivery] refused ${event} to webhook ${webhook.id} (${hostOf(webhook.url)}): ${refused}`,
         );
+        await db.insert(webhookDeliveries).values({
+          webhookId: webhook.id,
+          event,
+          url: webhook.url,
+          status: "failed",
+          maxAttempts: MAX_ATTEMPTS,
+          // The reason names a host or an address, never the URL.
+          lastError: `Destination refused: ${refused}`.slice(0, 500),
+          payloadSummary,
+        });
         continue;
       }
 
@@ -215,8 +275,8 @@ export async function dispatchWebhookEvent(
         await queue.enqueue(event, {
           deliveryId: row.id,
           webhookId: webhook.id,
-          url: webhook.url,
-          secret: webhook.secret,
+          organizationId,
+          event,
           body,
         });
       } catch (err) {
@@ -227,6 +287,15 @@ export async function dispatchWebhookEvent(
     }
   } catch (err) {
     console.error("[webhookDelivery] dispatch error (non-fatal):", loggableError(err));
+  }
+}
+
+/** A webhook URL's host, for logs: its path or query can carry a token. */
+function hostOf(raw: string): string {
+  try {
+    return bareHost(new URL(raw).hostname);
+  } catch {
+    return "invalid URL";
   }
 }
 
