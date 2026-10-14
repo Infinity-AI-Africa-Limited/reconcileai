@@ -37,6 +37,7 @@ const workflowRow = {
   attemptNumber: 1,
   ownerUserId: 8,
   dueAt,
+  overdueAt: null as Date | null,
   approvalRequired: true,
   status: "active" as const,
   decisionSubmittedByUserId: null as number | null,
@@ -315,6 +316,46 @@ describe("when a governed workflow closes", () => {
     expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
       code: "PRECONDITION_FAILED", message: expect.stringMatching(/already closed/),
     });
+  });
+
+  it("should fail closed when a deadline elapsed before the monitor records its durable overdue event", async () => {
+    const fake = scripted({
+      workflow: [{ ...workflowRow, status: "approved", dueAt: new Date("2026-10-14T11:59:59.000Z"), overdueAt: null }],
+    });
+
+    expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
+      code: "PRECONDITION_FAILED", message: expect.stringMatching(/due date has elapsed/i),
+    });
+    expect(noWrites(fake)).toEqual([]);
+  });
+
+  it("should require and persist a separate late-resolution reason once overdue evidence exists", async () => {
+    const overdue = { ...workflowRow, status: "approved" as const, overdueAt: new Date("2026-10-14T12:00:00.000Z") };
+    const refused = scripted({ workflow: [overdue] });
+    expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
+      code: "PRECONDITION_FAILED", message: expect.stringMatching(/late-resolution reason/i),
+    });
+    expect(noWrites(refused)).toEqual([]);
+
+    const accepted = scripted({ workflow: [overdue] });
+    await expect(resolveExceptionWorkflow({
+      ...base,
+      actor: approver,
+      outcome: "resolved",
+      resolutionNotes: "n",
+      lateResolutionReason: "Approved after customer evidence review",
+    })).resolves.toEqual({ id: 91, status: "closed", outcome: "resolved" });
+    expect(rowOf(accepted.writes("update", "exception_workflows")[0])).toMatchObject({
+      status: "closed", lateResolutionReason: "Approved after customer evidence review",
+    });
+    expect(rowOf(accepted.writes("insert", "exception_workflow_events")[0])).toMatchObject({
+      eventType: "closed", lateResolutionReason: "Approved after customer evidence review",
+    });
+    // Narrative stays in the protected workflow row, not audit metadata.
+    expect(JSON.stringify(auditMock.mock.calls)).not.toContain("Approved after customer evidence");
+    expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({
+      details: expect.objectContaining({ overdue: true, lateResolutionReasonPresent: true }),
+    }));
   });
 });
 

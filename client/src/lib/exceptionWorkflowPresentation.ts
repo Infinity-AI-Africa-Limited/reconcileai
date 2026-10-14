@@ -14,6 +14,7 @@ const EVENT_LABELS: Record<string, string> = {
   started: "Workflow started",
   reassigned: "Owner or due date changed",
   escalated: "Escalated",
+  due_date_elapsed: "Due date elapsed — system escalation recorded",
   decision_recorded: "Decision recorded",
   decision_approved: "Decision approved",
   closed: "Closed",

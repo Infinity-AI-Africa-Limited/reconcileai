@@ -220,11 +220,20 @@ export function useExceptionWorkflow(params: {
       );
       if (approved) setApprovalNote(clearIfStill(approvalNote));
     },
-    close: async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
+    close: async (outcome: "resolved" | "dismissed", resolutionNotes: string, lateResolutionReason?: string) => {
       if (exceptionId === null) return;
       if (!resolutionNotes.trim()) return void toast.error("Record closure notes before closing the workflow");
+      if (workflow?.overdueAt && !lateResolutionReason?.trim()) {
+        return void toast.error("Record the late-resolution reason before closing this overdue workflow");
+      }
       const closed = await run(
-        () => closeMutation.mutateAsync({ exceptionId, ...scope, outcome, resolutionNotes }),
+        () => closeMutation.mutateAsync({
+          exceptionId,
+          ...scope,
+          outcome,
+          resolutionNotes,
+          ...(workflow?.overdueAt ? { lateResolutionReason: lateResolutionReason!.trim() } : {}),
+        }),
         `Exception ${outcome} through its governed workflow`,
         "The governed workflow is not ready to close"
       );
@@ -236,9 +245,9 @@ export function useExceptionWorkflow(params: {
   const closure = closureState(workflowQuery.data);
   const workflowInProgress = workflow !== null && workflow.status !== "closed";
   /** Resolve or dismiss by whichever path this exception allows; a blocked one says why. */
-  const closeException = async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
+  const closeException = async (outcome: "resolved" | "dismissed", resolutionNotes: string, lateResolutionReason?: string) => {
     if (closure.mode === "blocked") return void toast.error(closure.reason);
-    if (closure.mode === "governed") return actions.close(outcome, resolutionNotes);
+    if (closure.mode === "governed") return actions.close(outcome, resolutionNotes, lateResolutionReason);
     return closeDirect(outcome);
   };
 
@@ -246,6 +255,7 @@ export function useExceptionWorkflow(params: {
     closure,
     /** A workflow in progress owns the case: it does not also go to the review queue. */
     moveToReviewBlocked: workflowInProgress,
+    workflowIsOverdue: workflow?.overdueAt !== null && workflow?.overdueAt !== undefined,
     closeException,
     view: workflowQuery.data ?? null,
     isLoading: exceptionId !== null && workflowQuery.isLoading,

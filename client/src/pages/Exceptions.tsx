@@ -74,6 +74,7 @@ export default function Exceptions() {
   const [statusFilter, setStatusFilter] = useState<string>(arrival.status ?? "all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
+  const [lateResolutionReason, setLateResolutionReason] = useState("");
   const [filters, setFilters] = useState({ category: "all", severity: "all" });
   const [autoFilter, setAutoFilter] = useState<boolean>(true);
 
@@ -119,6 +120,7 @@ export default function Exceptions() {
     onClosed: () => {
       setSelectedEx(null);
       setResolveNotes("");
+      setLateResolutionReason("");
     },
     closeDirect: (outcome) => (selectedEx ? handleResolve(selectedEx.id, outcome) : Promise.resolve()),
   });
@@ -174,6 +176,7 @@ export default function Exceptions() {
       toast.success(`Exception ${status}`);
       setSelectedEx(null);
       setResolveNotes("");
+      setLateResolutionReason("");
       refetch();
     } catch (err) {
       toast.error(errorMessageOf(err, "Failed to resolve"));
@@ -525,17 +528,29 @@ export default function Exceptions() {
                     <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
                   </div>
+                  {governed.workflowIsOverdue ? (
+                    <div>
+                      <label className="text-sm font-medium mb-1 block">Late-resolution reason</label>
+                      <Textarea
+                        value={lateResolutionReason}
+                        onChange={(e) => setLateResolutionReason(e.target.value)}
+                        placeholder="Why is this overdue case being closed now?"
+                        rows={2}
+                      />
+                      <p className="mt-1 text-xs text-amber-800">This overdue workflow needs a recorded late-resolution reason and the required independent approval before closure.</p>
+                    </div>
+                  ) : null}
                   {governed.closure.mode === "blocked" ? (
                     <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{governed.closure.reason}</p>
                   ) : null}
                   <div className="flex gap-2 flex-wrap">
-                    <Button onClick={() => governed.closeException("resolved", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
+                    <Button onClick={() => governed.closeException("resolved", resolveNotes, lateResolutionReason)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
                     </Button>
                     <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || governed.moveToReviewBlocked} className="flex-1">
                       <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
                     </Button>
-                    <Button variant="ghost" onClick={() => governed.closeException("dismissed", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
+                    <Button variant="ghost" onClick={() => governed.closeException("dismissed", resolveNotes, lateResolutionReason)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       Dismiss
                     </Button>
                   </div>

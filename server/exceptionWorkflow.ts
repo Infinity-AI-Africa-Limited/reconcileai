@@ -54,6 +54,7 @@ type StoredWorkflow = {
   attemptNumber: number;
   ownerUserId: number;
   dueAt: Date;
+  overdueAt: Date | null;
   approvalRequired: boolean;
   status: ExceptionWorkflowStatus;
   decisionSubmittedByUserId: number | null;
@@ -68,6 +69,7 @@ const WORKFLOW_FIELDS = {
   attemptNumber: exceptionWorkflows.attemptNumber,
   ownerUserId: exceptionWorkflows.ownerUserId,
   dueAt: exceptionWorkflows.dueAt,
+  overdueAt: exceptionWorkflows.overdueAt,
   approvalRequired: exceptionWorkflows.approvalRequired,
   status: exceptionWorkflows.status,
   decisionRationale: exceptionWorkflows.decisionRationale,
@@ -80,6 +82,7 @@ const WORKFLOW_FIELDS = {
   approvedByUserId: exceptionWorkflows.approvedByUserId,
   approvedAt: exceptionWorkflows.approvedAt,
   approvalNote: exceptionWorkflows.approvalNote,
+  lateResolutionReason: exceptionWorkflows.lateResolutionReason,
   closedByUserId: exceptionWorkflows.closedByUserId,
   closedAt: exceptionWorkflows.closedAt,
   finalOutcome: exceptionWorkflows.finalOutcome,
@@ -94,6 +97,7 @@ const LOCKED_WORKFLOW_FIELDS = {
   attemptNumber: exceptionWorkflows.attemptNumber,
   ownerUserId: exceptionWorkflows.ownerUserId,
   dueAt: exceptionWorkflows.dueAt,
+  overdueAt: exceptionWorkflows.overdueAt,
   approvalRequired: exceptionWorkflows.approvalRequired,
   status: exceptionWorkflows.status,
   decisionSubmittedByUserId: exceptionWorkflows.decisionSubmittedByUserId,
@@ -120,6 +124,7 @@ const EVENT_FIELDS = {
   actorUserId: exceptionWorkflowEvents.actorUserId,
   note: exceptionWorkflowEvents.note,
   decisionEvidenceReference: exceptionWorkflowEvents.decisionEvidenceReference,
+  lateResolutionReason: exceptionWorkflowEvents.lateResolutionReason,
   ownerUserId: exceptionWorkflowEvents.ownerUserId,
   dueAt: exceptionWorkflowEvents.dueAt,
   outcome: exceptionWorkflowEvents.outcome,
@@ -251,6 +256,7 @@ async function recordEvent(
   fields: {
     note?: string | null;
     decisionEvidenceReference?: string | null;
+    lateResolutionReason?: string | null;
     ownerUserId?: number;
     dueAt?: Date;
     outcome?: "resolved" | "dismissed";
@@ -393,7 +399,7 @@ async function peopleNamed(
     escalatedByUserId: number | null;
     closedByUserId: number | null;
   },
-  history: Array<{ actorUserId: number; ownerUserId: number | null }>
+  history: Array<{ actorUserId: number | null; ownerUserId: number | null }>
 ): Promise<Array<{ id: number; name: string | null }>> {
   const ids = new Set<number>();
   for (const id of [
@@ -622,9 +628,10 @@ export async function resolveExceptionWorkflow(params: {
   exceptionId: number;
   outcome: "resolved" | "dismissed";
   resolutionNotes: string;
+  lateResolutionReason?: string;
   client: ClientInfo;
 }) {
-  const { actor, organizationId, exceptionId, outcome, resolutionNotes, client } = params;
+  const { actor, organizationId, exceptionId, outcome, resolutionNotes, lateResolutionReason, client } = params;
   const db = await requireDb();
   return db.transaction(async tx => {
     const { exception, workflow } = await lockOpenWorkflow(tx, organizationId, exceptionId, "This governed workflow is already closed");
@@ -636,24 +643,44 @@ export async function resolveExceptionWorkflow(params: {
           : "This workflow needs recorded decision evidence before resolution."
       );
     }
+    const now = new Date();
+    // A deadline can elapse in the window before the monitor's next pass. Do
+    // not let that timing race bypass the durable overdue event and reapproval.
+    if (workflow.dueAt.getTime() <= now.getTime() && workflow.overdueAt === null) {
+      refuse("PRECONDITION_FAILED", "This workflow due date has elapsed. Wait for the overdue control to record it, then provide late-resolution evidence and obtain the required approval.");
+    }
+    if (workflow.overdueAt !== null && !lateResolutionReason?.trim()) {
+      refuse("PRECONDITION_FAILED", "This workflow is overdue. Record a late-resolution reason before closing it.");
+    }
     if (isExceptionClosed(exception.status)) {
       refuse("PRECONDITION_FAILED", "This exception is already closed");
     }
-    const now = new Date();
     await tx
       .update(exceptions)
       .set({ status: outcome, resolvedBy: actor.id, resolvedAt: now, resolutionNotes })
       .where(exceptionRow(organizationId, exceptionId));
     await tx
       .update(exceptionWorkflows)
-      .set({ status: "closed", closedByUserId: actor.id, closedAt: now, finalOutcome: outcome })
+      .set({
+        status: "closed",
+        closedByUserId: actor.id,
+        closedAt: now,
+        finalOutcome: outcome,
+        ...(workflow.overdueAt !== null ? { lateResolutionReason: lateResolutionReason!.trim() } : {}),
+      })
       .where(workflowGuard(workflow));
     // The closure notes live on the exception row, which a reopen overwrites.
-    await recordEvent(tx, workflow, "closed", actor, { note: resolutionNotes, outcome });
+    await recordEvent(tx, workflow, "closed", actor, {
+      note: resolutionNotes,
+      lateResolutionReason: workflow.overdueAt !== null ? lateResolutionReason!.trim() : null,
+      outcome,
+    });
     await audit(tx, actor, organizationId, client, "exception_workflow_closed", workflow.id, {
       exceptionId,
       outcome,
       decisionApproved: workflow.approvalRequired,
+      overdue: workflow.overdueAt !== null,
+      lateResolutionReasonPresent: workflow.overdueAt !== null,
     });
     return { id: workflow.id, status: "closed" as const, outcome };
   });
