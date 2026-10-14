@@ -8,11 +8,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   canManageExceptionWorkflows,
   canStartExceptionWorkflow,
+  isExceptionWorkflowOverdue,
   isExceptionWorkflowReadyToClose,
+  statusAfterDeadline,
   statusAfterDecision,
   statusAfterEscalation,
 } from "@shared/exceptionWorkflowRules";
 import {
+  MAX_TIMER_DELAY_MS,
+  OPEN_WORKFLOW_REFRESH_MS,
   clearIfStill,
   closureState,
   defaultWorkflowDueAt,
@@ -20,10 +24,17 @@ import {
   exceptionWorkflowEventLabel,
   exceptionWorkflowStatusLabel,
   fromDateTimeLocalValue,
+  msUntilDeadlineCheck,
+  overdueClosureNotice,
   patchExceptionInList,
   toDateTimeLocalValue,
   workflowFormKey,
+  workflowRefreshInterval,
 } from "./exceptionWorkflowPresentation";
+
+const NOW = new Date("2026-10-14T12:00:00.000Z");
+const PASSED = new Date("2026-10-14T11:59:59.000Z");
+const AHEAD = new Date("2026-10-14T12:30:00.000Z");
 
 describe("when deciding who may change a workflow", () => {
   it.each(["super_admin", "admin", "operations"])("should admit the %s role", role => {
@@ -108,6 +119,105 @@ describe("when the workspace decides how this exception may close", () => {
       mode: "blocked",
       reason: expect.stringMatching(/Start a new governed review/),
     });
+  });
+
+  it("should block an approval given before a deadline that has now passed, before the server records it", () => {
+    // The server withdraws that approval as it records the deadline, which it
+    // does before deciding any close: offering the close would only earn a refusal.
+    const view = { exceptionStatus: "in_review", workflow: { approvalRequired: true, status: "approved", dueAt: PASSED, overdueAt: null } };
+    expect(closureState(view, NOW)).toEqual({ mode: "blocked", reason: expect.stringMatching(/approval given since the deadline/) });
+  });
+
+  it("should allow an approval given after the deadline was recorded", () => {
+    const view = { exceptionStatus: "escalated", workflow: { approvalRequired: true, status: "approved", dueAt: PASSED, overdueAt: PASSED } };
+    expect(closureState(view, NOW)).toEqual({ mode: "governed" });
+  });
+
+  it("should allow an approval whose deadline is still ahead", () => {
+    const view = { exceptionStatus: "in_review", workflow: { approvalRequired: true, status: "approved", dueAt: AHEAD, overdueAt: null } };
+    expect(closureState(view, NOW)).toEqual({ mode: "governed" });
+  });
+});
+
+describe("when a deadline passes", () => {
+  it("should count an open attempt as overdue from the moment its due date passes, recorded or not", () => {
+    expect(isExceptionWorkflowOverdue({ status: "approved", dueAt: PASSED, overdueAt: null }, NOW)).toBe(true);
+    expect(isExceptionWorkflowOverdue({ status: "approved", dueAt: NOW, overdueAt: null }, NOW)).toBe(true);
+    expect(isExceptionWorkflowOverdue({ status: "escalated", dueAt: AHEAD, overdueAt: PASSED }, NOW)).toBe(true);
+    expect(isExceptionWorkflowOverdue({ status: "active", dueAt: AHEAD, overdueAt: null }, NOW)).toBe(false);
+  });
+
+  it("should not count a closed attempt, or no attempt, as overdue", () => {
+    expect(isExceptionWorkflowOverdue({ status: "closed", dueAt: PASSED, overdueAt: PASSED }, NOW)).toBe(false);
+    expect(isExceptionWorkflowOverdue(null, NOW)).toBe(false);
+  });
+
+  it("should read the wire format the workspace receives", () => {
+    expect(isExceptionWorkflowOverdue({ status: "active", dueAt: PASSED.toISOString(), overdueAt: null }, NOW)).toBe(true);
+    expect(isExceptionWorkflowOverdue({ status: "active", dueAt: "not a date", overdueAt: null }, NOW)).toBe(false);
+  });
+
+  it("should withdraw an approval but keep the decision when the missed deadline is recorded", () => {
+    expect(statusAfterDeadline("approved", true)).toBe("decision_submitted");
+    expect(statusAfterDeadline("decision_submitted", true)).toBe("decision_submitted");
+    expect(statusAfterDeadline("decision_recorded", false)).toBe("decision_recorded");
+    expect(statusAfterDeadline("active", true)).toBe("escalated");
+  });
+});
+
+describe("when the close form explains a missed deadline", () => {
+  const workflow = (overrides: Partial<{ approvalRequired: boolean; status: string; dueAt: Date; overdueAt: Date | null }> = {}) => ({
+    approvalRequired: true,
+    status: "decision_submitted",
+    dueAt: PASSED,
+    overdueAt: null,
+    ...overrides,
+  });
+
+  it("should say nothing while the deadline is ahead", () => {
+    expect(overdueClosureNotice(workflow({ dueAt: AHEAD }), NOW)).toBeNull();
+    expect(overdueClosureNotice(null, NOW)).toBeNull();
+  });
+
+  it("should say the record is on its way when the deadline has passed unrecorded", () => {
+    expect(overdueClosureNotice(workflow(), NOW)).toMatch(/has passed; the overdue control records it within a minute/);
+  });
+
+  it("should name the separate approval only when the workflow requires one", () => {
+    expect(overdueClosureNotice(workflow({ overdueAt: PASSED }), NOW)).toMatch(/late-resolution reason and a separate human approval/);
+    expect(overdueClosureNotice(workflow({ overdueAt: PASSED, approvalRequired: false }), NOW)).toBe(
+      "This workflow missed its due date. Closing it needs a late-resolution reason."
+    );
+  });
+});
+
+describe("when an open workflow is on screen", () => {
+  it("should keep re-reading an attempt still in progress, so a recorded deadline appears without a refused close", () => {
+    expect(workflowRefreshInterval({ workflow: { status: "approved" } })).toBe(OPEN_WORKFLOW_REFRESH_MS);
+  });
+
+  it("should stop re-reading once nothing can change without the viewer", () => {
+    expect(workflowRefreshInterval({ workflow: { status: "closed" } })).toBe(false);
+    expect(workflowRefreshInterval({ workflow: null })).toBe(false);
+    expect(workflowRefreshInterval(undefined)).toBe(false);
+  });
+
+  it("should check again just after the deadline passes", () => {
+    const due = NOW.getTime() + 60_000;
+    expect(msUntilDeadlineCheck({ status: "active", dueAt: new Date(due), overdueAt: null }, NOW.getTime())).toBe(61_000);
+  });
+
+  it("should have nothing to wait for once the deadline is past, recorded, or the attempt closed", () => {
+    expect(msUntilDeadlineCheck({ status: "active", dueAt: PASSED, overdueAt: null }, NOW.getTime())).toBeNull();
+    expect(msUntilDeadlineCheck({ status: "active", dueAt: AHEAD, overdueAt: PASSED }, NOW.getTime())).toBeNull();
+    expect(msUntilDeadlineCheck({ status: "closed", dueAt: AHEAD, overdueAt: null }, NOW.getTime())).toBeNull();
+    expect(msUntilDeadlineCheck(null, NOW.getTime())).toBeNull();
+  });
+
+  it("should wait for a far deadline in steps a browser timer can hold", () => {
+    // A longer delay overflows and fires at once — which would re-render in a loop.
+    const farOff = new Date(NOW.getTime() + 60 * 24 * 60 * 60 * 1000);
+    expect(msUntilDeadlineCheck({ status: "active", dueAt: farOff, overdueAt: null }, NOW.getTime())).toBe(MAX_TIMER_DELAY_MS);
   });
 });
 

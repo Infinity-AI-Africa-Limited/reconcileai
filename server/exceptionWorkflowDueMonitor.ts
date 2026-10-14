@@ -1,8 +1,10 @@
 import { and, eq, inArray, isNull, lte } from "drizzle-orm";
-import { exceptionWorkflowEvents, exceptionWorkflows, exceptions } from "../drizzle/schema";
+import { exceptionWorkflows, exceptions } from "../drizzle/schema";
 import { getDb } from "./db";
 import { loggableError } from "./dbErrors";
-import { logAuditStrict } from "./routers/shared";
+import { recordElapsedDeadline } from "./exceptionWorkflowDeadline";
+
+export { DUE_DATE_ELAPSED_NOTE } from "./exceptionWorkflowDeadline";
 
 /**
  * Application-owned overdue control for governed exception workflows.
@@ -15,6 +17,10 @@ import { logAuditStrict } from "./routers/shared";
  * the same exception → workflow lock order as manual workflow writes, then
  * conditionally marked once. That makes duplicate passes and concurrent
  * instances harmless.
+ *
+ * The monitor is not the only recorder. Every governed write records an elapsed
+ * deadline before it acts (exceptionWorkflowDeadline.ts), so the window between
+ * passes cannot be used to move a missed deadline out of sight.
  *
  * The monitor never makes a financial decision, moves funds, posts to a
  * ledger, or closes an exception. It records the elapsed deadline, makes the
@@ -33,23 +39,13 @@ const OPEN_STATUSES = [
 
 const DUE_MONITOR_BATCH_SIZE = 100;
 export const EXCEPTION_WORKFLOW_DUE_MONITOR_INTERVAL_MS = 60_000;
-export const DUE_DATE_ELAPSED_NOTE = "Due date elapsed; system escalation recorded.";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
-type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
-type WorkflowStatus = (typeof OPEN_STATUSES)[number];
 
 type DueCandidate = {
   id: number;
   organizationId: number;
   exceptionId: number;
-};
-
-type LockedWorkflow = DueCandidate & {
-  dueAt: Date;
-  overdueAt: Date | null;
-  approvalRequired: boolean;
-  status: WorkflowStatus | "closed";
 };
 
 const CANDIDATE_FIELDS = {
@@ -60,6 +56,7 @@ const CANDIDATE_FIELDS = {
 
 const LOCKED_WORKFLOW_FIELDS = {
   ...CANDIDATE_FIELDS,
+  ownerUserId: exceptionWorkflows.ownerUserId,
   dueAt: exceptionWorkflows.dueAt,
   overdueAt: exceptionWorkflows.overdueAt,
   approvalRequired: exceptionWorkflows.approvalRequired,
@@ -71,24 +68,6 @@ export function dueMonitorEnabledHere(env: NodeJS.ProcessEnv = process.env): { e
   if (env.VITEST) return { enabled: false, reason: "test process" };
   if (env.NODE_ENV !== "production") return { enabled: false, reason: "not a production service" };
   return { enabled: true, reason: "production service" };
-}
-
-/** MySQL2 returns a ResultSetHeader inside an array; test adapters use the same observable shape. */
-function affectedRowsOf(result: unknown): number {
-  const header = Array.isArray(result) ? result[0] : result;
-  if (!header || typeof header !== "object" || !("affectedRows" in header)) return 0;
-  const value = (header as { affectedRows?: unknown }).affectedRows;
-  return typeof value === "number" ? value : Number(value) || 0;
-}
-
-function nextStatus(workflow: LockedWorkflow): WorkflowStatus {
-  // `expireOne` already excludes this, but keep the helper independently
-  // correct if a caller changes its precondition later.
-  if (workflow.status === "closed") throw new Error("A closed workflow cannot become overdue");
-  // An expiry does not erase the decision. It does invalidate an approval that
-  // pre-dated the missed deadline, so a distinct person must approve again.
-  if (workflow.approvalRequired && workflow.status === "approved") return "decision_submitted";
-  return workflow.status === "active" ? "escalated" : workflow.status;
 }
 
 async function expireOne(
@@ -119,64 +98,10 @@ async function expireOne(
       )
       .limit(1)
       .for("update");
-    if (!workflow || workflow.overdueAt !== null || workflow.dueAt.getTime() > now.getTime() || workflow.status === "closed") {
-      return false;
-    }
-
-    const locked = workflow as LockedWorkflow;
-    const status = nextStatus(locked);
-    const approvalInvalidated = locked.approvalRequired && locked.status === "approved";
-    const update = await tx
-      .update(exceptionWorkflows)
-      .set({
-        status,
-        overdueAt: now,
-        escalatedAt: now,
-        escalatedByUserId: null,
-        ...(approvalInvalidated
-          ? { approvedByUserId: null, approvedAt: null, approvalNote: null }
-          : {}),
-      })
-      .where(
-        and(
-          eq(exceptionWorkflows.id, locked.id),
-          eq(exceptionWorkflows.organizationId, locked.organizationId),
-          isNull(exceptionWorkflows.overdueAt),
-          eq(exceptionWorkflows.status, locked.status),
-          lte(exceptionWorkflows.dueAt, now),
-        ),
-      );
-    // The guard makes a repeated or racing monitor pass a no-op. Never append
-    // an event or audit record when this pass did not claim the workflow.
-    if (affectedRowsOf(update) !== 1) return false;
-
-    await tx
-      .update(exceptions)
-      .set({ status: "escalated" })
-      .where(and(eq(exceptions.id, locked.exceptionId), eq(exceptions.organizationId, locked.organizationId)));
-    await tx.insert(exceptionWorkflowEvents).values({
-      organizationId: locked.organizationId,
-      workflowId: locked.id,
-      exceptionId: locked.exceptionId,
-      eventType: "due_date_elapsed",
-      actorUserId: null,
-      note: DUE_DATE_ELAPSED_NOTE,
-    });
-    await logAuditStrict({
-      userId: null,
-      organizationId: locked.organizationId,
-      action: "exception_workflow_due_date_elapsed",
-      entityType: "exception_workflow",
-      entityId: locked.id,
-      details: {
-        exceptionId: locked.exceptionId,
-        previousStatus: locked.status,
-        status,
-        approvalInvalidated,
-      },
-      executor: tx,
-    });
-    return true;
+    if (!workflow) return false;
+    // Re-checked under the locks: a write may have recorded it, closed the
+    // attempt, or moved the deadline since the scan.
+    return (await recordElapsedDeadline(tx, exception, workflow, now, "due_monitor")) !== null;
   });
 }
 
@@ -185,8 +110,19 @@ async function expireOne(
  * optimization; `expireOne` re-checks the durable predicate after obtaining
  * locks, so a restart, retry or second service instance cannot duplicate the
  * escalation evidence.
+ *
+ * One candidate's failure does not stop the pass. The scan is ordered by due
+ * date, so a row that fails every time would otherwise be first in every batch
+ * and block every deadline behind it, in every tenant, indefinitely.
+ *
+ * `organizationId` limits a sweep to one tenant, for a caller that must not
+ * touch any other — an operator's targeted run, or a test on a shared database.
+ * The scheduled monitor sweeps every tenant.
  */
-export async function expireDueExceptionWorkflows(now = new Date()): Promise<{ scanned: number; expired: number }> {
+export async function expireDueExceptionWorkflows(
+  options: { now?: Date; organizationId?: number } = {},
+): Promise<{ scanned: number; expired: number; failed: number }> {
+  const now = options.now ?? new Date();
   const db = await getDb();
   if (!db) throw new Error("Database unavailable for governed exception due-date control");
   const candidates = await db
@@ -197,16 +133,27 @@ export async function expireDueExceptionWorkflows(now = new Date()): Promise<{ s
         isNull(exceptionWorkflows.overdueAt),
         lte(exceptionWorkflows.dueAt, now),
         inArray(exceptionWorkflows.status, OPEN_STATUSES),
+        options.organizationId === undefined ? undefined : eq(exceptionWorkflows.organizationId, options.organizationId),
       ),
     )
     .orderBy(exceptionWorkflows.dueAt, exceptionWorkflows.id)
     .limit(DUE_MONITOR_BATCH_SIZE);
 
   let expired = 0;
+  let failed = 0;
   for (const candidate of candidates as DueCandidate[]) {
-    if (await expireOne(db, candidate, now)) expired += 1;
+    try {
+      if (await expireOne(db, candidate, now)) expired += 1;
+    } catch (error) {
+      failed += 1;
+      console.error("[exception-workflow-due-monitor] could not record an elapsed due date; a later pass will retry", {
+        workflowId: candidate.id,
+        organizationId: candidate.organizationId,
+        ...loggableError(error),
+      });
+    }
   }
-  return { scanned: candidates.length, expired };
+  return { scanned: candidates.length, expired, failed };
 }
 
 let dueMonitorTimer: NodeJS.Timeout | null = null;
@@ -218,12 +165,12 @@ let tickInFlight = false;
  * durable `overdueAt IS NULL` state; no in-memory queue entry is required to
  * recover a missed deadline.
  */
-export async function dueMonitorTick(): Promise<{ scanned: number; expired: number } | null> {
+export async function dueMonitorTick(): Promise<{ scanned: number; expired: number; failed: number } | null> {
   if (tickInFlight) return null;
   tickInFlight = true;
   try {
     const result = await expireDueExceptionWorkflows();
-    if (result.expired > 0) {
+    if (result.expired > 0 || result.failed > 0) {
       console.warn("[exception-workflow-due-monitor] recorded elapsed due dates", result);
     }
     return result;

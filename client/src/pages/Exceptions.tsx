@@ -24,6 +24,7 @@ import { canManageExceptionWorkflows } from "@shared/exceptionWorkflowRules";
 import { roleCanWriteReconciliation } from "@shared/reconciliationWriteRoles";
 import { ExceptionWorkflowPanel } from "@/components/ExceptionWorkflowPanel";
 import { useExceptionWorkflow, type ExceptionListInput } from "@/hooks/useExceptionWorkflow";
+import { useKeyedDraft } from "@/hooks/useKeyedDraft";
 import { errorMessageOf } from "@/lib/exceptionWorkflowPresentation";
 
 // ─── Template category filter persistence ───────────────────────────────────
@@ -73,8 +74,9 @@ export default function Exceptions() {
   // nothing ever set — so choosing "Open" changed the menu and nothing else.
   const [statusFilter, setStatusFilter] = useState<string>(arrival.status ?? "all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
-  const [resolveNotes, setResolveNotes] = useState("");
-  const [lateResolutionReason, setLateResolutionReason] = useState("");
+  // Resolution notes belong to the exception they were written for. One shared
+  // box let notes drafted for one case be saved as another's closure record.
+  const [resolveNotes, setResolveNotes] = useKeyedDraft(selectedEx ? `exception:${selectedEx.id}` : "none");
   const [filters, setFilters] = useState({ category: "all", severity: "all" });
   const [autoFilter, setAutoFilter] = useState<boolean>(true);
 
@@ -120,7 +122,6 @@ export default function Exceptions() {
     onClosed: () => {
       setSelectedEx(null);
       setResolveNotes("");
-      setLateResolutionReason("");
     },
     closeDirect: (outcome) => (selectedEx ? handleResolve(selectedEx.id, outcome) : Promise.resolve()),
   });
@@ -176,7 +177,6 @@ export default function Exceptions() {
       toast.success(`Exception ${status}`);
       setSelectedEx(null);
       setResolveNotes("");
-      setLateResolutionReason("");
       refetch();
     } catch (err) {
       toast.error(errorMessageOf(err, "Failed to resolve"));
@@ -407,7 +407,10 @@ export default function Exceptions() {
 
       {/* Exception Detail Dialog */}
       <Dialog open={!!selectedEx} onOpenChange={(o) => { if (!o) setSelectedEx(null); }}>
-        <DialogContent className="max-w-lg">
+        {/* Scrolls within the viewport. With the governed workflow inside it the
+            dialog runs to ~1,400px; fixed and centred without this, its title and
+            its Resolve / Dismiss controls sat off-screen on a laptop display. */}
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -528,29 +531,29 @@ export default function Exceptions() {
                     <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
                   </div>
-                  {governed.workflowIsOverdue ? (
+                  {governed.overdue.isOverdue ? (
                     <div>
                       <label className="text-sm font-medium mb-1 block">Late-resolution reason</label>
                       <Textarea
-                        value={lateResolutionReason}
-                        onChange={(e) => setLateResolutionReason(e.target.value)}
+                        value={governed.form.lateResolutionReason}
+                        onChange={(e) => governed.form.setLateResolutionReason(e.target.value)}
                         placeholder="Why is this overdue case being closed now?"
                         rows={2}
                       />
-                      <p className="mt-1 text-xs text-amber-800">This overdue workflow needs a recorded late-resolution reason and the required independent approval before closure.</p>
+                      {governed.overdue.notice ? <p className="mt-1 text-xs text-amber-800">{governed.overdue.notice}</p> : null}
                     </div>
                   ) : null}
                   {governed.closure.mode === "blocked" ? (
                     <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{governed.closure.reason}</p>
                   ) : null}
                   <div className="flex gap-2 flex-wrap">
-                    <Button onClick={() => governed.closeException("resolved", resolveNotes, lateResolutionReason)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
+                    <Button onClick={() => governed.closeException("resolved", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
                     </Button>
                     <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || governed.moveToReviewBlocked} className="flex-1">
                       <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
                     </Button>
-                    <Button variant="ghost" onClick={() => governed.closeException("dismissed", resolveNotes, lateResolutionReason)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
+                    <Button variant="ghost" onClick={() => governed.closeException("dismissed", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       Dismiss
                     </Button>
                   </div>
