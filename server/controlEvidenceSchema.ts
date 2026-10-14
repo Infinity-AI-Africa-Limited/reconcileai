@@ -3,20 +3,12 @@ import { z } from "zod";
 import { CONTROL_SOURCE_CONTRACT_STATUSES } from "./controlManifest";
 import { resolveOrgScope } from "./_core/tenancy";
 import { isControlPeriod } from "../shared/controlPeriod";
+import { storableDateInput } from "./storableTimestamp";
 
 const nonEmptyText = (max: number) => z.string().trim().min(1).max(max);
 const nullableText = (max: number) => nonEmptyText(max).nullable();
-const dateInput = z
-  .string()
-  .datetime({ offset: true })
-  .transform((value, ctx) => {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      ctx.addIssue({ code: "custom", message: "Invalid ISO date-time" });
-      return z.NEVER;
-    }
-    return date;
-  });
+// Bounded to what the TIMESTAMP columns can hold (server/storableTimestamp.ts).
+const dateInput = storableDateInput;
 const nullableCurrency = z
   .string()
   .trim()

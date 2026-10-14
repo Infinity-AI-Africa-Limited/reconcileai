@@ -211,6 +211,44 @@ export const controlBatchManifests = mysqlTable("control_batch_manifests", {
 export type ControlBatchManifest = typeof controlBatchManifests.$inferSelect;
 export type InsertControlBatchManifest = typeof controlBatchManifests.$inferInsert;
 
+// ─── Versioned control policies ───────────────────────────────────────
+// Policy records are append-only governance evidence. They describe the
+// approved mappings and matching rules a tenant may later bind to a governed
+// daily control; this table never changes a live run by itself. `activeSlot`
+// carries a unique key only while active, so one tenant/policy key can have at
+// most one active version without preventing a complete immutable history.
+export const controlPolicies = mysqlTable("control_policies", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  policyType: mysqlEnum("policyType", ["mapping", "reconciliation"]).notNull(),
+  policyKey: varchar("policyKey", { length: 100 }).notNull(),
+  version: int("version").notNull(),
+  displayName: varchar("displayName", { length: 255 }).notNull(),
+  description: text("description").notNull(),
+  definition: json("definition").notNull(),
+  definitionDigest: varchar("definitionDigest", { length: 64 }).notNull(),
+  status: mysqlEnum("status", ["draft", "approved", "active", "retired"]).default("draft").notNull(),
+  approvalReference: varchar("approvalReference", { length: 255 }),
+  approvedByUserId: int("approvedByUserId"),
+  approvedAt: timestamp("approvedAt"),
+  effectiveAt: timestamp("effectiveAt").notNull(),
+  /** Non-null only while status is active; unique index enforces one active version. */
+  activeSlot: varchar("activeSlot", { length: 240 }),
+  retirementReference: varchar("retirementReference", { length: 255 }),
+  retiredByUserId: int("retiredByUserId"),
+  retiredAt: timestamp("retiredAt"),
+  createdByUserId: int("createdByUserId").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_control_policy_org_type_key_version").on(table.organizationId, table.policyType, table.policyKey, table.version),
+  uniqueIndex("uq_control_policy_active_slot").on(table.activeSlot),
+  index("idx_control_policy_org_status").on(table.organizationId, table.status),
+  index("idx_control_policy_org_effective").on(table.organizationId, table.effectiveAt, table.id),
+]);
+
+export type ControlPolicy = typeof controlPolicies.$inferSelect;
+export type InsertControlPolicy = typeof controlPolicies.$inferInsert;
+
 // ─── Users ───────────────────────────────────────────────────────────
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
