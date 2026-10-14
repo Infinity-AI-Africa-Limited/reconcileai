@@ -19,6 +19,7 @@
 import mysql from "mysql2/promise";
 import { getWoodcorePool } from "./woodcoreDb";
 import { ENV } from "./_core/env";
+import { createAppPool } from "./dbSession";
 import { errorSummary } from "./errorText";
 
 type TableSpec = { live: string; mirror: string; cols: string[]; batch: number };
@@ -76,7 +77,8 @@ let tidbPool: mysql.Pool | null = null;
 function getTidbPool(): mysql.Pool {
   if (!tidbPool) {
     if (!ENV.databaseUrl) throw new Error("DATABASE_URL is not set");
-    tidbPool = mysql.createPool(ENV.databaseUrl);
+    // Our database: pinned to UTC like every app session (server/dbSession.ts).
+    tidbPool = createAppPool(ENV.databaseUrl).promise();
   }
   return tidbPool;
 }

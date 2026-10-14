@@ -39,6 +39,7 @@ import {
 import { ENV } from './_core/env';
 import { AUDIT_WRITER_VERSION, auditTimestamp, computeRecordHash } from "./auditChain";
 import { loggableError } from "./dbErrors";
+import { createAppPool } from "./dbSession";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -56,7 +57,8 @@ let _db: ReturnType<typeof drizzle> | null = null;
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL, { schema, mode: "default" });
+      // Pinned to UTC on every connection (server/dbSession.ts): drizzle's timestamps assume it.
+      _db = drizzle(createAppPool(process.env.DATABASE_URL), { schema, mode: "default" });
     } catch (error) {
       console.warn("[Database] Failed to connect:", loggableError(error));
       _db = null;

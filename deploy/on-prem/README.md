@@ -84,6 +84,19 @@ The bundled MySQL starts empty — apply the schema once before first use. Pick 
 > files shipped in the image). For a fully offline rollout, run the migration as a
 > release step in your packaging pipeline before shipping the stack.
 
+### Database time zone
+The bank's MySQL may run in local time (WAT, EAT…); nothing needs changing for
+ReconcileAI. The app sets `time_zone = '+00:00'` on every connection it opens to
+its own database (`server/dbSession.ts`), because it stores timestamps as UTC.
+The server's default zone therefore does not matter. Two consequences:
+
+- **No time-zone tables are needed.** The app uses the offset `+00:00`, not the
+  name `UTC`.
+- **Ad-hoc SQL sessions run in the server's zone**, not UTC. When reading
+  ReconcileAI's `TIMESTAMP` columns from a MySQL client for an audit or an
+  export, run `SET time_zone = '+00:00';` first, or the times will read as
+  shifted. ReconcileAI itself is unaffected.
+
 ---
 
 ## Serving boundary: local development versus bank deployment

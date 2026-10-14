@@ -1693,6 +1693,18 @@ After setting `DATABASE_URL`, run migrations:
 pnpm db:migrate
 ```
 
+> **Every session on the app database runs in UTC (since 2026-10-14).** drizzle
+> writes `timestamp` columns as zone-less UTC strings and reads them back as UTC,
+> while MySQL interprets such strings in the *session* zone. Until this was fixed,
+> correctness depended on the server's default being UTC. That held for TiDB Cloud
+> and CI, but not for an on-premise bank MySQL in local time, where every write
+> and every `DEFAULT now()` read shifted by the offset.
+>
+> `createAppPool` (`server/dbSession.ts`) issues `SET time_zone = '+00:00'` as the
+> first statement on each new connection. **Every pool on `DATABASE_URL` must come
+> from it.** `server/dbSessionGate.test.ts` fails CI on a pool opened any other way;
+> its one exception is `woodcoreDb.ts`, Woodcore's own database.
+
 > ⚠️ **Never run `pnpm db:push` against production.** It is
 > `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW
 > migration from whatever `schema.ts` is in your working tree, then applies it.
