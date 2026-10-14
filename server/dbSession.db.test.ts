@@ -10,12 +10,13 @@
  * — such as the local proof run at +01:00 — exercises.
  */
 import { eq, inArray, sql } from "drizzle-orm";
+import { createPool as createCallbackPool } from "mysql2";
 import mysql from "mysql2/promise";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { organizations } from "../drizzle/schema";
 import { getDb } from "./db";
 import { classifyDatabaseTarget } from "./dbTarget";
-import { createAppPool, SESSION_TIME_ZONE } from "./dbSession";
+import { createAppPool, pinSessionTimeZone, SESSION_TIME_ZONE } from "./dbSession";
 
 const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
@@ -96,6 +97,39 @@ describe.runIf(localDatabase)("when the server's sessions meet a real database",
       expectAllUtc(sessions);
     } finally {
       await pool.end();
+    }
+  });
+
+  it("should refuse the query waiting behind a failed pin, which never reaches the server", async () => {
+    // Decided by mysql2's command queue, not by us, so proven on a real
+    // connection: a pin the server rejects, and a WRITE queued behind it.
+    const pool = createCallbackPool({ uri: url, connectionLimit: 1 });
+    pinSessionTimeZone(pool, "SET time_zone = 'Not/AZone'");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const marker = code();
+    try {
+      const outcome = await Promise.race([
+        new Promise<string>(resolve =>
+          pool.query(
+            "INSERT INTO organizations (name, code, isDemo) VALUES (?, ?, 1)",
+            ["Failed pin proof", marker],
+            error => resolve(error ? "refused" : "ran")
+          )
+        ),
+        new Promise<string>(resolve => setTimeout(() => resolve("hung"), 10_000)),
+      ]);
+
+      expect(outcome).toBe("refused");
+      const [rows] = (await db.execute(
+        sql`SELECT COUNT(*) AS n FROM organizations WHERE code = ${marker}`
+      )) as unknown as [Array<{ n: number | string }>];
+      expect(Number(rows[0].n)).toBe(0);
+      expect(logged).toHaveBeenCalledTimes(1);
+    } finally {
+      logged.mockRestore();
+      await new Promise<void>(resolve => pool.end(() => resolve()));
+      // Only if the guarantee above were broken would the row exist.
+      await db.delete(organizations).where(eq(organizations.code, marker));
     }
   });
 

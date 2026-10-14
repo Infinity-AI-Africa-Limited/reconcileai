@@ -28,15 +28,22 @@ type SessionConnection = {
  * Pin each new physical connection of `pool` to UTC.
  *
  * mysql2 emits `connection` before it hands a new connection to its first
- * caller, and runs a connection's commands in order, so the SET is always the
- * first statement that connection executes. If it fails the connection is
- * destroyed, so the waiting query fails instead of running in the wrong zone.
+ * caller, and runs a connection's commands one at a time, in order. So the SET
+ * is always the first statement the connection executes, and the caller's
+ * query waits behind it.
+ *
+ * If the SET fails, the connection is destroyed and leaves the pool. The query
+ * waiting behind it is then refused and never reaches the server; without the
+ * destroy it would run in the server's zone. That behaviour is mysql2's command
+ * queue, not ours, so `dbSession.db.test.ts` pins it against a real server.
+ * `statement` is replaceable only so that test can make the pin fail.
  */
-export function pinSessionTimeZone(pool: {
-  on(event: "connection", listener: (connection: SessionConnection) => void): unknown;
-}): void {
+export function pinSessionTimeZone(
+  pool: { on(event: "connection", listener: (connection: SessionConnection) => void): unknown },
+  statement: string = SET_SESSION_TIME_ZONE
+): void {
   pool.on("connection", connection => {
-    connection.query(SET_SESSION_TIME_ZONE, error => {
+    connection.query(statement, error => {
       if (!error) return;
       console.error(
         "[db] could not pin the session time zone to UTC; closing the connection rather than run in the server's zone",
