@@ -99,8 +99,23 @@ const LOCKED_WORKFLOW_FIELDS = {
   decisionSubmittedByUserId: exceptionWorkflows.decisionSubmittedByUserId,
 } as const;
 
+/** What the workspace shows of every attempt, earlier ones included. */
+const ATTEMPT_FIELDS = {
+  id: exceptionWorkflows.id,
+  attemptNumber: exceptionWorkflows.attemptNumber,
+  status: exceptionWorkflows.status,
+  approvalRequired: exceptionWorkflows.approvalRequired,
+  finalOutcome: exceptionWorkflows.finalOutcome,
+  startedAt: exceptionWorkflows.startedAt,
+  closedAt: exceptionWorkflows.closedAt,
+} as const;
+
+/** Attempts one read returns: a case reopened more often than this is pathological, not a workload. */
+const ATTEMPT_LIMIT = 50;
+
 const EVENT_FIELDS = {
   id: exceptionWorkflowEvents.id,
+  workflowId: exceptionWorkflowEvents.workflowId,
   eventType: exceptionWorkflowEvents.eventType,
   actorUserId: exceptionWorkflowEvents.actorUserId,
   note: exceptionWorkflowEvents.note,
@@ -318,7 +333,24 @@ export async function getExceptionWorkflow(organizationId: number, exceptionId: 
       .orderBy(desc(exceptionWorkflows.attemptNumber))
       .limit(1)
   ).at(0);
-  const history = workflow
+  // EVERY attempt, not only the latest: starting a reopened case's next review
+  // must not hide the decisions and approvals of the reviews before it.
+  const attempts = workflow
+    ? await db
+        .select(ATTEMPT_FIELDS)
+        .from(exceptionWorkflows)
+        .where(
+          and(
+            eq(exceptionWorkflows.organizationId, organizationId),
+            eq(exceptionWorkflows.exceptionId, exceptionId)
+          )
+        )
+        .orderBy(desc(exceptionWorkflows.attemptNumber))
+        .limit(ATTEMPT_LIMIT)
+    : [];
+  const attemptNumberOf = new Map(attempts.map(attempt => [attempt.id, attempt.attemptNumber]));
+  // By workflow id, so the (organizationId, workflowId, id) index serves it.
+  const history = attempts.length
     ? (
         await db
           .select(EVENT_FIELDS)
@@ -326,16 +358,19 @@ export async function getExceptionWorkflow(organizationId: number, exceptionId: 
           .where(
             and(
               eq(exceptionWorkflowEvents.organizationId, organizationId),
-              eq(exceptionWorkflowEvents.workflowId, workflow.id)
+              inArray(exceptionWorkflowEvents.workflowId, [...attemptNumberOf.keys()])
             )
           )
           .orderBy(desc(exceptionWorkflowEvents.id))
           .limit(HISTORY_LIMIT)
-      ).reverse()
+      )
+        .reverse()
+        .map(({ workflowId, ...event }) => ({ ...event, attemptNumber: attemptNumberOf.get(workflowId) ?? null }))
     : [];
   return {
     exceptionStatus: exception.status,
     workflow: workflow ?? null,
+    attempts,
     history,
     people: workflow ? await peopleNamed(db, organizationId, workflow, history) : [],
   };

@@ -175,6 +175,21 @@ describe.runIf(localDatabase)("when governed workflows run on a real database", 
     expect(closed.exceptionStatus).toBe("resolved");
     expect(closed.workflow?.status).toBe("closed");
     expect(closed.history.at(-1)).toMatchObject({ eventType: "closed", note: "Duplicate reversed", outcome: "resolved" });
+
+    // Reopened, then reviewed again: the first review's evidence stays readable.
+    await db.update(exceptions).set({ status: "open" }).where(eq(exceptions.id, exceptionId));
+    await startExceptionWorkflow({ actor: maker, organizationId, exceptionId, ownerUserId: checker.id, dueAt: due(), approvalRequired: true, client });
+    const reviewedAgain = await getExceptionWorkflow(organizationId, exceptionId);
+    expect(reviewedAgain.attempts.map(attempt => attempt.attemptNumber)).toEqual([2, 1]);
+    expect(reviewedAgain.history.map(event => [event.attemptNumber, event.eventType])).toEqual([
+      [1, "started"],
+      [1, "decision_recorded"],
+      [1, "decision_approved"],
+      [1, "decision_recorded"],
+      [1, "decision_approved"],
+      [1, "closed"],
+      [2, "started"],
+    ]);
   });
 
   it("should never deadlock a refused Start against a reassignment of the same exception", async () => {

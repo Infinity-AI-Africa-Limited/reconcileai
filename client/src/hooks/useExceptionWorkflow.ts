@@ -10,6 +10,7 @@ import {
   fromDateTimeLocalValue,
   patchExceptionInList,
   toDateTimeLocalValue,
+  workflowFormKey,
 } from "@/lib/exceptionWorkflowPresentation";
 
 export type ExceptionListInput = inferRouterInputs<AppRouter>["exceptions"]["list"];
@@ -118,12 +119,13 @@ export function useExceptionWorkflow(params: {
   const [escalationNote, setEscalationNote] = useState("");
   const [approvalNote, setApprovalNote] = useState("");
 
-  // Refill the form when the case, its attempt or its stage changes — not on
-  // every refetch, which would overwrite what the operator is typing. The
+  // Refill the form when the case or its attempt changes — never on a stage
+  // change or a refetch, which would overwrite what the operator is drafting
+  // (an optimistic escalation used to wipe a half-written decision). The
   // narrative boxes start empty: an earlier escalation or approval is history,
-  // not a draft for the next one.
+  // not a draft for the next one; each also clears after its own action.
   const workflow = workflowQuery.data?.workflow ?? null;
-  const prefillKey = `${exceptionId}:${workflow?.id ?? "none"}:${workflow?.status ?? "none"}`;
+  const prefillKey = workflowFormKey(exceptionId, workflow);
   useEffect(() => {
     if (exceptionId === null) return;
     if (workflow && workflow.status !== "closed") {
@@ -184,11 +186,12 @@ export function useExceptionWorkflow(params: {
     escalate: async () => {
       if (exceptionId === null) return;
       if (!escalationNote.trim()) return void toast.error("Enter the escalation reason before escalating");
-      await run(
+      const escalated = await run(
         () => escalateMutation.mutateAsync({ exceptionId, ...scope, note: escalationNote }),
         "Workflow escalated with its reason recorded",
         "Failed to escalate workflow"
       );
+      if (escalated) setEscalationNote("");
     },
     recordDecision: async () => {
       if (exceptionId === null) return;
@@ -204,11 +207,12 @@ export function useExceptionWorkflow(params: {
     approve: async () => {
       if (exceptionId === null) return;
       if (!approvalNote.trim()) return void toast.error("Enter the approval note before approving the decision");
-      await run(
+      const approved = await run(
         () => approvalMutation.mutateAsync({ exceptionId, ...scope, approvalNote }),
         "Decision approved",
         "Failed to approve decision"
       );
+      if (approved) setApprovalNote("");
     },
     close: async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
       if (exceptionId === null) return;

@@ -365,8 +365,8 @@ describe("when the legacy close runs", () => {
 describe("when a workflow is read", () => {
   it("should return the exception's status, its latest attempt, the history in order, and names within the tenant", async () => {
     const events = [
-      { id: 3, eventType: "decision_recorded", actorUserId: 71, note: "n2" },
-      { id: 2, eventType: "started", actorUserId: 71, ownerUserId: 8 },
+      { id: 3, workflowId: 91, eventType: "decision_recorded", actorUserId: 71, note: "n2" },
+      { id: 2, workflowId: 91, eventType: "started", actorUserId: 71, ownerUserId: 8 },
     ];
     const workflow = { ...workflowRow, startedByUserId: 71, approvedByUserId: null, escalatedByUserId: null, closedByUserId: null };
     const fake = scripted({ workflow: [workflow], events, users: [{ id: 71, name: "Ada" }] });
@@ -375,16 +375,41 @@ describe("when a workflow is read", () => {
 
     expect(view.exceptionStatus).toBe("in_review");
     expect(view.workflow).toMatchObject({ id: 91 });
-    expect(view.history.map(event => event.id)).toEqual([2, 3]);
+    expect(view.history.map(event => [event.id, event.attemptNumber])).toEqual([[2, 1], [3, 1]]);
+    expect(view.history[0]).not.toHaveProperty("workflowId");
     expect(view.people).toEqual([{ id: 71, name: "Ada" }]);
     const peopleRead = fake.ops.filter(op => op.table === "users").at(-1);
     expect(peopleRead?.where?.params).toEqual(expect.arrayContaining([42]));
     expect(peopleRead?.fields).toEqual(["id", "name"]);
   });
 
-  it("should return no workflow, history or names for an exception never governed", async () => {
+  it("should keep earlier attempts' evidence readable once the next attempt starts", async () => {
+    // Greptile #194: history was read for the latest attempt only.
+    const attempt2 = { ...workflowRow, id: 92, attemptNumber: 2, startedByUserId: 71, approvedByUserId: null, escalatedByUserId: null, closedByUserId: null };
+    const attempt1 = { ...attempt2, id: 91, attemptNumber: 1, status: "closed" };
+    const events = [
+      { id: 7, workflowId: 92, eventType: "started", actorUserId: 71 },
+      { id: 5, workflowId: 91, eventType: "decision_approved", actorUserId: 72, note: "First approval" },
+    ];
+    const fake = scripted({ workflow: [attempt2, attempt1], events });
+
+    const view = await getExceptionWorkflow(42, 5);
+
+    expect(view.attempts.map(attempt => attempt.attemptNumber)).toEqual([2, 1]);
+    expect(view.history.map(event => [event.note ?? event.eventType, event.attemptNumber])).toEqual([
+      ["First approval", 1],
+      ["started", 2],
+    ]);
+    const historyRead = fake.ops.find(op => op.table === "exception_workflow_events");
+    expect(historyRead?.where?.sql).toMatch(/`workflowId` in \(\?, \?\)/);
+    expect(historyRead?.where?.params).toEqual([42, 92, 91]);
+  });
+
+  it("should return no workflow, attempts, history or names for an exception never governed", async () => {
     scripted({ workflow: [] });
-    await expect(getExceptionWorkflow(42, 5)).resolves.toEqual({ exceptionStatus: "in_review", workflow: null, history: [], people: [] });
+    await expect(getExceptionWorkflow(42, 5)).resolves.toEqual({
+      exceptionStatus: "in_review", workflow: null, attempts: [], history: [], people: [],
+    });
   });
 
   it("should answer another tenant's exception as not found", async () => {

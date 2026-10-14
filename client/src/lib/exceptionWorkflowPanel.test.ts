@@ -43,7 +43,7 @@ const workflow = (overrides: Partial<Workflow> = {}): Workflow =>
 function state(view: Partial<View> | null, overrides: Partial<ExceptionWorkflowState> = {}): ExceptionWorkflowState {
   const noop = vi.fn();
   return {
-    view: view === null ? null : ({ exceptionStatus: "in_review", workflow: null, history: [], people: [], ...view } as View),
+    view: view === null ? null : ({ exceptionStatus: "in_review", workflow: null, attempts: [], history: [], people: [], ...view } as View),
     isLoading: false,
     owners: [{ id: 8, name: "Ngozi", email: "ngozi@example.com", role: "operations" }],
     ownersLoading: false,
@@ -63,6 +63,24 @@ function state(view: Partial<View> | null, overrides: Partial<ExceptionWorkflowS
   } as ExceptionWorkflowState;
 }
 
+type HistoryEvent = View["history"][number];
+let nextEventId = 1;
+const event = (overrides: Partial<HistoryEvent> = {}): HistoryEvent => ({
+  id: nextEventId++,
+  eventType: "decision_recorded",
+  actorUserId: 71,
+  note: null,
+  decisionEvidenceReference: null,
+  ownerUserId: null,
+  dueAt: null,
+  outcome: null,
+  createdAt: new Date("2026-10-14T09:00:00.000Z"),
+  attemptNumber: 1,
+  ...overrides,
+});
+const attempt = (attemptNumber: number) =>
+  ({ id: 90 + attemptNumber, attemptNumber, status: "closed", approvalRequired: true, finalOutcome: "resolved", startedAt: new Date(), closedAt: new Date() }) as View["attempts"][number];
+
 const render = (s: ExceptionWorkflowState, canManage = true) =>
   renderToStaticMarkup(createElement(ExceptionWorkflowPanel, { state: s, canManage }));
 
@@ -73,7 +91,7 @@ describe("when the viewer may not change workflows", () => {
     const html = render(
       state({
         workflow: workflow({ decisionEvidenceReference: "CASE-1" }),
-        history: [{ id: 1, eventType: "started", actorUserId: 71, note: null, decisionEvidenceReference: null, ownerUserId: 8, dueAt: null, outcome: null, createdAt: new Date() }],
+        history: [event({ eventType: "started", ownerUserId: 8 })],
         people: [{ id: 8, name: "Ngozi" }, { id: 71, name: "Ada" }],
       }),
       false
@@ -149,5 +167,48 @@ describe("when the workflow is still loading", () => {
     const html = render(state(null, { isLoading: true }));
     expect(html).toContain("Loading governed workflow");
     expect(html).not.toContain("Start governed workflow");
+  });
+});
+
+describe("when the history records an assignment", () => {
+  it("should show who received the case and the deadline they were given", () => {
+    const html = render(
+      state({
+        workflow: workflow(),
+        attempts: [attempt(1)],
+        history: [event({ eventType: "reassigned", ownerUserId: 9, dueAt: new Date("2026-10-20T12:00:00.000Z") })],
+        people: [{ id: 9, name: "Tunde" }],
+      }),
+      false
+    );
+    expect(html).toContain("Owner or due date changed");
+    expect(html).toContain("Owner: Tunde · Due:");
+  });
+});
+
+describe("when an exception has been reviewed more than once", () => {
+  it("should keep the earlier review's evidence, headed by attempt", () => {
+    const html = render(
+      state({
+        exceptionStatus: "in_review",
+        workflow: workflow({ id: 92, attemptNumber: 2 }),
+        attempts: [attempt(2), attempt(1)],
+        history: [
+          event({ eventType: "decision_approved", note: "First approval", attemptNumber: 1 }),
+          event({ eventType: "started", ownerUserId: 8, attemptNumber: 2 }),
+        ],
+      })
+    );
+    expect(html).toContain("Attempt 1");
+    expect(html).toContain("First approval");
+    expect(html.indexOf(">Attempt 1<")).toBeLessThan(html.indexOf(">Attempt 2<"));
+  });
+});
+
+describe("when a manager views a closed review", () => {
+  it("should still show its owner and deadline", () => {
+    const html = render(state({ exceptionStatus: "resolved", workflow: workflow({ status: "closed" }), people: [{ id: 8, name: "Ngozi" }] }));
+    expect(html).toContain("Owner: Ngozi");
+    expect(html).toContain("This governed workflow is closed");
   });
 });

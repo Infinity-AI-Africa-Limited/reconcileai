@@ -21,6 +21,7 @@ import {
   fromDateTimeLocalValue,
   patchExceptionInList,
   toDateTimeLocalValue,
+  workflowFormKey,
 } from "./exceptionWorkflowPresentation";
 
 describe("when deciding who may change a workflow", () => {
@@ -183,5 +184,20 @@ describe("when statuses and steps are labelled", () => {
     expect(exceptionWorkflowStatusLabel("decision_submitted")).toBe("decision submitted");
     expect(exceptionWorkflowEventLabel("decision_approved")).toBe("Decision approved");
     expect(exceptionWorkflowEventLabel("something_new")).toBe("something new");
+  });
+});
+
+describe("when the workflow form decides whether to refill", () => {
+  it("should not refill on a stage change, which would wipe a decision being drafted", () => {
+    // Greptile #194: an optimistic escalation changed the key and overwrote the draft.
+    const active = { id: 91, status: "active" };
+    const escalated = { id: 91, status: "escalated" };
+    expect(workflowFormKey(5, escalated)).toBe(workflowFormKey(5, active));
+  });
+
+  it("should refill for another exception or another attempt", () => {
+    expect(workflowFormKey(5, { id: 91 })).not.toBe(workflowFormKey(6, { id: 91 }));
+    expect(workflowFormKey(5, { id: 91 })).not.toBe(workflowFormKey(5, { id: 92 }));
+    expect(workflowFormKey(5, null)).not.toBe(workflowFormKey(5, { id: 91 }));
   });
 });

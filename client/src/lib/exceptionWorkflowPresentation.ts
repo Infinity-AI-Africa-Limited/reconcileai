@@ -52,6 +52,15 @@ export function defaultWorkflowDueAt(now: Date): Date {
   return due;
 }
 
+/**
+ * When the workflow form refills from the server: a different exception or a
+ * different attempt. NOT a change of stage — an escalation (even an optimistic
+ * one that then rolls back) must not overwrite the decision being drafted.
+ */
+export function workflowFormKey(exceptionId: number | null, workflow: { id: number } | null | undefined): string {
+  return `${exceptionId ?? "none"}:${workflow?.id ?? "none"}`;
+}
+
 /** A thrown value's message for a toast, or the fallback when it carries none. */
 export function errorMessageOf(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message;

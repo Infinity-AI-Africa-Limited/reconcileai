@@ -61,6 +61,7 @@ export function ExceptionWorkflowPanel({ state, canManage }: { state: ExceptionW
           </span>
         ) : null}
       </div>
+      {workflow ? <WorkflowFacts view={view} workflow={workflow} /> : null}
       {canStart ? (
         <StartControls state={state} previousAttempt={workflow?.attemptNumber ?? null} />
       ) : workflow && workflow.status !== "closed" ? (
@@ -183,16 +184,28 @@ function WorkflowFacts({ view, workflow }: { view: View; workflow: Workflow }) {
   );
 }
 
+/**
+ * Every step of every attempt, oldest first, with a heading where an attempt
+ * begins — a reopened case's earlier reviews stay readable. Assignment steps
+ * show who received the case and the deadline they were given.
+ */
 function WorkflowHistory({ view }: { view: View }) {
   if (view.history.length === 0) return null;
+  const severalAttempts = view.attempts.length > 1;
   return (
     <div className="border-t pt-2">
       <p className="text-xs font-medium mb-1">History</p>
       <ol className="space-y-1">
-        {view.history.map(event => (
+        {view.history.map((event, index) => (
           <li key={event.id} className="text-xs text-muted-foreground">
+            {severalAttempts && event.attemptNumber !== view.history[index - 1]?.attemptNumber ? (
+              <span className="block font-semibold text-foreground pt-1">Attempt {event.attemptNumber}</span>
+            ) : null}
             <span className="font-medium text-foreground">{exceptionWorkflowEventLabel(event.eventType)}</span>
             {" · "}{personName(view, event.actorUserId)}{" · "}{when(event.createdAt)}
+            {event.ownerUserId !== null ? (
+              <span className="block pl-2">Owner: {personName(view, event.ownerUserId)} · Due: {when(event.dueAt)}</span>
+            ) : null}
             {event.note ? <span className="block whitespace-pre-wrap pl-2">{event.note}</span> : null}
             {event.decisionEvidenceReference ? <span className="block pl-2">Evidence: {event.decisionEvidenceReference}</span> : null}
           </li>
