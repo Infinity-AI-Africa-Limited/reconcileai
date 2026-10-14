@@ -612,6 +612,10 @@ export const exceptionWorkflows = mysqlTable("exception_workflows", {
   attemptNumber: int("attemptNumber").notNull(),
   ownerUserId: int("ownerUserId").notNull(),
   dueAt: timestamp("dueAt").notNull(),
+  // Set once by the application-owned due monitor. Its presence means that a
+  // late closure needs explicit handling; it is never inferred from a page
+  // render or a browser clock.
+  overdueAt: timestamp("overdueAt"),
   approvalRequired: boolean("approvalRequired").default(false).notNull(),
   status: mysqlEnum("status", [
     "active",
@@ -634,6 +638,9 @@ export const exceptionWorkflows = mysqlTable("exception_workflows", {
   approvedByUserId: int("approvedByUserId"),
   approvedAt: timestamp("approvedAt"),
   approvalNote: text("approvalNote"),
+  // A separate, explicit human reason is required when `overdueAt` exists;
+  // regular resolution notes explain the outcome, not why closure is late.
+  lateResolutionReason: text("lateResolutionReason"),
   closedByUserId: int("closedByUserId"),
   closedAt: timestamp("closedAt"),
   finalOutcome: mysqlEnum("finalOutcome", ["resolved", "dismissed"]),
@@ -643,6 +650,7 @@ export const exceptionWorkflows = mysqlTable("exception_workflows", {
 }, (table) => [
   uniqueIndex("uq_exception_workflows_org_exception_attempt").on(table.organizationId, table.exceptionId, table.attemptNumber),
   index("idx_exception_workflows_org_status_due").on(table.organizationId, table.status, table.dueAt),
+  index("idx_exception_workflows_due_monitor").on(table.overdueAt, table.dueAt, table.id),
   index("idx_exception_workflows_owner").on(table.organizationId, table.ownerUserId, table.status),
 ]);
 
@@ -662,14 +670,20 @@ export const exceptionWorkflowEvents = mysqlTable("exception_workflow_events", {
     "started",
     "reassigned",
     "escalated",
+    "due_date_elapsed",
     "decision_recorded",
     "decision_approved",
     "closed",
   ]).notNull(),
-  actorUserId: int("actorUserId").notNull(),
+  // Null is the named system actor for an automated control event; it must not
+  // be falsely attributed to the workflow owner or an unrelated administrator.
+  actorUserId: int("actorUserId"),
   // The narrative of this step: rationale, escalation reason, approval or closure notes.
   note: text("note"),
   decisionEvidenceReference: varchar("decisionEvidenceReference", { length: 500 }),
+  // Keeps the exceptional late-close explanation with this immutable event,
+  // even after a later reopened attempt becomes the current workflow row.
+  lateResolutionReason: text("lateResolutionReason"),
   ownerUserId: int("ownerUserId"),
   dueAt: timestamp("dueAt"),
   outcome: mysqlEnum("outcome", ["resolved", "dismissed"]),

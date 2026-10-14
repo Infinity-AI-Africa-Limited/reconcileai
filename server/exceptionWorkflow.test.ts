@@ -29,6 +29,8 @@ const approver = { id: 72, role: "operations", organizationId: 42 };
 const client = { ip: "127.0.0.1", ua: "exception-workflow-test" };
 const NOW = new Date("2026-10-14T12:00:00.000Z");
 const dueAt = new Date("2026-10-15T12:00:00.000Z");
+/** A deadline that passed an hour before NOW and that nothing has recorded yet. */
+const MISSED = new Date("2026-10-14T11:00:00.000Z");
 const openException = { id: 5, status: "in_review" };
 const workflowRow = {
   id: 91,
@@ -37,6 +39,7 @@ const workflowRow = {
   attemptNumber: 1,
   ownerUserId: 8,
   dueAt,
+  overdueAt: null as Date | null,
   approvalRequired: true,
   status: "active" as const,
   decisionSubmittedByUserId: null as number | null,
@@ -163,6 +166,31 @@ describe("when a workflow's owner or due date changes", () => {
     );
   });
 
+  it("should record a deadline that has already passed before moving it, so a later due date cannot erase it", async () => {
+    // Between monitor passes, a reassignment used to move an elapsed deadline
+    // into the future unrecorded. The monitor then never saw it, and the case
+    // closed with no overdue evidence, no renewed approval and no late reason.
+    const fake = scripted({ workflow: [{ ...workflowRow, status: "approved", dueAt: MISSED, decisionSubmittedByUserId: 71 }] });
+
+    await updateExceptionWorkflowOwnership({ ...base, actor, ownerUserId: 9, dueAt });
+
+    expect(lockOrder(fake.ops)).toEqual(["exceptions", "exception_workflows"]);
+    const [recorded, reassigned] = fake.writes("update", "exception_workflows");
+    expect(rowOf(recorded)).toMatchObject({ status: "decision_submitted", overdueAt: NOW, approvedByUserId: null });
+    // The move is guarded on the status the record left, not the one first read:
+    // guarded on "approved" it would match no row and change nothing.
+    expect(rowOf(reassigned)).toEqual({ ownerUserId: 9, dueAt });
+    expect(reassigned.where?.params).toEqual([91, 42, "decision_submitted"]);
+    expect(fake.writes("insert", "exception_workflow_events").map(op => rowOf(op))).toEqual([
+      expect.objectContaining({ eventType: "due_date_elapsed", actorUserId: null, ownerUserId: 8, dueAt: MISSED }),
+      expect.objectContaining({ eventType: "reassigned", actorUserId: 71, ownerUserId: 9, dueAt }),
+    ]);
+    expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({
+      action: "exception_workflow_reassigned",
+      details: expect.objectContaining({ previousDueAt: MISSED.toISOString(), dueAt: dueAt.toISOString(), overdue: true }),
+    }));
+  });
+
   it("should refuse a closed workflow", async () => {
     const fake = scripted({ workflow: [{ ...workflowRow, status: "closed" }] });
     expect(await failureOf(() => updateExceptionWorkflowOwnership({ ...base, actor, ownerUserId: 9, dueAt }))).toMatchObject({
@@ -270,6 +298,18 @@ describe("when a decision is approved", () => {
     expect(rowOf(fake.writes("insert", "exception_workflow_events")[0])).toMatchObject({ eventType: "decision_approved", note: "Checked CASE-1", actorUserId: 72 });
   });
 
+  it("should record a missed deadline first, so an approval given after it stands", async () => {
+    // Recorded later by the monitor instead, the deadline would withdraw this
+    // approval as though it had been given before it.
+    const fake = scripted({ workflow: [{ ...submitted, dueAt: MISSED }] });
+    await expect(approveExceptionWorkflowDecision({ ...base, actor: approver, approvalNote: "Checked after the deadline" })).resolves.toEqual({ id: 91, status: "approved" });
+
+    const [recorded, approved] = fake.writes("update", "exception_workflows");
+    expect(rowOf(recorded)).toMatchObject({ status: "decision_submitted", overdueAt: NOW });
+    expect(rowOf(approved)).toMatchObject({ status: "approved", approvedByUserId: 72 });
+    expect(fake.writes("insert", "exception_workflow_events").map(op => rowOf(op)?.eventType)).toEqual(["due_date_elapsed", "decision_approved"]);
+  });
+
   it("should refuse the person who submitted the decision", async () => {
     const fake = scripted({ workflow: [submitted] });
     expect(await failureOf(() => approveExceptionWorkflowDecision({ ...base, actor, approvalNote: "Self" }))).toMatchObject({ code: "FORBIDDEN" });
@@ -315,6 +355,109 @@ describe("when a governed workflow closes", () => {
     expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
       code: "PRECONDITION_FAILED", message: expect.stringMatching(/already closed/),
     });
+  });
+
+  it("should record a missed deadline in its own commit, then refuse a close whose approval predates it", async () => {
+    // The approval was given before the deadline; recording the deadline
+    // withdraws it. The record must survive the refusal, so the workspace's
+    // refetch shows why the close was refused rather than the old approval.
+    const unrecorded = { ...workflowRow, status: "approved" as const, dueAt: MISSED, decisionSubmittedByUserId: 71 };
+    const recorded = { ...unrecorded, status: "decision_submitted" as const, overdueAt: NOW };
+    const fake = scriptedDb({
+      select: { exception_workflows: [[unrecorded], [recorded]] },
+      standing: { exceptions: [openException] },
+    });
+    getDbMock.mockResolvedValue(fake.db);
+
+    expect(await failureOf(() => resolveExceptionWorkflow({
+      ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "Counterparty answered late",
+    }))).toMatchObject({
+      code: "PRECONDITION_FAILED", message: expect.stringMatching(/missed its due date.*separate human approval given since/i),
+    });
+
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({
+      status: "decision_submitted", overdueAt: NOW, approvedByUserId: null, approvedAt: null, approvalNote: null,
+    });
+    expect(fake.writes("insert", "exception_workflow_events").map(op => rowOf(op)?.eventType)).toEqual(["due_date_elapsed"]);
+    // Nothing of the close itself.
+    expect(fake.writes("update", "exceptions").map(op => rowOf(op))).toEqual([{ status: "escalated" }]);
+    expect(fake.writes("update", "exception_workflows")).toHaveLength(1);
+    expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({
+      action: "exception_workflow_due_date_elapsed", userId: null,
+      details: expect.objectContaining({ trigger: "workflow_write", approvalInvalidated: true }),
+    }));
+  });
+
+  it("should record and close a late case in one request when its reason is given and no approval is needed", async () => {
+    const unrecorded = { ...workflowRow, approvalRequired: false, status: "decision_recorded" as const, dueAt: MISSED, decisionSubmittedByUserId: 71 };
+    const fake = scriptedDb({
+      select: { exception_workflows: [[unrecorded], [{ ...unrecorded, status: "decision_recorded" as const, overdueAt: NOW }]] },
+      standing: { exceptions: [openException] },
+    });
+    getDbMock.mockResolvedValue(fake.db);
+
+    await expect(resolveExceptionWorkflow({
+      ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "  Bank statement arrived late  ",
+    })).resolves.toEqual({ id: 91, status: "closed", outcome: "resolved" });
+
+    expect(fake.writes("insert", "exception_workflow_events").map(op => rowOf(op)?.eventType)).toEqual(["due_date_elapsed", "closed"]);
+    expect(rowOf(fake.writes("insert", "exception_workflow_events")[1])).toMatchObject({ lateResolutionReason: "Bank statement arrived late" });
+    expect(rowOf(fake.writes("update", "exception_workflows")[1])).toMatchObject({ status: "closed", lateResolutionReason: "Bank statement arrived late" });
+  });
+
+  it("should not keep a late-resolution reason sent for a close that was on time", async () => {
+    // It would read as evidence of a lateness the server never recorded.
+    const fake = scripted({ workflow: [{ ...workflowRow, status: "approved", decisionSubmittedByUserId: 71 }] });
+    await resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "Browser clock ran fast" });
+
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).not.toHaveProperty("lateResolutionReason");
+    expect(rowOf(fake.writes("insert", "exception_workflow_events")[0])).toMatchObject({ eventType: "closed", lateResolutionReason: null });
+    expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ overdue: false }) }));
+  });
+
+  it("should fail closed when an elapsed deadline could not be recorded", async () => {
+    // Under the locks the record cannot lose a race, but if it ever made no
+    // row change the close must not go ahead as though the case were on time.
+    const fake = scriptedDb({
+      standing: { exceptions: [openException], exception_workflows: [{ ...workflowRow, status: "approved", dueAt: MISSED }] },
+      update: { exception_workflows: [0, 0] },
+    });
+    getDbMock.mockResolvedValue(fake.db);
+
+    expect(await failureOf(() => resolveExceptionWorkflow({
+      ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "r",
+    }))).toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/could not be recorded/) });
+    expect(fake.writes("update", "exceptions")).toEqual([]);
+    expect(fake.writes("insert", "exception_workflow_events")).toEqual([]);
+  });
+
+  it("should require and persist a separate late-resolution reason once overdue evidence exists", async () => {
+    const overdue = { ...workflowRow, status: "approved" as const, overdueAt: new Date("2026-10-14T12:00:00.000Z") };
+    const refused = scripted({ workflow: [overdue] });
+    expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
+      code: "PRECONDITION_FAILED", message: expect.stringMatching(/late-resolution reason/i),
+    });
+    expect(noWrites(refused)).toEqual([]);
+
+    const accepted = scripted({ workflow: [overdue] });
+    await expect(resolveExceptionWorkflow({
+      ...base,
+      actor: approver,
+      outcome: "resolved",
+      resolutionNotes: "n",
+      lateResolutionReason: "Approved after customer evidence review",
+    })).resolves.toEqual({ id: 91, status: "closed", outcome: "resolved" });
+    expect(rowOf(accepted.writes("update", "exception_workflows")[0])).toMatchObject({
+      status: "closed", lateResolutionReason: "Approved after customer evidence review",
+    });
+    expect(rowOf(accepted.writes("insert", "exception_workflow_events")[0])).toMatchObject({
+      eventType: "closed", lateResolutionReason: "Approved after customer evidence review",
+    });
+    // Narrative stays in the protected workflow row, not audit metadata.
+    expect(JSON.stringify(auditMock.mock.calls)).not.toContain("Approved after customer evidence");
+    expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({
+      details: expect.objectContaining({ overdue: true, lateResolutionReasonPresent: true }),
+    }));
   });
 });
 
@@ -415,5 +558,100 @@ describe("when a workflow is read", () => {
   it("should answer another tenant's exception as not found", async () => {
     scripted({ exception: [] });
     expect(await failureOf(() => getExceptionWorkflow(42, 5))).toEqual({ code: "NOT_FOUND", message: "Exception not found" });
+  });
+});
+
+describe("when any write on an open attempt finds its deadline passed and unrecorded", () => {
+  // The class, not one instance: every write on an open attempt goes through
+  // the same lock-and-record step, so none can act on a missed deadline that
+  // is not yet on record. A new write that skipped it would fail here.
+  const late = { ...workflowRow, dueAt: MISSED };
+  it.each([
+    ["a reassignment", { ...late }, () => updateExceptionWorkflowOwnership({ ...base, actor, ownerUserId: 9, dueAt })],
+    ["an escalation", { ...late }, () => escalateExceptionWorkflow({ ...base, actor, note: "Chasing the bank" })],
+    ["a decision", { ...late }, () => recordExceptionWorkflowDecision({ ...base, actor, rationale: "r", evidenceReference: "e" })],
+    [
+      "an approval",
+      { ...late, status: "decision_submitted" as const, decisionSubmittedByUserId: 71 },
+      () => approveExceptionWorkflowDecision({ ...base, actor: approver, approvalNote: "n" }),
+    ],
+    [
+      "a close",
+      { ...late, approvalRequired: false, status: "decision_recorded" as const, decisionSubmittedByUserId: 71 },
+      () => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "r" }),
+    ],
+  ])("should record the missed deadline before %s acts", async (_label, workflow, write) => {
+    const fake = scripted({ workflow: [workflow] });
+
+    await write();
+
+    const events = fake.writes("insert", "exception_workflow_events").map(op => rowOf(op)?.eventType);
+    expect(events[0]).toBe("due_date_elapsed");
+    expect(events.length).toBeGreaterThan(1);
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({ overdueAt: NOW });
+  });
+});
+
+/** Still ahead when a write is called; passed by the time it holds its locks. */
+const DUE_DURING_WAIT = new Date("2026-10-14T12:00:30.000Z");
+const LOCKS_GRANTED = new Date("2026-10-14T12:01:00.000Z");
+
+/**
+ * A database whose workflow lock read returns only at LOCKS_GRANTED — the write
+ * waited behind another for its locks, and the deadline passed meanwhile.
+ */
+function locksGrantedAfterDeadline(row: Record<string, unknown>) {
+  const lockReads: unknown[][] = [[row], [row]];
+  const take = lockReads.shift.bind(lockReads);
+  lockReads.shift = () => {
+    vi.setSystemTime(LOCKS_GRANTED);
+    return take();
+  };
+  const fake = scriptedDb({
+    select: { exception_workflows: lockReads },
+    standing: { exceptions: [openException], users: [{ id: 8 }] },
+  });
+  getDbMock.mockResolvedValue(fake.db);
+  return fake;
+}
+
+describe("when the deadline passes while a write waits for its locks", () => {
+  // The clock is read with the locks held. Read before them, a write that
+  // queued behind another would judge the deadline as of before its wait.
+  it("should not close as on time a case that went overdue while the close waited", async () => {
+    const fake = locksGrantedAfterDeadline({ ...workflowRow, status: "approved", dueAt: DUE_DURING_WAIT, decisionSubmittedByUserId: 71 });
+
+    expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
+      code: "PRECONDITION_FAILED",
+    });
+
+    expect(fake.writes("update", "exceptions").map(op => rowOf(op)?.status)).not.toContain("resolved");
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({
+      status: "decision_submitted", overdueAt: LOCKS_GRANTED, approvedByUserId: null,
+    });
+  });
+
+  const late = { ...workflowRow, dueAt: DUE_DURING_WAIT };
+  it.each([
+    ["a reassignment", { ...late }, () => updateExceptionWorkflowOwnership({ ...base, actor, ownerUserId: 9, dueAt })],
+    ["an escalation", { ...late }, () => escalateExceptionWorkflow({ ...base, actor, note: "Chasing the bank" })],
+    ["a decision", { ...late }, () => recordExceptionWorkflowDecision({ ...base, actor, rationale: "r", evidenceReference: "e" })],
+    [
+      "an approval",
+      { ...late, status: "decision_submitted" as const, decisionSubmittedByUserId: 71 },
+      () => approveExceptionWorkflowDecision({ ...base, actor: approver, approvalNote: "n" }),
+    ],
+    [
+      "a close",
+      { ...late, approvalRequired: false, status: "decision_recorded" as const, decisionSubmittedByUserId: 71 },
+      () => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "r" }),
+    ],
+  ])("should judge the deadline at the time %s holds its locks", async (_label, workflow, write) => {
+    const fake = locksGrantedAfterDeadline(workflow);
+
+    await write();
+
+    expect(fake.writes("insert", "exception_workflow_events").map(op => rowOf(op)?.eventType)[0]).toBe("due_date_elapsed");
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({ overdueAt: LOCKS_GRANTED });
   });
 });

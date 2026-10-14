@@ -20,6 +20,7 @@ const workflow = (overrides: Partial<Workflow> = {}): Workflow =>
     attemptNumber: 1,
     ownerUserId: 8,
     dueAt: new Date("2026-10-15T12:00:00.000Z"),
+    overdueAt: null,
     approvalRequired: true,
     status: "active",
     decisionRationale: null,
@@ -32,6 +33,7 @@ const workflow = (overrides: Partial<Workflow> = {}): Workflow =>
     approvedByUserId: null,
     approvedAt: null,
     approvalNote: null,
+    lateResolutionReason: null,
     closedByUserId: null,
     closedAt: null,
     finalOutcome: null,
@@ -71,6 +73,7 @@ const event = (overrides: Partial<HistoryEvent> = {}): HistoryEvent => ({
   actorUserId: 71,
   note: null,
   decisionEvidenceReference: null,
+  lateResolutionReason: null,
   ownerUserId: null,
   dueAt: null,
   outcome: null,
@@ -210,5 +213,18 @@ describe("when a manager views a closed review", () => {
     const html = render(state({ exceptionStatus: "resolved", workflow: workflow({ status: "closed" }), people: [{ id: 8, name: "Ngozi" }] }));
     expect(html).toContain("Owner: Ngozi");
     expect(html).toContain("This governed workflow is closed");
+  });
+});
+
+describe("when a system control records an elapsed due date", () => {
+  it("should name the system control and make the overdue state visible", () => {
+    const html = render(state({
+      workflow: workflow({ overdueAt: new Date("2026-10-16T12:00:00.000Z") }),
+      history: [event({ eventType: "due_date_elapsed", actorUserId: null })],
+    }), false);
+    expect(html).toContain("Overdue since:");
+    expect(html).toContain("System escalation recorded");
+    expect(html).toContain("Due date elapsed — system escalation recorded");
+    expect(html).toContain("System control");
   });
 });

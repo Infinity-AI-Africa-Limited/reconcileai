@@ -1,18 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { toast } from "sonner";
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import type { AppRouter } from "../../../server/routers";
-import { statusAfterEscalation } from "@shared/exceptionWorkflowRules";
+import { isExceptionWorkflowOverdue, statusAfterEscalation } from "@shared/exceptionWorkflowRules";
 import { trpc } from "@/lib/trpc";
+import { useKeyedDraft } from "@/hooks/useKeyedDraft";
 import {
   clearIfStill,
   closureState,
   defaultWorkflowDueAt,
   errorMessageOf,
   fromDateTimeLocalValue,
+  msUntilDeadlineCheck,
+  overdueClosureNotice,
   patchExceptionInList,
   toDateTimeLocalValue,
   workflowFormKey,
+  workflowRefreshInterval,
 } from "@/lib/exceptionWorkflowPresentation";
 
 export type ExceptionListInput = inferRouterInputs<AppRouter>["exceptions"]["list"];
@@ -49,6 +53,10 @@ export function useExceptionWorkflow(params: {
 
   const workflowQuery = trpc.exceptionWorkflow.get.useQuery(viewInput(exceptionId ?? 0), {
     enabled: exceptionId !== null,
+    // An open attempt changes without this viewer acting: the due-date control
+    // records a missed deadline and may withdraw an approval. Re-read it, so the
+    // close form asks for what a late close needs before the operator tries.
+    refetchInterval: query => workflowRefreshInterval(query.state.data),
   });
   const ownersQuery = trpc.exceptionWorkflow.owners.useQuery(scope, {
     enabled: exceptionId !== null && canManage,
@@ -132,6 +140,11 @@ export function useExceptionWorkflow(params: {
   // not a draft for the next one; each also clears after its own action.
   const workflow = workflowQuery.data?.workflow ?? null;
   const prefillKey = workflowFormKey(exceptionId, workflow);
+  // Filed under this case AND attempt rather than reset when they change: a
+  // reason drafted for another case, saved here, would become this case's
+  // permanent closure evidence — so it must be unreadable here, not merely
+  // cleared on the render after.
+  const [lateResolutionReason, setLateResolutionReason] = useKeyedDraft(prefillKey);
   useEffect(() => {
     if (exceptionId === null) return;
     if (workflow && workflow.status !== "closed") {
@@ -150,6 +163,30 @@ export function useExceptionWorkflow(params: {
     setEscalationNote("");
     setApprovalNote("");
   }, [prefillKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-render, and re-read the workflow, just after an open attempt's deadline
+  // passes. Overdue state is judged against the clock at render, so without a
+  // render at the deadline a form left open would go on offering an on-time
+  // close the server will refuse. Re-armed after each wait, because one timer
+  // cannot span a deadline weeks away.
+  const [deadlineChecks, recheckDeadline] = useReducer((count: number) => count + 1, 0);
+  const deadlineWait = msUntilDeadlineCheck(workflow, Date.now());
+  // Primitives only: the view's dates are new objects on every refetch.
+  const deadlineKey = workflow
+    ? `${workflow.id}:${workflow.status}:${new Date(workflow.dueAt).getTime()}:${workflow.overdueAt === null ? "open" : "recorded"}`
+    : "none";
+  useEffect(() => {
+    if (deadlineWait === null || exceptionId === null) return;
+    const timer = setTimeout(() => {
+      recheckDeadline();
+      void refreshView(exceptionId);
+    }, deadlineWait);
+    return () => clearTimeout(timer);
+  }, [exceptionId, deadlineKey, deadlineChecks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Judged against the clock at render; the deadline timer above re-renders at the deadline.
+  const now = new Date();
+  const overdue = isExceptionWorkflowOverdue(workflow, now);
 
   const run = async (action: () => Promise<unknown>, success: string, failure: string): Promise<boolean> => {
     try {
@@ -223,17 +260,32 @@ export function useExceptionWorkflow(params: {
     close: async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
       if (exceptionId === null) return;
       if (!resolutionNotes.trim()) return void toast.error("Record closure notes before closing the workflow");
+      const lateReason = lateResolutionReason.trim();
+      if (overdue && !lateReason) {
+        return void toast.error("Record the late-resolution reason before closing this overdue workflow");
+      }
       const closed = await run(
-        () => closeMutation.mutateAsync({ exceptionId, ...scope, outcome, resolutionNotes }),
+        // Sent whenever one was written; the server keeps it only for a close it
+        // has recorded as late.
+        () => closeMutation.mutateAsync({
+          exceptionId,
+          ...scope,
+          outcome,
+          resolutionNotes,
+          ...(lateReason ? { lateResolutionReason: lateReason } : {}),
+        }),
         `Exception ${outcome} through its governed workflow`,
         "The governed workflow is not ready to close"
       );
-      if (closed) onClosed();
+      if (closed) {
+        setLateResolutionReason(clearIfStill(lateResolutionReason));
+        onClosed();
+      }
     },
   };
 
   // The decisions the page's own buttons follow, made here so the page only renders them.
-  const closure = closureState(workflowQuery.data);
+  const closure = closureState(workflowQuery.data, now);
   const workflowInProgress = workflow !== null && workflow.status !== "closed";
   /** Resolve or dismiss by whichever path this exception allows; a blocked one says why. */
   const closeException = async (outcome: "resolved" | "dismissed", resolutionNotes: string) => {
@@ -246,6 +298,8 @@ export function useExceptionWorkflow(params: {
     closure,
     /** A workflow in progress owns the case: it does not also go to the review queue. */
     moveToReviewBlocked: workflowInProgress,
+    /** A missed deadline: the close form asks for the late-resolution reason, and says why. */
+    overdue: { isOverdue: overdue, notice: overdueClosureNotice(workflow, now) },
     closeException,
     view: workflowQuery.data ?? null,
     isLoading: exceptionId !== null && workflowQuery.isLoading,
@@ -260,6 +314,7 @@ export function useExceptionWorkflow(params: {
       evidenceReference, setEvidenceReference,
       escalationNote, setEscalationNote,
       approvalNote, setApprovalNote,
+      lateResolutionReason, setLateResolutionReason,
     },
     pending: {
       start: startMutation.isPending,

@@ -116,6 +116,7 @@ export const exceptionWorkflowRouter = router({
       exceptionId: input.exceptionId,
       outcome: input.outcome,
       resolutionNotes: input.resolutionNotes,
+      lateResolutionReason: input.lateResolutionReason,
       client: getClientInfo(ctx),
     });
     // After the commit: the same learning and webhook as any other closure.

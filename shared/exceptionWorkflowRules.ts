@@ -68,3 +68,33 @@ export function statusAfterEscalation(status: ExceptionWorkflowStatus): Exceptio
 export function statusAfterDecision(approvalRequired: boolean): ExceptionWorkflowStatus {
   return approvalRequired ? "decision_submitted" : "decision_recorded";
 }
+
+/**
+ * What an attempt becomes when its missed deadline is recorded. The decision
+ * stays; an approval does not. Every governed write records an elapsed deadline
+ * before it acts, so an attempt still `approved` when its deadline is recorded
+ * was approved BEFORE the deadline, and that approval no longer vouches for a
+ * case closing late: a different person must approve again.
+ */
+export function statusAfterDeadline(status: ExceptionWorkflowStatus, approvalRequired: boolean): ExceptionWorkflowStatus {
+  if (approvalRequired && status === "approved") return "decision_submitted";
+  return statusAfterEscalation(status);
+}
+
+/**
+ * Whether an open attempt has missed its deadline — from the moment its due
+ * date passes, not only once the server's due-date control has recorded it.
+ *
+ * The server's record (`overdueAt`) is the authority, and it is what a close is
+ * checked against. The workspace reads this so it can ask for the late-closure
+ * evidence as the deadline passes, instead of after a refused close.
+ */
+export function isExceptionWorkflowOverdue(
+  workflow: { status: string; dueAt: Date | string; overdueAt: Date | string | null } | null | undefined,
+  now: Date
+): boolean {
+  if (!workflow || workflow.status === "closed") return false;
+  if (workflow.overdueAt != null) return true;
+  const due = new Date(workflow.dueAt).getTime();
+  return Number.isFinite(due) && due <= now.getTime();
+}
