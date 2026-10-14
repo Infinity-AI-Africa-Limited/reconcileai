@@ -1322,9 +1322,10 @@ table is in `GATED_ELSEWHERE` with a reason.
   nothing.
 - **The tenant is the row's, not the request's**: the job's (`runOrganizationId`,
   and on failure the job re-read), the upload batch's (now recorded at creation),
-  the exception's — announced only when `updateException` matched a row, since
-  its WHERE pins the tenant. An id from another tenant changes nothing and
-  announces nothing.
+  the exception's — announced only after the change committed inside that
+  tenant: `updateException` matched a row (its WHERE pins the tenant), or a
+  closure ran `afterExceptionClosed` (both closure paths lock the case by tenant
+  and id). An id from another tenant changes nothing and announces nothing.
 - **`webhookDelivery.tenancy.test.ts` ratchets it structurally**: every read of
   `webhooks` anywhere in `server/` must name `webhooks.organizationId` in its
   WHERE, and every dispatch must pass a tenant that is not a literal, an

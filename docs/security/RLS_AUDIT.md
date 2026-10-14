@@ -6,7 +6,7 @@
 > columns. This document is the human-readable half; the test is the enforced half.
 > **Both must be updated together when a table is added.**
 
-*Audited: 9 October 2026 · 115 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
+*Audited: 14 October 2026 · 117 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
 
 ## 1. Isolation model
 
@@ -21,11 +21,11 @@ enforced at three layers:
 
 ## 2. Classification summary (see the test for the per-table list)
 
-Measured by `server/rlsAudit.test.ts` on 2026-10-09 (115 tables).
+Measured by `server/rlsAudit.test.ts` on 2026-10-14 (117 tables).
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 33 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 35 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 45 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
 | `derived` | 4 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
@@ -97,7 +97,9 @@ Fixing that encoding without the tenant scope would have made the leak live.
 *Remediation:* dispatch takes a required tenant id (`isTenantId`) and reads only
 that tenant's active webhooks (`activeWebhooksOfTenant`), with an in-memory
 second barrier; every caller passes the tenant of the job, batch or exception
-the event is about; `webhooks.create` records the creator's organisation and
+the event is about (an exception event only after the change committed inside
+that tenant — `updateException` matched a row, or a closure through
+`afterExceptionClosed`, whose two paths lock the case by tenant and id); `webhooks.create` records the creator's organisation and
 refuses an account with none; `webhooks.list` is per organisation and never
 returns the signing secret; upload batches now record their organisation. Rows
 with `organizationId` NULL fail closed (they receive nothing). Enforced by
@@ -144,6 +146,8 @@ justification comment in the classification map and a row in §2/§3 here.
 | `control_source_contracts` | `tenant_required` | Versioned customer control-input contract: source role, delivery route, local cut-off, schema version, control-total requirement, owner and approval reference. It contains no source credential or source-file payload. |
 | `control_batch_manifests` | `tenant_required` | Per-delivery control evidence bound to one source-contract version: expected and received count/value evidence, mapping/policy versions, schema state and duplicate-delivery result. Monetary totals are stored as exact decimal strings; the record is not a transaction ledger. |
 | `control_policies` | `tenant_required` | Immutable tenant-scoped mapping and reconciliation policy registry. It stores a bounded configuration definition, digest, lifecycle state, approval/retirement references, and actor/timestamp evidence; it does not store credentials, raw source rows, or customer identities. |
+| `exception_workflows` | `tenant_required` | Governed material-exception workflow: assigned owner, due date, escalation, bounded decision rationale and approved evidence locator, distinct approval evidence, and closure outcome. It never stores raw source payloads or credentials. |
+| `exception_workflow_events` | `tenant_required` | Append-only history of every governed workflow step (start, reassignment, escalation, decision and its revisions, approval, closure) with its actor, time and narrative, so a revised decision or superseded approval is never lost. Rows are only inserted; reads are scoped to the tenant and workflow. No raw source payloads or credentials. |
 
 ## 8. Shopify public-app connector tables (September 2026, PR #134)
 

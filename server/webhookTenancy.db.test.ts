@@ -358,7 +358,9 @@ describe.runIf(localDatabase)("when two tenants' webhooks meet a real database",
 
     it("should neither change nor announce A's exception when B names its id", async () => {
       const exceptionId = await oneOfAsExceptions();
-      await callers.b.exceptions.resolve({ id: exceptionId, status: "resolved", resolutionNotes: "not mine" });
+      await expect(
+        callers.b.exceptions.resolve({ id: exceptionId, status: "resolved", resolutionNotes: "not mine" }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
       await sleep(STRAGGLER_GRACE_MS);
 
       const [row] = await db.select({ status: exceptions.status }).from(exceptions).where(eq(exceptions.id, exceptionId));

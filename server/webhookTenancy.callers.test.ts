@@ -55,9 +55,19 @@ vi.mock("./routers/shared", async importOriginal => ({
   ...(await importOriginal<typeof import("./routers/shared")>()),
   logAudit: vi.fn(async () => {}),
 }));
-vi.mock("./webhookDelivery", async importOriginal => ({
-  ...(await importOriginal<typeof import("./webhookDelivery")>()),
+// A plain factory, not importOriginal: with importOriginal, a later dynamic
+// import("./webhookDelivery") (exceptionClosureEffects makes one) can resolve to
+// the original module instead of this mock.
+vi.mock("./webhookDelivery", () => ({
   dispatchWebhookEvent: vi.fn(async () => {}),
+  activeWebhooksOfTenant: vi.fn(async () => []),
+  listDeliveries: vi.fn(async () => []),
+  deliveryStats: vi.fn(async () => ({})),
+}));
+vi.mock("./exceptionWorkflow", async importOriginal => ({
+  ...(await importOriginal<typeof import("./exceptionWorkflow")>()),
+  closeExceptionOutsideWorkflow: vi.fn(async () => {}),
+  resolveExceptionWorkflow: vi.fn(async () => ({ status: "resolved" })),
 }));
 vi.mock("./reconciliationQueue", async importOriginal => ({
   ...(await importOriginal<typeof import("./reconciliationQueue")>()),
@@ -74,7 +84,9 @@ vi.mock("./emailReportService", async importOriginal => ({
   checkAndSendAlerts: vi.fn(async () => {}),
 }));
 
+import { TRPCError } from "@trpc/server";
 import * as db from "./db";
+import { closeExceptionOutsideWorkflow, resolveExceptionWorkflow } from "./exceptionWorkflow";
 import { dispatchWebhookEvent } from "./webhookDelivery";
 import { appRouter } from "./routers";
 
@@ -100,6 +112,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   // clearAllMocks keeps implementations; a test that changes one must not leak it.
   vi.mocked(db.updateException).mockResolvedValue(1);
+  // mockReset, not clear: a queued once-rejection one path never consumed must not leak.
+  vi.mocked(closeExceptionOutsideWorkflow).mockReset().mockResolvedValue(undefined as never);
+  vi.mocked(resolveExceptionWorkflow).mockReset().mockResolvedValue({ status: "resolved" } as never);
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -149,7 +164,6 @@ describe("when a file is uploaded", () => {
 
 describe("when an exception changes", () => {
   const actions = [
-    ["resolve", "exception.resolved", (c: ReturnType<typeof caller>) => c.exceptions.resolve({ id: 11, status: "resolved" })],
     ["escalate", "exception.escalated", (c: ReturnType<typeof caller>) => c.exceptions.escalate({ id: 11 })],
     ["moveToReview", "exception.in_review", (c: ReturnType<typeof caller>) => c.exceptions.moveToReview({ id: 11 })],
     ["ageTracker.escalate", "exception.escalated", (c: ReturnType<typeof caller>) => c.ageTracker.escalate({ id: 11 })],
@@ -190,6 +204,45 @@ describe("when an exception changes", () => {
 
     expect(vi.mocked(db.updateException).mock.calls[0][1]).toBe(OTHER_TENANT);
     expect(sent()).toEqual([[OTHER_TENANT, "exception.escalated"]]);
+  });
+});
+
+describe("when an exception is closed", () => {
+  // Both paths commit the close inside one tenant (the case is locked by tenant
+  // and id; another tenant's id is NOT_FOUND), then hand that tenant to
+  // afterExceptionClosed, which announces to it alone.
+  const closes = [
+    ["exceptions.resolve", (c: ReturnType<typeof caller>) => c.exceptions.resolve({ id: 11, status: "resolved" })],
+    [
+      "exceptionWorkflow.resolve",
+      (c: ReturnType<typeof caller>) =>
+        c.exceptionWorkflow.resolve({ exceptionId: 11, outcome: "resolved", resolutionNotes: "Reversed at bank" }),
+    ],
+  ] as const;
+
+  it.each(closes)("%s should announce it to the closing tenant", async (_name, act) => {
+    await act(caller(TENANT));
+    await settle();
+
+    expect(sent()).toEqual([[TENANT, "exception.resolved"]]);
+    expect(dispatched.mock.calls[0][2]).toMatchObject({ exceptionId: 11, status: "resolved" });
+  });
+
+  it.each(closes)("%s should announce nothing when the id is another tenant's", async (_name, act) => {
+    const notFound = new TRPCError({ code: "NOT_FOUND", message: "Exception not found" });
+    vi.mocked(closeExceptionOutsideWorkflow).mockRejectedValueOnce(notFound);
+    vi.mocked(resolveExceptionWorkflow).mockRejectedValueOnce(notFound);
+    await expect(act(caller(TENANT))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await settle();
+
+    expect(dispatched).not.toHaveBeenCalled();
+  });
+
+  it("should announce nothing when a legacy close has no tenant", async () => {
+    await caller(null).exceptions.resolve({ id: 11, status: "resolved" });
+    await settle();
+
+    expect(dispatched).not.toHaveBeenCalled();
   });
 });
 

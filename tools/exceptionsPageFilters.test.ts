@@ -14,14 +14,26 @@ import path from "node:path";
 
 const SRC = readFileSync(path.resolve(__dirname, "..", "client/src/pages/Exceptions.tsx"), "utf8").replace(/\r\n/g, "\n");
 
-/** The argument text of the page's `trpc.exceptions.list.useQuery(...)`. */
+/**
+ * The argument text of the page's `trpc.exceptions.list.useQuery(...)` — or,
+ * when it passes a local (`listInput`, which the governed-workflow hook also
+ * needs for its optimistic list updates), that local's definition. Only a
+ * plain `const <name> = { … }` is followed; anything else fails loudly rather
+ * than passing on text it did not read.
+ */
 function listQueryArgs(): string {
   const start = SRC.indexOf("trpc.exceptions.list.useQuery(");
   expect(start, "the exceptions.list query has moved").toBeGreaterThan(-1);
   let depth = 0;
   for (let i = start + "trpc.exceptions.list.useQuery".length; i < SRC.length; i++) {
     if (SRC[i] === "(") depth++;
-    else if (SRC[i] === ")" && --depth === 0) return SRC.slice(start, i);
+    else if (SRC[i] === ")" && --depth === 0) {
+      const args = SRC.slice(start + "trpc.exceptions.list.useQuery(".length, i).trim();
+      if (!/^[A-Za-z_$][\w$]*$/.test(args)) return args;
+      const definition = SRC.match(new RegExp(`const ${args}\\s*=\\s*([{][\\s\\S]*?\\n\\s*[}])`));
+      expect(definition, `the query passes \`${args}\`, but its object definition was not found`).not.toBeNull();
+      return definition![1];
+    }
   }
   throw new Error("unbalanced exceptions.list query");
 }

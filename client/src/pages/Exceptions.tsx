@@ -20,6 +20,11 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import ExceptionGlossary from "@/components/ExceptionGlossary";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
 import { HiddenExceptionsNotice } from "@/components/HiddenExceptionsNotice";
+import { canManageExceptionWorkflows } from "@shared/exceptionWorkflowRules";
+import { roleCanWriteReconciliation } from "@shared/reconciliationWriteRoles";
+import { ExceptionWorkflowPanel } from "@/components/ExceptionWorkflowPanel";
+import { useExceptionWorkflow, type ExceptionListInput } from "@/hooks/useExceptionWorkflow";
+import { errorMessageOf } from "@/lib/exceptionWorkflowPresentation";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -49,7 +54,10 @@ export default function Exceptions() {
   // Super admins inside a tenant portal must read THAT tenant's data.
   const viewAsOrgId = useViewAsOrgId();
   const { user } = useAuth();
-  const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
+  // Read-only by role (CFO, compliance) OR by session: a reviewer link carries
+  // the operations role with `isReadOnly`, and the server refuses its every write.
+  const isReadOnly = !roleCanWriteReconciliation(user?.role) || user?.isReadOnly === true;
+  const canManageWorkflows = canManageExceptionWorkflows(user);
   // A link (a dashboard count) names the rows it counted; honour it for this
   // visit. Read once: the URL is where the viewer ARRIVED from, not live state.
   const search = useSearch();
@@ -83,7 +91,7 @@ export default function Exceptions() {
   // Every filter goes to the server. Category and severity used to be applied
   // to the 200 rows already loaded, so over a wider range the table, its count
   // and the empty state described one slice while the total described all rows.
-  const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
+  const listInput = {
     viewAsOrgId,
     status: statusFilter !== "all" ? statusFilter : undefined,
     category: filters.category !== "all" ? filters.category : undefined,
@@ -92,7 +100,8 @@ export default function Exceptions() {
     dateTo: dateToObj,
     limit: 200,
     offset: 0,
-  });
+  } satisfies ExceptionListInput;
+  const { data, isLoading, refetch } = trpc.exceptions.list.useQuery(listInput);
 
   // Staleness state: exceptionId → { cbsStillAnomalous, verificationNote, userKeptResolved }
   const [stalenessMap, setStalenessMap] = useState<Map<number, { cbsStillAnomalous: boolean; verificationNote: string; userKeptResolved: boolean }>>(new Map());
@@ -100,6 +109,19 @@ export default function Exceptions() {
   const resolveMutation = trpc.exceptions.resolve.useMutation();
   const moveToReviewMutation = trpc.exceptions.moveToReview.useMutation();
   const exportXlsxMutation = trpc.exceptions.exportXlsx.useMutation();
+  // The governed workflow for the selected exception: queries, form, actions.
+  const governed = useExceptionWorkflow({
+    exceptionId: selectedEx?.id ?? null,
+    listInput,
+    viewAsOrgId,
+    canManage: canManageWorkflows,
+    currentUserId: user?.id,
+    onClosed: () => {
+      setSelectedEx(null);
+      setResolveNotes("");
+    },
+    closeDirect: (outcome) => (selectedEx ? handleResolve(selectedEx.id, outcome) : Promise.resolve()),
+  });
 
   const reopenMutation = trpc.exceptions.reopen.useMutation({
     onSuccess: () => {
@@ -153,8 +175,8 @@ export default function Exceptions() {
       setSelectedEx(null);
       setResolveNotes("");
       refetch();
-    } catch (err: any) {
-      toast.error(err.message || "Failed to resolve");
+    } catch (err) {
+      toast.error(errorMessageOf(err, "Failed to resolve"));
     }
   };
 
@@ -165,8 +187,8 @@ export default function Exceptions() {
       setSelectedEx(null);
       setResolveNotes("");
       refetch();
-    } catch (err: any) {
-      toast.error(err.message || "Failed to move to review");
+    } catch (err) {
+      toast.error(errorMessageOf(err, "Failed to move to review"));
     }
   };
 
@@ -213,7 +235,7 @@ export default function Exceptions() {
               });
               window.open(res.url, "_blank");
               toast.success(`Excel export ready: ${res.fileName}`);
-            } catch (err: any) { toast.error(err.message || "Excel export failed"); }
+            } catch (err) { toast.error(errorMessageOf(err, "Excel export failed")); }
           }}
           disabled={exportXlsxMutation.isPending}
         >
@@ -490,6 +512,8 @@ export default function Exceptions() {
                 );
               })()}
 
+              <ExceptionWorkflowPanel state={governed} canManage={canManageWorkflows} />
+
               {isReadOnly ? (
                 <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                   <Lock className="h-4 w-4 shrink-0 text-amber-600" />
@@ -501,14 +525,17 @@ export default function Exceptions() {
                     <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
                   </div>
+                  {governed.closure.mode === "blocked" ? (
+                    <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{governed.closure.reason}</p>
+                  ) : null}
                   <div className="flex gap-2 flex-wrap">
-                    <Button onClick={() => handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending} className="flex-1">
+                    <Button onClick={() => governed.closeException("resolved", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
                     </Button>
-                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending} className="flex-1">
+                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || governed.moveToReviewBlocked} className="flex-1">
                       <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
                     </Button>
-                    <Button variant="ghost" onClick={() => handleResolve(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending} className="flex-1">
+                    <Button variant="ghost" onClick={() => governed.closeException("dismissed", resolveNotes)} disabled={resolveMutation.isPending || governed.pending.close || governed.closure.mode === "blocked"} className="flex-1">
                       Dismiss
                     </Button>
                   </div>
