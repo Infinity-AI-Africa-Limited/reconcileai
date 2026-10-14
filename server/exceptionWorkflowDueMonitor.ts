@@ -100,7 +100,11 @@ async function expireOne(
       .for("update");
     if (!workflow) return false;
     // Re-checked under the locks: a write may have recorded it, closed the
-    // attempt, or moved the deadline since the scan.
+    // attempt, or moved the deadline since the scan. `now` is the sweep's
+    // as-of time, read before any lock wait. That is safe HERE and nowhere
+    // else: the monitor only records, so an early clock can make it record
+    // less, never let anything through. Every workflow write reads its clock
+    // after taking these locks (lockOpenWorkflow), and catches what this skips.
     return (await recordElapsedDeadline(tx, exception, workflow, now, "due_monitor")) !== null;
   });
 }

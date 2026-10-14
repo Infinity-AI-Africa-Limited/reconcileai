@@ -591,3 +591,67 @@ describe("when any write on an open attempt finds its deadline passed and unreco
     expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({ overdueAt: NOW });
   });
 });
+
+/** Still ahead when a write is called; passed by the time it holds its locks. */
+const DUE_DURING_WAIT = new Date("2026-10-14T12:00:30.000Z");
+const LOCKS_GRANTED = new Date("2026-10-14T12:01:00.000Z");
+
+/**
+ * A database whose workflow lock read returns only at LOCKS_GRANTED — the write
+ * waited behind another for its locks, and the deadline passed meanwhile.
+ */
+function locksGrantedAfterDeadline(row: Record<string, unknown>) {
+  const lockReads: unknown[][] = [[row], [row]];
+  const take = lockReads.shift.bind(lockReads);
+  lockReads.shift = () => {
+    vi.setSystemTime(LOCKS_GRANTED);
+    return take();
+  };
+  const fake = scriptedDb({
+    select: { exception_workflows: lockReads },
+    standing: { exceptions: [openException], users: [{ id: 8 }] },
+  });
+  getDbMock.mockResolvedValue(fake.db);
+  return fake;
+}
+
+describe("when the deadline passes while a write waits for its locks", () => {
+  // The clock is read with the locks held. Read before them, a write that
+  // queued behind another would judge the deadline as of before its wait.
+  it("should not close as on time a case that went overdue while the close waited", async () => {
+    const fake = locksGrantedAfterDeadline({ ...workflowRow, status: "approved", dueAt: DUE_DURING_WAIT, decisionSubmittedByUserId: 71 });
+
+    expect(await failureOf(() => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n" }))).toMatchObject({
+      code: "PRECONDITION_FAILED",
+    });
+
+    expect(fake.writes("update", "exceptions").map(op => rowOf(op)?.status)).not.toContain("resolved");
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({
+      status: "decision_submitted", overdueAt: LOCKS_GRANTED, approvedByUserId: null,
+    });
+  });
+
+  const late = { ...workflowRow, dueAt: DUE_DURING_WAIT };
+  it.each([
+    ["a reassignment", { ...late }, () => updateExceptionWorkflowOwnership({ ...base, actor, ownerUserId: 9, dueAt })],
+    ["an escalation", { ...late }, () => escalateExceptionWorkflow({ ...base, actor, note: "Chasing the bank" })],
+    ["a decision", { ...late }, () => recordExceptionWorkflowDecision({ ...base, actor, rationale: "r", evidenceReference: "e" })],
+    [
+      "an approval",
+      { ...late, status: "decision_submitted" as const, decisionSubmittedByUserId: 71 },
+      () => approveExceptionWorkflowDecision({ ...base, actor: approver, approvalNote: "n" }),
+    ],
+    [
+      "a close",
+      { ...late, approvalRequired: false, status: "decision_recorded" as const, decisionSubmittedByUserId: 71 },
+      () => resolveExceptionWorkflow({ ...base, actor: approver, outcome: "resolved", resolutionNotes: "n", lateResolutionReason: "r" }),
+    ],
+  ])("should judge the deadline at the time %s holds its locks", async (_label, workflow, write) => {
+    const fake = locksGrantedAfterDeadline(workflow);
+
+    await write();
+
+    expect(fake.writes("insert", "exception_workflow_events").map(op => rowOf(op)?.eventType)[0]).toBe("due_date_elapsed");
+    expect(rowOf(fake.writes("update", "exception_workflows")[0])).toMatchObject({ overdueAt: LOCKS_GRANTED });
+  });
+});
