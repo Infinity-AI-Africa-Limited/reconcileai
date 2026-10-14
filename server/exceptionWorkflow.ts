@@ -1,13 +1,40 @@
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
+  canStartExceptionWorkflow,
+  isExceptionClosed,
+  isExceptionWorkflowReadyToClose,
+  statusAfterDecision,
+  statusAfterEscalation,
+  type ExceptionWorkflowStatus,
+} from "@shared/exceptionWorkflowRules";
+import {
+  exceptionWorkflowEvents,
   exceptionWorkflows,
   exceptions,
-  organizations,
   users,
 } from "../drizzle/schema";
-import { getDb } from "./db";
+import { getDb, orgFilter } from "./db";
 import { logAuditStrict } from "./routers/shared";
+
+/**
+ * Governed workflows for material exceptions.
+ *
+ * LOCK ORDER. Every write takes its locks in this order, and takes no others:
+ *   1. the exception row             (FOR UPDATE, scoped to the tenant)
+ *   2. its latest workflow attempt   (FOR UPDATE)
+ * Owners are read, never locked. With one order, two writes on the same
+ * exception queue behind each other instead of deadlocking: Start used to hold
+ * exception → owner → workflow while reassignment held workflow → owner →
+ * exception. The legacy close takes the same two locks, so it cannot slip
+ * between a Start's check and its insert and close a case its new workflow
+ * still governs.
+ *
+ * EVIDENCE. The workflow row holds the CURRENT owner, decision and approval.
+ * Every step, with its narrative, is also appended to `exception_workflow_events`,
+ * so a revised decision, a second escalation or a superseded approval is never
+ * lost. Audit events carry identifiers and flags, never the narratives.
+ */
 
 export type ExceptionWorkflowActor = {
   id: number;
@@ -20,14 +47,6 @@ type Transaction = Parameters<
   Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>["transaction"]>[0]
 >[0];
 
-type WorkflowStatus =
-  | "active"
-  | "escalated"
-  | "decision_recorded"
-  | "decision_submitted"
-  | "approved"
-  | "closed";
-
 type StoredWorkflow = {
   id: number;
   organizationId: number;
@@ -36,9 +55,11 @@ type StoredWorkflow = {
   ownerUserId: number;
   dueAt: Date;
   approvalRequired: boolean;
-  status: WorkflowStatus;
+  status: ExceptionWorkflowStatus;
   decisionSubmittedByUserId: number | null;
 };
+
+type LockedException = { id: number; status: string };
 
 const WORKFLOW_FIELDS = {
   id: exceptionWorkflows.id,
@@ -66,11 +87,35 @@ const WORKFLOW_FIELDS = {
   startedAt: exceptionWorkflows.startedAt,
 } as const;
 
+const LOCKED_WORKFLOW_FIELDS = {
+  id: exceptionWorkflows.id,
+  organizationId: exceptionWorkflows.organizationId,
+  exceptionId: exceptionWorkflows.exceptionId,
+  attemptNumber: exceptionWorkflows.attemptNumber,
+  ownerUserId: exceptionWorkflows.ownerUserId,
+  dueAt: exceptionWorkflows.dueAt,
+  approvalRequired: exceptionWorkflows.approvalRequired,
+  status: exceptionWorkflows.status,
+  decisionSubmittedByUserId: exceptionWorkflows.decisionSubmittedByUserId,
+} as const;
+
+const EVENT_FIELDS = {
+  id: exceptionWorkflowEvents.id,
+  eventType: exceptionWorkflowEvents.eventType,
+  actorUserId: exceptionWorkflowEvents.actorUserId,
+  note: exceptionWorkflowEvents.note,
+  decisionEvidenceReference: exceptionWorkflowEvents.decisionEvidenceReference,
+  ownerUserId: exceptionWorkflowEvents.ownerUserId,
+  dueAt: exceptionWorkflowEvents.dueAt,
+  outcome: exceptionWorkflowEvents.outcome,
+  createdAt: exceptionWorkflowEvents.createdAt,
+} as const;
+
+/** The most history one read returns; an attempt's steps are few, this only bounds a pathological one. */
+const HISTORY_LIMIT = 200;
+
 function unavailable(): never {
-  throw new TRPCError({
-    code: "INTERNAL_SERVER_ERROR",
-    message: "Database unavailable",
-  });
+  throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 }
 
 async function requireDb() {
@@ -85,92 +130,37 @@ function insertedId(result: { insertId?: number | string }): number {
   return id;
 }
 
-function activeWorkflowStatus(status: WorkflowStatus): boolean {
-  return status !== "closed";
+function refuse(code: "PRECONDITION_FAILED" | "CONFLICT" | "FORBIDDEN" | "BAD_REQUEST", message: string): never {
+  throw new TRPCError({ code, message });
 }
 
-function workflowNotFound(): never {
-  throw new TRPCError({
-    code: "NOT_FOUND",
-    message: "Governed exception workflow not found",
-  });
+function exceptionNotFound(): never {
+  throw new TRPCError({ code: "NOT_FOUND", message: "Exception not found" });
 }
 
-/**
- * The approved owner is deliberately a real, active non-guest user in the same
- * tenant. A numeric id alone is not an assignment: without this check a case
- * could be filed to a departed account or to a user from another institution.
- */
-async function requireEligibleOwner(
-  tx: Transaction,
-  organizationId: number,
-  ownerUserId: number
-) {
-  const [owner] = await tx
-    .select({ id: users.id })
-    .from(users)
-    .where(
-      and(
-        eq(users.id, ownerUserId),
-        eq(users.organizationId, organizationId),
-        eq(users.isActive, true),
-        eq(users.isGuest, false)
-      )
-    )
-    .limit(1)
-    .for("update");
-  if (!owner) {
-    throw new TRPCError({
-      code: "NOT_FOUND",
-      message: "Eligible workflow owner not found",
-    });
+function assertFutureDueDate(dueAt: Date) {
+  if (!Number.isFinite(dueAt.getTime()) || dueAt.getTime() <= Date.now()) {
+    refuse("BAD_REQUEST", "A workflow due date must be in the future");
   }
 }
 
-async function requireException(
+/** Locks 1 and 2 of the lock order. Another tenant's exception is "not found". */
+async function lockCase(
   tx: Transaction,
-  organizationId: number,
+  organizationId: number | null,
   exceptionId: number
-) {
+): Promise<{ exception: LockedException; workflow: StoredWorkflow | null }> {
   const [exception] = await tx
     .select({ id: exceptions.id, status: exceptions.status })
     .from(exceptions)
-    .where(
-      and(
-        eq(exceptions.id, exceptionId),
-        eq(exceptions.organizationId, organizationId)
-      )
-    )
+    .where(and(eq(exceptions.id, exceptionId), orgFilter(exceptions.organizationId, organizationId)))
     .limit(1)
     .for("update");
-  if (!exception) {
-    throw new TRPCError({ code: "NOT_FOUND", message: "Exception not found" });
-  }
-  if (exception.status === "resolved" || exception.status === "dismissed") {
-    throw new TRPCError({
-      code: "PRECONDITION_FAILED",
-      message: "A closed exception cannot enter a governed workflow",
-    });
-  }
-}
-
-async function lockedWorkflow(
-  tx: Transaction,
-  organizationId: number,
-  exceptionId: number
-): Promise<StoredWorkflow> {
+  if (!exception) exceptionNotFound();
+  // A workflow always belongs to a tenant, so an org-less exception has none.
+  if (organizationId === null) return { exception, workflow: null };
   const [workflow] = await tx
-    .select({
-      id: exceptionWorkflows.id,
-      organizationId: exceptionWorkflows.organizationId,
-      exceptionId: exceptionWorkflows.exceptionId,
-      attemptNumber: exceptionWorkflows.attemptNumber,
-      ownerUserId: exceptionWorkflows.ownerUserId,
-      dueAt: exceptionWorkflows.dueAt,
-      approvalRequired: exceptionWorkflows.approvalRequired,
-      status: exceptionWorkflows.status,
-      decisionSubmittedByUserId: exceptionWorkflows.decisionSubmittedByUserId,
-    })
+    .select(LOCKED_WORKFLOW_FIELDS)
     .from(exceptionWorkflows)
     .where(
       and(
@@ -181,8 +171,84 @@ async function lockedWorkflow(
     .orderBy(desc(exceptionWorkflows.attemptNumber))
     .limit(1)
     .for("update");
-  if (!workflow) workflowNotFound();
-  return workflow as StoredWorkflow;
+  return { exception, workflow: (workflow as StoredWorkflow | undefined) ?? null };
+}
+
+/** The case, locked, with an attempt still in progress — or the refusal named. */
+async function lockOpenWorkflow(
+  tx: Transaction,
+  organizationId: number,
+  exceptionId: number,
+  closedRefusal: string
+): Promise<{ exception: LockedException; workflow: StoredWorkflow }> {
+  const { exception, workflow } = await lockCase(tx, organizationId, exceptionId);
+  if (!workflow) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Governed exception workflow not found" });
+  }
+  if (workflow.status === "closed") refuse("PRECONDITION_FAILED", closedRefusal);
+  return { exception, workflow };
+}
+
+/**
+ * The owner is a real, active, non-guest member of the same tenant. A numeric
+ * id alone is not an assignment: without this a case could be filed to a
+ * departed account or to another institution's user. A read-only reviewer
+ * identity is an outside party and is never accountable for a case. Read, not
+ * locked: see the lock order above.
+ */
+async function requireEligibleOwner(tx: Transaction, organizationId: number, ownerUserId: number) {
+  const [owner] = await tx
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      and(
+        eq(users.id, ownerUserId),
+        eq(users.organizationId, organizationId),
+        eq(users.isActive, true),
+        eq(users.isGuest, false),
+        eq(users.isReadOnly, false)
+      )
+    )
+    .limit(1);
+  if (!owner) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Eligible workflow owner not found" });
+  }
+}
+
+/** Where the workflow row is still in the state the step was checked against. */
+function workflowGuard(workflow: StoredWorkflow) {
+  return and(
+    eq(exceptionWorkflows.id, workflow.id),
+    eq(exceptionWorkflows.organizationId, workflow.organizationId),
+    eq(exceptionWorkflows.status, workflow.status)
+  );
+}
+
+function exceptionRow(organizationId: number | null, exceptionId: number) {
+  return and(eq(exceptions.id, exceptionId), orgFilter(exceptions.organizationId, organizationId));
+}
+
+async function recordEvent(
+  tx: Transaction,
+  workflow: { id: number; organizationId: number; exceptionId: number },
+  eventType: (typeof exceptionWorkflowEvents.$inferInsert)["eventType"],
+  actor: ExceptionWorkflowActor,
+  fields: {
+    note?: string | null;
+    decisionEvidenceReference?: string | null;
+    ownerUserId?: number;
+    dueAt?: Date;
+    outcome?: "resolved" | "dismissed";
+  } = {}
+) {
+  await tx.insert(exceptionWorkflowEvents).values({
+    organizationId: workflow.organizationId,
+    workflowId: workflow.id,
+    exceptionId: workflow.exceptionId,
+    eventType,
+    actorUserId: actor.id,
+    ...fields,
+  });
 }
 
 async function audit(
@@ -210,41 +276,107 @@ async function audit(
 export async function listExceptionWorkflowOwners(organizationId: number) {
   const db = await requireDb();
   return db
-    .select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-      role: users.role,
-    })
+    .select({ id: users.id, name: users.name, email: users.email, role: users.role })
     .from(users)
     .where(
       and(
         eq(users.organizationId, organizationId),
         eq(users.isActive, true),
-        eq(users.isGuest, false)
+        eq(users.isGuest, false),
+        eq(users.isReadOnly, false)
       )
     )
     .orderBy(users.name, users.email, users.id)
     .limit(250);
 }
 
-export async function getExceptionWorkflow(
-  organizationId: number,
-  exceptionId: number
-) {
+/**
+ * The exception's current status, its latest attempt and that attempt's step
+ * history. Another tenant's exception id is "not found", the same answer as a
+ * missing one.
+ */
+export async function getExceptionWorkflow(organizationId: number, exceptionId: number) {
   const db = await requireDb();
-  const [workflow] = await db
-    .select(WORKFLOW_FIELDS)
-    .from(exceptionWorkflows)
-    .where(
-      and(
-        eq(exceptionWorkflows.organizationId, organizationId),
-        eq(exceptionWorkflows.exceptionId, exceptionId)
-      )
-    )
-    .orderBy(desc(exceptionWorkflows.attemptNumber))
+  const [exception] = await db
+    .select({ status: exceptions.status })
+    .from(exceptions)
+    .where(exceptionRow(organizationId, exceptionId))
     .limit(1);
-  return workflow ?? null;
+  if (!exception) exceptionNotFound();
+  // `.at(0)`, not destructuring: the API's type must say an exception may have
+  // no workflow yet, and destructuring an array types its first item as present.
+  const workflow = (
+    await db
+      .select(WORKFLOW_FIELDS)
+      .from(exceptionWorkflows)
+      .where(
+        and(
+          eq(exceptionWorkflows.organizationId, organizationId),
+          eq(exceptionWorkflows.exceptionId, exceptionId)
+        )
+      )
+      .orderBy(desc(exceptionWorkflows.attemptNumber))
+      .limit(1)
+  ).at(0);
+  const history = workflow
+    ? (
+        await db
+          .select(EVENT_FIELDS)
+          .from(exceptionWorkflowEvents)
+          .where(
+            and(
+              eq(exceptionWorkflowEvents.organizationId, organizationId),
+              eq(exceptionWorkflowEvents.workflowId, workflow.id)
+            )
+          )
+          .orderBy(desc(exceptionWorkflowEvents.id))
+          .limit(HISTORY_LIMIT)
+      ).reverse()
+    : [];
+  return {
+    exceptionStatus: exception.status,
+    workflow: workflow ?? null,
+    history,
+    people: workflow ? await peopleNamed(db, organizationId, workflow, history) : [],
+  };
+}
+
+/**
+ * Display names for everyone the workflow names, read within the tenant.
+ * Names only: an email is not needed to read a case, and read-only sessions
+ * see this too. Someone outside the tenant (staff acting in a portal) is
+ * simply absent, and shows as "User N".
+ */
+async function peopleNamed(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  organizationId: number,
+  workflow: {
+    ownerUserId: number;
+    startedByUserId: number;
+    decisionSubmittedByUserId: number | null;
+    approvedByUserId: number | null;
+    escalatedByUserId: number | null;
+    closedByUserId: number | null;
+  },
+  history: Array<{ actorUserId: number; ownerUserId: number | null }>
+): Promise<Array<{ id: number; name: string | null }>> {
+  const ids = new Set<number>();
+  for (const id of [
+    workflow.ownerUserId,
+    workflow.startedByUserId,
+    workflow.decisionSubmittedByUserId,
+    workflow.approvedByUserId,
+    workflow.escalatedByUserId,
+    workflow.closedByUserId,
+    ...history.flatMap(event => [event.actorUserId, event.ownerUserId]),
+  ]) {
+    if (typeof id === "number") ids.add(id);
+  }
+  if (ids.size === 0) return [];
+  return db
+    .select({ id: users.id, name: users.name })
+    .from(users)
+    .where(and(inArray(users.id, [...ids]), eq(users.organizationId, organizationId)));
 }
 
 export async function startExceptionWorkflow(params: {
@@ -256,103 +388,46 @@ export async function startExceptionWorkflow(params: {
   approvalRequired: boolean;
   client: ClientInfo;
 }) {
-  const {
-    actor,
-    organizationId,
-    exceptionId,
-    ownerUserId,
-    dueAt,
-    approvalRequired,
-    client,
-  } = params;
-  if (!Number.isFinite(dueAt.getTime()) || dueAt.getTime() <= Date.now()) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: "A workflow due date must be in the future",
-    });
-  }
+  const { actor, organizationId, exceptionId, ownerUserId, dueAt, approvalRequired, client } = params;
+  assertFutureDueDate(dueAt);
   const db = await requireDb();
   return db.transaction(async tx => {
-    const [organization] = await tx
-      .select({ id: organizations.id })
-      .from(organizations)
-      .where(eq(organizations.id, organizationId))
-      .limit(1)
-      .for("update");
-    if (!organization)
-      throw new TRPCError({
-        code: "NOT_FOUND",
-        message: "Organisation not found",
-      });
-    await requireException(tx, organizationId, exceptionId);
+    const { exception, workflow: latest } = await lockCase(tx, organizationId, exceptionId);
+    if (!canStartExceptionWorkflow(exception.status, latest?.status)) {
+      if (isExceptionClosed(exception.status)) {
+        refuse("PRECONDITION_FAILED", "A closed exception cannot enter a governed workflow");
+      }
+      refuse("CONFLICT", "This exception already has a governed workflow in progress. Update it instead.");
+    }
     await requireEligibleOwner(tx, organizationId, ownerUserId);
 
-    const [existing] = await tx
-      .select({
-        id: exceptionWorkflows.id,
-        attemptNumber: exceptionWorkflows.attemptNumber,
-        status: exceptionWorkflows.status,
-      })
-      .from(exceptionWorkflows)
-      .where(
-        and(
-          eq(exceptionWorkflows.organizationId, organizationId),
-          eq(exceptionWorkflows.exceptionId, exceptionId)
-        )
-      )
-      .orderBy(desc(exceptionWorkflows.attemptNumber))
-      .limit(1)
-      .for("update");
-    if (existing && activeWorkflowStatus(existing.status)) {
-      throw new TRPCError({
-        code: "CONFLICT",
-        message:
-          "This exception already has a governed workflow. Update its existing workflow instead.",
-      });
-    }
-
+    const attemptNumber = (latest?.attemptNumber ?? 0) + 1;
+    const now = new Date();
     const [inserted] = await tx.insert(exceptionWorkflows).values({
       organizationId,
       exceptionId,
-      attemptNumber: (existing?.attemptNumber ?? 0) + 1,
+      attemptNumber,
       ownerUserId,
       dueAt,
       approvalRequired,
       status: "active",
       startedByUserId: actor.id,
-      startedAt: new Date(),
+      startedAt: now,
     });
-    const id = insertedId(inserted);
+    const workflow = { id: insertedId(inserted), organizationId, exceptionId };
     await tx
       .update(exceptions)
-      .set({
-        assignedTo: ownerUserId,
-        assignedAt: new Date(),
-        assignedBy: actor.id,
-        status: "in_review",
-      })
-      .where(
-        and(
-          eq(exceptions.id, exceptionId),
-          eq(exceptions.organizationId, organizationId)
-        )
-      );
-    await audit(
-      tx,
-      actor,
-      organizationId,
-      client,
-      "exception_workflow_started",
-      id,
-      {
-        exceptionId,
-        attemptNumber: (existing?.attemptNumber ?? 0) + 1,
-        ownerUserId,
-        dueAt: dueAt.toISOString(),
-        approvalRequired,
-      }
-    );
-    return { id, status: "active" as const };
+      .set({ assignedTo: ownerUserId, assignedAt: now, assignedBy: actor.id, status: "in_review" })
+      .where(exceptionRow(organizationId, exceptionId));
+    await recordEvent(tx, workflow, "started", actor, { ownerUserId, dueAt });
+    await audit(tx, actor, organizationId, client, "exception_workflow_started", workflow.id, {
+      exceptionId,
+      attemptNumber,
+      ownerUserId,
+      dueAt: dueAt.toISOString(),
+      approvalRequired,
+    });
+    return { id: workflow.id, status: "active" as const, attemptNumber };
   });
 }
 
@@ -364,63 +439,34 @@ export async function updateExceptionWorkflowOwnership(params: {
   dueAt: Date;
   client: ClientInfo;
 }) {
-  const { actor, organizationId, exceptionId, ownerUserId, dueAt, client } =
-    params;
-  if (!Number.isFinite(dueAt.getTime()) || dueAt.getTime() <= Date.now()) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: "A workflow due date must be in the future",
-    });
-  }
+  const { actor, organizationId, exceptionId, ownerUserId, dueAt, client } = params;
+  assertFutureDueDate(dueAt);
   const db = await requireDb();
   return db.transaction(async tx => {
-    const workflow = await lockedWorkflow(tx, organizationId, exceptionId);
-    if (!activeWorkflowStatus(workflow.status)) {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: "A closed workflow cannot be reassigned",
-      });
-    }
+    const { workflow } = await lockOpenWorkflow(tx, organizationId, exceptionId, "A closed workflow cannot be reassigned");
     await requireEligibleOwner(tx, organizationId, ownerUserId);
-    await tx
-      .update(exceptionWorkflows)
-      .set({ ownerUserId, dueAt })
-      .where(
-        and(
-          eq(exceptionWorkflows.id, workflow.id),
-          eq(exceptionWorkflows.organizationId, organizationId)
-        )
-      );
+    const now = new Date();
+    await tx.update(exceptionWorkflows).set({ ownerUserId, dueAt }).where(workflowGuard(workflow));
     await tx
       .update(exceptions)
-      .set({
-        assignedTo: ownerUserId,
-        assignedAt: new Date(),
-        assignedBy: actor.id,
-      })
-      .where(
-        and(
-          eq(exceptions.id, exceptionId),
-          eq(exceptions.organizationId, organizationId)
-        )
-      );
-    await audit(
-      tx,
-      actor,
-      organizationId,
-      client,
-      "exception_workflow_reassigned",
-      workflow.id,
-      {
-        exceptionId,
-        ownerUserId,
-        dueAt: dueAt.toISOString(),
-      }
-    );
+      .set({ assignedTo: ownerUserId, assignedAt: now, assignedBy: actor.id })
+      .where(exceptionRow(organizationId, exceptionId));
+    await recordEvent(tx, workflow, "reassigned", actor, { ownerUserId, dueAt });
+    await audit(tx, actor, organizationId, client, "exception_workflow_reassigned", workflow.id, {
+      exceptionId,
+      previousOwnerUserId: workflow.ownerUserId,
+      ownerUserId,
+      dueAt: dueAt.toISOString(),
+    });
     return { id: workflow.id, ownerUserId, dueAt };
   });
 }
 
+/**
+ * Escalation is recorded at any point before closure, but never moves the
+ * workflow backwards: escalating a case whose decision is submitted or
+ * approved keeps that decision in force rather than discarding it.
+ */
 export async function escalateExceptionWorkflow(params: {
   actor: ExceptionWorkflowActor;
   organizationId: number;
@@ -431,50 +477,30 @@ export async function escalateExceptionWorkflow(params: {
   const { actor, organizationId, exceptionId, note, client } = params;
   const db = await requireDb();
   return db.transaction(async tx => {
-    const workflow = await lockedWorkflow(tx, organizationId, exceptionId);
-    if (!activeWorkflowStatus(workflow.status)) {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: "A closed workflow cannot be escalated",
-      });
-    }
-    const now = new Date();
+    const { workflow } = await lockOpenWorkflow(tx, organizationId, exceptionId, "A closed workflow cannot be escalated");
+    const status = statusAfterEscalation(workflow.status);
     await tx
       .update(exceptionWorkflows)
-      .set({
-        status: "escalated",
-        escalationNote: note,
-        escalatedAt: now,
-        escalatedByUserId: actor.id,
-      })
-      .where(
-        and(
-          eq(exceptionWorkflows.id, workflow.id),
-          eq(exceptionWorkflows.organizationId, organizationId)
-        )
-      );
-    await tx
-      .update(exceptions)
-      .set({ status: "escalated" })
-      .where(
-        and(
-          eq(exceptions.id, exceptionId),
-          eq(exceptions.organizationId, organizationId)
-        )
-      );
-    await audit(
-      tx,
-      actor,
-      organizationId,
-      client,
-      "exception_workflow_escalated",
-      workflow.id,
-      { exceptionId, escalationNotePresent: true }
-    );
-    return { id: workflow.id, status: "escalated" as const };
+      .set({ status, escalationNote: note, escalatedAt: new Date(), escalatedByUserId: actor.id })
+      .where(workflowGuard(workflow));
+    await tx.update(exceptions).set({ status: "escalated" }).where(exceptionRow(organizationId, exceptionId));
+    await recordEvent(tx, workflow, "escalated", actor, { note });
+    await audit(tx, actor, organizationId, client, "exception_workflow_escalated", workflow.id, {
+      exceptionId,
+      escalationNotePresent: true,
+      previousStatus: workflow.status,
+      status,
+    });
+    return { id: workflow.id, status };
   });
 }
 
+/**
+ * Record the decision, or revise it. A revision replaces the CURRENT decision
+ * and clears the current approval — an approval vouches for the decision it
+ * saw, not for its replacement — while the earlier decision and approval stay
+ * in the step history.
+ */
 export async function recordExceptionWorkflowDecision(params: {
   actor: ExceptionWorkflowActor;
   organizationId: number;
@@ -483,27 +509,12 @@ export async function recordExceptionWorkflowDecision(params: {
   evidenceReference: string;
   client: ClientInfo;
 }) {
-  const {
-    actor,
-    organizationId,
-    exceptionId,
-    rationale,
-    evidenceReference,
-    client,
-  } = params;
+  const { actor, organizationId, exceptionId, rationale, evidenceReference, client } = params;
   const db = await requireDb();
   return db.transaction(async tx => {
-    const workflow = await lockedWorkflow(tx, organizationId, exceptionId);
-    if (!activeWorkflowStatus(workflow.status)) {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: "A closed workflow cannot receive a decision",
-      });
-    }
-    const now = new Date();
-    const status: WorkflowStatus = workflow.approvalRequired
-      ? "decision_submitted"
-      : "decision_recorded";
+    const { workflow } = await lockOpenWorkflow(tx, organizationId, exceptionId, "A closed workflow cannot receive a decision");
+    const revision = workflow.decisionSubmittedByUserId !== null;
+    const status = statusAfterDecision(workflow.approvalRequired);
     await tx
       .update(exceptionWorkflows)
       .set({
@@ -511,28 +522,24 @@ export async function recordExceptionWorkflowDecision(params: {
         decisionRationale: rationale,
         decisionEvidenceReference: evidenceReference,
         decisionSubmittedByUserId: actor.id,
-        decisionSubmittedAt: now,
+        decisionSubmittedAt: new Date(),
+        approvedByUserId: null,
+        approvedAt: null,
+        approvalNote: null,
       })
-      .where(
-        and(
-          eq(exceptionWorkflows.id, workflow.id),
-          eq(exceptionWorkflows.organizationId, organizationId)
-        )
-      );
-    await audit(
-      tx,
-      actor,
-      organizationId,
-      client,
-      "exception_workflow_decision_recorded",
-      workflow.id,
-      {
-        exceptionId,
-        approvalRequired: workflow.approvalRequired,
-        decisionEvidenceReference: evidenceReference,
-      }
-    );
-    return { id: workflow.id, status };
+      .where(workflowGuard(workflow));
+    await recordEvent(tx, workflow, "decision_recorded", actor, {
+      note: rationale,
+      decisionEvidenceReference: evidenceReference,
+    });
+    await audit(tx, actor, organizationId, client, "exception_workflow_decision_recorded", workflow.id, {
+      exceptionId,
+      approvalRequired: workflow.approvalRequired,
+      decisionEvidenceReference: evidenceReference,
+      revision,
+      supersededApproval: workflow.status === "approved",
+    });
+    return { id: workflow.id, status, revision };
   });
 }
 
@@ -546,57 +553,34 @@ export async function approveExceptionWorkflowDecision(params: {
   const { actor, organizationId, exceptionId, approvalNote, client } = params;
   const db = await requireDb();
   return db.transaction(async tx => {
-    const workflow = await lockedWorkflow(tx, organizationId, exceptionId);
+    const { workflow } = await lockOpenWorkflow(tx, organizationId, exceptionId, "A closed workflow cannot be approved");
     if (!workflow.approvalRequired) {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: "This workflow does not require a separate approval",
-      });
+      refuse("PRECONDITION_FAILED", "This workflow does not require a separate approval");
     }
     if (workflow.status !== "decision_submitted") {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: "Record a decision before it can be approved",
-      });
+      refuse("PRECONDITION_FAILED", "Record a decision before it can be approved");
     }
     if (workflow.decisionSubmittedByUserId === actor.id) {
-      throw new TRPCError({
-        code: "FORBIDDEN",
-        message: "A decision must be approved by a different person",
-      });
+      refuse("FORBIDDEN", "A decision must be approved by a different person");
     }
-    const now = new Date();
     await tx
       .update(exceptionWorkflows)
-      .set({
-        status: "approved",
-        approvedByUserId: actor.id,
-        approvedAt: now,
-        approvalNote,
-      })
-      .where(
-        and(
-          eq(exceptionWorkflows.id, workflow.id),
-          eq(exceptionWorkflows.organizationId, organizationId),
-          eq(exceptionWorkflows.status, "decision_submitted")
-        )
-      );
-    await audit(
-      tx,
-      actor,
-      organizationId,
-      client,
-      "exception_workflow_decision_approved",
-      workflow.id,
-      {
-        exceptionId,
-        approvalNotePresent: true,
-      }
-    );
+      .set({ status: "approved", approvedByUserId: actor.id, approvedAt: new Date(), approvalNote })
+      .where(workflowGuard(workflow));
+    await recordEvent(tx, workflow, "decision_approved", actor, { note: approvalNote });
+    await audit(tx, actor, organizationId, client, "exception_workflow_decision_approved", workflow.id, {
+      exceptionId,
+      approvalNotePresent: true,
+    });
     return { id: workflow.id, status: "approved" as const };
   });
 }
 
+/**
+ * Close the exception through its governed workflow. The caller runs the
+ * closure's after-effects (webhook, learning) once this has COMMITTED — see
+ * `afterExceptionClosed` — so they never describe a closure that rolled back.
+ */
 export async function resolveExceptionWorkflow(params: {
   actor: ExceptionWorkflowActor;
   organizationId: number;
@@ -605,91 +589,75 @@ export async function resolveExceptionWorkflow(params: {
   resolutionNotes: string;
   client: ClientInfo;
 }) {
-  const {
-    actor,
-    organizationId,
-    exceptionId,
-    outcome,
-    resolutionNotes,
-    client,
-  } = params;
+  const { actor, organizationId, exceptionId, outcome, resolutionNotes, client } = params;
   const db = await requireDb();
   return db.transaction(async tx => {
-    const workflow = await lockedWorkflow(tx, organizationId, exceptionId);
-    const isDecisionReady = workflow.approvalRequired
-      ? workflow.status === "approved"
-      : workflow.status === "decision_recorded";
-    if (!isDecisionReady) {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: workflow.approvalRequired
+    const { exception, workflow } = await lockOpenWorkflow(tx, organizationId, exceptionId, "This governed workflow is already closed");
+    if (!isExceptionWorkflowReadyToClose(workflow)) {
+      refuse(
+        "PRECONDITION_FAILED",
+        workflow.approvalRequired
           ? "This workflow needs a recorded decision and a separate human approval before resolution."
-          : "This workflow needs recorded decision evidence before resolution.",
-      });
+          : "This workflow needs recorded decision evidence before resolution."
+      );
+    }
+    if (isExceptionClosed(exception.status)) {
+      refuse("PRECONDITION_FAILED", "This exception is already closed");
     }
     const now = new Date();
     await tx
       .update(exceptions)
-      .set({
-        status: outcome,
-        resolvedBy: actor.id,
-        resolvedAt: now,
-        resolutionNotes,
-      })
-      .where(
-        and(
-          eq(exceptions.id, exceptionId),
-          eq(exceptions.organizationId, organizationId)
-        )
-      );
+      .set({ status: outcome, resolvedBy: actor.id, resolvedAt: now, resolutionNotes })
+      .where(exceptionRow(organizationId, exceptionId));
     await tx
       .update(exceptionWorkflows)
-      .set({
-        status: "closed",
-        closedByUserId: actor.id,
-        closedAt: now,
-        finalOutcome: outcome,
-      })
-      .where(
-        and(
-          eq(exceptionWorkflows.id, workflow.id),
-          eq(exceptionWorkflows.organizationId, organizationId),
-          eq(exceptionWorkflows.status, workflow.status)
-        )
-      );
-    await audit(
-      tx,
-      actor,
-      organizationId,
-      client,
-      "exception_workflow_closed",
-      workflow.id,
-      {
-        exceptionId,
-        outcome,
-        decisionApproved: workflow.approvalRequired,
-      }
-    );
+      .set({ status: "closed", closedByUserId: actor.id, closedAt: now, finalOutcome: outcome })
+      .where(workflowGuard(workflow));
+    // The closure notes live on the exception row, which a reopen overwrites.
+    await recordEvent(tx, workflow, "closed", actor, { note: resolutionNotes, outcome });
+    await audit(tx, actor, organizationId, client, "exception_workflow_closed", workflow.id, {
+      exceptionId,
+      outcome,
+      decisionApproved: workflow.approvalRequired,
+    });
     return { id: workflow.id, status: "closed" as const, outcome };
   });
 }
 
 /**
- * Existing `exceptions.resolve` remains for ordinary exceptions, but it must not
- * close a case already enrolled in governed workflow. This is a server-side
- * backstop for clients that do not yet render the new workflow controls.
+ * The legacy close (`exceptions.resolve`), for exceptions that were never
+ * governed. It takes the SAME two locks as Start, in the same order, and
+ * checks and writes inside them: checked outside a transaction, a Start could
+ * enrol the case between the check and this update, which would then close it
+ * without its decision or approval.
+ *
+ * Fails closed for any exception that has ever been governed, including one
+ * reopened after its attempt closed: its next close goes through a new
+ * governed attempt. A missing exception, or another tenant's, is "not found"
+ * — the legacy route used to report success for it.
  */
-export async function assertLegacyExceptionResolutionPermitted(
-  organizationId: number | null,
-  exceptionId: number
-) {
-  if (!organizationId) return;
-  const workflow = await getExceptionWorkflow(organizationId, exceptionId);
-  if (workflow && workflow.status !== "closed") {
-    throw new TRPCError({
-      code: "PRECONDITION_FAILED",
-      message:
-        "This exception has a governed workflow. Record its decision evidence and required approval before closing it.",
-    });
-  }
+export async function closeExceptionOutsideWorkflow(params: {
+  organizationId: number | null;
+  exceptionId: number;
+  status: "resolved" | "dismissed";
+  resolutionNotes: string | null;
+  actorId: number;
+}) {
+  const { organizationId, exceptionId, status, resolutionNotes, actorId } = params;
+  const db = await requireDb();
+  await db.transaction(async tx => {
+    const { workflow } = await lockCase(tx, organizationId, exceptionId);
+    if (workflow) {
+      refuse(
+        "PRECONDITION_FAILED",
+        workflow.status === "closed"
+          ? "This exception was governed and has been reopened. Start a new governed review to close it."
+          : "This exception has a governed workflow. Record its decision evidence and required approval before closing it."
+      );
+    }
+    await tx
+      .update(exceptions)
+      .set({ status, resolvedBy: actorId, resolvedAt: new Date(), resolutionNotes })
+      .where(exceptionRow(organizationId, exceptionId));
+  });
 }

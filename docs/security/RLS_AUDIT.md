@@ -112,6 +112,7 @@ justification comment in the classification map and a row in §2/§3 here.
 | `control_batch_manifests` | `tenant_required` | Per-delivery control evidence bound to one source-contract version: expected and received count/value evidence, mapping/policy versions, schema state and duplicate-delivery result. Monetary totals are stored as exact decimal strings; the record is not a transaction ledger. |
 | `control_policies` | `tenant_required` | Immutable tenant-scoped mapping and reconciliation policy registry. It stores a bounded configuration definition, digest, lifecycle state, approval/retirement references, and actor/timestamp evidence; it does not store credentials, raw source rows, or customer identities. |
 | `exception_workflows` | `tenant_required` | Governed material-exception workflow: assigned owner, due date, escalation, bounded decision rationale and approved evidence locator, distinct approval evidence, and closure outcome. It never stores raw source payloads or credentials. |
+| `exception_workflow_events` | `tenant_required` | Append-only history of every governed workflow step (start, reassignment, escalation, decision and its revisions, approval, closure) with its actor, time and narrative, so a revised decision or superseded approval is never lost. Rows are only inserted; reads are scoped to the tenant and workflow. No raw source payloads or credentials. |
 
 ## 8. Shopify public-app connector tables (September 2026, PR #134)
 

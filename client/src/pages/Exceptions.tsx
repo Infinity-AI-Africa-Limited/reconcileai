@@ -6,8 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Loader2, AlertTriangle, CheckCircle2, Eye, ClipboardList,
   FilterX, Filter, Download, Lock, RefreshCw
@@ -22,7 +20,11 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import ExceptionGlossary from "@/components/ExceptionGlossary";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
 import { HiddenExceptionsNotice } from "@/components/HiddenExceptionsNotice";
-import { exceptionWorkflowStatusLabel, isExceptionWorkflowReadyToClose } from "@/lib/exceptionWorkflowPresentation";
+import { canManageExceptionWorkflows } from "@shared/exceptionWorkflowRules";
+import { roleCanWriteReconciliation } from "@shared/reconciliationWriteRoles";
+import { ExceptionWorkflowPanel } from "@/components/ExceptionWorkflowPanel";
+import { useExceptionWorkflow, type ExceptionListInput } from "@/hooks/useExceptionWorkflow";
+import { closureState, errorMessageOf } from "@/lib/exceptionWorkflowPresentation";
 
 // ─── Template category filter persistence ───────────────────────────────────
 const LS_KEY = "reconcileai_template_autofilter";
@@ -52,7 +54,10 @@ export default function Exceptions() {
   // Super admins inside a tenant portal must read THAT tenant's data.
   const viewAsOrgId = useViewAsOrgId();
   const { user } = useAuth();
-  const isReadOnly = user?.role === "cfo" || user?.role === "compliance";
+  // Read-only by role (CFO, compliance) OR by session: a reviewer link carries
+  // the operations role with `isReadOnly`, and the server refuses its every write.
+  const isReadOnly = !roleCanWriteReconciliation(user?.role) || user?.isReadOnly === true;
+  const canManageWorkflows = canManageExceptionWorkflows(user);
   // A link (a dashboard count) names the rows it counted; honour it for this
   // visit. Read once: the URL is where the viewer ARRIVED from, not live state.
   const search = useSearch();
@@ -69,13 +74,6 @@ export default function Exceptions() {
   const [statusFilter, setStatusFilter] = useState<string>(arrival.status ?? "all");
   const [selectedEx, setSelectedEx] = useState<any>(null);
   const [resolveNotes, setResolveNotes] = useState("");
-  const [workflowOwnerId, setWorkflowOwnerId] = useState("");
-  const [workflowDueAt, setWorkflowDueAt] = useState("");
-  const [workflowApprovalRequired, setWorkflowApprovalRequired] = useState(true);
-  const [decisionRationale, setDecisionRationale] = useState("");
-  const [decisionEvidenceReference, setDecisionEvidenceReference] = useState("");
-  const [escalationNote, setEscalationNote] = useState("");
-  const [approvalNote, setApprovalNote] = useState("");
   const [filters, setFilters] = useState({ category: "all", severity: "all" });
   const [autoFilter, setAutoFilter] = useState<boolean>(true);
 
@@ -93,7 +91,7 @@ export default function Exceptions() {
   // Every filter goes to the server. Category and severity used to be applied
   // to the 200 rows already loaded, so over a wider range the table, its count
   // and the empty state described one slice while the total described all rows.
-  const { data, isLoading, refetch } = trpc.exceptions.list.useQuery({
+  const listInput = {
     viewAsOrgId,
     status: statusFilter !== "all" ? statusFilter : undefined,
     category: filters.category !== "all" ? filters.category : undefined,
@@ -102,7 +100,8 @@ export default function Exceptions() {
     dateTo: dateToObj,
     limit: 200,
     offset: 0,
-  });
+  } satisfies ExceptionListInput;
+  const { data, isLoading, refetch } = trpc.exceptions.list.useQuery(listInput);
 
   // Staleness state: exceptionId → { cbsStillAnomalous, verificationNote, userKeptResolved }
   const [stalenessMap, setStalenessMap] = useState<Map<number, { cbsStillAnomalous: boolean; verificationNote: string; userKeptResolved: boolean }>>(new Map());
@@ -110,18 +109,18 @@ export default function Exceptions() {
   const resolveMutation = trpc.exceptions.resolve.useMutation();
   const moveToReviewMutation = trpc.exceptions.moveToReview.useMutation();
   const exportXlsxMutation = trpc.exceptions.exportXlsx.useMutation();
-  const workflowScope = viewAsOrgId ? { viewAsOrgId } : {};
-  const workflowQueryInput = { exceptionId: selectedEx?.id ?? 1, viewAsOrgId };
-  const workflowQuery = trpc.exceptionWorkflow.get.useQuery(workflowQueryInput, { enabled: Boolean(selectedEx) });
-  const workflowOwnersQuery = trpc.exceptionWorkflow.owners.useQuery(workflowScope, {
-    enabled: Boolean(selectedEx) && !isReadOnly,
+  // The governed workflow for the selected exception: queries, form, actions.
+  const governed = useExceptionWorkflow({
+    exceptionId: selectedEx?.id ?? null,
+    listInput,
+    viewAsOrgId,
+    canManage: canManageWorkflows,
+    currentUserId: user?.id,
+    onClosed: () => {
+      setSelectedEx(null);
+      setResolveNotes("");
+    },
   });
-  const startWorkflowMutation = trpc.exceptionWorkflow.start.useMutation();
-  const updateWorkflowOwnershipMutation = trpc.exceptionWorkflow.updateOwnership.useMutation();
-  const escalateWorkflowMutation = trpc.exceptionWorkflow.escalate.useMutation();
-  const recordDecisionMutation = trpc.exceptionWorkflow.recordDecision.useMutation();
-  const approveDecisionMutation = trpc.exceptionWorkflow.approveDecision.useMutation();
-  const resolveWorkflowMutation = trpc.exceptionWorkflow.resolve.useMutation();
 
   const reopenMutation = trpc.exceptions.reopen.useMutation({
     onSuccess: () => {
@@ -168,28 +167,6 @@ export default function Exceptions() {
     if (data?.data && data.data.length > 0) triggerStalenessCheck(data.data);
   }, [data?.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (!selectedEx) return;
-    const workflow = workflowQuery.data;
-    if (workflow) {
-      setWorkflowOwnerId(String(workflow.ownerUserId));
-      setWorkflowDueAt(new Date(workflow.dueAt).toISOString().slice(0, 16));
-      setWorkflowApprovalRequired(workflow.approvalRequired);
-      setDecisionRationale(workflow.decisionRationale ?? "");
-      setDecisionEvidenceReference(workflow.decisionEvidenceReference ?? "");
-      setEscalationNote(workflow.escalationNote ?? "");
-      setApprovalNote(workflow.approvalNote ?? "");
-      return;
-    }
-    setWorkflowOwnerId(String(user?.id ?? ""));
-    setWorkflowDueAt(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 16));
-    setWorkflowApprovalRequired(true);
-    setDecisionRationale("");
-    setDecisionEvidenceReference("");
-    setEscalationNote("");
-    setApprovalNote("");
-  }, [selectedEx?.id, workflowQuery.data, user?.id]);
-
   const handleResolve = async (id: number, status: "resolved" | "dismissed") => {
     try {
       await resolveMutation.mutateAsync({ id, status, resolutionNotes: resolveNotes });
@@ -197,8 +174,8 @@ export default function Exceptions() {
       setSelectedEx(null);
       setResolveNotes("");
       refetch();
-    } catch (err: any) {
-      toast.error(err.message || "Failed to resolve");
+    } catch (err) {
+      toast.error(errorMessageOf(err, "Failed to resolve"));
     }
   };
 
@@ -209,68 +186,9 @@ export default function Exceptions() {
       setSelectedEx(null);
       setResolveNotes("");
       refetch();
-    } catch (err: any) {
-      toast.error(err.message || "Failed to move to review");
+    } catch (err) {
+      toast.error(errorMessageOf(err, "Failed to move to review"));
     }
-  };
-
-  const workflowInput = (exceptionId: number) => ({ exceptionId, ...workflowScope });
-  const refreshWorkflow = async () => { await workflowQuery.refetch(); await refetch(); };
-
-  const handleStartWorkflow = async () => {
-    if (!selectedEx || !workflowOwnerId || !workflowDueAt) return toast.error("Choose an owner and future due date before starting the workflow");
-    try {
-      await startWorkflowMutation.mutateAsync({ ...workflowInput(selectedEx.id), ownerUserId: Number(workflowOwnerId), dueAt: new Date(workflowDueAt), approvalRequired: workflowApprovalRequired });
-      toast.success("Governed workflow started and assigned");
-      await refreshWorkflow();
-    } catch (err: any) { toast.error(err.message || "Failed to start governed workflow"); }
-  };
-
-  const handleUpdateWorkflowOwnership = async () => {
-    if (!selectedEx || !workflowOwnerId || !workflowDueAt) return toast.error("Choose an owner and future due date");
-    try {
-      await updateWorkflowOwnershipMutation.mutateAsync({ ...workflowInput(selectedEx.id), ownerUserId: Number(workflowOwnerId), dueAt: new Date(workflowDueAt) });
-      toast.success("Workflow ownership and due date updated");
-      await refreshWorkflow();
-    } catch (err: any) { toast.error(err.message || "Failed to update workflow ownership"); }
-  };
-
-  const handleEscalateWorkflow = async () => {
-    if (!selectedEx || !escalationNote.trim()) return toast.error("Enter the escalation reason before escalating");
-    try {
-      await escalateWorkflowMutation.mutateAsync({ ...workflowInput(selectedEx.id), note: escalationNote });
-      toast.success("Workflow escalated with recorded reason");
-      await refreshWorkflow();
-    } catch (err: any) { toast.error(err.message || "Failed to escalate workflow"); }
-  };
-
-  const handleRecordDecision = async () => {
-    if (!selectedEx || !decisionRationale.trim() || !decisionEvidenceReference.trim()) return toast.error("Record both the decision rationale and evidence reference");
-    try {
-      const result = await recordDecisionMutation.mutateAsync({ ...workflowInput(selectedEx.id), rationale: decisionRationale, evidenceReference: decisionEvidenceReference });
-      toast.success(result.status === "decision_submitted" ? "Decision submitted for separate approval" : "Decision evidence recorded");
-      await refreshWorkflow();
-    } catch (err: any) { toast.error(err.message || "Failed to record decision evidence"); }
-  };
-
-  const handleApproveDecision = async () => {
-    if (!selectedEx || !approvalNote.trim()) return toast.error("Enter the approval note before approving the decision");
-    try {
-      await approveDecisionMutation.mutateAsync({ ...workflowInput(selectedEx.id), approvalNote });
-      toast.success("Decision approved by a separate operator");
-      await refreshWorkflow();
-    } catch (err: any) { toast.error(err.message || "Failed to approve decision"); }
-  };
-
-  const handleResolveWorkflow = async (outcome: "resolved" | "dismissed") => {
-    if (!selectedEx || !resolveNotes.trim()) return toast.error("Record closure notes before closing the workflow");
-    try {
-      await resolveWorkflowMutation.mutateAsync({ ...workflowInput(selectedEx.id), outcome, resolutionNotes: resolveNotes });
-      toast.success(`Governed workflow ${outcome}`);
-      setSelectedEx(null);
-      setResolveNotes("");
-      await refetch();
-    } catch (err: any) { toast.error(err.message || "The governed workflow is not ready to close"); }
   };
 
   const severityColor = (s: string) => {
@@ -296,8 +214,13 @@ export default function Exceptions() {
   const loaded = filtered.length;
   const matchingTotal = data?.total ?? 0;
   const anyFilter = statusFilter !== "all" || filters.category !== "all" || filters.severity !== "all";
-  const governedWorkflow = workflowQuery.data ?? null;
-  const governedWorkflowReadyToClose = isExceptionWorkflowReadyToClose(governedWorkflow);
+  const closure = closureState(governed.view);
+  const governedOpen = governed.view?.workflow != null && governed.view.workflow.status !== "closed";
+  const closePending = resolveMutation.isPending || governed.pending.close;
+  const closeException = (outcome: "resolved" | "dismissed") =>
+    closure.mode === "governed"
+      ? governed.actions.close(outcome, resolveNotes)
+      : handleResolve(selectedEx.id, outcome);
 
   return (
     <div className="space-y-6">
@@ -318,7 +241,7 @@ export default function Exceptions() {
               });
               window.open(res.url, "_blank");
               toast.success(`Excel export ready: ${res.fileName}`);
-            } catch (err: any) { toast.error(err.message || "Excel export failed"); }
+            } catch (err) { toast.error(errorMessageOf(err, "Excel export failed")); }
           }}
           disabled={exportXlsxMutation.isPending}
         >
@@ -595,71 +518,7 @@ export default function Exceptions() {
                 );
               })()}
 
-              {isReadOnly && workflowQuery.data && (
-                <div className="rounded-lg border border-primary/20 bg-primary/[0.03] p-3 text-sm">
-                  <p className="font-semibold text-primary">Governed workflow: {exceptionWorkflowStatusLabel(workflowQuery.data.status)}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">Owner: User {workflowQuery.data.ownerUserId} · Due: {new Date(workflowQuery.data.dueAt).toLocaleString()}</p>
-                  {workflowQuery.data.decisionEvidenceReference && <p className="mt-1 text-xs text-muted-foreground">Decision evidence: {workflowQuery.data.decisionEvidenceReference}</p>}
-                </div>
-              )}
-
-              {!isReadOnly && !workflowQuery.isLoading && (
-                <div className="rounded-lg border border-primary/20 bg-primary/[0.03] p-3 space-y-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-primary">Governed workflow</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">Assign material exceptions, set a due date, preserve a decision reference, and require separate human approval where needed.</p>
-                    </div>
-                    {workflowQuery.data && <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">{exceptionWorkflowStatusLabel(workflowQuery.data.status)}</span>}
-                  </div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div>
-                      <label className="text-xs font-medium">Accountable owner</label>
-                      <Select value={workflowOwnerId} onValueChange={setWorkflowOwnerId}>
-                        <SelectTrigger className="w-full mt-1"><SelectValue placeholder="Choose owner" /></SelectTrigger>
-                        <SelectContent>{(workflowOwnersQuery.data ?? []).map((owner) => <SelectItem key={owner.id} value={String(owner.id)}>{owner.name || owner.email || `User ${owner.id}`}</SelectItem>)}</SelectContent>
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="text-xs font-medium">Due by</label>
-                      <Input className="mt-1" type="datetime-local" value={workflowDueAt} onChange={(event) => setWorkflowDueAt(event.target.value)} />
-                    </div>
-                  </div>
-                  {!workflowQuery.data ? (
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={workflowApprovalRequired} onCheckedChange={(checked) => setWorkflowApprovalRequired(checked === true)} />Require a second operator to approve the decision before closure</label>
-                      <Button size="sm" onClick={handleStartWorkflow} disabled={startWorkflowMutation.isPending || workflowOwnersQuery.isLoading}>{startWorkflowMutation.isPending && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}Start governed workflow</Button>
-                    </div>
-                  ) : workflowQuery.data.status !== "closed" ? (
-                    <div className="space-y-3">
-                      <Button size="sm" variant="outline" onClick={handleUpdateWorkflowOwnership} disabled={updateWorkflowOwnershipMutation.isPending}>Update owner / due date</Button>
-                      <div className="space-y-2 border-t pt-3">
-                        <label className="text-xs font-medium">Escalation reason</label>
-                        <Textarea value={escalationNote} onChange={(event) => setEscalationNote(event.target.value)} placeholder="Why this case needs escalation..." rows={2} />
-                        <Button size="sm" variant="outline" onClick={handleEscalateWorkflow} disabled={escalateWorkflowMutation.isPending}>Escalate with evidence</Button>
-                      </div>
-                      {(workflowQuery.data.status === "active" || workflowQuery.data.status === "escalated") && (
-                        <div className="space-y-2 border-t pt-3">
-                          <label className="text-xs font-medium">Decision rationale</label>
-                          <Textarea value={decisionRationale} onChange={(event) => setDecisionRationale(event.target.value)} placeholder="What is the human decision and why?" rows={3} />
-                          <label className="text-xs font-medium">Evidence reference</label>
-                          <Input value={decisionEvidenceReference} onChange={(event) => setDecisionEvidenceReference(event.target.value)} placeholder="Case, report, control or source-evidence reference" />
-                          <Button size="sm" onClick={handleRecordDecision} disabled={recordDecisionMutation.isPending}>Record decision evidence</Button>
-                        </div>
-                      )}
-                      {workflowQuery.data.status === "decision_submitted" && (
-                        <div className="space-y-2 border-t pt-3">
-                          <p className="text-xs text-amber-700">A different operations user must approve this decision before closure.</p>
-                          <label className="text-xs font-medium">Approval note</label>
-                          <Textarea value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="Independent review evidence..." rows={2} />
-                          <Button size="sm" onClick={handleApproveDecision} disabled={approveDecisionMutation.isPending}>Approve decision</Button>
-                        </div>
-                      )}
-                      {governedWorkflowReadyToClose && <p className="rounded bg-green-50 px-2 py-1.5 text-xs text-green-800">Decision evidence is complete. Record closure notes below to resolve or dismiss this exception.</p>}
-                    </div>
-                  ) : <p className="text-xs text-muted-foreground">This governed workflow is closed. Its ownership, decision and approval evidence remain in the audit trail.</p>}
-                </div>
-              )}
+              <ExceptionWorkflowPanel state={governed} canManage={canManageWorkflows} />
 
               {isReadOnly ? (
                 <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
@@ -672,19 +531,17 @@ export default function Exceptions() {
                     <label className="text-sm font-medium mb-1 block">Resolution Notes</label>
                     <Textarea value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} placeholder="Describe the resolution..." rows={3} />
                   </div>
-                  {governedWorkflow && governedWorkflow.status !== "closed" && !governedWorkflowReadyToClose && (
-                    <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      Closure is blocked until this governed workflow has the required decision evidence{governedWorkflow.approvalRequired ? " and separate human approval" : ""}.
-                    </p>
-                  )}
+                  {closure.mode === "blocked" ? (
+                    <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{closure.reason}</p>
+                  ) : null}
                   <div className="flex gap-2 flex-wrap">
-                    <Button onClick={() => governedWorkflow ? handleResolveWorkflow("resolved") : handleResolve(selectedEx.id, "resolved")} disabled={resolveMutation.isPending || resolveWorkflowMutation.isPending || Boolean(governedWorkflow && (governedWorkflow.status === "closed" || !governedWorkflowReadyToClose))} className="flex-1">
+                    <Button onClick={() => closeException("resolved")} disabled={closePending || closure.mode === "blocked"} className="flex-1">
                       <CheckCircle2 className="h-4 w-4 mr-1" /> Resolve
                     </Button>
-                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || Boolean(governedWorkflow && governedWorkflow.status !== "closed")} className="flex-1">
+                    <Button variant="outline" onClick={() => handleMoveToReview(selectedEx.id)} disabled={moveToReviewMutation.isPending || governedOpen} className="flex-1">
                       <ClipboardList className="h-4 w-4 mr-1" /> Move to Review
                     </Button>
-                    <Button variant="ghost" onClick={() => governedWorkflow ? handleResolveWorkflow("dismissed") : handleResolve(selectedEx.id, "dismissed")} disabled={resolveMutation.isPending || resolveWorkflowMutation.isPending || Boolean(governedWorkflow && (governedWorkflow.status === "closed" || !governedWorkflowReadyToClose))} className="flex-1">
+                    <Button variant="ghost" onClick={() => closeException("dismissed")} disabled={closePending || closure.mode === "blocked"} className="flex-1">
                       Dismiss
                     </Button>
                   </div>

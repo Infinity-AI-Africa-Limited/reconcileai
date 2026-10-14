@@ -649,6 +649,37 @@ export const exceptionWorkflows = mysqlTable("exception_workflows", {
 export type ExceptionWorkflow = typeof exceptionWorkflows.$inferSelect;
 export type InsertExceptionWorkflow = typeof exceptionWorkflows.$inferInsert;
 
+// Append-only evidence for every governed step. The workflow row holds the
+// CURRENT decision and approval; this holds every one ever made — a revised
+// decision, a second escalation, a superseded approval — with its narrative,
+// which audit-event metadata deliberately omits. Rows are only ever inserted.
+export const exceptionWorkflowEvents = mysqlTable("exception_workflow_events", {
+  id: int("id").autoincrement().primaryKey(),
+  organizationId: int("organizationId").notNull(),
+  workflowId: int("workflowId").notNull(),
+  exceptionId: int("exceptionId").notNull(),
+  eventType: mysqlEnum("eventType", [
+    "started",
+    "reassigned",
+    "escalated",
+    "decision_recorded",
+    "decision_approved",
+    "closed",
+  ]).notNull(),
+  actorUserId: int("actorUserId").notNull(),
+  // The narrative of this step: rationale, escalation reason, approval or closure notes.
+  note: text("note"),
+  decisionEvidenceReference: varchar("decisionEvidenceReference", { length: 500 }),
+  ownerUserId: int("ownerUserId"),
+  dueAt: timestamp("dueAt"),
+  outcome: mysqlEnum("outcome", ["resolved", "dismissed"]),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_exception_workflow_events_workflow").on(table.organizationId, table.workflowId, table.id),
+]);
+
+export type ExceptionWorkflowEvent = typeof exceptionWorkflowEvents.$inferSelect;
+
 // ─── Audit Logs ──────────────────────────────────────────────────────
 export const auditLogs = mysqlTable("audit_logs", {
   id: int("id").autoincrement().primaryKey(),

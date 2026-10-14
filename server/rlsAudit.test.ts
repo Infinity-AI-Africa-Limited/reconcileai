@@ -135,6 +135,8 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // Material-exception ownership, due dates, decision evidence and human
   // approvals are all customer control records and are tenant-required.
   exception_workflows: "tenant_required",
+  // Append-only step history of those workflows, narratives included.
+  exception_workflow_events: "tenant_required",
   distributors: "tenant_nullable",
   agent_action_drafts: "tenant_nullable",
   agent_memory: "tenant_nullable",
