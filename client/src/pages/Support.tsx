@@ -1,35 +1,33 @@
 /**
- * Support page — required for SHOPLINE App Store listing.
- * Accessible at /support (public, no auth required).
+ * Public support page for ReconcileAI's Shopify Scope A app.
+ * Accessible at /support without authentication.
  */
+import { BookOpen, Mail, ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Mail, MessageCircle, BookOpen, Clock } from "lucide-react";
 
 export default function Support() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="container max-w-4xl py-16">
-        <h1 className="text-3xl font-bold mb-2">Support</h1>
+        <h1 className="text-3xl font-bold mb-2">ReconcileAI Support</h1>
         <p className="text-muted-foreground mb-8">
-          Get help with ReconcileAI — we&apos;re here to ensure your reconciliation runs smoothly.
+          Help for the read-only Shopify Scope A reconciliation workspace.
         </p>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
+        <div className="grid grid-cols-1 gap-6 mb-12 md:grid-cols-2">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <Mail className="h-5 w-5 text-primary" />
-                Email Support
+                Contact support
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-muted-foreground mb-2">
-                For technical issues, billing questions, or account inquiries.
+              <p className="mb-2 text-sm text-muted-foreground">
+                Include your Shopify store domain and a short description of the issue. Do not send order files, customer data,
+                API tokens, or screenshots containing sensitive data by email.
               </p>
-              <a
-                href="mailto:support@reconcileaiafrica.com"
-                className="text-primary underline text-sm font-medium"
-              >
+              <a href="mailto:support@reconcileaiafrica.com" className="text-sm font-medium text-primary underline">
                 support@reconcileaiafrica.com
               </a>
             </CardContent>
@@ -38,15 +36,14 @@ export default function Support() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
-                <Clock className="h-5 w-5 text-primary" />
-                Response Times
+                <ShieldCheck className="h-5 w-5 text-primary" />
+                Scope A boundary
               </CardTitle>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground">
-                <strong>Starter/Growth:</strong> Within 24 hours<br />
-                <strong>Professional:</strong> Within 12 hours<br />
-                <strong>Scale/Enterprise:</strong> Within 4 hours
+                ReconcileAI reads limited Shopify order evidence. It does not edit Shopify records, issue refunds, move funds,
+                post to a ledger, or access Shopify Payments payouts and fees in this release.
               </p>
             </CardContent>
           </Card>
@@ -55,115 +52,77 @@ export default function Support() {
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <BookOpen className="h-5 w-5 text-primary" />
-                Documentation
+                Before contacting us
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-muted-foreground mb-2">
-                Guides, FAQs, and API documentation for self-service help.
+              <p className="text-sm text-muted-foreground">
+                Confirm that you are in the correct Shopify store, that the app remains installed, and that your settlement export
+                includes an order reference, amount, currency, and settlement date.
               </p>
-              <a
-                href="https://www.reconcileaiafrica.com/docs"
-                className="text-primary underline text-sm font-medium"
-              >
-                View Documentation
-              </a>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <MessageCircle className="h-5 w-5 text-primary" />
-                Feature Requests
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground mb-2">
-                Have an idea for improving ReconcileAI? We&apos;d love to hear it.
-              </p>
-              <a
-                href="mailto:feedback@reconcileaiafrica.com"
-                className="text-primary underline text-sm font-medium"
-              >
-                feedback@reconcileaiafrica.com
-              </a>
             </CardContent>
           </Card>
         </div>
 
         <section className="mb-12">
-          <h2 className="text-2xl font-semibold mb-6">Frequently Asked Questions</h2>
-
+          <h2 className="mb-6 text-2xl font-semibold">Frequently asked questions</h2>
           <div className="space-y-6">
             <div>
-              <h3 className="font-medium mb-2">How do I connect my SHOPLINE store?</h3>
+              <h3 className="mb-2 font-medium">What does ReconcileAI access from Shopify?</h3>
               <p className="text-sm text-muted-foreground">
-                ReconcileAI connects automatically when you install it from the SHOPLINE App Store.
-                Simply click &quot;Install&quot;, authorize the requested permissions, and your store data
-                will begin syncing within minutes.
+                Scope A uses Shopify&apos;s <code>read_orders</code> permission to read recent order and refund evidence needed for
+                reconciliation. It does not have write permissions, and it does not connect to Shopify Payments payouts or fees.
               </p>
             </div>
 
             <div>
-              <h3 className="font-medium mb-2">How often does reconciliation run?</h3>
+              <h3 className="mb-2 font-medium">How do I reconcile a settlement?</h3>
               <p className="text-sm text-muted-foreground">
-                ReconcileAI processes transactions in real-time via webhooks. Additionally,
-                a full reconciliation sweep runs every 15 minutes to catch any missed events,
-                and a comprehensive daily batch ensures complete coverage.
+                In the embedded ReconcileAI workspace, first request a refresh of your recent Shopify order evidence. Then upload
+                a settlement, payout, payment-provider, or courier export that you obtained from your provider. Review the
+                detected column mapping before importing the evidence.
               </p>
             </div>
 
             <div>
-              <h3 className="font-medium mb-2">What happens if I exceed my plan&apos;s order limit?</h3>
+              <h3 className="mb-2 font-medium">Does ReconcileAI change my Shopify store or move money?</h3>
               <p className="text-sm text-muted-foreground">
-                You&apos;ll receive a notification when you reach 80% of your monthly order limit.
-                If you exceed the limit, reconciliation continues but you&apos;ll be prompted to
-                upgrade to the next tier. We never stop processing mid-month.
+                No. ReconcileAI is read-only in Scope A. It presents evidence, matches, and differences for human review; it does
+                not modify orders, issue refunds, initiate payments, or make a financial decision for you.
               </p>
             </div>
 
             <div>
-              <h3 className="font-medium mb-2">Can I connect multiple stores?</h3>
+              <h3 className="mb-2 font-medium">Is the app paid?</h3>
               <p className="text-sm text-muted-foreground">
-                Yes! The number of stores you can connect depends on your plan tier.
-                Starter supports 1 store, Growth supports 3, Professional supports 10,
-                Scale supports 50, and Enterprise is unlimited.
+                Scope A is available without charge at launch. Shopify billing is not used for this release.
               </p>
             </div>
 
             <div>
-              <h3 className="font-medium mb-2">How do I cancel my subscription?</h3>
+              <h3 className="mb-2 font-medium">How do I stop access or request deletion?</h3>
               <p className="text-sm text-muted-foreground">
-                You can cancel at any time by uninstalling ReconcileAI from your SHOPLINE
-                App Store. Your data will be retained for 90 days in case you want to
-                reinstall, after which it is permanently deleted.
+                You can uninstall ReconcileAI from Shopify to stop the app&apos;s access. For a data-rights request, email support with
+                your store domain and the type of request. See the <a href="/privacy" className="text-primary underline">Privacy Notice</a>{" "}
+                for the handling process.
               </p>
             </div>
 
             <div>
-              <h3 className="font-medium mb-2">Is my financial data secure?</h3>
+              <h3 className="mb-2 font-medium">What should I avoid sending to support?</h3>
               <p className="text-sm text-muted-foreground">
-                Absolutely. All data is encrypted in transit (TLS 1.3) and at rest (AES-256).
-                Access tokens are stored using envelope encryption. We are GDPR and POPIA
-                compliant. See our{" "}
-                <a href="/privacy" className="text-primary underline">Privacy Policy</a>{" "}
-                for full details.
+                Never send access tokens, passwords, full payment credentials, raw Shopify webhook bodies, or customer personal
+                data. We will ask for a safe, minimum-data diagnostic path if investigation is needed.
               </p>
             </div>
           </div>
         </section>
 
         <section>
-          <h2 className="text-2xl font-semibold mb-4">Service Status</h2>
+          <h2 className="mb-4 text-2xl font-semibold">Useful links</h2>
           <p className="text-sm text-muted-foreground">
-            Check the current status of ReconcileAI services at{" "}
-            <a
-              href="https://status.reconcileaiafrica.com"
-              className="text-primary underline"
-            >
-              status.reconcileaiafrica.com
-            </a>
+            Read our <a href="/privacy" className="text-primary underline">Privacy Notice</a> and{" "}
+            <a href="/terms" className="text-primary underline">Terms of Service</a>.
           </p>
         </section>
       </div>

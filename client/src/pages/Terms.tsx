@@ -1,175 +1,120 @@
 /**
- * Terms of Service page — required for SHOPLINE App Store listing.
- * Accessible at /terms (public, no auth required).
+ * Public terms for ReconcileAI's Shopify Scope A app.
+ * Accessible at /terms without authentication.
  */
 export default function Terms() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="container max-w-4xl py-16">
         <h1 className="text-3xl font-bold mb-2">Terms of Service</h1>
-        <p className="text-muted-foreground mb-8">
-          Last updated: July 19, 2026
-        </p>
+        <p className="text-muted-foreground mb-8">Last updated: October 15, 2026</p>
 
         <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6">
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">1. Agreement to Terms</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">1. Agreement</h2>
             <p>
-              By installing ReconcileAI from the SHOPLINE App Store, you agree to be bound
-              by these Terms of Service (&quot;Terms&quot;). ReconcileAI is provided by Infinity AI
-              Africa Limited (&quot;Infinity AI&quot;, &quot;we&quot;, &quot;us&quot;, or &quot;our&quot;).
+              These Terms govern use of the Shopify Scope A version of ReconcileAI. By installing or using the app, you agree
+              to these Terms. ReconcileAI is provided by Infinity AI Africa Limited (&quot;Infinity AI&quot;, &quot;we&quot;, &quot;us&quot;, or &quot;our&quot;).
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">2. Scope A service</h2>
+            <p>
+              Scope A is a read-only order-evidence reconciliation workspace. It can read recent Shopify order evidence using
+              the permission you authorize and compare it with settlement evidence that you provide. It is not a payment
+              processor, settlement engine, ledger of record, accounting service, or source system of record.
             </p>
             <p className="mt-2">
-              If you do not agree to these Terms, do not install or use ReconcileAI.
+              Scope A cannot edit Shopify orders, issue refunds, move funds, post to a general ledger, or change Shopify store
+              settings. Shopify Payments payouts and fees are not connected in this release. A person remains responsible for
+              reviewing reconciliation outputs and approving any business decision.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">2. Description of Service</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">3. Access, installation, and your responsibilities</h2>
             <p>
-              ReconcileAI is an automated financial reconciliation platform that connects to
-              your SHOPLINE store to match orders, payment transactions, and settlement payouts.
-              The service identifies discrepancies, classifies exceptions, and provides
-              real-time monitoring of your financial operations.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">3. Subscription and Billing</h2>
-            <p>
-              ReconcileAI offers multiple subscription tiers billed monthly through the
-              SHOPLINE App Store billing system. All plans include a 7-day free trial.
-            </p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li><strong>Starter:</strong> $29/month — Up to 500 orders/month, 1 store</li>
-              <li><strong>Growth:</strong> $79/month — Up to 2,000 orders/month, 3 stores</li>
-              <li><strong>Professional:</strong> $149/month — Up to 10,000 orders/month, 10 stores</li>
-              <li><strong>Scale:</strong> $299/month — Up to 50,000 orders/month, 50 stores</li>
-              <li><strong>Enterprise:</strong> $499/month — Unlimited orders and stores</li>
-            </ul>
-            <p className="mt-4">
-              Billing is managed by SHOPLINE. You authorize SHOPLINE to charge your registered
-              payment method on a recurring monthly basis. You may cancel your subscription
-              at any time through the SHOPLINE App Store.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">4. Free Trial</h2>
-            <p>
-              New installations receive a 7-day free trial with full access to the selected
-              plan&apos;s features. After the trial period, your subscription will automatically
-              convert to a paid subscription unless cancelled before the trial ends.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">5. Acceptable Use</h2>
-            <p>You agree not to:</p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li>Use the service for any unlawful purpose or in violation of any applicable laws</li>
-              <li>Attempt to reverse-engineer, decompile, or disassemble the service</li>
-              <li>Share your account credentials with unauthorized third parties</li>
-              <li>Use the service to process data from stores you do not own or have authorization to manage</li>
-              <li>Exceed the usage limits of your subscription tier (orders/month, connected stores)</li>
-            </ul>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">6. Data Accuracy and Limitations</h2>
-            <p>
-              ReconcileAI performs automated reconciliation based on the data available through
-              the SHOPLINE API. While we strive for accuracy, we do not guarantee that all
-              discrepancies will be detected or that all matches will be correct.
+              You must be authorized to install the app and to provide any settlement evidence you import. You are responsible
+              for validating source records, the mapping you confirm, and any decision made from the resulting evidence. Do not
+              upload personal customer information or data that you are not authorized to process.
             </p>
             <p className="mt-2">
-              <strong>ReconcileAI is a decision-support tool, not a replacement for professional
-              accounting or auditing services.</strong> You remain responsible for verifying
-              reconciliation results and making final financial decisions.
+              ReconcileAI&apos;s Shopify access is limited to <code>read_orders</code> for Scope A. You may revoke that access by
+              uninstalling the app from Shopify. We may suspend access where necessary to protect the service, comply with law,
+              or investigate a security issue.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">7. Service Availability</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">4. Launch pricing</h2>
             <p>
-              We target 99.9% uptime for the ReconcileAI service. However, we do not guarantee
-              uninterrupted access. Scheduled maintenance windows will be communicated in advance.
-              We are not liable for downtime caused by SHOPLINE platform issues, network
-              outages, or force majeure events.
+              Scope A is offered without charge at launch. ReconcileAI does not use Shopify billing for this release. If a paid
+              offering is introduced later, its price, billing terms, and effective date will be presented before any charge is
+              made; your continued use alone will not create a charge.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">8. Intellectual Property</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">5. Data and privacy</h2>
             <p>
-              ReconcileAI, including its algorithms, user interface, documentation, and
-              branding, is the intellectual property of Infinity AI Africa Limited.
-              Your subscription grants you a non-exclusive, non-transferable license to
-              use the service for your business operations.
-            </p>
-            <p className="mt-2">
-              Your financial data remains your property at all times. We claim no ownership
-              over the data processed through our service.
+              Your use of the service is also governed by our <a href="/privacy" className="text-primary underline">Privacy Notice</a>.
+              We process data only for the Scope A reconciliation and service-protection purposes described there. You retain
+              responsibility for the data you provide and for any applicable retention, financial-control, and regulatory duties.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">9. Limitation of Liability</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">6. No professional or financial advice</h2>
             <p>
-              To the maximum extent permitted by applicable law, Infinity AI Africa Limited
-              shall not be liable for any indirect, incidental, special, consequential, or
-              punitive damages, including but not limited to loss of profits, data, or
-              business opportunities, arising from your use of ReconcileAI.
+              ReconcileAI presents evidence and workflow support. It does not provide legal, tax, audit, accounting, investment,
+              or financial advice, and it does not certify the accuracy, completeness, or compliance of a reconciliation. You
+              must apply your own review and approval controls before acting on any result.
             </p>
-            <p className="mt-2">
-              Our total liability for any claim arising from these Terms shall not exceed
-              the amount you paid for the service in the 12 months preceding the claim.
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">7. Service availability and changes</h2>
+            <p>
+              We may maintain, change, suspend, or discontinue the launch service where reasonably necessary. We do not promise
+              uninterrupted availability, a particular outcome, or a particular reconciliation rate. We will use reasonable
+              efforts to communicate material changes affecting the Scope A service.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">8. Intellectual property</h2>
+            <p>
+              ReconcileAI, its software, interface, and documentation are owned by Infinity AI or its licensors. Subject to these
+              Terms, we grant you a limited, non-exclusive, non-transferable right to use Scope A for your internal business
+              reconciliation purpose. You retain your rights in your data.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">9. Limitation of liability</h2>
+            <p>
+              To the extent permitted by applicable law, Infinity AI is not liable for indirect, incidental, special,
+              consequential, or punitive loss arising from use of the launch service. Nothing in these Terms excludes liability
+              that cannot lawfully be excluded.
             </p>
           </section>
 
           <section>
             <h2 className="text-xl font-semibold mt-8 mb-4">10. Termination</h2>
             <p>
-              You may terminate your subscription at any time by uninstalling ReconcileAI
-              from your SHOPLINE store. We may suspend or terminate your access if you
-              violate these Terms or if your billing fails after multiple attempts.
-            </p>
-            <p className="mt-2">
-              Upon termination, your access to the service will cease immediately.
-              Data retention and deletion follow our Privacy Policy.
+              You may stop using Scope A and uninstall the app at any time. On uninstall or a valid Shopify privacy request,
+              ReconcileAI restricts Shopify access and handles the resulting data request under the Privacy Notice. We may
+              terminate or suspend access if these Terms are breached or if continued access presents a security or legal risk.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">11. Governing Law</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">11. Governing law and contact</h2>
             <p>
-              These Terms are governed by the laws of the Federal Republic of Nigeria.
-              Any disputes shall be resolved through arbitration in Lagos, Nigeria,
-              under the rules of the Lagos Court of Arbitration.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">12. Changes to Terms</h2>
-            <p>
-              We reserve the right to modify these Terms at any time. Material changes
-              will be communicated via email or in-app notification at least 30 days
-              before taking effect. Continued use after changes constitutes acceptance.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">13. Contact</h2>
-            <p>
-              For questions about these Terms, contact:
-            </p>
-            <p className="mt-2">
-              <strong>Infinity AI Africa Limited</strong><br />
-              Email:{" "}
-              <a href="mailto:legal@reconcileaiafrica.com" className="text-primary underline">
-                legal@reconcileaiafrica.com
-              </a><br />
-              Website: <a href="https://www.reconcileaiafrica.com" className="text-primary underline">www.reconcileaiafrica.com</a>
+              These Terms are governed by the laws of the Federal Republic of Nigeria, subject to any mandatory law that applies
+              to you. Questions about these Terms can be sent to{" "}
+              <a href="mailto:support@reconcileaiafrica.com" className="text-primary underline">support@reconcileaiafrica.com</a>.
             </p>
           </section>
         </div>
