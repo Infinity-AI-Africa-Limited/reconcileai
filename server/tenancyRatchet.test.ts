@@ -46,8 +46,8 @@ const ALLOWED: Record<string, string> = {
   // gone rather than merely re-justified. Do not re-add them.
   updateTransactionStatus: "bulk status write driven by the engine over rows it already selected",
 
-  // Unused today; retained rather than deleted.
-  updateWebhook: "no callers — dead code",
+  // Unused today; retained rather than deleted. (updateWebhook was here too; it
+  // was deleted with the webhook tenancy fix, 2026-10-14.)
   updateApiKeyLastUsed: "no callers — dead code (validateApiKey writes lastUsedAt inline)",
 };
 

@@ -1309,6 +1309,82 @@ table is in `GATED_ELSEWHERE` with a reason.
   looked up WITH `pocSlug`, inside `server/poc-engine.ts` where possible so no
   caller can forget it.
 
+### An outbound webhook event reaches ONE tenant (since 2026-10-14)
+
+| Date | Defect | Exposure measured | Fix |
+|---|---|---|---|
+| 2026-10-14 | `dispatchWebhookEvent` selected every active webhook (`WHERE isActive`), and no caller named a tenant — every tenant's run results, exception counts and resolution events fanned out to every tenant's webhooks, including one subscribed to `"*"` | **None in production.** Read-only count, 2026-10-14: 0 webhooks, 0 deliveries. And `webhooks.create` stored `events` as `JSON.stringify(...)`, so every API-created webhook subscribed to nothing — the leak was latent until that encoding was fixed, which is why both fixes ship together | Tenant-required dispatch; `webhooks.create` records the organisation |
+| 2026-10-14 | Server-side request forgery (Greptile, #196): once webhooks fired, an admin at any tenant could register `http://127.0.0.1:<port>/`, a private address or 169.254.169.254, and the delivery worker would POST there from inside the platform's network. Cloud mode had no destination check at all — the egress guard is a no-op there | None: the same 0 webhooks | `server/outboundDestination.ts`, at registration, at dispatch and at the socket |
+
+- **`dispatchWebhookEvent(organizationId, event, payload)` takes a REQUIRED
+  tenant** (`number`, and `isTenantId` at runtime — 0, NaN and anything an `as`
+  smuggled through are refused), and selects only `webhooks.organizationId =
+  tenant` via `activeWebhooksOfTenant`. A webhook with no organisation receives
+  nothing.
+- **The tenant is the row's, not the request's**: the job's (`runOrganizationId`,
+  and on failure the job re-read), the upload batch's (now recorded at creation),
+  the exception's — announced only after the change committed inside that
+  tenant: `updateException` matched a row (its WHERE pins the tenant), or a
+  closure ran `afterExceptionClosed` (both closure paths lock the case by tenant
+  and id). An id from another tenant changes nothing and announces nothing.
+- **`webhookDelivery.tenancy.test.ts` ratchets it structurally**: every read of
+  `webhooks` anywhere in `server/` must restrict it to one tenant in its
+  WHERE, and every dispatch must pass a tenant that is not a literal, an
+  assertion or `ctx`. readScopeRatchet missed this because it asks only whether a
+  select HAS a where clause — this one had one, on `isActive`. **A where clause is
+  not a tenant predicate.** The real-database proof over real HTTP is
+  `webhookTenancy.db.test.ts`.
+- **Webhooks are admin-only on the server, as on the page.** `webhooks.*`
+  (`server/routers/webhooks.ts`) is `adminProcedure`; the Integrations page
+  always was (`navItems.ts`), and the procedures behind it accepted any member,
+  the read-only CFO and Compliance roles included. Events are the shared list
+  in `shared/webhookEvents.ts` (an unknown name is refused, not stored to never
+  fire). An organisation may hold at most 25 active webhooks, enforced by
+  `db.createWebhookWithinLimit` in ONE transaction under the organisation's row
+  lock, with the count itself a locking read (TiDB's plain reads use the
+  transaction's start snapshot). A separate count and insert let two creates
+  at the ceiling both in — proven on real MySQL, round 0.
+- **A queued delivery carries ids and the signed body only.** The URL and
+  signing secret are read at each attempt, within the job's tenant — so the
+  secret never sits in Redis, and a webhook deleted after dispatch receives
+  none of the retries already queued for it.
+
+### A request to a tenant-supplied destination goes through `server/outboundDestination.ts`
+
+The server sending a request to a URL a tenant typed is server-side request
+forgery unless the destination is checked. The guard has three parts, and each
+closes a bypass the others leave open:
+
+1. **The URL, before any lookup** (`destinationProblem`): cloud mode takes
+   `https` only, no credentials in the URL, no internal-looking host
+   (`localhost`, `.internal`, `.local`, a single label), and an IP-literal host
+   is judged as an address. WHATWG URL already turns `2130706433`, `0x7f.1` and
+   `127.1` into `127.0.0.1`, so those disguises meet the address check.
+2. **Every address the host resolves to** (`permittedAddresses`): one refused
+   answer refuses the request. The tenant controls the DNS, so a mix of public
+   and private answers is the attack, not an accident.
+3. **The connection** (`postToDestination`): the check runs as the socket's own
+   `lookup`, so nothing re-resolves between check and connect (DNS rebinding),
+   and redirects are never followed.
+
+The address rule is an allow-list where the address space allows one (IPv6:
+global unicast 2000::/3 only). In every deployment, link-local (the metadata
+endpoints), unspecified, multicast, reserved, and IPv4 inside IPv6 (mapped,
+NAT64, 6to4) are refused. On premise, private addresses are the point, and
+`EGRESS_ALLOWLIST` decides which outside hosts are approved. Messages name the
+host or address, never the URL: a webhook URL's path often carries a token.
+
+`outboundDestination.test.ts` pins it against real sockets (a refusal makes no
+connection; an accepted one connects to the checked address), and
+`webhookDestination.db.test.ts` runs Greptile's scenario on the real chain:
+with the guard removed, the server opened four connections to its own loopback.
+
+> ⚠️ **Open, same class, different transports (raised 2026-10-14):** three more
+> tenant-configured destinations make the server connect, unguarded — the SFTP
+> credential `host` (`sftp.create`, any non-guest member), the bucket-ingestion
+> `endpoint` (tenant admin), and the WoodCore connector `baseUrl` (connector
+> admins). Route each through this module's checks before it is used.
+
 ### The governed-run evidence pack (`server/controlEvidencePack.ts`, #197)
 
 A read-only, metadata-only reconstruction of one admitted governed run:

@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { agentMemory, exceptions, transactions } from "../drizzle/schema";
 import { getDb } from "./db";
 import { loggableError } from "./dbErrors";
+import { isTenantId } from "@shared/tenantId";
 
 export type ExceptionClosure = {
   /** The tenant whose exception closed. Learning is skipped without one. */
@@ -92,10 +93,17 @@ async function captureResolutionLearning(closure: ExceptionClosure): Promise<voi
   await intelligence.recordLocalSignature(organizationId, signature);
 }
 
-/** The same event, with the same payload, the legacy route always sent. */
+/**
+ * The same event, with the same payload, the legacy route always sent — to the
+ * webhooks of the tenant whose exception closed, and no one else's. Both
+ * closure paths commit inside that tenant, so it is the exception's own. A
+ * closure with no tenant announces nothing.
+ */
 async function notifyResolved(closure: ExceptionClosure): Promise<void> {
+  const tenant = closure.organizationId;
+  if (!isTenantId(tenant)) return;
   const { dispatchWebhookEvent } = await import("./webhookDelivery");
-  await dispatchWebhookEvent("exception.resolved", {
+  await dispatchWebhookEvent(tenant, "exception.resolved", {
     exceptionId: closure.exceptionId,
     status: closure.outcome,
   });

@@ -47,10 +47,10 @@ describe("when an exception closes", () => {
     expect(mocks.recordLocalSignature).toHaveBeenCalledWith(42, expect.anything());
   });
 
-  it("should send the same exception.resolved webhook the legacy route sent", async () => {
+  it("should send the legacy route's exception.resolved webhook, to the closing tenant only", async () => {
     mocks.getDb.mockResolvedValue(scriptedDb({ select: { exceptions: [[learnedRow]] } }).db);
     await afterExceptionClosed({ ...closure, outcome: "dismissed" });
-    expect(mocks.dispatchWebhookEvent).toHaveBeenCalledWith("exception.resolved", { exceptionId: 5, status: "dismissed" });
+    expect(mocks.dispatchWebhookEvent).toHaveBeenCalledWith(42, "exception.resolved", { exceptionId: 5, status: "dismissed" });
   });
 
   it("should learn nothing from another tenant's exception, which the scoped read cannot see", async () => {
@@ -61,10 +61,12 @@ describe("when an exception closes", () => {
     expect(mocks.recordLocalSignature).not.toHaveBeenCalled();
   });
 
-  it("should skip learning for an org-less closure but still notify", async () => {
+  it("should neither learn from nor announce an org-less closure", async () => {
+    // There is no tenant whose webhooks it could go to. Before 2026-10-14 the
+    // dispatcher took no tenant, so "still notify" meant notifying every tenant.
     await afterExceptionClosed({ ...closure, organizationId: null });
     expect(mocks.getDb).not.toHaveBeenCalled();
-    expect(mocks.dispatchWebhookEvent).toHaveBeenCalledTimes(1);
+    expect(mocks.dispatchWebhookEvent).not.toHaveBeenCalled();
   });
 
   it("should never throw, whichever effect fails", async () => {

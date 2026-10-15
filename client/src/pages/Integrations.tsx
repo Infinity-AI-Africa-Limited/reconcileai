@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
+import { WEBHOOK_EVENTS, type WebhookEvent } from "@shared/webhookEvents";
 import {
   Webhook, Key, Plus, Trash2, Copy, Check, AlertTriangle,
   Globe, Shield, Clock, ExternalLink,
@@ -17,12 +18,17 @@ function WebhookSection() {
     onSuccess: (data) => {
       toast.success(`Webhook created. Save the signing secret!`);
       setNewSecret(data.secret);
+      // Cleared only once it is saved: a refused URL keeps the form as typed.
+      setShowCreate(false);
+      setName("");
+      setUrl("");
       refetch();
     },
     onError: (err) => toast.error(err.message),
   });
   const deleteWebhook = trpc.webhooks.delete.useMutation({
     onSuccess: () => { toast.success("Webhook deleted"); refetch(); },
+    onError: (err) => toast.error(err.message),
   });
 
   const [showCreate, setShowCreate] = useState(false);
@@ -30,26 +36,17 @@ function WebhookSection() {
   const [url, setUrl] = useState("");
   const [newSecret, setNewSecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [selectedEvents, setSelectedEvents] = useState<string[]>([
+  const [selectedEvents, setSelectedEvents] = useState<WebhookEvent[]>([
     "reconciliation.completed",
     "exception.created",
   ]);
 
-  const availableEvents = [
-    "upload.completed",
-    "reconciliation.completed",
-    "reconciliation.failed",
-    "exception.created",
-    "exception.resolved",
-    "exception.escalated",
-  ];
+  // The events the server sends, from the list it validates against.
+  const availableEvents = WEBHOOK_EVENTS;
 
   const handleCreate = () => {
     if (!name || !url) return;
     createWebhook.mutate({ name, url, events: selectedEvents });
-    setShowCreate(false);
-    setName("");
-    setUrl("");
   };
 
   const copySecret = () => {
@@ -126,7 +123,7 @@ function WebhookSection() {
               </div>
             </div>
             <div className="flex gap-2">
-              <Button onClick={handleCreate} disabled={!name || !url || selectedEvents.length === 0}>
+              <Button onClick={handleCreate} disabled={!name || !url || selectedEvents.length === 0 || createWebhook.isPending}>
                 Create Webhook
               </Button>
               <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
@@ -346,10 +343,11 @@ function DocumentationSection() {
           <div className="border rounded-lg p-4">
             <h4 className="font-semibold text-sm mb-2">Webhook Payload Format</h4>
             <pre className="bg-muted p-3 rounded text-xs overflow-x-auto">
-{`POST /your-endpoint
+{`POST https://your-endpoint (https only)
 Content-Type: application/json
-X-ReconcileAI-Signature: <hmac-sha256>
+X-ReconcileAI-Signature: <hex HMAC-SHA256 of the raw body, keyed by your secret>
 X-ReconcileAI-Event: reconciliation.completed
+X-ReconcileAI-Delivery: <id, the same on every retry>
 
 {
   "event": "reconciliation.completed",
