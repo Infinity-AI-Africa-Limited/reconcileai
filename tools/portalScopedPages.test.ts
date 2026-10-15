@@ -34,6 +34,9 @@ const PORTAL_PAGES: Record<string, string[]> = {
     // Row-targeted: the job names its own tenant, and the server derives the
     // tenant from the row (canActOnTenant), so no portal id is needed.
     "reconciliation.get",
+    // Same row-targeted rule as reconciliation.get. The evidence pack accepts
+    // only a job id; it does not accept a caller-selected organisation id.
+    "controlEvidence.getGovernedRunEvidencePack",
   ],
   "client/src/pages/Reports.tsx": [],
   "client/src/pages/ExceptionIntelligence.tsx": [],
