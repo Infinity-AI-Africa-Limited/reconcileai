@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useViewAsOrgId } from "@/contexts/PortalContext";
-import { boundedEvidenceCount, evidencePackIssueCopy, evidencePackStateCopy, formatEvidenceTime, looksLikeGovernedControl } from "@/lib/governedControlEvidence";
+import { boundedEvidenceCount, evidencePackIssueCopy, evidencePackStateCopy, formatEvidenceTime, looksLikeGovernedControl, shouldRetryEvidencePack } from "@/lib/governedControlEvidence";
 
 export default function ReconciliationPage() {
   // Super admins inside a tenant portal must read THAT tenant's data.
@@ -52,7 +52,7 @@ export default function ReconciliationPage() {
   const { data: evidencePack, isLoading: evidencePackLoading, error: evidencePackError } =
     trpc.controlEvidence.getGovernedRunEvidencePack.useQuery(
       { jobId: selectedJob! },
-      { enabled: !!selectedJob && isGovernedControl },
+      { enabled: !!selectedJob && isGovernedControl, retry: shouldRetryEvidencePack },
     );
 
   const channelMap = useMemo(() => new Map(channels?.map((c) => [c.id, c]) || []), [channels]);
@@ -436,7 +436,7 @@ export default function ReconciliationPage() {
                                 <div key={source.role} className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2 text-xs">
                                   <div>
                                     <p className="font-medium capitalize">{source.role.replaceAll("_", " ")}</p>
-                                    <p className="text-muted-foreground">Received {formatEvidenceTime(source.receivedAt)} · {source.mappingVersion ?? "No mapping version"}</p>
+                                    <p className="text-muted-foreground">Received {formatEvidenceTime(source.receivedAt)} · {source.receivedRecords === null ? "No record count" : `${source.receivedRecords} record${source.receivedRecords === 1 ? "" : "s"}`} · {source.mappingVersion ?? "No mapping version"}</p>
                                   </div>
                                   <span className={`rounded-full px-2 py-0.5 font-medium ${source.verified ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-800"}`}>
                                     {source.verified ? "Linked" : "Check"}

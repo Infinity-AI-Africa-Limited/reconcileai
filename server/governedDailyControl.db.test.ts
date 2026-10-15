@@ -425,9 +425,11 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
         statusCounts: { active: 1 },
       },
     });
+    // The run's totals were compared with each manifest's received count; a
+    // real completed run must pass that check, not be flagged by it.
     expect(pack.sourceEvidence).toEqual([
-      expect.objectContaining({ role: "settlement", verified: true }),
-      expect.objectContaining({ role: "internal_register", verified: true }),
+      expect.objectContaining({ role: "settlement", receivedRecords: 2, verified: true }),
+      expect.objectContaining({ role: "internal_register", receivedRecords: 2, verified: true }),
     ]);
     // A control pack can point to evidence without becoming an export of the
     // transaction records or delivery identity it was admitted from.
@@ -436,9 +438,14 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
     expect(pack.governedExceptionWorkflow.events).toEqual([
       expect.objectContaining({ eventType: "started" }),
     ]);
+    // Each kind of record, read on its own bounded query and merged in order.
     expect(pack.auditEvidence.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityType: "exception_workflow", action: "exception_workflow_started" }),
+      expect.objectContaining({ entityType: "reconciliation_job" }),
+      expect.objectContaining({ entityType: "control_batch_manifest" }),
     ]));
+    const sequence = pack.auditEvidence.events.map(event => event.sequenceNumber ?? 0);
+    expect(sequence).toEqual([...sequence].sort((a, b) => a - b));
   });
 
   it(

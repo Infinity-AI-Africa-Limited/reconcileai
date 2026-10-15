@@ -1,5 +1,5 @@
 import { TRPCError } from "@trpc/server";
-import { and, asc, count, eq, inArray, or } from "drizzle-orm";
+import { and, asc, count, eq, inArray } from "drizzle-orm";
 import {
   auditLogs,
   controlBatchManifests,
@@ -10,7 +10,8 @@ import {
   jobProgressEvents,
 } from "../drizzle/schema";
 import { isControlPeriod } from "../shared/controlPeriod";
-import { getDb } from "./db";
+import type { GovernedControlPackIssue } from "../shared/governedControlEvidence";
+import { getDb, type DbExecutor } from "./db";
 
 /**
  * A read-only reconstruction of the evidence already attached to one governed
@@ -45,6 +46,9 @@ type EvidenceJob = {
   id: number;
   organizationId: number | null;
   engineConfig: unknown;
+  /** The channels the run actually reconciled; the snapshot names the admitted ones. */
+  sourceChannelId: number;
+  targetChannelId: number;
   status: string;
   createdAt: Date;
   startedAt: Date | null;
@@ -56,18 +60,7 @@ type EvidenceJob = {
   unmatchedCount: number;
 };
 
-export type GovernedControlPackIssue =
-  | "unreadable_admission_snapshot"
-  | "missing_source_evidence"
-  | "source_contract_channel_mismatch"
-  | "source_contract_role_mismatch"
-  | "source_contract_version_mismatch"
-  | "manifest_control_period_mismatch"
-  | "manifest_batch_mismatch"
-  | "manifest_not_accepted"
-  | "manifest_has_invalid_rows"
-  | "manifest_duplicate_delivery"
-  | "manifest_policy_version_mismatch";
+export type { GovernedControlPackIssue };
 
 export type GovernedControlPackState = "reconstructable" | "evidence_gap";
 
@@ -179,7 +172,18 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-  const organizationId = job.organizationId;
+  // Every read below is one snapshot. Read separately, a pack built while a
+  // workflow closed or a manifest changed could mix the states before and
+  // after — evidence that never existed at any single moment.
+  return db.transaction(tx => readEvidencePack(tx, job, job.organizationId as number, admission));
+}
+
+async function readEvidencePack(
+  db: DbExecutor,
+  job: EvidenceJob,
+  organizationId: number,
+  admission: SafeAdmission,
+) {
   const expected = new Map<number, { role: "settlement" | "internal_register"; side: SafeGovernedSide }>([
     [admission.settlement.manifestId, { role: "settlement", side: admission.settlement }],
     [admission.register.manifestId, { role: "internal_register", side: admission.register }],
@@ -199,6 +203,7 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
       schemaState: controlBatchManifests.schemaState,
       duplicateDelivery: controlBatchManifests.duplicateDelivery,
       invalidRowCount: controlBatchManifests.invalidRowCount,
+      receivedRecordCount: controlBatchManifests.receivedRecordCount,
       role: controlSourceContracts.role,
       channelId: controlSourceContracts.channelId,
       contractVersion: controlSourceContracts.version,
@@ -214,6 +219,14 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
     .where(and(eq(controlBatchManifests.organizationId, organizationId), inArray(controlBatchManifests.id, manifestIds)));
 
   const issues = new Set<GovernedControlPackIssue>();
+
+  // The run must have reconciled the channels it was admitted for. The worker
+  // refuses a mismatch before matching (governedSidesOf); the pack reports it
+  // rather than vouching for evidence that belongs to other channels.
+  if (job.sourceChannelId !== admission.settlement.channelId || job.targetChannelId !== admission.register.channelId) {
+    addIssue(issues, "run_channel_mismatch");
+  }
+
   const sourceEvidence = manifestIds.map(manifestId => {
     const expectedSide = expected.get(manifestId)!;
     const row = manifests.find(manifest => manifest.id === manifestId);
@@ -227,6 +240,7 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
         reconciliationPolicyVersion: null as string | null,
         schemaState: null as string | null,
         deliveryState: "missing" as const,
+        receivedRecords: null as number | null,
         verified: false,
       };
     }
@@ -268,6 +282,18 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
       addIssue(issues, "manifest_policy_version_mismatch");
       verified = false;
     }
+    // A completed run loaded exactly its approved batch, proven equal to the
+    // manifest's received count before matching (populationReasons). Its
+    // recorded totals must therefore equal those counts; if they do not, the
+    // run did not reconcile the population this evidence describes. A run
+    // that did not complete recorded no population to compare.
+    if (job.status === "completed") {
+      const runRecords = expectedSide.role === "settlement" ? job.totalSourceTxns : job.totalTargetTxns;
+      if (runRecords !== row.receivedRecordCount) {
+        addIssue(issues, "run_population_mismatch");
+        verified = false;
+      }
+    }
     return {
       role: expectedSide.role,
       receivedAt: safeTime(row.receivedAt),
@@ -276,6 +302,7 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
       reconciliationPolicyVersion: row.reconciliationPolicyVersion,
       schemaState: row.schemaState,
       deliveryState: row.duplicateDelivery,
+      receivedRecords: row.receivedRecordCount,
       verified,
     };
   });
@@ -337,48 +364,73 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
     workflowStatuses.map(row => [row.status, Number(row.count)]),
   );
 
-  const contractIds = manifests.map(manifest => manifest.sourceContractId);
-  // This remains a SQL subquery. Fetching every workflow id just to build the
-  // audit filter would reintroduce the unbounded read avoided by the grouped
-  // status query above.
-  const workflowIdsForJob = db
-    .select({ id: exceptionWorkflows.id })
-    .from(exceptionWorkflows)
-    .innerJoin(
-      exceptions,
-      and(
-        eq(exceptions.id, exceptionWorkflows.exceptionId),
-        eq(exceptions.organizationId, exceptionWorkflows.organizationId),
-      ),
-    )
-    .where(and(eq(exceptionWorkflows.organizationId, organizationId), eq(exceptions.jobId, job.id)));
-  const auditTargets = [
-    and(eq(auditLogs.entityType, "reconciliation_job"), eq(auditLogs.entityId, job.id)),
-    and(eq(auditLogs.entityType, "control_batch_manifest"), inArray(auditLogs.entityId, manifestIds)),
-    and(eq(auditLogs.entityType, "exception_workflow"), inArray(auditLogs.entityId, workflowIdsForJob)),
+  const contractIds = [...new Set(manifests.map(manifest => manifest.sourceContractId))];
+  // One bounded read per kind of record, merged here. A single read OR-ing
+  // the four (with the workflow ids as a subquery) left the optimizer free to
+  // walk this tenant's whole audit chain in sequence order: measured on MySQL
+  // 8.4 against a 500,000-record chain, ~1.7s to return 21 rows once other
+  // tenants' workflow audits existed. Each read below is an entity-index
+  // lookup (the workflow read is driven from this job's exceptions), so the
+  // cost follows the run, not the tenant's history. The merged first
+  // MAX_AUDIT_EVENTS by sequence equal the single query's: each kind's first
+  // MAX_AUDIT_EVENTS + 1 contain every one of its rows that could rank.
+  const auditColumns = {
+    id: auditLogs.id,
+    action: auditLogs.action,
+    entityType: auditLogs.entityType,
+    createdAt: auditLogs.createdAt,
+    sequenceNumber: auditLogs.sequenceNumber,
+    signed: auditLogs.recordHash,
+  };
+  const auditFor = (entityType: string, entityIds: number[]) =>
+    entityIds.length === 0
+      ? Promise.resolve([])
+      : db
+          .select(auditColumns)
+          .from(auditLogs)
+          .where(
+            and(
+              eq(auditLogs.organizationId, organizationId),
+              eq(auditLogs.entityType, entityType),
+              inArray(auditLogs.entityId, entityIds),
+            ),
+          )
+          .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id))
+          .limit(MAX_AUDIT_EVENTS + 1);
+  const auditByKind = [
+    await auditFor("reconciliation_job", [job.id]),
+    await auditFor("control_batch_manifest", manifestIds),
+    await auditFor("control_source_contract", contractIds),
+    await db
+      .select(auditColumns)
+      .from(auditLogs)
+      .innerJoin(
+        exceptionWorkflows,
+        and(
+          eq(exceptionWorkflows.id, auditLogs.entityId),
+          eq(exceptionWorkflows.organizationId, auditLogs.organizationId),
+        ),
+      )
+      .innerJoin(
+        exceptions,
+        and(
+          eq(exceptions.id, exceptionWorkflows.exceptionId),
+          eq(exceptions.organizationId, exceptionWorkflows.organizationId),
+        ),
+      )
+      .where(
+        and(
+          eq(auditLogs.organizationId, organizationId),
+          eq(auditLogs.entityType, "exception_workflow"),
+          eq(exceptions.jobId, job.id),
+        ),
+      )
+      .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id))
+      .limit(MAX_AUDIT_EVENTS + 1),
   ];
-  if (contractIds.length > 0) {
-    auditTargets.push(
-      and(eq(auditLogs.entityType, "control_source_contract"), inArray(auditLogs.entityId, contractIds)),
-    );
-  }
-  const auditRows = await db
-    .select({
-      action: auditLogs.action,
-      entityType: auditLogs.entityType,
-      createdAt: auditLogs.createdAt,
-      sequenceNumber: auditLogs.sequenceNumber,
-      signed: auditLogs.recordHash,
-    })
-    .from(auditLogs)
-    .where(
-      and(
-        eq(auditLogs.organizationId, organizationId),
-        or(...auditTargets),
-      ),
-    )
-    .orderBy(asc(auditLogs.sequenceNumber), asc(auditLogs.id))
-    .limit(MAX_AUDIT_EVENTS + 1);
+  const auditRows = auditByKind
+    .flat()
+    .sort((a, b) => (a.sequenceNumber ?? 0) - (b.sequenceNumber ?? 0) || a.id - b.id);
   const auditEventsTruncated = auditRows.length > MAX_AUDIT_EVENTS;
   const auditEvents = auditRows.slice(0, MAX_AUDIT_EVENTS).map(row => ({
     action: row.action,
