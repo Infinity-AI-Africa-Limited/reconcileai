@@ -21,6 +21,8 @@ import {
   channels,
   controlBatchManifests,
   controlSourceContracts,
+  exceptionWorkflowEvents,
+  exceptionWorkflows,
   exceptions,
   jobProgressEvents,
   matches,
@@ -33,6 +35,7 @@ import {
 import type { TrpcContext } from "./_core/context";
 import { createReconciliationJob, getDb } from "./db";
 import { classifyDatabaseTarget } from "./dbTarget";
+import { startExceptionWorkflow } from "./exceptionWorkflow";
 import { enqueueReconciliationRun } from "./reconciliationQueue";
 
 const url = process.env.DATABASE_URL;
@@ -233,6 +236,8 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
     // Best-effort and never throwing: a cleanup failure must not hide the result.
     const steps: Array<() => Promise<unknown>> = [
       () => db.delete(matches).where(eq(matches.organizationId, organizationId)),
+      () => db.delete(exceptionWorkflowEvents).where(eq(exceptionWorkflowEvents.organizationId, organizationId)),
+      () => db.delete(exceptionWorkflows).where(eq(exceptionWorkflows.organizationId, organizationId)),
       () => db.delete(exceptions).where(eq(exceptions.organizationId, organizationId)),
       () =>
         jobIds.length > 0
@@ -373,6 +378,68 @@ describe.runIf(localDatabase)("when a governed daily control runs against a real
     },
     RUN_TIMEOUT_MS
   );
+
+  it("should reconstruct a metadata-only evidence pack from the admitted run", async () => {
+    const jobId = jobIds[0];
+    expect(jobId, "the completed governed run must exist before its evidence is read").toBeTruthy();
+
+    const [exception] = await db
+      .select({ id: exceptions.id })
+      .from(exceptions)
+      .where(and(eq(exceptions.organizationId, organizationId), eq(exceptions.jobId, jobId)))
+      .limit(1);
+    expect(exception, "the governed run must have a material exception to enroll").toBeTruthy();
+    await startExceptionWorkflow({
+      actor: { id: userId, role: "operations", organizationId },
+      organizationId,
+      exceptionId: exception.id,
+      ownerUserId: userId,
+      dueAt: new Date(Date.now() + 3_600_000),
+      approvalRequired: false,
+      client: { ip: "127.0.0.1", ua: "vitest" },
+    });
+
+    const pack = await caller.controlEvidence.getGovernedRunEvidencePack({ jobId });
+
+    expect(pack).toMatchObject({
+      schemaVersion: "governed-control-evidence-pack-v1",
+      state: "reconstructable",
+      issues: [],
+      boundary: {
+        rawSourceDataIncluded: false,
+        sourcePayloadIncluded: false,
+        financialDecisionMade: false,
+        auditChainVerified: false,
+      },
+      admission: {
+        controlPeriod: PERIOD,
+        sourceContractCount: 2,
+        batchManifestCount: 2,
+        reconciliationPolicyVersions: ["settlement-ledger-v1"],
+      },
+      run: {
+        status: "completed",
+        totals: { sourceRecords: 2, targetRecords: 2, matchedRecords: 1, exceptionRecords: 2 },
+      },
+      governedExceptionWorkflow: {
+        statusCounts: { active: 1 },
+      },
+    });
+    expect(pack.sourceEvidence).toEqual([
+      expect.objectContaining({ role: "settlement", verified: true }),
+      expect.objectContaining({ role: "internal_register", verified: true }),
+    ]);
+    // A control pack can point to evidence without becoming an export of the
+    // transaction records or delivery identity it was admitted from.
+    expect(JSON.stringify(pack)).not.toContain("GOV-S1");
+    expect(JSON.stringify(pack)).not.toContain("governed-settlement");
+    expect(pack.governedExceptionWorkflow.events).toEqual([
+      expect.objectContaining({ eventType: "started" }),
+    ]);
+    expect(pack.auditEvidence.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: "exception_workflow", action: "exception_workflow_started" }),
+    ]));
+  });
 
   it(
     "should fail a governed run in the worker, writing nothing, once its approved rows have moved on",

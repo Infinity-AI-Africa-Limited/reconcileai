@@ -12,9 +12,11 @@ import {
   recordControlBatchManifest,
   recordControlSourceContract,
 } from "../controlEvidenceStore";
+import { buildGovernedControlEvidencePack } from "../controlEvidencePack";
 import { evaluateGovernedAdmission } from "../controlRunAdmission";
 import { assessPersistedControlRun } from "../controlRunReadiness";
-import { getClientInfo } from "./shared";
+import { z } from "zod";
+import { assertJobVisible, getClientInfo } from "./shared";
 
 /**
  * Tenant-scoped evidence for a daily control: immutable approved source
@@ -23,6 +25,18 @@ import { getClientInfo } from "./shared";
  * separately reviewed increment.
  */
 export const controlEvidenceRouter = router({
+  /**
+   * A bounded, metadata-only reconstruction of an already admitted governed
+   * run. The resource is reached by job id, so its tenant is derived from the
+   * job itself rather than from a caller-supplied organisation id.
+  */
+  getGovernedRunEvidencePack: protectedProcedure
+    .input(z.object({ jobId: z.number().int().positive() }).strict())
+    .query(async ({ ctx, input }) => {
+      const job = await assertJobVisible(ctx.user, input.jobId);
+      return buildGovernedControlEvidencePack(job);
+    }),
+
   /**
    * Read-only daily-control preflight. It translates persisted source contracts
    * and batch manifests into the fail-closed completeness policy; it cannot
