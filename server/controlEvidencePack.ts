@@ -8,6 +8,7 @@ import {
   exceptionWorkflows,
   exceptions,
   jobProgressEvents,
+  reconciliationJobs,
 } from "../drizzle/schema";
 import { isControlPeriod } from "../shared/controlPeriod";
 import type { GovernedControlPackIssue } from "../shared/governedControlEvidence";
@@ -171,11 +172,48 @@ export async function buildGovernedControlEvidencePack(job: EvidenceJob) {
   }
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const organizationId = job.organizationId;
 
-  // Every read below is one snapshot. Read separately, a pack built while a
-  // workflow closed or a manifest changed could mix the states before and
-  // after — evidence that never existed at any single moment.
-  return db.transaction(tx => readEvidencePack(tx, job, job.organizationId as number, admission));
+  // Every read is one snapshot, the job's own row included. Read separately, a
+  // pack built while a workflow closed or a manifest changed could mix the
+  // states before and after — evidence that never existed at any single
+  // moment. The row the router authorised was read before this transaction,
+  // so it is read again here, FIRST (the snapshot starts at the first read),
+  // within the tenant already authorised; a run that finished in between then
+  // shows its completed status beside its completion records, not before them.
+  return db.transaction(async tx => {
+    const [current] = await tx
+      .select({
+        id: reconciliationJobs.id,
+        organizationId: reconciliationJobs.organizationId,
+        engineConfig: reconciliationJobs.engineConfig,
+        sourceChannelId: reconciliationJobs.sourceChannelId,
+        targetChannelId: reconciliationJobs.targetChannelId,
+        status: reconciliationJobs.status,
+        createdAt: reconciliationJobs.createdAt,
+        startedAt: reconciliationJobs.startedAt,
+        completedAt: reconciliationJobs.completedAt,
+        totalSourceTxns: reconciliationJobs.totalSourceTxns,
+        totalTargetTxns: reconciliationJobs.totalTargetTxns,
+        matchedCount: reconciliationJobs.matchedCount,
+        exceptionCount: reconciliationJobs.exceptionCount,
+        unmatchedCount: reconciliationJobs.unmatchedCount,
+      })
+      .from(reconciliationJobs)
+      .where(and(eq(reconciliationJobs.id, job.id), eq(reconciliationJobs.organizationId, organizationId)))
+      .limit(1);
+    // Gone, or moved to another tenant, since it was authorised: one answer
+    // for both, as assertJobVisible gives.
+    if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+    const currentAdmission = governedAdmissionOf(current.engineConfig);
+    if (!currentAdmission) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "This job has no readable governed daily-control admission evidence.",
+      });
+    }
+    return readEvidencePack(tx, current, organizationId, currentAdmission);
+  });
 }
 
 async function readEvidencePack(

@@ -1324,7 +1324,10 @@ A read-only, metadata-only reconstruction of one admitted governed run:
   worker proved that equality before matching, so a difference means the run
   did not reconcile the population this evidence describes.
 - **Every read is one snapshot** (one transaction), so a pack built during a
-  concurrent change never mixes states.
+  concurrent change never mixes states. That includes the job's own row: the
+  router's `assertJobVisible` read predates the transaction, so the job is read
+  again FIRST inside it, within the authorised tenant, and the pack is built
+  from that row (Greptile, #198).
 - **Every read is bounded by the run, not by the tenant's history.** The audit
   references are four entity-index reads (job, manifests, contracts, the job's
   workflows) merged in sequence order. One query OR-ing them — the shape #197

@@ -71,9 +71,17 @@ const audit = (sequenceNumber: number, entityType: string, action = "recorded") 
   signed: `h${sequenceNumber}`,
 });
 
-function evidenceDb(options: { manifests?: unknown[]; progress?: unknown[]; workflowEvents?: unknown[]; workflowStates?: unknown[]; audits?: AuditsByKind } = {}) {
+type EvidenceJobRow = typeof job;
+
+/**
+ * `run` is the job row as the pack reads it INSIDE its snapshot; pass `[]`
+ * for a run that is gone by then. It defaults to the row the router read.
+ */
+function evidenceDb(options: { run?: EvidenceJobRow | []; manifests?: unknown[]; progress?: unknown[]; workflowEvents?: unknown[]; workflowStates?: unknown[]; audits?: AuditsByKind } = {}) {
+  const run = options.run ?? job;
   const fake = scriptedDb({
     select: {
+      reconciliation_jobs: [Array.isArray(run) ? run : [run]],
       control_batch_manifests: [options.manifests ?? [manifest(), manifest({ id: 702, sourceContractId: 502, uploadBatchId: 902, role: "internal_register", channelId: 12 })]],
       job_progress_events: [options.progress ?? [{ phase: "completed", progress: 100, createdAt: new Date("2026-10-10T08:03:00.000Z") }]],
       exception_workflow_events: [options.workflowEvents ?? [{ eventType: "decision_approved", outcome: null, createdAt: new Date("2026-10-10T08:04:00.000Z") }]],
@@ -199,18 +207,20 @@ describe("when an eligible reader opens a governed evidence pack", () => {
   });
 
   it("should report a run that reconciled channels other than the admitted ones", async () => {
-    evidenceDb();
+    const run = { ...job, sourceChannelId: 99 };
+    evidenceDb({ run });
 
-    const result = await buildGovernedControlEvidencePack({ ...job, sourceChannelId: 99 });
+    const result = await buildGovernedControlEvidencePack(run);
 
     expect(result.state).toBe("evidence_gap");
     expect(result.issues).toEqual(["run_channel_mismatch"]);
   });
 
   it("should report a completed run whose record counts differ from the admitted manifests'", async () => {
-    evidenceDb();
+    const run = { ...job, totalSourceTxns: 3 };
+    evidenceDb({ run });
 
-    const result = await buildGovernedControlEvidencePack({ ...job, totalSourceTxns: 3 });
+    const result = await buildGovernedControlEvidencePack(run);
 
     expect(result.state).toBe("evidence_gap");
     expect(result.issues).toEqual(["run_population_mismatch"]);
@@ -221,9 +231,10 @@ describe("when an eligible reader opens a governed evidence pack", () => {
   });
 
   it("should not compare counts for a run that did not complete, since it recorded none", async () => {
-    evidenceDb();
+    const run = { ...job, status: "failed", totalSourceTxns: 0, totalTargetTxns: 0 };
+    evidenceDb({ run });
 
-    const result = await buildGovernedControlEvidencePack({ ...job, status: "failed", totalSourceTxns: 0, totalTargetTxns: 0 });
+    const result = await buildGovernedControlEvidencePack(run);
 
     expect(result.state).toBe("reconstructable");
     expect(result.issues).toEqual([]);
@@ -253,6 +264,44 @@ describe("when an eligible reader opens a governed evidence pack", () => {
 
     expect(result.auditEvidence.events).toHaveLength(20);
     expect(result.auditEvidence.truncated).toBe(false);
+  });
+
+  it("should read the run's own row first, inside the snapshot, within the authorised tenant", async () => {
+    const fake = evidenceDb();
+
+    await buildGovernedControlEvidencePack(job);
+
+    const reads = fake.ops.filter(op => op.kind === "select");
+    expect(reads[0].table).toBe("reconciliation_jobs");
+    expect(reads[0].where?.params).toEqual(expect.arrayContaining([job.id, organizationId]));
+    expect(reads[0].txId).not.toBeNull();
+    expect(new Set(reads.map(op => op.txId)).size).toBe(1);
+  });
+
+  it("should report the run as the snapshot found it, not as the router read it", async () => {
+    // Greptile (#198): the router's row predates the snapshot. A run that
+    // finished in between must not show as running beside its completion
+    // records.
+    evidenceDb({ run: job });
+
+    const result = await buildGovernedControlEvidencePack({
+      ...job,
+      status: "running",
+      completedAt: null,
+      totalSourceTxns: 0,
+      totalTargetTxns: 0,
+    });
+
+    expect(result.run).toMatchObject({ status: "completed", totals: { sourceRecords: 2, targetRecords: 2 } });
+    expect(result.run.completedAt).toBe(job.completedAt.toISOString());
+    expect(result.issues).toEqual([]);
+  });
+
+  it("should answer not found when the run is gone by the time the snapshot starts", async () => {
+    const fake = evidenceDb({ run: [] });
+
+    await expect(buildGovernedControlEvidencePack(job)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(fake.ops.filter(op => op.kind === "select").map(op => op.table)).toEqual(["reconciliation_jobs"]);
   });
 
   it("should refuse an ordinary or legacy job rather than returning another run's records", async () => {
