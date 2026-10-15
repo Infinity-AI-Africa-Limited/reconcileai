@@ -29,6 +29,8 @@ const job = {
       register: { channelId: 12, manifestId: 702, uploadBatchId: 902 },
     },
   }),
+  sourceChannelId: 11,
+  targetChannelId: 12,
   status: "completed",
   createdAt: new Date("2026-10-10T08:01:00.000Z"),
   startedAt: new Date("2026-10-10T08:02:00.000Z"),
@@ -52,23 +54,46 @@ const manifest = (overrides: Record<string, unknown> = {}) => ({
   schemaState: "accepted",
   duplicateDelivery: "none",
   invalidRowCount: 0,
+  receivedRecordCount: 2,
   role: "settlement",
   channelId: 11,
   contractVersion: 1,
   ...overrides,
 });
 
-function evidenceDb(options: { manifests?: unknown[]; progress?: unknown[]; workflowEvents?: unknown[]; workflowStates?: unknown[]; audits?: unknown[] } = {}) {
+type AuditsByKind = { job?: unknown[]; manifests?: unknown[]; contracts?: unknown[]; workflows?: unknown[] };
+const audit = (sequenceNumber: number, entityType: string, action = "recorded") => ({
+  id: sequenceNumber,
+  action,
+  entityType,
+  createdAt: new Date("2026-10-10T08:00:00.000Z"),
+  sequenceNumber,
+  signed: `h${sequenceNumber}`,
+});
+
+type EvidenceJobRow = typeof job;
+
+/**
+ * `run` is the job row as the pack reads it INSIDE its snapshot; pass `[]`
+ * for a run that is gone by then. It defaults to the row the router read.
+ */
+function evidenceDb(options: { run?: EvidenceJobRow | []; manifests?: unknown[]; progress?: unknown[]; workflowEvents?: unknown[]; workflowStates?: unknown[]; audits?: AuditsByKind } = {}) {
+  const run = options.run ?? job;
   const fake = scriptedDb({
     select: {
+      reconciliation_jobs: [Array.isArray(run) ? run : [run]],
       control_batch_manifests: [options.manifests ?? [manifest(), manifest({ id: 702, sourceContractId: 502, uploadBatchId: 902, role: "internal_register", channelId: 12 })]],
       job_progress_events: [options.progress ?? [{ phase: "completed", progress: 100, createdAt: new Date("2026-10-10T08:03:00.000Z") }]],
       exception_workflow_events: [options.workflowEvents ?? [{ eventType: "decision_approved", outcome: null, createdAt: new Date("2026-10-10T08:04:00.000Z") }]],
       exception_workflows: [options.workflowStates ?? [{ status: "approved", count: 1 }]],
-      audit_logs: [options.audits ?? [
-        { action: "control_batch_manifest_recorded", entityType: "control_batch_manifest", createdAt: new Date("2026-10-09T20:00:00.000Z"), sequenceNumber: 30, signed: "h1" },
-        { action: "create_governed_daily_control_run", entityType: "reconciliation_job", createdAt: new Date("2026-10-10T08:01:00.000Z"), sequenceNumber: 31, signed: "h2" },
-      ]],
+      // One read per kind of record, in this order: the job, its manifests,
+      // their source contracts, then the job's governed workflows.
+      audit_logs: [
+        options.audits?.job ?? [audit(31, "reconciliation_job", "create_governed_daily_control_run")],
+        options.audits?.manifests ?? [audit(30, "control_batch_manifest", "control_batch_manifest_recorded")],
+        options.audits?.contracts ?? [audit(5, "control_source_contract", "control_source_contract_recorded")],
+        options.audits?.workflows ?? [audit(40, "exception_workflow", "exception_workflow_started")],
+      ],
     },
   });
   state.db = fake.db;
@@ -131,9 +156,27 @@ describe("when an eligible reader opens a governed evidence pack", () => {
     expect(manifestRead?.where?.params).toEqual(expect.arrayContaining([organizationId, 701, 702]));
     const workflowRead = fake.ops.find(op => op.kind === "select" && op.table === "exception_workflow_events");
     expect(workflowRead?.where?.params).toEqual(expect.arrayContaining([organizationId, job.id]));
-    const auditRead = fake.ops.find(op => op.kind === "select" && op.table === "audit_logs");
-    expect(auditRead?.where?.params).toEqual(expect.arrayContaining([organizationId, job.id, 701, 702]));
-    expect(auditRead?.where?.params).toContain("exception_workflow");
+    // Four bounded audit reads, each this tenant's and each on one kind of record.
+    const auditReads = fake.ops.filter(op => op.kind === "select" && op.table === "audit_logs");
+    expect(auditReads).toHaveLength(4);
+    for (const read of auditReads) {
+      expect(read.where?.params).toContain(organizationId);
+      expect(read.limit).toBe(21);
+    }
+    expect(auditReads[0].where?.params).toEqual(expect.arrayContaining(["reconciliation_job", job.id]));
+    expect(auditReads[1].where?.params).toEqual(expect.arrayContaining(["control_batch_manifest", 701, 702]));
+    expect(auditReads[2].where?.params).toEqual(expect.arrayContaining(["control_source_contract", 501, 502]));
+    expect(auditReads[3].where?.params).toEqual(expect.arrayContaining(["exception_workflow", job.id]));
+    // No OR across kinds: that shape let the optimizer walk the whole chain.
+    for (const read of auditReads) expect(read.where?.sql).not.toMatch(/\bor\b/i);
+    expect(result.auditEvidence.events.map(event => event.sequenceNumber)).toEqual([5, 30, 31, 40]);
+
+    // Every read is one snapshot: the same transaction, so the pack never
+    // mixes states from before and after a concurrent change.
+    const reads = fake.ops.filter(op => op.kind === "select");
+    expect(reads.length).toBeGreaterThan(0);
+    expect(new Set(reads.map(op => op.txId)).size).toBe(1);
+    expect(reads[0].txId).not.toBeNull();
     const workflowCountRead = fake.ops.find(op => op.kind === "select" && op.table === "exception_workflows");
     expect(workflowCountRead?.fields).toEqual(expect.arrayContaining(["status", "count"]));
     expect(fake.writes("insert", "audit_logs")).toHaveLength(0);
@@ -161,6 +204,104 @@ describe("when an eligible reader opens a governed evidence pack", () => {
       "manifest_policy_version_mismatch",
     ]));
     expect(result.sourceEvidence.every(source => source.verified === false)).toBe(true);
+  });
+
+  it("should report a run that reconciled channels other than the admitted ones", async () => {
+    const run = { ...job, sourceChannelId: 99 };
+    evidenceDb({ run });
+
+    const result = await buildGovernedControlEvidencePack(run);
+
+    expect(result.state).toBe("evidence_gap");
+    expect(result.issues).toEqual(["run_channel_mismatch"]);
+  });
+
+  it("should report a completed run whose record counts differ from the admitted manifests'", async () => {
+    const run = { ...job, totalSourceTxns: 3 };
+    evidenceDb({ run });
+
+    const result = await buildGovernedControlEvidencePack(run);
+
+    expect(result.state).toBe("evidence_gap");
+    expect(result.issues).toEqual(["run_population_mismatch"]);
+    expect(result.sourceEvidence).toEqual([
+      expect.objectContaining({ role: "settlement", receivedRecords: 2, verified: false }),
+      expect.objectContaining({ role: "internal_register", receivedRecords: 2, verified: true }),
+    ]);
+  });
+
+  it("should not compare counts for a run that did not complete, since it recorded none", async () => {
+    const run = { ...job, status: "failed", totalSourceTxns: 0, totalTargetTxns: 0 };
+    evidenceDb({ run });
+
+    const result = await buildGovernedControlEvidencePack(run);
+
+    expect(result.state).toBe("reconstructable");
+    expect(result.issues).toEqual([]);
+  });
+
+  it("should list the earliest audit references across every kind, and say when there are more", async () => {
+    // 15 job references and 10 workflow references: 25 in all, the first 20
+    // by sequence shown, whichever kind each came from.
+    const jobAudits = Array.from({ length: 15 }, (_, i) => audit(100 + i * 2, "reconciliation_job"));
+    const workflowAudits = Array.from({ length: 10 }, (_, i) => audit(101 + i * 2, "exception_workflow"));
+    evidenceDb({ audits: { job: jobAudits, manifests: [], contracts: [], workflows: workflowAudits } });
+
+    const result = await buildGovernedControlEvidencePack(job);
+
+    const shown = result.auditEvidence.events.map(event => event.sequenceNumber);
+    expect(shown).toEqual(Array.from({ length: 20 }, (_, i) => 100 + i));
+    expect(result.auditEvidence.truncated).toBe(true);
+  });
+
+  it("should not call the audit list truncated when exactly the cap fits", async () => {
+    // 12 + 8 = 20 references: all shown, and nothing hidden.
+    const jobAudits = Array.from({ length: 12 }, (_, i) => audit(1 + i, "reconciliation_job"));
+    const workflowAudits = Array.from({ length: 8 }, (_, i) => audit(50 + i, "exception_workflow"));
+    evidenceDb({ audits: { job: jobAudits, manifests: [], contracts: [], workflows: workflowAudits } });
+
+    const result = await buildGovernedControlEvidencePack(job);
+
+    expect(result.auditEvidence.events).toHaveLength(20);
+    expect(result.auditEvidence.truncated).toBe(false);
+  });
+
+  it("should read the run's own row first, inside the snapshot, within the authorised tenant", async () => {
+    const fake = evidenceDb();
+
+    await buildGovernedControlEvidencePack(job);
+
+    const reads = fake.ops.filter(op => op.kind === "select");
+    expect(reads[0].table).toBe("reconciliation_jobs");
+    expect(reads[0].where?.params).toEqual(expect.arrayContaining([job.id, organizationId]));
+    expect(reads[0].txId).not.toBeNull();
+    expect(new Set(reads.map(op => op.txId)).size).toBe(1);
+  });
+
+  it("should report the run as the snapshot found it, not as the router read it", async () => {
+    // Greptile (#198): the router's row predates the snapshot. A run that
+    // finished in between must not show as running beside its completion
+    // records.
+    evidenceDb({ run: job });
+
+    const result = await buildGovernedControlEvidencePack({
+      ...job,
+      status: "running",
+      completedAt: null,
+      totalSourceTxns: 0,
+      totalTargetTxns: 0,
+    });
+
+    expect(result.run).toMatchObject({ status: "completed", totals: { sourceRecords: 2, targetRecords: 2 } });
+    expect(result.run.completedAt).toBe(job.completedAt.toISOString());
+    expect(result.issues).toEqual([]);
+  });
+
+  it("should answer not found when the run is gone by the time the snapshot starts", async () => {
+    const fake = evidenceDb({ run: [] });
+
+    await expect(buildGovernedControlEvidencePack(job)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(fake.ops.filter(op => op.kind === "select").map(op => op.table)).toEqual(["reconciliation_jobs"]);
   });
 
   it("should refuse an ordinary or legacy job rather than returning another run's records", async () => {
