@@ -1385,6 +1385,36 @@ with the guard removed, the server opened four connections to its own loopback.
 > `endpoint` (tenant admin), and the WoodCore connector `baseUrl` (connector
 > admins). Route each through this module's checks before it is used.
 
+### The governed-run evidence pack (`server/controlEvidencePack.ts`, #197)
+
+A read-only, metadata-only reconstruction of one admitted governed run:
+`controlEvidence.getGovernedRunEvidencePack({ jobId })`. Its rules:
+
+- **The tenant comes from the job** (`assertJobVisible`); the input is
+  `.strict()`, so an organisation override is a `BAD_REQUEST`, not ignored.
+- **It reports gaps; it never fills them in** (`evidence_gap` + issue codes from
+  `shared/governedControlEvidence.ts`, whose list the page's copy is typed
+  against). Beyond the manifest checks, a run must have reconciled the channels
+  its admission names (`run_channel_mismatch`), and a COMPLETED run's totals
+  must equal its manifests' received counts (`run_population_mismatch`) — the
+  worker proved that equality before matching, so a difference means the run
+  did not reconcile the population this evidence describes.
+- **Every read is one snapshot** (one transaction), so a pack built during a
+  concurrent change never mixes states. That includes the job's own row: the
+  router's `assertJobVisible` read predates the transaction, so the job is read
+  again FIRST inside it, within the authorised tenant, and the pack is built
+  from that row (Greptile, #198).
+- **Every read is bounded by the run, not by the tenant's history.** The audit
+  references are four entity-index reads (job, manifests, contracts, the job's
+  workflows) merged in sequence order. One query OR-ing them — the shape #197
+  shipped — let MySQL walk the tenant's whole audit chain. On a 500,000-record
+  chain the whole pack took ~870ms, against ~23ms split, for byte-identical
+  output. A capped list is no guarantee of a bounded read; check the plan.
+- **Metadata only.** No transaction rows, source keys, delivery identities,
+  payloads, audit details, narratives, IPs or user agents; tests assert the
+  absence. The pack never claims audit-chain integrity (`integrityVerified:
+  false`) — that is the administrator Audit Trail check.
+
 ---
 
 ## 9A. Feature Evaluation Rubric — The Intelligence Moat Test

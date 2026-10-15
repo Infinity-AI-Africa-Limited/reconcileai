@@ -1,3 +1,5 @@
+import type { GovernedControlPackIssue } from "@shared/governedControlEvidence";
+
 export type EvidencePackState = "reconstructable" | "evidence_gap";
 
 /** Presentation-only copy for the metadata-only governed evidence pack. */
@@ -15,8 +17,9 @@ export function evidencePackStateCopy(state: EvidencePackState) {
       };
 }
 
-export function evidencePackIssueCopy(issue: string): string {
-  const copy: Record<string, string> = {
+/** Operator wording for every gap the server can report; a missing one does not compile. */
+const ISSUE_COPY: Record<GovernedControlPackIssue, string> = {
+    unreadable_admission_snapshot: "The run's admission record can no longer be read.",
     missing_source_evidence: "An admitted source manifest is no longer available to this tenant-scoped pack.",
     source_contract_channel_mismatch: "A source contract no longer names the channel recorded at admission.",
     source_contract_role_mismatch: "A source contract no longer carries its admitted control role.",
@@ -27,8 +30,14 @@ export function evidencePackIssueCopy(issue: string): string {
     manifest_has_invalid_rows: "A source manifest records invalid rows.",
     manifest_duplicate_delivery: "A source manifest records a duplicate-delivery state.",
     manifest_policy_version_mismatch: "A manifest policy version is outside the admitted policy-version set.",
-  };
-  return copy[issue] ?? "An unrecognised evidence inconsistency was reported.";
+    run_channel_mismatch: "The run reconciled channels other than the ones its admission recorded.",
+    run_population_mismatch: "The run's recorded record counts differ from the admitted manifests' received counts.",
+};
+
+export function evidencePackIssueCopy(issue: string): string {
+  return Object.prototype.hasOwnProperty.call(ISSUE_COPY, issue)
+    ? ISSUE_COPY[issue as GovernedControlPackIssue]
+    : "An unrecognised evidence inconsistency was reported.";
 }
 
 export function formatEvidenceTime(value: string | null): string {
@@ -39,6 +48,17 @@ export function formatEvidenceTime(value: string | null): string {
 export function boundedEvidenceCount(count: number, truncated: boolean, noun: string): string {
   const label = `${count} ${noun}${count === 1 ? "" : "s"}`;
   return truncated ? `At least ${label}` : label;
+}
+
+/**
+ * Whether to retry a failed pack read. A refusal (any 4xx — not a governed
+ * run, not visible, a bad id) answers the same every time, so retrying it only
+ * holds the panel on its loading state; a server or network failure may pass.
+ */
+export function shouldRetryEvidencePack(failureCount: number, error: unknown): boolean {
+  const status = (error as { data?: { httpStatus?: unknown } } | null)?.data?.httpStatus;
+  if (typeof status === "number" && status >= 400 && status < 500) return false;
+  return failureCount < 2;
 }
 
 /** A client-side hint only; the server strictly parses and authorizes the pack. */
