@@ -2054,6 +2054,20 @@ sandbox.
   bytes go to object storage rather than a DB column. A review finding that
   reads the rule as `storagePut()`-only is wrong; this was raised on PR #160
   and withdrawn.
+
+  **A file holding a tenant's data goes through `putTenantObject()`**
+  (`server/tenantStorage.ts`, since PR #200). It keys the file under
+  `org/<tenant>/` — the tenant whose DATA it is, not the uploader's own
+  organisation — and refuses a tenant that is being deleted. Shop redaction
+  erases a tenant's files by listing that prefix, so a file keyed by a user id
+  (the old `exports/<userId>/` layout) is one erasure cannot find.
+  Every such upload is aborted after `TENANT_UPLOAD_DEADLINE_MS`, counted from
+  before the tenant check, and shop redaction leaves storage alone until that
+  long (plus a margin) after it first ran. So no upload that saw the tenant
+  active can land after its folder was listed — do not lengthen the deadline
+  without the wait. `server/storageUploadGate.test.ts` fails CI when other
+  code names `storagePut`/`storagePutPrivate` or loads the S3 SDK; a file that
+  legitimately must is listed there with its reason.
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
 - **Never use `&&` for conditional rendering in JSX** — use a ternary with an

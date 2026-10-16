@@ -16,8 +16,10 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { isTenantId } from "@shared/tenantId";
 import { ENV } from "./_core/env";
 
 // Presigned-URL lifetime. SigV4 caps presigned URLs at 7 days; use just under it.
@@ -39,6 +41,60 @@ function normalizeKey(relKey: string): string {
 /** Prefix a relative key with its owning organization: `org/42/reports/x.csv`. */
 export function orgScopedKey(organizationId: number, relKey: string): string {
   return `org/${organizationId}/${normalizeKey(relKey)}`;
+}
+
+/**
+ * The key for an object holding ONE tenant's data: under `org/<id>/` when the
+ * data has a tenant, so the storage proxy's owner check applies and erasing the
+ * tenant finds the object by listing its prefix. Data with no tenant keeps its
+ * relative key. Name the tenant whose data it is — not the uploader's own
+ * organisation, which differs when staff export a tenant's job.
+ */
+export function tenantObjectKey(organizationId: number | null | undefined, relKey: string): string {
+  return isTenantId(organizationId) ? orgScopedKey(organizationId, relKey) : normalizeKey(relKey);
+}
+
+/** A bucket and the S3 service it lives on (`endpoint` empty or null for AWS S3). */
+export interface StorageLocation {
+  bucket: string;
+  endpoint: string | null;
+}
+
+/** Where the platform stores its objects; `bucket` is "" when storage is not configured. */
+export function platformStorageLocation(): StorageLocation {
+  return { bucket: ENV.awsS3Bucket.trim(), endpoint: ENV.awsS3Endpoint.trim() };
+}
+
+/**
+ * The service an endpoint names. Bucket names are global on AWS S3, so no
+ * endpoint and any amazonaws.com host are one service there. Elsewhere (R2,
+ * MinIO) names are scoped to the endpoint's origin — scheme, host and port,
+ * which the URL parser normalises (case, default port, trailing path). An
+ * endpoint that is not a URL can only match itself: no client could have
+ * reached a bucket by it.
+ */
+function storageService(endpoint: string | null | undefined): string {
+  const raw = (endpoint ?? "").trim();
+  if (!raw) return "aws";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return `unparsed:${raw.toLowerCase()}`;
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === "amazonaws.com" || host.endsWith(".amazonaws.com")) return "aws";
+  return url.origin;
+}
+
+/** Do two locations name the same bucket: the same service, and the same bucket name? */
+export function sameStorageBucket(a: StorageLocation, b: StorageLocation): boolean {
+  const name = a.bucket.trim().toLowerCase();
+  return (
+    name !== "" &&
+    name === b.bucket.trim().toLowerCase() &&
+    storageService(a.endpoint) === storageService(b.endpoint)
+  );
 }
 
 /** Extract the owning org from a key under the convention; null for legacy keys. */
@@ -86,7 +142,8 @@ function toBody(data: Buffer | Uint8Array | string): Buffer {
 export async function storagePut(
   relKey: string,
   data: Buffer | Uint8Array | string,
-  contentType = "application/octet-stream"
+  contentType = "application/octet-stream",
+  options: { abortSignal?: AbortSignal } = {}
 ): Promise<{ key: string; url: string }> {
   const { s3, bucket } = getClient();
   const key = normalizeKey(relKey);
@@ -97,7 +154,8 @@ export async function storagePut(
       Key: key,
       Body: toBody(data),
       ContentType: contentType,
-    })
+    }),
+    { abortSignal: options.abortSignal }
   );
 
   const url = await getSignedUrl(
@@ -162,6 +220,37 @@ export async function storageReadPrivate(relKey: string): Promise<Buffer> {
   const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   if (!out.Body) throw new Error("Stored object has no body");
   return Buffer.from(await out.Body.transformToByteArray());
+}
+
+/** A tenant's folder holds far fewer objects; a listing this long is refused, not truncated. */
+const MAX_LIST_PAGES = 1_000;
+
+/**
+ * Every key under a folder prefix, following continuation tokens to the end.
+ *
+ * The prefix must name a folder — non-empty and ending in "/" — so `org/1/`
+ * can never also match `org/12/…`, and no caller can list the bucket. A
+ * listing that cannot be completed throws rather than return part of the
+ * folder: callers use it to prove a folder is empty.
+ */
+export async function storageListKeys(prefix: string): Promise<string[]> {
+  const folder = normalizeKey(prefix);
+  if (folder.length < 2 || !folder.endsWith("/")) throw new Error("storage_list_prefix_invalid");
+  const { s3, bucket } = getClient();
+  const keys: string[] = [];
+  let token: string | undefined;
+  for (let page = 0; page < MAX_LIST_PAGES; page++) {
+    const out = await s3.send(
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: folder, ContinuationToken: token })
+    );
+    for (const item of out.Contents ?? []) if (item.Key?.startsWith(folder)) keys.push(item.Key);
+    if (!out.IsTruncated) return keys;
+    if (!out.NextContinuationToken || out.NextContinuationToken === token) {
+      throw new Error("storage_list_incomplete");
+    }
+    token = out.NextContinuationToken;
+  }
+  throw new Error("storage_list_too_large");
 }
 
 /**

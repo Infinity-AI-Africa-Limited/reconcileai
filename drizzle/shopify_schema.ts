@@ -423,11 +423,11 @@ export const shopifyPrivacyArtifacts = mysqlTable(
 export type ShopifyPrivacyArtifact = typeof shopifyPrivacyArtifacts.$inferSelect;
 
 /**
- * Durable report-only execution state for a `shop/redact` request. This first
- * processor records an immutable count-only inventory and stops in a blocked
- * state. It never deletes tenant data and never represents Shopify deletion as
- * complete; the legacy request hash and webhook id remain only because they
- * predate the report-only executor.
+ * Durable, lease-fenced execution state for a `shop/redact` request. The
+ * worker records a count-only inventory, erases known tenant storage first, and
+ * deletes the fenced workspace atomically. On success this tenant-linked state
+ * is deleted and only the de-identified receipt remains. The legacy request
+ * hash and webhook id remain only while the deletion is in progress.
  */
 export const shopifyShopRedactionJobs = mysqlTable(
   "shopify_shop_redaction_jobs",
@@ -479,6 +479,33 @@ export const shopifyShopRedactionJobs = mysqlTable(
   ],
 );
 export type ShopifyShopRedactionJob = typeof shopifyShopRedactionJobs.$inferSelect;
+
+/**
+ * Minimal completion evidence retained after a Shopify `shop/redact` erases its
+ * merchant workspace. This table is deliberately not tenant- or store-linked:
+ * retaining an organization id, domain, webhook body or provider id after the
+ * erasure would undermine the deletion it records. `requestHash` is a
+ * domain-separated keyed digest, never a raw payload or customer identifier.
+ */
+export const shopifyShopRedactionReceipts = mysqlTable(
+  "shopify_shop_redaction_receipts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    runId: varchar("runId", { length: 36 }).notNull(),
+    requestHash: varchar("requestHash", { length: 64 }).notNull(),
+    manifestVersion: int("manifestVersion").notNull(),
+    /** Fixed, count-only manifest; no identifiers, payloads, URLs or object keys. */
+    manifestSummary: json("manifestSummary").notNull(),
+    completedAt: timestamp("completedAt").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_shopify_redaction_receipt_run").on(t.runId),
+    uniqueIndex("uq_shopify_redaction_receipt_request").on(t.requestHash),
+    index("idx_shopify_redaction_receipt_completed").on(t.completedAt),
+  ],
+);
+export type ShopifyShopRedactionReceipt = typeof shopifyShopRedactionReceipts.$inferSelect;
 
 /**
  * Versioned sync cursor/evidence reserved for the next order-led sync phase.

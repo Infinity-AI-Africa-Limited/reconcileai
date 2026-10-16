@@ -26,7 +26,7 @@ import { governedSidesOf, loadGovernedPopulation } from "./controlRunAdmission";
 import { isTenantId } from "@shared/tenantId";
 import { dateGapCsvCell, dateGapSheetCell } from "@shared/matchDateGap";
 import { eq, or, desc, asc, sql, isNull, and, like, inArray, gte } from "drizzle-orm";
-import { storagePut } from "./storage";
+import { putTenantObject, userExportPath } from "./tenantStorage";
 import {
   runMatchingEngine,
   categorizeException,
@@ -1336,11 +1336,12 @@ export const appRouter = router({
 
         const buffer = await workbook.xlsx.writeBuffer();
         const fileName = `exceptions-export-${Date.now()}.xlsx`;
-        const { url } = await storagePut(
-          `exports/${ctx.user.id}/${fileName}`,
-          Buffer.from(buffer),
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+        const { url } = await putTenantObject({
+          organizationId: ctx.user.organizationId,
+          relKey: userExportPath(ctx.user.id, fileName),
+          body: Buffer.from(buffer),
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
         await logAudit(ctx.user.id, "export_exceptions_xlsx", "exception", undefined, {
           filters: input, count: exceptions.data?.length ?? 0,
         }, ip, ua);
@@ -1748,11 +1749,12 @@ export const appRouter = router({
 
         const buffer = await workbook.xlsx.writeBuffer();
         const fileName = `audit-trail-export-${Date.now()}.xlsx`;
-        const { url } = await storagePut(
-          `exports/${ctx.user.id}/${fileName}`,
-          Buffer.from(buffer),
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+        const { url } = await putTenantObject({
+          organizationId: ctx.user.organizationId,
+          relKey: userExportPath(ctx.user.id, fileName),
+          body: Buffer.from(buffer),
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
         await logAudit(ctx.user.id, "export_audit_trail_xlsx", "audit_log", undefined, {
           rowCount: dateFiltered.length, filters: input,
         }, ip, ua);
@@ -2018,11 +2020,12 @@ export const appRouter = router({
 
         // Upload CSV to storage
         const fileName = `reconciliation-export-${input.jobId}-${input.type}-${Date.now()}.csv`;
-        const { url } = await storagePut(
-          `exports/${ctx.user.id}/${fileName}`,
-          Buffer.from(csvContent, "utf-8"),
-          "text/csv"
-        );
+        const { url } = await putTenantObject({
+          organizationId: visibleJob.organizationId,
+          relKey: userExportPath(ctx.user.id, fileName),
+          body: Buffer.from(csvContent, "utf-8"),
+          contentType: "text/csv",
+        });
 
         // The job's tenant, not the default: staff outside a portal may export any
         // tenant's job, and that tenant's trail must show who took its data.
@@ -2195,11 +2198,12 @@ export const appRouter = router({
 
         const buffer = await workbook.xlsx.writeBuffer();
         const fileName = `reconciliation-export-${input.jobId}-${input.type}-${Date.now()}.xlsx`;
-        const { url } = await storagePut(
-          `exports/${ctx.user.id}/${fileName}`,
-          Buffer.from(buffer),
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+        const { url } = await putTenantObject({
+          organizationId: visibleJob.organizationId,
+          relKey: userExportPath(ctx.user.id, fileName),
+          body: Buffer.from(buffer),
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
 
         await logAudit(ctx.user.id, "export_xlsx", "reconciliation_job", input.jobId, {
           type: input.type,
@@ -2320,11 +2324,12 @@ export const appRouter = router({
           ? `${input.dateFrom}_to_${input.dateTo}`
           : `all_${new Date().toISOString().slice(0, 10)}`;
         const fileName = `reconciliation-all-runs-${dateSuffix}-${Date.now()}.xlsx`;
-        const { url } = await storagePut(
-          `exports/${ctx.user.id}/${fileName}`,
-          Buffer.from(buffer),
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+        const { url } = await putTenantObject({
+          organizationId: ctx.user.organizationId,
+          relKey: userExportPath(ctx.user.id, fileName),
+          body: Buffer.from(buffer),
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
 
         await logAudit(ctx.user.id, "export_all_xlsx", "reconciliation_job", undefined, {
           count: filtered.length,
@@ -6891,11 +6896,12 @@ Always be specific, reference actual exception IDs and amounts where available, 
 
         const buffer = await workbook.xlsx.writeBuffer();
         const fileName = `cfo-channel-metrics-${input.period}-${Date.now()}.xlsx`;
-        const { url } = await storagePut(
-          `exports/${ctx.user.id}/${fileName}`,
-          Buffer.from(buffer),
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+        const { url } = await putTenantObject({
+          organizationId: ctx.user.organizationId,
+          relKey: userExportPath(ctx.user.id, fileName),
+          body: Buffer.from(buffer),
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
         await logAudit(ctx.user.id, "export_cfo_report_xlsx", "cfo_report", undefined, {
           period: input.period, rowCount: rows.length,
         }, ip, ua);
