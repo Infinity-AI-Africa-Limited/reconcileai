@@ -30,7 +30,7 @@ const DIRECT_UPLOADERS: Record<string, string> = {
     "Shopify privacy exports: a private object under org/<id>/privacy/, fenced against shop redaction under lock, and recorded in shopify_privacy_artifacts.",
   "routers/poc.ts": "POC uploads belong to a public POC page's slug, not to a tenant; poc_file_uploads records each key.",
   "_core/imageGeneration.ts": "Generated images from a prompt; no tenant data.",
-  "_core/index.ts": "The storage health probe writes a timestamped probe object, then deletes it; no tenant data.",
+  "storageHealth.ts": "The /api/health storage probe writes, lists and deletes one probe object under health-checks/; no tenant data.",
 };
 
 /** The only files that may load the S3 SDK, and why. */

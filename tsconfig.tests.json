@@ -64,6 +64,7 @@
     "server/tenantStorage.test.ts",
     "server/storageList.test.ts",
     "server/storageUploadGate.test.ts",
+    "server/storageHealth.test.ts",
     "server/connectors/shopify/syncCursor.db.test.ts",
     "server/connectors/shopify/syncOrchestrator.test.ts",
     "server/connectors/shopify/tokenStore.test.ts",
