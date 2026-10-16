@@ -32,10 +32,15 @@ export function canManageExceptionWorkflows(
   return typeof user.role === "string" && EXCEPTION_WORKFLOW_WRITER_ROLES.includes(user.role);
 }
 
-const CLOSED_EXCEPTION_STATUSES = new Set(["resolved", "dismissed"]);
+/** Exception statuses that end an investigation. Every other status, including one added later, is still open. */
+export const CLOSED_EXCEPTION_STATUSES = ["resolved", "dismissed"] as const;
+const closedExceptionStatuses: ReadonlySet<string> = new Set(CLOSED_EXCEPTION_STATUSES);
+
+/** The workflow status that ends a governed attempt; every other one is still live. */
+export const CLOSED_EXCEPTION_WORKFLOW_STATUS = "closed" satisfies ExceptionWorkflowStatus;
 
 export function isExceptionClosed(exceptionStatus: string | null | undefined): boolean {
-  return typeof exceptionStatus === "string" && CLOSED_EXCEPTION_STATUSES.has(exceptionStatus);
+  return typeof exceptionStatus === "string" && closedExceptionStatuses.has(exceptionStatus);
 }
 
 /**

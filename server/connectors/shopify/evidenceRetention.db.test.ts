@@ -2,6 +2,10 @@
  * End-to-end proof for Shopify Scope A's scheduled 90-day evidence-retention
  * control. It runs only against a locally classified, throwaway MySQL target;
  * production and Railway URLs are rejected before Vitest registers the suite.
+ *
+ * Every case seeds its own tenants, sweeps only their stores, asserts only on
+ * their rows, and the suite removes everything it wrote, so it is safe to run
+ * against a reused database and alongside other suites.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
@@ -11,8 +15,10 @@ import {
   agentActionDrafts,
   agentMemory,
   anomalyScores,
+  auditChainLocks,
   auditLogs,
   channels,
+  controlBatchManifests,
   exceptionWorkflowEvents,
   exceptionWorkflows,
   exceptions,
@@ -20,6 +26,7 @@ import {
   organizations,
   reconciliationJobs,
   reconciliationReports,
+  sharedReportTokens,
   transactions,
   uploadBatches,
   users,
@@ -27,6 +34,7 @@ import {
 import {
   shopifyConnectorStores,
   shopifyEvidenceRetentionReceipts,
+  shopifyPrivacyRequests,
   shopifyWebhookEvents,
 } from "../../../drizzle/shopify_schema";
 import { classifyDatabaseTarget } from "../../dbTarget";
@@ -34,6 +42,7 @@ import { createAppPool } from "../../dbSession";
 import {
   purgeExpiredShopifyScopeAEvidence,
   SHOPIFY_SCOPE_A_EVIDENCE_RETENTION_DAYS,
+  type ShopifyEvidenceRetentionDeps,
 } from "./evidenceRetention";
 import {
   shopifyOrdersChannelCode,
@@ -43,51 +52,96 @@ import {
 const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
 const NOW = new Date("2026-10-16T12:00:00.000Z");
+const CUTOFF = new Date("2026-07-18T12:00:00.000Z");
 const OLD = new Date("2026-07-17T11:59:59.000Z");
 const RECENT = new Date("2026-10-15T12:00:00.000Z");
+const DAY = 24 * 60 * 60 * 1_000;
 
 const insertId = (result: unknown) =>
   Number((result as [{ insertId: number }])[0].insertId);
+
+interface Tenant {
+  organizationId: number;
+  userId: number;
+  storeId: number;
+  ordersChannelId: number;
+  settlementChannelId: number;
+  batchId: number;
+}
 
 describe.runIf(localDatabase)(
   "when Shopify Scope A evidence reaches 90 days in MySQL",
   () => {
     let pool: Pool;
     let db: MySql2Database;
-    const nonce = `${Date.now()}${Math.floor(Math.random() * 1_000)}`.slice(
-      -12
-    );
-    let organizationId = 0;
-    let userId = 0;
-    let storeId = 0;
+    const nonce = `${Date.now()}${Math.floor(Math.random() * 1_000)}`.slice(-12);
+    const orgIds: number[] = [];
+    let seq = 0;
+    const tag = () => `${nonce}-${++seq}`;
 
     beforeAll(async () => {
       pool = createAppPool(url!).promise();
       db = drizzle(pool);
+    });
 
-      organizationId = insertId(
+    afterAll(async () => {
+      if (db && orgIds.length) {
+        for (const table of [
+          exceptionWorkflowEvents,
+          exceptionWorkflows,
+          agentActionDrafts,
+          agentMemory,
+          exceptions,
+          anomalyScores,
+          matches,
+          sharedReportTokens,
+          reconciliationReports,
+          reconciliationJobs,
+          transactions,
+          controlBatchManifests,
+          uploadBatches,
+          shopifyWebhookEvents,
+          shopifyPrivacyRequests,
+          shopifyEvidenceRetentionReceipts,
+          auditLogs,
+          channels,
+          shopifyConnectorStores,
+          users,
+        ] as const) {
+          await db.delete(table).where(inArray(table.organizationId, orgIds));
+        }
+        await db.delete(auditChainLocks).where(inArray(auditChainLocks.chainKey, orgIds));
+        await db.delete(organizations).where(inArray(organizations.id, orgIds));
+      }
+      await pool?.end();
+    });
+
+    async function seedTenant(): Promise<Tenant> {
+      const label = tag();
+      const organizationId = insertId(
         await db.insert(organizations).values({
-          name: `Retention rehearsal ${nonce}`,
-          code: `RETENTION_${nonce}`.slice(0, 50),
+          name: `Retention rehearsal ${label}`,
+          code: `RETENTION_${label}`.slice(0, 50),
           segment: "retail_commerce",
           onboardingChannel: "shopify_public_app",
           deletionState: "active",
         })
       );
-      userId = insertId(
+      orgIds.push(organizationId);
+      const userId = insertId(
         await db.insert(users).values({
-          openId: `retention_${nonce}`.slice(0, 64),
+          openId: `retention_${label}`.slice(0, 64),
           name: "Masked retention rehearsal user",
-          email: `retention-${nonce}@example.invalid`,
+          email: `retention-${label}@example.invalid`,
           role: "admin",
           organizationId,
         })
       );
-      storeId = insertId(
+      const storeId = insertId(
         await db.insert(shopifyConnectorStores).values({
           organizationId,
-          shopDomain: `retention-${nonce}.myshopify.com`,
-          shopId: `retention_shop_${nonce}`,
+          shopDomain: `retention-${label}.myshopify.com`,
+          shopId: `retention_shop_${label}`,
           displayName: "Masked retention rehearsal store",
           grantedScopes: "read_orders",
           requestedScopes: "read_orders",
@@ -95,16 +149,7 @@ describe.runIf(localDatabase)(
           claimedByUserId: userId,
         })
       );
-    });
-
-    afterAll(async () => {
-      // The command that starts this rehearsal drops the entire dedicated schema.
-      // Closing the pool is still required for an orderly local cleanup.
-      await pool?.end();
-    });
-
-    it("should remove terminal evidence while deferring a live exception and recording only aggregate proof", async () => {
-      const orderChannelId = insertId(
+      const ordersChannelId = insertId(
         await db.insert(channels).values({
           organizationId,
           name: "Synthetic Shopify orders",
@@ -120,140 +165,170 @@ describe.runIf(localDatabase)(
           channelType: "ecommerce_gateway",
         })
       );
-
-      const staleBatchId = insertId(
+      const batchId = insertId(
         await db.insert(uploadBatches).values({
           organizationId,
           userId,
-          channelId: orderChannelId,
+          channelId: ordersChannelId,
           fileName: "masked-scope-a-input.csv",
           status: "completed",
           createdAt: OLD,
           completedAt: OLD,
         })
       );
-      const retainedBatchId = insertId(
-        await db.insert(uploadBatches).values({
-          organizationId,
-          userId,
-          channelId: settlementChannelId,
-          fileName: "masked-recent-input.csv",
-          status: "completed",
-          createdAt: RECENT,
-          completedAt: RECENT,
+      return { organizationId, userId, storeId, ordersChannelId, settlementChannelId, batchId };
+    }
+
+    /** An order row, or with `settlement` a settlement-evidence row, dated `at`. */
+    async function seedTransaction(
+      t: Tenant,
+      at: Date,
+      options: {
+        settlement?: boolean;
+        status?: "unmatched" | "matched" | "exception";
+        batchId?: number;
+        matchId?: number;
+      } = {}
+    ): Promise<number> {
+      const settlement = options.settlement ?? false;
+      return insertId(
+        await db.insert(transactions).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          batchId: options.batchId ?? t.batchId,
+          channelId: settlement ? t.settlementChannelId : t.ordersChannelId,
+          shopifyStoreId: settlement ? null : t.storeId,
+          transactionRef: `order-${tag()}`,
+          shopifyRefundId: "",
+          amount: "110.00",
+          currency: "USD",
+          transactionDate: at,
+          shopifyUpdatedAt: settlement ? null : at,
+          debitCredit: "credit",
+          status: options.status ?? "unmatched",
+          matchId: options.matchId ?? null,
+          createdAt: at,
         })
       );
+    }
 
-      const oldJobId = insertId(
+    async function seedJob(
+      t: Tenant,
+      status: "pending" | "running" | "completed" = "completed",
+      completedAt: Date = OLD
+    ): Promise<number> {
+      return insertId(
         await db.insert(reconciliationJobs).values({
-          organizationId,
-          userId,
-          name: "Masked terminal Scope A reconciliation",
-          sourceChannelId: orderChannelId,
-          targetChannelId: settlementChannelId,
+          organizationId: t.organizationId,
+          userId: t.userId,
+          name: "Masked Scope A reconciliation",
+          sourceChannelId: t.ordersChannelId,
+          targetChannelId: t.settlementChannelId,
           dateFrom: OLD,
           dateTo: OLD,
+          status,
+          createdAt: OLD,
+          completedAt: status === "completed" ? completedAt : null,
+        })
+      );
+    }
+
+    async function seedMatch(
+      t: Tenant,
+      jobId: number,
+      sourceTransactionId: number,
+      targetTransactionId: number,
+      status: "confirmed" | "pending_review" | "rejected" = "confirmed"
+    ): Promise<number> {
+      return insertId(
+        await db.insert(matches).values({
+          organizationId: t.organizationId,
+          jobId,
+          sourceTransactionId,
+          targetTransactionId,
+          matchType: "exact",
+          confidenceScore: "100.00",
+          status,
+          createdAt: OLD,
+        })
+      );
+    }
+
+    const sweep = (
+      tenants: Tenant[],
+      deps: Partial<ShopifyEvidenceRetentionDeps> = {}
+    ) =>
+      purgeExpiredShopifyScopeAEvidence({
+        db: db as never,
+        now: () => NOW,
+        onlyStoreIds: tenants.map(t => t.storeId),
+        ...deps,
+      });
+
+    const transactionIds = async (ids: number[]) =>
+      (await db.select({ id: transactions.id }).from(transactions).where(inArray(transactions.id, ids)))
+        .map(row => row.id)
+        .sort((a, b) => a - b);
+
+    const receiptsFor = (t: Tenant) =>
+      db
+        .select()
+        .from(shopifyEvidenceRetentionReceipts)
+        .where(
+          and(
+            eq(shopifyEvidenceRetentionReceipts.organizationId, t.organizationId),
+            eq(shopifyEvidenceRetentionReceipts.storeId, t.storeId)
+          )
+        );
+
+    const auditsFor = (t: Tenant, action: string) =>
+      db
+        .select()
+        .from(auditLogs)
+        .where(and(eq(auditLogs.organizationId, t.organizationId), eq(auditLogs.action, action)));
+
+    it("should remove terminal evidence with everything derived from it, defer a live exception, and record only aggregate proof", async () => {
+      const t = await seedTenant();
+      const emptyBatchId = t.batchId;
+      const rowsBatchId = insertId(
+        await db.insert(uploadBatches).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          channelId: t.ordersChannelId,
+          fileName: "masked-rows.csv",
           status: "completed",
           createdAt: OLD,
           completedAt: OLD,
         })
       );
+      const fileBatchId = insertId(
+        await db.insert(uploadBatches).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          channelId: t.settlementChannelId,
+          fileName: "masked-stored-file.csv",
+          fileUrl: "https://storage.invalid/masked-object",
+          status: "completed",
+          createdAt: OLD,
+          completedAt: OLD,
+        })
+      );
+      const jobId = await seedJob(t);
 
-      const staleOrderId = insertId(
-        await db.insert(transactions).values({
-          organizationId,
-          userId,
-          batchId: staleBatchId,
-          channelId: orderChannelId,
-          shopifyStoreId: storeId,
-          transactionRef: `order-${nonce}-expired`,
-          shopifyRefundId: "",
-          amount: "110.00",
-          currency: "USD",
-          transactionDate: OLD,
-          shopifyUpdatedAt: OLD,
-          debitCredit: "credit",
-          status: "matched",
-          createdAt: OLD,
-        })
-      );
-      const retainedSettlementId = insertId(
-        await db.insert(transactions).values({
-          organizationId,
-          userId,
-          batchId: retainedBatchId,
-          channelId: settlementChannelId,
-          amount: "110.00",
-          currency: "USD",
-          transactionDate: RECENT,
-          debitCredit: "credit",
-          status: "matched",
-          createdAt: RECENT,
-        })
-      );
-      const terminalExceptionTransactionId = insertId(
-        await db.insert(transactions).values({
-          organizationId,
-          userId,
-          batchId: staleBatchId,
-          channelId: orderChannelId,
-          shopifyStoreId: storeId,
-          transactionRef: `order-${nonce}-terminal-exception`,
-          shopifyRefundId: "",
-          amount: "4.00",
-          currency: "USD",
-          transactionDate: OLD,
-          shopifyUpdatedAt: OLD,
-          debitCredit: "credit",
-          createdAt: OLD,
-        })
-      );
-      const liveExceptionTransactionId = insertId(
-        await db.insert(transactions).values({
-          organizationId,
-          userId,
-          // The control remains live, so its batch is deliberately retained. The
-          // terminal batch can then prove orphan-batch deletion independently.
-          batchId: retainedBatchId,
-          channelId: orderChannelId,
-          shopifyStoreId: storeId,
-          transactionRef: `order-${nonce}-live-exception`,
-          shopifyRefundId: "",
-          amount: "6.00",
-          currency: "USD",
-          transactionDate: OLD,
-          shopifyUpdatedAt: OLD,
-          debitCredit: "credit",
-          createdAt: OLD,
-        })
-      );
+      const order = await seedTransaction(t, OLD, { status: "matched", batchId: rowsBatchId });
+      const settlement = await seedTransaction(t, OLD, {
+        settlement: true,
+        status: "matched",
+        batchId: rowsBatchId,
+      });
+      const matchId = await seedMatch(t, jobId, order, settlement);
 
-      const matchId = insertId(
-        await db.insert(matches).values({
-          organizationId,
-          jobId: oldJobId,
-          sourceTransactionId: staleOrderId,
-          targetTransactionId: retainedSettlementId,
-          matchType: "exact",
-          confidenceScore: "100.00",
-          status: "confirmed",
-          createdAt: OLD,
-        })
-      );
-      await db
-        .update(transactions)
-        .set({ matchId })
-        .where(eq(transactions.id, staleOrderId));
-      await db
-        .update(transactions)
-        .set({ matchId })
-        .where(eq(transactions.id, retainedSettlementId));
-
+      const terminal = await seedTransaction(t, OLD, { batchId: rowsBatchId });
       const terminalExceptionId = insertId(
         await db.insert(exceptions).values({
-          organizationId,
-          jobId: oldJobId,
-          transactionId: terminalExceptionTransactionId,
+          organizationId: t.organizationId,
+          jobId,
+          transactionId: terminal,
           category: "unmatched",
           severity: "medium",
           currency: "USD",
@@ -261,34 +336,34 @@ describe.runIf(localDatabase)(
           createdAt: OLD,
         })
       );
-      const terminalWorkflowId = insertId(
+      const workflowId = insertId(
         await db.insert(exceptionWorkflows).values({
-          organizationId,
+          organizationId: t.organizationId,
           exceptionId: terminalExceptionId,
           attemptNumber: 1,
-          ownerUserId: userId,
+          ownerUserId: t.userId,
           dueAt: OLD,
           approvalRequired: true,
           status: "closed",
           finalOutcome: "resolved",
-          startedByUserId: userId,
+          startedByUserId: t.userId,
           startedAt: OLD,
-          closedByUserId: userId,
+          closedByUserId: t.userId,
           closedAt: OLD,
           updatedAt: OLD,
         })
       );
       await db.insert(exceptionWorkflowEvents).values({
-        organizationId,
+        organizationId: t.organizationId,
         exceptionId: terminalExceptionId,
-        workflowId: terminalWorkflowId,
+        workflowId,
         eventType: "closed",
-        actorUserId: userId,
+        actorUserId: t.userId,
         outcome: "resolved",
         createdAt: OLD,
       });
       await db.insert(agentActionDrafts).values({
-        organizationId,
+        organizationId: t.organizationId,
         exceptionId: terminalExceptionId,
         actionType: "no_action",
         subject: "Masked terminal action draft",
@@ -297,7 +372,7 @@ describe.runIf(localDatabase)(
         createdAt: OLD,
       });
       await db.insert(agentMemory).values({
-        organizationId,
+        organizationId: t.organizationId,
         exceptionId: terminalExceptionId,
         exceptionCategory: "unmatched",
         amountRange: "0-100k",
@@ -307,17 +382,21 @@ describe.runIf(localDatabase)(
         createdAt: OLD,
       });
       await db.insert(anomalyScores).values({
-        organizationId,
-        transactionId: terminalExceptionTransactionId,
+        organizationId: t.organizationId,
+        transactionId: terminal,
         anomalyScore: "0.9000",
         detectionMethod: "statistical_iqr",
+        isFlagged: true,
+        reviewStatus: "resolved",
         createdAt: OLD,
       });
+
+      const live = await seedTransaction(t, OLD, { status: "exception", batchId: rowsBatchId });
       const liveExceptionId = insertId(
         await db.insert(exceptions).values({
-          organizationId,
+          organizationId: t.organizationId,
           jobId: 0,
-          transactionId: liveExceptionTransactionId,
+          transactionId: live,
           category: "unmatched",
           severity: "high",
           currency: "USD",
@@ -325,180 +404,348 @@ describe.runIf(localDatabase)(
           createdAt: OLD,
         })
       );
-      await db.insert(reconciliationReports).values({
-        organizationId,
-        userId,
-        jobId: oldJobId,
-        reportType: "daily",
-        title: "Masked terminal report",
-        summary: { only: "aggregates" },
-        format: "csv",
-        createdAt: OLD,
+      const reportId = insertId(
+        await db.insert(reconciliationReports).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          jobId,
+          reportType: "daily",
+          title: "Masked terminal report",
+          summary: { only: "aggregates" },
+          format: "csv",
+          createdAt: OLD,
+        })
+      );
+      await db.insert(sharedReportTokens).values({
+        reportId,
+        token: `masked-share-${tag()}`,
+        createdByUserId: t.userId,
+        organizationId: t.organizationId,
+        recipientEmail: "recipient@example.invalid",
       });
-      await db.insert(shopifyWebhookEvents).values({
-        organizationId,
-        storeId,
-        webhookId: `masked_webhook_${nonce}`,
-        topic: "orders/updated",
-        payloadSha256: "a".repeat(64),
-        status: "processed",
-        receivedAt: OLD,
-        processedAt: OLD,
-      });
+      for (const status of ["processed", "received"] as const) {
+        await db.insert(shopifyWebhookEvents).values({
+          organizationId: t.organizationId,
+          storeId: t.storeId,
+          webhookId: `masked_webhook_${tag()}`,
+          topic: "orders/updated",
+          payloadSha256: "a".repeat(64),
+          status,
+          receivedAt: OLD,
+          processedAt: status === "processed" ? OLD : null,
+        });
+      }
 
-      const first = await purgeExpiredShopifyScopeAEvidence({
-        db: db as never,
-        now: () => NOW,
-      });
+      const first = await sweep([t]);
 
       expect(first).toMatchObject({
         storesConsidered: 1,
         storesCompleted: 1,
-        transactionsDeleted: 2,
+        transactionsDeleted: 3,
         matchesDeleted: 1,
         exceptionsDeleted: 1,
         workflowsDeleted: 1,
         workflowEventsDeleted: 1,
+        agentActionDraftsDeleted: 1,
+        agentMemoryDeleted: 1,
+        anomalyScoresDeleted: 1,
         reportsDeleted: 1,
+        reportShareLinksDeleted: 1,
         jobsDeleted: 1,
         batchesDeleted: 1,
+        blockedUploadFiles: 1,
         webhookEventsDeleted: 1,
+        deferredUnprocessedWebhooks: 1,
         deferredActiveExceptions: 1,
       });
+      expect(await transactionIds([order, settlement, terminal, live])).toEqual([live]);
+      expect(await db.select().from(matches).where(eq(matches.id, matchId))).toEqual([]);
+      expect(
+        await db.select().from(exceptions).where(inArray(exceptions.id, [terminalExceptionId, liveExceptionId]))
+      ).toMatchObject([{ id: liveExceptionId, status: "open" }]);
+      expect(await db.select().from(exceptionWorkflows).where(eq(exceptionWorkflows.id, workflowId))).toEqual([]);
+      expect(await db.select().from(reconciliationJobs).where(eq(reconciliationJobs.id, jobId))).toEqual([]);
+      expect(await db.select().from(reconciliationReports).where(eq(reconciliationReports.id, reportId))).toEqual([]);
+      expect(await db.select().from(sharedReportTokens).where(eq(sharedReportTokens.reportId, reportId))).toEqual([]);
+      expect(
+        (
+          await db
+            .select({ id: uploadBatches.id })
+            .from(uploadBatches)
+            .where(inArray(uploadBatches.id, [emptyBatchId, rowsBatchId, fileBatchId]))
+        ).map(row => row.id)
+      ).toEqual([rowsBatchId, fileBatchId].sort((a, b) => a - b));
       expect(
         await db
-          .select()
-          .from(transactions)
-          .where(
-            inArray(transactions.id, [
-              staleOrderId,
-              terminalExceptionTransactionId,
-            ])
-          )
-      ).toEqual([]);
-      expect(
-        await db.select().from(matches).where(eq(matches.id, matchId))
-      ).toEqual([]);
-      expect(
-        await db
-          .select()
-          .from(exceptions)
-          .where(eq(exceptions.id, terminalExceptionId))
-      ).toEqual([]);
-      expect(
-        await db
-          .select()
-          .from(exceptionWorkflows)
-          .where(eq(exceptionWorkflows.id, terminalWorkflowId))
-      ).toEqual([]);
-      expect(
-        await db
-          .select()
-          .from(reconciliationJobs)
-          .where(eq(reconciliationJobs.id, oldJobId))
-      ).toEqual([]);
-      expect(
-        await db
-          .select()
-          .from(reconciliationReports)
-          .where(eq(reconciliationReports.jobId, oldJobId))
-      ).toEqual([]);
-      expect(
-        await db
-          .select()
-          .from(uploadBatches)
-          .where(eq(uploadBatches.id, staleBatchId))
-      ).toEqual([]);
-      expect(
-        await db
-          .select()
+          .select({ status: shopifyWebhookEvents.status })
           .from(shopifyWebhookEvents)
-          .where(eq(shopifyWebhookEvents.storeId, storeId))
-      ).toEqual([]);
+          .where(eq(shopifyWebhookEvents.storeId, t.storeId))
+      ).toEqual([{ status: "received" }]);
 
-      const [retained] = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.id, retainedSettlementId));
-      expect(retained).toMatchObject({ status: "unmatched", matchId: null });
-      expect(
-        await db
-          .select()
-          .from(exceptions)
-          .where(eq(exceptions.id, liveExceptionId))
-      ).toHaveLength(1);
-      expect(
-        await db
-          .select()
-          .from(transactions)
-          .where(eq(transactions.id, liveExceptionTransactionId))
-      ).toHaveLength(1);
-
-      const receipts = await db
-        .select()
-        .from(shopifyEvidenceRetentionReceipts)
-        .where(
-          and(
-            eq(shopifyEvidenceRetentionReceipts.organizationId, organizationId),
-            eq(shopifyEvidenceRetentionReceipts.storeId, storeId)
-          )
-        );
+      const receipts = await receiptsFor(t);
       expect(receipts).toHaveLength(1);
       expect(receipts[0]).toMatchObject({
         retentionDays: SHOPIFY_SCOPE_A_EVIDENCE_RETENTION_DAYS,
-        cutoffAt: new Date("2026-07-18T12:00:00.000Z"),
+        cutoffAt: CUTOFF,
         completedAt: NOW,
       });
-      expect(JSON.stringify(receipts[0]?.summary)).toMatch(
-        /"transactionsDeleted":2/
-      );
+      expect(receipts[0]?.summary).toMatchObject({ transactionsDeleted: 3, deferredActiveExceptions: 1 });
       expect(JSON.stringify(receipts[0]?.summary)).not.toMatch(
-        /order-|amount|shopDomain|example\.invalid/i
+        /order-|110|shopDomain|myshopify|example\.invalid|storage\.invalid/i
       );
-      const audits = await db
-        .select()
-        .from(auditLogs)
-        .where(
-          and(
-            eq(auditLogs.organizationId, organizationId),
-            eq(auditLogs.action, "shopify_scope_a_retention_sweep")
-          )
-        );
-      expect(audits).toHaveLength(1);
+      expect(await auditsFor(t, "shopify_scope_a_retention_sweep")).toHaveLength(1);
+      const batchAudits = await auditsFor(t, "shopify_scope_a_retention_batch");
+      expect(batchAudits.length).toBeGreaterThan(0);
+      expect(JSON.stringify(batchAudits.map(row => row.details))).not.toMatch(/order-|example\.invalid/i);
 
-      // A second process-level invocation on the same day does not re-run: the
-      // durable receipt prevents duplicate proof or purge work across restarts.
-      const second = await purgeExpiredShopifyScopeAEvidence({
-        db: db as never,
-        now: () => NOW,
+      // The durable receipt makes a same-day re-run a no-op across restarts.
+      const second = await sweep([t]);
+      expect(second).toMatchObject({ storesConsidered: 1, storesSkipped: 1, transactionsDeleted: 0 });
+      expect(await receiptsFor(t)).toHaveLength(1);
+      expect(await auditsFor(t, "shopify_scope_a_retention_sweep")).toHaveLength(1);
+      expect(await transactionIds([live])).toEqual([live]);
+    });
+
+    it("should keep an expired transaction, and the run behind it, while the transaction it is reconciled with is kept", async () => {
+      const t = await seedTenant();
+      const jobId = await seedJob(t);
+      // A run's own period starts from its completion, not its window.
+      const lateJobId = await seedJob(t, "completed", RECENT);
+
+      // The job engine records a pair as a match row and leaves matchId empty.
+      const engineOrder = await seedTransaction(t, OLD, { status: "matched" });
+      const engineSettlement = await seedTransaction(t, RECENT, { settlement: true, status: "matched" });
+      const engineMatch = await seedMatch(t, jobId, engineOrder, engineSettlement);
+
+      // Shopify's inline reconciliation records it by cross-pointing matchId.
+      const inlineOrder = await seedTransaction(t, OLD, { status: "matched" });
+      const inlineSettlement = await seedTransaction(t, RECENT, {
+        settlement: true,
+        status: "matched",
+        matchId: inlineOrder,
       });
-      expect(second).toMatchObject({
-        storesConsidered: 1,
-        storesSkipped: 1,
-        transactionsDeleted: 0,
-        matchesDeleted: 0,
-        exceptionsDeleted: 0,
+      await db.update(transactions).set({ matchId: inlineSettlement }).where(eq(transactions.id, inlineOrder));
+
+      // A chain is one group: a is kept because b's other counterpart is recent.
+      const a = await seedTransaction(t, OLD, { status: "matched" });
+      const b = await seedTransaction(t, OLD, { settlement: true, status: "matched" });
+      const c = await seedTransaction(t, RECENT, { status: "matched" });
+      await seedMatch(t, jobId, a, b);
+      await seedMatch(t, jobId, c, b);
+
+      // A rejected match pairs nothing: d goes, its recent counterpart stays as it was.
+      const d = await seedTransaction(t, OLD);
+      const e = await seedTransaction(t, RECENT, { settlement: true });
+      const rejected = await seedMatch(t, jobId, d, e, "rejected");
+
+      // One candidate per batch, so a group is found by following its links
+      // out of the batch rather than by both halves happening to be candidates.
+      const report = await sweep([t], { batchSize: 1 });
+
+      expect(report).toMatchObject({
+        storesCompleted: 1,
+        transactionsDeleted: 1,
+        matchesDeleted: 1,
+        deferredPairedTransactions: 4,
+        jobsDeleted: 0,
       });
       expect(
-        await db
-          .select()
-          .from(shopifyEvidenceRetentionReceipts)
-          .where(
-            and(
-              eq(
-                shopifyEvidenceRetentionReceipts.organizationId,
-                organizationId
-              ),
-              eq(shopifyEvidenceRetentionReceipts.storeId, storeId)
-            )
-          )
-      ).toHaveLength(1);
+        await transactionIds([engineOrder, engineSettlement, inlineOrder, inlineSettlement, a, b, c, d, e])
+      ).toEqual([engineOrder, engineSettlement, inlineOrder, inlineSettlement, a, b, c, e].sort((x, y) => x - y));
+      // No survivor was reset: a false "missing counterparty" needs an unmatched half.
+      const survivors = await db
+        .select({ id: transactions.id, status: transactions.status, matchId: transactions.matchId })
+        .from(transactions)
+        .where(inArray(transactions.id, [engineSettlement, inlineSettlement, b, c, e]));
+      expect(Object.fromEntries(survivors.map(row => [row.id, [row.status, row.matchId]]))).toEqual({
+        [engineSettlement]: ["matched", null],
+        [inlineSettlement]: ["matched", inlineOrder],
+        [b]: ["matched", null],
+        [c]: ["matched", null],
+        [e]: ["unmatched", null],
+      });
+      expect(
+        (await db.select({ id: matches.id }).from(matches).where(inArray(matches.id, [engineMatch, rejected]))).map(
+          row => row.id
+        )
+      ).toEqual([engineMatch]);
+      // A run some retained match still names is kept with it, and so is one
+      // that finished recently, whatever window it covered.
+      expect(
+        (
+          await db
+            .select({ id: reconciliationJobs.id })
+            .from(reconciliationJobs)
+            .where(inArray(reconciliationJobs.id, [jobId, lateJobId]))
+        ).map(row => row.id)
+      ).toEqual([jobId, lateJobId]);
+    });
+
+    it("should keep evidence that a queued run, a pending review, a governed control or an unanswered data request still needs", async () => {
+      const queued = await seedTenant();
+      const review = await seedTenant();
+      const anomaly = await seedTenant();
+      const governed = await seedTenant();
+      const privacy = await seedTenant();
+
+      await seedJob(queued, "pending");
+      const queuedRow = await seedTransaction(queued, OLD);
+
+      const reviewSource = await seedTransaction(review, OLD, { status: "exception" });
+      const reviewTarget = await seedTransaction(review, OLD, { settlement: true, status: "exception" });
+      await seedMatch(review, await seedJob(review), reviewSource, reviewTarget, "pending_review");
+
+      const flagged = await seedTransaction(anomaly, OLD);
+      const unflagged = await seedTransaction(anomaly, OLD);
+      for (const [transactionId, isFlagged] of [[flagged, true], [unflagged, false]] as const) {
+        await db.insert(anomalyScores).values({
+          organizationId: anomaly.organizationId,
+          transactionId,
+          anomalyScore: "0.9000",
+          detectionMethod: "statistical_iqr",
+          isFlagged,
+          reviewStatus: "pending",
+          createdAt: OLD,
+        });
+      }
+
+      const governedRow = await seedTransaction(governed, OLD);
+      // A manifest can also name an upload that holds no rows (an empty
+      // delivery is still a delivery the control accounted for).
+      const governedEmptyBatchId = insertId(
+        await db.insert(uploadBatches).values({
+          organizationId: governed.organizationId,
+          userId: governed.userId,
+          channelId: governed.settlementChannelId,
+          fileName: "masked-empty-delivery.csv",
+          status: "completed",
+          createdAt: OLD,
+          completedAt: OLD,
+        })
+      );
+      for (const uploadBatchId of [governed.batchId, governedEmptyBatchId]) {
+        await db.insert(controlBatchManifests).values({
+          organizationId: governed.organizationId,
+          sourceContractId: 1,
+          sourceContractVersion: 1,
+          controlPeriod: "2026-07-17",
+          deliveryIdentity: `masked-delivery-${tag()}`,
+          uploadBatchId,
+          receivedAt: OLD,
+          mappingVersion: "v1",
+          reconciliationPolicyVersion: "v1",
+          schemaState: "accepted",
+          duplicateDelivery: "none",
+          receivedRecordCount: uploadBatchId === governed.batchId ? 1 : 0,
+          receivedMonetaryTotal: uploadBatchId === governed.batchId ? "110.00" : "0.00",
+          receivedCurrency: "USD",
+          recordedByUserId: governed.userId,
+          createdAt: OLD,
+        });
+      }
+
+      const privacyRow = await seedTransaction(privacy, OLD);
+      const requestId = insertId(
+        await db.insert(shopifyPrivacyRequests).values({
+          organizationId: privacy.organizationId,
+          storeId: privacy.storeId,
+          topic: "customers/data_request",
+          requestHash: "b".repeat(64),
+          status: "manual_review",
+          receivedAt: RECENT,
+        })
+      );
+
+      const report = await sweep([queued, review, anomaly, governed, privacy]);
+
+      expect(report).toMatchObject({
+        storesConsidered: 5,
+        storesCompleted: 5,
+        transactionsDeleted: 1,
+        anomalyScoresDeleted: 1,
+        deferredNonterminalJobs: 1,
+        deferredPendingMatchReviews: 1,
+        deferredAnomalyReviews: 1,
+        deferredGovernedEvidence: 1,
+        deferredPrivacyRequests: 1,
+      });
+      expect(
+        await transactionIds([queuedRow, reviewSource, reviewTarget, flagged, unflagged, governedRow, privacyRow])
+      ).toEqual([queuedRow, reviewSource, reviewTarget, flagged, governedRow, privacyRow].sort((x, y) => x - y));
+      // A governed upload is the control's record, not an orphan, rows or none.
       expect(
         await db
-          .select()
-          .from(exceptions)
-          .where(eq(exceptions.id, liveExceptionId))
-      ).toHaveLength(1);
+          .select({ id: uploadBatches.id })
+          .from(uploadBatches)
+          .where(inArray(uploadBatches.id, [governed.batchId, governedEmptyBatchId]))
+      ).toHaveLength(2);
+      for (const tenant of [queued, review, anomaly, governed, privacy]) {
+        expect(await receiptsFor(tenant)).toHaveLength(1);
+      }
+
+      // Once the request is answered, the next day's sweep takes the evidence.
+      await db.update(shopifyPrivacyRequests).set({ status: "completed" }).where(eq(shopifyPrivacyRequests.id, requestId));
+      const nextDay = await sweep([privacy], { now: () => new Date(NOW.getTime() + DAY) });
+      expect(nextDay).toMatchObject({ storesCompleted: 1, transactionsDeleted: 1 });
+      expect(await transactionIds([privacyRow])).toEqual([]);
+    });
+
+    it("should work through a backlog in bounded, separately audited batches", async () => {
+      const t = await seedTenant();
+      const rows: number[] = [];
+      for (let i = 0; i < 7; i += 1) rows.push(await seedTransaction(t, OLD));
+
+      const report = await sweep([t], { batchSize: 2 });
+
+      expect(report).toMatchObject({ storesCompleted: 1, transactionsDeleted: 7 });
+      expect(await transactionIds(rows)).toEqual([]);
+      const evidenceBatches = (await auditsFor(t, "shopify_scope_a_retention_batch")).filter(
+        row => (row.details as { phase?: string } | null)?.phase === "evidence"
+      );
+      expect(evidenceBatches.map(row => (row.details as { transactionsDeleted?: number }).transactionsDeleted)).toEqual([
+        2, 2, 2, 1,
+      ]);
+    });
+
+    it("should stop at its time budget without a receipt, and resume where it stopped", async () => {
+      const t = await seedTenant();
+      const jobId = await seedJob(t);
+      // Candidates in id order: one that can go, three kept because each is
+      // matched to a recent settlement, then one more that can go.
+      const first = await seedTransaction(t, OLD);
+      const kept: number[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const order = await seedTransaction(t, OLD, { status: "matched" });
+        const settlement = await seedTransaction(t, RECENT, { settlement: true, status: "matched" });
+        await seedMatch(t, jobId, order, settlement);
+        kept.push(order);
+      }
+      const last = await seedTransaction(t, OLD);
+
+      // Each read of this clock advances it by one. A sweep reads it once to
+      // start, once per store, and once before every batch.
+      let tick = 0;
+      const clock = () => tick++;
+      // Room for two batches of two: [first, kept0] and [kept1, kept2].
+      const partial = await sweep([t], { batchSize: 2, budgetMs: 4, elapsed: clock });
+
+      expect(partial).toMatchObject({ storesIncomplete: 1, storesCompleted: 0, transactionsDeleted: 1 });
+      expect(await transactionIds([first, ...kept, last])).toEqual([...kept, last]);
+      expect(await receiptsFor(t)).toEqual([]);
+      // The part that ran is on the record even though the day is not finished.
+      expect(await auditsFor(t, "shopify_scope_a_retention_batch")).toHaveLength(1);
+
+      // Room for four batches: enough to finish from where it stopped, and not
+      // enough to finish if it started again from the top.
+      tick = 0;
+      const rest = await sweep([t], { batchSize: 2, budgetMs: 6, elapsed: clock });
+
+      expect(rest).toMatchObject({ storesCompleted: 1, transactionsDeleted: 1 });
+      expect(await transactionIds([first, ...kept, last])).toEqual(kept);
+      const receipts = await receiptsFor(t);
+      expect(receipts).toHaveLength(1);
+      // The receipt reports the whole day's pass, both runs of it.
+      expect(receipts[0]?.summary).toMatchObject({ transactionsDeleted: 2, deferredPairedTransactions: 3 });
     });
   }
 );

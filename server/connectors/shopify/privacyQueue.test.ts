@@ -115,4 +115,18 @@ describe("when the privacy recovery loop ticks", () => {
     expect(error.mock.calls[0]?.[1]).toMatchObject({ code: "shopify_scope_a_retention_unavailable" });
     error.mockRestore();
   });
+
+  it("should check privacy deadlines before it spends any time on retention", async () => {
+    const order: string[] = [];
+    const step = (name: string) => vi.fn(async () => { order.push(name); });
+
+    await runShopifyPrivacyRecoverySweep({
+      recover: step("recover"),
+      cleanup: step("cleanup"),
+      deadlines: step("deadlines"),
+      retention: step("retention"),
+    });
+
+    expect(order).toEqual(["recover", "cleanup", "deadlines", "retention"]);
+  });
 });

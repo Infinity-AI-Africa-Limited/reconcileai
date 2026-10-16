@@ -89,12 +89,13 @@ export async function recoverShopifyPrivacyOutbox(): Promise<void> {
 let recoveryTimer: NodeJS.Timeout | null = null;
 
 /**
- * One recovery sweep: re-dispatch the outbox, clean expired artifacts, purge
- * selected expired Scope A evidence, and report requests nearing Shopify's
- * deadline. Each step contains its own failure so one outage does not stall the
- * others. Retention has its own one-day process-local cadence and is still
- * transactionally idempotent after a restart. Exported for tests; production
- * runs it from the loop below.
+ * One recovery sweep: re-dispatch the outbox, clean expired artifacts, report
+ * requests nearing Shopify's deadline, then purge selected expired Scope A
+ * evidence. Each step contains its own failure so one outage does not stall the
+ * others. Retention runs last because it is the one step that can take a while
+ * (up to its own time budget), and the privacy obligations go first. It keeps
+ * its own daily cadence and durable receipts, so a restart repeats no finished
+ * work. Exported for tests; production runs it from the loop below.
  */
 export async function runShopifyPrivacyRecoverySweep(deps: {
   recover?: () => Promise<unknown>;
@@ -112,6 +113,11 @@ export async function runShopifyPrivacyRecoverySweep(deps: {
   } catch (error) {
     console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed", ...loggableError(error) });
   }
+  try {
+    await (deps.deadlines ?? runShopifyPrivacyDeadlineCheck)();
+  } catch (error) {
+    console.error("[shopify-privacy] deadline check unavailable", { code: "privacy_deadline_check_failed", ...loggableError(error) });
+  }
   // An explicitly injected sweep is a unit-test/diagnostic path. It must not
   // accidentally call the real database just because the caller is testing a
   // different recovery stage. The production loop calls this with no deps.
@@ -121,11 +127,6 @@ export async function runShopifyPrivacyRecoverySweep(deps: {
     } catch (error) {
       console.error("[shopify-privacy] Scope A retention unavailable", { code: "shopify_scope_a_retention_unavailable", ...loggableError(error) });
     }
-  }
-  try {
-    await (deps.deadlines ?? runShopifyPrivacyDeadlineCheck)();
-  } catch (error) {
-    console.error("[shopify-privacy] deadline check unavailable", { code: "privacy_deadline_check_failed", ...loggableError(error) });
   }
 }
 

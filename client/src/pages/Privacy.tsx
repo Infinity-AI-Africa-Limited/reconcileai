@@ -83,13 +83,17 @@ export default function Privacy() {
               than stored as the original uploaded file.
             </p>
             <p className="mt-2">
-              For the current Scope A service, field-minimized Shopify order/refund evidence, merchant settlement rows,
-              and their terminal reconciliation outputs are scheduled for removal after <strong>90 days</strong> from the
-              most recent source date or Shopify update recorded for that evidence. We do not remove evidence while it is
-              needed for an active exception investigation, governed human review, an in-progress reconciliation, a valid
-              privacy request, or a legal/security/operational matter. We retain limited de-identified operational and
-              audit evidence separately to operate and demonstrate the deletion control; it does not contain order values,
-              customer identifiers, raw payloads, source-file content, or direct provider identifiers.
+              For the current Scope A service, field-minimized Shopify order and refund evidence, merchant settlement rows,
+              and their finished reconciliation outputs are removed <strong>90 days</strong> after the latest of the
+              evidence&apos;s source date, its most recent Shopify update, and the date we recorded it. A reconciled pair, such
+              as an order and the settlement matched to it, is removed together, once both halves have reached that point.
+              We keep evidence for as long as it is still needed: while an exception on it is open, while a governed review
+              of it is in progress, while a match or anomaly on it is awaiting review, while a reconciliation run that reads
+              it is queued or running, while a governed control relies on it, while a customer data request for your store
+              is not yet answered, or while a legal, security, or operational matter requires it. We retain limited
+              de-identified operational and audit evidence separately to operate and demonstrate the deletion control; it
+              does not contain order values, customer identifiers, raw payloads, source-file content, or direct provider
+              identifiers.
             </p>
             <p className="mt-2">
               If Shopify sends a <code>shop/redact</code> request, ReconcileAI immediately fences the affected workspace,

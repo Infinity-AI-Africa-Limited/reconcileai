@@ -108,3 +108,36 @@ describe("when the policies describe Shopify's privacy requests", () => {
     expect(prose(terms)).toMatch(/deletes its Shopify access credentials/);
   });
 });
+
+describe("when the privacy notice describes Scope A evidence retention", () => {
+  it("should state the retention period the control enforces and every reason it keeps evidence", () => {
+    // Read from source rather than imported: the module pulls in the database
+    // layer. A hold added to the control fails here until the notice names it.
+    const source = read("server/connectors/shopify/evidenceRetention.ts");
+    const days = /export const SHOPIFY_SCOPE_A_EVIDENCE_RETENTION_DAYS = (\d+);/.exec(source)?.[1];
+    expect(days, "the retention period must stay an integer literal").toBeDefined();
+    const holdsBody = source.slice(
+      source.indexOf("  return {", source.indexOf("export function scopeAEvidenceHolds")),
+      source.indexOf("function purgeable(")
+    );
+    const holds = [...holdsBody.matchAll(/^ {4}(\w+): /gm)].map((match) => match[1]);
+    const named: Record<string, RegExp> = {
+      investigation: /while an exception on it is open, while a governed review of it is in progress/,
+      matchReview: /while a match or anomaly on it is awaiting review/,
+      anomalyReview: /while a match or anomaly on it is awaiting review/,
+      queuedRun: /while a reconciliation run that reads it is queued or running/,
+      governedControl: /while a governed control relies on it/,
+    };
+    expect(holds.sort()).toEqual(Object.keys(named).sort());
+
+    const text = prose(privacy);
+    expect(text).toContain(`removed ${days} days after the latest of`);
+    for (const hold of holds) expect(text, hold).toMatch(named[hold]!);
+    // The two holds that are not per-record: the store's unanswered data
+    // requests, and the pair rule that keeps a reconciled pair together.
+    expect(source).toContain('eq(shopifyPrivacyRequests.topic, "customers/data_request")');
+    expect(text).toMatch(/while a customer data request for your store is not yet answered/);
+    expect(source).toContain("export function deletableAfterPairing");
+    expect(text).toMatch(/A reconciled pair, such as an order and the settlement matched to it, is removed together/);
+  });
+});
