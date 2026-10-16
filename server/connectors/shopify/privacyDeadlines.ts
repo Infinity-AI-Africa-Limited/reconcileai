@@ -2,9 +2,9 @@
  * Shopify privacy requests that need a person — or have stopped moving — before
  * Shopify's 30-day compliance deadline passes.
  *
- * Several outcomes are deliberately left to an operator: `shop/redact` is
- * report-only (SHOPIFY_SHOP_REDACTION_BLOCKER — automatic deletion is not
- * enabled), and a request whose selectors could not be protected, or whose job
+ * Several outcomes are deliberately left to an operator: an automatic
+ * `shop/redact` refuses completion when it finds an unmanaged legacy file
+ * reference, and a request whose selectors could not be protected, or whose job
  * failed terminally, parks in `manual_review` or `failed_terminal`. Nothing
  * showed those to anyone: no page lists them and nothing alerted, so a deletion
  * request could pass its deadline seen only by a database query.

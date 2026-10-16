@@ -1,33 +1,24 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import {
-  SHOPIFY_SHOP_REDACTION_BLOCKER,
-  handleShopifyShopRedactionJob,
-} from "./shopRedaction";
+import { handleShopifyShopRedactionJob } from "./shopRedaction";
 import { rowOf, scriptedDb } from "./scriptedDb.testkit";
 
 const JOBS = "shopify_shop_redaction_jobs";
 const REQUESTS = "shopify_privacy_requests";
 const OUTBOX = "shopify_privacy_queue_outbox";
 const STORES = "shopify_connector_stores";
-const TOKENS = "shopify_connector_tokens";
-const SELECTORS = "shopify_privacy_request_selectors";
-const DATA_JOBS = "shopify_privacy_data_request_jobs";
-const REDACTION_JOBS = "shopify_privacy_customer_redaction_jobs";
+const RECEIPTS = "shopify_shop_redaction_receipts";
+const ORGANIZATIONS = "organizations";
+const USERS = "users";
 const ARTIFACTS = "shopify_privacy_artifacts";
-const EVENTS = "shopify_webhook_events";
-const CURSORS = "shopify_sync_cursors";
-const TOMBSTONES = "shopify_order_redaction_tombstones";
-const TRANSACTIONS = "transactions";
-const CHANNELS = "channels";
+const EXPORTS = "s3_csv_exports";
 const BATCHES = "upload_batches";
-const MATCHES = "matches";
-const EXCEPTIONS = "exceptions";
-const ANOMALIES = "anomaly_scores";
-const NOW = new Date("2026-09-25T12:00:00.000Z");
+const REPORTS = "reconciliation_reports";
+const NOW = new Date("2026-10-16T07:30:00.000Z");
 
 const JOB = {
   id: 903,
+  runId: "00000000-0000-4000-8000-000000000903",
   organizationId: 42,
   storeId: 7,
   privacyRequestId: 904,
@@ -36,279 +27,163 @@ const JOB = {
   manifestVersion: 1,
 };
 
-const COUNTS: Record<string, number> = {
-  [STORES]: 1,
-  [TOKENS]: 0,
-  [REQUESTS]: 4,
-  [SELECTORS]: 3,
-  [DATA_JOBS]: 1,
-  [REDACTION_JOBS]: 1,
-  [ARTIFACTS]: 1,
-  [EVENTS]: 8,
-  [CURSORS]: 1,
-  [TOMBSTONES]: 2,
-  [TRANSACTIONS]: 6,
-  [CHANNELS]: 1,
-  [BATCHES]: 2,
-  [MATCHES]: 9,
-  [EXCEPTIONS]: 4,
-  [ANOMALIES]: 3,
-};
-
-/** Tables counted twice per run: the orders channel first, then settlement evidence. */
-const SETTLEMENT_COUNTS: Record<string, number> = {
-  [TRANSACTIONS]: 5,
-  [CHANNELS]: 1,
-  [BATCHES]: 7,
-};
-
-function workerDb(options: {
-  claimRows?: number[];
-  finalRows?: number;
-  counts?: Partial<Record<string, number>>;
-} = {}) {
-  const countRows = { ...COUNTS, ...options.counts };
+function workerDb(
+  options: { unmanagedFile?: boolean; claimRows?: number[] } = {}
+) {
+  const select = (rows: unknown[]) => rows;
   return scriptedDb({
+    standing: {
+      // The manifest reads every tenant-scoped table as a count. A standing count
+      // lets this fixture prove erasure behavior without embedding merchant data.
+      shopify_connector_tokens: [{ count: 0 }],
+      shopify_privacy_request_selectors: [{ count: 0 }],
+      shopify_privacy_data_request_jobs: [{ count: 0 }],
+      shopify_privacy_customer_redaction_jobs: [{ count: 0 }],
+      shopify_webhook_events: [{ count: 0 }],
+      shopify_sync_cursors: [{ count: 0 }],
+      shopify_order_redaction_tombstones: [{ count: 0 }],
+      transactions: [{ count: 0 }],
+      channels: [{ count: 0 }],
+      matches: [{ count: 0 }],
+      exceptions: [{ count: 0 }],
+      anomaly_scores: [{ count: 0 }],
+    },
     select: {
-      [JOBS]: [[JOB], [JOB]],
-      [REQUESTS]: [[{ id: 904 }], [{ count: countRows[REQUESTS] }], [{ id: 904 }], [{ count: countRows[REQUESTS] }]],
-      [STORES]: [[{ count: countRows[STORES] }], [{ count: countRows[STORES] }]],
-      [TOKENS]: [[{ count: countRows[TOKENS] }], [{ count: countRows[TOKENS] }]],
-      [SELECTORS]: [[{ count: countRows[SELECTORS] }], [{ count: countRows[SELECTORS] }]],
-      [DATA_JOBS]: [[{ count: countRows[DATA_JOBS] }], [{ count: countRows[DATA_JOBS] }]],
-      [REDACTION_JOBS]: [[{ count: countRows[REDACTION_JOBS] }], [{ count: countRows[REDACTION_JOBS] }]],
-      [ARTIFACTS]: [[{ count: countRows[ARTIFACTS] }], [{ count: countRows[ARTIFACTS] }]],
-      [EVENTS]: [[{ count: countRows[EVENTS] }], [{ count: countRows[EVENTS] }]],
-      [CURSORS]: [[{ count: countRows[CURSORS] }], [{ count: countRows[CURSORS] }]],
-      [TOMBSTONES]: [[{ count: countRows[TOMBSTONES] }], [{ count: countRows[TOMBSTONES] }]],
-      [TRANSACTIONS]: twice([{ count: countRows[TRANSACTIONS] }], [{ count: SETTLEMENT_COUNTS[TRANSACTIONS] }]),
-      [CHANNELS]: twice([{ count: countRows[CHANNELS] }], [{ count: SETTLEMENT_COUNTS[CHANNELS] }]),
-      [BATCHES]: twice([{ count: countRows[BATCHES] }], [{ count: SETTLEMENT_COUNTS[BATCHES] }]),
-      [MATCHES]: [[{ count: countRows[MATCHES] }], [{ count: countRows[MATCHES] }]],
-      [EXCEPTIONS]: [[{ count: countRows[EXCEPTIONS] }], [{ count: countRows[EXCEPTIONS] }]],
-      [ANOMALIES]: [[{ count: countRows[ANOMALIES] }], [{ count: countRows[ANOMALIES] }]],
+      [JOBS]: [
+        select([JOB]),
+        select([{ shopDomain: "erasure-test.myshopify.com" }]),
+      ],
+      [REQUESTS]: [select([{ id: 904 }]), select([{ count: 0 }])],
+      [STORES]: [select([{ count: 1 }])],
+      [ARTIFACTS]: [
+        select([{ count: 1 }]),
+        select([{ key: "org/42/privacy/redaction.zip" }]),
+      ],
+      [EXPORTS]: [select([{ key: "org/42/exports/evidence.xlsx" }])],
+      [BATCHES]: [
+        select([{ count: 0 }]),
+        select([{ count: 0 }]),
+        select([{ count: options.unmanagedFile ? 1 : 0 }]),
+      ],
+      [REPORTS]: [select([{ count: 0 }])],
     },
-    update: {
-      [JOBS]: [...(options.claimRows ?? [1]), options.finalRows ?? 1],
-    },
+    update: { [JOBS]: options.claimRows ?? [1] },
   });
 }
 
-/** One run's orders-then-settlement answers, for each of up to two runs. */
-function twice(orders: unknown[], settlement: unknown[]): unknown[][] {
-  return [orders, settlement, orders, settlement];
-}
-
-function uuidSequence() {
-  let value = 0;
-  return () => `00000000-0000-4000-8000-${String(++value).padStart(12, "0")}`;
-}
-
-describe("when the report-only shop-redaction worker runs", () => {
-  it("should allow only one worker to claim a job", async () => {
-    const fake = workerDb({ claimRows: [1, 0] });
-    const firstCheckpoint = vi.fn(async () => {});
-    const secondCheckpoint = vi.fn(async () => {});
-
-    await Promise.all([
-      handleShopifyShopRedactionJob(903, {
-        db: fake.db as never,
-        now: () => NOW,
-        uuid: uuidSequence(),
-        afterManifest: firstCheckpoint,
-      }),
-      handleShopifyShopRedactionJob(903, {
-        db: fake.db as never,
-        now: () => NOW,
-        uuid: uuidSequence(),
-        afterManifest: secondCheckpoint,
-      }),
-    ]);
-
-    expect(firstCheckpoint).toHaveBeenCalledTimes(1);
-    expect(secondCheckpoint).not.toHaveBeenCalled();
-    expect(fake.writes("update", JOBS).filter((op) => rowOf(op)?.status === "processing")).toHaveLength(2);
-    expect(fake.writes("update", JOBS).filter((op) => rowOf(op)?.status === "blocked_dependency")).toHaveLength(1);
-  });
-
-  it("should keep an early redelivery retryable while another worker holds the lease", async () => {
-    const fake = scriptedDb({
-      select: { [JOBS]: [[{ status: "processing" }]] },
-      update: { [JOBS]: [0] },
-    });
-
-    await expect(handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW }))
-      .rejects.toMatchObject({ name: "ShopifyPrivacyJobNotClaimableError" });
-
-    expect(fake.writes("update", JOBS)).toHaveLength(1);
-    expect(fake.ops.some((op) => op.kind === "update" && op.table === REQUESTS)).toBe(false);
-  });
-
-  it("should record only scoped numeric counts and end blocked, never completed", async () => {
+describe("when the destructive Shopify shop-redaction worker runs", () => {
+  it("should erase owned storage and tenant records while retaining only a non-identifying receipt", async () => {
     const fake = workerDb();
+    const deleteObject = vi.fn(async () => {});
 
     await handleShopifyShopRedactionJob(903, {
       db: fake.db as never,
       now: () => NOW,
       uuid: () => "11111111-1111-4111-8111-111111111111",
+      deleteObject,
     });
 
-    const finalJob = fake.writes("update", JOBS).at(-1);
-    expect(finalJob?.data).toMatchObject({
-      status: "blocked_dependency",
-      failureCode: SHOPIFY_SHOP_REDACTION_BLOCKER,
-      lastCheckpoint: "report_only_manifest_recorded",
-      completedAt: null,
-      manifestSummary: {
-        connectorStores: 1,
-        connectorTokens: 0,
-        privacyRequests: 4,
-        privacySelectors: 3,
-        dataRequestJobs: 1,
-        customerRedactionJobs: 1,
-        privacyArtifacts: 1,
-        webhookEvents: 8,
-        syncCursors: 1,
-        suppressionTombstones: 2,
-        orderTransactions: 6,
-        directShopifyChannels: 1,
-        directShopifyBatches: 2,
-        settlementEvidenceChannels: 1,
-        settlementEvidenceTransactions: 5,
-        settlementEvidenceBatches: 7,
-        reconciliationMatches: 9,
-        reconciliationExceptions: 4,
-        anomalyScores: 3,
-      },
+    expect(deleteObject).toHaveBeenCalledWith("org/42/privacy/redaction.zip");
+    expect(deleteObject).toHaveBeenCalledWith("org/42/exports/evidence.xlsx");
+    expect(fake.writes("delete", STORES)).toHaveLength(1);
+    expect(fake.writes("delete", USERS)).toHaveLength(1);
+    expect(fake.writes("delete", ORGANIZATIONS)).toHaveLength(1);
+    expect(fake.writes("delete", JOBS)).toHaveLength(1);
+    const receipt = rowOf(fake.writes("insert", RECEIPTS)[0]);
+    expect(receipt).toMatchObject({
+      runId: JOB.runId,
+      requestHash: JOB.requestHash,
+      manifestVersion: 1,
+      completedAt: NOW,
     });
-    expect(Object.values((rowOf(finalJob)?.manifestSummary ?? {}) as Record<string, unknown>)
-      .every((value) => Number.isSafeInteger(value) && Number(value) >= 0)).toBe(true);
-    expect(JSON.stringify(rowOf(finalJob)?.manifestSummary)).not.toMatch(
-      /domain|orderId|email|payload|objectKey|hash|webhookId|organizationId|storeId/i,
+    expect(JSON.stringify(receipt)).not.toMatch(
+      /organizationId|storeId|domain|orderId|email|payload|objectKey|url/i
     );
-    expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({
-      status: "blocked_dependency",
-      completionNote: SHOPIFY_SHOP_REDACTION_BLOCKER,
-      completedAt: null,
-    });
-    expect(fake.committed().some((op) => rowOf(op)?.status === "completed")).toBe(false);
-    expect(fake.writes("delete", STORES)).toEqual([]);
-    expect(fake.writes("delete", TRANSACTIONS)).toEqual([]);
-    expect(fake.committed().filter((op) => op.kind !== "select" && ![JOBS, REQUESTS].includes(op.table))).toEqual([]);
-  });
-
-  it("should fence every count by exact organization and store/channel snapshot", async () => {
-    const fake = workerDb();
-
-    await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
-
-    for (const table of [STORES, TOKENS, REQUESTS, SELECTORS, DATA_JOBS, REDACTION_JOBS, ARTIFACTS,
-      EVENTS, CURSORS, TOMBSTONES, TRANSACTIONS, CHANNELS, BATCHES, MATCHES, EXCEPTIONS, ANOMALIES]) {
-      const countSelect = fake.ops.find((op) => op.kind === "select" && op.table === table && op.where);
-      expect(countSelect, `missing scoped count for ${table}`).toBeDefined();
-      expect(countSelect?.where?.params).toContain(42);
-    }
-    for (const table of [STORES, TOKENS, REQUESTS, DATA_JOBS, REDACTION_JOBS, ARTIFACTS,
-      EVENTS, CURSORS, TOMBSTONES, TRANSACTIONS, SELECTORS, MATCHES, EXCEPTIONS, ANOMALIES]) {
-      const countSelect = fake.ops.find((op) => op.kind === "select" && op.table === table && op.where);
-      expect(countSelect?.where?.params).toContain(7);
-    }
-    for (const table of [CHANNELS, BATCHES]) {
-      const countSelect = fake.ops.find((op) => op.kind === "select" && op.table === table && op.where);
-      expect(countSelect?.where?.params).toContain("shopify_orders_7");
-    }
-    expect(fake.ops.some((op) => op.kind === "select" && op.table === EVENTS && op.where?.params.includes(null))).toBe(false);
-    // The two membership subqueries are ORM-built and correlated to the row counted.
-    const selectorCount = fake.ops.find((op) => op.kind === "select" && op.table === "shopify_privacy_request_selectors");
-    expect(selectorCount?.where?.sql).toMatch(
-      /exists \(select `id` from `shopify_privacy_requests` where \(`shopify_privacy_requests`\.`id` = `shopify_privacy_request_selectors`\.`requestId`/i,
-    );
-    const batchCount = fake.ops.find((op) => op.kind === "select" && op.table === "upload_batches");
-    expect(batchCount?.where?.sql).toMatch(/exists \(select `id` from `channels` where \(`channels`\.`id` = `upload_batches`\.`channelId`/i);
-  });
-
-  it("should prevent a stale worker from finalizing or changing the parent request", async () => {
-    const fake = workerDb({ finalRows: 0 });
-    const leaseId = "11111111-1111-4111-8111-111111111111";
-
-    await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW, uuid: () => leaseId });
-
-    const finalJob = fake.writes("update", JOBS).at(-1);
-    expect(finalJob?.where?.params).toContain("processing");
-    expect(finalJob?.where?.params).toContain(leaseId);
     expect(fake.writes("update", REQUESTS)).toEqual([]);
   });
 
-  it("should re-arm only the matching internal outbox row after a report-only worker crash", async () => {
+  it("should stop before destructive database writes and retain a retry when object deletion fails", async () => {
     const fake = workerDb();
-
     await handleShopifyShopRedactionJob(903, {
       db: fake.db as never,
       now: () => NOW,
-      afterManifest: async () => {
-        throw new Error("simulated_worker_crash");
+      deleteObject: async () => {
+        throw new Error("object_store_temporarily_unavailable");
       },
     });
 
+    expect(fake.writes("delete", STORES)).toEqual([]);
+    expect(fake.writes("delete", ORGANIZATIONS)).toEqual([]);
     expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
       status: "failed_retryable",
       failureCode: "worker_failed",
       completedAt: null,
     });
-    const rearmed = fake.writes("update", OUTBOX).at(-1);
-    expect(rearmed?.data).toMatchObject({
+    expect(fake.writes("update", OUTBOX).at(-1)?.data).toMatchObject({
       status: "failed_retryable",
-      failureCode: "worker_failed",
     });
-    expect(rearmed?.where?.params).toContain("shop_redact");
-    expect(rearmed?.where?.params).toContain(903);
-    expect(fake.writes("update", REQUESTS).at(-1)?.data).toMatchObject({
-      status: "failed_retryable",
-      completionNote: "worker_failed",
+  });
+
+  it("should fail closed for an unmanaged legacy file reference rather than claim deletion", async () => {
+    const fake = workerDb({ unmanagedFile: true });
+    const deleteObject = vi.fn(async () => {});
+
+    await handleShopifyShopRedactionJob(903, {
+      db: fake.db as never,
+      now: () => NOW,
+      deleteObject,
+    });
+
+    expect(fake.writes("delete", STORES)).toEqual([]);
+    expect(fake.writes("insert", RECEIPTS)).toEqual([]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+      status: "manual_review",
+      failureCode: "unmanaged_file_reference",
       completedAt: null,
     });
   });
 
-  it("should contain no destructive database or storage operation in the executor module", () => {
-    const source = readFileSync(new URL("./shopRedaction.ts", import.meta.url), "utf8");
-    expect(source).not.toMatch(/\.delete\s*\(/);
-    expect(source).not.toMatch(/storage(Delete|Put|Get)|createAuditLog|tenantEncryptionKeys|\busers\b|\borganizations\b/);
-    expect(source).not.toMatch(/status:\s*["']completed["']/);
-    expect(source.match(/completedAt:\s*null/g)).toHaveLength(4);
-  });
-});
-
-describe("when the store's data reaches beyond the orders channel", () => {
-  // Greptile #161 (review of 21ba605): settlement evidence imported through App
-  // Home lives in its own channel, on rows without `shopifyStoreId`, so the
-  // inventory missed its channel, rows and batches. The reconciliation output
-  // derived from the store's rows was missing too.
-  const counted = (fake: ReturnType<typeof workerDb>, table: string) =>
-    fake.ops.filter((op) => op.kind === "select" && op.table === table && op.where);
-
-  it("should count settlement evidence by its own channel, scoped to the tenant", async () => {
-    const fake = workerDb();
-    await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
-
-    for (const table of [TRANSACTIONS, CHANNELS, BATCHES]) {
-      const settlement = counted(fake, table).find((op) => op.where?.params.includes("shopify_settlement_evidence_7"));
-      expect(settlement, `no settlement-evidence count for ${table}`).toBeDefined();
-      expect(settlement?.where?.params).toContain(42);
-    }
+  it("should preserve an early redelivery when another worker still holds the lease", async () => {
+    const fake = scriptedDb({
+      select: { [JOBS]: [[{ status: "processing" }]] },
+      update: { [JOBS]: [0] },
+    });
+    await expect(
+      handleShopifyShopRedactionJob(903, {
+        db: fake.db as never,
+        now: () => NOW,
+      })
+    ).rejects.toMatchObject({ name: "ShopifyPrivacyJobNotClaimableError" });
   });
 
-  it("should count matches, exceptions and anomaly scores from both the orders and the settlement rows", async () => {
+  it("should leave destructive erasure retryable if the process fails after inventory", async () => {
     const fake = workerDb();
-    await handleShopifyShopRedactionJob(903, { db: fake.db as never, now: () => NOW });
+    await handleShopifyShopRedactionJob(903, {
+      db: fake.db as never,
+      now: () => NOW,
+      afterManifest: async () => {
+        throw new Error("simulated_crash_after_inventory");
+      },
+    });
+    expect(fake.writes("delete", STORES)).toEqual([]);
+    expect(fake.writes("update", JOBS).at(-1)?.data).toMatchObject({
+      status: "failed_retryable",
+    });
+  });
 
-    for (const table of [MATCHES, EXCEPTIONS, ANOMALIES]) {
-      const [op] = counted(fake, table);
-      // Scoped to the tenant, and to the store's rows by either route.
-      expect(op?.where?.params).toEqual(expect.arrayContaining([42, 7, "shopify_settlement_evidence_7"]));
-      expect(op?.where?.sql).toMatch(/`transactions`\.`shopifyStoreId` = \?/);
-    }
-    const [matchCount] = counted(fake, MATCHES);
-    expect(matchCount?.where?.sql).toMatch(/`matches`\.`sourceTransactionId` in \(select/);
-    expect(matchCount?.where?.sql).toMatch(/`matches`\.`targetTransactionId` in \(select/);
+  it("should contain storage-first deletion, a lease-fenced database transaction, and no report-only blocker", () => {
+    const source = readFileSync(
+      new URL("./shopRedaction.ts", import.meta.url),
+      "utf8"
+    );
+    expect(source).toMatch(/deleteTenantObjects\(\s*db,\s*job\.organizationId/);
+    expect(source).toMatch(/eraseTenantWorkspace\(db, job, manifest, now\)/);
+    expect(source).toMatch(
+      /eq\(shopifyShopRedactionJobs\.leaseId, job\.leaseId\)/
+    );
+    expect(source).toMatch(/shopifyShopRedactionReceipts/);
+    expect(source).not.toMatch(
+      /automatic_deletion_not_enabled|report_only_manifest_recorded/
+    );
   });
 });

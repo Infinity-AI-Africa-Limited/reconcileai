@@ -241,6 +241,9 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // Transient redaction jobs carry organizationId NOT NULL while the provider
   // request is being processed; completed jobs are removed or de-identified.
   shopify_shop_redaction_jobs: "tenant_required",
+  // Post-erasure receipt retains only a keyed request digest, run UUID and
+  // aggregate counts: it must contain no tenant or store identifier.
+  shopify_shop_redaction_receipts: "global",
   // A pre-tenant platform lock — one installation in flight per shop domain.
   // Holds a lease id and expiry only; no tenant data, and it exists before any tenant does.
   shopify_install_leases: "global",
